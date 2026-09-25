@@ -18,6 +18,7 @@ def validate_plan(inputs: ModelInputs, plan: ExtractedPlan) -> tuple[bool, tuple
     violations.extend(_check_one_buyer(inputs, plan))
     violations.extend(_check_bank_bounds(inputs, plan))
     violations.extend(_check_product_rules(inputs, plan))
+    violations.extend(_check_soc_dynamics(inputs, plan))
     return not violations, tuple(violations)
 
 
@@ -76,6 +77,50 @@ def _check_bank_bounds(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
     for (bank_id, t, _scenario), kw in plan.headroom_schedule.items():
         if kw < -_TOL_KW:
             violations.append(f"bound: negative headroom {kw:.3f}kW on bank {bank_id} interval {t}")
+    return violations
+
+
+def _check_soc_dynamics(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
+    """K1/C2 defense-in-depth: re-derives every modeled bank's SoC bounds and its energy-balance step
+    from the plan's own reported allocations/headroom/charge, independent of `model.py`'s highspy rows
+    (02a S3.8's "re-derives the constraints from raw numbers")."""
+    violations = []
+    for bank in inputs.banks:
+        if not bank.models_soc:
+            continue
+        intervals = sorted(bank.max_discharge_kw)
+        for scenario in {s.scenario for s in inputs.scenarios}:
+            expected_soc = bank.initial_soc_kwh
+            for t in intervals:
+                reported = plan.soc_by_bank_interval_scenario.get((bank.bank_id, t, scenario))
+                if reported is not None and abs(reported - expected_soc) > _TOL_KW:
+                    violations.append(
+                        f"C1: bank {bank.bank_id} interval {t} scenario {scenario} SoC {reported:.3f}kWh "
+                        f"!= balance-derived {expected_soc:.3f}kWh"
+                    )
+                if not (bank.reserve_kwh - _TOL_KW <= expected_soc <= bank.capacity_kwh + _TOL_KW):
+                    violations.append(
+                        f"C2: bank {bank.bank_id} interval {t} scenario {scenario} SoC "
+                        f"{expected_soc:.3f}kWh outside [{bank.reserve_kwh}, {bank.capacity_kwh}]kWh"
+                    )
+                discharge_total = sum(
+                    kw
+                    for (_oid, b, ti), kw in plan.bank_interval_allocation.items()
+                    if b == bank.bank_id and ti == t
+                ) + plan.headroom_schedule.get((bank.bank_id, t, scenario), 0.0)
+                charge = plan.charge_by_bank_interval_scenario.get((bank.bank_id, t, scenario), 0.0)
+                dt_h = inputs.interval_hours
+                expected_soc = (
+                    expected_soc
+                    + bank.eta_c * charge * dt_h
+                    - (dt_h / bank.eta_d) * discharge_total
+                    - bank.self_discharge_kwh_per_h * dt_h
+                )
+            if expected_soc < bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh - _TOL_KW:
+                violations.append(
+                    f"C15: bank {bank.bank_id} scenario {scenario} terminal SoC {expected_soc:.3f}kWh "
+                    f"< initial {bank.initial_soc_kwh}kWh - slack {inputs.terminal_soc_slack_kwh}kWh"
+                )
     return violations
 
 

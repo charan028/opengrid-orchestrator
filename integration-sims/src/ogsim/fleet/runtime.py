@@ -21,10 +21,10 @@ from ogsim.common.mqtt_client import SimMqttClient
 from ogsim.common.scenario import ScenarioCommand, parse_scenario_cmd, utc_timestamp
 from ogsim.fleet import household, physics
 from ogsim.fleet.anomalies import FLEET_ANOMALY_TYPES, FleetAnomalyManager
-from ogsim.fleet.commands import CommandVerdict, evaluate_batch, utc_now_from_epoch
+from ogsim.fleet.commands import CommandVerdict, build_ack, evaluate_batch, utc_now_from_epoch
 from ogsim.fleet.lease import HoldTracker, lease_expiry_from_message
 from ogsim.fleet.state import FleetState, build_fleet_state
-from ogsim.fleet.stop import StopRegistry, ramp_toward_zero
+from ogsim.fleet.stop import StopRegistry, ramp_toward_zero, verify_stop_event
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,32 @@ class FleetEngine:
         )
         return ActiveAnomalyStarted(cmd)
 
-    def handle_stop_event(self, action: str, scope: str, scope_id: str | None) -> None:
-        self.stops.apply_stop_event(action, scope, scope_id)
+    def handle_stop_event(
+        self,
+        event: dict[str, Any],
+        safestop_public_key: Ed25519PublicKey,
+        guardian_public_key: Ed25519PublicKey,
+    ) -> bool:
+        """Verifies `event` per crypto.md §2.3 (`verify_stop_event`) and
+        only then applies it to `self.stops`. A rejected event -- wrong key
+        for the action, or a bad/missing signature -- is logged and never
+        reaches `StopRegistry`. Returns True if applied."""
+        reject_reason = verify_stop_event(event, safestop_public_key, guardian_public_key)
+        if reject_reason is not None:
+            logger.warning(
+                "rejected stop event: reason=%s stop_id=%s action=%s scope=%s scope_id=%s key_id=%s",
+                reject_reason,
+                event.get("stop_id"),
+                event.get("action"),
+                event.get("scope"),
+                event.get("scope_id"),
+                event.get("key_id"),
+            )
+            return False
+        self.stops.apply_stop_event(
+            str(event.get("action", "")), str(event.get("scope", "")), event.get("scope_id")
+        )
+        return True
 
     def handle_lease_message(self, hub_id: str, expires_at: str) -> None:
         idx = self.state.hub_index.get(hub_id)
@@ -164,14 +188,10 @@ class FleetEngine:
         return messages
 
     def build_ack(self, verdict: CommandVerdict, batch_id: str, now: float) -> dict[str, Any]:
-        return {
-            "hub_id": verdict.hub_id,
-            "batch_id": batch_id,
-            "accepted": verdict.accepted,
-            "applied_p_kw": self._applied_p_kw(verdict),
-            "reject_reason": verdict.reject_reason,
-            "ts": utc_timestamp(now),
-        }
+        """Builds this hub's `ack.schema.json` message via the pure
+        `ogsim.fleet.commands.build_ack`, supplying the hub's actual
+        post-physics applied power (after the SoC/reserve clamp)."""
+        return build_ack(verdict, batch_id, self._applied_p_kw(verdict), now)
 
     def _applied_p_kw(self, verdict: CommandVerdict) -> float | None:
         if not verdict.accepted:
@@ -223,13 +243,19 @@ def load_guardian_public_key(config: FleetConfig) -> Ed25519PublicKey:
         return load_public_key(fh.read())
 
 
+def load_safestop_public_key(config: FleetConfig) -> Ed25519PublicKey:
+    with open(config.safestop_key_path(), encoding="utf-8") as fh:
+        return load_public_key(fh.read())
+
+
 async def run_fleet(
     client: SimMqttClient, engine: FleetEngine, clock: Clock, public_key: Ed25519PublicKey
 ) -> None:
     """Async shell: subscribes to inbound topics, ticks `engine` on
-    `config.telemetry_interval_s`, and publishes telemetry/acks. Intended
-    to run under `asyncio.gather` alongside a message-consuming task; kept
-    thin and deliberately not unit-tested (the engine above is)."""
+    `config.telemetry_interval_s`, and publishes telemetry. Intended to run
+    under `asyncio.gather` alongside a message-consuming task (which
+    publishes acks as command batches arrive); kept thin and deliberately
+    not unit-tested (the engine above is)."""
     await client.subscribe("cmd/+/batch", qos=1)
     await client.subscribe("stop/#", qos=1)
     await client.subscribe("lease/+", qos=1)

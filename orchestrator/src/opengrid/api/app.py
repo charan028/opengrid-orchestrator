@@ -90,9 +90,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(SchemaValidationError)
     async def _schema_invalid(_request: Request, exc: SchemaValidationError) -> JSONResponse:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)}
-        )
+        return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
 
 
 def _include_routers(app: FastAPI) -> None:

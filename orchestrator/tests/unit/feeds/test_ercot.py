@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from opengrid.feeds.ercot import ErcotClient
+from opengrid.feeds.ercot import ErcotAuthError, ErcotClient
 from opengrid.feeds.http_client import FeedHttpError
+from opengrid.feeds.secrets import Secret
+
+_PASSWORD = "hunter2"
 
 NOW = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
 
@@ -26,7 +30,7 @@ SPP_PAYLOAD = {
 @pytest.fixture(autouse=True)
 def _ercot_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEST_ERCOT_USER", "user@example.com")
-    monkeypatch.setenv("TEST_ERCOT_PASSWORD", "hunter2")
+    monkeypatch.setenv("TEST_ERCOT_PASSWORD", _PASSWORD)
     monkeypatch.setenv("TEST_ERCOT_KEY_PRIMARY", "primary-key")
     monkeypatch.setenv("TEST_ERCOT_KEY_SECONDARY", "secondary-key")
 
@@ -46,7 +50,9 @@ def _make_client(handler: httpx.MockTransport) -> ErcotClient:
 async def test_fetch_product_success_with_primary_key() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if str(request.url).startswith("http://test/token"):
-            return httpx.Response(200, json={"access_token": "tok-1"})
+            body = request.content.decode()
+            assert "response_type=id_token" in body
+            return httpx.Response(200, json={"id_token": "tok-1"})
         assert request.headers["Ocp-Apim-Subscription-Key"] == "primary-key"
         return httpx.Response(200, json=SPP_PAYLOAD)
 
@@ -63,7 +69,7 @@ async def test_401_triggers_reauth_then_key_rotation_on_repeat_401() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if str(request.url).startswith("http://test/token"):
             calls["token"] += 1
-            return httpx.Response(200, json={"access_token": f"tok-{calls['token']}"})
+            return httpx.Response(200, json={"id_token": f"tok-{calls['token']}"})
         calls["data"] += 1
         key = request.headers["Ocp-Apim-Subscription-Key"]
         if key == "primary-key":
@@ -84,7 +90,7 @@ async def test_401_triggers_reauth_then_key_rotation_on_repeat_401() -> None:
 async def test_key_rotation_is_sticky_across_calls() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if str(request.url).startswith("http://test/token"):
-            return httpx.Response(200, json={"access_token": "tok"})
+            return httpx.Response(200, json={"id_token": "tok"})
         key = request.headers["Ocp-Apim-Subscription-Key"]
         if key == "primary-key":
             return httpx.Response(401)
@@ -103,7 +109,7 @@ async def test_key_rotation_is_sticky_across_calls() -> None:
 async def test_both_keys_failing_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if str(request.url).startswith("http://test/token"):
-            return httpx.Response(200, json={"access_token": "tok"})
+            return httpx.Response(200, json={"id_token": "tok"})
         return httpx.Response(401)
 
     client = _make_client(httpx.MockTransport(handler))
@@ -116,3 +122,40 @@ async def test_unknown_product_rejected() -> None:
     client = _make_client(httpx.MockTransport(lambda r: httpx.Response(200, json={})))
     with pytest.raises(ValueError, match="unknown ERCOT product"):
         await client.fetch_product("not-a-product", now=NOW)
+
+
+async def test_token_response_missing_id_token_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).startswith("http://test/token")
+        return httpx.Response(200, json={"access_token": "wrong-field"})  # old `token` shape
+
+    client = _make_client(httpx.MockTransport(handler))
+    with pytest.raises(ErcotAuthError, match="id_token"):
+        await client.fetch_product("np6-905-cd", now=NOW)
+
+
+async def test_auth_failure_never_leaks_password(caplog: pytest.LogCaptureFixture) -> None:
+    """A live ERCOT token rejection (e.g. `400 invalid_grant`) must never surface the password in the
+    raised exception's message, its repr, or any log record (BUILD.md S5a/S6)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith("http://test/token"):
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        return httpx.Response(200, json=SPP_PAYLOAD)
+
+    client = _make_client(httpx.MockTransport(handler))
+    with caplog.at_level(logging.WARNING), pytest.raises(ErcotAuthError) as exc_info:
+        await client.fetch_product("np6-905-cd", now=NOW)
+
+    assert _PASSWORD not in str(exc_info.value)
+    assert _PASSWORD not in repr(exc_info.value)
+    for record in caplog.records:
+        assert _PASSWORD not in record.getMessage()
+        assert _PASSWORD not in repr(record)
+
+
+def test_secret_repr_and_str_never_show_the_value() -> None:
+    secret = Secret(_PASSWORD)
+    assert _PASSWORD not in repr(secret)
+    assert _PASSWORD not in str(secret)
+    assert secret.reveal() == _PASSWORD

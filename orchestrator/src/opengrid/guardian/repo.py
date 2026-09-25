@@ -26,9 +26,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.guardian.ports import (
+    ActiveObligation,
     BankSnapshot,
     GuardianPorts,
     HubSnapshot,
+    HubStatePort,
     L2Instruction,
     ProposedBatch,
     ProposedItem,
@@ -37,12 +39,6 @@ from opengrid.guardian.ports import (
 from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
-
-_HUB_SNAPSHOT_SQL = """
-SELECT h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, s.soc_kwh, s.p_kw, s.health
-FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id
-WHERE h.hub_id = %(hub_id)s
-"""
 
 _BANK_SNAPSHOT_SQL = "SELECT kva_rating, reserve_kva, feeder_id FROM og.bank WHERE bank_id = %(bank_id)s"
 
@@ -56,6 +52,16 @@ _ACTIVE_COMMITMENT_SQL = """
 SELECT committed_kw FROM og.commitment
 WHERE obligation_id = %(obligation_id)s AND supersedes IS NULL
 ORDER BY interval_start DESC LIMIT 1
+"""
+
+# GUARD-01/K13: guardian's own, independent enumeration of every obligation with an ACTIVE commitment
+# against this bank -- read-only from og.reservation/og.commitment, never from the proposed batch's own
+# item list, so a batch cannot evade G-19 by omitting an obligation or relabelling it obligation_id=None.
+_ACTIVE_OBLIGATIONS_FOR_BANK_SQL = """
+SELECT DISTINCT c.obligation_id, c.committed_kw
+FROM og.reservation r
+JOIN og.commitment c ON c.obligation_id = r.obligation_id AND c.supersedes IS NULL
+WHERE r.bank_id::text = %(bank_id)s AND r.released_at IS NULL
 """
 
 _PRIOR_GRANT_SQL = """
@@ -73,21 +79,6 @@ SELECT payload FROM og.trace
 WHERE decision_type = 'RT_ALLOCATION' AND payload ->> 'command_batch_id' = %(command_batch_id)s
 ORDER BY seq DESC LIMIT 1
 """
-
-
-class PgHubStatePort:
-    def __init__(self, pool: AsyncConnectionPool) -> None:
-        self._pool = pool
-
-    async def snapshot(self, hub_id: str) -> HubSnapshot | None:
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_HUB_SNAPSHOT_SQL, {"hub_id": hub_id})
-            row = await cur.fetchone()
-        if row is None:
-            return None
-        e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, prev_p_kw, health = row
-        params = HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d)
-        return HubSnapshot(params=params, soc_kwh=soc_kwh, prev_p_kw=prev_p_kw, health=health)
 
 
 _ALL_HUB_PARAMS_SQL = "SELECT hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d FROM og.hub"
@@ -154,6 +145,13 @@ class PgCommitmentPort:
             await cur.execute(_ACTIVE_COMMITMENT_SQL, {"obligation_id": obligation_id})
             row = await cur.fetchone()
         return Decimal(str(row[0])) if row else Decimal(0)
+
+    async def active_obligations_for_bank(self, bank_id: str, cycle_id: str) -> list[ActiveObligation]:
+        _ = cycle_id  # MVP-S schema has no cycle-scoped index; "released_at IS NULL" is the active set
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ACTIVE_OBLIGATIONS_FOR_BANK_SQL, {"bank_id": bank_id})
+            rows = await cur.fetchall()
+        return [ActiveObligation(obligation_id=row[0], frozen_kw=Decimal(str(row[1]))) for row in rows]
 
 
 class PgPriorGrantPort:
@@ -322,17 +320,24 @@ class ChronyClockPort:
 def build_pg_ports(
     pool: AsyncConnectionPool,
     trace_store: TraceStore,
+    hubs: HubStatePort,
     *,
     zones_by_bank: dict[str, str] | None = None,
 ) -> tuple[GuardianPorts, InMemoryLeaseStatePort]:
     """Convenience wiring for `main.py`: constructs every Postgres-backed port plus the in-memory lease
-    tracker (returned separately so `main.py` can call `record_accepted` after a PASS verdict)."""
+    tracker (returned separately so `main.py` can call `record_accepted` after a PASS verdict).
+
+    GUARD-02/04: `hubs` is a required argument, not a Postgres default -- guardian's hub-state read must
+    always be its OWN telemetry (`opengrid.guardian.mqtt_io.MqttHubStatePort`), never `og.hub_state`
+    (the row the engine/fleet processes maintain). There is deliberately no `PgHubStatePort` in this
+    module for a caller to reach for by mistake.
+    """
     leases = InMemoryLeaseStatePort()
     ports = GuardianPorts(
         clock=ChronyClockPort(),
         proposals=PgProposalPort(pool),
         trace=TraceStorePort(trace_store),
-        hubs=PgHubStatePort(pool),
+        hubs=hubs,
         banks=PgBankStatePort(pool),
         ledger=LedgerModulePort(),
         commitments=PgCommitmentPort(pool),

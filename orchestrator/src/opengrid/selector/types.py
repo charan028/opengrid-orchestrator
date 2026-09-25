@@ -9,9 +9,10 @@ $/kWh for degradation cost, minutes for `interval_minutes`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
+from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D, DEFAULT_SELF_DISCHARGE_KWH_PER_H
 from opengrid.core.products import VariableKind
 
 ScenarioName = Literal["P10", "P50", "P90"]
@@ -20,10 +21,32 @@ GateKind = Literal["SCHEDULED_15MIN", "ADMISSION", "RENOMINATION"]
 
 @dataclass(frozen=True, slots=True)
 class BankSnapshot:
-    """A bank's discharge capability per interval index (from `fleet.capability`, 02b S4)."""
+    """A bank's capability per interval index (from `fleet.capability`, 02b S4), plus the energy
+    envelope the SoC balance (02a S3.2/S3.3 C1/C2/C15) needs.
+
+    `max_charge_kw`/`capacity_kwh`/`reserve_kwh`/`initial_soc_kwh` are additive to the pre-existing
+    `max_discharge_kw`-only snapshot: `capacity_kwh <= 0` (the default) means "no energy envelope
+    supplied for this bank" and `build_mode_o_model` skips SoC modeling for it entirely, so every
+    existing caller/test that only ever set `max_discharge_kw` keeps its prior (power-only) behavior.
+    `eta_c`/`eta_d`/`self_discharge_kwh_per_h` default to `opengrid.core.physics`'s MVP-S constants
+    (02a S3.2's eta_c=eta_d=0.9487) -- the selector never re-derives these, only imports them, per
+    BUILD.md S1's no-duplicated-functions rule.
+    """
 
     bank_id: str
     max_discharge_kw: dict[int, float]
+    max_charge_kw: dict[int, float] = field(default_factory=dict)
+    initial_soc_kwh: float = 0.0
+    capacity_kwh: float = 0.0
+    reserve_kwh: float = 0.0
+    eta_c: float = DEFAULT_ETA_C
+    eta_d: float = DEFAULT_ETA_D
+    self_discharge_kwh_per_h: float = DEFAULT_SELF_DISCHARGE_KWH_PER_H
+
+    @property
+    def models_soc(self) -> bool:
+        """Whether this bank carries an energy envelope the SoC balance should enforce."""
+        return self.capacity_kwh > 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +114,11 @@ class ModelInputs:
     scenarios: tuple[ScenarioPrice, ...]
     committed: tuple[CommittedObligation, ...]
     candidates: tuple[CandidateOpportunity, ...]
+    terminal_soc_slack_kwh: float = 0.0
+    """02a S3.3 C15 (simplified terminal energy): a bank's SoC at the end of the horizon must be >=
+    its `initial_soc_kwh` minus this slack, for every scenario. 0.0 (the default) requires the bank to
+    end the horizon at least as full as it started (no free depletion); a nonzero slack allows a
+    configurable planned net drawdown."""
 
     @property
     def interval_hours(self) -> float:
@@ -140,6 +168,12 @@ class ExtractedPlan:
     committed_profile: dict[str, dict[int, float]]
     headroom_schedule: dict[tuple[str, int, str], float]
     bank_capacity_duals: dict[tuple[str, int], float]
+    soc_by_bank_interval_scenario: dict[tuple[str, int, str], float] = field(default_factory=dict)
+    """SoC (kWh) at the *start* of each interval, per bank/scenario, for every bank with
+    `BankSnapshot.models_soc`; interval index `max(t)+1` is the terminal SoC (02a S3.3 C15)."""
+    charge_by_bank_interval_scenario: dict[tuple[str, int, str], float] = field(default_factory=dict)
+    """g_{b,t,omega}: charge power (kW) per bank/interval/scenario, for every bank with
+    `BankSnapshot.models_soc`."""
 
 
 @dataclass(frozen=True, slots=True)

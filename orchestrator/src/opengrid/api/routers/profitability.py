@@ -23,13 +23,18 @@ async def profitability_summary(
     service: str | None = None,
     day: date | None = None,
 ) -> list[dict[str, Any]]:
-    """Per-service/day revenue, energy cost, degradation, penalty, net margin, LP-vs-rule-baseline,
-    and forgone-upside-from-lock (02b S7.1, S8 screen 6)."""
+    """Per-obligation-interval revenue, energy cost, degradation, penalty, net margin,
+    LP-vs-rule-baseline, and forgone-upside-from-lock (02b S7.1, S8 screen 6). Row shape matches
+    `opengrid.ui.routes.profitability.profitability_table_view`, which keys rows by `obligation_id`
+    (the screen and its own totals/chart aggregate for display, this endpoint does not)."""
     rows = await store.profitability_summary(service=service, day=day)
     return [
         {
+            "obligation_id": row["obligation_id"],
             "service_type": row["service_type"],
-            "day": row["day"].isoformat(),
+            "contract_id": row["contract_id"],
+            "interval_start": row["interval_start"].isoformat(),
+            "interval_end": row["interval_end"].isoformat(),
             "revenue": row["revenue"],
             "energy_cost": row["energy_cost"],
             "degradation_cost": row["degradation_cost"],

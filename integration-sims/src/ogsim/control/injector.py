@@ -18,7 +18,7 @@ apply to them.
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import time
 import uuid
 from collections.abc import Iterable
@@ -26,8 +26,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import httpx
+
 from ogsim.control import catalogue, market_client, mqtt_pub
 from ogsim.control.log import AnomalyLog
+
+logger = logging.getLogger(__name__)
 
 InjectionSource = Literal["manual", "scenario", "random"]
 
@@ -72,11 +76,19 @@ class InjectionRecord:
 
 def _scenario_control_message(record: InjectionRecord, duration_s: int | None) -> dict[str, Any]:
     """Builds the `<root>/scenario/cmd` payload for a scada/fleet record,
-    conforming to interfaces/mqtt/scenario_control.schema.json."""
+    conforming to interfaces/mqtt/scenario_control.schema.json.
+
+    `target.kind` is inferred per injection (`infer_wire_target_kind`), not
+    read as one static default off the catalogue entry: several entries
+    (e.g. `not_following_commands`) apply to more than one wire kind
+    depending on whether `record.target` actually names a hub, a bank or a
+    zone.
+    """
     entry = catalogue.BY_ID[record.type]
+    wire_kind = catalogue.infer_wire_target_kind(entry, record.target)
     return {
         "id": record.id,
-        "target": {"kind": entry.wire_target_kind, "ref": record.target},
+        "target": {"kind": wire_kind, "ref": record.target},
         "type": entry.wire_type,
         "params": record.params,
         "start": datetime.fromtimestamp(record.start, tz=UTC).isoformat(),
@@ -150,8 +162,16 @@ class Injector:
         found = record is not None
         if record is not None:
             if record.owner == "market":
-                with contextlib.suppress(Exception):
+                try:
                     await market_client.cancel(anomaly_id)
+                except httpx.HTTPError:
+                    # market_client.cancel raises on a failed HTTP call
+                    # (connection failure, timeout, non-2xx status). The
+                    # anomaly is already removed from `_active` above, so a
+                    # failed remote cancel just means ogsim.market's own
+                    # copy expires on its own duration instead -- not a
+                    # reason to lose the injection log entry below.
+                    logger.warning("market cancel failed for anomaly %s", anomaly_id, exc_info=True)
             else:
                 # No cancel verb in the wire schema: republish the same
                 # command with duration_s=0, which the sim treats as an

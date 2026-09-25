@@ -117,10 +117,28 @@ class LedgerPort(Protocol):
     async def ledger_version(self) -> int: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ActiveObligation:
+    """One obligation with an ACTIVE commitment against `bank_id` for the current interval, read
+    independently by guardian from `og.commitment`/`og.reservation` -- never derived from the batch's
+    own item list (GUARD-01/K13: a batch that omits an obligation, or relabels it `obligation_id=None`,
+    must not be able to hide it from G-19)."""
+
+    obligation_id: UUID
+    frozen_kw: Decimal
+
+
 class CommitmentPort(Protocol):
     async def active_kw(self, obligation_id: UUID, cycle_id: str) -> Decimal:
         """K13: the frozen committed kw for this obligation's current interval, read fresh -- never the
         allocator's cached copy."""
+        ...
+
+    async def active_obligations_for_bank(self, bank_id: str, cycle_id: str) -> list[ActiveObligation]:
+        """K13/GUARD-01: every obligation with an ACTIVE commitment for `bank_id`'s hubs during
+        `cycle_id`'s interval, read independently of the proposed batch. G-19 evaluates EVERY entry this
+        returns -- an obligation the batch's items never mention still counts, with new_kw=0 (VETO
+        unless an allowed reason code covers it), closing the omission/relabelling bypass."""
         ...
 
 

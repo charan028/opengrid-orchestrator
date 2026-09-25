@@ -13,6 +13,30 @@ def test_health_ok(client) -> None:
     resp = client.get("/og/api/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+    assert isinstance(resp.json()["processes"], dict)
+
+
+def test_fleet_hubs_smoke(client) -> None:
+    resp = client.get("/og/api/fleet/hubs", headers=VIEWER_HEADERS)
+    assert resp.status_code == 200
+    assert "items" in resp.json()
+
+
+def test_dispatch_opportunities_smoke(client) -> None:
+    resp = client.get("/og/api/dispatch/opportunities", headers=VIEWER_HEADERS)
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+def test_ledger_timeline_smoke(client) -> None:
+    """Exercises the real `og.reservation`/`og.grant` queries end to end, including the known
+    text-vs-uuid `bank_id` type mismatch flagged in `opengrid.api`'s README -- an empty result for a
+    made-up bank id is the expected (non-crashing) outcome today."""
+    resp = client.get("/og/api/ledger/no-such-bank/timeline", headers=VIEWER_HEADERS)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["reservations"] == []
+    assert body["grants"] == []
 
 
 def test_contract_crud_round_trip(client) -> None:
@@ -65,7 +89,7 @@ def test_trace_write_then_verify_round_trip(client) -> None:
         json={"event_class": "TEST_TRACE_CLASS", "retention_days": 3},
     )
     result = client.post(
-        "/og/api/trace/verify", headers=VIEWER_HEADERS, params={"stream_id": "operator_action:operator"}
+        "/og/api/trace/verify", headers=VIEWER_HEADERS, json={"stream_id": "operator_action:operator"}
     )
     assert result.status_code == 200
-    assert result.json()["ok"] is True
+    assert result.json()["passed"] is True

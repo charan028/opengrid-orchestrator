@@ -217,6 +217,91 @@ def test_ts_05_59b_substitution_shortfall_propagates_to_cycle_result() -> None:
     assert shortfall.shortfall_kw == 10.0
 
 
+def test_alloc_02_k9_pi_steps_once_per_bank_with_two_dist_deferral_calls() -> None:
+    """ALLOC-02/K9: with two DIST_DEFERRAL obligations on the same bank, the PI integrator must step
+    exactly once per cycle (not once per obligation, which would double-integrate/double-count relief),
+    and at most one obligation carries the DIST_DEFERRAL relief reason for this cycle."""
+    fleet = FleetState(
+        hubs=(_hub("h1", "b1", 100.0), _hub("h2", "b1", 100.0)),
+        banks=(_bank("b1", 200.0, reserve_kva=0.0),),
+    )
+    ledger = LedgerView(
+        calls=(
+            _call("o1", "b1", "T1", 5.0, "DIST_DEFERRAL", ("h1",)),
+            _call("o2", "b1", "T1", 5.0, "DIST_DEFERRAL", ("h2",)),
+        )
+    )
+    scada = {"b1": ScadaSample(bank_id="b1", apparent_power_kva=150.0, sigma_n=1.0, sigma_x=1.0)}
+    pi_states: dict = {}
+    result = cycle(_T0, fleet, ledger, Schedule(), scada, (), pi_states=pi_states)
+
+    dist_deferral_grants = [g for g in result.grants if g.reason_code == reasons.R_GRANT_DIST_DEFERRAL_PI]
+    assert len(dist_deferral_grants) <= 1  # relief applied to at most one obligation this cycle
+    assert "b1" in pi_states  # exactly one PiState entry: one integrator instance per bank (K9)
+
+    # Stepping the PI once vs. once-per-obligation is directly observable: with two DIST_DEFERRAL
+    # calls, a bug that re-steps per obligation would run pi.step() twice this cycle. Patch step() to
+    # count calls and assert it ran exactly once.
+    from opengrid.allocator.dist_deferral_pi import DistDeferralPI
+
+    call_count = 0
+    real_step = DistDeferralPI.step
+
+    def counting_step(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_step(self, *args, **kwargs)
+
+    DistDeferralPI.step = counting_step
+    try:
+        cycle(_T0, fleet, ledger, Schedule(), scada, (), pi_states={})
+    finally:
+        DistDeferralPI.step = real_step
+    assert call_count == 1
+
+
+def test_alloc_01_k2_hub_capacity_never_exceeded_across_obligations() -> None:
+    """ALLOC-01/K2: two obligations sharing the same eligible hub must not both be granted up to the
+    hub's full capability -- the second obligation's water-fill must see the first obligation's grant
+    already consumed, even though bank-level capability alone would allow both in full."""
+    fleet = FleetState(hubs=(_hub("h1", "b1", 10.0),), banks=(_bank("b1", 100.0),))
+    ledger = LedgerView(
+        calls=(
+            _call("o1", "b1", "T1", 10.0, "DIST_DEFERRAL", ("h1",)),
+            _call("o2", "b1", "T2", 10.0, "ERCOT_AS", ("h1",)),
+        )
+    )
+    result = cycle(_T0, fleet, ledger, Schedule(), {}, ())
+
+    by_ob = {g.obligation_id: g.granted_kw for g in result.grants if not g.is_headroom}
+    assert by_ob.get("o1", 0.0) + by_ob.get("o2", 0.0) <= 10.0 + 1e-6
+    shortfall = next(s for s in result.shortfalls if s.obligation_id == "o2")
+    assert shortfall.shortfall_kw == 10.0
+    assert shortfall.reason_code == reasons.R_COMMIT_LOCK_INFEASIBLE
+
+
+@given(
+    demands=st.lists(st.floats(min_value=0, max_value=50, allow_nan=False), min_size=1, max_size=5),
+    hub_cap=st.floats(min_value=0, max_value=50, allow_nan=False),
+)
+@settings(max_examples=50)
+def test_alloc_01_property_shared_hub_never_exceeds_capability_across_obligations(
+    demands: list[float], hub_cap: float
+) -> None:
+    """ALLOC-01/K2 property: however many obligations have OVERLAPPING eligible hub sets (here, all
+    sharing the same single hub), the total kW granted across every obligation never exceeds that
+    hub's free capability -- bank-level headroom alone must never be treated as hub-level headroom."""
+    fleet = FleetState(hubs=(_hub("h1", "b1", hub_cap),), banks=(_bank("b1", 100_000.0),))
+    calls = tuple(
+        _call(f"o{i}", "b1", "T1", demand, "DIST_DEFERRAL", ("h1",)) for i, demand in enumerate(demands)
+    )
+    ledger = LedgerView(calls=calls)
+    result = cycle(_T0, fleet, ledger, Schedule(), {}, ())
+
+    total_granted = sum(g.granted_kw for g in result.grants if not g.is_headroom)
+    assert total_granted <= hub_cap + 1e-6
+
+
 @given(
     demands=st.lists(st.floats(min_value=0, max_value=200, allow_nan=False), min_size=1, max_size=4),
     cap=st.floats(min_value=0, max_value=500, allow_nan=False),

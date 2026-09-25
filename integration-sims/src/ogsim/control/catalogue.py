@@ -344,6 +344,38 @@ def owner_of(anomaly_type: str) -> str | None:
     return entry.owner if entry else None
 
 
+# Naming conventions used across ogsim.fleet/ogsim.scada for target refs
+# (fleet/state.py's f"hub-{i:05d}"/f"bank-{i:03d}", common/config.py's
+# DEFAULT_ZONES "LZ_*"), used only to disambiguate a catalogue entry whose
+# `target_kind` names more than one possible wire kind (e.g. "hub or bank").
+# An unrecognized ref (e.g. an opaque test id) falls back to `wire_target_kind`.
+_REF_PREFIX_TO_WIRE_KIND: tuple[tuple[str, str], ...] = (
+    ("bank", "bank"),
+    ("hub", "hub"),
+    ("lz_", "zone"),
+    ("zone", "zone"),
+)
+
+
+def infer_wire_target_kind(entry: AnomalyType, target: str) -> str:
+    """Infers the wire `target.kind` for one injection of `entry`, based on
+    the *actual* target ref rather than the catalogue's single default.
+
+    Several catalogue entries apply to more than one wire kind (e.g.
+    `not_following_commands`: "hub or bank", `reserve_floor_pressure`: "hub
+    or zone"): `entry.wire_target_kind` alone would always report the same
+    kind even when a given injection actually targets a different one. This
+    matches `target` against known ref naming conventions and only accepts
+    a match that `entry.target_kind` actually allows; otherwise it falls
+    back to `entry.wire_target_kind`.
+    """
+    normalized = target.strip().lower()
+    for prefix, kind in _REF_PREFIX_TO_WIRE_KIND:
+        if normalized.startswith(prefix) and kind in entry.target_kind:
+            return kind
+    return entry.wire_target_kind
+
+
 def as_list() -> list[dict]:
     return [
         {

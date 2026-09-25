@@ -20,8 +20,8 @@ from opengrid.platform.config import load_config
 from opengrid.platform.db import build_dsn, make_pool, migrate_sync
 from opengrid.settle import settle
 from opengrid.settle.pg_backend import PgSettleBackend
-from opengrid.settle.trace_pg_backend import SettleTracePgBackend
 from opengrid.trace import TraceStore
+from opengrid.trace.pg_backend import PgTraceBackend
 
 
 def _try_connect_dsn() -> str | None:
@@ -120,7 +120,7 @@ async def test_settle_persists_meter_performance_invoice_and_pnl(pg_pool):
     interval_end = interval_start + timedelta(minutes=15)
     await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
 
-    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(SettleTracePgBackend(pg_pool)))
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
 
     async with pg_pool.connection() as conn, conn.cursor() as cur:
@@ -148,7 +148,7 @@ async def test_rerunning_settle_is_idempotent_no_duplicate_rows(pg_pool):
     interval_end = interval_start + timedelta(minutes=15)
     await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
 
-    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(SettleTracePgBackend(pg_pool)))
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
     await settle(obligation_id, interval_start, interval_end)
     await settle(obligation_id, interval_start, interval_end)
@@ -169,7 +169,7 @@ async def test_correction_supersedes_the_original_meter_interval(pg_pool):
     interval_end = interval_start + timedelta(minutes=15)
     await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
 
-    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(SettleTracePgBackend(pg_pool)))
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
 
     # a correction: replace telemetry with a different value and re-settle

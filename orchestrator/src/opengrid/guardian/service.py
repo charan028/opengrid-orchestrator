@@ -16,11 +16,12 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
 from opengrid.core.crypto import sha256_hex_of_json, sign_payload
-from opengrid.core.models.engine import CommandBatchRow, Verdict
+from opengrid.core.models.engine import CommandBatchRow, Verdict, VerdictOutcome
 from opengrid.guardian import checks
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
@@ -201,6 +202,10 @@ class GuardianService:
         return [] if g15.ok else [g15]
 
     async def _check_commitment_lock(self, proposal: ProposedBatch) -> list[CheckOutcome]:
+        """GUARD-01/K13: enumerate ACTIVE obligations independently (never from the batch's own item
+        list) so omitting an obligation, or relabelling it `obligation_id=None`, cannot evade G-19. A
+        missing obligation contributes new_kw=0 to the check below, which vetoes it unless an allowed
+        reason code was given for it."""
         violations: list[CheckOutcome] = []
         totals = checks.obligation_totals(proposal.items)
         reason_by_obligation: dict[str, str | None] = {}
@@ -208,10 +213,14 @@ class GuardianService:
             if item.obligation_id is not None:
                 reason_by_obligation.setdefault(str(item.obligation_id), item.reason_code)
 
-        for obligation_key, new_kw in totals.items():
-            obligation_id = UUID(obligation_key)
-            frozen_kw = await self.ports.commitments.active_kw(obligation_id, proposal.cycle_id)
-            prior = await self.ports.prior_grants.prior_granted_kw(obligation_id)
+        active_obligations = await self.ports.commitments.active_obligations_for_bank(
+            proposal.bank_id, proposal.cycle_id
+        )
+        for obligation in active_obligations:
+            obligation_key = str(obligation.obligation_id)
+            new_kw = totals.get(obligation_key, Decimal(0))  # omitted from the batch -> counts as 0 kw
+            frozen_kw = obligation.frozen_kw
+            prior = await self.ports.prior_grants.prior_granted_kw(obligation.obligation_id)
             prior_kw = prior if prior is not None else frozen_kw
             reason_code = reason_by_obligation.get(obligation_key)
             g19 = checks.check_g19_commitment_lock(
@@ -236,7 +245,7 @@ class GuardianService:
         return total
 
     @staticmethod
-    def _classify(violations: list[CheckOutcome]) -> str:
+    def _classify(violations: list[CheckOutcome]) -> VerdictOutcome:
         """VETOED if a batch-wide rule failed or every item-level violation shares no untouched
         sibling; PARTLY_VETOED when only a strict subset of hubs is affected by item-level rules."""
         if any(v.rule_id not in _ITEM_LEVEL_RULES for v in violations):
@@ -249,7 +258,7 @@ class GuardianService:
         verdict_id: UUID,
         started: float,
         *,
-        outcome: str,
+        outcome: VerdictOutcome,
         vetoed_rule_ids: list[str],
     ) -> Verdict:
         latency_ms = max(int((self.monotonic_fn() - started) * 1000), 0)

@@ -4,6 +4,8 @@ two-step confirmation through the guardian, and the sampled fleet SSE stream.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -18,14 +20,15 @@ from opengrid.api.sse import sse_response
 from opengrid.api.store import StoreProtocol
 from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow
-from opengrid.guardian import evaluate_and_sign
-from opengrid.ledger import ledger_version
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
 router = APIRouter(prefix="/og/api/fleet", tags=["fleet"])
 
 _COMMAND_PROPOSAL_KIND = "fleet_command"
+_COMMAND_VALIDITY_S = 30
+_VERDICT_POLL_INTERVAL_S = 0.2
+_VERDICT_POLL_TIMEOUT_S = 3.0
 
 
 @router.get("/hubs")
@@ -37,9 +40,11 @@ async def list_hubs(
     health: str | None = None,
     limit: int = Query(default=200, le=2000, gt=0),
     offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
+    """`{"items": [...]}`, matching `opengrid.ui.routes.fleet`/`control_room`'s own parsing
+    (`raw.get("items", [])`)."""
     hubs = await store.list_hubs(zone=zone, bank_id=bank, health=health, limit=limit, offset=offset)
-    return [h.model_dump(mode="json") for h in hubs]
+    return {"items": hubs}
 
 
 @router.get("/hubs/{hub_id}")
@@ -48,18 +53,14 @@ async def get_hub(
     store: Annotated[StoreProtocol, Depends(get_store)],
     _identity: Annotated[Identity, Depends(require_viewer)],
 ) -> dict[str, Any]:
-    found = await store.get_hub(hub_id)
-    if found is None:
+    """A flat hub+state dict -- `opengrid.ui.templates._partials.hub_drilldown.html` reads
+    `hub.hub_id`/`bank_id`/`zone`/`soc_kwh`/`p_kw`/`health`/`lease_epoch`/`lease_expires_at`/
+    `last_command_id`/`last_seen_at` directly off the top-level object."""
+    hub = await store.get_hub(hub_id)
+    if hub is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="hub not found")
-    hub, state = found
     sparkline = await store.hub_telemetry_sparkline(hub_id, minutes=15)
-    return {
-        "hub": hub.model_dump(mode="json"),
-        "state": state.model_dump(mode="json"),
-        "telemetry_sparkline": [
-            {"ts": row["ts"].isoformat(), "soc_kwh": row["soc_kwh"], "p_kw": row["p_kw"]} for row in sparkline
-        ],
-    }
+    return {**hub, "telemetry_sparkline": sparkline}
 
 
 @router.get("/banks/{bank_id}")
@@ -94,7 +95,8 @@ async def stream_fleet(
         hubs = await store.list_hubs(zone=zone, bank_id=None, health=None, limit=2000, offset=0)
         return {
             "hubs": [
-                {"hub_id": h.hub_id, "health": h.health, "soc_kwh": h.soc_kwh, "p_kw": h.p_kw} for h in hubs
+                {"hub_id": h["hub_id"], "health": h["health"], "soc_kwh": h["soc_kwh"], "p_kw": h["p_kw"]}
+                for h in hubs
             ]
         }
 
@@ -127,53 +129,110 @@ async def confirm_command(
     store: Annotated[StoreProtocol, Depends(get_store)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> CommandConfirmResult:
-    """Step 2 of 2: the guardian actually runs its checks here (reserve, ramp, lease/epoch, G-19
-    commitment lock) and either signs or vetoes (02b S7.3); a veto is returned as `409`, never
-    silently retried."""
+    """Step 2 of 2 (02b S7.3): writes the K10 decision pre-image (`decision_type="RT_ALLOCATION"`,
+    the shape `opengrid.guardian.repo.PgProposalPort` reads back) and a `command_batch` header row,
+    then polls `og.verdict` for the independently-running `og-guardian` process's PASS/VETOED/TIMEOUT
+    result -- `api` never signs or evaluates a batch itself (K3: sole signer stays in `og-guardian`).
+    A veto is returned as `409`, never silently retried; no verdict within the poll window is a `503`
+    (guardian not keeping up or not running), not a silent success.
+    """
     proposal = _pop_or_404(proposals, proposal_id, kind=_COMMAND_PROPOSAL_KIND)
     body: CommandProposalRequest = proposal.body
 
+    bank_id = await _resolve_bank_id(store, body)
+    lease_epoch = await _resolve_lease_epoch(store, body)
     command_batch_id = uuid4()
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(seconds=_COMMAND_VALIDITY_S)
     item_payload = {
-        "bank_id": body.bank_id,
-        "hub_id": body.hub_id,
+        "hub_id": body.hub_id or bank_id,
         "p_kw_setpoint": body.p_kw_setpoint,
         "reason_code": "MANUAL_OPERATOR",
     }
+    allocation_payload = {
+        "command_batch_id": str(command_batch_id),
+        "bank_id": bank_id,
+        "cycle_id": "MANUAL",
+        "epoch": lease_epoch,
+        "seq": int(now.timestamp()),
+        "issued_at": now.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "ledger_version": await store.current_ledger_version(),
+        "items": [item_payload],
+        "is_firm_event": False,
+        "reason": body.reason,
+        "proposer": identity.user,
+    }
     trace_ref = await trace_store.append(
         stream_id=f"operator_action:{identity.user}",
-        decision_type="OPERATOR_ACTION",
-        event_class="MANUAL_COMMAND",
-        payload={"decision_ref": str(command_batch_id), "command": item_payload, "reason": body.reason},
+        decision_type="RT_ALLOCATION",
+        event_class="RT_ALLOCATION",
+        payload=allocation_payload,
+        reason_codes=["MANUAL_OPERATOR"],
     )
     batch = CommandBatchRow(
         command_batch_id=command_batch_id,
         cycle_id="MANUAL",
-        ledger_version=await ledger_version(),
+        ledger_version=allocation_payload["ledger_version"],
         submission_id=str(proposal_id),
         command_count=1,
         merkle_root=sha256_hex_of_json(item_payload),
         trace_pre_image_id=trace_ref.trace_id,
     )
-    verdict = await evaluate_and_sign(batch)
+    await store.insert_command_batch(batch)
     await store.insert_operator_action(
         operator_ref=identity.user,
         action_kind="MANUAL_COMMAND",
-        target_ref=body.bank_id or body.hub_id,
+        target_ref=bank_id,
         tier="TIER1",
         reason=body.reason,
         trace_id=trace_ref.trace_id,
-        confirmed_at=None,
+        confirmed_at=now,
     )
+
+    verdict = await _poll_for_verdict(store, command_batch_id)
+    if verdict is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="no guardian verdict within the poll window -- og-guardian may not be running",
+        )
     result = CommandConfirmResult(
         proposal_id=proposal_id,
         outcome=verdict.outcome,
         vetoed_rule_ids=verdict.vetoed_rule_ids,
         trace_id=trace_ref.trace_id,
     )
-    if verdict.outcome in ("VETOED", "TIMEOUT"):
+    if verdict.outcome != "PASS":
         raise HTTPException(status.HTTP_409_CONFLICT, detail=result.model_dump(mode="json"))
     return result
+
+
+async def _resolve_bank_id(store: StoreProtocol, body: CommandProposalRequest) -> str:
+    if body.bank_id:
+        return body.bank_id
+    hub = await store.get_hub(body.hub_id) if body.hub_id else None
+    if hub is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="hub not found")
+    bank_id: str = hub["bank_id"]
+    return bank_id
+
+
+async def _resolve_lease_epoch(store: StoreProtocol, body: CommandProposalRequest) -> int:
+    if not body.hub_id:
+        return 0
+    hub = await store.get_hub(body.hub_id)
+    return int(hub["lease_epoch"]) if hub is not None else 0
+
+
+async def _poll_for_verdict(store: StoreProtocol, command_batch_id: UUID) -> Any:
+    elapsed = 0.0
+    while elapsed < _VERDICT_POLL_TIMEOUT_S:
+        verdict = await store.get_verdict(command_batch_id)
+        if verdict is not None:
+            return verdict
+        await asyncio.sleep(_VERDICT_POLL_INTERVAL_S)
+        elapsed += _VERDICT_POLL_INTERVAL_S
+    return None
 
 
 def _pop_or_404(proposals: ProposalStore, proposal_id: UUID, *, kind: str) -> Any:

@@ -56,17 +56,16 @@ async def forecast(
     _identity: Annotated[Identity, Depends(require_viewer)],
     series_key: str,
     kind: str = "price",
-) -> list[dict[str, Any]]:
-    """P10/P50/P90 array, 96 steps (02b S3, S7.1)."""
+) -> dict[str, Any]:
+    """P10/P50/P90 quantile band, 96 steps (02b S3, S7.1), as parallel arrays --
+    `opengrid.ui.routes.markets.forecast_band_view` reads `forecast["p10"/"p50"/"p90"/"ts"]` directly."""
     points = await store.forecast_series(series_key=series_key, kind=kind)
-    return [
-        {
-            "horizon_step": p.horizon_step,
-            "interval_start_utc": p.interval_start_utc.isoformat(),
-            "p10": p.p10,
-            "p50": p.p50,
-            "p90": p.p90,
-            "firm_fitness": p.firm_fitness,
-        }
-        for p in points
-    ]
+    return {
+        "series_key": series_key,
+        "kind": kind,
+        "ts": [p.interval_start_utc.isoformat() for p in points],
+        "p10": [p.p10 for p in points],
+        "p50": [p.p50 for p in points],
+        "p90": [p.p90 for p in points],
+        "firm_fitness": [p.firm_fitness for p in points],
+    }

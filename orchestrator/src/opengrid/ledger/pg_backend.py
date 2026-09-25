@@ -21,7 +21,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.ledger import ReservationRecord
+from opengrid.ledger import GrantRecord, ReservationRecord
 
 _ADVISORY_LOCK_KEY = 774_411_001  # arbitrary fixed key for og.reservation's version counter
 
@@ -116,6 +116,45 @@ class PgLedgerBackend:
                 """,
                 (reason, version, reservation_id),
             )
+
+
+class PgGrantBackend:
+    """`GrantBackend` implementation over `og.grant` (merge task A3). Separate class from
+    `PgLedgerBackend` since grants are insert-only and never row-locked/read back by this module (the
+    API's `Store.list_grants` owns reads, `orchestrator/src/opengrid/api/store.py`) -- keeping the two
+    write paths apart avoids a shared-connection-pattern coupling neither needs."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def insert_grants(self, records: list[GrantRecord]) -> None:
+        if not records:
+            return
+        async with self._pool.connection() as conn, conn.transaction():
+            for record in records:
+                await conn.execute(
+                    """
+                    INSERT INTO og.grant
+                        (grant_id, cycle_id, obligation_id, bank_id, granted_kw, is_headroom,
+                         ledger_version, command_batch_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        record.grant_id,
+                        record.cycle_id,
+                        record.obligation_id,
+                        record.bank_id,
+                        record.granted_kw,
+                        record.is_headroom,
+                        record.ledger_version,
+                        record.command_batch_id,
+                    ),
+                )
+
+
+async def make_grant_backend(pool: AsyncConnectionPool) -> PgGrantBackend:
+    """Convenience constructor matching `make_backend`'s usage pattern."""
+    return PgGrantBackend(pool)
 
 
 def _row_to_record(row: dict[str, Any]) -> ReservationRecord:

@@ -16,6 +16,7 @@ from opengrid.core.models.engine import CommandBatchRow
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import (
+    ActiveObligation,
     BankSnapshot,
     GuardianPorts,
     HubSnapshot,
@@ -93,9 +94,18 @@ class FakeLedger:
 class FakeCommitments:
     def __init__(self) -> None:
         self.frozen: dict[UUID, Decimal] = {}
+        # GUARD-01: obligations guardian's OWN independent read considers ACTIVE for a bank, keyed by
+        # bank_id -- deliberately separate from anything the proposal's items claim.
+        self.active_by_bank: dict[str, set[UUID]] = {}
 
     async def active_kw(self, obligation_id: UUID, cycle_id: str) -> Decimal:
         return self.frozen.get(obligation_id, Decimal(0))
+
+    async def active_obligations_for_bank(self, bank_id: str, cycle_id: str) -> list[ActiveObligation]:
+        return [
+            ActiveObligation(obligation_id=oid, frozen_kw=self.frozen.get(oid, Decimal(0)))
+            for oid in self.active_by_bank.get(bank_id, set())
+        ]
 
 
 class FakePriorGrants:
@@ -262,6 +272,9 @@ def wire_default_passing_scenario(fakes: Fakes, proposal: ProposedBatch) -> None
         fakes.hubs.hubs[item.hub_id] = make_hub_snapshot(prev_p_kw=item.p_kw_setpoint)
     fakes.banks.banks[proposal.bank_id] = make_bank_snapshot()
     fakes.leases.last[proposal.bank_id] = (proposal.epoch - 1, 0)
+    for item in proposal.items:
+        if item.obligation_id is not None:
+            fakes.commitments.active_by_bank.setdefault(proposal.bank_id, set()).add(item.obligation_id)
 
 
 def service_with(

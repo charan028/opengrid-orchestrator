@@ -47,12 +47,34 @@ def _load_schema(name: str) -> dict[str, Any]:
         return loaded
 
 
-@cache
-def _validator(name: str) -> jsonschema.protocols.Validator:
-    schema = _load_schema(name)
+def build_validator(schema: dict[str, Any]) -> jsonschema.protocols.Validator:
+    """Builds a `jsonschema` validator for `schema`, checking the schema
+    itself is well-formed first. The one place that knows how to turn a raw
+    JSON Schema dict into a validator -- shared with
+    `ogsim.control.schema_validation`, which validates `scenario_control`
+    messages against a schema it locates itself (with a graceful no-op
+    fallback the control plane needs that this cached-by-name loader does
+    not provide), so it reuses this builder rather than re-implementing it.
+    """
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
     return validator_cls(schema)
+
+
+def first_error_message(validator: jsonschema.protocols.Validator, message: dict[str, Any]) -> str | None:
+    """Returns the first schema violation's message (with its JSON path),
+    or `None` if `message` is valid. Errors are sorted by path so repeated
+    calls with the same invalid message report the same violation first."""
+    errors = sorted(validator.iter_errors(message), key=lambda e: e.path)
+    if not errors:
+        return None
+    first = errors[0]
+    return f"{first.message} at {list(first.path)}"
+
+
+@cache
+def _validator(name: str) -> jsonschema.protocols.Validator:
+    return build_validator(_load_schema(name))
 
 
 class SchemaValidationError(ValueError):
@@ -64,8 +86,6 @@ def validate(schema_name: str, message: dict[str, Any]) -> None:
 
     Raises `SchemaValidationError` with the first violation on failure.
     """
-    validator = _validator(schema_name)
-    errors = sorted(validator.iter_errors(message), key=lambda e: e.path)
-    if errors:
-        first = errors[0]
-        raise SchemaValidationError(f"{schema_name}: {first.message} at {list(first.path)}")
+    error = first_error_message(_validator(schema_name), message)
+    if error is not None:
+        raise SchemaValidationError(f"{schema_name}: {error}")

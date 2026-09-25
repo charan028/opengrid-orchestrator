@@ -20,6 +20,8 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
+from psycopg_pool import AsyncConnectionPool
+
 from opengrid.settle.backend import SettleBackend
 from opengrid.settle.baselines import METER_SOURCE_BY_SERVICE, compute_baseline_kwh
 from opengrid.settle.billing import draft_invoice_lines, next_version
@@ -27,6 +29,7 @@ from opengrid.settle.metering import meter_interval as _meter_interval
 from opengrid.settle.performance import compute_performance
 from opengrid.settle.profitability import compute_forgone_upside, compute_pnl
 from opengrid.trace import TraceStore
+from opengrid.trace.pg_backend import run_retention_prune_job
 
 _SECONDS_PER_HOUR = Decimal("3600")
 _SETTLE_STREAM_ID = "settle"
@@ -36,15 +39,23 @@ _logger = logging.getLogger(__name__)
 
 _backend: SettleBackend | None = None
 _trace_store: TraceStore | None = None
+_trace_pool: AsyncConnectionPool | None = None
 
 
-def configure(backend: SettleBackend, trace_store: TraceStore) -> None:
+def configure(
+    backend: SettleBackend, trace_store: TraceStore, *, trace_pool: AsyncConnectionPool | None = None
+) -> None:
     """Wire up the real (or fake) I/O this process/test run uses. Called once by
     `opengrid.settle.main` at process startup, and by tests before exercising `settle()` or
-    `run_trace_pruning_cycle()`."""
-    global _backend, _trace_store
+    `run_trace_pruning_cycle()`.
+
+    `trace_pool`, when given, lets `run_trace_pruning_cycle()` also run the canonical per-event-class
+    retention job (`opengrid.trace.pg_backend.run_retention_prune_job`, health-owned, BUILD.md S4).
+    Unit tests configure with no pool and get the pool-free seq-window prune only."""
+    global _backend, _trace_store, _trace_pool
     _backend = backend
     _trace_store = trace_store
+    _trace_pool = trace_pool
 
 
 def _require_backend() -> SettleBackend:
@@ -250,7 +261,14 @@ async def run_settle_cycle(*, max_concurrency: int = _DEFAULT_MAX_CONCURRENCY) -
 
 async def run_trace_pruning_cycle() -> dict[str, int]:
     """Calls `opengrid.trace.TraceStore.checkpoint()` then `.prune()` on settle's cadence (02a S8.3,
-    02b S1.2: "trace pruning ... runs on og-settle's cadence")."""
+    02b S1.2: "trace pruning ... runs on og-settle's cadence"), then, when a trace pool is configured,
+    the canonical per-event-class retention job (`opengrid.trace.pg_backend.run_retention_prune_job`,
+    health-owned) so `og.retention_policy`'s per-class days are honored, not just the seq-window
+    backstop `TraceStore.prune()` provides."""
     trace_store = _require_trace_store()
     await trace_store.checkpoint()
-    return await trace_store.prune()
+    deleted = await trace_store.prune()
+    if _trace_pool is not None:
+        deleted_by_class = await run_retention_prune_job(_trace_pool)
+        deleted.update(deleted_by_class)
+    return deleted

@@ -36,4 +36,6 @@ def extract_plan(
         committed_profile=committed_profile,
         headroom_schedule=dict(primal.h),
         bank_capacity_duals=dict(outcome.bank_capacity_duals),
+        soc_by_bank_interval_scenario=dict(primal.soc),
+        charge_by_bank_interval_scenario=dict(primal.charge),
     )

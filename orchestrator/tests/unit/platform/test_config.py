@@ -40,6 +40,21 @@ def test_load_config_missing_file_raises(tmp_path):
         load_config(tmp_path / "missing.toml")
 
 
+def test_load_config_og_config_unset_raises_config_error(monkeypatch):
+    """PLAT-001: with no explicit path and OG_CONFIG unset, `Path("")` used to normalise to the cwd
+    (truthy, exists) so the guard silently fell through to opening the cwd as a file (PermissionError/
+    IsADirectoryError) instead of the documented ConfigError."""
+    monkeypatch.delenv("OG_CONFIG", raising=False)
+    with pytest.raises(ConfigError):
+        load_config(None)
+
+
+def test_load_config_og_config_empty_string_raises_config_error(monkeypatch):
+    monkeypatch.setenv("OG_CONFIG", "")
+    with pytest.raises(ConfigError):
+        load_config(None)
+
+
 def test_og_db_env_overrides_database(tmp_path, monkeypatch):
     path = _write_toml(tmp_path)
     monkeypatch.setenv("OG_DB", "og_t_arch")

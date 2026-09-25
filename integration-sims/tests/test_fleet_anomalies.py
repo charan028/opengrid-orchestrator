@@ -4,13 +4,31 @@ duration elapse. Uses ogsim.fleet.runtime.FleetEngine with a small fleet."""
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
 from ogsim.common.config import MqttSettings, load_fleet_config
+from ogsim.common.scenario import WIRE_TYPE_TO_CATALOGUE_ID
 from ogsim.fleet.runtime import FleetEngine
 
 MQTT = MqttSettings(host="127.0.0.1", port=1883, username="og_sim", password="", topic_root="og/v1")
+
+_CATALOGUE_ID_TO_WIRE_TYPE = {v: k for k, v in WIRE_TYPE_TO_CATALOGUE_ID.items()}
+
+# Which target.kind the schema-conformant wire message carries for each
+# FLEET_* anomaly type used by this test file (mirrors ogsim.control.catalogue).
+_TARGET_KIND = {
+    "hub_offline": "hub",
+    "zone_mass_disconnect": "zone",
+    "not_following_commands": "hub",
+    "inverter_trip": "hub",
+    "soc_sensor_drift": "hub",
+    "telemetry_delay_burst": "hub",
+    "lease_loss": "hub",
+    "clock_skew": "hub",
+    "reserve_floor_pressure": "hub",
+}
 
 
 @pytest.fixture
@@ -24,11 +42,11 @@ def engine() -> FleetEngine:
 def _inject(engine: FleetEngine, anomaly_type: str, target: str, params: dict, start: float, duration: float):
     raw = {
         "id": f"anom-{anomaly_type}",
-        "target": target,
-        "type": anomaly_type,
+        "target": {"kind": _TARGET_KIND[anomaly_type], "ref": target},
+        "type": _CATALOGUE_ID_TO_WIRE_TYPE[anomaly_type],
         "params": params,
-        "start": start,
-        "duration": duration,
+        "start": datetime.fromtimestamp(start, tz=UTC).isoformat(),
+        "duration_s": duration,
     }
     return engine.handle_scenario_cmd(raw)
 

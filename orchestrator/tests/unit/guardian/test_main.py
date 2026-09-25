@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -15,6 +16,19 @@ from .test_mqtt_io import FakePublishClient
 from .test_repo import FakeCursor, FakePool
 
 NOW = datetime(2026, 9, 26, 18, 0, 0, tzinfo=UTC)
+
+
+def test_main_wires_mqtt_hub_state_port_not_postgres():
+    """GUARD-02/04: og-guardian's hub-state read must be its OWN MQTT telemetry cache
+    (`opengrid.guardian.mqtt_io.MqttHubStatePort`), never a Postgres-backed port reading `og.hub_state`
+    (the row the engine/fleet processes maintain) -- a batch the allocator planned around could then be
+    signed off a value nobody independently verified."""
+    from opengrid.guardian.mqtt_io import MqttHubStatePort
+
+    source = inspect.getsource(guardian_main)
+    assert "MqttHubStatePort" in source
+    assert "PgHubStatePort" not in source
+    assert guardian_main.MqttHubStatePort is MqttHubStatePort
 
 
 async def test_fetch_pending_batches_maps_rows():

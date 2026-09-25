@@ -103,6 +103,31 @@ class CapabilityProvider(Protocol):
     async def capability_kw(self, bank_id: str, interval_start: datetime) -> Decimal: ...
 
 
+@dataclass(frozen=True, slots=True)
+class GrantRecord:
+    """In-process/DB row shape mirroring `og.grant` (migrations/0001_init.sql, bank_id widened to text
+    by migrations/0004_bank_id_text.sql -- merge task A1). Insert-only: the allocator's 2 s cycle
+    (`opengrid.allocator.run_cycle`) proposes a fresh set of grants every cycle; nothing here ever
+    updates or deletes a row (02a S7: "insert-only `og.grant` rows")."""
+
+    grant_id: UUID
+    cycle_id: str
+    bank_id: str
+    granted_kw: Decimal
+    ledger_version: int
+    obligation_id: UUID | None = None
+    is_headroom: bool = False
+    command_batch_id: UUID | None = None
+
+
+class GrantBackend(Protocol):
+    """Postgres persistence contract for `og.grant` (merge task A3: gives `opengrid.engine` a real
+    `LedgerGateway.persist_grants` to wire into `opengrid.allocator`, instead of `run_cycle` raising
+    `NotImplementedError` for lack of a grant-persistence gateway, `INTERFACES.md`)."""
+
+    async def insert_grants(self, records: list[GrantRecord]) -> None: ...
+
+
 class LedgerBackend(Protocol):
     """Postgres persistence contract for `og.reservation`. Isolates I/O per BUILD.md S5a; a real
     implementation (`opengrid.ledger.pg_backend.PgLedgerBackend`) uses `SELECT ... FOR UPDATE` inside a
@@ -169,11 +194,17 @@ class ReservationLedger:
     """
 
     def __init__(
-        self, backend: LedgerBackend, capability: CapabilityProvider, *, as_release_enabled: bool = False
+        self,
+        backend: LedgerBackend,
+        capability: CapabilityProvider,
+        *,
+        as_release_enabled: bool = False,
+        grant_backend: GrantBackend | None = None,
     ):
         self._backend = backend
         self._capability = capability
         self._as_release_enabled = as_release_enabled
+        self._grant_backend = grant_backend
         self._cache = _ReadCache()
         self._write_lock = asyncio.Lock()
         self._version = 0
@@ -276,6 +307,21 @@ class ReservationLedger:
             self._cache.put(
                 replace(record, released_at=_now(), release_reason=reason_code, ledger_version=version)
             )
+
+    async def persist_grants(self, cycle_id: str, grants: list[GrantRecord]) -> None:
+        """S7: write one cycle's proposed grants as insert-only `og.grant` rows (merge task A3). Each
+        record is stamped with the ledger version current at call time, per grant, matching the
+        reservation write path's convention (02a S1.9) -- callers that need one shared version across
+        the whole batch should read `ledger_version()` once and pass matching `GrantRecord`s.
+
+        Raises `RuntimeError` if no `grant_backend` was wired at construction (an engine-only capability
+        -- unit tests exercising just the reservation path never need it)."""
+        if self._grant_backend is None:
+            raise RuntimeError("ReservationLedger was constructed without a grant_backend")
+        if not grants:
+            return
+        async with self._write_lock:
+            await self._grant_backend.insert_grants(grants)
 
     async def substitute(
         self,
@@ -384,3 +430,10 @@ async def free_headroom(bank_id: str, interval_start: datetime) -> Decimal:
     """`capability(bank, t) - committed(bank, t)` (02a S4.1/S5.1 S2). Read-only; used by the
     allocator's S2 to size the spot/headroom schedule."""
     return await _require_instance().free_headroom(bank_id, interval_start)
+
+
+async def persist_grants(cycle_id: str, grants: list[GrantRecord]) -> None:
+    """S7: insert-only write of one allocator cycle's proposed grants into `og.grant` (merge task A3).
+    The engine-owned `LedgerGateway` adapter (`opengrid.allocator.gateways.LedgerGateway`) calls this
+    once per cycle after `opengrid.allocator.run_cycle` produces its `CycleResult`."""
+    await _require_instance().persist_grants(cycle_id, grants)

@@ -22,6 +22,8 @@ class PrimalSnapshot:
     q: dict[str, float]
     ybar: dict[tuple[str, str, int], float]
     h: dict[tuple[str, int, str], float]
+    soc: dict[tuple[str, int, str], float]
+    charge: dict[tuple[str, int, str], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +72,8 @@ def _snapshot_primal(built: BuiltModel) -> PrimalSnapshot:
         q={oid: values[v.index] for oid, v in built.q_vars.items()},
         ybar={key: values[v.index] for key, v in built.ybar_vars.items()},
         h={key: values[v.index] for key, v in built.h_vars.items()},
+        soc={key: values[v.index] for key, v in built.soc_vars.items()},
+        charge={key: values[v.index] for key, v in built.charge_vars.items()},
     )
 
 
@@ -136,7 +140,11 @@ def highs_solve(
         status = "INFEASIBLE_F1"
 
     objective_value = highs.getObjectiveValue() if has_incumbent else 0.0
-    primal = _snapshot_primal(built) if has_incumbent else PrimalSnapshot(x={}, q={}, ybar={}, h={})
+    primal = (
+        _snapshot_primal(built)
+        if has_incumbent
+        else PrimalSnapshot(x={}, q={}, ybar={}, h={}, soc={}, charge={})
+    )
     duals = _price_of_firmness(built) if has_incumbent else {}
 
     return SolveOutcome(

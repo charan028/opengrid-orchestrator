@@ -2,20 +2,26 @@
 
 No solving, no I/O -- `solve.py` runs it, `extract.py` reads the solution back into `ExtractedPlan`.
 
-**Deliverable-boundary simplification (documented, not hacked around).** Full physics (SoC dynamics,
-charge-side constraints C7-C9, charge/discharge exclusivity C14, terminal-energy C15, cycle budget C18)
-live on the other side of the `fleet.capability`/`forecast.scenarios` interface boundary (02b S4/S3):
-`fleet` already reduces hub/bank SoC state to a discharge-capability envelope per bank/interval before
-the selector ever sees it (02b S12 "fleet never simulates -- it only stores and aggregates"), and the
-review's own architecture puts SoC dynamics in `core.physics`/`fleet`, not `selector`. Re-deriving them
-here would violate BUILD.md S1's no-duplicated-functions rule and duplicate the `fleet`/`allocator`
-owners' work. This builder therefore implements the constraint families that are genuinely the
-selector's to decide: C1 (aggregate bank capacity balance, reduced to the discharge envelope), C6/C13
-(one obligation-set per bank/interval, i.e. K2 one-buyer, materialized as a shared-capacity row), C12
-(firm delivery + locality via eligible-bank sets), C16 (non-anticipativity, structural: first-stage
-variables carry no scenario index), and C24 (the commitment lock, an equality on the frozen total).
-C3/C11 (AS-vs-firm exclusivity beyond shared-capacity competition), C17 (reserve-deficit recovery) and
-the piecewise penalty term are deferred; see the module's final-report note.
+**Deliverable-boundary simplification (documented, not hacked around).** `fleet.capability` still
+reduces hub/bank *instantaneous power* state to a discharge/charge-power envelope per bank/interval
+before the selector ever sees it (02b S12 "fleet never simulates -- it only stores and aggregates") --
+the selector never re-derives per-hub physics. But a day-ahead plan built only from that per-interval
+power envelope, with no memory of *energy* across intervals, can commit more energy over a window than
+the bank's SoC can actually deliver (a correctness bug fixed here): this builder now also carries the
+per-bank *energy* envelope (`BankSnapshot.capacity_kwh`/`reserve_kwh`/`initial_soc_kwh`, populated once
+`fleet` exposes them -- see the module's final-report note) through C1's energy balance, C2's SOC
+bounds (enforced as the SoC variables' own bounds) and C15's simplified terminal-energy floor, using
+`core.physics`'s shared eta_c/eta_d/self-discharge constants (never re-deriving the formula's
+coefficients, only inlining its already-linear affine form -- see the SoC section below for why). This
+builder implements the constraint families that are genuinely the selector's to decide: C1 (bank energy
+balance across intervals, plus the aggregate power balance reduced to the discharge envelope), C2 (SOC
+bounds), C6/C13 (one obligation-set per bank/interval, i.e. K2 one-buyer, materialized as a
+shared-capacity row), C12 (firm delivery + locality via eligible-bank sets), C15 (terminal energy,
+simplified per 02a S3.3), C16 (non-anticipativity, structural: first-stage variables carry no scenario
+index), and C24 (the commitment lock, an equality on the frozen total). Charge-side constraints C7-C9,
+charge/discharge exclusivity C14, cycle budget C18, C3/C11 (AS-vs-firm exclusivity beyond
+shared-capacity competition) and C17 (reserve-deficit recovery) are still deferred; see the module's
+final-report note.
 
 Variables:
     x_o        in {0,1}         -- BINARY candidates (all-or-nothing).
@@ -63,6 +69,10 @@ class BuiltModel:
     capacity_rows: dict[tuple[str, int, str], highspy.highs_cons]
     lock_rows: dict[tuple[str, int], highspy.highs_cons]
     integer_vars: list[highspy.highs_var] = field(default_factory=list)
+    soc_vars: dict[tuple[str, int, str], highspy.highs_var] = field(default_factory=dict)
+    charge_vars: dict[tuple[str, int, str], highspy.highs_var] = field(default_factory=dict)
+    soc_balance_rows: dict[tuple[str, int, str], highspy.highs_cons] = field(default_factory=dict)
+    terminal_soc_rows: dict[tuple[str, str], highspy.highs_cons] = field(default_factory=dict)
 
 
 def _semi_continuous_bounds(min_qty_kw: float, increment_kw: float, max_kw: float) -> tuple[float, int]:
@@ -162,6 +172,59 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                 lhs = highs.qsum([*consumers, h])
                 capacity_rows[bank.bank_id, t, scenario.scenario] = highs.addConstr(lhs <= cap_kw)
 
+    # --- SoC dynamics (02a S3.2/S3.3 C1 energy balance, C2 SOC bounds, C15 terminal energy) --------
+    # Per-bank, per-scenario energy state, added only for banks carrying an energy envelope
+    # (`BankSnapshot.models_soc`) -- see that property's docstring for why this is backward compatible
+    # with every caller that only ever supplied a power envelope. The affine step below is exactly
+    # `opengrid.core.physics.soc_step`'s formula (its clamp to [0, e_kwh] becomes these LP variables'
+    # own bounds instead of a runtime min/max, since HiGHS constraints must stay linear); the
+    # coefficients (`eta_c`, `eta_d`, `self_discharge_kwh_per_h`) are `BankSnapshot`'s copies of
+    # `core.physics`'s constants, never re-derived. No linear-coefficient helper exists in `core` for
+    # this step today -- see the module's final-report note on adding one so `allocator`/`guardian`
+    # can share it too instead of each inlining the same affine form.
+    soc_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
+    charge_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
+    soc_balance_rows: dict[tuple[str, int, str], highspy.highs_cons] = {}
+    terminal_soc_rows: dict[tuple[str, str], highspy.highs_cons] = {}
+
+    for bank in inputs.banks:
+        if not bank.models_soc:
+            continue
+        intervals = sorted(bank.max_discharge_kw)
+        if not intervals:
+            continue
+        for scenario in inputs.scenarios:
+            first_t = intervals[0]
+            soc_vars[bank.bank_id, first_t, scenario.scenario] = highs.addVariable(
+                lb=bank.reserve_kwh, ub=bank.capacity_kwh
+            )
+            highs.addConstr(soc_vars[bank.bank_id, first_t, scenario.scenario] == bank.initial_soc_kwh)
+
+            for t in intervals:
+                charge = highs.addVariable(lb=0.0, ub=_clamped(bank.max_charge_kw.get(t, 0.0)))
+                charge_vars[bank.bank_id, t, scenario.scenario] = charge
+                discharge_total = highs.qsum(
+                    [
+                        *consumers_by_bt.get((bank.bank_id, t), []),
+                        h_vars[bank.bank_id, t, scenario.scenario],
+                    ]
+                )
+                next_e = highs.addVariable(lb=bank.reserve_kwh, ub=bank.capacity_kwh)
+                soc_vars[bank.bank_id, t + 1, scenario.scenario] = next_e
+                soc_balance_rows[bank.bank_id, t, scenario.scenario] = highs.addConstr(
+                    next_e
+                    == soc_vars[bank.bank_id, t, scenario.scenario]
+                    + bank.eta_c * charge * dt_h
+                    - (dt_h / bank.eta_d) * discharge_total
+                    - bank.self_discharge_kwh_per_h * dt_h
+                )
+
+            terminal_t = intervals[-1] + 1
+            terminal_soc_rows[bank.bank_id, scenario.scenario] = highs.addConstr(
+                soc_vars[bank.bank_id, terminal_t, scenario.scenario]
+                >= bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh
+            )
+
     # --- objective (02a S3.4, MVP-S subset) ---------------------------------------------------------
     vars_by_obligation: dict[str, list[highspy.highs_var]] = {}
     for (obligation_id, _bank_id, _t), var in ybar_vars.items():
@@ -186,6 +249,12 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                 price = scenario.price_usd_per_mwh.get(t, 0.0)
                 h = h_vars[bank.bank_id, t, scenario.scenario]
                 obj_terms.append(scenario.probability * dt_h * (price / 1000.0) * h)
+                charge = charge_vars.get((bank.bank_id, t, scenario.scenario))
+                if charge is not None:
+                    # Charging draws from the grid at the same price signal (02a S3.4's -(v^E+w_b)*g;
+                    # w_b, a per-bank wheeling tariff, is not yet a modeled parameter anywhere in this
+                    # codebase -- see the module's final-report note).
+                    obj_terms.append(-scenario.probability * dt_h * (price / 1000.0) * charge)
 
     if obj_terms:
         objective = obj_terms[0]
@@ -205,4 +274,8 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
         capacity_rows=capacity_rows,
         lock_rows={},
         integer_vars=integer_vars,
+        soc_vars=soc_vars,
+        charge_vars=charge_vars,
+        soc_balance_rows=soc_balance_rows,
+        terminal_soc_rows=terminal_soc_rows,
     )

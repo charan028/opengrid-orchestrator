@@ -69,20 +69,6 @@ class FakePool:
         return self._conn
 
 
-async def test_pg_hub_state_port_found():
-    cursor = FakeCursor([(39.2, 7.84, 11.0, 0.9487, 0.9487, 20.0, 3.0, "online")])
-    port = repo.PgHubStatePort(FakePool(cursor))
-    snap = await port.snapshot("hub-1")
-    assert snap is not None
-    assert snap.soc_kwh == 20.0 and snap.prev_p_kw == 3.0 and snap.health == "online"
-    assert snap.params.p_kw == 11.0
-
-
-async def test_pg_hub_state_port_missing():
-    port = repo.PgHubStatePort(FakePool(FakeCursor([None])))
-    assert await port.snapshot("nope") is None
-
-
 async def test_pg_bank_state_port_found_with_load():
     cursor = FakeCursor([(75.0, 5.0, "feeder-1"), (42.0,)])
     port = repo.PgBankStatePort(FakePool(cursor))
@@ -113,6 +99,21 @@ async def test_pg_commitment_port_found_and_default():
 
     missing = repo.PgCommitmentPort(FakePool(FakeCursor([None])))
     assert await missing.active_kw(obligation_id, "cycle-1") == Decimal(0)
+
+
+async def test_pg_commitment_port_active_obligations_for_bank():
+    """GUARD-01: guardian's own enumeration reads og.reservation/og.commitment directly, independent of
+    anything a proposed batch claims."""
+    obligation_id = uuid4()
+    cursor = FakeCursor([[(obligation_id, Decimal("5.0"))]])
+    port = repo.PgCommitmentPort(FakePool(cursor))
+    obligations = await port.active_obligations_for_bank("bank-1", "cycle-1")
+    assert obligations == [repo.ActiveObligation(obligation_id=obligation_id, frozen_kw=Decimal("5.0"))]
+
+
+async def test_pg_commitment_port_active_obligations_for_bank_none_active():
+    port = repo.PgCommitmentPort(FakePool(FakeCursor([[]])))
+    assert await port.active_obligations_for_bank("bank-1", "cycle-1") == []
 
 
 async def test_pg_prior_grant_port_found_and_missing():
@@ -242,6 +243,16 @@ async def test_chrony_clock_port_missing_system_time_line_returns_zero(monkeypat
 async def test_build_pg_ports_wires_everything():
     pool = FakePool(FakeCursor([]))
     trace_store = object()  # opaque -- only passed through to TraceStorePort's constructor
-    ports, leases = repo.build_pg_ports(pool, trace_store, zones_by_bank={"bank-1": "zone-a"})  # type: ignore[arg-type]
+    hubs = object()  # GUARD-02/04: caller must supply guardian's own telemetry-backed hubs port
+    ports, leases = repo.build_pg_ports(
+        pool, trace_store, hubs, zones_by_bank={"bank-1": "zone-a"}
+    )  # type: ignore[arg-type]
     assert ports.zones_by_bank == {"bank-1": "zone-a"}
+    assert ports.hubs is hubs
     assert isinstance(leases, repo.InMemoryLeaseStatePort)
+
+
+def test_pg_hub_state_port_removed():
+    """GUARD-02/04: there is no Postgres-backed HubStatePort in repo.py to default to -- guardian's hub
+    read must always be its own MQTT telemetry (opengrid.guardian.mqtt_io.MqttHubStatePort)."""
+    assert not hasattr(repo, "PgHubStatePort")
