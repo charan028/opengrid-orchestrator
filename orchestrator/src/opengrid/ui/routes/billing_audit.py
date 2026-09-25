@@ -3,14 +3,23 @@
 Renders `/og/billing`: invoice lines with filters and CSV export, an M&V performance summary, and a
 trace explorer with a chain-verify button and its pass/fail result. Server-rendered first paint comes
 from `opengrid.ui.api_client.get_json` (02b S7.1); the CSV export and the chain-verify POST are relayed
-to `opengrid.api` directly (the API owns CSV formatting and `trace.verify`). View-model functions below
-are pure and unit-tested against JSON fixtures, no HTTP or DB involved.
+to `opengrid.api` through the same shared `opengrid.ui.api_client` module (`get_bytes`/`post_json`) --
+this screen used to keep a private `_post_json` copy plus a second bare `httpx.AsyncClient` for the CSV
+relay; both now go through the one client every other screen already uses (BUILD.md code-review round).
+View-model functions below are pure and unit-tested against JSON fixtures, no HTTP or DB involved.
 
 Assumption pending the `api` agent's implementation: `GET /og/api/billing/invoice-lines` is expected to
 embed an optional `"performance"` array (`opengrid.core.models.engine.Performance` rows) alongside
 `"lines"` for the M&V summary, since 02b S7.1 lists no separate performance endpoint. If the API agent
 instead ships a dedicated endpoint, `mnv_performance_view` below is unaffected -- only
 `billing_page`'s fetch needs a one-line change.
+
+Open issue for the `api`/`trace` agents: the trace explorer (below) cannot show a per-event age
+indicator (BUILD.md code-review round item 5) because `opengrid.core.models.engine.TraceRow` -- what
+`GET /og/api/trace/events` serializes -- carries no timestamp field at all (only `trace_id`, decision/
+event class, `stream_id`, `seq`, `reason_codes`, `hash`, `prev_hash`). Adding one (e.g. `created_at`,
+which `opengrid.trace.store.TraceRecordRef` already computes but does not expose on the row) is a
+prerequisite; fabricating an age from `seq` alone would be misleading.
 """
 
 from __future__ import annotations
@@ -19,35 +28,20 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import HTMLResponse
 
-from opengrid.ui.api_client import ApiUnavailable, api_base_url, get_json
+from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
+from opengrid.ui.api_client import get_bytes as api_get_bytes
 from opengrid.ui.role import is_operator, role_of
 from opengrid.ui.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing")
 
-_POST_TIMEOUT_S = 5.0
 _INVOICE_LINES_PATH = "/og/api/billing/invoice-lines"
 _TRACE_EVENTS_PATH = "/og/api/trace/events"
 _TRACE_VERIFY_PATH = "/og/api/trace/verify"
-
-
-async def _post_json(path: str, payload: dict[str, Any]) -> Any:
-    """POST an `opengrid.api` endpoint (02b S7.1); `opengrid.ui.api_client` only covers GET, so the one
-    mutating call this screen needs (`trace/verify`, itself read-only in effect) is made the same way,
-    against the same base URL, with the same `ApiUnavailable` contract."""
-    url = f"{api_base_url()}{path}"
-    try:
-        async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as exc:
-        raise ApiUnavailable(f"POST {path} failed: {exc}") from exc
 
 
 def invoice_table_view(lines: list[dict[str, Any]]) -> dict[str, Any]:
@@ -198,12 +192,9 @@ async def export_invoice_lines_csv(
     """Stream the CSV export by relaying `GET .../invoice-lines?format=csv` from `opengrid.api`
     unchanged (the API owns CSV formatting; the UI only adds the download headers)."""
     params = {k: v for k, v in {"from": from_, "to": to, "format": "csv"}.items() if v}
-    url = f"{api_base_url()}{_INVOICE_LINES_PATH}"
-    async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
+    content = await api_get_bytes(_INVOICE_LINES_PATH, params=params)
     return Response(
-        content=response.content,
+        content=content,
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=invoice_lines.csv"},
     )
@@ -218,7 +209,7 @@ async def run_chain_verify(
 ) -> HTMLResponse:
     """HTMX partial: runs the chain-verify button, returns the pass/fail fragment (02b S7.1/S8)."""
     try:
-        result = await _post_json(_TRACE_VERIFY_PATH, {"class": class_, "from": from_, "to": to})
+        result = await post_json(_TRACE_VERIFY_PATH, {"class": class_, "from": from_, "to": to})
     except ApiUnavailable as exc:
         result = {"passed": False, "checked": 0, "first_broken": {"error": str(exc)}}
     return templates.TemplateResponse(

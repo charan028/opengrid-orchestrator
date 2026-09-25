@@ -95,10 +95,14 @@ VALUES (%(id)s, %(contract_id)s, %(obligation_id)s, %(period_start)s, %(period_e
 """
 
 _FETCH_ACTIVE_PNL_SQL = """
-SELECT pnl_id, net_value
+SELECT pnl_id, net_value, version
 FROM og.pnl
 WHERE obligation_id = %(obligation_id)s AND interval_start = %(interval_start)s
-ORDER BY created_at DESC LIMIT 1
+  AND superseded_by IS NULL
+"""
+
+_SUPERSEDE_PNL_SQL = """
+UPDATE og.pnl SET superseded_by = %(new_id)s WHERE pnl_id = %(old_id)s
 """
 
 _FETCH_INVOICE_LINES_FOR_PERIOD_SQL = """
@@ -138,9 +142,10 @@ LIMIT 500
 _INSERT_PNL_SQL = """
 INSERT INTO og.pnl
     (pnl_id, obligation_id, interval_start, interval_end, revenue, energy_cost, degradation_cost,
-     penalty, net_value, rule_baseline_value, forgone_upside)
+     penalty, net_value, rule_baseline_value, forgone_upside, version)
 VALUES (%(id)s, %(obligation_id)s, %(interval_start)s, %(interval_end)s, %(revenue)s, %(energy_cost)s,
-        %(degradation_cost)s, %(penalty)s, %(net_value)s, %(rule_baseline_value)s, %(forgone_upside)s)
+        %(degradation_cost)s, %(penalty)s, %(net_value)s, %(rule_baseline_value)s, %(forgone_upside)s,
+        %(version)s)
 """
 
 
@@ -341,7 +346,7 @@ class PgSettleBackend:
             row = await cur.fetchone()
         if row is None:
             return None
-        return ExistingPnl(pnl_id=row["pnl_id"], net_value=row["net_value"])
+        return ExistingPnl(pnl_id=row["pnl_id"], net_value=row["net_value"], version=row["version"])
 
     async def insert_pnl(
         self,
@@ -356,6 +361,7 @@ class PgSettleBackend:
         net_value: Decimal,
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
+        version: int,
     ) -> UUID:
         new_id = uuid4()
         async with self.pool.connection() as conn, conn.cursor() as cur:
@@ -373,9 +379,14 @@ class PgSettleBackend:
                     "net_value": net_value,
                     "rule_baseline_value": rule_baseline_value,
                     "forgone_upside": forgone_upside,
+                    "version": version,
                 },
             )
         return new_id
+
+    async def mark_pnl_superseded(self, old_id: UUID, new_id: UUID) -> None:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_SUPERSEDE_PNL_SQL, {"old_id": old_id, "new_id": new_id})
 
     async def fetch_rule_baseline_delivered_kwh(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

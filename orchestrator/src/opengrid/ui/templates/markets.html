@@ -7,33 +7,36 @@
 {% endblock %}
 
 {% block content %}
-<section class="og-grid" aria-label="Price / load / wind / solar / AS series">
-  {% for chart in series_charts %}
-  {% include "markets_series_fragment.html" %}
-  {% endfor %}
-</section>
+{# `#markets-poll-wrapper` re-fetches this exact screen (server-side, through the normal route -- not a
+   client-side setTimeout one-shot, BUILD.md code-review round item 2) every 30s and swaps its own
+   freshly-rendered content back in (`hx-select`/`hx-swap="outerHTML"`, the standard htmx "poll a
+   fragment of yourself" idiom -- market data does not need SSE's ~1-2s cadence, 02b S8). The per-series
+   and forecast charts' `<script>` tags live *inside* this wrapper (not in `{% block scripts %}`, which
+   never re-runs) so their `og.chart(...)` calls re-execute with fresh data on every poll, not just first
+   paint. #}
+<div id="markets-poll-wrapper"
+     hx-get="{{ request.url.path }}{{ ('?' + request.url.query) if request.url.query else '' }}"
+     hx-select="#markets-poll-wrapper" hx-target="this" hx-swap="outerHTML" hx-trigger="every 30s">
+  <section class="og-grid" aria-label="Price / load / wind / solar / AS series">
+    {% for chart in series_charts %}
+    {% include "markets_series_fragment.html" %}
+    {% endfor %}
+  </section>
 
-<section class="og-panel" aria-labelledby="forecast-heading">
-  <h2 id="forecast-heading">Forecast band (P10 / P50 / P90)</h2>
-  <div id="forecast-chart" style="height: 260px;" role="img" aria-label="Forecast quantile band chart"></div>
-</section>
+  <section class="og-panel" aria-labelledby="forecast-heading">
+    <h2 id="forecast-heading">Forecast band (P10 / P50 / P90)</h2>
+    <div id="forecast-chart" style="height: 260px;" role="img" aria-label="Forecast quantile band chart"></div>
+  </section>
 
-<section class="og-panel" aria-labelledby="freshness-heading">
-  <h2 id="freshness-heading">Freshness & source status</h2>
-  {% with columns=[{"key": "source", "label": "Source"}, {"key": "product", "label": "Product"}, {"key": "mode_badge", "label": "Mode", "html": true}, {"key": "age_badge", "label": "Age", "html": true}, {"key": "consecutive_failures", "label": "Failures", "numeric": true}, {"key": "breaker_badge", "label": "Breaker", "html": true}], rows=freshness_rows, empty_message='No feed status available' %}
-    {% include "_partials/data_table.html" %}
-  {% endwith %}
-</section>
-{% endblock %}
+  <section class="og-panel" aria-labelledby="freshness-heading">
+    <h2 id="freshness-heading">Freshness & source status</h2>
+    {% with columns=[{"key": "source", "label": "Source"}, {"key": "product", "label": "Product"}, {"key": "mode_badge", "label": "Mode", "html": true}, {"key": "age_badge", "label": "Age", "html": true}, {"key": "consecutive_failures", "label": "Failures", "numeric": true}, {"key": "breaker_badge", "label": "Breaker", "html": true}], rows=freshness_rows, empty_message='No feed status available' %}
+      {% include "_partials/data_table.html" %}
+    {% endwith %}
+  </section>
 
-{% block scripts %}
-<script>
-  document.addEventListener("DOMContentLoaded", function () {
+  <script>
     og.chart("#forecast-chart", {{ forecast.chart_option | tojson }});
-
-    window.setTimeout(function () {
-      htmx.ajax("GET", window.location.pathname + window.location.search, {target: "body", select: "body"});
-    }, 30000);
-  });
-</script>
+  </script>
+</div>
 {% endblock %}

@@ -4,11 +4,15 @@ duration elapse. Uses ogsim.scada.runtime.ScadaEngine with a small config."""
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
 from ogsim.common.config import load_scada_config
+from ogsim.common.scenario import WIRE_TYPE_TO_CATALOGUE_ID
 from ogsim.scada.runtime import ScadaEngine
+
+_CATALOGUE_ID_TO_WIRE_TYPE = {v: k for k, v in WIRE_TYPE_TO_CATALOGUE_ID.items()}
 
 
 @pytest.fixture
@@ -29,11 +33,11 @@ def _inject(
 ):
     raw = {
         "id": f"anom-{anomaly_type}",
-        "target": target,
-        "type": anomaly_type,
+        "target": {"kind": "bank", "ref": target},
+        "type": _CATALOGUE_ID_TO_WIRE_TYPE[anomaly_type],
         "params": params,
-        "start": start,
-        "duration": duration,
+        "start": datetime.fromtimestamp(start, tz=UTC).isoformat(),
+        "duration_s": duration,
     }
     assert engine.handle_scenario_cmd(raw) is True
 

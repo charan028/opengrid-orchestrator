@@ -58,3 +58,36 @@ def fake_api(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, Any]], None
         monkeypatch.setattr(health, "get_json", fake_get_json)
 
     return install
+
+
+@pytest.fixture
+def fake_post_api(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, Any]], None]:
+    """Install a fake `post_json` that serves fixture payloads keyed by request path. A value that is
+    itself an `api_client.ApiUnavailable` instance is raised instead of returned, so a single `install()`
+    call can set up both the happy path and an error path (e.g. a 409 veto, a 503 timeout) per test."""
+
+    def install(responses: dict[str, Any]) -> None:
+        async def fake_post_json(path: str, payload: dict[str, Any]) -> Any:
+            if path not in responses:
+                raise api_client.ApiUnavailable(f"no fixture registered for POST {path}")
+            entry = responses[path]
+            if isinstance(entry, api_client.ApiUnavailable):
+                raise entry
+            return entry
+
+        monkeypatch.setattr(api_client, "post_json", fake_post_json)
+        # route modules imported `post_json` by name, so patch their references too.
+        import opengrid.ui.routes.control_room as control_room
+        import opengrid.ui.routes.fleet as fleet
+        import opengrid.ui.routes.health as health
+
+        monkeypatch.setattr(control_room, "post_json", fake_post_json)
+        monkeypatch.setattr(fleet, "post_json", fake_post_json)
+        monkeypatch.setattr(health, "post_json", fake_post_json)
+        try:
+            import opengrid.ui.routes.billing_audit as billing_audit
+        except ImportError:
+            return
+        monkeypatch.setattr(billing_audit, "post_json", fake_post_json)
+
+    return install

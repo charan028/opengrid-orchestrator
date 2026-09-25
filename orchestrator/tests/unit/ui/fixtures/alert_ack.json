@@ -1,0 +1,8 @@
+{
+  "id": 7,
+  "rule": "FEED_STALE",
+  "severity": "warning",
+  "summary": "ERCOT price feed approaching staleness",
+  "opened_at": "2026-09-25T12:00:00+00:00",
+  "acked_by": "op.jane"
+}

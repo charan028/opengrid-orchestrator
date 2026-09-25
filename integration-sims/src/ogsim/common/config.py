@@ -67,10 +67,18 @@ class FleetConfig:
     bank_kva_rating_default: float = 75.0
     guardian_public_key_path: str = "/etc/opengrid/guardian_ed25519.pub"
     guardian_public_key_path_dev: str = ""
+    safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
+    safestop_public_key_path_dev: str = ""
 
     def public_key_path(self) -> str:
-        """Dev override wins when set, so local runs don't need /etc access."""
+        """Guardian public key path; dev override wins when set, so local
+        runs don't need /etc access."""
         return self.guardian_public_key_path_dev or self.guardian_public_key_path
+
+    def safestop_key_path(self) -> str:
+        """Safestop public key path (crypto.md §2.3: the only key allowed to
+        sign a StopEvent `action="ENGAGE"`); dev override wins when set."""
+        return self.safestop_public_key_path_dev or self.safestop_public_key_path
 
 
 def load_fleet_config(path: str | None = None) -> FleetConfig:
@@ -99,6 +107,8 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         bank_kva_rating_default=float(raw.get("bank_kva_rating_default", defaults.bank_kva_rating_default)),
         guardian_public_key_path=str(raw.get("guardian_public_key_path", defaults.guardian_public_key_path)),
         guardian_public_key_path_dev=str(raw.get("guardian_public_key_path_dev", "")),
+        safestop_public_key_path=str(raw.get("safestop_public_key_path", defaults.safestop_public_key_path)),
+        safestop_public_key_path_dev=str(raw.get("safestop_public_key_path_dev", "")),
     )
 
 

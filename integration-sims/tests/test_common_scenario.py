@@ -1,8 +1,9 @@
-"""Tests for ogsim.common.scenario -- tolerant <root>/scenario/cmd parsing
-for both the schema-conformant shape and ogsim.control's current legacy
-flat shape (BUILD.md point 4's documented wire-shape compromise)."""
+"""Tests for ogsim.common.scenario -- <root>/scenario/cmd parsing against
+the one schema-conformant wire shape (interfaces/mqtt/scenario_control.schema.json)."""
 
 from __future__ import annotations
+
+import pytest
 
 from ogsim.common.scenario import parse_scenario_cmd
 
@@ -23,7 +24,10 @@ def test_parses_schema_conformant_shape() -> None:
     assert cmd.duration_s == 60
 
 
-def test_parses_legacy_flat_shape() -> None:
+def test_flat_string_target_is_rejected() -> None:
+    # The legacy flat shape ({target: "<string>", duration: ...}) is no
+    # longer accepted: ogsim.control now publishes only the schema-
+    # conformant {kind, ref} shape.
     raw = {
         "id": "22222222-2222-2222-2222-222222222222",
         "target": "hub-0007",
@@ -32,12 +36,8 @@ def test_parses_legacy_flat_shape() -> None:
         "start": 1780000000.0,
         "duration": 60.0,
     }
-    cmd = parse_scenario_cmd(raw)
-    assert cmd.catalogue_type == "hub_offline"
-    assert cmd.target_kind is None
-    assert cmd.target_ref == "hub-0007"
-    assert cmd.duration_s == 60.0
-    assert cmd.start_epoch == 1780000000.0
+    with pytest.raises(ValueError, match="target shape"):
+        parse_scenario_cmd(raw)
 
 
 def test_scada_bad_quality_maps_to_full_catalogue_id() -> None:

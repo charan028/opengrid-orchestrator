@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import math
+from decimal import Decimal
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
@@ -17,9 +18,22 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+#: CORE-002: JCS/JSON key ordering is by UTF-16 code unit (RFC 8785); for any key whose characters are
+#: all in the Basic Multilingual Plane, Python's code-point ordering already agrees with that (each
+#: BMP code point is exactly one UTF-16 code unit, in the same relative order). A key containing a
+#: non-BMP (astral) character breaks that equivalence: a supplementary code point sorts AFTER every
+#: BMP code point by raw value, but its UTF-16 surrogate pair's high surrogate (0xD800-0xDBFF) sorts
+#: BEFORE the BMP range 0xE000-0xFFFF. Rather than re-implement UTF-16 comparison, this module refuses
+#: to canonicalize such a key -- MVP-S has no legitimate use for astral characters in a wire object key.
+_NON_BMP_THRESHOLD = 0x10000
+
 
 class SignatureError(Exception):
     """Raised when a signature fails to verify."""
+
+
+class CanonicalizationError(Exception):
+    """Raised when a value cannot be canonicalized per RFC 8785 (JCS)."""
 
 
 def _canon_number(n: float | int) -> str:
@@ -30,11 +44,54 @@ def _canon_number(n: float | int) -> str:
     if isinstance(n, float):
         if math.isnan(n) or math.isinf(n):
             raise ValueError("JCS cannot encode NaN/Infinity")
-        if n == int(n) and abs(n) < 1e15:
-            return str(int(n))
-        # ECMAScript-compatible shortest round-trip representation
-        return repr(n)
+        return _ecmascript_number_to_string(n)
     raise TypeError(f"unsupported number type: {type(n)!r}")
+
+
+def _ecmascript_number_to_string(x: float) -> str:
+    """CORE-001: ECMAScript `Number::toString` (radix 10), exactly -- JCS numbers are "serialized as
+    per section 6.1 of [ECMA-262]" (RFC 8785 S3.2.2.3), and it disagrees with Python's `repr()` at
+    several boundaries Python switches fixed/exponential notation at different magnitudes than V8
+    does (e.g. `1e-6`/`1e-7`, `1e15`/`1e21`), and prints `-0.0` where JS prints `"0"`.
+
+    Approach: `repr(x)` is Python's own shortest-round-trip decimal string for `x` (same requirement
+    ECMAScript imposes: the digit string `s`/`k` must be the shortest that round-trips). Parsing it as
+    an exact `Decimal` and stripping trailing zero digits (adjusting the exponent to compensate)
+    recovers ECMA-262's `(s, n, k)` -- the minimal significant-digit string and decimal-point
+    position -- independent of which fixed/exponential format Python chose to print. ECMA-262's
+    formatting rules (6.1.6.1.20 steps 6-10) are then applied directly to `(s, n, k)`.
+    """
+    if x == 0.0:  # covers both +0.0 and -0.0: ECMAScript ToString(-0) is "0"
+        return "0"
+    sign = "-" if x < 0 else ""
+    digits, exponent = _shortest_round_trip_digits(abs(x))
+    k = len(digits)
+    n = k + exponent  # value = int(digits) * 10**exponent == 0.digits-shifted * 10**n
+
+    if k <= n <= 21:
+        return sign + digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return sign + digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return sign + "0." + "0" * (-n) + digits
+    exp = n - 1
+    mantissa = digits[0] + ("." + digits[1:] if k > 1 else "")
+    return f"{sign}{mantissa}e{'+' if exp >= 0 else '-'}{abs(exp)}"
+
+
+def _shortest_round_trip_digits(x: float) -> tuple[str, int]:
+    """`x` is a positive finite float. Returns `(digits, exponent)` with no leading/trailing zero in
+    `digits` (except the single digit "0", never reached here since x != 0) such that
+    `x == int(digits) * 10**exponent` exactly, and `digits` is the shortest such string (inherited
+    from `repr(x)`, Python's own shortest-round-trip formatter)."""
+    sign, digit_tuple, exponent = Decimal(repr(x)).as_tuple()
+    assert sign == 0  # x is positive
+    assert isinstance(exponent, int)  # never 'n'/'N'/'F' for a finite Decimal parsed from repr()
+    digits = list(digit_tuple)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    return "".join(str(d) for d in digits), exponent
 
 
 def _canon_string(s: str) -> str:
@@ -75,6 +132,14 @@ def _canon_value(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(_canon_value(v) for v in value) + "]"
     if isinstance(value, dict):
+        for k in value:
+            if not isinstance(k, str):
+                raise TypeError(f"JCS object keys must be strings, got {type(k)!r}")
+            if any(ord(ch) >= _NON_BMP_THRESHOLD for ch in k):
+                raise CanonicalizationError(
+                    f"non-BMP character in object key {k!r}: code-point ordering would not match "
+                    "RFC 8785's required UTF-16 code-unit ordering (CORE-002)"
+                )
         items = sorted(value.items(), key=lambda kv: kv[0])
         body = ",".join(f"{_canon_string(k)}:{_canon_value(v)}" for k, v in items)
         return "{" + body + "}"

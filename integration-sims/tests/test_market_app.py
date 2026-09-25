@@ -7,6 +7,7 @@ interfaces/http/market-api.md."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -16,6 +17,21 @@ from ogsim.market.config import MarketConfig
 
 TEST_USER = "test@example.com"
 TEST_PASSWORD = "test"
+
+
+class _FakeClock:
+    """A settable clock for `create_app(clock=...)`, so a test can advance
+    time deterministically instead of sleeping real seconds to observe an
+    anomaly's revert."""
+
+    def __init__(self, start: datetime) -> None:
+        self._now = start
+
+    def __call__(self) -> datetime:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += timedelta(seconds=seconds)
 
 
 @pytest.fixture
@@ -198,6 +214,42 @@ async def test_admin_cancel_removes_an_active_anomaly(client: httpx.AsyncClient)
     assert any(a["id"] == "cancel-me" for a in listing.json()["anomalies"])
     cancel_resp = await client.delete("/admin/anomalies/cancel-me")
     assert cancel_resp.json()["ok"] is True
+
+
+async def test_admin_anomaly_reverts_deterministically_via_injected_clock():
+    """HTTP-level revert test (BUILD.md §5a's "no flaky sleeps: use injected
+    clocks"): injects a price_spike with a 10s duration and an implicit
+    start (so it is timed off the injected clock), confirms it is active,
+    advances the fake clock past its duration with no real sleep, and
+    confirms the spike price is gone -- the anomaly reverted on its own."""
+    clock = _FakeClock(datetime(2026, 9, 26, 18, 0, 0, tzinfo=UTC))
+    cfg = MarketConfig(data_mode="synthetic", seed=7, test_users={TEST_USER: TEST_PASSWORD})
+    app = create_app(cfg, clock=clock)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://market.test") as client:
+        await client.post(
+            "/admin/anomalies",
+            json={
+                "id": "revert-1",
+                "type": "price_spike",
+                "target": "np6-905-cd",
+                "params": {"value_usd_per_mwh": 5000.0},
+                "duration": 10.0,
+            },
+        )
+        active_resp = await client.get(
+            "/ercot/np6-905-cd/spp_node_zone_hub", params={"settlementPoint": "LZ_NORTH"}, headers=_headers()
+        )
+        active_prices = [row[3] for row in active_resp.json()["data"]]
+        assert "5000.0" in active_prices
+
+        clock.advance(11.0)  # past the 10s duration -- no real sleep
+
+        reverted_resp = await client.get(
+            "/ercot/np6-905-cd/spp_node_zone_hub", params={"settlementPoint": "LZ_NORTH"}, headers=_headers()
+        )
+        reverted_prices = [row[3] for row in reverted_resp.json()["data"]]
+        assert "5000.0" not in reverted_prices
 
 
 async def test_as_endpoint_uses_ancillary_type_codes(client: httpx.AsyncClient):

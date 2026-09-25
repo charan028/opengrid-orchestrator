@@ -1,21 +1,12 @@
-"""ogsim.common.scenario -- tolerant `<root>/scenario/cmd` parsing.
+"""ogsim.common.scenario -- `<root>/scenario/cmd` parsing.
 
-OPEN ISSUE for the merge agent (see BUILD.md point 4): `ogsim.control`'s
-`mqtt_pub.py`/`injector.py` (owned by the "market" agent, not us) currently
-publish a flat legacy shape on `<root>/scenario/cmd`:
-
-    {id, target: "<string>", type: "<lowercase catalogue id>", params,
-     start: <unix epoch float>, duration: <seconds float>}
-
-not the `interfaces/mqtt/scenario_control.schema.json` shape this fleet/
-scada code was told to treat as ground truth (`target: {kind, ref}`,
-`type` an uppercase `FLEET_*`/`SCADA_*` enum, `start` an RFC3339 string,
-`duration_s`). Rather than block on that mismatch, this parser tries the
-schema-conformant shape first and falls back to the legacy flat shape, so
-fleet/scada interoperate with whatever is actually on the wire today. This
-is a compromise, not a fix: the two producers/consumers should converge on
-one shape when the merge agent reconciles `ogsim.control` and
-`ogsim.fleet`/`ogsim.scada`.
+Parses the single schema-conformant shape published by `ogsim.control`
+(`mqtt_pub.py`/`injector.py`) and consumed by `ogsim.fleet`/`ogsim.scada`,
+per `interfaces/mqtt/scenario_control.schema.json`: `target: {kind, ref}`,
+`type` an uppercase `FLEET_*`/`SCADA_*`/`MARKET_*`/`PARTNER_CALL` enum
+value, `start` an RFC3339 string, `duration_s` in seconds. `ogsim.control`
+and `ogsim.fleet`/`ogsim.scada` are both owned by this agent, so there is
+one wire shape, not a tolerant fallback.
 """
 
 from __future__ import annotations
@@ -55,11 +46,11 @@ WIRE_TYPE_TO_CATALOGUE_ID: dict[str, str] = {
 
 @dataclass(frozen=True)
 class ScenarioCommand:
-    """Normalized scenario command, regardless of which wire shape it arrived in."""
+    """Normalized scenario command, parsed from the schema-conformant wire shape."""
 
     id: str
     catalogue_type: str  # lowercase ogsim.control.catalogue id
-    target_kind: str | None  # sim/asset/zone/bank/hub, if the schema shape was used
+    target_kind: str  # sim/asset/zone/bank/hub
     target_ref: str  # bank_id/hub_id/zone name/"*"
     params: dict[str, Any]
     start_epoch: float
@@ -73,33 +64,23 @@ def _parse_start(value: Any) -> float:
 
 
 def parse_scenario_cmd(raw: dict[str, Any]) -> ScenarioCommand:
-    """Parses a `<root>/scenario/cmd` payload, trying the schema-conformant
-    shape first and falling back to the legacy flat shape (see module
-    docstring). Raises `ValueError` if neither shape fits."""
+    """Parses a `<root>/scenario/cmd` payload conforming to
+    `interfaces/mqtt/scenario_control.schema.json`. Raises `ValueError` if
+    `target` is not the `{kind, ref}` shape that schema requires."""
     target = raw.get("target")
-    if isinstance(target, dict) and "kind" in target and "ref" in target:
-        wire_type = str(raw.get("type", ""))
-        catalogue_type = WIRE_TYPE_TO_CATALOGUE_ID.get(wire_type, wire_type.lower())
-        return ScenarioCommand(
-            id=str(raw["id"]),
-            catalogue_type=catalogue_type,
-            target_kind=str(target["kind"]),
-            target_ref=str(target["ref"]),
-            params=dict(raw.get("params", {})),
-            start_epoch=_parse_start(raw["start"]),
-            duration_s=_optional_float(raw.get("duration_s")),
-        )
-    if isinstance(target, str):
-        return ScenarioCommand(
-            id=str(raw["id"]),
-            catalogue_type=str(raw.get("type", "")).lower(),
-            target_kind=None,
-            target_ref=target,
-            params=dict(raw.get("params", {})),
-            start_epoch=_parse_start(raw["start"]),
-            duration_s=_optional_float(raw.get("duration")),
-        )
-    raise ValueError(f"scenario/cmd payload has neither a recognized target shape: {raw!r}")
+    if not (isinstance(target, dict) and "kind" in target and "ref" in target):
+        raise ValueError(f"scenario/cmd payload has no valid target shape: {raw!r}")
+    wire_type = str(raw.get("type", ""))
+    catalogue_type = WIRE_TYPE_TO_CATALOGUE_ID.get(wire_type, wire_type.lower())
+    return ScenarioCommand(
+        id=str(raw["id"]),
+        catalogue_type=catalogue_type,
+        target_kind=str(target["kind"]),
+        target_ref=str(target["ref"]),
+        params=dict(raw.get("params", {})),
+        start_epoch=_parse_start(raw["start"]),
+        duration_s=_optional_float(raw.get("duration_s")),
+    )
 
 
 def _optional_float(value: Any) -> float | None:

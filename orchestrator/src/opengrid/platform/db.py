@@ -13,29 +13,45 @@ import sys
 from pathlib import Path
 
 import psycopg
+from psycopg.conninfo import make_conninfo
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.platform.config import Config, load_config
+from opengrid.platform.config import Config, load_config, resolve_secret
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
 _FILENAME_RE = re.compile(r"^(\d+)_.*\.sql$")
 
+# PLAT-005: named constants, no bare hosts/ports in the DSN-building logic.
+DEFAULT_POSTGRES_HOST = "127.0.0.1"
+DEFAULT_POSTGRES_PORT = 5432
+DEFAULT_POSTGRES_USER = "opengrid"
+DEFAULT_POOL_MIN_SIZE = 2
+DEFAULT_POOL_MAX_SIZE = 8
+POOL_OPEN_TIMEOUT_S = 10.0  # PLAT-004: og-* processes must not hang forever waiting for Postgres
+
+_ENV_DB_USER = "OG_DB_USER"
+_ENV_DB_PASSWORD = "OG_DB_PASSWORD"  # noqa: S105 -- this is the env VAR NAME, never a secret value
+
 
 def build_dsn(cfg: Config) -> str:
-    host = cfg.get("postgres.host", "127.0.0.1")
-    port = cfg.get("postgres.port", 5432)
+    """Build the Postgres connection string. PLAT-002: the password comes from
+    `resolve_secret(OG_DB_PASSWORD)`, which raises `ConfigError` loudly when unset -- there is no
+    silent empty-password fallback. PLAT-003: `psycopg.conninfo.make_conninfo` handles quoting/escaping
+    (a password containing a space or `=` previously produced a malformed/misparsed DSN)."""
+    host = cfg.get("postgres.host", DEFAULT_POSTGRES_HOST)
+    port = cfg.get("postgres.port", DEFAULT_POSTGRES_PORT)
     database = cfg.postgres_database
-    user = os.environ.get("OG_DB_USER", "opengrid")
-    password = os.environ.get("OG_DB_PASSWORD", "")
-    return f"host={host} port={port} dbname={database} user={user} password={password}"
+    user = os.environ.get(_ENV_DB_USER, DEFAULT_POSTGRES_USER)
+    password = resolve_secret(_ENV_DB_PASSWORD)
+    return make_conninfo(host=str(host), port=port, dbname=database, user=user, password=password)
 
 
 async def make_pool(cfg: Config) -> AsyncConnectionPool:
     dsn = build_dsn(cfg)
-    pool_min = cfg.get("postgres.pool_min", 2)
-    pool_max = cfg.get("postgres.pool_max", 8)
+    pool_min = cfg.get("postgres.pool_min", DEFAULT_POOL_MIN_SIZE)
+    pool_max = cfg.get("postgres.pool_max", DEFAULT_POOL_MAX_SIZE)
     pool = AsyncConnectionPool(dsn, min_size=pool_min, max_size=pool_max, open=False)
-    await pool.open(wait=True)
+    await pool.open(wait=True, timeout=POOL_OPEN_TIMEOUT_S)  # PLAT-004
     return pool
 
 

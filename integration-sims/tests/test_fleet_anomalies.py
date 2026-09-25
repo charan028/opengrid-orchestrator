@@ -3,14 +3,36 @@ duration elapse. Uses ogsim.fleet.runtime.FleetEngine with a small fleet."""
 
 from __future__ import annotations
 
+import math
+import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ogsim.common.config import MqttSettings, load_fleet_config
+from ogsim.common.crypto import sign
+from ogsim.common.scenario import WIRE_TYPE_TO_CATALOGUE_ID
 from ogsim.fleet.runtime import FleetEngine
 
 MQTT = MqttSettings(host="127.0.0.1", port=1883, username="og_sim", password="", topic_root="og/v1")
+
+_CATALOGUE_ID_TO_WIRE_TYPE = {v: k for k, v in WIRE_TYPE_TO_CATALOGUE_ID.items()}
+
+# Which target.kind the schema-conformant wire message carries for each
+# FLEET_* anomaly type used by this test file (mirrors ogsim.control.catalogue).
+_TARGET_KIND = {
+    "hub_offline": "hub",
+    "zone_mass_disconnect": "zone",
+    "not_following_commands": "hub",
+    "inverter_trip": "hub",
+    "soc_sensor_drift": "hub",
+    "telemetry_delay_burst": "hub",
+    "lease_loss": "hub",
+    "clock_skew": "hub",
+    "reserve_floor_pressure": "hub",
+}
 
 
 @pytest.fixture
@@ -24,11 +46,11 @@ def engine() -> FleetEngine:
 def _inject(engine: FleetEngine, anomaly_type: str, target: str, params: dict, start: float, duration: float):
     raw = {
         "id": f"anom-{anomaly_type}",
-        "target": target,
-        "type": anomaly_type,
+        "target": {"kind": _TARGET_KIND[anomaly_type], "ref": target},
+        "type": _CATALOGUE_ID_TO_WIRE_TYPE[anomaly_type],
         "params": params,
-        "start": start,
-        "duration": duration,
+        "start": datetime.fromtimestamp(start, tz=UTC).isoformat(),
+        "duration_s": duration,
     }
     return engine.handle_scenario_cmd(raw)
 
@@ -131,9 +153,44 @@ def test_reserve_floor_pressure_overrides_home_load_and_reverts(engine: FleetEng
     engine.tick(1.0)
     assert engine.anomalies.modifiers.forced_home_load_kw[idx] == 9.0
     engine.tick(11.0)
-    import math
-
     assert math.isnan(engine.anomalies.modifiers.forced_home_load_kw[idx])
+
+
+def _stop_event(signing_key: Ed25519PrivateKey, *, action: str) -> dict:
+    event = {
+        "stop_id": str(uuid.uuid4()),
+        "scope": "bank",
+        "scope_id": "bank-000",
+        "action": action,
+        "reason": "test",
+        "issued_by": "operator-1",
+        "issued_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "approver_ref": None,
+    }
+    fields = ("stop_id", "scope", "scope_id", "action", "reason", "issued_by", "issued_at", "approver_ref")
+    signing_fields = {k: event[k] for k in fields if k in event}
+    event["key_id"] = "test-key"
+    event["signature"] = sign(signing_key, signing_fields)
+    return event
+
+
+def test_handle_stop_event_applies_a_correctly_signed_engage(engine: FleetEngine) -> None:
+    safestop_key = Ed25519PrivateKey.generate()
+    guardian_key = Ed25519PrivateKey.generate()
+    event = _stop_event(safestop_key, action="ENGAGE")
+    applied = engine.handle_stop_event(event, safestop_key.public_key(), guardian_key.public_key())
+    assert applied is True
+    assert engine.stops.is_stopped("LZ_NORTH", "bank-000") is True
+
+
+def test_handle_stop_event_rejects_engage_signed_by_guardian_key(engine: FleetEngine) -> None:
+    safestop_key = Ed25519PrivateKey.generate()
+    guardian_key = Ed25519PrivateKey.generate()
+    event = _stop_event(guardian_key, action="ENGAGE")
+    applied = engine.handle_stop_event(event, safestop_key.public_key(), guardian_key.public_key())
+    assert applied is False
+    # Rejected -- never reaches the StopRegistry.
+    assert engine.stops.is_stopped("LZ_NORTH", "bank-000") is False
 
 
 def test_tampered_unsigned_command_selftest_is_rejected(engine: FleetEngine) -> None:

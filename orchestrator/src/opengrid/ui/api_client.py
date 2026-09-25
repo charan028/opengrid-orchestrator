@@ -20,6 +20,7 @@ import httpx
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _TIMEOUT_S = 3.0
+_POST_TIMEOUT_S = 5.0
 _ENV_BASE_URL = "OG_API_BASE_URL"
 
 
@@ -27,13 +28,30 @@ class ApiUnavailable(Exception):  # noqa: N818 -- shared symbol name; ui-b's scr
     """Raised when the API cannot be reached or returns a non-2xx status. Routes catch this and render
     the screen degraded (missing widgets, a visible banner) rather than a 500 -- an operator console must
     stay usable when one dependency is slow or down (02b S6.5 degraded-mode principle, applied to the
-    UI's own read path)."""
+    UI's own read path).
+
+    `status_code`/`detail` are populated when the failure was a non-2xx HTTP response (as opposed to a
+    transport error/timeout), taken from the API's own response, so a caller that needs to distinguish
+    e.g. a 409 guardian veto from a 503 timeout or a 410 expired proposal can branch on them without
+    re-parsing the exception message."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, detail: Any = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
 
 
 def api_base_url() -> str:
     """Base URL of the `og-api` process. Overridable via `OG_API_BASE_URL` for tests/dev; defaults to the
     loopback address `[api].bind_host`/`bind_port` resolve to in production (02b S1.4)."""
     return os.environ.get(_ENV_BASE_URL, _DEFAULT_BASE_URL)
+
+
+def _response_detail(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
 
 
 async def get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
@@ -48,5 +66,52 @@ async def get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
             response = await client.get(url, params=params)
             response.raise_for_status()
             return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise ApiUnavailable(
+            f"GET {path} failed: {exc}",
+            status_code=exc.response.status_code,
+            detail=_response_detail(exc.response),
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise ApiUnavailable(f"GET {path} failed: {exc}") from exc
+
+
+async def post_json(path: str, payload: dict[str, Any]) -> Any:
+    """POST `path` (e.g. `/og/api/safestop`) with a JSON `payload` and return the parsed JSON body.
+
+    Shares `get_json`'s `ApiUnavailable` contract (BUILD.md code-review round: this used to be a private
+    `_post_json` copy in `opengrid.ui.routes.billing_audit`, plus a second bare `httpx.AsyncClient` for
+    the CSV relay in the same module -- both now go through this one shared client)."""
+    url = f"{api_base_url()}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise ApiUnavailable(
+            f"POST {path} failed: {exc}",
+            status_code=exc.response.status_code,
+            detail=_response_detail(exc.response),
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise ApiUnavailable(f"POST {path} failed: {exc}") from exc
+
+
+async def get_bytes(path: str, *, params: dict[str, Any] | None = None) -> bytes:
+    """GET `path` and return the raw response body (e.g. a CSV export the API formats itself) -- the one
+    non-JSON shape this client needs to relay unchanged. Same `ApiUnavailable` contract as `get_json`."""
+    url = f"{api_base_url()}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.content
+    except httpx.HTTPStatusError as exc:
+        raise ApiUnavailable(
+            f"GET {path} failed: {exc}",
+            status_code=exc.response.status_code,
+            detail=_response_detail(exc.response),
+        ) from exc
     except httpx.HTTPError as exc:
         raise ApiUnavailable(f"GET {path} failed: {exc}") from exc

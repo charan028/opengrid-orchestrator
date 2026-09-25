@@ -185,7 +185,11 @@ async def markets_page(request: Request) -> HTMLResponse:
             series_charts.append(series_chart_view([], series_key=series_key))
 
     try:
-        forecast = await get_json("/og/api/forecast", params={"series_key": "price", "kind": "quantiles"})
+        # `kind` must be one of `opengrid.forecast.models.ForecastKind` ("price"/"load") -- the API
+        # rejects anything else. This screen's forecast band is the wholesale price forecast, so "price"
+        # is both a valid kind and the correct one; "quantiles" (fixed here, BUILD.md code-review round
+        # item 6) was never a valid `kind` value and would have 422'd against a real `og-api`.
+        forecast = await get_json("/og/api/forecast", params={"series_key": "price", "kind": "price"})
     except ApiUnavailable as exc:
         logger.warning("markets: forecast unavailable: %s", exc)
         degraded = degraded or str(exc)

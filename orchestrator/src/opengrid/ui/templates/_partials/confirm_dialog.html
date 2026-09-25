@@ -6,26 +6,64 @@
      confirm_url: str (POST .../{proposal_id}/confirm), confirm_label: str|None
      variant: "primary"|"danger"|"safestop"|None (trigger button style; "safestop" is the visually
        distinct, hard-to-hit-by-accident scoped stop control)
-     target: str|None (CSS selector for the hx-post result, default "#confirm-result") #}
-<span x-data="{ open: false, busy: false }" class="confirm-dialog-wrapper">
+     target: str|None (CSS selector for the hx-post result, default "#confirm-result")
+     expires_in_s: float|None (from the step-1 `ProposalAccepted` response; when set, a live countdown is
+       shown and the confirm button disables itself once it reaches 0 -- a stale proposal should not be
+       confirmable)
+     open_default: bool|None (default false; a UI route that just rendered this fragment as the direct
+       result of a step-1 propose call -- rather than as a static page include -- sets this true so the
+       dialog appears already open instead of behind its own trigger button)
+     show_trigger: bool|None (default true; set false alongside open_default=true to omit the trigger
+       button entirely, since the operator already triggered step 1 via their own form)
+
+   Focus management (BUILD.md code-review round item 3): opening the dialog (via the trigger button, or
+   already-open on render) moves focus to the Cancel button; closing it (Escape, or Cancel) returns focus
+   to the trigger button. Escape-to-close was already wired via `x-on:keydown.escape.window`. #}
+<span x-data="{
+        open: {{ 'true' if open_default|default(false) else 'false' }},
+        busy: false,
+        remaining: {{ expires_in_s|default('null') }}
+      }"
+      x-init="
+        if (open) { $nextTick(function () { if ($refs.cancelBtn) { $refs.cancelBtn.focus(); } }); }
+        if (remaining !== null) {
+          let _timer = setInterval(function () {
+            remaining = Math.max(0, remaining - 1);
+            if (remaining <= 0) { clearInterval(_timer); }
+          }, 1000);
+        }
+      "
+      class="confirm-dialog-wrapper">
+  {% if show_trigger|default(true) %}
   <button type="button"
+          x-ref="triggerBtn"
           class="btn {{ 'btn-safestop' if variant == 'safestop' else ('btn-danger' if variant == 'danger' else 'btn-primary') }}"
-          @click="open = true">
+          @click="open = true; $nextTick(function () { if ($refs.cancelBtn) { $refs.cancelBtn.focus(); } })">
     {{ trigger_label }}
   </button>
+  {% endif %}
   <div class="confirm-dialog-backdrop"
        x-show="open"
        x-cloak
-       x-on:keydown.escape.window="open = false"
+       x-on:keydown.escape.window="open = false; $nextTick(function () { if ($refs.triggerBtn) { $refs.triggerBtn.focus(); } })"
        role="presentation">
     <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="{{ dialog_id }}-title">
       <h2 id="{{ dialog_id }}-title">{{ title }}</h2>
       <p>{{ summary }}</p>
+      {% if expires_in_s is defined and expires_in_s is not none %}
+      <p class="confirm-dialog-countdown" role="status">
+        Expires in <span x-text="remaining"></span>s
+        <template x-if="remaining <= 0"><strong> -- proposal expired, propose again</strong></template>
+      </p>
+      {% endif %}
       <div class="confirm-dialog-actions">
-        <button type="button" class="btn" x-on:click="open = false" :disabled="busy">Cancel</button>
+        <button type="button" class="btn" x-ref="cancelBtn" :disabled="busy"
+                x-on:click="open = false; $nextTick(function () { if ($refs.triggerBtn) { $refs.triggerBtn.focus(); } })">
+          Cancel
+        </button>
         <button type="button"
                 class="btn {{ 'btn-safestop' if variant == 'safestop' else 'btn-danger' }}"
-                :disabled="busy"
+                :disabled="busy || (remaining !== null && remaining <= 0)"
                 hx-post="{{ confirm_url }}"
                 hx-target="{{ target|default('#confirm-result') }}"
                 hx-swap="innerHTML"

@@ -31,9 +31,10 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
 async def run_trace_pruning_cycle() -> dict[str, int]: ...
 ```
 
-Both take no dependency-injection parameters; call `opengrid.settle.configure(backend, trace_store)`
-once (the process entry point `opengrid.settle.main` does this at startup; tests do it with fakes)
-before calling either.
+Both take no dependency-injection parameters; call
+`opengrid.settle.configure(backend, trace_store, trace_pool=pool)` once (the process entry point
+`opengrid.settle.main` does this at startup, passing its Postgres pool so the retention job can run;
+tests do it with fakes and no pool) before calling either.
 
 `run_settle_cycle(*, max_concurrency=20)` is the batch entry point `og-settle`'s tick calls: it fetches
 every pending obligation-interval from the backend and settles them concurrently (BUILD.md S2: many
@@ -52,8 +53,7 @@ customers/obligations at once), logging and skipping any single failure rather t
 | `csv_export.py` | CSV rendering of invoice-line/meter-interval export rows (ES08-S05) |
 | `backend.py` | `SettleBackend` Protocol -- the only I/O contract the pure modules above never see |
 | `pg_backend.py` | Postgres implementation of `SettleBackend` |
-| `trace_pg_backend.py` | A settle-owned Postgres `TraceBackend` (`opengrid.trace.pg_backend` is health-owned and not built yet; delete this once it lands) |
-| `main.py` | `og-settle` process wiring (`python -m opengrid.settle.main`) |
+| `main.py` | `og-settle` process wiring (`python -m opengrid.settle.main`); wires `opengrid.trace.pg_backend.PgTraceBackend` (health-owned canonical `TraceBackend`) and passes the pool to `configure(..., trace_pool=pool)` so `run_trace_pruning_cycle()` also runs `opengrid.trace.pg_backend.run_retention_prune_job` |
 
 ## How to test
 

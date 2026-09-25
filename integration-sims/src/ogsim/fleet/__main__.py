@@ -18,7 +18,12 @@ from typing import Any
 from ogsim.common.clock import RealClock
 from ogsim.common.config import load_fleet_config
 from ogsim.common.mqtt_client import AiomqttTransportAdapter, SimMqttClient, mqtt_settings
-from ogsim.fleet.runtime import FleetEngine, load_guardian_public_key, run_fleet
+from ogsim.fleet.runtime import (
+    FleetEngine,
+    load_guardian_public_key,
+    load_safestop_public_key,
+    run_fleet,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +76,7 @@ async def _run_forever() -> None:
 
     config = load_fleet_config()
     public_key = load_guardian_public_key(config)
+    safestop_public_key = load_safestop_public_key(config)
     engine = FleetEngine(config)
     clock = RealClock()
 
@@ -81,12 +87,21 @@ async def _run_forever() -> None:
 
         async def consume() -> None:
             async for msg in client.messages():
-                _dispatch_message(engine, str(msg.topic), msg.payload, public_key)
+                await _dispatch_message(
+                    engine, client, str(msg.topic), msg.payload, public_key, safestop_public_key
+                )
 
         await asyncio.gather(consume(), run_fleet(client, engine, clock, public_key))
 
 
-def _dispatch_message(engine: FleetEngine, topic: str, payload: Any, public_key: Any) -> None:
+async def _dispatch_message(
+    engine: FleetEngine,
+    client: SimMqttClient,
+    topic: str,
+    payload: Any,
+    public_key: Any,
+    safestop_public_key: Any,
+) -> None:
     try:
         data = json.loads(payload)
     except (json.JSONDecodeError, TypeError):
@@ -94,16 +109,35 @@ def _dispatch_message(engine: FleetEngine, topic: str, payload: Any, public_key:
         return
     parts = topic.split("/")
     if "/cmd/" in topic and topic.endswith("/batch"):
-        engine.handle_command_batch(data, public_key, time.time())
+        await _handle_command_batch(engine, client, data, public_key)
     elif "/stop/" in topic:
         scope = parts[-2]
         scope_id = None if scope == "fleet" else parts[-1]
-        action = data.get("action", "RELEASE") if data else "RELEASE"
-        engine.handle_stop_event(action, scope, scope_id)
+        if not data:
+            # An empty retained payload clears the retained MQTT message
+            # itself (stop.schema.json) -- there is no StopEvent content to
+            # verify a signature over, so this always releases.
+            engine.stops.apply_stop_event("RELEASE", scope, scope_id)
+        else:
+            engine.handle_stop_event(data, safestop_public_key, public_key)
     elif "/lease/" in topic and data:
         engine.handle_lease_message(parts[-1], data["expires_at"])
     elif topic.endswith("/scenario/cmd"):
         engine.handle_scenario_cmd(data)
+
+
+async def _handle_command_batch(
+    engine: FleetEngine, client: SimMqttClient, batch: dict[str, Any], public_key: Any
+) -> None:
+    """Evaluates `batch` and publishes one ack per verdict to
+    `<root>/ack/<hub_id>` (ack.schema.json), QoS 1 -- every command verdict
+    gets an ack, accepted or rejected."""
+    verdicts = engine.handle_command_batch(batch, public_key, time.time())
+    batch_id = str(batch.get("batch_id", ""))
+    now = time.time()
+    for verdict in verdicts:
+        ack = engine.build_ack(verdict, batch_id, now)
+        await client.publish_validated("ack", f"ack/{verdict.hub_id}", ack, qos=1)
 
 
 def main() -> None:

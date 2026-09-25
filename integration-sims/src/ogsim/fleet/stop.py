@@ -11,11 +11,59 @@ join/reconnect behave the same as always having been subscribed.
 Ramping ONLY affects the commanded (market) setpoint, never a hub's home
 load: engaging a stop must not force discharge below the reserve floor,
 it just removes market dispatch.
+
+`verify_stop_event` implements crypto.md §2.3's signing rule: only the
+safestop key may sign `action="ENGAGE"`; `action="RELEASE"` must be signed
+by the guardian key (Tier-2 approved). A StopEvent that fails this --
+wrong key for the action, or a bad/missing signature -- is rejected and
+must never reach `StopRegistry.apply_stop_event`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+from ogsim.common.crypto import verify_signature
+
+StopRejectReason = str  # currently just "BAD_SIGNATURE"; callers log rejects themselves
+
+# stop.schema.json fields that are signed over (JCS bytes), i.e. everything
+# except `key_id`/`signature` (crypto.md §2.3).
+_STOP_SIGNED_FIELDS = (
+    "stop_id",
+    "scope",
+    "scope_id",
+    "action",
+    "reason",
+    "issued_by",
+    "issued_at",
+    "approver_ref",
+)
+
+
+def _stop_signing_fields(event: dict[str, Any]) -> dict[str, Any]:
+    return {k: event[k] for k in _STOP_SIGNED_FIELDS if k in event}
+
+
+def verify_stop_event(
+    event: dict[str, Any],
+    safestop_public_key: Ed25519PublicKey,
+    guardian_public_key: Ed25519PublicKey,
+) -> StopRejectReason | None:
+    """Verifies `event` per crypto.md §2.3. Returns `None` if the signature
+    is valid for the key required by `event["action"]`, else a reject
+    reason. `action="ENGAGE"` must verify against `safestop_public_key`;
+    any other action (i.e. "RELEASE") must verify against
+    `guardian_public_key` -- a RELEASE signed by the safestop key is
+    rejected, and so is an ENGAGE signed by the guardian key."""
+    key = safestop_public_key if event.get("action") == "ENGAGE" else guardian_public_key
+    signing_fields = _stop_signing_fields(event)
+    if not verify_signature(key, signing_fields, event.get("signature")):
+        return "BAD_SIGNATURE"
+    return None
 
 
 @dataclass

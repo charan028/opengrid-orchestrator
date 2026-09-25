@@ -15,6 +15,7 @@ from dataclasses import dataclass
 DEFAULT_ETA_C = 0.9487
 DEFAULT_ETA_D = 0.9487
 DEFAULT_SELF_DISCHARGE_KWH_PER_H = 0.0005
+DEFAULT_INVERTER_CAP_KW = 11.0  # CORE-004: named default hub inverter power cap, not a bare literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,27 @@ def soc_step(
     delta = params.eta_c * p_c * dt_h - (p_d * dt_h) / params.eta_d - params.self_discharge_kwh_per_h * dt_h
     new_soc = soc_kwh + delta
     return min(max(new_soc, 0.0), params.e_kwh)
+
+
+def hub_sustainable_discharge_kw(
+    soc_kwh: float,
+    reserve_kwh: float,
+    p_kw: float,
+    dt_h: float,
+    eta_d: float,
+) -> float:
+    """CORE-003/K1: the discharge power (kW, >= 0) actually sustainable for a FULL interval of length
+    `dt_h` without breaching the reserve floor, given only `soc_kwh - reserve_kwh` of usable energy
+    above reserve. A sliver of energy just above reserve cannot be commanded at the hub's full rated
+    power (`p_kw`) for a whole interval -- that would draw more energy than exists above the floor and
+    still leave the hub committed to the setpoint until the next cycle. Callers in the allocator's
+    capability path use this (not the raw `p_kw` rating) as the ceiling offered to water-filling/PI.
+    """
+    available_kwh = max(soc_kwh - reserve_kwh, 0.0)
+    if available_kwh <= 0.0 or dt_h <= 0.0:
+        return 0.0
+    energy_limited_kw = (available_kwh * eta_d) / dt_h
+    return min(max(p_kw, 0.0), energy_limited_kw)
 
 
 def hub_capability(soc_kwh: float, params: HubParams) -> tuple[float, float]:
@@ -87,16 +109,26 @@ def apply_ramp_limit(
     target_p_kw: float,
     dt_s: float,
     ramp_kw_per_s: float,
+    *,
+    ramp_down_kw_per_s: float | None = None,
 ) -> float:
     """Clamp a requested setpoint change to the allowed ramp rate over dt_s seconds (K4/G-04/G-05/G-06).
-    Positive ramp_kw_per_s bounds the rate of change in either direction.
+
+    `ramp_kw_per_s` bounds the upward rate of change (and, when `ramp_down_kw_per_s` is omitted, the
+    downward rate too -- the common symmetric case). Pass `ramp_down_kw_per_s` to bound a faster/slower
+    downward rate independently (ALLOC-03: some loops, e.g. the DIST_DEFERRAL PI, ramp down and up at
+    different named rates). A non-positive rate for a given direction holds the setpoint (no movement
+    in that direction), matching the original symmetric behavior when only `ramp_kw_per_s` is given.
     """
-    if ramp_kw_per_s <= 0:
-        return prev_p_kw
-    max_delta = ramp_kw_per_s * dt_s
+    ramp_up = ramp_kw_per_s
+    ramp_down = ramp_down_kw_per_s if ramp_down_kw_per_s is not None else ramp_kw_per_s
     delta = target_p_kw - prev_p_kw
-    if delta > max_delta:
-        return prev_p_kw + max_delta
-    if delta < -max_delta:
-        return prev_p_kw - max_delta
+    if delta > 0:
+        if ramp_up <= 0:
+            return prev_p_kw
+        return prev_p_kw + min(delta, ramp_up * dt_s)
+    if delta < 0:
+        if ramp_down <= 0:
+            return prev_p_kw
+        return prev_p_kw - min(-delta, ramp_down * dt_s)
     return target_p_kw

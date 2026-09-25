@@ -13,7 +13,7 @@ Environment=PYTHONPATH=/opt/opengrid/current/orchestrator/src
 Environment=OG_CONFIG=/opt/opengrid/current/orchestrator/config/orchestrator.toml
 EnvironmentFile=/etc/opengrid/secrets.env
 EnvironmentFile=/etc/opengrid/api_keys.env
-ExecStart=/opt/opengrid/venv/bin/python -m opengrid.settle
+ExecStart=/opt/opengrid/venv/bin/python -m opengrid.settle.main
 Restart=always
 RestartSec=2
 MemoryMax=512M

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
 import os
 
@@ -33,7 +32,7 @@ from opengrid.guardian.ports import ProposedBatch
 from opengrid.guardian.repo import build_pg_ports, load_hub_params
 from opengrid.guardian.service import GuardianService
 from opengrid.platform.config import Config, load_config, resolve_secret
-from opengrid.platform.db import build_dsn
+from opengrid.platform.db import POOL_OPEN_TIMEOUT_S, build_dsn
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.log import configure_logging
 from opengrid.platform.mqtt import build_client
@@ -136,13 +135,13 @@ async def main() -> None:
     )
 
     pool = AsyncConnectionPool(build_dsn(cfg), min_size=1, max_size=4, open=False)
-    await pool.open(wait=True)
+    await pool.open(wait=True, timeout=POOL_OPEN_TIMEOUT_S)  # PLAT-004
 
     trace_store = TraceStore(PgTraceBackend(pool))
-    ports, leases = build_pg_ports(pool, trace_store)
-
+    # GUARD-02/04: guardian's hub-state read is always its OWN MQTT telemetry cache, never a Postgres
+    # port -- passed in directly so `build_pg_ports` can never default to reading og.hub_state instead.
     telemetry_cache = MqttHubStatePort(await load_hub_params(pool))
-    ports = dataclasses.replace(ports, hubs=telemetry_cache)
+    ports, leases = build_pg_ports(pool, trace_store, telemetry_cache)
 
     service = GuardianService(ports=ports, config=guardian_cfg, signing_seed=signing_seed)
     guardian_module.configure(service)

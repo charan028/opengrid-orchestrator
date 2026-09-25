@@ -19,7 +19,7 @@ from opengrid.contracts import AdmissionError
 from opengrid.contracts import configure as configure_contracts
 from opengrid.contracts.pg_repo import PgContractsRepo
 from opengrid.ledger import ReservationError
-from opengrid.platform.config import load_config
+from opengrid.platform.config import ConfigError, load_config
 from opengrid.platform.db import make_pool
 from opengrid.platform.log import configure_logging
 from opengrid.platform.mqtt import SchemaValidationError
@@ -90,9 +90,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(SchemaValidationError)
     async def _schema_invalid(_request: Request, exc: SchemaValidationError) -> JSONResponse:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)}
-        )
+        return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
 
 
 def _include_routers(app: FastAPI) -> None:
@@ -124,10 +122,28 @@ def _include_routers(app: FastAPI) -> None:
         app.include_router(router_module.router)
 
 
+_DEFAULT_UI_BASE_PATH = "/og"
+
+
 def _mount_ui(app: FastAPI) -> None:
     """Mounts the UI package's router if present (owned by ui-a/ui-b, `orchestrator/INTERFACES.md`
     `opengrid.ui`: `build_router()`). Not required for `api`'s own tests/verification -- absent during
-    early parallel development, the API still serves every REST/SSE endpoint on its own."""
+    early parallel development, the API still serves every REST/SSE endpoint on its own.
+
+    Merge fix: this used to call `app.include_router(build_router())` with no `prefix`, so
+    `opengrid.ui.routes.control_room`'s `@router.get("/")` (and every other UI screen) was served at the
+    FastAPI app's own root `/` instead of `[ui].base_path` (`/og`, `orchestrator/config/orchestrator.toml`,
+    per `opengrid.ui.routes`'s own docstring) -- confirmed live: Apache proxies
+    `https://base.tocy-net.net/og/` to this app's `/og/`, which 404'd because nothing was ever registered
+    there. `[api]`'s REST routers already all use an explicit `/og/api/...` path in each `@router.get`, so
+    they were unaffected; only the UI mount was missing its prefix.
+
+    `create_app()` runs before `_lifespan` (which is where `app.state.config` gets set, since it only
+    runs once the app actually starts serving), and API unit tests call `create_app()` directly with no
+    `OG_CONFIG` set at all (`tests/unit/api/conftest.py`) -- so this loads its own `Config` defensively
+    rather than requiring one, falling back to the documented default base path on any `ConfigError`
+    (the same value `orchestrator/config/orchestrator.toml`'s `[ui].base_path` ships with).
+    """
     try:
         ui_module = import_module("opengrid.ui")
     except ImportError:
@@ -137,8 +153,14 @@ def _mount_ui(app: FastAPI) -> None:
     if build_router is None:
         logger.warning("opengrid.ui has no build_router(); skipping UI mount")
         return
+
     try:
-        app.include_router(build_router())
+        base_path = str(load_config().get("ui.base_path", _DEFAULT_UI_BASE_PATH))
+    except ConfigError:
+        base_path = _DEFAULT_UI_BASE_PATH
+
+    try:
+        app.include_router(build_router(), prefix=base_path)
     except NotImplementedError:
         logger.info("opengrid.ui.build_router() not implemented yet; API-only mode")
 

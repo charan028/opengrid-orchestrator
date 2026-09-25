@@ -13,14 +13,15 @@ from uuid import UUID, uuid4
 
 from opengrid.api.store import (
     BankAggregate,
-    CustomerSummary,
     FeedStatusRow,
     ForecastPoint,
     HealthSnapshot,
     ProcessHeartbeat,
 )
 from opengrid.core.models.engine import (
-    Contract,
+    CommandBatchRow,
+    Commitment,
+    Grant,
     InvoiceLine,
     Obligation,
     Opportunity,
@@ -28,8 +29,9 @@ from opengrid.core.models.engine import (
     Plan,
     Reservation,
     TraceRow,
+    Verdict,
 )
-from opengrid.core.models.platform import Alert, FeedObs, Hub, HubState
+from opengrid.core.models.platform import Alert, FeedObs
 from opengrid.core.tracehash import ChainRecord
 
 SAMPLE_HUB_ID = "hub-0001"
@@ -48,9 +50,22 @@ class FakeStore:
     assert on them."""
 
     alerts: list[Alert] = field(default_factory=list)
-    contracts: dict[UUID, Contract] = field(default_factory=dict)
     operator_actions: list[dict[str, Any]] = field(default_factory=list)
     retention: dict[str, int] = field(default_factory=lambda: {"OPERATOR_ACTION": 1825})
+    command_batches: list[CommandBatchRow] = field(default_factory=list)
+    verdicts: dict[UUID, Verdict] = field(default_factory=dict)
+    #: Outcome `insert_command_batch` immediately stamps for the batch it just received, simulating an
+    #: instant og-guardian response so tests don't wait out `_VERDICT_POLL_TIMEOUT_S`. Tests flip this
+    #: (and `next_vetoed_rule_ids`) before confirming to exercise the veto/timeout paths.
+    next_verdict_outcome: str = "PASS"
+    next_vetoed_rule_ids: list[str] = field(default_factory=list)
+    #: Simulates `og-safestop`'s own async response to the NOTIFY protocol: a PROPOSE is remembered by
+    #: proposal_id, and a matching CONFIRM immediately writes a `stop_event`-shaped entry -- unless
+    #: `safestop_responds` is False, simulating "og-safestop is not running" for the 503 test.
+    safestop_responds: bool = True
+    notifications: list[dict[str, Any]] = field(default_factory=list)
+    _pending_stop_proposals: dict[str, tuple[str, str]] = field(default_factory=dict, init=False)
+    stop_events: dict[tuple[str, str], tuple[str, datetime]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.alerts = [
@@ -62,27 +77,47 @@ class FakeStore:
                 opened_at=_now(),
             )
         ]
-        self.contracts = {
-            SAMPLE_CONTRACT_ID: Contract(
-                contract_id=SAMPLE_CONTRACT_ID,
-                customer_id=SAMPLE_CUSTOMER_ID,
-                service_type="ERCOT_ENERGY",
-                tier="T2",
-                profile_ref="ercot-energy-profile@1",
-                start_at=_now(),
-                status="ACTIVE",
-            )
-        }
 
-    async def list_hubs(self, *, zone, bank_id, health, limit, offset) -> list[HubState]:
-        return [HubState(hub_id=SAMPLE_HUB_ID, soc_kwh=10.0, p_kw=-2.0, health="online", last_seen_at=_now())]
+    async def list_hubs(self, *, zone, bank_id, health, limit, offset) -> list[dict[str, Any]]:
+        return [
+            {
+                "hub_id": SAMPLE_HUB_ID,
+                "bank_id": SAMPLE_BANK_ID,
+                "zone": "LZ_SOUTH",
+                "soc_kwh": 10.0,
+                "p_kw": -2.0,
+                "health": "online",
+                "lease_epoch": 0,
+                "lease_expires_at": None,
+                "last_command_id": None,
+                "last_seen_at": _now(),
+                "fault_code": None,
+            }
+        ]
 
-    async def get_hub(self, hub_id: str) -> tuple[Hub, HubState] | None:
+    async def get_hub(self, hub_id: str) -> dict[str, Any] | None:
         if hub_id != SAMPLE_HUB_ID:
             return None
-        hub = Hub(hub_id=hub_id, bank_id=SAMPLE_BANK_ID, zone="LZ_SOUTH", e_kwh=13.5, r_kwh=2.7, p_kw=5.0)
-        state = HubState(hub_id=hub_id, soc_kwh=10.0, p_kw=-2.0, health="online", last_seen_at=_now())
-        return hub, state
+        return {
+            "hub_id": hub_id,
+            "bank_id": SAMPLE_BANK_ID,
+            "zone": "LZ_SOUTH",
+            "e_kwh": 13.5,
+            "r_kwh": 2.7,
+            "rated_p_kw": 5.0,
+            "eta_c": 0.9487,
+            "eta_d": 0.9487,
+            "lat": None,
+            "lon": None,
+            "soc_kwh": 10.0,
+            "p_kw": -2.0,
+            "health": "online",
+            "lease_epoch": 3,
+            "lease_expires_at": None,
+            "last_command_id": None,
+            "last_seen_at": _now(),
+            "fault_code": None,
+        }
 
     async def get_bank(self, bank_id: str) -> BankAggregate | None:
         if bank_id != SAMPLE_BANK_ID:
@@ -154,6 +189,24 @@ class FakeStore:
             )
         ]
 
+    async def list_obligations(self, *, state: str | None) -> list[Obligation]:
+        return [
+            Obligation(
+                obligation_id=uuid4(),
+                opportunity_id=uuid4(),
+                contract_id=SAMPLE_CONTRACT_ID,
+                service_type="ERCOT_ENERGY",
+                tier="T2",
+                window_start=_now(),
+                window_end=_now(),
+                committed_qty_kw=Decimal("100"),
+                state=state or "COMMITTED",
+            )
+        ]
+
+    async def count_active_commitments(self) -> int:
+        return 1
+
     async def latest_plan(self) -> Plan | None:
         return Plan(
             plan_id=uuid4(),
@@ -179,11 +232,45 @@ class FakeStore:
             )
         ]
 
+    async def list_grants(self, bank_id: str) -> list[Grant]:
+        # `Grant.bank_id`/`Reservation.bank_id` are typed `UUID` (`opengrid.core.models.engine`,
+        # matching `og.reservation`/`og.grant`'s `uuid` columns) while the fleet twin's `bank_id` is a
+        # text code like "bank-01" (`og.bank.bank_id TEXT`, 02b S4.2) -- a pre-existing schema/model
+        # mismatch outside `api`'s ownership (flagged in the final report). The fake stands in a real
+        # UUID here rather than the text `bank_id` argument to avoid a spurious pydantic error in tests.
+        return [
+            Grant(
+                grant_id=uuid4(),
+                cycle_id="cycle-1",
+                obligation_id=uuid4(),
+                bank_id=uuid4(),
+                granted_kw=Decimal("50"),
+                is_headroom=False,
+                ledger_version=1,
+            )
+        ]
+
+    async def list_commitments(self, *, limit: int = 200) -> list[Commitment]:
+        return [
+            Commitment(
+                commitment_id=uuid4(),
+                obligation_id=uuid4(),
+                plan_id=uuid4(),
+                interval_start=_now(),
+                interval_end=_now(),
+                committed_kw=Decimal("50"),
+                variable_kind="CONTINUOUS",
+            )
+        ]
+
     async def profitability_summary(self, *, service, day) -> list[dict[str, Any]]:
         return [
             {
+                "obligation_id": uuid4(),
                 "service_type": service or "ERCOT_ENERGY",
-                "day": day or date.today(),
+                "contract_id": SAMPLE_CONTRACT_ID,
+                "interval_start": _now(),
+                "interval_end": _now(),
                 "revenue": Decimal("100"),
                 "energy_cost": Decimal("10"),
                 "degradation_cost": Decimal("1"),
@@ -232,6 +319,9 @@ class FakeStore:
             )
         ]
 
+    async def list_stream_ids(self) -> list[str]:
+        return ["engine:cycle-1"]
+
     async def health_snapshot(self, *, heartbeat_miss_threshold_s: float) -> HealthSnapshot:
         return HealthSnapshot(
             processes=[ProcessHeartbeat(process="og-engine", pid=1, ts=_now(), status="ok")],
@@ -251,31 +341,34 @@ class FakeStore:
                 return acked
         return None
 
-    async def list_customers(self) -> list[CustomerSummary]:
-        return [
-            CustomerSummary(customer_id=SAMPLE_CUSTOMER_ID, contract_count=1, service_types=["ERCOT_ENERGY"])
-        ]
+    async def current_ledger_version(self) -> int:
+        return 1
 
-    async def list_contracts(self, *, customer_id: UUID | None) -> list[Contract]:
-        return list(self.contracts.values())
+    async def insert_command_batch(self, batch: CommandBatchRow) -> None:
+        self.command_batches.append(batch)
+        self.verdicts[batch.command_batch_id] = Verdict(
+            verdict_id=uuid4(),
+            command_batch_id=batch.command_batch_id,
+            outcome=self.next_verdict_outcome,
+            vetoed_rule_ids=list(self.next_vetoed_rule_ids),
+            latency_ms=5,
+            inputs_hash="deadbeef",
+        )
 
-    async def get_contract(self, contract_id: UUID) -> Contract | None:
-        return self.contracts.get(contract_id)
+    async def get_verdict(self, command_batch_id: UUID) -> Verdict | None:
+        return self.verdicts.get(command_batch_id)
 
-    async def create_contract(self, contract: Contract) -> Contract:
-        self.contracts[contract.contract_id] = contract
-        return contract
+    async def notify(self, channel: str, payload: dict[str, Any]) -> None:
+        self.notifications.append({"channel": channel, **payload})
+        if payload["action"] == "PROPOSE":
+            self._pending_stop_proposals[payload["proposal_id"]] = (payload["scope"], payload["scope_ref"])
+        elif payload["action"] == "CONFIRM" and self.safestop_responds:
+            scope_scope_ref = self._pending_stop_proposals.pop(payload["proposal_id"], None)
+            if scope_scope_ref is not None:
+                self.stop_events[scope_scope_ref] = ("ENGAGE", _now())
 
-    async def update_contract_status(self, contract_id: UUID, status: str) -> Contract | None:
-        existing = self.contracts.get(contract_id)
-        if existing is None:
-            return None
-        updated = existing.model_copy(update={"status": status})
-        self.contracts[contract_id] = updated
-        return updated
-
-    async def get_obligation(self, obligation_id: UUID) -> Obligation | None:
-        return None
+    async def latest_stop_event(self, scope_kind: str, scope_ref: str) -> tuple[str, datetime] | None:
+        return self.stop_events.get((scope_kind, scope_ref))
 
     async def retention_policy(self) -> list[dict[str, Any]]:
         return [

@@ -49,6 +49,54 @@ def test_confirm_dialog_is_two_step() -> None:
     assert "btn-safestop" in html
 
 
+def test_confirm_dialog_shows_countdown_and_disables_confirm_at_expiry() -> None:
+    html = templates.env.get_template("_partials/confirm_dialog.html").render(
+        dialog_id="d2",
+        trigger_label="Engage",
+        title="Confirm",
+        summary="This will engage.",
+        confirm_url="/og/fleet/safestop/abc/confirm",
+        variant="safestop",
+        expires_in_s=60.0,
+    )
+    assert "remaining: 60.0" in html
+    assert "Expires in" in html
+    assert ':disabled="busy || (remaining !== null && remaining <= 0)"' in html
+
+
+def test_confirm_dialog_open_default_renders_already_open_with_no_trigger() -> None:
+    html = templates.env.get_template("_partials/confirm_dialog.html").render(
+        dialog_id="d3",
+        title="Confirm",
+        summary="Real proposal summary from the API.",
+        confirm_url="/og/fleet/safestop/abc/confirm",
+        variant="safestop",
+        open_default=True,
+        show_trigger=False,
+        expires_in_s=30.0,
+    )
+    assert "open: true" in html
+    assert 'x-ref="triggerBtn"' not in html
+    assert "Real proposal summary from the API." in html
+
+
+def test_confirm_dialog_has_focus_management_for_open_and_close() -> None:
+    html = templates.env.get_template("_partials/confirm_dialog.html").render(
+        dialog_id="d4",
+        trigger_label="Engage",
+        title="Confirm",
+        summary="This will engage.",
+        confirm_url="/og/fleet/safestop/abc/confirm",
+        variant="safestop",
+    )
+    # opening (trigger click, or already-open via x-init) moves focus into the dialog
+    assert 'x-ref="cancelBtn"' in html
+    assert "$refs.cancelBtn" in html
+    # Escape and Cancel both close the dialog and restore focus to the trigger button
+    assert "keydown.escape.window" in html
+    assert "$refs.triggerBtn" in html
+
+
 def test_stale_badge_flags_stale_values() -> None:
     template = templates.env.get_template("_partials/stale_badge.html")
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from opengrid.core import reasons
 from opengrid.core.physics import BankParams, HubParams, recharge_headroom
 
 
@@ -31,7 +32,7 @@ def check_reserve_floor(soc_kwh: float, params: HubParams, *, margin_pct: float 
     of the usable energy capacity (default 1%, per 02a G-01's "reserve + 1%")."""
     margin_kwh = params.e_kwh * margin_pct
     if soc_kwh < params.r_kwh + margin_kwh:
-        return LimitResult.failed("RESERVE_FLOOR")
+        return LimitResult.failed(reasons.R_RESERVE_FLOOR)
     return LimitResult.passed()
 
 
@@ -39,7 +40,7 @@ def check_hub_power(p_kw: float, params: HubParams, *, inverter_cap_kw: float = 
     """G-02/K4: |P| <= min(inverter cap, per-hub cap)."""
     cap = min(inverter_cap_kw, params.p_kw)
     if abs(p_kw) > cap + 1e-9:
-        return LimitResult.failed("HUB_POWER_LIMIT")
+        return LimitResult.failed(reasons.R_HUB_POWER_LIMIT)
     return LimitResult.passed()
 
 
@@ -55,10 +56,10 @@ def check_bank_kva(
     headroom = recharge_headroom(bank_load_kva, bank)
     allowed = headroom * loading_pct if additional_kw >= 0 else float("inf")
     if additional_kw > 0 and additional_kw > allowed + 1e-9:
-        return LimitResult.failed("BANK_KVA_LIMIT")
+        return LimitResult.failed(reasons.R_BANK_KVA_LIMIT)
     net = bank_load_kva + additional_kw
     if net > bank.kva_rating * loading_pct + 1e-9:
-        return LimitResult.failed("BANK_KVA_LIMIT")
+        return LimitResult.failed(reasons.R_BANK_KVA_LIMIT)
     return LimitResult.passed()
 
 
@@ -72,7 +73,7 @@ def check_hub_ramp(
     if ramp_kw_per_s <= 0:
         return LimitResult.passed()
     if abs(target_p_kw - prev_p_kw) > ramp_kw_per_s * dt_s + 1e-9:
-        return LimitResult.failed("HUB_RAMP_LIMIT")
+        return LimitResult.failed(reasons.R_HUB_RAMP_LIMIT)
     return LimitResult.passed()
 
 
@@ -89,7 +90,7 @@ def check_fleet_ramp_cap(
     cap_per_min = discretionary_cap_kw_per_min if is_firm_event else non_firm_cap_kw_per_min
     cap_kw = cap_per_min * (dt_s / 60.0)
     if abs(fleet_delta_kw) > cap_kw + 1e-9:
-        return LimitResult.failed("FLEET_RAMP_CAP")
+        return LimitResult.failed(reasons.R_FLEET_RAMP_CAP)
     return LimitResult.passed()
 
 
@@ -105,7 +106,7 @@ def check_feeder_ramp_ceiling(
         return LimitResult.passed()
     cap_kw = feeder_ceiling_kw_per_min * (dt_s / 60.0)
     if abs(feeder_delta_kw) > cap_kw + 1e-9:
-        return LimitResult.failed("FEEDER_RAMP_CEILING")
+        return LimitResult.failed(reasons.R_FEEDER_RAMP_CEILING)
     return LimitResult.passed()
 
 
@@ -113,7 +114,7 @@ def check_one_buyer(reservations_kw: list[float], capability_kw: float) -> Limit
     """K2: sum of reservations against a hub/bank/interval must not exceed capability."""
     total = sum(reservations_kw)
     if total > capability_kw + 1e-9:
-        return LimitResult.failed("ONE_BUYER_EXCEEDED")
+        return LimitResult.failed(reasons.R_ONE_BUYER_EXCEEDED)
     return LimitResult.passed()
 
 
@@ -123,14 +124,7 @@ def check_commitment_lock(
     prior_kw: float,
     reason_code: str | None,
     *,
-    allowed_release_reasons: frozenset[str] = frozenset(
-        {
-            "R-COMMIT-LOCK-OVERRIDE-L0",
-            "R-COMMIT-LOCK-OVERRIDE-L1",
-            "R-COMMIT-LOCK-OVERRIDE-L2",
-            "R-COMMIT-LOCK-INFEASIBLE",
-        }
-    ),
+    allowed_release_reasons: frozenset[str] = reasons.COMMIT_LOCK_OVERRIDE_REASONS,
     as_release_enabled: bool = False,
 ) -> LimitResult:
     """K13/G-19: a committed allocation may never be reduced below min(frozen, prior) without an
@@ -140,6 +134,6 @@ def check_commitment_lock(
         return LimitResult.passed()
     if reason_code in allowed_release_reasons:
         return LimitResult.passed()
-    if reason_code == "R-AS-RELEASE" and as_release_enabled:
+    if reason_code == reasons.R_AS_RELEASE and as_release_enabled:
         return LimitResult.passed()
-    return LimitResult.failed("R-COMMIT-LOCK-VIOLATION")
+    return LimitResult.failed(reasons.R_COMMIT_LOCK_VIOLATION)

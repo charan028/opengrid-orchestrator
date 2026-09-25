@@ -31,7 +31,10 @@ async def run_forever(tick: TickFn, *, interval_s: float, process_name: str) -> 
     loop = asyncio.get_running_loop()
 
     def _request_stop(sig_name: str) -> None:
-        logger.info("shutdown requested", extra={"signal": sig_name, "process": process_name})
+        # PLAT-006: "process" collides with the LogRecord's OWN reserved `process` attribute (the OS
+        # PID) -- passing it via `extra` makes `makeRecord` raise KeyError instead of logging, which
+        # would have silently defeated run_forever's whole "log and keep going" contract below.
+        logger.info("shutdown requested", extra={"signal": sig_name, "proc_name": process_name})
         stop_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -44,9 +47,9 @@ async def run_forever(tick: TickFn, *, interval_s: float, process_name: str) -> 
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("tick failed", extra={"process": process_name})
+            logger.exception("tick failed", extra={"proc_name": process_name})
 
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
-    logger.info("stopped", extra={"process": process_name})
+    logger.info("stopped", extra={"proc_name": process_name})

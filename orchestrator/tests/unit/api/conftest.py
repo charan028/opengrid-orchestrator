@@ -4,16 +4,21 @@ none of `create_app()`'s lifespan (real Postgres pool) ever runs (BUILD.md S5: "
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
+import opengrid.contracts as contracts_module
 from opengrid.api.app import create_app
 from opengrid.api.deps import get_config, get_proposals, get_store, get_trace_store
 from opengrid.api.proposals import ProposalStore
+from opengrid.core.models.engine import Contract
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
-from .fakes import FakeStore, FakeTraceBackend
+from .contracts_fake import FakeContractsRepo
+from .fakes import SAMPLE_CONTRACT_ID, SAMPLE_CUSTOMER_ID, FakeStore, FakeTraceBackend
 
 OPERATOR_HEADERS = {"X-Remote-User": "operator"}
 VIEWER_HEADERS = {"X-Remote-User": "viewer"}
@@ -37,6 +42,27 @@ def fake_proposals() -> ProposalStore:
 @pytest.fixture
 def fake_config() -> Config:
     return Config({"api": {"sse_heartbeat_s": 15, "roles": {"operator": [], "viewer": []}}})
+
+
+@pytest.fixture(autouse=True)
+def _configured_contracts(fake_trace_store):
+    """`opengrid.contracts` (02a, selector agent) is a module-level singleton configured once by its
+    owning process -- `api`'s own tests wire a minimal in-memory fake here rather than depending on
+    another agent's `tests/unit/contracts/fakes.py`, and reset it afterwards so this suite's state
+    never leaks into another module's test run."""
+    repo = FakeContractsRepo()
+    repo.contracts[SAMPLE_CONTRACT_ID] = Contract(
+        contract_id=SAMPLE_CONTRACT_ID,
+        customer_id=SAMPLE_CUSTOMER_ID,
+        service_type="ERCOT_ENERGY",
+        tier="T2",
+        profile_ref="ercot-energy-profile@1",
+        start_at=datetime.now(UTC),
+        status="ACTIVE",
+    )
+    contracts_module.configure(repo, fake_trace_store)
+    yield
+    contracts_module.reset_for_testing()
 
 
 @pytest.fixture

@@ -234,6 +234,64 @@ async def test_g19_commitment_lock_allows_override_reason(fakes, guardian_config
     assert verdict.outcome == "PASS"
 
 
+async def test_g19_cannot_be_bypassed_by_omitting_obligation(fakes, guardian_config, signing_seed):
+    """GUARD-01: an obligation with an ACTIVE commitment that the batch's items never mention at all
+    must still be evaluated by G-19 -- guardian enumerates active obligations itself, so "just don't
+    include it" is not a way to dodge the commitment lock."""
+    proposal = make_proposal()  # no obligation_id on its single item
+    wire_default_passing_scenario(fakes, proposal)
+    obligation_id = uuid4()
+    fakes.commitments.active_by_bank.setdefault(proposal.bank_id, set()).add(obligation_id)
+    fakes.commitments.frozen[obligation_id] = Decimal("5.0")
+    fakes.prior_grants.prior[obligation_id] = Decimal("5.0")
+    batch = make_batch_row(proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+
+    verdict = await service.evaluate_and_sign(batch)
+
+    assert "G-19" in verdict.vetoed_rule_ids
+    assert verdict.signature is None
+
+
+async def test_g19_cannot_be_bypassed_by_null_obligation_id(fakes, guardian_config, signing_seed):
+    """GUARD-01: relabelling an item's obligation_id=None does not remove the obligation from
+    guardian's own independently-enumerated active set, so it still counts as new_kw=0 -> VETO."""
+    obligation_id = uuid4()
+    proposal = make_proposal(obligation_id=None, reason_code="SELECTOR")
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.commitments.active_by_bank.setdefault(proposal.bank_id, set()).add(obligation_id)
+    fakes.commitments.frozen[obligation_id] = Decimal("5.0")
+    fakes.prior_grants.prior[obligation_id] = Decimal("5.0")
+    batch = make_batch_row(proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+
+    verdict = await service.evaluate_and_sign(batch)
+
+    assert "G-19" in verdict.vetoed_rule_ids
+    assert verdict.signature is None
+
+
+async def test_g19_as_release_disabled_by_default_still_vetoes(fakes, guardian_config, signing_seed):
+    """GUARD-01: R-AS-RELEASE only excuses a reduction when as_release_enabled is explicitly turned on
+    (default False, per GuardianConfig.as_release_enabled) -- an unreasoned-looking release must not
+    sneak past the independently-enumerated obligation just because it carries that reason code."""
+    assert guardian_config.as_release_enabled is False
+    obligation_id = uuid4()
+    proposal = make_proposal(
+        obligation_id=obligation_id, obligation_granted_kw=Decimal("0.0"), reason_code="R-AS-RELEASE"
+    )
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.commitments.frozen[obligation_id] = Decimal("5.0")
+    fakes.prior_grants.prior[obligation_id] = Decimal("5.0")
+    batch = make_batch_row(proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+
+    verdict = await service.evaluate_and_sign(batch)
+
+    assert "G-19" in verdict.vetoed_rule_ids
+    assert verdict.signature is None
+
+
 async def test_partly_vetoed_when_only_some_hubs_affected(fakes, guardian_config, signing_seed):
     from opengrid.guardian.ports import ProposedBatch, ProposedItem
 

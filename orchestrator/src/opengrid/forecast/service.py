@@ -23,8 +23,12 @@ from opengrid.platform.config import Config
 
 logger = logging.getLogger(__name__)
 
-#: 02b S2.2 -- the ERCOT system-average settlement point, used when `[forecast].price_series` is unset.
-DEFAULT_PRICE_SERIES: tuple[str, ...] = ("HB_HUBAVG",)
+#: Last-resort fallback only, used when neither `[forecast].price_series` nor `[fleet].zones` is
+#: configured. `feeds.ercot.PRODUCT_PATHS["np6-905-cd"]` queries `settlementPointType=LZ` (load zones),
+#: so the price series keys `feed_obs` actually carries are the same load-zone codes as `[fleet].zones`
+#: (e.g. `LZ_NORTH`) -- never a hub code -- which is why `price_series` below falls back to
+#: `fleet.zones` first, matching `load_series`'s existing fallback (README.md's canonical list).
+DEFAULT_PRICE_SERIES: tuple[str, ...] = ("LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST")
 
 #: 02a S3 "P10 = low, P50 = mid, P90 = high", weights per the stub docstring / 02a plan.scenario_set.
 SCENARIO_WEIGHTS: dict[str, float] = {"P10": 0.25, "P50": 0.5, "P90": 0.25}
@@ -46,7 +50,9 @@ async def compute_and_persist(
     horizon_start = floor_to_interval(now, resolution_min)
     steps = (horizon_hours * 60) // resolution_min
 
-    price_series: list[str] = list(cfg.get("forecast.price_series", DEFAULT_PRICE_SERIES))
+    price_series: list[str] = list(
+        cfg.get("forecast.price_series") or cfg.get("fleet.zones", list(DEFAULT_PRICE_SERIES))
+    )
     load_series: list[str] = list(cfg.get("forecast.load_series") or cfg.get("fleet.zones", []))
 
     rows: list[ForecastRow] = []

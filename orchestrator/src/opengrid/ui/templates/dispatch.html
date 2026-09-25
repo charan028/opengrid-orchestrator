@@ -91,8 +91,63 @@
   document.addEventListener("DOMContentLoaded", function () {
     og.chart("#ledger-chart", {{ ledger.chart_option | tojson }});
 
-    og.sse("{{ base_path }}/api/stream/dispatch", function () {
+    var PIPELINE_STATES = ["OFFERED", "SELECTED", "COMMITTED", "DELIVERING", "FULFILLED_OR_SHORTFALL"];
+    function pipelineColumnFor(state) {
+      return (state === "FULFILLED" || state === "SHORTFALL") ? "FULFILLED_OR_SHORTFALL" : state;
+    }
+
+    // Live updates (02b S7.2): `/api/stream/dispatch` emits `{opportunities: [...], latest_plan: {...}}`
+    // roughly every 2s -- rebuild each kanban column's cards from `opportunities` in place. The payload
+    // has no ledger-reservation or grants data, so the ledger chart and grants table stay as of first
+    // paint until the api agent's stream payload grows those fields.
+    og.sse("{{ base_path }}/api/stream/dispatch", function (data) {
       document.getElementById("dispatch-updated").textContent = "live";
+      document.getElementById("dispatch-updated").dataset.stale = "false";
+      if (!data || !Array.isArray(data.opportunities)) {
+        return;
+      }
+      var byColumn = {};
+      PIPELINE_STATES.forEach(function (s) { byColumn[s] = []; });
+      data.opportunities.forEach(function (row) {
+        var column = pipelineColumnFor(row.state || "OFFERED");
+        if (byColumn[column]) {
+          byColumn[column].push(row);
+        }
+      });
+      PIPELINE_STATES.forEach(function (state) {
+        var column = document.querySelector('.og-kanban-column[data-state="' + state + '"]');
+        if (!column) {
+          return;
+        }
+        var countEl = column.querySelector("h3 span");
+        if (countEl) {
+          countEl.textContent = String(byColumn[state].length);
+        }
+        column.querySelectorAll(".og-kanban-card, .og-card-meta").forEach(function (el) { el.remove(); });
+        if (byColumn[state].length === 0) {
+          var empty = document.createElement("p");
+          empty.className = "og-card-meta";
+          empty.textContent = "none";
+          column.appendChild(empty);
+          return;
+        }
+        byColumn[state].forEach(function (item) {
+          var card = document.createElement("div");
+          card.className = "og-kanban-card" + (item.at_risk ? " og-at-risk" : "");
+          var idLine = document.createElement("div");
+          idLine.textContent = item.obligation_id || "";
+          card.appendChild(idLine);
+          var metaLine = document.createElement("div");
+          metaLine.className = "og-card-meta";
+          metaLine.textContent = [
+            item.service_type,
+            item.tier,
+            (item.committed_qty_kw != null ? item.committed_qty_kw : item.requested_kw) + " kW",
+          ].filter(Boolean).join(" · ");
+          card.appendChild(metaLine);
+          column.appendChild(card);
+        });
+      });
     }, {
       onError: function () {
         document.getElementById("dispatch-updated").textContent = "reconnecting";

@@ -20,8 +20,8 @@ from opengrid.platform.config import load_config
 from opengrid.platform.db import build_dsn, make_pool, migrate_sync
 from opengrid.settle import settle
 from opengrid.settle.pg_backend import PgSettleBackend
-from opengrid.settle.trace_pg_backend import SettleTracePgBackend
 from opengrid.trace import TraceStore
+from opengrid.trace.pg_backend import PgTraceBackend
 
 
 def _try_connect_dsn() -> str | None:
@@ -120,7 +120,7 @@ async def test_settle_persists_meter_performance_invoice_and_pnl(pg_pool):
     interval_end = interval_start + timedelta(minutes=15)
     await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
 
-    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(SettleTracePgBackend(pg_pool)))
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
 
     async with pg_pool.connection() as conn, conn.cursor() as cur:
@@ -148,7 +148,7 @@ async def test_rerunning_settle_is_idempotent_no_duplicate_rows(pg_pool):
     interval_end = interval_start + timedelta(minutes=15)
     await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
 
-    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(SettleTracePgBackend(pg_pool)))
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
     await settle(obligation_id, interval_start, interval_end)
     await settle(obligation_id, interval_start, interval_end)
@@ -169,7 +169,7 @@ async def test_correction_supersedes_the_original_meter_interval(pg_pool):
     interval_end = interval_start + timedelta(minutes=15)
     await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
 
-    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(SettleTracePgBackend(pg_pool)))
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
 
     # a correction: replace telemetry with a different value and re-settle
@@ -188,3 +188,38 @@ async def test_correction_supersedes_the_original_meter_interval(pg_pool):
     assert len(rows) == 2
     assert rows[0][1] is not None  # the original is now superseded
     assert rows[1][1] is None  # the correction is the active row
+
+
+async def test_correction_supersedes_the_original_pnl_row(pg_pool):
+    """`og.pnl` follows the same insert-only + version/superseded_by pattern as `meter_interval`
+    (migration 0006): a corrected net_value adds a new versioned row and supersedes the original,
+    never mutating it in place and never leaving two active rows."""
+    obligation_id, hub_id = await _insert_fixture(pg_pool, committed_kw=Decimal("4"))
+    interval_start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=80)
+    interval_end = interval_start + timedelta(minutes=15)
+    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
+
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
+    await settle(obligation_id, interval_start, interval_end)
+
+    async with pg_pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("DELETE FROM og.telemetry WHERE hub_id = %s", (hub_id,))
+    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("6"))
+    await settle(obligation_id, interval_start, interval_end)
+
+    async with pg_pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT version, superseded_by FROM og.pnl WHERE obligation_id = %s ORDER BY version",
+            (obligation_id,),
+        )
+        rows = await cur.fetchall()
+        await cur.execute(
+            "SELECT count(*) FROM og.pnl WHERE obligation_id = %s AND superseded_by IS NULL",
+            (obligation_id,),
+        )
+        (active_count,) = await cur.fetchone()
+
+    assert len(rows) == 2
+    assert rows[0][1] is not None  # the original is now superseded
+    assert rows[1][1] is None  # the correction is the active row
+    assert active_count == 1  # never more than one active pnl row per obligation-interval

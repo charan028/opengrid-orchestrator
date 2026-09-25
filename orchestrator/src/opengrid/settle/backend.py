@@ -40,6 +40,7 @@ class ExistingInvoiceLineRow:
 class ExistingPnl:
     pnl_id: UUID
     net_value: Decimal
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,8 +153,10 @@ class SettleBackend(Protocol):
     ) -> UUID: ...
 
     async def fetch_active_pnl(self, obligation_id: UUID, interval_start: datetime) -> ExistingPnl | None:
-        """The most recently inserted `pnl` row for this obligation-interval, if any (`pnl` carries
-        no version/supersedes columns -- idempotency is keyed on comparing `net_value`)."""
+        """The current (`superseded_by IS NULL`) `pnl` row for this obligation-interval, if any --
+        insert-only + versioned exactly like `meter_interval` (02a S1's insert-only-table rule; a DB
+        partial unique index on `(obligation_id, interval_start) WHERE superseded_by IS NULL` is the
+        actual idempotency guard, not just this read-then-compare check)."""
         ...
 
     async def insert_pnl(
@@ -169,7 +172,15 @@ class SettleBackend(Protocol):
         net_value: Decimal,
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
-    ) -> UUID: ...
+        version: int,
+    ) -> UUID:
+        """Insert a new `pnl` row (never an UPDATE of its data columns); returns its id."""
+        ...
+
+    async def mark_pnl_superseded(self, old_id: UUID, new_id: UUID) -> None:
+        """The one narrow link-only mutation 02a S1.1 allows: point the retired `pnl` row's
+        `superseded_by` at its replacement, mirroring `mark_meter_interval_superseded`."""
+        ...
 
     async def fetch_rule_baseline_delivered_kwh(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

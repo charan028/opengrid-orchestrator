@@ -13,20 +13,27 @@ import math
 from dataclasses import dataclass
 
 from opengrid.allocator.models import BankSnapshot, PiState, ScadaSample
+from opengrid.core.physics import BankParams, apply_ramp_limit, recharge_headroom
 
 _FEED_FORWARD_TAU_S = 45.0
 _KP = 0.3  # class A1 SCADA gain (02a S5.4)
 _I_MAX_FRACTION_OF_KC = 0.2
 _RAMP_DOWN_KW_PER_MIN = 150.0
 _RAMP_UP_MIN_KW_PER_MIN = 150.0
+_SECONDS_PER_MINUTE = 60.0
 
 
 def gross_need_kva(scada: ScadaSample, bank: BankSnapshot) -> float:
-    """n_k = P^G_k - sqrt((S^lim_b)^2 - (Q^G_k - Qhat^F_{k+1})^2), two fixed-point iterations
-    (02a S5.4). Falls back to the linear P-only need if the radicand goes negative (over-limit on
-    reactive alone), which the ramp/clip stage downstream will still bound safely.
+    """n_k = P^G_k - sqrt((S^lim_b)^2 - (Q^G_k - Qhat^F_{k+1})^2) (02a S5.4). `S^lim_b`, the bank's
+    apparent-power ceiling, is `opengrid.core.physics.recharge_headroom` evaluated at zero existing
+    load (ALLOC-03: never re-derive `kva_rating - reserve_kva` locally) -- the ONE formula the
+    allocator and guardian G-03 both call (02b S12). "Two fixed-point iterations" (02a S5.4) describes
+    how this closed-form expression was itself derived (solving the fixed point of the coupled P/Q
+    apparent-power equation offline); it is evaluated once per call, not iterated at runtime. Falls
+    back to the linear P-only need if the radicand goes negative (over-limit on reactive alone), which
+    the ramp/clip stage downstream will still bound safely.
     """
-    s_lim = bank.kva_rating - bank.reserve_kva
+    s_lim = recharge_headroom(0.0, BankParams(kva_rating=bank.kva_rating, reserve_kva=bank.reserve_kva))
     q_term = scada.reactive_power_kvar - scada.forecast_reactive_kvar_next
     radicand = s_lim * s_lim - q_term * q_term
     p_budget = math.sqrt(radicand) if radicand > 0 else 0.0
@@ -38,17 +45,6 @@ def _deadband(error_kw: float, db_kw: float) -> float:
     if abs(error_kw) <= db_kw:
         return 0.0
     return error_kw - math.copysign(db_kw, error_kw)
-
-
-def _ramp_limit(target: float, prev: float, *, up_per_min: float, down_per_min: float, dt_s: float) -> float:
-    max_up = up_per_min * (dt_s / 60.0)
-    max_down = down_per_min * (dt_s / 60.0)
-    delta = target - prev
-    if delta > max_up:
-        return prev + max_up
-    if delta < -max_down:
-        return prev - max_down
-    return target
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +81,7 @@ class DistDeferralPI:
         beta_x = scada.beta_x if abs(scada.beta_x) > 1e-9 else 1.0
 
         u_raw = n_tilde + _KP * e_db / beta_x + state.integral
-        cap = min(self.bank.kva_rating, self.bank.kva_rating - self.bank.reserve_kva)
+        cap = recharge_headroom(0.0, BankParams(kva_rating=self.bank.kva_rating, reserve_kva=self.bank.reserve_kva))
         u_sat = min(max(u_raw, 0.0), max(cap, 0.0))
 
         # Conditional-integration anti-windup: only integrate while not clipped by saturation.
@@ -93,13 +89,16 @@ class DistDeferralPI:
         if abs(u_raw - u_sat) < 1e-9:
             new_integral = _clip(state.integral + self.ki * dt_c_s * e_db / beta_x, -self.i_max, self.i_max)
 
-        ramp_up = max(_RAMP_UP_MIN_KW_PER_MIN, self.bank.kva_rating / 3.0)
-        output = _ramp_limit(
-            u_sat,
+        # ALLOC-03: the PI's asymmetric up/down ramp is `opengrid.core.physics.apply_ramp_limit`'s
+        # `ramp_down_kw_per_s` extension (never a locally re-derived ramp clamp), converting the
+        # loop's per-minute rates (02a S5.4) to the function's per-second units.
+        ramp_up_kw_per_min = max(_RAMP_UP_MIN_KW_PER_MIN, self.bank.kva_rating / 3.0)
+        output = apply_ramp_limit(
             state.prev_output_kw,
-            up_per_min=ramp_up,
-            down_per_min=_RAMP_DOWN_KW_PER_MIN,
-            dt_s=dt_c_s,
+            u_sat,
+            dt_c_s,
+            ramp_up_kw_per_min / _SECONDS_PER_MINUTE,
+            ramp_down_kw_per_s=_RAMP_DOWN_KW_PER_MIN / _SECONDS_PER_MINUTE,
         )
 
         new_state = PiState(

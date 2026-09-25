@@ -25,7 +25,7 @@ guardian's own inputs, never from a second implementation of the formulas.
 | `config.py` | `GuardianConfig` (`[guardian]`/`[allocator]` TOML, no hard-coded thresholds). |
 | `keys.py` | Ed25519 signing-seed resolution (`GUARDIAN_SIGNING_SEED` env or key file) + `keygen`. |
 | `service.py` | `GuardianService.evaluate_and_sign` — the decision engine: runs every check, classifies PASS/VETOED/PARTLY_VETOED/TIMEOUT, signs on PASS, traces the verdict. No I/O. |
-| `repo.py` | Postgres-backed port implementations (`PgHubStatePort`, `PgCommitmentPort`, `PgProposalPort`, `ChronyClockPort`, …). |
+| `repo.py` | Postgres-backed port implementations (`PgCommitmentPort` incl. its own `active_obligations_for_bank` enumeration, `PgProposalPort`, `ChronyClockPort`, …). Deliberately has no hub-state port — that must always be `mqtt_io.MqttHubStatePort`. |
 | `mqtt_io.py` | Guardian's own independent telemetry cache (`<root>/tel/#`) and signed publish (`<root>/cmd/*/batch`, `<root>/lease/*`). |
 | `main.py` | Process wiring: pool, MQTT client, `run_forever` cycle over pending `og.command_batch` rows. |
 

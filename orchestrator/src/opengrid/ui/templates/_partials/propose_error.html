@@ -1,0 +1,6 @@
+{# propose_error.html -- step-1 propose call failed (ApiUnavailable, or a validation error the route
+   caught itself). Params: message: str. #}
+<div role="status">
+  <p>{% with status='critical', label='UNAVAILABLE' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message }}</p>
+</div>

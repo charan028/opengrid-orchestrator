@@ -29,18 +29,30 @@
 {% if is_operator %}
 <section class="og-panel" aria-label="Fleet-wide safe stop">
   <h2>Scoped safe stop</h2>
-  <p class="stale-badge">Stops new dispatch for the chosen scope. Never force-discharges below reserve. Requires confirmation.</p>
-  {% with dialog_id='safestop-fleet', trigger_label='Safe stop: entire fleet', title='Confirm fleet-wide safe stop', summary='This halts new dispatch for every bank in the fleet until released. This action is logged and requires operator confirmation.', confirm_url=base_path ~ '/api/safestop/fleet/confirm', confirm_label='Engage fleet stop', variant='safestop' %}
-    {% include "_partials/confirm_dialog.html" %}
-  {% endwith %}
-  <div id="confirm-result" role="status"></div>
+  <p class="stale-badge">Stops new dispatch for the chosen scope. Never force-discharges below reserve.
+    Requires a two-step confirmation: propose, then confirm the exact summary the API returns.</p>
+  <form id="safestop-propose-form" class="og-grid" style="grid-template-columns: repeat(4, auto);"
+        hx-post="{{ base_path }}/fleet/safestop/propose" hx-target="#safestop-propose-result" hx-swap="innerHTML">
+    <label>Scope
+      <select name="scope">
+        <option value="fleet">Fleet</option>
+        <option value="zone">Zone</option>
+        <option value="bank">Bank</option>
+      </select>
+    </label>
+    <label>Scope id (zone or bank) <input type="text" name="scope_id"></label>
+    <label>Reason <input type="text" name="reason" required></label>
+    <button class="btn btn-safestop" type="submit">Propose safe stop (step 1 of 2)</button>
+  </form>
+  <div id="safestop-propose-result" role="status"></div>
+  <div id="safestop-confirm-result" role="status"></div>
 </section>
 {% endif %}
 
 <section class="og-panel" aria-label="Bank / hub table">
   <h2>Hubs</h2>
   <p>Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}], rows=table_rows, empty_message='No hubs match the current filter', row_id_key='hub_id' %}
+  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match the current filter', row_id_key='hub_id' %}
     {% include "_partials/data_table.html" %}
   {% endwith %}
 </section>
@@ -52,14 +64,16 @@
 {% if is_operator %}
 <section class="og-panel" aria-label="Manual command">
   <h2>Manual command</h2>
-  <form id="manual-command-form" class="og-grid" style="grid-template-columns: repeat(4, auto);"
-        hx-post="{{ base_path }}/api/fleet/command" hx-target="#manual-command-result" hx-swap="innerHTML">
-    <label>Bank or hub id <input type="text" name="target_id" required></label>
+  <form id="manual-command-form" class="og-grid" style="grid-template-columns: repeat(5, auto);"
+        hx-post="{{ base_path }}/fleet/command/propose" hx-target="#command-propose-result" hx-swap="innerHTML">
+    <label>Bank id <input type="text" name="bank_id"></label>
+    <label>Hub id <input type="text" name="hub_id"></label>
     <label>Setpoint (kW) <input type="number" step="0.1" name="p_kw_setpoint" required></label>
     <label>Reason <input type="text" name="reason" required></label>
     <button class="btn btn-primary" type="submit">Propose (step 1 of 2)</button>
   </form>
-  <div id="manual-command-result" role="status"></div>
+  <div id="command-propose-result" role="status"></div>
+  <div id="command-confirm-result" role="status"></div>
 </section>
 {% endif %}
 {% endblock %}
@@ -80,8 +94,30 @@
       });
     });
 
-    og.sse("{{ base_path }}/api/stream/fleet", function () {
+    // Live updates (02b S7.2): the fleet stream emits `{"hubs": [{hub_id, health, soc_kwh, p_kw}, ...]}`
+    // roughly once a second -- refresh the matching table row's numeric cells in place rather than
+    // re-fetching the whole screen. The stream payload has no bank_id/zone/last_seen_at, so those
+    // columns (and the age badge, which needs a fresh timestamp the API doesn't send here) stay as of
+    // first paint until the operator reloads or re-filters.
+    og.sse("{{ base_path }}/api/stream/fleet", function (data) {
       document.getElementById("fleet-updated").textContent = "live";
+      document.getElementById("fleet-updated").dataset.stale = "false";
+      if (!data || !Array.isArray(data.hubs)) {
+        return;
+      }
+      data.hubs.forEach(function (hub) {
+        var row = document.querySelector('tr.clickable-row[data-row-id="' + hub.hub_id + '"]');
+        if (!row) {
+          return;
+        }
+        var cells = row.querySelectorAll("td");
+        if (cells[4]) {
+          cells[4].textContent = hub.soc_kwh;
+        }
+        if (cells[5]) {
+          cells[5].textContent = hub.p_kw;
+        }
+      });
     }, {
       onError: function () {
         document.getElementById("fleet-updated").textContent = "reconnecting";

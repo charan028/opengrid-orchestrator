@@ -24,8 +24,8 @@ from opengrid.platform.log import configure_logging
 from opengrid.platform.process import run_forever
 from opengrid.settle import configure, run_settle_cycle, run_trace_pruning_cycle
 from opengrid.settle.pg_backend import PgSettleBackend
-from opengrid.settle.trace_pg_backend import SettleTracePgBackend
 from opengrid.trace import TraceStore
+from opengrid.trace.pg_backend import PgTraceBackend
 
 _PROCESS_NAME = "og-settle"
 _DEFAULT_SETTLE_INTERVAL_S = 60.0
@@ -36,7 +36,7 @@ async def _run() -> None:
     logger = configure_logging(_PROCESS_NAME)
     cfg = load_config(os.environ.get("OG_CONFIG"))
     pool = await make_pool(cfg)
-    configure(PgSettleBackend(pool), TraceStore(SettleTracePgBackend(pool)))
+    configure(PgSettleBackend(pool), TraceStore(PgTraceBackend(pool)), trace_pool=pool)
 
     settle_interval_s = float(cfg.get("settle.interval_s", _DEFAULT_SETTLE_INTERVAL_S))
     trace_prune_interval_s = float(cfg.get("settle.trace_prune_interval_s", _DEFAULT_TRACE_PRUNE_INTERVAL_S))

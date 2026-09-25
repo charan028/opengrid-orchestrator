@@ -1,0 +1,20 @@
+{# safestop_confirm_result.html -- step-2 safe-stop confirm HTMX fragment. Params:
+     result: dict|None (SafestopConfirmResult: proposal_id/scope/scope_id/engaged/trace_id) on success
+     status_code: int|None (the API's status code on failure: 503 timeout, 410/404 expired/unknown)
+     message: str|None (failure detail) #}
+<div id="safestop-confirm-result" role="status">
+  {% if result and result.engaged %}
+  <p>{% with status='critical', label='ENGAGED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Safe stop engaged for {{ result.scope }}{% if result.scope_id %}/{{ result.scope_id }}{% endif %}.
+    Trace {{ result.trace_id|default('-') }}.</p>
+  {% elif status_code == 503 %}
+  <p>{% with status='warning', label='TIMEOUT' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    No confirmation from og-safestop within the poll window. {{ message }}</p>
+  {% elif status_code in (410, 404) %}
+  <p>{% with status='caution', label='EXPIRED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The proposal expired or is unknown -- propose again. {{ message }}</p>
+  {% else %}
+  <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message|default('the safe stop could not be confirmed') }}</p>
+  {% endif %}
+</div>

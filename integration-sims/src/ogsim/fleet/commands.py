@@ -5,6 +5,10 @@ the guardian's public key, and each hub's last accepted (epoch, seq),
 verifies signature then freshness, per crypto.md's "freshness checks
 happen after signature verification and are independent of it."
 Returns one `CommandVerdict` per item so the caller can ack each hub.
+
+`build_ack` builds the corresponding `interfaces/mqtt/ack.schema.json`
+message for one verdict (fleet -> orchestrator, `<root>/ack/<hub_id>`,
+QoS 1) -- also pure, so the ack shape is unit-testable without MQTT.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ogsim.common.crypto import verify_signature
+from ogsim.common.scenario import utc_timestamp
 
 RejectReason = str  # one of BAD_SIGNATURE | STALE_EPOCH | STALE_SEQ | EXPIRED
 
@@ -96,3 +101,25 @@ def evaluate_batch(
 def utc_now_from_epoch(epoch_seconds: float) -> datetime:
     """Converts a Unix-epoch float (from `Clock.now()`) to an aware UTC datetime."""
     return datetime.fromtimestamp(epoch_seconds, tz=UTC)
+
+
+def build_ack(
+    verdict: CommandVerdict, batch_id: str, applied_p_kw: float | None, now_epoch: float
+) -> dict[str, Any]:
+    """Builds one `ack.schema.json`-conformant ack for `verdict`.
+
+    `applied_p_kw` is the hub's actual post-physics applied power (after the
+    SoC/reserve clamp, see `ogsim.fleet.physics.clip_commanded_setpoint`),
+    supplied by the caller since a `CommandVerdict` alone carries only the
+    *requested* setpoint. Always reported as `None` for a rejected verdict,
+    regardless of what the caller passes in, since a rejected command was
+    never applied.
+    """
+    return {
+        "hub_id": verdict.hub_id,
+        "batch_id": batch_id,
+        "accepted": verdict.accepted,
+        "applied_p_kw": applied_p_kw if verdict.accepted else None,
+        "reject_reason": verdict.reject_reason,
+        "ts": utc_timestamp(now_epoch),
+    }

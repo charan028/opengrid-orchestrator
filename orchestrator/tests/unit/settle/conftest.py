@@ -152,12 +152,18 @@ class FakeSettleBackend:
         net_value: Decimal,
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
+        version: int,
     ) -> UUID:
         self.insert_pnl_calls += 1
         self.pnl_insert_log.append((obligation_id, interval_start))
         new_id = uuid4()
-        self.pnl_rows[(obligation_id, interval_start)] = ExistingPnl(pnl_id=new_id, net_value=net_value)
+        self.pnl_rows[(obligation_id, interval_start)] = ExistingPnl(
+            pnl_id=new_id, net_value=net_value, version=version
+        )
         return new_id
+
+    async def mark_pnl_superseded(self, old_id: UUID, new_id: UUID) -> None:
+        return None
 
     async def fetch_rule_baseline_delivered_kwh(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

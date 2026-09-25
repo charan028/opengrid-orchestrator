@@ -9,7 +9,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ogsim.common.crypto import sign
-from ogsim.fleet.commands import evaluate_batch
+from ogsim.fleet.commands import CommandVerdict, build_ack, evaluate_batch
 
 
 @pytest.fixture
@@ -104,6 +104,35 @@ def test_past_expiry_rejected_as_expired(guardian_key: Ed25519PrivateKey) -> Non
     )
     verdicts = evaluate_batch(batch, guardian_key.public_key(), {}, now)
     assert verdicts[0].reject_reason == "EXPIRED"
+
+
+def test_build_ack_for_accepted_verdict_matches_ack_schema_shape() -> None:
+    verdict = CommandVerdict(
+        hub_id="hub-00001", accepted=True, reject_reason=None, requested_p_kw_setpoint=-3.2
+    )
+    ack = build_ack(verdict, batch_id="b1", applied_p_kw=-2.5, now_epoch=1780000000.0)
+    assert ack == {
+        "hub_id": "hub-00001",
+        "batch_id": "b1",
+        "accepted": True,
+        "applied_p_kw": -2.5,
+        "reject_reason": None,
+        "ts": "2026-05-28T20:26:40.000Z",
+    }
+
+
+def test_build_ack_for_rejected_verdict_has_no_applied_power() -> None:
+    verdict = CommandVerdict(
+        hub_id="hub-00002", accepted=False, reject_reason="STALE_SEQ", requested_p_kw_setpoint=None
+    )
+    # applied_p_kw is always None for a rejected verdict, even if the caller
+    # (incorrectly) passed one in -- a rejected command was never applied.
+    ack = build_ack(verdict, batch_id="b2", applied_p_kw=4.0, now_epoch=1780000000.0)
+    assert ack["accepted"] is False
+    assert ack["applied_p_kw"] is None
+    assert ack["reject_reason"] == "STALE_SEQ"
+    assert ack["hub_id"] == "hub-00002"
+    assert ack["batch_id"] == "b2"
 
 
 def test_precondition_ledger_version_passes_through_unconditionally(guardian_key: Ed25519PrivateKey) -> None:

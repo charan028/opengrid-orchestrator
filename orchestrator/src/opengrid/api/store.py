@@ -10,6 +10,7 @@ matching Python type).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol
@@ -21,7 +22,10 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.engine import (
     CommandBatchRow,
+    Commitment,
+    Grant,
     InvoiceLine,
+    Obligation,
     Opportunity,
     Performance,
     Plan,
@@ -29,7 +33,7 @@ from opengrid.core.models.engine import (
     TraceRow,
     Verdict,
 )
-from opengrid.core.models.platform import Alert, FeedObs, Hub, HubState
+from opengrid.core.models.platform import Alert, FeedObs
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +91,15 @@ class StoreProtocol(Protocol):
 
     async def list_hubs(
         self, *, zone: str | None, bank_id: str | None, health: str | None, limit: int, offset: int
-    ) -> list[HubState]: ...
+    ) -> list[dict[str, Any]]:
+        """Flat `hub_id`/`bank_id`/`zone`/`soc_kwh`/`p_kw`/`health`/... rows -- `opengrid.ui`'s Fleet
+        table needs `bank_id`/`zone` (on `Hub`) alongside `HubState`'s fields, so this is a plain
+        `hub JOIN hub_state` projection rather than a single core model."""
+        ...
 
-    async def get_hub(self, hub_id: str) -> tuple[Hub, HubState] | None: ...
+    async def get_hub(self, hub_id: str) -> dict[str, Any] | None:
+        """Same flat shape as `list_hubs`'s rows, for the hub drill-down partial."""
+        ...
 
     async def get_bank(self, bank_id: str) -> BankAggregate | None: ...
 
@@ -105,9 +115,31 @@ class StoreProtocol(Protocol):
 
     async def list_opportunities(self, *, state: str | None) -> list[Opportunity]: ...
 
+    async def list_obligations(self, *, state: str | None) -> list[Obligation]:
+        """The dispatch Kanban's real pipeline rows (02b S8 screen 3: "offered -> committed ->
+        delivering -> fulfilled"). `Opportunity.state` only ever reaches `OFFERED/SELECTED/REJECTED/
+        EXPIRED` (02a S1.4) -- the committed/delivering/fulfilled stages the screen shows are
+        `Obligation.state` (02a S1.5), which is what `opengrid.ui.routes.dispatch.pipeline_view`
+        (`committed_qty_kw`, `tier`, `at_risk`, `last_reason_code`) already parses."""
+        ...
+
+    async def count_active_commitments(self) -> int:
+        """`og.obligation` rows in `COMMITTED`/`DELIVERING` -- the control room's "active commitment
+        count" (02b S8 screen 1). Distinct from `list_opportunities`: `Opportunity.state` has no
+        `COMMITTED` value (that's an `Obligation` state, 02a S1.5)."""
+        ...
+
     async def latest_plan(self) -> Plan | None: ...
 
     async def ledger_timeline(self, bank_id: str) -> list[Reservation]: ...
+
+    async def list_grants(self, bank_id: str) -> list[Grant]: ...
+
+    async def list_commitments(self, *, limit: int = 200) -> list[Commitment]:
+        """Recent commitments across every bank -- `og.commitment` has no `bank_id` column (it is keyed
+        by `obligation_id`/interval, 02a S1.6), so this is not bank-scoped like `ledger_timeline`; the
+        dispatch screen's commitment-lock event feed filters by reason code/`supersedes` itself."""
+        ...
 
     async def profitability_summary(
         self, *, service: str | None, day: date | None
@@ -120,6 +152,13 @@ class StoreProtocol(Protocol):
     async def trace_events(
         self, *, event_class: str | None, t0: datetime | None, t1: datetime | None, limit: int
     ) -> list[TraceRow]: ...
+
+    async def list_stream_ids(self) -> list[str]:
+        """Every distinct `stream_id` ever written -- used only to enumerate what `POST
+        /og/api/trace/verify` should check when no single `stream_id` is given; not the hash-chain
+        `TraceBackend.stream_ids()` (that stays private to `opengrid.trace`), just a plain read of the
+        column for this one purpose."""
+        ...
 
     async def health_snapshot(self, *, heartbeat_miss_threshold_s: float) -> HealthSnapshot: ...
 
@@ -136,6 +175,17 @@ class StoreProtocol(Protocol):
     async def insert_command_batch(self, batch: CommandBatchRow) -> None: ...
 
     async def get_verdict(self, command_batch_id: UUID) -> Verdict | None: ...
+
+    async def notify(self, channel: str, payload: dict[str, Any]) -> None:
+        """`SELECT pg_notify(channel, json)` -- the LISTEN/NOTIFY request intake
+        `opengrid.safestop.pg_backend`'s `REQUEST_CHANNEL` documents as `og-api`'s side of the
+        PROPOSE/CONFIRM protocol (`opengrid.safestop.main`'s own module docstring)."""
+        ...
+
+    async def latest_stop_event(self, scope_kind: str, scope_ref: str) -> tuple[str, datetime] | None:
+        """(action, created_at) of the most recent `stop_event` for this scope, or `None`. Read-only;
+        `og.stop_event` is written only by `opengrid.safestop`/the guardian's Tier-2 path."""
+        ...
 
     async def retention_policy(self) -> list[dict[str, Any]]: ...
 
@@ -180,7 +230,7 @@ class PgStore:
 
     async def list_hubs(
         self, *, zone: str | None, bank_id: str | None, health: str | None, limit: int, offset: int
-    ) -> list[HubState]:
+    ) -> list[dict[str, Any]]:
         clauses: list[str] = ["1=1"]
         params: list[Any] = []
         if zone is not None:
@@ -197,52 +247,25 @@ class PgStore:
         # dynamic clause selection, not string-built SQL values (the same pattern repeats in every
         # other list_*/*_events method below, each with its own lint suppression on the literal).
         sql = f"""
-            SELECT s.hub_id, s.soc_kwh, s.p_kw, s.health, s.lease_epoch, s.lease_expires_at,
-                   s.last_command_id, s.last_seen_at, s.fault_code
+            SELECT h.hub_id, h.bank_id, h.zone, s.soc_kwh, s.p_kw, s.health, s.lease_epoch,
+                   s.lease_expires_at, s.last_command_id, s.last_seen_at, s.fault_code
             FROM og.hub_state s JOIN og.hub h ON h.hub_id = s.hub_id
             WHERE {" AND ".join(clauses)}
             ORDER BY s.hub_id LIMIT %s OFFSET %s
         """  # noqa: S608
-        rows = await self._fetch(sql, (*params, limit, offset))
-        return [HubState(**row) for row in rows]
+        return await self._fetch(sql, (*params, limit, offset))
 
-    async def get_hub(self, hub_id: str) -> tuple[Hub, HubState] | None:
+    async def get_hub(self, hub_id: str) -> dict[str, Any] | None:
         rows = await self._fetch(
             """
-            SELECT h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, h.lat, h.lon,
-                   s.soc_kwh, s.p_kw AS state_p_kw, s.health, s.lease_epoch, s.lease_expires_at,
+            SELECT h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw AS rated_p_kw, h.eta_c, h.eta_d,
+                   h.lat, h.lon, s.soc_kwh, s.p_kw, s.health, s.lease_epoch, s.lease_expires_at,
                    s.last_command_id, s.last_seen_at, s.fault_code
             FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id WHERE h.hub_id = %s
             """,
             (hub_id,),
         )
-        row = _row_or_none(rows)
-        if row is None:
-            return None
-        hub = Hub(
-            hub_id=row["hub_id"],
-            bank_id=row["bank_id"],
-            zone=row["zone"],
-            e_kwh=row["e_kwh"],
-            r_kwh=row["r_kwh"],
-            p_kw=row["p_kw"],
-            eta_c=row["eta_c"],
-            eta_d=row["eta_d"],
-            lat=row["lat"],
-            lon=row["lon"],
-        )
-        state = HubState(
-            hub_id=row["hub_id"],
-            soc_kwh=row["soc_kwh"],
-            p_kw=row["state_p_kw"],
-            health=row["health"],
-            lease_epoch=row["lease_epoch"],
-            lease_expires_at=row["lease_expires_at"],
-            last_command_id=row["last_command_id"],
-            last_seen_at=row["last_seen_at"],
-            fault_code=row["fault_code"],
-        )
-        return hub, state
+        return _row_or_none(rows)
 
     async def hub_telemetry_sparkline(self, hub_id: str, *, minutes: int) -> list[dict[str, Any]]:
         return await self._fetch(
@@ -327,6 +350,26 @@ class PgStore:
         rows = await self._fetch(sql, tuple(params))
         return [Opportunity(**row) for row in rows]
 
+    async def list_obligations(self, *, state: str | None) -> list[Obligation]:
+        clauses: list[str] = ["1=1"]
+        params: list[Any] = []
+        if state is not None:
+            clauses.append("state = %s")
+            params.append(state)
+        sql = f"""
+            SELECT obligation_id, opportunity_id, contract_id, service_type, tier, window_start,
+                   window_end, committed_qty_kw, state, at_risk, last_reason_code, version
+            FROM og.obligation WHERE {" AND ".join(clauses)} ORDER BY updated_at DESC LIMIT 500
+        """  # noqa: S608 -- clause fragments are hard-coded, values are bound as `%s` params
+        rows = await self._fetch(sql, tuple(params))
+        return [Obligation(**row) for row in rows]
+
+    async def count_active_commitments(self) -> int:
+        rows = await self._fetch(
+            "SELECT count(*) AS n FROM og.obligation WHERE state IN ('COMMITTED', 'DELIVERING')"
+        )
+        return int(rows[0]["n"]) if rows else 0
+
     async def latest_plan(self) -> Plan | None:
         rows = await self._fetch(
             """
@@ -339,19 +382,60 @@ class PgStore:
         return Plan(**row) if row is not None else None
 
     async def ledger_timeline(self, bank_id: str) -> list[Reservation]:
-        rows = await self._fetch(
+        rows = await self._fetch_by_uuid_bank_id(
             """
             SELECT reservation_id, obligation_id, bank_id, kind, amount, interval_start, interval_end,
                    ledger_version, released_at, release_reason
             FROM og.reservation WHERE bank_id = %s ORDER BY interval_start ASC LIMIT 1000
             """,
-            (bank_id,),
+            bank_id,
         )
         return [Reservation(**row) for row in rows]
+
+    async def list_grants(self, bank_id: str) -> list[Grant]:
+        rows = await self._fetch_by_uuid_bank_id(
+            """
+            SELECT grant_id, cycle_id, obligation_id, bank_id, granted_kw, is_headroom, ledger_version,
+                   command_batch_id
+            FROM og.grant WHERE bank_id = %s ORDER BY created_at DESC LIMIT 200
+            """,
+            bank_id,
+        )
+        return [Grant(**row) for row in rows]
+
+    async def _fetch_by_uuid_bank_id(self, sql: str, bank_id: str) -> list[dict[str, Any]]:
+        """`og.reservation`/`og.grant`'s `bank_id` column is `uuid` while the fleet twin's bank
+        identifiers are text codes like `"bank-01"` (`og.bank.bank_id TEXT`, 02b S4.2) -- a pre-existing
+        schema/model mismatch outside `api`'s ownership (see the package README). A path `bank_id` that
+        is not a UUID can therefore never match a row; returning an empty timeline for it is the
+        correct read (not a guess) until the two identifier spaces are reconciled, so this catches only
+        that one specific, already-diagnosed error rather than swallowing failures broadly.
+        """
+        try:
+            UUID(bank_id)
+        except ValueError:
+            return []
+        return await self._fetch(sql, (bank_id,))
+
+    async def list_commitments(self, *, limit: int = 200) -> list[Commitment]:
+        rows = await self._fetch(
+            """
+            SELECT commitment_id, obligation_id, plan_id, interval_start, interval_end, committed_kw,
+                   variable_kind, supersedes, reason_code
+            FROM og.commitment ORDER BY created_at DESC LIMIT %s
+            """,
+            (limit,),
+        )
+        return [Commitment(**row) for row in rows]
 
     # -- profitability / billing ---------------------------------------------------------------------
 
     async def profitability_summary(self, *, service: str | None, day: date | None) -> list[dict[str, Any]]:
+        """Per-obligation-interval P&L rows (not aggregated): `opengrid.ui.routes.profitability`'s
+        `profitability_table_view`/`lp_vs_baseline_view` key off `row["obligation_id"]` for the table
+        and the LP-vs-baseline chart, so a `GROUP BY service/day` summary would drop the very column
+        the screen displays rows by. Summing/averaging for display is the UI's job (it already builds
+        column totals itself)."""
         clauses: list[str] = ["1=1"]
         params: list[Any] = []
         if service is not None:
@@ -361,15 +445,12 @@ class PgStore:
             clauses.append("p.interval_start::date = %s")
             params.append(day)
         sql = f"""
-            SELECT o.service_type, p.interval_start::date AS day,
-                   sum(p.revenue) AS revenue, sum(p.energy_cost) AS energy_cost,
-                   sum(p.degradation_cost) AS degradation_cost, sum(p.penalty) AS penalty,
-                   sum(p.net_value) AS net_value, sum(p.rule_baseline_value) AS rule_baseline_value,
-                   sum(p.forgone_upside) AS forgone_upside
+            SELECT p.obligation_id, o.service_type, o.contract_id, p.interval_start, p.interval_end,
+                   p.revenue, p.energy_cost, p.degradation_cost, p.penalty, p.net_value,
+                   p.rule_baseline_value, p.forgone_upside
             FROM og.pnl p JOIN og.obligation o ON o.obligation_id = p.obligation_id
             WHERE {" AND ".join(clauses)}
-            GROUP BY o.service_type, p.interval_start::date
-            ORDER BY day DESC, o.service_type
+            ORDER BY p.interval_start DESC LIMIT 1000
         """  # noqa: S608 -- clause fragments are hard-coded, values are bound as `%s` params
         return await self._fetch(sql, tuple(params))
 
@@ -420,6 +501,10 @@ class PgStore:
         """  # noqa: S608 -- clause fragments are hard-coded, values are bound as `%s` params
         rows = await self._fetch(sql, (*params, limit))
         return [TraceRow(**row) for row in rows]
+
+    async def list_stream_ids(self) -> list[str]:
+        rows = await self._fetch("SELECT DISTINCT stream_id FROM og.trace")
+        return [row["stream_id"] for row in rows]
 
     # -- health -----------------------------------------------------------------------------------
 
@@ -493,6 +578,23 @@ class PgStore:
             return None
         row = {**row, "vetoed_rule_ids": row["vetoed_rule_ids"] or []}
         return Verdict(**row)
+
+    # -- safestop notify/poll (02b S7.1/S7.3) --------------------------------------------------------
+
+    async def notify(self, channel: str, payload: dict[str, Any]) -> None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT pg_notify(%s, %s)", (channel, json.dumps(payload)))
+
+    async def latest_stop_event(self, scope_kind: str, scope_ref: str) -> tuple[str, datetime] | None:
+        rows = await self._fetch(
+            """
+            SELECT action, created_at FROM og.stop_event
+            WHERE scope_kind = %s AND scope_ref = %s ORDER BY created_at DESC LIMIT 1
+            """,
+            (scope_kind, scope_ref),
+        )
+        row = _row_or_none(rows)
+        return (row["action"], row["created_at"]) if row is not None else None
 
     # -- retention ------------------------------------------------------------------------------------
 

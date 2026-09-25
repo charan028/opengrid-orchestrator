@@ -7,22 +7,22 @@
 
 {% block content %}
 <section class="og-grid" aria-label="Key performance indicators">
-  {% with label='Fleet power', value=health.fleet_mw|default('--'), unit='MW', since_iso=health.as_of|default(none), stale_after_s=10 %}
+  {% with label='Fleet power', value=health.fleet_mw|default('--'), unit='MW', since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-fleet-mw' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
   {% with label='Fleet energy', value=health.fleet_mwh|default('--'), unit='MWh', since_iso=health.as_of|default(none), stale_after_s=10 %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label='Active commitments', value=health.active_commitments|default('--'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+  {% with label='Active commitments', value=health.active_commitments|default('--'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-active-commitments' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
   {% with label="Today's net margin", value=health.net_margin_usd|default('--'), unit='USD', since_iso=health.as_of|default(none), stale_after_s=30 %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+  {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-reserve-breaches' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label='kWh sold twice', value=health.double_sold_kwh|default(0), severity=('critical' if health.double_sold_kwh else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+  {% with label='kWh sold twice', value=health.double_sold_kwh|default(0), severity=('critical' if health.double_sold_kwh else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-double-sold' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
   {% with label='Commitment switches', value=health.commitment_switches|default(0), severity=('critical' if health.commitment_switches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
@@ -45,9 +45,16 @@
   </div>
   <div class="og-panel" aria-label="Open alerts">
     <h2>Open alerts</h2>
-    {% with columns=[{"key": "severity", "label": "Severity"}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=health.alerts|default([]), empty_message='No open alerts' %}
+    {% with columns=[{"key": "id", "label": "ID"}, {"key": "severity", "label": "Severity"}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=health.alerts|default([]), empty_message='No open alerts' %}
       {% include "_partials/data_table.html" %}
     {% endwith %}
+    {% if is_operator %}
+    <form hx-post="{{ base_path }}/alerts/ack" hx-target="#control-room-ack-result">
+      <label>Alert id <input type="number" name="alert_id" min="1" required></label>
+      <button class="btn" type="submit">Acknowledge</button>
+    </form>
+    <div id="control-room-ack-result" role="status"></div>
+    {% endif %}
   </div>
 </section>
 {% endblock %}
@@ -72,9 +79,33 @@
       series: [{ type: "line", data: [], showSymbol: false, lineStyle: { width: 2 } }],
     });
 
+    function setKpiValue(tileId, value) {
+      var tile = document.getElementById(tileId);
+      if (!tile) { return; }
+      var valueEl = tile.querySelector(".kpi-value");
+      if (!valueEl || !valueEl.childNodes.length) { return; }
+      valueEl.childNodes[0].nodeValue = String(value);
+    }
+
+    // Live updates (02b S7.2): `/api/stream/control-room` emits `{active_commitment_count, fleet_mw,
+    // open_alert_count, reserve_breach_count, double_sold_kwh}` roughly every 2s -- refresh the matching
+    // KPI tiles' text in place. The stream carries no market-ticker series or per-alert detail, so the
+    // chart and the alert table stay as of first paint (or the Health screen's own alert stream) until
+    // the api agent's payload grows those fields.
     og.sse("{{ base_path }}/api/stream/control-room", function (data) {
       document.getElementById("control-room-updated").textContent = "live";
-      // widgets refresh their own KPI values from `data` as the API's payload shape stabilizes.
+      document.getElementById("control-room-updated").dataset.stale = "false";
+      if (!data) { return; }
+      if (typeof data.fleet_mw === "number") { setKpiValue("kpi-fleet-mw", data.fleet_mw.toFixed(2)); }
+      if (typeof data.active_commitment_count === "number") {
+        setKpiValue("kpi-active-commitments", data.active_commitment_count);
+      }
+      if (typeof data.reserve_breach_count === "number") {
+        setKpiValue("kpi-reserve-breaches", data.reserve_breach_count);
+      }
+      if (typeof data.double_sold_kwh === "number") {
+        setKpiValue("kpi-double-sold", data.double_sold_kwh);
+      }
     }, {
       onError: function () {
         document.getElementById("control-room-updated").textContent = "reconnecting";

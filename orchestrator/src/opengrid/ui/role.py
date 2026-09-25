@@ -9,7 +9,11 @@ that gap is documented, not hidden.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import Request
+
+logger = logging.getLogger(__name__)
 
 VIEWER = "viewer"
 OPERATOR = "operator"
@@ -18,9 +22,15 @@ _KNOWN_ROLES = (VIEWER, OPERATOR)
 
 
 def role_of(request: Request) -> str:
-    """Return `"operator"` or `"viewer"` (default) for the current request."""
+    """Return `"operator"` or `"viewer"` (default) for the current request. A header present but not one
+    of the known role names is logged (BUILD.md code-review round item 5) and treated as `"viewer"` --
+    Apache is trusted to only ever forward a known role, so an unrecognized value is worth a warning even
+    though the request still degrades safely rather than failing closed."""
     raw = request.headers.get(_ROLE_HEADER, VIEWER).strip().lower()
-    return raw if raw in _KNOWN_ROLES else VIEWER
+    if raw in _KNOWN_ROLES:
+        return raw
+    logger.warning("unknown %s header value=%r; defaulting to %s", _ROLE_HEADER, raw, VIEWER)
+    return VIEWER
 
 
 def is_operator(request: Request) -> bool:

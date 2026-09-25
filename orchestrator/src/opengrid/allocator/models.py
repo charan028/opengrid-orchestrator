@@ -28,6 +28,14 @@ class HubSnapshot:
     tau: float = 1.0  # priority/duration weight for water-filling (S5.5)
     served_last_cycle: bool = False
     health: Literal["OK", "STALE", "FAULT", "LAGGING"] = "OK"
+    # CORE-003/K1: optional SoC/reserve/efficiency, when fleet supplies them, so the allocator's own
+    # capability path can additionally cap `free_discharge_kw` by `hub_sustainable_discharge_kw` --
+    # `hub_capability()`'s reserve-safe cap alone still lets a sliver of energy just above reserve be
+    # offered at the hub's full power rating for an entire interval. `None` means "trust
+    # free_discharge_kw as-is" (fleet not yet wired to supply these for MVP-S).
+    soc_kwh: float | None = None
+    reserve_kwh: float | None = None
+    eta_d: float = 0.9487
 
     @property
     def is_healthy(self) -> bool:

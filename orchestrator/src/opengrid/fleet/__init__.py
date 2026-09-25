@@ -44,6 +44,21 @@ class AvailableCapability(NamedTuple):
     excluded_hub_ids: frozenset[str]  # stale/offline hubs excluded this interval (02b S6.5)
 
 
+class HubCapabilitySnapshot(NamedTuple):
+    """One hub's real-time eligibility state, fleet's own (allocator-independent) shape (merge task A3,
+    BUILD.md merge role). `opengrid.engine` (the sole wiring owner, 02b S1.2) maps a list of these onto
+    `opengrid.allocator.models.HubSnapshot` for the allocator's `FleetGateway.fleet_state` -- fleet never
+    imports `opengrid.allocator` itself (dependency direction: core <- platform <- modules, BUILD.md
+    S5a), so this stays a fleet-owned type at the same abstraction level as `AvailableCapability`.
+    """
+
+    hub_id: str
+    bank_id: str
+    free_discharge_kw: float  # reserve-safe (K1): from hub_capability(), 0.0 if not "online"
+    health: HubHealth
+    last_seen_at: datetime | None
+
+
 @dataclass(frozen=True, slots=True)
 class TelemetryRow:
     """One row for the append-only `og.telemetry` partitioned table (02b S4.2)."""
@@ -398,3 +413,40 @@ async def capability(bank_id: str, interval_start: datetime) -> AvailableCapabil
         max_charge_kw=max_charge_kw,
         excluded_hub_ids=frozenset(excluded),
     )
+
+
+def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
+    """Per-hub eligibility snapshot for every hub on `bank_id` (merge task A3): the hub-level detail
+    `capability()`'s bank-aggregate return throws away, needed so `opengrid.engine` can build the
+    allocator's `HubSnapshot` sequence for its 2 s water-filling cycle (`opengrid.allocator.cycle`,
+    `opengrid.allocator.waterfill`) instead of `run_cycle` raising `NotImplementedError` for lack of a
+    hub-level fleet read (`opengrid.allocator.gateways.FleetGateway.fleet_state`).
+
+    A hub excluded this instant (stale/offline/fault) is still returned, with `free_discharge_kw=0.0`,
+    so the allocator can report *why* a hub got nothing (health) rather than seeing it silently vanish
+    from the bank's roster. Raises `LookupError` if `bank_id` is not a known bank.
+    """
+    bank_rt = _banks.get(bank_id)
+    if bank_rt is None:
+        raise LookupError(f"unknown bank_id: {bank_id}")
+
+    now = datetime.now(UTC)
+    snapshots: list[HubCapabilitySnapshot] = []
+    for hub_id in bank_rt.hub_ids:
+        runtime = _hubs[hub_id]
+        classification = _classify_health(
+            fault_code=runtime.fault_code, last_seen_at=runtime.last_seen_at, now=now
+        )
+        free_discharge_kw = 0.0
+        if classification == "online":
+            free_discharge_kw, _charge_kw = hub_capability(runtime.soc_kwh, runtime.params)
+        snapshots.append(
+            HubCapabilitySnapshot(
+                hub_id=hub_id,
+                bank_id=bank_id,
+                free_discharge_kw=free_discharge_kw,
+                health=classification,
+                last_seen_at=runtime.last_seen_at,
+            )
+        )
+    return snapshots

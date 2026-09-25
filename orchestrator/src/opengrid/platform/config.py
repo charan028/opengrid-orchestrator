@@ -73,9 +73,13 @@ class Config:
 def load_config(path: str | Path | None = None) -> Config:
     """Load `orchestrator.toml` from `path`, or from the `OG_CONFIG` env var, and apply the two
     workspace overrides (`OG_DB` -> postgres.database, `OG_MQTT_ROOT` -> mqtt.topic_root)."""
-    resolved = Path(path) if path is not None else Path(os.environ.get(_ENV_CONFIG_PATH, ""))
-    if not resolved or not str(resolved):
+    # PLAT-001: `Path("")` normalises to `Path(".")`, which is truthy and exists (the cwd) -- so the
+    # old `not resolved or not str(resolved)` guard never actually caught an unset/empty OG_CONFIG. Test
+    # the raw string BEFORE building a Path, so an unset/blank env var fails loudly and specifically.
+    raw_path = str(path) if path is not None else os.environ.get(_ENV_CONFIG_PATH, "")
+    if not raw_path:
         raise ConfigError(f"No config path given and {_ENV_CONFIG_PATH} is not set")
+    resolved = Path(raw_path)
     if not resolved.exists():
         raise ConfigError(f"Config file not found: {resolved}")
 

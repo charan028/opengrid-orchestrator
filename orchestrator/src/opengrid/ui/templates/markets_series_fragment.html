@@ -6,8 +6,11 @@
   {% endwith %}
   <div id="chart-{{ chart.series_key }}" style="height: 200px;" role="img" aria-label="{{ chart.label }} time series"></div>
   <script>
-    document.addEventListener("DOMContentLoaded", function () {
-      og.chart("#chart-{{ chart.series_key }}", {{ chart.chart_option | tojson }});
-    });
+    /* Not wrapped in DOMContentLoaded: this fragment is re-fetched by the 30s poll wrapper in
+       markets.html (BUILD.md code-review round item 2), and DOMContentLoaded only ever fires once for
+       the whole document -- a listener registered here on first paint would never re-run on a later
+       htmx swap. `og` (static/og.js) loads synchronously in <head>, so it is already defined by the
+       time this inline script runs, whether at first paint or after a swap. */
+    og.chart("#chart-{{ chart.series_key }}", {{ chart.chart_option | tojson }});
   </script>
 </div>

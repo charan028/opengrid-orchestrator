@@ -59,10 +59,19 @@ rollback() {
 trap rollback ERR
 
 echo "$(ts) running migrations" | tee -a "$LOG"
-runuser -u opengrid -- env \
-  OG_CONFIG="$NEW_RELEASE/orchestrator/config/orchestrator.toml" \
-  PYTHONPATH="$NEW_RELEASE/orchestrator/src" \
-  "$VENV" -m opengrid.platform.db migrate
+# Merge fix: opengrid.platform.db.build_dsn() resolves OG_DB_PASSWORD via resolve_secret(), which
+# raises unless the env var is actually set -- it was never being loaded here, so every deploy failed
+# migrations before touching the database. secrets.env/api_keys.env are root:opengrid mode 640
+# (deploy/README.md), readable by opengrid, so `runuser -u opengrid` can source them directly.
+runuser -u opengrid -- bash -c '
+  set -a
+  . /etc/opengrid/secrets.env
+  . /etc/opengrid/api_keys.env
+  set +a
+  export OG_CONFIG="'"$NEW_RELEASE"'/orchestrator/config/orchestrator.toml"
+  export PYTHONPATH="'"$NEW_RELEASE"'/orchestrator/src"
+  exec "'"$VENV"'" -m opengrid.platform.db migrate
+'
 
 echo "$(ts) switching current -> $NEW_RELEASE" | tee -a "$LOG"
 ln -sfn "$NEW_RELEASE" "$CURRENT"

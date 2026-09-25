@@ -38,12 +38,12 @@
   </div>
   <div class="og-panel" aria-label="Alerts">
     <h2>Alerts</h2>
-    {% with columns=[{"key": "severity_badge", "label": "Severity", "html": true}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=alert_rows, empty_message='No alerts' %}
+    {% with columns=[{"key": "id", "label": "ID"}, {"key": "severity_badge", "label": "Severity", "html": true}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=alert_rows, empty_message='No alerts' %}
       {% include "_partials/data_table.html" %}
     {% endwith %}
     {% if is_operator %}
-    <form hx-post="{{ base_path }}/api/health/alerts/ack" hx-target="#ack-result">
-      <label>Alert id <input type="text" name="alert_id" required></label>
+    <form hx-post="{{ base_path }}/health/alerts/ack" hx-target="#ack-result">
+      <label>Alert id <input type="number" name="alert_id" min="1" required></label>
       <button class="btn" type="submit">Acknowledge</button>
     </form>
     <div id="ack-result" role="status"></div>
@@ -72,15 +72,59 @@
       ],
     });
 
-    og.sse("{{ base_path }}/api/stream/health", function () {
+    // Live updates (02b S7.2): `/api/stream/health` re-emits the full health payload roughly every 2s
+    // (same shape as first paint) -- rebuild the hub-health-by-zone chart from `hub_health_counts`. It
+    // has no cycle-latency series, so that chart stays as of first paint until the api agent adds one.
+    og.sse("{{ base_path }}/api/stream/health", function (data) {
       document.getElementById("health-updated").textContent = "live";
+      document.getElementById("health-updated").dataset.stale = "false";
+      if (data && data.hub_health_counts && typeof data.hub_health_counts === "object") {
+        var counts = data.hub_health_counts;
+        og.chart("#hub-health-chart", {
+          grid: { left: 40, right: 10, top: 10, bottom: 30 },
+          xAxis: { type: "category", data: Object.keys(counts) },
+          yAxis: { type: "value", name: "hubs" },
+          series: [{ type: "bar", data: Object.keys(counts).map(function (k) { return counts[k]; }) }],
+        });
+      }
     }, {
       onError: function () {
         document.getElementById("health-updated").textContent = "reconnecting";
         document.getElementById("health-updated").dataset.stale = "true";
       },
     });
-    og.sse("{{ base_path }}/api/stream/alerts", function () {});
+
+    // `/api/stream/alerts` emits `{"open_alerts": [{id, rule, severity, summary, opened_at, acked_by}]}`
+    // -- rebuild the Alerts table body from it (text content only, never innerHTML of feed data).
+    og.sse("{{ base_path }}/api/stream/alerts", function (data) {
+      if (!data || !Array.isArray(data.open_alerts)) {
+        return;
+      }
+      var panel = document.querySelector('[aria-label="Alerts"] tbody');
+      if (!panel) {
+        return;
+      }
+      panel.innerHTML = "";
+      if (data.open_alerts.length === 0) {
+        var emptyRow = document.createElement("tr");
+        var emptyCell = document.createElement("td");
+        emptyCell.className = "empty";
+        emptyCell.colSpan = 4;
+        emptyCell.textContent = "No alerts";
+        emptyRow.appendChild(emptyCell);
+        panel.appendChild(emptyRow);
+        return;
+      }
+      data.open_alerts.forEach(function (alert) {
+        var tr = document.createElement("tr");
+        [alert.id, alert.severity, alert.summary, alert.opened_at].forEach(function (value) {
+          var td = document.createElement("td");
+          td.textContent = value != null ? String(value) : "-";
+          tr.appendChild(td);
+        });
+        panel.appendChild(tr);
+      });
+    });
   });
 </script>
 {% endblock %}

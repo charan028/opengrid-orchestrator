@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from ogsim.fleet.physics import clip_commanded_setpoint, soc_step, tick
 
 ETA = math.sqrt(0.90)
@@ -103,6 +105,63 @@ def test_clip_commanded_setpoint_respects_p_limit_shared_with_home_load() -> Non
         dt_s=2.0,
     )
     assert applied == 1.0
+
+
+def test_clip_commanded_setpoint_clamps_pv_surplus_charging_near_full_soc() -> None:
+    # SoC is nearly full; PV surplus (net charging power, home_net_kw < 0)
+    # requests a full 5 kW charge, but only ~0.053 kWh of headroom to `e_kwh`
+    # remains -- applied must be clamped well below the requested setpoint.
+    applied = clip_commanded_setpoint(
+        soc_kwh=13.45,
+        p_kw_setpoint=5.0,
+        home_net_kw=0.0,
+        p_kw_limit=5.0,
+        e_kwh=13.5,
+        r_kwh=2.7,
+        eta_c=ETA,
+        eta_d=ETA,
+        dt_s=3600.0,
+    )
+    assert 0.0 < applied < 5.0
+    assert applied == pytest.approx(0.05 / ETA, rel=1e-6)
+
+
+def test_clip_commanded_setpoint_clamps_discharge_near_reserve_floor() -> None:
+    # SoC sits just 0.05 kWh above the reserve floor; a full -5 kW discharge
+    # request must be clamped to a small fraction of that magnitude.
+    applied = clip_commanded_setpoint(
+        soc_kwh=2.75,
+        p_kw_setpoint=-5.0,
+        home_net_kw=0.0,
+        p_kw_limit=5.0,
+        e_kwh=13.5,
+        r_kwh=2.7,
+        eta_c=ETA,
+        eta_d=ETA,
+        dt_s=3600.0,
+    )
+    assert -5.0 < applied < 0.0
+    assert applied == pytest.approx(-0.05 * ETA, rel=1e-6)
+
+
+def test_tick_applied_p_kw_reflects_soc_clamp_not_raw_commanded_setpoint() -> None:
+    # End-to-end via tick(): the applied power reported for ack/telemetry
+    # must be the post-clamp value, not the raw -5 kW commanded setpoint.
+    new_soc, applied = tick(
+        soc_kwh=2.75,
+        p_kw_commanded=-5.0,
+        home_net_kw=0.0,
+        p_kw_limit=5.0,
+        e_kwh=13.5,
+        r_kwh=2.7,
+        eta_c=ETA,
+        eta_d=ETA,
+        dt_s=3600.0,
+        self_discharge_kwh_per_h=0.0,
+    )
+    assert applied != -5.0
+    assert -5.0 < applied < 0.0
+    assert new_soc >= 0.0
 
 
 def test_tick_home_load_can_draw_below_reserve_but_not_below_zero() -> None:

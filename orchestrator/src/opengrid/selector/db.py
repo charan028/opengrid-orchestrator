@@ -12,6 +12,7 @@ from collections import defaultdict
 from typing import Any
 from uuid import UUID
 
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.platform.config import load_config
@@ -24,6 +25,18 @@ _FROZEN_COMMITMENTS_SQL = """
     FROM og.commitment
     WHERE supersedes IS NULL
       AND interval_start < %(horizon_end)s AND interval_end > %(horizon_start)s
+"""
+
+_OFFERED_OPPORTUNITIES_SQL = """
+    SELECT o.opportunity_id, o.contract_id, o.window_start, o.window_end, o.requested_kw,
+           o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
+           pr.variable_kind, pr.min_qty_kw, pr.increment_kw
+    FROM og.opportunity o
+    JOIN og.contract c ON c.contract_id = o.contract_id
+    LEFT JOIN og.product_rule pr ON pr.product_rule_id = o.product_rule_id
+    WHERE o.state = 'OFFERED'
+      AND o.window_start < %(horizon_end)s AND o.window_end > %(horizon_start)s
+      AND (%(contract_scope)s::uuid IS NULL OR o.contract_id = %(contract_scope)s::uuid)
 """
 
 
@@ -61,3 +74,31 @@ async def load_frozen_commitments(horizon_start: str, horizon_end: str) -> dict[
     for obligation_id, interval_start, committed_kw in rows:
         frozen[obligation_id][_interval_key(interval_start)] = committed_kw
     return dict(frozen)
+
+
+async def load_offered_opportunities_rows(
+    horizon_start: str, horizon_end: str, contract_scope: UUID | None
+) -> list[dict[str, Any]]:
+    """Raw `OFFERED` opportunity rows overlapping the horizon (02a S1.4/S3.2 O^new), joined to their
+    contract (for `service_type`/`degradation_cost`) and cached `product_rule.variable_kind` (02a
+    S1.3 -- already derived at admission time, never re-derived here per BUILD.md S1). This module's
+    own docstring already scopes selector to read `og.opportunity` directly (contracts/ledger own the
+    writes); `contracts` has no public opportunity-listing query yet (`admit`/`product_rules_for` are
+    its only fixed interface calls that touch `opportunity`), so `gate.load_candidates` reads this
+    table itself rather than staying a permanent placeholder -- see the selector module's final-report
+    note asking the merge agent to add a `contracts` query for this instead, once one exists.
+
+    A `product_rule_id`-less opportunity (no row joined) is treated as `CONTINUOUS`, `min_qty_kw=0`,
+    `increment_kw=0` -- the review's "else -> CONTINUOUS" default (02a S1.3).
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _OFFERED_OPPORTUNITIES_SQL,
+            {
+                "horizon_start": horizon_start,
+                "horizon_end": horizon_end,
+                "contract_scope": str(contract_scope) if contract_scope is not None else None,
+            },
+        )
+        return [dict(row) async for row in cur]

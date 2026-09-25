@@ -74,3 +74,33 @@ def test_owner_of_returns_the_correct_owner():
 def test_as_list_round_trips_every_catalogue_entry():
     listed_ids = {entry["id"] for entry in catalogue.as_list()}
     assert listed_ids == {a.id for a in catalogue.CATALOGUE}
+
+
+def test_infer_wire_target_kind_picks_bank_for_a_bank_ref():
+    # not_following_commands' catalogue target_kind is "hub or bank" and its
+    # static wire_target_kind default is "hub" -- a bank-shaped ref must
+    # still be reported as "bank", not the static default.
+    entry = catalogue.BY_ID["not_following_commands"]
+    assert catalogue.infer_wire_target_kind(entry, "bank-003") == "bank"
+
+
+def test_infer_wire_target_kind_picks_hub_for_a_hub_ref():
+    entry = catalogue.BY_ID["not_following_commands"]
+    assert catalogue.infer_wire_target_kind(entry, "hub-00042") == "hub"
+
+
+def test_infer_wire_target_kind_picks_zone_for_a_zone_ref():
+    entry = catalogue.BY_ID["reserve_floor_pressure"]
+    assert catalogue.infer_wire_target_kind(entry, "LZ_NORTH") == "zone"
+
+
+def test_infer_wire_target_kind_falls_back_to_default_for_an_unrecognized_ref():
+    entry = catalogue.BY_ID["not_following_commands"]
+    assert catalogue.infer_wire_target_kind(entry, "*") == entry.wire_target_kind
+
+
+def test_infer_wire_target_kind_never_picks_a_kind_the_entry_disallows():
+    # bank_overload only ever targets a bank; a "hub-"-looking ref must not
+    # flip it to "hub" since the catalogue entry doesn't allow that kind.
+    entry = catalogue.BY_ID["bank_overload"]
+    assert catalogue.infer_wire_target_kind(entry, "hub-00001") == "bank"

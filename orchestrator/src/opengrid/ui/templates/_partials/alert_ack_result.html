@@ -1,0 +1,12 @@
+{# alert_ack_result.html -- alert-ack HTMX fragment (Control room + Health screens' "Ack an alert"
+   action, 02b S8). Params: alert: dict|None (the updated alert row: id/rule/severity/summary/opened_at/
+   acked_by) on success, message: str|None on failure. #}
+<div role="status">
+  {% if alert %}
+  <p>{% with status='ok', label='ACKED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Alert {{ alert.id }} acknowledged by {{ alert.acked_by|default('-') }}.</p>
+  {% else %}
+  <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message|default('the alert could not be acknowledged') }}</p>
+  {% endif %}
+</div>

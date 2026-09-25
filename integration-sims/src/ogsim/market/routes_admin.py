@@ -3,7 +3,6 @@ anomalies. Not part of the simulated ERCOT/EIA/NWS surface."""
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -44,7 +43,7 @@ async def inject_anomaly(request: Request, body: InjectRequest) -> JSONResponse 
                 "known": sorted(MARKET_ANOMALY_TYPES),
             },
         )
-    start = body.start if body.start is not None else time.time()
+    start = body.start if body.start is not None else rt.now().timestamp()
     anomaly = Anomaly(
         id=body.id,
         type=body.type,

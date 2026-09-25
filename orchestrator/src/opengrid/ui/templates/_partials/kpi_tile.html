@@ -1,7 +1,8 @@
 {# kpi_tile.html -- BUILD.md base contract partial. Params: label: str, value: str|number, unit: str|None,
    severity: "good"|"caution"|"critical"|None, age_s / since_iso / stale_after_s: staleness, per
-   stale_badge.html. #}
-<div class="kpi-tile" data-severity="{{ severity|default('neutral') }}">
+   stale_badge.html. tile_id: str|None -- an element id a screen's own SSE handler can target to update
+   `.kpi-value`'s text in place on a live-stream message (BUILD.md code-review round item 2/blocker 4). #}
+<div class="kpi-tile" {% if tile_id %}id="{{ tile_id }}"{% endif %} data-severity="{{ severity|default('neutral') }}">
   <div class="kpi-label">{{ label }}</div>
   <div class="kpi-value">
     {{ value }}{% if unit %}<span class="kpi-unit">{{ unit }}</span>{% endif %}

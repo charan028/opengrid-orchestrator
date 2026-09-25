@@ -26,7 +26,14 @@ N_CANDIDATES = 120
 def _perf_inputs():
     intervals = range(N_INTERVALS)
     banks = tuple(
-        BankSnapshot(bank_id=f"B{i}", max_discharge_kw=dict.fromkeys(intervals, 250.0))
+        BankSnapshot(
+            bank_id=f"B{i}",
+            max_discharge_kw=dict.fromkeys(intervals, 250.0),
+            max_charge_kw=dict.fromkeys(intervals, 150.0),
+            initial_soc_kwh=800.0,
+            capacity_kwh=1000.0,
+            reserve_kwh=100.0,
+        )
         for i in range(N_BANKS)
     )
     scenarios = tuple(
@@ -69,9 +76,9 @@ def test_kpi_40_banks_96_intervals_3_scenarios_solves_under_30s():
     n_vars = built.highs.numVariables
     n_rows = built.highs.numConstrs
     message = (
-        f"{N_BANKS} banks x {N_INTERVALS} intervals x 3 scenarios, {N_CANDIDATES} candidates: "
-        f"{n_vars} vars / {n_rows} rows, wall={wall_elapsed_s:.2f}s, solver={outcome.time_ms}ms, "
-        f"status={outcome.status}, gap={outcome.gap}"
+        f"{N_BANKS} banks x {N_INTERVALS} intervals x 3 scenarios (with SoC dynamics), "
+        f"{N_CANDIDATES} candidates: {n_vars} vars / {n_rows} rows, wall={wall_elapsed_s:.2f}s, "
+        f"solver={outcome.time_ms}ms, status={outcome.status}, gap={outcome.gap}"
     )
     print(message)
     assert wall_elapsed_s < 30.0, message

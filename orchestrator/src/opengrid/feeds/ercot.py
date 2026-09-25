@@ -24,6 +24,7 @@ from opengrid.feeds.normalize import (
     ercot_spp_to_feed_obs,
     ercot_wind_to_feed_obs,
 )
+from opengrid.feeds.secrets import Secret, mask_secrets
 from opengrid.platform.config import resolve_secret
 
 logger = logging.getLogger(__name__)
@@ -104,28 +105,40 @@ class ErcotClient:
         return self._active_key
 
     async def _authenticate(self) -> str:
-        username = resolve_secret(self.username_env)
-        password = resolve_secret(self.password_env)
-        response = await request_with_retry(
-            self.http_client,
-            "POST",
-            self.token_url,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "password",
-                "username": username,
-                "password": password,
-                "client_id": TOKEN_CLIENT_ID,
-                "response_type": "token",
-                "scope": f"openid {TOKEN_CLIENT_ID} offline_access",
-            },
-            timeout_s=DEFAULT_TIMEOUT_S,
-            max_retries=0,
-        )
+        # Resolved once and kept as `Secret` from here on -- BUILD.md S5a/S6: never a raw credential
+        # in a local variable pytest (or a debugger) could dump, only `.reveal()`'d at the one call
+        # site that must send it.
+        username = Secret(resolve_secret(self.username_env))
+        password = Secret(resolve_secret(self.password_env))
+        secrets = (username, password)
+        try:
+            response = await request_with_retry(
+                self.http_client,
+                "POST",
+                self.token_url,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "password",
+                    "username": username.reveal(),
+                    "password": password.reveal(),
+                    "client_id": TOKEN_CLIENT_ID,
+                    "response_type": "id_token",
+                    "scope": f"openid {TOKEN_CLIENT_ID} offline_access",
+                },
+                timeout_s=DEFAULT_TIMEOUT_S,
+                max_retries=0,
+            )
+        except FeedHttpError as exc:
+            # `raise ... from None` drops the original traceback frame (whose locals held the request
+            # body) from anything pytest/logging renders; the message itself is masked as a backstop.
+            raise ErcotAuthError(mask_secrets(str(exc), secrets)) from None
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise ErcotAuthError(mask_secrets(str(exc), secrets)) from None
+
         body = response.json()
-        token = body.get("access_token")
+        token = body.get("id_token")
         if not token:
-            raise ErcotAuthError("ROPC token response missing access_token")
+            raise ErcotAuthError("ROPC token response missing id_token")
         return str(token)
 
     async def _get_token(self, *, now: datetime, force: bool = False) -> str:
@@ -138,9 +151,9 @@ class ErcotClient:
             raise ErcotAuthError("token cache empty after successful authentication")
         return self._token.access_token
 
-    def _current_subscription_key(self) -> str:
+    def _current_subscription_key(self) -> Secret:
         env_name = self.primary_key_env if self._active_key == "PRIMARY" else self.secondary_key_env
-        return resolve_secret(env_name)
+        return Secret(resolve_secret(env_name))
 
     def _rotate_key(self, *, reason: str) -> KeyRotationEvent | None:
         if self._active_key == "SECONDARY":
@@ -167,15 +180,17 @@ class ErcotClient:
         events: list[KeyRotationEvent] = []
 
         for reauth in (False, True):
-            token = await self._get_token(now=now, force=reauth)
+            token = Secret(await self._get_token(now=now, force=reauth))
+            subscription_key = self._current_subscription_key()
+            request_secrets = (token, subscription_key)
             try:
                 response = await request_with_retry(
                     self.http_client,
                     "GET",
                     url,
                     headers={
-                        "Authorization": f"Bearer {token}",
-                        "Ocp-Apim-Subscription-Key": self._current_subscription_key(),
+                        "Authorization": f"Bearer {token.reveal()}",
+                        "Ocp-Apim-Subscription-Key": subscription_key.reveal(),
                     },
                     params=params,
                 )
@@ -185,20 +200,29 @@ class ErcotClient:
                 if exc.status_code in (401, 403) and reauth:
                     rotation = self._rotate_key(reason=f"http_{exc.status_code}")
                     if rotation is None:
-                        raise
+                        raise FeedHttpError(
+                            exc.status_code, mask_secrets(str(exc), request_secrets)
+                        ) from None
                     events.append(rotation)
-                    response = await request_with_retry(
-                        self.http_client,
-                        "GET",
-                        url,
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                            "Ocp-Apim-Subscription-Key": self._current_subscription_key(),
-                        },
-                        params=params,
-                    )
+                    subscription_key = self._current_subscription_key()
+                    try:
+                        response = await request_with_retry(
+                            self.http_client,
+                            "GET",
+                            url,
+                            headers={
+                                "Authorization": f"Bearer {token.reveal()}",
+                                "Ocp-Apim-Subscription-Key": subscription_key.reveal(),
+                            },
+                            params=params,
+                        )
+                    except FeedHttpError as retry_exc:
+                        raise FeedHttpError(
+                            retry_exc.status_code,
+                            mask_secrets(str(retry_exc), (token, subscription_key)),
+                        ) from None
                 else:
-                    raise
+                    raise FeedHttpError(exc.status_code, mask_secrets(str(exc), request_secrets)) from None
             payload = response.json()
             normalizer = _NORMALIZERS[product]
             return normalizer(payload, product=product, recorded_at=now), events

@@ -26,9 +26,11 @@ async def list_opportunities(
     _identity: Annotated[Identity, Depends(require_viewer)],
     state: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Kanban pipeline: offered -> committed -> delivering -> fulfilled (02b S8 screen 3)."""
-    opportunities = await store.list_opportunities(state=state)
-    return [o.model_dump(mode="json") for o in opportunities]
+    """Kanban pipeline: offered -> committed -> delivering -> fulfilled (02b S8 screen 3). Returns
+    `Obligation` rows, not `Opportunity` rows: `Opportunity.state` never reaches committed/delivering/
+    fulfilled (02a S1.4 vs S1.5) -- see `StoreProtocol.list_obligations`."""
+    obligations = await store.list_obligations(state=state)
+    return [o.model_dump(mode="json") for o in obligations]
 
 
 @router.post("/opportunities", status_code=status.HTTP_201_CREATED)
@@ -39,9 +41,7 @@ async def create_opportunity(
     """Admission (02a S2.1): creates an `OFFERED` opportunity via `opengrid.contracts.admit`, or `409`
     with the admission reason code if structurally infeasible."""
     try:
-        opportunity = await admit(
-            body.contract_id, body.window_start, body.window_end, body.requested_kw
-        )
+        opportunity = await admit(body.contract_id, body.window_start, body.window_end, body.requested_kw)
     except AdmissionError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"reason_code": exc.reason_code}) from exc
     return opportunity.model_dump(mode="json")
@@ -62,10 +62,22 @@ async def ledger_timeline(
     bank_id: str,
     store: Annotated[StoreProtocol, Depends(get_store)],
     _identity: Annotated[Identity, Depends(require_viewer)],
-) -> list[dict[str, Any]]:
-    """Reservation timeline for a bank -- the Gantt-style ledger chart (02b S8 screen 3)."""
+) -> dict[str, Any]:
+    """Reservation timeline for a bank -- the Gantt-style ledger chart plus the grants/substitutions
+    feed and commitment-lock events (02b S8 screen 3), matching
+    `opengrid.ui.routes.dispatch.dispatch_page`'s `{"reservations", "grants", "commitments",
+    "bank_capacity_kw"}` shape."""
     reservations = await store.ledger_timeline(bank_id)
-    return [r.model_dump(mode="json") for r in reservations]
+    grants = await store.list_grants(bank_id)
+    commitments = await store.list_commitments()
+    bank = await store.get_bank(bank_id)
+    return {
+        "bank_id": bank_id,
+        "reservations": [r.model_dump(mode="json") for r in reservations],
+        "grants": [g.model_dump(mode="json") for g in grants],
+        "commitments": [c.model_dump(mode="json") for c in commitments],
+        "bank_capacity_kw": bank.kva_rating if bank is not None else 0.0,
+    }
 
 
 @router.get("/stream/dispatch")
@@ -76,10 +88,10 @@ async def stream_dispatch(
     _identity: Annotated[Identity, Depends(require_viewer)],
 ) -> EventSourceResponse:
     async def fetch() -> dict[str, Any]:
-        opportunities = await store.list_opportunities(state=None)
+        obligations = await store.list_obligations(state=None)
         plan = await store.latest_plan()
         return {
-            "opportunities": [o.model_dump(mode="json") for o in opportunities[:50]],
+            "opportunities": [o.model_dump(mode="json") for o in obligations[:50]],
             "latest_plan": plan.model_dump(mode="json") if plan is not None else None,
         }
 
@@ -97,12 +109,12 @@ async def stream_control_room(
     alerts (02b S7.2, S8 screen 1)."""
 
     async def fetch() -> dict[str, Any]:
-        opportunities = await store.list_opportunities(state="COMMITTED")
+        active_commitment_count = await store.count_active_commitments()
         alerts = await store.list_alerts(open_only=True)
         hubs = await store.list_hubs(zone=None, bank_id=None, health=None, limit=2000, offset=0)
-        fleet_mw = sum(h.p_kw for h in hubs) / 1000.0
+        fleet_mw = sum(h["p_kw"] for h in hubs) / 1000.0
         return {
-            "active_commitment_count": len(opportunities),
+            "active_commitment_count": active_commitment_count,
             "fleet_mw": fleet_mw,
             "open_alert_count": len(alerts),
             "reserve_breach_count": 0,

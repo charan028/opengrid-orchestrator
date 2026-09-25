@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from ogsim.control.injector import Injector, UnknownAnomalyTypeError
@@ -51,6 +52,17 @@ async def test_mqtt_message_conforms_to_scenario_control_shape(
     assert message["type"] == "SCADA_BANK_OVERLOAD"
     assert message["duration_s"] == 120
     assert "T" in message["start"]  # ISO-8601 date-time, not an epoch float
+
+
+async def test_wire_target_kind_is_inferred_per_injection_not_static(
+    injector: Injector, _stub_network_calls: list[dict[str, Any]]
+):
+    # not_following_commands applies to "hub or bank"; targeting an actual
+    # bank ref must produce target.kind "bank" on the wire, not the
+    # catalogue's static "hub" default.
+    await injector.inject(type_="not_following_commands", target="bank-003")
+    message = next(c["message"] for c in _stub_network_calls if c["kind"] == "mqtt_publish")
+    assert message["target"] == {"kind": "bank", "ref": "bank-003"}
 
 
 async def test_cancel_of_a_fleet_anomaly_republishes_with_zero_duration(
@@ -101,6 +113,29 @@ async def test_injection_log_records_inject_and_cancel_actions(injector: Injecto
     actions = [row["action"] for row in log]
     assert actions.count("inject") == 1
     assert actions.count("cancel") == 1
+
+
+async def test_cancel_of_market_anomaly_logs_and_survives_a_failed_remote_cancel(
+    injector: Injector, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """A narrow httpx.HTTPError from market_client.cancel (e.g. the market
+    process is down) must be caught, logged, and not raised -- the local
+    active-anomaly registry and injection log are still updated."""
+
+    async def failing_cancel(anomaly_id: str, base_url: str | None = None) -> dict[str, Any]:
+        raise httpx.ConnectError("connection refused")
+
+    from ogsim.control import market_client
+
+    monkeypatch.setattr(market_client, "cancel", failing_cancel)
+
+    record = await injector.inject(type_="price_spike", target="*", duration=60.0)
+    with caplog.at_level("WARNING"):
+        found = await injector.cancel(record.id)
+
+    assert found is True
+    assert record.id not in {a.id for a in injector.active()}
+    assert any("market cancel failed" in message for message in caplog.messages)
 
 
 async def test_injection_log_entries_include_end_time(injector: Injector):

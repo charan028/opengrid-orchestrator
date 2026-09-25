@@ -16,10 +16,12 @@ obligation on health loss (S5), and schedules any leftover headroom (S6).
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping, Sequence
+from dataclasses import replace as dataclasses_replace
 from datetime import datetime
 
 from opengrid.allocator import reasons
 from opengrid.allocator.dist_deferral_pi import DistDeferralPI
+from opengrid.core.physics import hub_sustainable_discharge_kw
 from opengrid.allocator.lexicographic import allocate_tiers
 from opengrid.allocator.models import (
     CycleResult,
@@ -72,7 +74,7 @@ def cycle(
 
     hubs_by_bank: dict[str, list[HubSnapshot]] = {}
     for hub in fleet_state.hubs:
-        hubs_by_bank.setdefault(hub.bank_id, []).append(hub)
+        hubs_by_bank.setdefault(hub.bank_id, []).append(_cap_sustainable_discharge(hub, dt_c_s))
 
     calls_by_bank: dict[str, list[ObligationCall]] = {}
     for call in ledger_view.calls:
@@ -97,26 +99,48 @@ def cycle(
         shortfalls.extend(tier_result.shortfalls)
 
         remaining_headroom = tier_result.remaining_capability_kw
+
+        # ALLOC-02/K9: exactly one DistDeferralPI step per bank per cycle -- hoisted out of the
+        # per-obligation loop below, which previously re-stepped (and re-integrated) the SAME PI once
+        # per DIST_DEFERRAL call on this bank. Its relief is applied to at most one obligation (the
+        # first DIST_DEFERRAL call in deterministic order) rather than compounded across several.
+        pi_extra_kw = 0.0
+        dist_deferral_calls = [c for c in calls if c.service_type == "DIST_DEFERRAL"]
+        if dist_deferral_calls and bank_id in scada:
+            pi_state = pi_states.get(bank_id, PiState())
+            pi = DistDeferralPI(bank)
+            pi_output_kw, new_pi_state = pi.step(scada[bank_id], pi_state, dt_c_s)
+            pi_states[bank_id] = new_pi_state
+            dist_deferral_tier_kw = sum(
+                tier_result.granted_kw.get(c.obligation_id, 0.0) for c in dist_deferral_calls
+            )
+            relief_kw = max(pi_output_kw - dist_deferral_tier_kw, 0.0)
+            pi_extra_kw = min(relief_kw, remaining_headroom)
+            if pi_extra_kw > _EPS:
+                remaining_headroom -= pi_extra_kw
+
+        pi_extra_applied = False
+
+        # ALLOC-01/K2: a hub can appear in more than one obligation's eligible set at the same bank
+        # (e.g. a HOME obligation and a DIST_DEFERRAL obligation sharing hubs). Track what this cycle
+        # has already granted each hub and subtract it before the NEXT obligation's water-fill, so no
+        # hub is ever granted beyond its own capability across obligations.
+        granted_kw_by_hub: dict[str, float] = {}
         for call in sorted(calls, key=lambda c: c.obligation_id):
             tier_granted = tier_result.granted_kw.get(call.obligation_id, 0.0)
             reason_code = reasons.R_GRANT_COMMITTED
 
-            if call.service_type == "DIST_DEFERRAL" and bank_id in scada:
-                pi_state = pi_states.get(bank_id, PiState())
-                pi = DistDeferralPI(bank)
-                pi_output_kw, new_pi_state = pi.step(scada[bank_id], pi_state, dt_c_s)
-                pi_states[bank_id] = new_pi_state
-                relief_kw = max(pi_output_kw - tier_granted, 0.0)
-                extra = min(relief_kw, remaining_headroom)
-                if extra > _EPS:
-                    tier_granted += extra
-                    remaining_headroom -= extra
-                    reason_code = reasons.R_GRANT_DIST_DEFERRAL_PI
+            if call.service_type == "DIST_DEFERRAL" and not pi_extra_applied and pi_extra_kw > _EPS:
+                tier_granted += pi_extra_kw
+                reason_code = reasons.R_GRANT_DIST_DEFERRAL_PI
+                pi_extra_applied = True
 
             if tier_granted <= _EPS:
                 continue
 
-            eligible = hubs_by_obligation.get(call.obligation_id, ())
+            eligible = _apply_granted_so_far(
+                hubs_by_obligation.get(call.obligation_id, ()), granted_kw_by_hub
+            )
             result = realize_obligation(
                 call.obligation_id, bank_id, eligible, tier_granted, stickiness=stickiness
             )
@@ -124,6 +148,9 @@ def cycle(
                 shortfalls.append(result.shortfall)
             if result.event is not None:
                 substitutions.append(result.event)
+
+            for hub_id, kw in result.per_hub_kw.items():
+                granted_kw_by_hub[hub_id] = granted_kw_by_hub.get(hub_id, 0.0) + kw
 
             delivered = sum(result.per_hub_kw.values())
             if delivered > _EPS:
@@ -166,6 +193,42 @@ def cycle(
         shortfalls=tuple(shortfalls),
         substitutions=tuple(substitutions),
     )
+
+
+def _cap_sustainable_discharge(hub: HubSnapshot, dt_c_s: float) -> HubSnapshot:
+    """CORE-003/K1: when fleet supplies `soc_kwh`/`reserve_kwh`, further cap `free_discharge_kw` by
+    `hub_sustainable_discharge_kw` for this cycle's `dt_c_s` -- a sliver of energy just above reserve
+    must not be offered to water-filling/PI at the hub's full power rating for a whole interval. A
+    no-op when fleet has not (yet) supplied SoC/reserve for this hub (MVP-S: optional fields)."""
+    if hub.soc_kwh is None or hub.reserve_kwh is None:
+        return hub
+    dt_h = dt_c_s / 3600.0
+    sustainable_kw = hub_sustainable_discharge_kw(
+        hub.soc_kwh, hub.reserve_kwh, hub.free_discharge_kw, dt_h, hub.eta_d
+    )
+    if sustainable_kw >= hub.free_discharge_kw:
+        return hub
+    return dataclasses_replace(hub, free_discharge_kw=sustainable_kw)
+
+
+def _apply_granted_so_far(
+    hubs: tuple[HubSnapshot, ...], granted_kw_by_hub: Mapping[str, float]
+) -> tuple[HubSnapshot, ...]:
+    """ALLOC-01/K2: shrink each hub's free capability by whatever this cycle already granted it (for a
+    different obligation sharing eligibility) before the next obligation's water-fill sees it -- the
+    same hub can never be committed beyond `hub.free_discharge_kw` in total across obligations."""
+    if not granted_kw_by_hub:
+        return hubs
+    adjusted: list[HubSnapshot] = []
+    for hub in hubs:
+        used = granted_kw_by_hub.get(hub.hub_id, 0.0)
+        if used <= _EPS:
+            adjusted.append(hub)
+        else:
+            adjusted.append(
+                dataclasses_replace(hub, free_discharge_kw=max(hub.free_discharge_kw - used, 0.0))
+            )
+    return tuple(adjusted)
 
 
 def _index_hubs_by_obligation(

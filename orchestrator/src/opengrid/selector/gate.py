@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID, uuid4
 
 from opengrid import forecast, ledger
 from opengrid.core.models.engine import Plan
 from opengrid.fleet import capability as fleet_capability
+from opengrid.platform.config import load_config
 from opengrid.selector import db
 from opengrid.selector.extract import extract_plan
 from opengrid.selector.model import build_mode_o_model
@@ -35,6 +37,16 @@ from opengrid.selector.validate import validate_plan
 
 INTERVAL_MINUTES = 15.0
 SCHEDULED_HORIZON_INTERVALS = 96  # 24h / 15min, 02a S3.2
+
+# 02a S3.7's "firm first, then AS, then market" F2 priority bucket, keyed by `contract.service_type`
+# (`CandidateOpportunity.category`'s docstring). `ERCOT_ENERGY` (spot-like) falls back to `MARKET`.
+_CATEGORY_BY_SERVICE_TYPE: dict[str, Literal["FIRM", "AS", "MARKET"]] = {
+    "HOME": "FIRM",
+    "DIST_DEFERRAL": "FIRM",
+    "PARTNER_CAPACITY": "FIRM",
+    "ERCOT_AS": "AS",
+    "ERCOT_ENERGY": "MARKET",
+}
 
 # Simple warm-start memory: previous gate's selection, shifted one interval by the caller if needed
 # (02a S3.7 "previous plan shifted one interval"). Kept in-process only -- a restart just solves cold.
@@ -117,12 +129,46 @@ async def load_committed(
 async def load_candidates(
     horizon_start: datetime, horizon_end: datetime, bank_ids: tuple[str, ...], contract_scope: UUID | None
 ) -> tuple[CandidateOpportunity, ...]:
-    """`OFFERED` opportunities for the horizon (`ADMISSION`/`RENOMINATION` narrow via `contract_scope`).
-    Placeholder until `contracts` exposes an opportunity-listing query beyond `admit`/`product_rules_for`
-    (INTERFACES.md only fixes those two) -- returns empty until that lands; tests inject candidates
-    directly via `ModelInputs` or by monkeypatching this function.
-    """
-    return ()
+    """`OFFERED` opportunities for the horizon (`ADMISSION`/`RENOMINATION` narrow via `contract_scope`),
+    read from `og.opportunity`/`og.contract`/`og.product_rule` via `selector.db` (that module's own
+    docstring already scopes selector to read those tables read-only). `contracts` exposes no public
+    opportunity-listing query beyond `admit`/`product_rules_for` (INTERFACES.md's fixed four) -- see the
+    module's final-report note asking the merge agent to add one there instead, so this reads the
+    tables directly rather than staying a permanent placeholder.
+
+    Every configured bank is eligible for every candidate: no `contracts`/`ledger` query exists yet to
+    narrow eligibility per opportunity either (`load_committed`'s docstring documents the identical gap
+    for committed obligations)."""
+    rows = await db.load_offered_opportunities_rows(
+        horizon_start.isoformat(), horizon_end.isoformat(), contract_scope
+    )
+    n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
+    candidates = []
+    for row in rows:
+        window_start = max(row["window_start"], horizon_start)
+        window_end = min(row["window_end"], horizon_end)
+        start_t = int((window_start - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
+        end_t = int((window_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
+        window_intervals = tuple(range(max(start_t, 0), min(end_t, n_intervals)))
+        if not window_intervals:
+            continue  # window does not actually overlap this horizon after clamping/rounding
+        candidates.append(
+            CandidateOpportunity(
+                opportunity_id=str(row["opportunity_id"]),
+                contract_id=str(row["contract_id"]),
+                eligible_bank_ids=bank_ids,
+                window_intervals=window_intervals,
+                requested_kw=float(row["requested_kw"]),
+                value_per_mwh=float(row["value_per_mwh"]) if row["value_per_mwh"] is not None else 0.0,
+                variable_kind=row["variable_kind"] or "CONTINUOUS",
+                min_qty_kw=float(row["min_qty_kw"] or 0.0),
+                increment_kw=float(row["increment_kw"] or 0.0),
+                degradation_cost_per_kwh=float(row["degradation_cost"] or 0.03),
+                tier=row["tier"] or "T4",
+                category=_CATEGORY_BY_SERVICE_TYPE.get(row["service_type"], "MARKET"),
+            )
+        )
+    return tuple(candidates)
 
 
 def _plan_mode_for(gate_kind: GateKind, horizon_start: datetime) -> str:
@@ -253,6 +299,10 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
 
 
 async def _configured_bank_ids() -> tuple[str, ...]:
-    """MVP-S bank list is configuration, not solver output (02a S3.1). Overridden by tests; production
-    reads it from `orchestrator.toml`'s `[banks]` table once the platform config schema defines it."""
-    return ()
+    """MVP-S bank list is configuration, not solver output (02a S3.1): `[fleet].banks` in
+    `orchestrator.toml`/`test.toml` gives the count; ids follow the `bank-NN` text-code convention used
+    elsewhere in the codebase (`og.bank.bank_id`, 02b S4.2 -- see `opengrid.api.store`'s docstring for
+    the same convention, e.g. `"bank-01"`). Overridden by tests."""
+    cfg = load_config()
+    bank_count = int(cfg.get("fleet.banks", 0))
+    return tuple(f"bank-{i:02d}" for i in range(1, bank_count + 1))

@@ -83,7 +83,25 @@ def test_fleet_screen_shows_write_actions_for_operator(
     body = response.text
     assert "Manual command" in body
     assert "Scoped safe stop" in body
-    assert "Safe stop: entire fleet" in body
+    assert "Propose safe stop (step 1 of 2)" in body
+    assert 'hx-post="/og/fleet/safestop/propose"' in body
+
+
+def test_fleet_hub_table_shows_a_per_row_age_column(
+    client: TestClient, fake_api: Callable[[dict[str, Any]], None]
+) -> None:
+    fake_api({"/og/api/fleet/hubs": load_fixture("hubs.json")})
+
+    response = client.get("/og/fleet")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Age</th>" in body
+    table_html = body.split("<table")[1].split("</table>")[0]
+    # last_seen_at is set in the fixture -- the per-row age badge renders a real age, not "unknown"
+    # (the screen's own "Data age: unknown" badge just above the table is a separate, pre-existing
+    # element that `og.js` ticks live client-side from `data-since`, not part of the table itself).
+    assert "age: unknown" not in table_html
 
 
 def test_fleet_hub_drilldown_fragment(client: TestClient, fake_api: Callable[[dict[str, Any]], None]) -> None:
