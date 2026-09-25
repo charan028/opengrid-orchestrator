@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Markets -- OpenGrid Orchestrator{% endblock %}
+{% block header_title %}Markets & feeds{% endblock %}
+
+{% block header_actions %}
+<span class="stale-badge" id="markets-updated" data-stale="false">poll: 30s</span>
+{% endblock %}
+
+{% block content %}
+<section class="og-grid" aria-label="Price / load / wind / solar / AS series">
+  {% for chart in series_charts %}
+  {% include "markets_series_fragment.html" %}
+  {% endfor %}
+</section>
+
+<section class="og-panel" aria-labelledby="forecast-heading">
+  <h2 id="forecast-heading">Forecast band (P10 / P50 / P90)</h2>
+  <div id="forecast-chart" style="height: 260px;" role="img" aria-label="Forecast quantile band chart"></div>
+</section>
+
+<section class="og-panel" aria-labelledby="freshness-heading">
+  <h2 id="freshness-heading">Freshness & source status</h2>
+  {% with columns=[{"key": "source", "label": "Source"}, {"key": "product", "label": "Product"}, {"key": "mode_badge", "label": "Mode", "html": true}, {"key": "age_badge", "label": "Age", "html": true}, {"key": "consecutive_failures", "label": "Failures", "numeric": true}, {"key": "breaker_badge", "label": "Breaker", "html": true}], rows=freshness_rows, empty_message='No feed status available' %}
+    {% include "_partials/data_table.html" %}
+  {% endwith %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    og.chart("#forecast-chart", {{ forecast.chart_option | tojson }});
+
+    window.setTimeout(function () {
+      htmx.ajax("GET", window.location.pathname + window.location.search, {target: "body", select: "body"});
+    }, 30000);
+  });
+</script>
+{% endblock %}

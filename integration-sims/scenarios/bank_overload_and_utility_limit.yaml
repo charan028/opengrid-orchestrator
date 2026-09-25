@@ -1,0 +1,16 @@
+name: bank_overload_and_utility_limit
+description: >
+  A bank's SCADA-reported load climbs over its kVA rating, followed by a
+  utility limit instruction. Proves the DIST_DEFERRAL PI loop responds and
+  the guardian's feeder-ceiling / ramp checks hold.
+steps:
+  - at_s: 0
+    type: bank_overload
+    target: BANK_07
+    params: {kva_over_rating_pct: 25}
+    duration: 180
+  - at_s: 60
+    type: utility_instruction
+    target: BANK_07
+    params: {mode: limit, limit_kw: 50}
+    duration: 240

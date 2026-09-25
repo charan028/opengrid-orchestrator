@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/ack.schema.json",
+  "title": "Ack",
+  "description": "Hub -> orchestrator, published on <root>/ack/<hub_id>, QoS 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hub_id", "batch_id", "accepted", "ts"],
+  "properties": {
+    "hub_id": { "type": "string", "minLength": 1 },
+    "batch_id": { "type": "string", "format": "uuid" },
+    "accepted": { "type": "boolean" },
+    "applied_p_kw": { "type": ["number", "null"] },
+    "reject_reason": {
+      "type": ["string", "null"],
+      "enum": ["BAD_SIGNATURE", "STALE_EPOCH", "STALE_SEQ", "EXPIRED", null]
+    },
+    "ts": { "type": "string", "format": "date-time" }
+  }
+}

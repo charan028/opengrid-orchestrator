@@ -1,0 +1,80 @@
+[
+  {
+    "obligation_id": "OBL-1001",
+    "contract_id": "CTR-A",
+    "customer_id": "CUST-A",
+    "service_type": "HOME",
+    "tier": "T1",
+    "window_start": "2026-09-25T18:00:00+00:00",
+    "window_end": "2026-09-25T19:00:00+00:00",
+    "committed_qty_kw": 12.5,
+    "state": "OFFERED",
+    "at_risk": false,
+    "last_reason_code": null
+  },
+  {
+    "obligation_id": "OBL-1002",
+    "contract_id": "CTR-B",
+    "customer_id": "CUST-B",
+    "service_type": "ERCOT_ENERGY",
+    "tier": "T2",
+    "window_start": "2026-09-25T18:00:00+00:00",
+    "window_end": "2026-09-25T19:00:00+00:00",
+    "committed_qty_kw": 40.0,
+    "state": "COMMITTED",
+    "at_risk": false,
+    "last_reason_code": "R-GATE-SELECT"
+  },
+  {
+    "obligation_id": "OBL-1003",
+    "contract_id": "CTR-C",
+    "customer_id": "CUST-C",
+    "service_type": "DIST_DEFERRAL",
+    "tier": "T3",
+    "window_start": "2026-09-25T18:00:00+00:00",
+    "window_end": "2026-09-25T19:00:00+00:00",
+    "committed_qty_kw": 8.0,
+    "state": "DELIVERING",
+    "at_risk": true,
+    "last_reason_code": "FEEDER_OVERLOAD"
+  },
+  {
+    "obligation_id": "OBL-1004",
+    "contract_id": "CTR-D",
+    "customer_id": "CUST-D",
+    "service_type": "PARTNER_CAPACITY",
+    "tier": "T1",
+    "window_start": "2026-09-25T17:00:00+00:00",
+    "window_end": "2026-09-25T18:00:00+00:00",
+    "committed_qty_kw": 5.0,
+    "state": "FULFILLED",
+    "at_risk": false,
+    "last_reason_code": null
+  },
+  {
+    "obligation_id": "OBL-1005",
+    "contract_id": "CTR-E",
+    "customer_id": "CUST-E",
+    "service_type": "ERCOT_AS",
+    "tier": "T4",
+    "window_start": "2026-09-25T17:00:00+00:00",
+    "window_end": "2026-09-25T18:00:00+00:00",
+    "committed_qty_kw": 3.0,
+    "state": "SHORTFALL",
+    "at_risk": true,
+    "last_reason_code": "HUB_OFFLINE"
+  },
+  {
+    "obligation_id": "OBL-1006",
+    "contract_id": "CTR-A",
+    "customer_id": "CUST-A",
+    "service_type": "HOME",
+    "tier": "T1",
+    "window_start": "2026-09-25T18:00:00+00:00",
+    "window_end": "2026-09-25T19:00:00+00:00",
+    "committed_qty_kw": 6.0,
+    "state": "SELECTED",
+    "at_risk": false,
+    "last_reason_code": null
+  }
+]

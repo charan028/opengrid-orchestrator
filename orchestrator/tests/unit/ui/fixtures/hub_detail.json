@@ -1,0 +1,12 @@
+{
+  "hub_id": "hub-0001",
+  "bank_id": "bank-01",
+  "zone": "LZ_SOUTH",
+  "soc_kwh": 9.8,
+  "p_kw": -2.1,
+  "health": "online",
+  "lease_epoch": 42,
+  "lease_expires_at": "2026-09-25T12:00:30+00:00",
+  "last_command_id": "1b7e6c2a-6e2d-4f2a-8a3d-2f0f6c1a9b10",
+  "last_seen_at": "2026-09-25T12:00:00+00:00"
+}

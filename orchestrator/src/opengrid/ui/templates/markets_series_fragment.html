@@ -1,0 +1,13 @@
+{# markets_series_fragment.html -- one series chart card. Params: chart (series_chart_view output). #}
+<div class="og-panel" id="series-{{ chart.series_key }}">
+  <h2>{{ chart.label }}</h2>
+  {% with label=chart.label, value=chart.latest_value|default('--'), unit=chart.unit, since_iso=chart.latest_ts, stale_after_s=1800 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+  <div id="chart-{{ chart.series_key }}" style="height: 200px;" role="img" aria-label="{{ chart.label }} time series"></div>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      og.chart("#chart-{{ chart.series_key }}", {{ chart.chart_option | tojson }});
+    });
+  </script>
+</div>

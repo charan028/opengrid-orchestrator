@@ -1,0 +1,25 @@
+{# hub_drilldown.html -- HTMX fragment for a single hub (Fleet screen drill-down, 02b S8 row 2).
+   Params: hub: dict with hub_id/bank_id/zone/soc_kwh/p_kw/health/lease_epoch/lease_expires_at/
+   last_command_id/last_seen_at, and optionally `error`. #}
+<div class="og-panel" id="hub-drilldown">
+  <h2>Hub {{ hub.hub_id }}</h2>
+  {% if hub.error %}
+  <p class="og-degraded-banner">{{ hub.error }}</p>
+  {% else %}
+  <dl class="og-grid">
+    <div><dt class="kpi-label">Bank</dt><dd>{{ hub.bank_id|default('-') }}</dd></div>
+    <div><dt class="kpi-label">Zone</dt><dd>{{ hub.zone|default('-') }}</dd></div>
+    <div>
+      <dt class="kpi-label">Health</dt>
+      <dd>{% with status = hub.health|default('unknown') %}{% include "_partials/status_badge.html" %}{% endwith %}</dd>
+    </div>
+    <div><dt class="kpi-label">SoC</dt><dd>{{ hub.soc_kwh|default('-') }} kWh</dd></div>
+    <div><dt class="kpi-label">P</dt><dd>{{ hub.p_kw|default('-') }} kW</dd></div>
+    <div><dt class="kpi-label">Lease epoch</dt><dd>{{ hub.lease_epoch|default('-') }}</dd></div>
+    <div><dt class="kpi-label">Lease expires</dt><dd>{{ hub.lease_expires_at|default('-') }}</dd></div>
+    <div><dt class="kpi-label">Last command</dt><dd>{{ hub.last_command_id|default('-') }}</dd></div>
+  </dl>
+  <div class="stale-badge" data-since="{{ hub.last_seen_at }}" data-stale-after="6">age: unknown</div>
+  <div id="telemetry-sparkline" class="og-map" style="height: 160px;" data-hub-id="{{ hub.hub_id }}"></div>
+  {% endif %}
+</div>

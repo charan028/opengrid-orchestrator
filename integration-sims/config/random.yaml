@@ -1,0 +1,161 @@
+# Autonomous random-mode configuration for ogsim.control (BUILD.md §3).
+#
+# Every enabled type below fires as an independent Poisson process
+# (rate_per_hour) while its owning simulator is enabled and random mode is
+# not paused. Duration and numeric params are drawn uniformly from the
+# given [low, high] ranges (a single number means "fixed, not randomized"),
+# then scaled by the active intensity profile's multipliers.
+#
+# Edit and re-run `python -m ogsim.control random reload` (or restart the
+# control plane) to apply changes.
+
+seed: 20260926
+profile: normal
+paused: false
+max_concurrent: 5
+
+sims:
+  market: { enabled: true }
+  scada: { enabled: true }
+  fleet: { enabled: true }
+
+profiles:
+  calm: { rate_multiplier: 0.25, duration_multiplier: 0.75 }
+  normal: { rate_multiplier: 1.0, duration_multiplier: 1.0 }
+  stressed: { rate_multiplier: 2.5, duration_multiplier: 1.25 }
+  chaos: { rate_multiplier: 6.0, duration_multiplier: 1.5 }
+
+types:
+  # ---- market / data APIs ----
+  price_spike:
+    rate_per_hour: 0.3
+    duration_s: [60, 300]
+    params: { value_usd_per_mwh: [1000, 5000] }
+  negative_price:
+    rate_per_hour: 0.15
+    duration_s: [60, 180]
+    params: { value_usd_per_mwh: [-200, -10] }
+  as_price_jump:
+    rate_per_hour: 0.2
+    duration_s: [120, 600]
+    params: { value_usd_per_mwh: [200, 800] }
+  http_5xx:
+    rate_per_hour: 0.2
+    duration_s: [30, 180]
+    params: { status: 503 }
+  http_429:
+    rate_per_hour: 0.25
+    duration_s: [30, 120]
+    params: { retry_after_s: [10, 60] }
+  http_401_primary:
+    rate_per_hour: 0.1
+    duration_s: [60, 300]
+    params: {}
+  stale_posting:
+    rate_per_hour: 0.15
+    duration_s: [300, 1800]
+    params: {}
+  malformed_payload:
+    rate_per_hour: 0.1
+    duration_s: [15, 60]
+    params: {}
+  slow_response:
+    rate_per_hour: 0.3
+    duration_s: [60, 240]
+    params: { latency_s: [2, 8] }
+  nws_extreme_weather:
+    rate_per_hour: 0.05
+    duration_s: [1800, 7200]
+    params: { temperature_c: [35, 46], wind_kph: [60, 110] }
+
+  # ---- SCADA ----
+  bank_overload:
+    rate_per_hour: 0.2
+    duration_s: [120, 600]
+    params: { kva_over_rating_pct: [10, 40] }
+  load_spike:
+    rate_per_hour: 0.25
+    duration_s: [60, 300]
+    params: { multiplier: [1.5, 3.0] }
+  frozen_value:
+    rate_per_hour: 0.1
+    duration_s: [120, 600]
+    params: {}
+  bad_quality_flag:
+    rate_per_hour: 0.15
+    duration_s: [60, 300]
+    params: {}
+  stale_no_update:
+    rate_per_hour: 0.1
+    duration_s: [300, 1200]
+    params: {}
+  out_of_range_value:
+    rate_per_hour: 0.05
+    duration_s: [30, 120]
+    params: { value: [-10, -1] }
+  oscillation:
+    rate_per_hour: 0.1
+    duration_s: [60, 300]
+    params: { amplitude_pct: [10, 25], period_s: [5, 20] }
+  phase_imbalance:
+    rate_per_hour: 0.1
+    duration_s: [120, 600]
+    params: { imbalance_pct: [15, 35] }
+  breaker_open:
+    rate_per_hour: 0.05
+    duration_s: [60, 300]
+    params: {}
+  comms_loss:
+    rate_per_hour: 0.15
+    duration_s: [60, 600]
+    params: {}
+  utility_instruction:
+    rate_per_hour: 0.05
+    duration_s: [120, 600]
+    params: { limit_kw: [0, 100] }
+  time_skew:
+    rate_per_hour: 0.05
+    duration_s: [120, 600]
+    params: { skew_s: [60, 600] }
+
+  # ---- fleet (hubs) ----
+  hub_offline:
+    rate_per_hour: 0.3
+    duration_s: [60, 600]
+    params: {}
+  zone_mass_disconnect:
+    rate_per_hour: 0.05
+    duration_s: [60, 300]
+    params: {}
+  not_following_commands:
+    rate_per_hour: 0.1
+    duration_s: [60, 300]
+    params: {}
+  inverter_trip:
+    rate_per_hour: 0.15
+    duration_s: [60, 600]
+    params: {}
+  soc_sensor_drift:
+    rate_per_hour: 0.1
+    duration_s: [600, 3600]
+    params: { drift_kwh_per_min: [0.1, 1.0] }
+  telemetry_delay_burst:
+    rate_per_hour: 0.2
+    duration_s: [30, 180]
+    params: { delay_s: [5, 30] }
+  lease_loss:
+    rate_per_hour: 0.1
+    duration_s: [30, 120]
+    params: {}
+  clock_skew:
+    rate_per_hour: 0.05
+    duration_s: [120, 600]
+    params: { skew_s: [60, 600] }
+  tampered_unsigned_command:
+    rate_per_hour: 0.05
+    duration_s: [10, 30]
+    params: {}
+  reserve_floor_pressure:
+    rate_per_hour: 0.1
+    duration_s: [600, 3600]
+    params: { home_load_kw: [4, 10] }

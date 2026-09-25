@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/stop.schema.json",
+  "title": "StopEvent",
+  "description": "Safestop (ENGAGE) or Guardian (RELEASE, Tier-2 approved) -> hubs, published on <root>/stop/<scope>/<id>, QoS 1, retained. An empty retained payload on the same topic clears (releases) the stop.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stop_id", "scope", "action", "reason", "issued_by", "issued_at", "key_id", "signature"],
+  "properties": {
+    "stop_id": { "type": "string", "format": "uuid" },
+    "scope": { "type": "string", "enum": ["fleet", "zone", "bank"] },
+    "scope_id": { "type": ["string", "null"], "description": "zone name or bank_id; null for fleet scope" },
+    "action": { "type": "string", "enum": ["ENGAGE", "RELEASE"] },
+    "reason": { "type": "string", "minLength": 1 },
+    "issued_by": { "type": "string", "minLength": 1, "description": "operator id or 'SAFESTOP_AUTO'" },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "approver_ref": { "type": ["string", "null"], "description": "second approver for RELEASE (Tier 2)" },
+    "key_id": { "type": "string", "minLength": 1, "description": "'safestop-*' may only sign ENGAGE; RELEASE must be signed by a 'guardian-*' key." },
+    "signature": { "type": "string", "minLength": 1 }
+  }
+}

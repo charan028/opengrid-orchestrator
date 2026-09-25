@@ -1,0 +1,26 @@
+{
+  "as_of": "2026-09-25T12:00:00+00:00",
+  "fleet_mw": 4.2,
+  "fleet_mwh": 12.6,
+  "active_commitments": 5,
+  "net_margin_usd": 187.35,
+  "reserve_breaches": 0,
+  "double_sold_kwh": 0,
+  "commitment_switches": 0,
+  "degraded_mode": null,
+  "alerts": [
+    {"severity": "warning", "summary": "ERCOT price feed approaching staleness", "opened_at": "2026-09-25T11:58:00+00:00"}
+  ],
+  "processes": {
+    "feeds": {"status": "ok", "ts": "2026-09-25T12:00:00+00:00"},
+    "engine": {"status": "ok", "ts": "2026-09-25T12:00:00+00:00"},
+    "guardian": {"status": "ok", "ts": "2026-09-25T12:00:00+00:00"},
+    "safestop": {"status": "ok", "ts": "2026-09-25T12:00:00+00:00"},
+    "sim": {"status": "ok", "ts": "2026-09-25T12:00:00+00:00"},
+    "settle": {"status": "ok", "ts": "2026-09-25T12:00:00+00:00"},
+    "api": {"status": "ok", "ts": "2026-09-25T12:00:00+00:00"}
+  },
+  "feeds": [
+    {"source": "ERCOT", "product": "np6-905-cd", "quality": "GOOD", "last_value_at": "2026-09-25T11:59:50+00:00"}
+  ]
+}

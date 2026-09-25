@@ -1,0 +1,32 @@
+{
+  "rows": [
+    {
+      "obligation_id": "OBL-2001",
+      "service_type": "ERCOT_ENERGY",
+      "customer_id": "CUST-B",
+      "interval_start": "2026-09-25T00:00:00+00:00",
+      "interval_end": "2026-09-26T00:00:00+00:00",
+      "revenue": "500.00",
+      "energy_cost": "120.00",
+      "degradation_cost": "15.00",
+      "penalty": "0.00",
+      "net_value": "365.00",
+      "rule_baseline_value": "300.00",
+      "forgone_upside": "40.00"
+    },
+    {
+      "obligation_id": "OBL-2002",
+      "service_type": "DIST_DEFERRAL",
+      "customer_id": "CUST-C",
+      "interval_start": "2026-09-25T00:00:00+00:00",
+      "interval_end": "2026-09-26T00:00:00+00:00",
+      "revenue": "80.00",
+      "energy_cost": "10.00",
+      "degradation_cost": "5.00",
+      "penalty": "20.00",
+      "net_value": "45.00",
+      "rule_baseline_value": null,
+      "forgone_upside": "0.00"
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+"""Postgres-backed `FleetBackend` (02b S4.2). Kept separate from `opengrid.fleet.__init__` so the
+twin's classification/aggregation logic has no `psycopg` import and stays unit-testable without a
+database (mirrors `opengrid.trace.pg_backend`, BUILD.md S5a "pure logic separated from I/O").
+"""
+
+from __future__ import annotations
+
+from psycopg_pool import AsyncConnectionPool
+
+from opengrid.core.models.platform import Bank, Hub, HubState
+from opengrid.fleet import TelemetryRow
+
+_LOAD_HUBS_SQL = "SELECT hub_id, bank_id, zone, e_kwh, r_kwh, p_kw, eta_c, eta_d, lat, lon FROM og.hub"
+_LOAD_BANKS_SQL = "SELECT bank_id, zone, kva_rating, reserve_kva, feeder_id FROM og.bank"
+_LOAD_HUB_STATES_SQL = """
+SELECT hub_id, soc_kwh, p_kw, health, lease_epoch, lease_expires_at, last_command_id, last_seen_at,
+       fault_code
+FROM og.hub_state
+"""
+_UPSERT_HUB_STATE_SQL = """
+INSERT INTO og.hub_state
+    (hub_id, soc_kwh, p_kw, health, lease_epoch, lease_expires_at, last_command_id, last_seen_at,
+     fault_code)
+VALUES (%(hub_id)s, %(soc_kwh)s, %(p_kw)s, %(health)s, %(lease_epoch)s, %(lease_expires_at)s,
+        %(last_command_id)s, %(last_seen_at)s, %(fault_code)s)
+ON CONFLICT (hub_id) DO UPDATE SET
+    soc_kwh = EXCLUDED.soc_kwh,
+    p_kw = EXCLUDED.p_kw,
+    health = EXCLUDED.health,
+    lease_epoch = EXCLUDED.lease_epoch,
+    lease_expires_at = EXCLUDED.lease_expires_at,
+    last_command_id = EXCLUDED.last_command_id,
+    last_seen_at = EXCLUDED.last_seen_at,
+    fault_code = EXCLUDED.fault_code
+"""
+_COPY_TELEMETRY_SQL = "COPY og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health) FROM STDIN"
+
+
+class PgFleetBackend:
+    """`FleetBackend` implementation over a `psycopg_pool.AsyncConnectionPool`."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def load_hubs(self) -> list[Hub]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LOAD_HUBS_SQL)
+            rows = await cur.fetchall()
+        columns = ("hub_id", "bank_id", "zone", "e_kwh", "r_kwh", "p_kw", "eta_c", "eta_d", "lat", "lon")
+        return [Hub(**dict(zip(columns, row, strict=True))) for row in rows]
+
+    async def load_banks(self) -> list[Bank]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LOAD_BANKS_SQL)
+            rows = await cur.fetchall()
+        columns = ("bank_id", "zone", "kva_rating", "reserve_kva", "feeder_id")
+        return [Bank(**dict(zip(columns, row, strict=True))) for row in rows]
+
+    async def load_hub_states(self) -> list[HubState]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LOAD_HUB_STATES_SQL)
+            rows = await cur.fetchall()
+        columns = (
+            "hub_id",
+            "soc_kwh",
+            "p_kw",
+            "health",
+            "lease_epoch",
+            "lease_expires_at",
+            "last_command_id",
+            "last_seen_at",
+            "fault_code",
+        )
+        return [HubState(**dict(zip(columns, row, strict=True))) for row in rows]
+
+    async def upsert_hub_states(self, states: list[HubState]) -> None:
+        if not states:
+            return
+        params = [
+            {
+                "hub_id": s.hub_id,
+                "soc_kwh": s.soc_kwh,
+                "p_kw": s.p_kw,
+                "health": s.health,
+                "lease_epoch": s.lease_epoch,
+                "lease_expires_at": s.lease_expires_at,
+                "last_command_id": s.last_command_id,
+                "last_seen_at": s.last_seen_at,
+                "fault_code": s.fault_code,
+            }
+            for s in states
+        ]
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.executemany(_UPSERT_HUB_STATE_SQL, params)
+
+    async def copy_telemetry(self, rows: list[TelemetryRow]) -> None:
+        if not rows:
+            return
+        async with (
+            self._pool.connection() as conn,
+            conn.cursor() as cur,
+            cur.copy(_COPY_TELEMETRY_SQL) as copy,
+        ):
+            for row in rows:
+                await copy.write_row(
+                    (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health)
+                )

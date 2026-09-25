@@ -1,0 +1,30 @@
+{# data_table.html -- BUILD.md base contract partial. Params: columns: [{key, label, numeric: bool}],
+   rows: [dict], empty_message: str|None, row_id_key: str|None (adds data-row-id + a clickable-row class
+   for drill-down rows, e.g. the Fleet hub table). Sticky header, numeric right-align, units in the header
+   (UI-UX spec S5.8). #}
+<table class="data-table">
+  <thead>
+    <tr>
+      {% for c in columns %}
+      <th class="{{ 'num' if c.numeric else '' }}" scope="col">{{ c.label }}</th>
+      {% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr {% if row_id_key %}class="clickable-row" data-row-id="{{ row[row_id_key] }}" tabindex="0"{% endif %}>
+      {% for c in columns %}
+      <td class="{{ 'num' if c.numeric else '' }}">
+        {%- if c.key in row -%}
+          {%- if c.html -%}{{ row[c.key]|safe }}{%- else -%}{{ row[c.key] }}{%- endif -%}
+        {%- endif -%}
+      </td>
+      {% endfor %}
+    </tr>
+    {% else %}
+    <tr>
+      <td class="empty" colspan="{{ columns|length }}">{{ empty_message|default('No data') }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

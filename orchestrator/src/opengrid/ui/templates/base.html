@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OpenGrid Orchestrator{% endblock %}</title>
+  <link rel="stylesheet" href="{{ base_path }}/static/og.css">
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@1.9.12/dist/htmx.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@1.9.12/dist/ext/sse.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="{{ base_path }}/static/og.js"></script>
+</head>
+<body hx-ext="sse">
+  <div class="og-shell">
+    <nav class="og-nav" aria-label="Screens">
+      <div class="og-nav-brand">OpenGrid</div>
+      <ul>
+        {% for item in nav_screens %}
+        <li>
+          <a href="{{ item.path }}"
+             class="{{ 'active' if request.url.path == item.path else '' }}"
+             {% if request.url.path == item.path %}aria-current="page"{% endif %}>
+            {{ item.label }}
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+      <button type="button" class="og-nav-role" onclick="og.toggleTheme()" aria-label="Toggle light/dark theme">
+        Role: {{ role|default('viewer') }} &middot; theme
+      </button>
+    </nav>
+    <div class="og-main">
+      <header class="og-header">
+        <h1>{% block header_title %}{% endblock %}</h1>
+        <div class="og-header-actions">{% block header_actions %}{% endblock %}</div>
+      </header>
+      <main class="og-content">
+        {% if degraded %}
+        <div class="og-degraded-banner" role="status">Degraded: {{ degraded }}</div>
+        {% endif %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

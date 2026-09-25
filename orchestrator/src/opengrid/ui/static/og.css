@@ -1,0 +1,503 @@
+/* opengrid.ui design tokens + base layout (BUILD.md UI brief; palette/tokens from
+   docs/orchestrator/04-ui/01-ui-ux-specification.md S5). Owner: ui-a.
+   Dark is the default/primary theme (control room); [data-theme="light"] mirrors every token. */
+
+:root,
+[data-theme="dark"] {
+  --bg: #0b0e14;
+  --panel: #131722;
+  --panel-2: #1a1f2e;
+  --border: #262c3d;
+  --text: #e6e9f0;
+  --muted: #8b92a8;
+  --kicker: #7cc4ff;
+
+  --status-good: #1baf7a;
+  --status-info: #7cc4ff;
+  --status-caution: #eda100;
+  --status-critical: #e34948;
+  --status-neutral: #8b92a8;
+
+  /* 7-series customer-type categorical palette, fixed order everywhere (UI-UX spec S5.2) */
+  --series-ercot-energy: #3987e5;
+  --series-ercot-as: #199e70;
+  --series-partner-capacity: #c98500;
+  --series-dist-deferral: #1aa5b8;
+  --series-large-load: #d55181;
+  --series-pipeline-ac: #9085e9;
+  --series-pjm-capacity: #008300;
+
+  --focus-ring: #7cc4ff;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #f4f6fb;
+  --panel: #ffffff;
+  --panel-2: #eef1f8;
+  --border: #d7dce6;
+  --text: #171a21;
+  --muted: #5b6172;
+  --kicker: #1861c7;
+
+  --status-good: #147a52;
+  --status-info: #1861c7;
+  --status-caution: #986600;
+  --status-critical: #ab2e2d;
+  --status-neutral: #5b6172;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  font-size: 13px;
+}
+
+a {
+  color: var(--kicker);
+}
+
+/* keyboard operability: a visible focus ring on every interactive element (WCAG AA) */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.og-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100vh;
+}
+
+.og-nav {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.og-nav-brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 16px 16px;
+  text-transform: uppercase;
+  font-size: 14px;
+}
+
+.og-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+}
+
+.og-nav li a {
+  display: block;
+  padding: 10px 16px;
+  color: var(--text);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+}
+
+.og-nav li a:hover {
+  background: var(--panel-2);
+}
+
+.og-nav li a.active {
+  border-left-color: var(--kicker);
+  background: var(--panel-2);
+  color: var(--kicker);
+  font-weight: 600;
+}
+
+.og-nav-role {
+  padding: 12px 16px 0;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+}
+
+.og-main {
+  min-width: 0;
+}
+
+.og-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.og-header h1 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.og-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.og-content {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.og-degraded-banner {
+  background: color-mix(in srgb, var(--status-caution) 20%, var(--panel));
+  border: 1px solid var(--status-caution);
+  color: var(--text);
+  padding: 8px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* --- panels / grid ---------------------------------------------------------------------------- */
+
+.og-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.og-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.og-panel h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  margin: 0 0 10px;
+}
+
+/* --- kpi tile ---------------------------------------------------------------------------------- */
+
+.kpi-tile {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kpi-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+
+.kpi-value {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.kpi-unit {
+  font-size: 13px;
+  color: var(--muted);
+  margin-left: 4px;
+  font-weight: 400;
+}
+
+.kpi-tile[data-severity="critical"] .kpi-value {
+  color: var(--status-critical);
+}
+
+.kpi-tile[data-severity="caution"] .kpi-value {
+  color: var(--status-caution);
+}
+
+.kpi-tile[data-severity="good"] .kpi-value {
+  color: var(--status-good);
+}
+
+/* --- status badge (colour + icon + text -- never colour alone) ------------------------------- */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-online,
+.status-good,
+.status-ok,
+.status-closed {
+  color: var(--status-good);
+  border-color: var(--status-good);
+}
+.status-online .status-dot,
+.status-good .status-dot,
+.status-ok .status-dot,
+.status-closed .status-dot {
+  background: var(--status-good);
+}
+
+.status-info,
+.status-dispatching {
+  color: var(--status-info);
+  border-color: var(--status-info);
+}
+.status-info .status-dot,
+.status-dispatching .status-dot {
+  background: var(--status-info);
+}
+
+.status-stale,
+.status-warning,
+.status-caution,
+.status-degraded {
+  color: var(--status-caution);
+  border-color: var(--status-caution);
+}
+.status-stale .status-dot,
+.status-warning .status-dot,
+.status-caution .status-dot,
+.status-degraded .status-dot {
+  background: var(--status-caution);
+}
+
+.status-offline,
+.status-fault,
+.status-critical,
+.status-breach {
+  color: var(--status-critical);
+  border-color: var(--status-critical);
+}
+.status-offline .status-dot,
+.status-fault .status-dot,
+.status-critical .status-dot,
+.status-breach .status-dot {
+  background: var(--status-critical);
+}
+
+.status-neutral,
+.status-unknown {
+  color: var(--status-neutral);
+  border-color: var(--status-neutral);
+}
+.status-neutral .status-dot,
+.status-unknown .status-dot {
+  background: var(--status-neutral);
+}
+
+/* --- stale badge (data age -- every value on screen must show its age) ------------------------ */
+
+.stale-badge {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.stale-badge[data-stale="true"] {
+  color: var(--status-caution);
+  font-weight: 600;
+}
+
+/* --- data table ---------------------------------------------------------------------------------*/
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table th.num,
+.data-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table tbody tr:hover {
+  background: var(--panel-2);
+}
+
+.data-table tbody tr.clickable-row {
+  cursor: pointer;
+}
+
+.data-table tbody tr.clickable-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.data-table td.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 20px;
+}
+
+/* --- buttons ------------------------------------------------------------------------------------*/
+
+.btn {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn:hover {
+  filter: brightness(1.1);
+}
+
+.btn-primary {
+  border-color: var(--status-info);
+  color: var(--status-info);
+}
+
+.btn-danger {
+  border-color: var(--status-critical);
+  color: var(--status-critical);
+  font-weight: 600;
+}
+
+/* the scoped safe-stop control must be visually distinct and hard to hit by accident */
+.btn-safestop {
+  border: 2px solid var(--status-critical);
+  background: color-mix(in srgb, var(--status-critical) 12%, var(--panel));
+  color: var(--status-critical);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 10px 18px;
+}
+
+/* --- confirm dialog (two-step confirmation) ------------------------------------------------------*/
+
+[x-cloak] {
+  display: none !important;
+}
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.confirm-dialog {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  max-width: 420px;
+  width: 90%;
+}
+
+.confirm-dialog h2 {
+  margin-top: 0;
+  font-size: 15px;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* --- map ------------------------------------------------------------------------------------------*/
+
+.og-map {
+  height: 420px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+/* --- responsive: 1280px desktop and tablet (BUILD.md UI brief) ------------------------------------*/
+
+@media (max-width: 900px) {
+  .og-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .og-nav {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 8px;
+  }
+
+  .og-nav ul {
+    display: flex;
+    flex: none;
+  }
+
+  .og-nav-role {
+    display: none;
+  }
+}

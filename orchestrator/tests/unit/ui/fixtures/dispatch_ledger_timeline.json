@@ -1,0 +1,82 @@
+{
+  "bank_id": "BANK-0001",
+  "bank_capacity_kw": 500.0,
+  "reservations": [
+    {
+      "reservation_id": "RES-1",
+      "obligation_id": "OBL-1002",
+      "bank_id": "BANK-0001",
+      "kind": "POWER_KW",
+      "amount": "40.0",
+      "interval_start": "2026-09-25T18:00:00+00:00",
+      "interval_end": "2026-09-25T18:15:00+00:00",
+      "ledger_version": 7,
+      "released_at": null
+    },
+    {
+      "reservation_id": "RES-2",
+      "obligation_id": "OBL-1003",
+      "bank_id": "BANK-0001",
+      "kind": "POWER_KW",
+      "amount": "8.0",
+      "interval_start": "2026-09-25T18:00:00+00:00",
+      "interval_end": "2026-09-25T18:15:00+00:00",
+      "ledger_version": 7,
+      "released_at": null
+    },
+    {
+      "reservation_id": "RES-3",
+      "obligation_id": "OBL-1002",
+      "bank_id": "BANK-0001",
+      "kind": "POWER_KW",
+      "amount": "45.0",
+      "interval_start": "2026-09-25T18:15:00+00:00",
+      "interval_end": "2026-09-25T18:30:00+00:00",
+      "ledger_version": 8,
+      "released_at": null
+    },
+    {
+      "reservation_id": "RES-4",
+      "obligation_id": "OBL-1099",
+      "bank_id": "BANK-0001",
+      "kind": "POWER_KW",
+      "amount": "12.0",
+      "interval_start": "2026-09-25T18:00:00+00:00",
+      "interval_end": "2026-09-25T18:15:00+00:00",
+      "ledger_version": 5,
+      "released_at": "2026-09-25T18:05:00+00:00"
+    }
+  ],
+  "grants": [
+    {
+      "grant_id": "GRANT-1",
+      "cycle_id": "CYCLE-100",
+      "obligation_id": "OBL-1002",
+      "bank_id": "BANK-0001",
+      "granted_kw": "40.0",
+      "is_headroom": false,
+      "ledger_version": 7,
+      "command_batch_id": "BATCH-1"
+    },
+    {
+      "grant_id": "GRANT-2",
+      "cycle_id": "CYCLE-101",
+      "obligation_id": "OBL-1002",
+      "bank_id": "BANK-0002",
+      "granted_kw": "40.0",
+      "is_headroom": false,
+      "ledger_version": 8,
+      "command_batch_id": "BATCH-2"
+    },
+    {
+      "grant_id": "GRANT-3",
+      "cycle_id": "CYCLE-101",
+      "obligation_id": null,
+      "bank_id": "BANK-0001",
+      "granted_kw": "15.0",
+      "is_headroom": true,
+      "ledger_version": 8,
+      "command_batch_id": "BATCH-2"
+    }
+  ]
+}

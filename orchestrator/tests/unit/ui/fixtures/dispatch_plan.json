@@ -1,0 +1,13 @@
+{
+  "plan_id": "PLAN-9001",
+  "plan_mode": "L-ID",
+  "gate_kind": "SCHEDULED_15MIN",
+  "horizon_start": "2026-09-25T18:00:00+00:00",
+  "horizon_end": "2026-09-25T18:15:00+00:00",
+  "scenario_set": [{"basis": "P50"}],
+  "solver_status": "OPTIMAL",
+  "solver_gap": "0.004",
+  "solver_time_ms": 128,
+  "objective_value": "1542.30",
+  "superseded_by": null
+}

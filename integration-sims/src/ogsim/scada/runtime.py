@@ -1,0 +1,128 @@
+"""ogsim.scada.runtime -- ScadaEngine: per-tick bank aggregation + anomalies,
+plus the thin async MQTT shell.
+
+`ScadaEngine` is pure (no I/O) and unit-testable with a `FakeClock`;
+`run_scada` is the async glue that feeds it from `ogsim.common.mqtt_client`.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any
+
+import numpy as np
+
+from ogsim.common.clock import Clock
+from ogsim.common.config import ScadaConfig
+from ogsim.common.mqtt_client import SimMqttClient
+from ogsim.common.scenario import parse_scenario_cmd, utc_timestamp
+from ogsim.scada.aggregation import BankTelemetryBuffer, bank_load_kw, kw_to_kva
+from ogsim.scada.anomalies import SCADA_ANOMALY_TYPES, ScadaAnomalyManager
+from ogsim.scada.background import BackgroundLoadModel
+from ogsim.scada.instructions import OverloadRule, limit_instruction
+
+logger = logging.getLogger(__name__)
+
+
+class ScadaEngine:
+    """Pure per-tick SCADA logic: aggregate fleet telemetry per bank, apply
+    anomalies, evaluate the overload rule, build outbound messages."""
+
+    def __init__(self, config: ScadaConfig, seed: int = 0) -> None:
+        self.config = config
+        self.rng = np.random.default_rng(seed)
+        self.bank_ids = [f"bank-{i:03d}" for i in range(config.bank_count)]
+        self.zones = [config.zones[i % len(config.zones)] for i in range(config.bank_count)]
+        self.kva_rating = {b: config.bank_kva_rating_default for b in self.bank_ids}
+        self.buffers: dict[str, BankTelemetryBuffer] = {b: BankTelemetryBuffer() for b in self.bank_ids}
+        self.background = BackgroundLoadModel(
+            config.bank_count, config.base_load_kw_default, config.history_tsv_path, self.rng
+        )
+        self.anomalies = ScadaAnomalyManager(self.bank_ids, self.zones)
+        self.overload_rule = OverloadRule(config.overload_consecutive_samples)
+
+    def ingest_telemetry(self, hub_id: str, bank_id: str, p_kw: float) -> None:
+        buffer = self.buffers.get(bank_id)
+        if buffer is not None:
+            buffer.update(hub_id, p_kw)
+
+    def handle_scenario_cmd(self, raw: dict[str, Any]) -> bool:
+        cmd = parse_scenario_cmd(raw)
+        if cmd.catalogue_type not in SCADA_ANOMALY_TYPES:
+            return False
+        self.anomalies.start(
+            cmd.id,
+            cmd.catalogue_type,
+            cmd.target_kind,
+            cmd.target_ref,
+            cmd.params,
+            cmd.start_epoch,
+            cmd.duration_s,
+        )
+        return True
+
+    def tick(self, now: float) -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[str, dict[str, Any]]]]:
+        """Returns `(bank_signal_messages, instruction_messages)` as
+        `(topic_suffix, message)` pairs for this tick."""
+        self.anomalies.tick(now)
+        noise = self.rng.normal(0.0, self.config.base_load_kw_default * 0.02, size=self.config.bank_count)
+        background_kw = self.background.load_kw(now, noise)
+
+        signals: list[tuple[str, dict[str, Any]]] = []
+        instructions: list[tuple[str, dict[str, Any]]] = []
+        for i, bank_id in enumerate(self.bank_ids):
+            modifiers = self.anomalies.modifiers[bank_id]
+            if modifiers.suppressed:
+                continue
+            real_kw = bank_load_kw(self.buffers[bank_id].net_battery_kw(), float(background_kw[i]))
+            value_kw, quality = self.anomalies.apply_reading(bank_id, real_kw, "good", now)
+            kva = kw_to_kva(value_kw)
+            ts = utc_timestamp(now + modifiers.time_skew_s)
+            signals.append(
+                (
+                    f"scada/{bank_id}",
+                    {
+                        "bank_id": bank_id,
+                        "signal": "APPARENT_POWER_KVA",
+                        "value": round(kva, 3),
+                        "unit": "kVA",
+                        "quality": quality,
+                        "ts": ts,
+                    },
+                )
+            )
+            pending = self.anomalies.take_pending_instruction(bank_id)
+            if pending is not None:
+                instructions.append((f"scada/instruction/{bank_id}", self._instruction_message(pending, now)))
+            elif self.overload_rule.observe(bank_id, kva, self.kva_rating[bank_id]):
+                msg = limit_instruction(
+                    str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
+                )
+                instructions.append((f"scada/instruction/{bank_id}", msg))
+        return signals, instructions
+
+    def _instruction_message(self, pending: dict[str, Any], now: float) -> dict[str, Any]:
+        return {
+            "instruction_id": str(uuid.uuid4()),
+            "bank_id": pending["bank_id"],
+            "kind": pending["kind"],
+            "limit_kw": pending.get("limit_kw"),
+            "issued_at": utc_timestamp(now),
+            "expires_at": None,
+            "issued_by": "SCENARIO_ANOMALY",
+        }
+
+
+async def run_scada(client: SimMqttClient, engine: ScadaEngine, clock: Clock) -> None:
+    """Async shell: subscribes to fleet telemetry and scenario commands,
+    ticks `engine` on `config.publish_interval_s`. Kept thin and not
+    unit-tested (the engine above is)."""
+    await client.subscribe("tel/#", qos=0)
+    await client.subscribe("scenario/cmd", qos=1)
+    while True:
+        now = clock.now()
+        signals, instructions = engine.tick(now)
+        await client.publish_batch("scada_bank_signal", signals, qos=0)
+        await client.publish_batch("scada_utility_instruction", instructions, qos=1)
+        await clock.sleep(engine.config.publish_interval_s)

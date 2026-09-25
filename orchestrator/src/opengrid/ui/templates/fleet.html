@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Fleet -- OpenGrid Orchestrator{% endblock %}
+{% block header_title %}Fleet monitoring & control{% endblock %}
+{% block header_actions %}
+<span class="stale-badge" id="fleet-updated" data-stale="false">live</span>
+{% endblock %}
+
+{% block content %}
+<section class="og-panel" aria-label="Filters">
+  <form method="get" action="{{ base_path }}/fleet" class="og-grid" style="grid-template-columns: repeat(4, auto);">
+    <label>Zone
+      <input type="text" name="zone" value="{{ filters.zone|default('') }}">
+    </label>
+    <label>Bank
+      <input type="text" name="bank" value="{{ filters.bank|default('') }}">
+    </label>
+    <label>Health
+      <select name="health">
+        <option value="">any</option>
+        {% for h in ["online", "stale", "offline", "fault"] %}
+        <option value="{{ h }}" {{ 'selected' if filters.health == h else '' }}>{{ h }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn" type="submit">Filter</button>
+  </form>
+</section>
+
+{% if is_operator %}
+<section class="og-panel" aria-label="Fleet-wide safe stop">
+  <h2>Scoped safe stop</h2>
+  <p class="stale-badge">Stops new dispatch for the chosen scope. Never force-discharges below reserve. Requires confirmation.</p>
+  {% with dialog_id='safestop-fleet', trigger_label='Safe stop: entire fleet', title='Confirm fleet-wide safe stop', summary='This halts new dispatch for every bank in the fleet until released. This action is logged and requires operator confirmation.', confirm_url=base_path ~ '/api/safestop/fleet/confirm', confirm_label='Engage fleet stop', variant='safestop' %}
+    {% include "_partials/confirm_dialog.html" %}
+  {% endwith %}
+  <div id="confirm-result" role="status"></div>
+</section>
+{% endif %}
+
+<section class="og-panel" aria-label="Bank / hub table">
+  <h2>Hubs</h2>
+  <p>Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
+  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}], rows=table_rows, empty_message='No hubs match the current filter', row_id_key='hub_id' %}
+    {% include "_partials/data_table.html" %}
+  {% endwith %}
+</section>
+
+<section class="og-panel" id="hub-drilldown-container" aria-label="Hub detail" aria-live="polite">
+  <p class="stale-badge">Select a hub row to see its drill-down (SoC, P, health, lease, last command, telemetry).</p>
+</section>
+
+{% if is_operator %}
+<section class="og-panel" aria-label="Manual command">
+  <h2>Manual command</h2>
+  <form id="manual-command-form" class="og-grid" style="grid-template-columns: repeat(4, auto);"
+        hx-post="{{ base_path }}/api/fleet/command" hx-target="#manual-command-result" hx-swap="innerHTML">
+    <label>Bank or hub id <input type="text" name="target_id" required></label>
+    <label>Setpoint (kW) <input type="number" step="0.1" name="p_kw_setpoint" required></label>
+    <label>Reason <input type="text" name="reason" required></label>
+    <button class="btn btn-primary" type="submit">Propose (step 1 of 2)</button>
+  </form>
+  <div id="manual-command-result" role="status"></div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("tr.clickable-row[data-row-id]").forEach(function (row) {
+      function open() {
+        htmx.ajax("GET", "{{ base_path }}/fleet/hubs/" + row.dataset.rowId, "#hub-drilldown-container");
+      }
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          open();
+        }
+      });
+    });
+
+    og.sse("{{ base_path }}/api/stream/fleet", function () {
+      document.getElementById("fleet-updated").textContent = "live";
+    }, {
+      onError: function () {
+        document.getElementById("fleet-updated").textContent = "reconnecting";
+        document.getElementById("fleet-updated").dataset.stale = "true";
+      },
+    });
+  });
+</script>
+{% endblock %}

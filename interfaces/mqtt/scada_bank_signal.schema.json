@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/scada_bank_signal.schema.json",
+  "title": "ScadaBankSignal",
+  "description": "Simulated utility SCADA -> orchestrator, published on <root>/scada/<bank_id>, QoS 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bank_id", "signal", "value", "unit", "quality", "ts"],
+  "properties": {
+    "bank_id": { "type": "string", "minLength": 1 },
+    "signal": { "type": "string", "enum": ["APPARENT_POWER_KVA", "REAL_POWER_KW", "VOLTAGE_PU", "CURRENT_A"] },
+    "value": { "type": "number" },
+    "unit": { "type": "string", "enum": ["kVA", "kW", "pu", "A"] },
+    "quality": {
+      "type": "string",
+      "enum": ["good", "stale", "missing", "out_of_range", "comm_fail"]
+    },
+    "ts": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Profitability -- OpenGrid Orchestrator{% endblock %}
+{% block header_title %}Profitability{% endblock %}
+
+{% block header_actions %}
+<form method="get" action="{{ base_path }}/profitability" aria-label="Filter profitability" style="display:flex; gap:6px; align-items:center;">
+  <label for="service">Service</label>
+  <select id="service" name="service">
+    <option value="" {% if not service %}selected{% endif %}>All</option>
+    {% for svc in ["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY"] %}
+    <option value="{{ svc }}" {% if service == svc %}selected{% endif %}>{{ svc }}</option>
+    {% endfor %}
+  </select>
+  <label for="day">Day</label>
+  <input type="date" id="day" name="day" value="{{ day or '' }}">
+  <button class="btn" type="submit">Filter</button>
+</form>
+<span class="stale-badge" id="profitability-updated" data-stale="false">poll: 30s</span>
+{% endblock %}
+
+{% block content %}
+<section class="og-grid" aria-label="Totals">
+  {% with label='Revenue', value='%.2f'|format(table.totals.revenue), unit='USD', since_iso=generated_at, stale_after_s=60 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+  {% with label='Energy cost', value='%.2f'|format(table.totals.energy_cost), unit='USD', since_iso=generated_at, stale_after_s=60 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+  {% with label='Degradation', value='%.2f'|format(table.totals.degradation_cost), unit='USD', since_iso=generated_at, stale_after_s=60 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+  {% with label='Penalty', value='%.2f'|format(table.totals.penalty), unit='USD', since_iso=generated_at, stale_after_s=60, severity=('caution' if table.totals.penalty else 'good') %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+  {% with label='Net margin', value='%.2f'|format(table.totals.net_value), unit='USD', since_iso=generated_at, stale_after_s=60 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+  {% with label='Forgone upside (lock)', value='%.2f'|format(forgone_upside.total_forgone_upside), unit='USD', since_iso=generated_at, stale_after_s=60, severity=('caution' if forgone_upside.total_forgone_upside else 'neutral') %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+</section>
+
+<section class="og-panel" aria-labelledby="pnl-heading">
+  <h2 id="pnl-heading">Per obligation / day ({{ table.row_count }} rows)</h2>
+  {% with columns=[{"key": "obligation_id", "label": "Obligation"}, {"key": "service_type", "label": "Service"}, {"key": "customer_id", "label": "Customer"}, {"key": "revenue", "label": "Revenue", "numeric": true}, {"key": "energy_cost", "label": "Energy cost", "numeric": true}, {"key": "degradation_cost", "label": "Degradation", "numeric": true}, {"key": "penalty", "label": "Penalty", "numeric": true}, {"key": "net_value", "label": "Net", "numeric": true}, {"key": "rule_baseline_value", "label": "Baseline", "numeric": true}, {"key": "forgone_upside", "label": "Forgone", "numeric": true}], rows=table.rows, empty_message='No profitability data for this filter' %}
+    {% include "_partials/data_table.html" %}
+  {% endwith %}
+</section>
+
+<section class="og-panel" aria-labelledby="lp-baseline-heading">
+  <h2 id="lp-baseline-heading">LP vs rule baseline ({{ lp_vs_baseline.compared_count }} obligations)</h2>
+  <div id="lp-baseline-chart" style="height: 260px;" role="img" aria-label="Bar chart comparing LP net value to rule baseline"></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    og.chart("#lp-baseline-chart", {{ lp_vs_baseline.chart_option | tojson }});
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,5 @@
+[
+  {"source": "ercot", "product": "np6-905-cd", "series": "price", "ts": "2026-09-25T18:00:00+00:00", "value": 32.5, "unit": "usd_per_mwh", "quality": "GOOD", "recorded_at": "2026-09-25T18:00:05+00:00"},
+  {"source": "ercot", "product": "np6-905-cd", "series": "price", "ts": "2026-09-25T18:15:00+00:00", "value": 41.0, "unit": "usd_per_mwh", "quality": "GOOD", "recorded_at": "2026-09-25T18:15:05+00:00"},
+  {"source": "ercot", "product": "np6-905-cd", "series": "price", "ts": "2026-09-25T17:45:00+00:00", "value": 29.0, "unit": "usd_per_mwh", "quality": "GOOD", "recorded_at": "2026-09-25T17:45:05+00:00"}
+]

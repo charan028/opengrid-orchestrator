@@ -1,0 +1,5 @@
+[
+  {"source": "ercot", "product": "np6-905-cd", "last_value_at": "2026-09-25T18:09:30+00:00", "last_success_at": "2026-09-25T18:09:30+00:00", "consecutive_failures": 0, "breaker_open": false, "active_key": "PRIMARY"},
+  {"source": "sim", "product": "scada-bank-load", "last_value_at": "2026-09-25T18:09:58+00:00", "last_success_at": "2026-09-25T18:09:58+00:00", "consecutive_failures": 0, "breaker_open": false, "active_key": null},
+  {"source": "eia", "product": "wind-solar", "last_value_at": "2026-09-25T17:40:00+00:00", "last_success_at": "2026-09-25T17:40:00+00:00", "consecutive_failures": 4, "breaker_open": true, "active_key": null}
+]

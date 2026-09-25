@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenGrid integration-sims - scada
+After=network.target mosquitto.service
+Requires=mosquitto.service
+PartOf=ogsim.target
+
+[Service]
+Type=simple
+User=opengrid
+Group=opengrid
+WorkingDirectory=/opt/opengrid/current/integration-sims
+Environment=PYTHONPATH=/opt/opengrid/current/integration-sims/src
+EnvironmentFile=/etc/opengrid/secrets.env
+ExecStart=/opt/ogsim/venv/bin/python -m ogsim.scada
+Restart=always
+RestartSec=2
+MemoryMax=384M
+MemoryHigh=307M
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opengrid /var/log/opengrid
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

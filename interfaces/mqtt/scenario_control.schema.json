@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/scenario_control.schema.json",
+  "title": "ScenarioControl",
+  "description": "api/operator -> sim, published on <root>/scenario/cmd, QoS 1. Also exposed by ogsim.control as REST + CLI (BUILD.md §3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "target", "type", "start"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["sim", "asset", "zone", "bank", "hub"] },
+        "ref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "SCADA_BANK_OVERLOAD", "SCADA_LOAD_SPIKE", "SCADA_FROZEN_VALUE", "SCADA_BAD_QUALITY",
+        "SCADA_STALE", "SCADA_OUT_OF_RANGE", "SCADA_OSCILLATION", "SCADA_PHASE_IMBALANCE",
+        "SCADA_TOPOLOGY_CHANGE", "SCADA_COMMS_LOSS", "SCADA_UTILITY_INSTRUCTION", "SCADA_TIME_SKEW",
+        "FLEET_HUB_OFFLINE", "FLEET_ZONE_MASS_DISCONNECT", "FLEET_NOT_FOLLOWING_COMMANDS",
+        "FLEET_INVERTER_TRIP", "FLEET_SOC_SENSOR_DRIFT", "FLEET_TELEMETRY_DELAY_BURST",
+        "FLEET_LEASE_LOSS", "FLEET_CLOCK_SKEW", "FLEET_TAMPERED_UNSIGNED_COMMAND",
+        "FLEET_RESERVE_FLOOR_PRESSURE",
+        "MARKET_PRICE_SPIKE", "MARKET_NEGATIVE_PRICE", "MARKET_AS_PRICE_JUMP", "MARKET_HTTP_5XX",
+        "MARKET_429_THROTTLE", "MARKET_401_KEY_REJECT", "MARKET_STALE_POSTING",
+        "MARKET_MALFORMED_PAYLOAD", "MARKET_SLOW_RESPONSE", "MARKET_NWS_EXTREME_WEATHER",
+        "PARTNER_CALL"
+      ]
+    },
+    "params": { "type": "object" },
+    "start": { "type": "string", "format": "date-time" },
+    "duration_s": { "type": ["integer", "null"], "minimum": 0 }
+  }
+}

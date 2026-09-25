@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Health -- OpenGrid Orchestrator{% endblock %}
+{% block header_title %}Health{% endblock %}
+{% block header_actions %}
+<span class="stale-badge" id="health-updated" data-stale="false">live</span>
+{% endblock %}
+
+{% block content %}
+{% if health.degraded_mode %}
+<div class="og-degraded-banner" role="alert">Degraded mode: {{ health.degraded_mode }}</div>
+{% endif %}
+
+<section class="og-panel" aria-label="Process status">
+  <h2>Processes</h2>
+  <p>Data {% with since_iso=rendered_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
+  {% with columns=[{"key": "process", "label": "Process"}, {"key": "status_badge", "label": "Status", "html": true}, {"key": "since_display", "label": "Since"}], rows=process_rows, empty_message='No heartbeat data' %}
+    {% include "_partials/data_table.html" %}
+  {% endwith %}
+</section>
+
+<section class="og-grid">
+  <div class="og-panel" aria-label="Feed freshness">
+    <h2>Feed freshness</h2>
+    {% with columns=[{"key": "source", "label": "Source"}, {"key": "product", "label": "Product"}, {"key": "quality_badge", "label": "Quality", "html": true}, {"key": "age_display", "label": "Age", "numeric": true}], rows=feed_rows, empty_message='No feed data' %}
+      {% include "_partials/data_table.html" %}
+    {% endwith %}
+  </div>
+  <div class="og-panel" aria-label="Hub health histogram">
+    <h2>Hub health by zone</h2>
+    <div id="hub-health-chart" style="height: 220px;"></div>
+  </div>
+</section>
+
+<section class="og-grid">
+  <div class="og-panel" aria-label="Cycle latency">
+    <h2>Cycle latency (p50/p99)</h2>
+    <div id="cycle-latency-chart" style="height: 200px;"></div>
+  </div>
+  <div class="og-panel" aria-label="Alerts">
+    <h2>Alerts</h2>
+    {% with columns=[{"key": "severity_badge", "label": "Severity", "html": true}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=alert_rows, empty_message='No alerts' %}
+      {% include "_partials/data_table.html" %}
+    {% endwith %}
+    {% if is_operator %}
+    <form hx-post="{{ base_path }}/api/health/alerts/ack" hx-target="#ack-result">
+      <label>Alert id <input type="text" name="alert_id" required></label>
+      <button class="btn" type="submit">Acknowledge</button>
+    </form>
+    <div id="ack-result" role="status"></div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    og.chart("#hub-health-chart", {
+      grid: { left: 40, right: 10, top: 10, bottom: 30 },
+      xAxis: { type: "category", data: [] },
+      yAxis: { type: "value", name: "hubs" },
+      series: [{ type: "bar", data: [] }],
+    });
+    og.chart("#cycle-latency-chart", {
+      grid: { left: 50, right: 10, top: 10, bottom: 20 },
+      legend: { data: ["p50", "p99"] },
+      xAxis: { type: "category", data: [] },
+      yAxis: { type: "value", name: "ms" },
+      series: [
+        { name: "p50", type: "line", data: [], showSymbol: false },
+        { name: "p99", type: "line", data: [], showSymbol: false },
+      ],
+    });
+
+    og.sse("{{ base_path }}/api/stream/health", function () {
+      document.getElementById("health-updated").textContent = "live";
+    }, {
+      onError: function () {
+        document.getElementById("health-updated").textContent = "reconnecting";
+        document.getElementById("health-updated").dataset.stale = "true";
+      },
+    });
+    og.sse("{{ base_path }}/api/stream/alerts", function () {});
+  });
+</script>
+{% endblock %}

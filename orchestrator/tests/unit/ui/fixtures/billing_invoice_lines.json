@@ -1,0 +1,60 @@
+{
+  "lines": [
+    {
+      "invoice_line_id": "INV-1",
+      "contract_id": "CTR-A",
+      "obligation_id": "OBL-1001",
+      "period_start": "2026-09-01",
+      "period_end": "2026-09-30",
+      "line_type": "CAPACITY_PAYMENT",
+      "quantity": "12.5",
+      "unit": "kW",
+      "rate": "4.00",
+      "amount": "50.00",
+      "status": "FINAL",
+      "supersedes": null,
+      "trace_roll_up": "hash-1",
+      "version": 1
+    },
+    {
+      "invoice_line_id": "INV-2",
+      "contract_id": "CTR-B",
+      "obligation_id": "OBL-1002",
+      "period_start": "2026-09-01",
+      "period_end": "2026-09-30",
+      "line_type": "LD_PENALTY",
+      "quantity": null,
+      "unit": null,
+      "rate": null,
+      "amount": "15.00",
+      "status": "PROVISIONAL",
+      "supersedes": null,
+      "trace_roll_up": null,
+      "version": 1
+    }
+  ],
+  "performance": [
+    {
+      "performance_id": "PERF-1",
+      "obligation_id": "OBL-1001",
+      "interval_start": "2026-09-25T18:00:00+00:00",
+      "interval_end": "2026-09-25T19:00:00+00:00",
+      "compliance_pct": "98.5",
+      "season_pct": "100.0",
+      "availability_pct": "99.0",
+      "response_time_s": 4,
+      "passed_threshold": true
+    },
+    {
+      "performance_id": "PERF-2",
+      "obligation_id": "OBL-1002",
+      "interval_start": "2026-09-25T18:00:00+00:00",
+      "interval_end": "2026-09-25T19:00:00+00:00",
+      "compliance_pct": "80.0",
+      "season_pct": "90.0",
+      "availability_pct": "85.0",
+      "response_time_s": 9,
+      "passed_threshold": false
+    }
+  ]
+}

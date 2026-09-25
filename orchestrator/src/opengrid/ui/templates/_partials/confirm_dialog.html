@@ -1,0 +1,39 @@
+{# confirm_dialog.html -- two-step confirmation (BUILD.md base contract partial; 02b S7.3). The trigger
+   button opens an Alpine.js modal; only the modal's own confirm button issues the hx-post to `confirm_url`
+   (step 2). Params:
+     dialog_id: str (unique per instance, for aria-labelledby)
+     trigger_label: str, title: str, summary: str (human-readable, from the step-1 proposal response)
+     confirm_url: str (POST .../{proposal_id}/confirm), confirm_label: str|None
+     variant: "primary"|"danger"|"safestop"|None (trigger button style; "safestop" is the visually
+       distinct, hard-to-hit-by-accident scoped stop control)
+     target: str|None (CSS selector for the hx-post result, default "#confirm-result") #}
+<span x-data="{ open: false, busy: false }" class="confirm-dialog-wrapper">
+  <button type="button"
+          class="btn {{ 'btn-safestop' if variant == 'safestop' else ('btn-danger' if variant == 'danger' else 'btn-primary') }}"
+          @click="open = true">
+    {{ trigger_label }}
+  </button>
+  <div class="confirm-dialog-backdrop"
+       x-show="open"
+       x-cloak
+       x-on:keydown.escape.window="open = false"
+       role="presentation">
+    <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="{{ dialog_id }}-title">
+      <h2 id="{{ dialog_id }}-title">{{ title }}</h2>
+      <p>{{ summary }}</p>
+      <div class="confirm-dialog-actions">
+        <button type="button" class="btn" x-on:click="open = false" :disabled="busy">Cancel</button>
+        <button type="button"
+                class="btn {{ 'btn-safestop' if variant == 'safestop' else 'btn-danger' }}"
+                :disabled="busy"
+                hx-post="{{ confirm_url }}"
+                hx-target="{{ target|default('#confirm-result') }}"
+                hx-swap="innerHTML"
+                x-on:click="busy = true"
+                x-on:htmx:after-request="busy = false; open = false">
+          {{ confirm_label|default('Confirm') }}
+        </button>
+      </div>
+    </div>
+  </div>
+</span>

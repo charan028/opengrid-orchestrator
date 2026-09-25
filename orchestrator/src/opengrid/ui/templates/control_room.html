@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Control room -- OpenGrid Orchestrator{% endblock %}
+{% block header_title %}Control room{% endblock %}
+{% block header_actions %}
+<span class="stale-badge" id="control-room-updated" data-stale="false">live</span>
+{% endblock %}
+
+{% block content %}
+<section class="og-grid" aria-label="Key performance indicators">
+  {% with label='Fleet power', value=health.fleet_mw|default('--'), unit='MW', since_iso=health.as_of|default(none), stale_after_s=10 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+  {% with label='Fleet energy', value=health.fleet_mwh|default('--'), unit='MWh', since_iso=health.as_of|default(none), stale_after_s=10 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+  {% with label='Active commitments', value=health.active_commitments|default('--'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+  {% with label="Today's net margin", value=health.net_margin_usd|default('--'), unit='USD', since_iso=health.as_of|default(none), stale_after_s=30 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+  {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+  {% with label='kWh sold twice', value=health.double_sold_kwh|default(0), severity=('critical' if health.double_sold_kwh else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+  {% with label='Commitment switches', value=health.commitment_switches|default(0), severity=('critical' if health.commitment_switches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+    {% include "_partials/kpi_tile.html" %}
+  {% endwith %}
+</section>
+
+<section class="og-panel" aria-label="Fleet map">
+  <h2>Fleet map</h2>
+  <div id="fleet-map" class="og-map"
+       data-hubs='{{ hubs|tojson }}'
+       role="img" aria-label="Map of fleet banks coloured by loading"></div>
+</section>
+
+<section class="og-grid">
+  <div class="og-panel" aria-label="ERCOT price, load, wind, solar">
+    <h2>Market ticker</h2>
+    <div id="market-ticker-chart" style="height: 220px;"></div>
+    <div class="stale-badge" data-since="{{ health.as_of|default('') }}" data-stale-after="600">age: unknown</div>
+  </div>
+  <div class="og-panel" aria-label="Open alerts">
+    <h2>Open alerts</h2>
+    {% with columns=[{"key": "severity", "label": "Severity"}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=health.alerts|default([]), empty_message='No open alerts' %}
+      {% include "_partials/data_table.html" %}
+    {% endwith %}
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var mapEl = document.getElementById("fleet-map");
+    var hubs = JSON.parse(mapEl.dataset.hubs || "[]");
+    var map = L.map(mapEl).setView([31.0, -99.0], 6); // ERCOT-ish default center
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap" }).addTo(map);
+    hubs.forEach(function (h) {
+      if (h.lat == null || h.lon == null) { return; }
+      var color = h.health === "online" ? "#1baf7a" : h.health === "fault" ? "#e34948" : "#eda100";
+      L.circleMarker([h.lat, h.lon], { radius: 4, color: color }).addTo(map).bindPopup(h.hub_id);
+    });
+
+    og.chart("#market-ticker-chart", {
+      grid: { left: 40, right: 10, top: 10, bottom: 20 },
+      xAxis: { type: "category", data: [] },
+      yAxis: { type: "value", name: "usd/mwh" },
+      series: [{ type: "line", data: [], showSymbol: false, lineStyle: { width: 2 } }],
+    });
+
+    og.sse("{{ base_path }}/api/stream/control-room", function (data) {
+      document.getElementById("control-room-updated").textContent = "live";
+      // widgets refresh their own KPI values from `data` as the API's payload shape stabilizes.
+    }, {
+      onError: function () {
+        document.getElementById("control-room-updated").textContent = "reconnecting";
+        document.getElementById("control-room-updated").dataset.stale = "true";
+      },
+    });
+  });
+</script>
+{% endblock %}

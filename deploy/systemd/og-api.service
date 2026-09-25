@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenGrid Orchestrator - api
+After=network.target postgresql.service mosquitto.service
+Requires=postgresql.service mosquitto.service
+PartOf=opengrid.target
+
+[Service]
+Type=simple
+User=opengrid
+Group=opengrid
+WorkingDirectory=/opt/opengrid/current/orchestrator
+Environment=PYTHONPATH=/opt/opengrid/current/orchestrator/src
+Environment=OG_CONFIG=/opt/opengrid/current/orchestrator/config/orchestrator.toml
+EnvironmentFile=/etc/opengrid/secrets.env
+EnvironmentFile=/etc/opengrid/api_keys.env
+ExecStart=/opt/opengrid/venv/bin/python -m opengrid.api
+Restart=always
+RestartSec=2
+MemoryMax=1G
+MemoryHigh=819M
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opengrid /var/log/opengrid
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

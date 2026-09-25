@@ -1,0 +1,10 @@
+{# kpi_tile.html -- BUILD.md base contract partial. Params: label: str, value: str|number, unit: str|None,
+   severity: "good"|"caution"|"critical"|None, age_s / since_iso / stale_after_s: staleness, per
+   stale_badge.html. #}
+<div class="kpi-tile" data-severity="{{ severity|default('neutral') }}">
+  <div class="kpi-label">{{ label }}</div>
+  <div class="kpi-value">
+    {{ value }}{% if unit %}<span class="kpi-unit">{{ unit }}</span>{% endif %}
+  </div>
+  {% include "_partials/stale_badge.html" %}
+</div>

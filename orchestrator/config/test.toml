@@ -1,0 +1,107 @@
+# Test/dev configuration: points feeds at the market simulator (ogsim.market) instead of live
+# ERCOT/EIA/NWS, and MQTT at the local broker under a workspace-scoped topic root. OG_MQTT_ROOT
+# (set by tools/remote.ps1 per workspace) overrides [mqtt].topic_root below at load time regardless.
+
+[general]
+env = "dev"
+node_id = "test"
+timezone_market = "America/Chicago"
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+database = "og_test"
+pool_min = 1
+pool_max = 4
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+topic_root = "ogtest/dev"
+client_id_prefix = "og-test"
+keepalive_s = 20
+
+[feeds.ercot]
+base_url = "http://127.0.0.1:8090/ercot"
+subscription_key_env = "ERCOT_PUBLIC_API_KEY_PRIMARY"
+subscription_key_secondary_env = "ERCOT_PUBLIC_API_KEY_SECONDARY"
+username_env = "ERCOT_API_USER"
+password_env = "ERCOT_API_PASSWORD"
+budget_requests_per_min = 24
+products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"]
+
+[feeds.eia]
+base_url = "http://127.0.0.1:8090/eia"
+api_key_env = "EIA_API_KEY"
+respondent = "ERCO"
+
+[feeds.nws]
+base_url = "http://127.0.0.1:8090/nws"
+user_agent = "OpenGrid-Orchestrator (ops@tocy-net.net)"
+grid_point = "EWX/156,91"
+
+[feeds.staleness]
+ercot_price_fresh_s = 600
+ercot_price_lgv_s = 900
+ercot_load_fresh_s = 1800
+wind_solar_fresh_s = 10800
+nws_fresh_s = 10800
+eia_fresh_s = 10800
+
+[forecast]
+horizon_hours = 24
+resolution_min = 15
+quantiles = [0.10, 0.50, 0.90]
+
+[fleet]
+hub_count = 200
+banks = 8
+zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"]
+telemetry_interval_s = 2
+lease_ttl_s = 30
+
+[allocator]
+cycle_interval_s = 2
+dwell_s = 300
+hysteresis_usd_per_mwh = 5
+
+[guardian]
+key_path = "/tmp/opengrid_test_guardian_ed25519.key"
+verdict_timeout_ms = 300
+clock_offset_max_ms = 200
+
+[safestop]
+key_path = "/tmp/opengrid_test_safestop_ed25519.key"
+ramp_bank_s = 30
+ramp_zone_s = 60
+ramp_fleet_s = 120
+
+[health]
+heartbeat_interval_s = 5
+heartbeat_miss_threshold = 3
+hub_stale_s = 6
+hub_offline_s = 30
+
+[retention]
+"trace.selection".days = 90
+"trace.commitment".days = 400
+"trace.renomination".days = 400
+"trace.exception".days = 400
+"trace.shortfall".days = 400
+"trace.command".days = 30
+"trace.operator_action".days = 400
+"trace.feed_change".days = 90
+"trace.alert".days = 90
+"telemetry".days = 14
+"feed_obs".days = 30
+
+[api]
+bind_host = "127.0.0.1"
+bind_port = 8080
+sse_heartbeat_s = 15
+
+[ui]
+base_path = "/og"
+
+[metrics]
+bind_host = "127.0.0.1"

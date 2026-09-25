@@ -1,0 +1,16 @@
+name: feed_outage_and_stale
+description: >
+  ERCOT's price feed goes into a 5xx outage, then recovers but stops posting
+  new data (stale). Proves feeds' circuit breaker + last-good-value serving,
+  and health's stale-feed degraded mode (no new commitments while stale).
+steps:
+  - at_s: 0
+    type: http_5xx
+    target: np6-905-cd
+    params: {status: 503}
+    duration: 120
+  - at_s: 120
+    type: stale_posting
+    target: np6-905-cd
+    params: {}
+    duration: 900

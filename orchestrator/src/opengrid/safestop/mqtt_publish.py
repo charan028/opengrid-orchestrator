@@ -1,0 +1,44 @@
+"""Real `StopPublisher`: publishes the retained `<root>/stop/<scope>/<id>` message over an already
+connected `aiomqtt.Client` (topics.md: QoS 1, retained). The client's lifetime is owned by `main.py`
+(one long-lived connection for the process), not by this module.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any
+
+import aiomqtt
+
+from opengrid.platform.config import Config
+from opengrid.platform.mqtt import SchemaValidationError, topic, validate_payload
+
+STOP_QOS = 1
+
+
+class StopPublishError(Exception):
+    """Raised when a stop payload fails schema validation or the MQTT publish itself fails."""
+
+
+@dataclass
+class AiomqttStopPublisher:
+    client: aiomqtt.Client
+    config: Config
+
+    async def publish_retained(self, topic_suffix: str, payload: dict[str, Any]) -> None:
+        try:
+            validate_payload("stop", payload)
+        except SchemaValidationError as exc:
+            raise StopPublishError(f"refusing to publish invalid stop payload: {exc}") from exc
+
+        full_topic = topic(self.config, topic_suffix)
+        try:
+            await self.client.publish(
+                full_topic,
+                payload=json.dumps(payload).encode("utf-8"),
+                qos=STOP_QOS,
+                retain=True,
+            )
+        except aiomqtt.MqttError as exc:
+            raise StopPublishError(f"MQTT publish failed for {full_topic}: {exc}") from exc

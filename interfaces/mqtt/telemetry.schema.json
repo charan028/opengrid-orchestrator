@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/telemetry.schema.json",
+  "title": "Telemetry",
+  "description": "Hub -> orchestrator, published on <root>/tel/<zone>/<bank_id>/<hub_id>, QoS 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hub_id", "bank_id", "zone", "ts", "soc_kwh", "p_kw", "health", "seq", "epoch"],
+  "properties": {
+    "hub_id": { "type": "string", "minLength": 1 },
+    "bank_id": { "type": "string", "minLength": 1 },
+    "zone": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time" },
+    "soc_kwh": { "type": "number", "minimum": 0 },
+    "p_kw": { "type": "number", "description": "+charge / -discharge" },
+    "health": { "type": "string", "enum": ["online", "stale", "fault"] },
+    "seq": { "type": "integer", "minimum": 0 },
+    "epoch": { "type": "integer", "minimum": 0 },
+    "fault_code": { "type": ["string", "null"] }
+  }
+}

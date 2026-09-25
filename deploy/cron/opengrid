@@ -1,0 +1,7 @@
+# /etc/cron.d/opengrid — nightly Postgres backup of the `og` database (deploy-owned; deploy/README.md).
+# The backup script lives at a stable path outside any release symlink so it keeps working
+# across deploys. og_test and og_t_* workspace DBs are never backed up (disposable).
+SHELL=/bin/bash
+PATH=/usr/bin:/bin:/usr/local/bin
+
+0 3 * * * opengrid /bin/bash -lc 'set -a; . /etc/opengrid/secrets.env; set +a; /opt/opengrid/deploy/scripts/backup.sh' >> /var/log/opengrid/backup.log 2>&1

@@ -1,0 +1,207 @@
+"""The 2-second S1-S7 allocation cycle (02a S5), as a pure function of its inputs.
+
+`cycle()` never touches a database or the network -- the thin adapter in
+`opengrid.allocator.__init__.run_cycle` gathers `FleetState`/`LedgerView`/`Schedule`/SCADA/instruction
+inputs from `opengrid.fleet`/`opengrid.ledger`/`opengrid.feeds` and converts this function's
+`CycleResult` into `og.grant` rows for the guardian. Keeping the logic pure makes it possible to
+hypothesis-test K1/K4/K5/K9/K13 without a DB, and keeps the hot path numpy-friendly for 2,000-10,000
+hubs across ~40 banks within the 200 ms budget (BUILD.md S5's performance target).
+
+The allocator NEVER selects new opportunities and NEVER reallocates a committed obligation's capacity
+to a different obligation (K13) -- it only re-derives, every 2 s, how much of each already-committed
+obligation's frozen floor is physically deliverable right now, substitutes hubs within the same
+obligation on health loss (S5), and schedules any leftover headroom (S6).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, MutableMapping, Sequence
+from datetime import datetime
+
+from opengrid.allocator import reasons
+from opengrid.allocator.dist_deferral_pi import DistDeferralPI
+from opengrid.allocator.lexicographic import allocate_tiers
+from opengrid.allocator.models import (
+    CycleResult,
+    DwellState,
+    FleetState,
+    HubSnapshot,
+    Instruction,
+    LedgerView,
+    ObligationCall,
+    PiState,
+    ProposedGrant,
+    ScadaSample,
+    Schedule,
+    ShortfallReport,
+    SubstitutionEvent,
+)
+from opengrid.allocator.price_response import price_responsive_schedule
+from opengrid.allocator.substitution import realize_obligation
+
+_EPS = 1e-9
+_DEFAULT_PRICE_THRESHOLD_USD_PER_MWH = 30.0
+
+
+def cycle(
+    t: datetime,
+    fleet_state: FleetState,
+    ledger_view: LedgerView,
+    schedule: Schedule,
+    scada: Mapping[str, ScadaSample],
+    instructions: Sequence[Instruction],
+    *,
+    cycle_id: str | None = None,
+    pi_states: MutableMapping[str, PiState] | None = None,
+    dwell_states: MutableMapping[str, DwellState] | None = None,
+    price_threshold_usd_per_mwh: float = _DEFAULT_PRICE_THRESHOLD_USD_PER_MWH,
+    dt_c_s: float = 2.0,
+    stickiness: float = 0.2,
+) -> CycleResult:
+    """Run one S1-S7 cycle across every bank in `fleet_state`.
+
+    `pi_states`/`dwell_states` are mutated in place (one entry per bank) so the caller keeps exactly
+    one `DistDeferralPI` integrator and one dwell tracker alive per bank across cycles (K9). Both
+    default to fresh empty dicts when omitted, for one-shot/test use.
+    """
+    cycle_id = cycle_id or t.isoformat()
+    pi_states = {} if pi_states is None else pi_states
+    dwell_states = {} if dwell_states is None else dwell_states
+
+    effective_cap, l2_banks = _apply_instructions(fleet_state, instructions)
+
+    hubs_by_bank: dict[str, list[HubSnapshot]] = {}
+    for hub in fleet_state.hubs:
+        hubs_by_bank.setdefault(hub.bank_id, []).append(hub)
+
+    calls_by_bank: dict[str, list[ObligationCall]] = {}
+    for call in ledger_view.calls:
+        calls_by_bank.setdefault(call.bank_id, []).append(call)
+
+    prices_by_bank = {p.bank_id: p.price_usd_per_mwh for p in schedule.prices}
+
+    grants: list[ProposedGrant] = []
+    shortfalls: list[ShortfallReport] = []
+    substitutions: list[SubstitutionEvent] = []
+
+    for bank in sorted(fleet_state.banks, key=lambda b: b.bank_id):
+        bank_id = bank.bank_id
+        cap = effective_cap.get(bank_id, bank.capability_kw)
+        calls = tuple(calls_by_bank.get(bank_id, ()))
+        hubs_by_obligation = _index_hubs_by_obligation(hubs_by_bank.get(bank_id, ()), calls)
+
+        shortfall_reason = (
+            reasons.R_COMMIT_LOCK_OVERRIDE_L2 if bank_id in l2_banks else reasons.R_COMMIT_LOCK_INFEASIBLE
+        )
+        tier_result = allocate_tiers(bank_id, calls, cap, shortfall_reason=shortfall_reason)
+        shortfalls.extend(tier_result.shortfalls)
+
+        remaining_headroom = tier_result.remaining_capability_kw
+        for call in sorted(calls, key=lambda c: c.obligation_id):
+            tier_granted = tier_result.granted_kw.get(call.obligation_id, 0.0)
+            reason_code = reasons.R_GRANT_COMMITTED
+
+            if call.service_type == "DIST_DEFERRAL" and bank_id in scada:
+                pi_state = pi_states.get(bank_id, PiState())
+                pi = DistDeferralPI(bank)
+                pi_output_kw, new_pi_state = pi.step(scada[bank_id], pi_state, dt_c_s)
+                pi_states[bank_id] = new_pi_state
+                relief_kw = max(pi_output_kw - tier_granted, 0.0)
+                extra = min(relief_kw, remaining_headroom)
+                if extra > _EPS:
+                    tier_granted += extra
+                    remaining_headroom -= extra
+                    reason_code = reasons.R_GRANT_DIST_DEFERRAL_PI
+
+            if tier_granted <= _EPS:
+                continue
+
+            eligible = hubs_by_obligation.get(call.obligation_id, ())
+            result = realize_obligation(
+                call.obligation_id, bank_id, eligible, tier_granted, stickiness=stickiness
+            )
+            if result.shortfall is not None:
+                shortfalls.append(result.shortfall)
+            if result.event is not None:
+                substitutions.append(result.event)
+
+            delivered = sum(result.per_hub_kw.values())
+            if delivered > _EPS:
+                grants.append(
+                    ProposedGrant(
+                        bank_id=bank_id,
+                        granted_kw=delivered,
+                        obligation_id=call.obligation_id,
+                        is_headroom=False,
+                        reason_code=reason_code,
+                    )
+                )
+
+        spot_kw, new_dwell = price_responsive_schedule(
+            remaining_headroom,
+            prices_by_bank.get(bank_id, 0.0),
+            price_threshold_usd_per_mwh,
+            dwell_states.get(bank_id, DwellState()),
+            t,
+        )
+        dwell_states[bank_id] = new_dwell
+        if spot_kw > _EPS:
+            grants.append(
+                ProposedGrant(
+                    bank_id=bank_id,
+                    granted_kw=spot_kw,
+                    obligation_id=None,
+                    is_headroom=True,
+                    reason_code=reasons.R_GRANT_HEADROOM,
+                )
+            )
+
+    shortfalls.sort(key=lambda s: (s.obligation_id, s.bank_id))
+    grants.sort(key=lambda g: (g.bank_id, g.obligation_id or ""))
+    substitutions.sort(key=lambda s: (s.obligation_id, s.bank_id))
+
+    return CycleResult(
+        cycle_id=cycle_id,
+        grants=tuple(grants),
+        shortfalls=tuple(shortfalls),
+        substitutions=tuple(substitutions),
+    )
+
+
+def _index_hubs_by_obligation(
+    hubs: Sequence[HubSnapshot], calls: Sequence[ObligationCall]
+) -> dict[str, tuple[HubSnapshot, ...]]:
+    by_id = {h.hub_id: h for h in hubs}
+    result: dict[str, tuple[HubSnapshot, ...]] = {}
+    for call in calls:
+        result[call.obligation_id] = tuple(by_id[hid] for hid in call.eligible_hub_ids if hid in by_id)
+    return result
+
+
+def _apply_instructions(
+    fleet_state: FleetState, instructions: Sequence[Instruction]
+) -> tuple[dict[str, float], set[str]]:
+    """K5: L2 instructions are hard constraints, applied before any economic decision. `BLOCK`/
+    `ESTOP` zero a scope's capability; `LIMIT` caps it. `FLEET` and `ZONE` scopes apply to every bank
+    in scope. Returns (effective_capability_by_bank, banks_touched_by_an_L2_instruction).
+    """
+    effective = {b.bank_id: b.capability_kw for b in fleet_state.banks}
+    touched: set[str] = set()
+    zones = {b.bank_id: b.zone for b in fleet_state.banks}
+
+    for instr in instructions:
+        if instr.scope == "FLEET":
+            targets = list(effective)
+        elif instr.scope == "ZONE":
+            targets = [bid for bid, zone in zones.items() if zone == instr.scope_ref]
+        else:
+            targets = [instr.scope_ref] if instr.scope_ref in effective else []
+
+        for bank_id in targets:
+            touched.add(bank_id)
+            if instr.kind in ("BLOCK", "ESTOP"):
+                effective[bank_id] = 0.0
+            elif instr.kind == "LIMIT" and instr.limit_kw is not None:
+                effective[bank_id] = min(effective[bank_id], max(instr.limit_kw, 0.0))
+
+    return effective, touched

@@ -1,0 +1,15 @@
+{# status_badge.html -- colour + icon + text, never colour alone (UI-UX spec S5, colour-blind safety).
+   Params: status: str (e.g. online/stale/offline/fault/good/warning/critical/neutral), label: str|None
+   (overrides the displayed text; defaults to `status`). #}
+{% set _s = status|lower %}
+<span class="status-badge status-{{ _s }}">
+  <span class="status-dot" aria-hidden="true"></span>
+  <span class="status-icon" aria-hidden="true">
+    {%- if _s in ['online', 'good', 'ok', 'closed', 'acked'] -%}&check;
+    {%- elif _s in ['stale', 'warning', 'caution', 'degraded', 'info', 'dispatching'] -%}&#9650;
+    {%- elif _s in ['offline', 'fault', 'critical', 'breach'] -%}&#9632;
+    {%- else -%}&ndash;
+    {%- endif -%}
+  </span>
+  <span class="status-text">{{ label|default(status) }}</span>
+</span>

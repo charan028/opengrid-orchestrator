@@ -1,0 +1,30 @@
+# ogsim.fleet configuration (02b §4 hub/bank physics, §5 sim harness).
+# Env overrides: OG_MQTT_HOST/OG_MQTT_PORT/OG_MQTT_ROOT/OG_MQTT_SIM_PASSWORD.
+# Point OGSIM_FLEET_CONFIG at a copy of this file to override values below.
+
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+  topic_root: og/v1
+
+hub_count: 2000
+bank_count: 40
+zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
+
+telemetry_interval_s: 2.0
+lease_ttl_s: 30.0
+lease_hold_after_expiry_s: 5.0
+stop_ramp_s: 4.0
+
+e_kwh_default: 13.5
+reserve_frac_default: 0.20
+p_kw_default: 5.0
+eta_c: 0.9487
+eta_d: 0.9487
+self_discharge_kwh_per_h: 0.0005
+bank_kva_rating_default: 75.0
+
+guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
+# Local/dev override (hex or base64 32-byte Ed25519 public key), takes
+# precedence over guardian_public_key_path when non-empty:
+guardian_public_key_path_dev: ""

@@ -1,0 +1,17 @@
+name: price_spike_during_delivery
+description: >
+  A price spike arrives while banks are mid-delivery on a committed contract.
+  Proves the commitment lock (K13/G-19): the guardian must refuse any batch
+  that reduces a committed allocation, even though the spike makes new,
+  higher-value opportunities look attractive.
+steps:
+  - at_s: 0
+    type: price_spike
+    target: np6-905-cd
+    params: {value_usd_per_mwh: 5000}
+    duration: 300
+  - at_s: 0
+    type: as_price_jump
+    target: np4-188-cd
+    params: {service: RRS, value_usd_per_mwh: 800}
+    duration: 300

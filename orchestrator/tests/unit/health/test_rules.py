@@ -1,0 +1,208 @@
+"""Unit tests for `opengrid.health.rules` (02b S6.4-S6.5): pure classification and alert-rule logic,
+no DB/clock -- every case injects `now` explicitly (BUILD.md S5a "no flaky sleeps")."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from opengrid.core.models.platform import FeedStatus, Heartbeat
+from opengrid.health.model import ALL_PROCESSES, HealthThresholds, HubHealthCounts, ProcessHealth
+from opengrid.health.rules import (
+    aggregate_hub_counts,
+    classify_all_processes,
+    classify_hub_health,
+    derive_degraded_modes,
+    evaluate_cycle_latency_alert,
+    evaluate_feed_alert,
+    evaluate_guardian_timeout_alert,
+    evaluate_hub_offline_ratio_alert,
+    evaluate_process_down_alert,
+    evaluate_reserve_breach_alert,
+)
+
+NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+THRESHOLDS = HealthThresholds()
+
+
+def _heartbeat(process: str, age_s: float) -> Heartbeat:
+    return Heartbeat(process=process, pid=1, ts=NOW - timedelta(seconds=age_s), status="ok")
+
+
+# --- process heartbeats --------------------------------------------------------------------------
+
+
+def test_process_within_miss_threshold_is_ok() -> None:
+    heartbeats = [_heartbeat("engine", 1.0)]
+    result = classify_all_processes(heartbeats, now=NOW, thresholds=THRESHOLDS)
+    engine = next(p for p in result if p.process == "engine")
+    assert engine.status == "ok"
+
+
+def test_process_past_miss_threshold_is_down() -> None:
+    heartbeats = [_heartbeat("engine", THRESHOLDS.heartbeat_down_after_s + 1)]
+    result = classify_all_processes(heartbeats, now=NOW, thresholds=THRESHOLDS)
+    engine = next(p for p in result if p.process == "engine")
+    assert engine.status == "down"
+
+
+def test_process_that_never_reported_is_down() -> None:
+    result = classify_all_processes([], now=NOW, thresholds=THRESHOLDS)
+    assert all(p.status == "down" for p in result)
+    assert {p.process for p in result} == set(ALL_PROCESSES)
+
+
+# --- hub health classification -------------------------------------------------------------------
+
+
+def test_hub_online_within_two_telemetry_intervals() -> None:
+    state = classify_hub_health(
+        last_seen_at=NOW - timedelta(seconds=1), fault_code=None, now=NOW, thresholds=THRESHOLDS
+    )
+    assert state == "online"
+
+
+def test_hub_stale_between_online_and_offline_thresholds() -> None:
+    state = classify_hub_health(
+        last_seen_at=NOW - timedelta(seconds=10), fault_code=None, now=NOW, thresholds=THRESHOLDS
+    )
+    assert state == "stale"
+
+
+def test_hub_offline_past_offline_threshold() -> None:
+    state = classify_hub_health(
+        last_seen_at=NOW - timedelta(seconds=31), fault_code=None, now=NOW, thresholds=THRESHOLDS
+    )
+    assert state == "offline"
+
+
+def test_hub_fault_overrides_timing() -> None:
+    state = classify_hub_health(last_seen_at=NOW, fault_code="INVERTER_TRIP", now=NOW, thresholds=THRESHOLDS)
+    assert state == "fault"
+
+
+def test_aggregate_hub_counts_rolls_up_by_zone() -> None:
+    classified = [("LZ_NORTH", "online"), ("LZ_NORTH", "offline"), ("LZ_SOUTH", "fault")]
+    counts = aggregate_hub_counts(classified)
+    assert counts["LZ_NORTH"] == HubHealthCounts(online=1, offline=1)
+    assert counts["LZ_SOUTH"] == HubHealthCounts(fault=1)
+    assert counts["LZ_NORTH"].total == 2
+    assert counts["LZ_SOUTH"].offline_ratio == 1.0
+
+
+# --- degraded modes (02b S6.5) --------------------------------------------------------------------
+
+
+def test_no_degraded_modes_when_everything_healthy() -> None:
+    processes = [ProcessHealth(p, "ok", NOW) for p in ALL_PROCESSES]
+    modes = derive_degraded_modes(feed_stale=False, process_health=processes)
+    assert modes == frozenset()
+
+
+def test_feed_stale_yields_no_new_commitments() -> None:
+    processes = [ProcessHealth(p, "ok", NOW) for p in ALL_PROCESSES]
+    modes = derive_degraded_modes(feed_stale=True, process_health=processes)
+    assert modes == frozenset({"NO_NEW_COMMITMENTS"})
+
+
+def test_engine_down_yields_hold_local_autonomy() -> None:
+    processes = [ProcessHealth(p, "down" if p == "engine" else "ok", NOW) for p in ALL_PROCESSES]
+    modes = derive_degraded_modes(feed_stale=False, process_health=processes)
+    assert modes == frozenset({"HOLD_LOCAL_AUTONOMY"})
+
+
+def test_guardian_down_yields_hold() -> None:
+    processes = [ProcessHealth(p, "down" if p == "guardian" else "ok", NOW) for p in ALL_PROCESSES]
+    modes = derive_degraded_modes(feed_stale=False, process_health=processes)
+    assert modes == frozenset({"HOLD"})
+
+
+def test_degraded_modes_can_combine() -> None:
+    processes = [
+        ProcessHealth(p, "down" if p in ("engine", "guardian") else "ok", NOW) for p in ALL_PROCESSES
+    ]
+    modes = derive_degraded_modes(feed_stale=True, process_health=processes)
+    assert modes == frozenset({"NO_NEW_COMMITMENTS", "HOLD_LOCAL_AUTONOMY", "HOLD"})
+
+
+# --- alert rules -----------------------------------------------------------------------------------
+
+
+def _feed_status(*, last_value_at: datetime | None, breaker_open: bool = False) -> FeedStatus:
+    return FeedStatus(
+        source="ercot",
+        product="price",
+        last_value_at=last_value_at,
+        last_success_at=last_value_at,
+        consecutive_failures=0,
+        breaker_open=breaker_open,
+    )
+
+
+def test_feed_alert_none_when_fresh() -> None:
+    fs = _feed_status(last_value_at=NOW)
+    assert evaluate_feed_alert(fs, now=NOW, thresholds=THRESHOLDS, staleness_threshold_s=60) is None
+
+
+def test_feed_alert_warning_when_stale() -> None:
+    fs = _feed_status(last_value_at=NOW - timedelta(seconds=120))
+    finding = evaluate_feed_alert(fs, now=NOW, thresholds=THRESHOLDS, staleness_threshold_s=60)
+    assert finding is not None
+    assert finding.rule == "ALR-FEED-STALE"
+    assert finding.severity == "warning"
+
+
+def test_feed_alert_critical_when_breaker_open() -> None:
+    fs = _feed_status(last_value_at=NOW, breaker_open=True)
+    finding = evaluate_feed_alert(fs, now=NOW, thresholds=THRESHOLDS, staleness_threshold_s=60)
+    assert finding is not None
+    assert finding.rule == "ALR-FEED-LGV-EXHAUSTED"
+    assert finding.severity == "critical"
+
+
+def test_process_down_alert_only_when_down() -> None:
+    assert evaluate_process_down_alert(ProcessHealth("engine", "ok", NOW)) is None
+    finding = evaluate_process_down_alert(ProcessHealth("engine", "down", NOW))
+    assert finding is not None
+    assert finding.rule == "ALR-PROCESS-DOWN"
+    assert finding.severity == "critical"
+
+
+def test_hub_offline_ratio_alert_thresholds() -> None:
+    assert evaluate_hub_offline_ratio_alert("Z", HubHealthCounts(online=100), thresholds=THRESHOLDS) is None
+    warning = evaluate_hub_offline_ratio_alert(
+        "Z", HubHealthCounts(online=93, offline=7), thresholds=THRESHOLDS
+    )
+    assert warning is not None
+    assert warning.severity == "warning"
+    critical = evaluate_hub_offline_ratio_alert(
+        "Z", HubHealthCounts(online=70, offline=30), thresholds=THRESHOLDS
+    )
+    assert critical is not None
+    assert critical.severity == "critical"
+
+
+def test_cycle_latency_alert_requires_consecutive_breaches() -> None:
+    assert evaluate_cycle_latency_alert(0.6, 1, thresholds=THRESHOLDS) is None  # not yet 3 in a row
+    finding = evaluate_cycle_latency_alert(0.6, 3, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-CYCLE-P99"
+
+
+def test_cycle_latency_alert_none_when_under_budget() -> None:
+    assert evaluate_cycle_latency_alert(0.1, 5, thresholds=THRESHOLDS) is None
+    assert evaluate_cycle_latency_alert(None, 5, thresholds=THRESHOLDS) is None
+
+
+def test_guardian_timeout_alert() -> None:
+    assert evaluate_guardian_timeout_alert(0.005, thresholds=THRESHOLDS) is None
+    finding = evaluate_guardian_timeout_alert(0.02, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.severity == "critical"
+
+
+def test_reserve_breach_alert() -> None:
+    assert evaluate_reserve_breach_alert(0) is None
+    finding = evaluate_reserve_breach_alert(1)
+    assert finding is not None
+    assert finding.rule == "ALR-RESERVE-BREACH"
+    assert finding.severity == "critical"

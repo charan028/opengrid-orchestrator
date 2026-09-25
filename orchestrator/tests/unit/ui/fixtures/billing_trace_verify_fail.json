@@ -1,0 +1,5 @@
+{
+  "passed": false,
+  "checked": 128,
+  "first_broken": {"trace_id": "TRACE-77", "expected_prev_hash": "ccc", "actual_prev_hash": "ddd"}
+}

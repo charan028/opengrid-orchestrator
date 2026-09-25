@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ogsim.control</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: #0e1116; color: #e6e6e6; }
+    h1 { font-size: 1.3rem; }
+    section { margin-bottom: 2rem; padding: 1rem; background: #171b22; border-radius: 8px; }
+    label { display: block; margin-top: 0.6rem; font-size: 0.85rem; color: #9aa4b2; }
+    input, select, textarea { width: 100%; padding: 0.4rem; margin-top: 0.2rem; background: #0e1116; color: #e6e6e6; border: 1px solid #333; border-radius: 4px; box-sizing: border-box; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.3rem 0.5rem; border-bottom: 1px solid #2a2f3a; }
+    .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 10px; font-size: 0.75rem; }
+    .pill.market { background: #3b82f6; }
+    .pill.scada { background: #f59e0b; }
+    .pill.fleet { background: #10b981; }
+    .pill.random { background: #a855f7; }
+    .pill.manual { background: #64748b; }
+    .pill.scenario { background: #0ea5e9; }
+    #status { font-size: 0.85rem; color: #9aa4b2; min-height: 1.2rem; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    .big-switch { padding: 0.6rem 1.2rem; font-size: 1rem; }
+    .big-switch.on { background: #dc2626; }
+    .sim-toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>OpenGrid integration sims — control plane</h1>
+
+  <section>
+    <h2>Autonomous random mode</h2>
+    <div class="row">
+      <button id="pauseAllBtn" class="big-switch" onclick="toggleRandomPause()">Pause all random</button>
+      <label style="margin:0;">Profile</label>
+      <select id="profileSelect" style="width:auto;" onchange="setProfile()">
+        {% for p in profiles %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="row" style="margin-top:0.6rem;" id="simToggles"></div>
+    <div id="randomStatus" style="margin-top:0.6rem; font-size:0.85rem; color:#9aa4b2;"></div>
+  </section>
+
+  <section>
+    <h2>Inject an anomaly</h2>
+    <label for="type">Anomaly type</label>
+    <select id="type"></select>
+
+    <label for="target">Target (product / bank / hub / zone id, or *)</label>
+    <input id="target" value="*">
+
+    <label for="params">Params (JSON)</label>
+    <textarea id="params" rows="3">{}</textarea>
+
+    <label for="duration">Duration (seconds)</label>
+    <input id="duration" type="number" value="60">
+
+    <button onclick="inject()">Inject</button>
+    <div id="status"></div>
+  </section>
+
+  <section>
+    <h2>Scenarios</h2>
+    <div id="scenarios"></div>
+  </section>
+
+  <section>
+    <h2>Active anomalies</h2>
+    <table id="active"><thead><tr><th>id</th><th>type</th><th>target</th><th>owner</th><th>source</th><th>ends in</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>Injection log</h2>
+    <table id="log"><thead><tr><th>time</th><th>action</th><th>source</th><th>id</th><th>type</th><th>target</th><th>start</th><th>end</th></tr></thead><tbody></tbody></table>
+  </section>
+
+<script>
+let TYPES = {{ types | tojson }};
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+function populateTypes() {
+  const sel = document.getElementById('type');
+  sel.innerHTML = '';
+  for (const t of TYPES) {
+    const opt = document.createElement('option');
+    opt.value = t.id;
+    opt.textContent = `${t.id} [${t.owner}]`;
+    opt.title = t.description;
+    sel.appendChild(opt);
+  }
+  sel.onchange = () => {
+    const t = TYPES.find(x => x.id === sel.value);
+    if (t) document.getElementById('params').value = JSON.stringify(
+      Object.fromEntries(Object.entries(t.params || {}).map(([k, v]) => [k, v.default])), null, 2
+    );
+  };
+  sel.onchange();
+}
+
+async function inject() {
+  const body = {
+    type: document.getElementById('type').value,
+    target: document.getElementById('target').value,
+    params: JSON.parse(document.getElementById('params').value || '{}'),
+    duration: parseFloat(document.getElementById('duration').value || '60'),
+  };
+  const resp = await fetch('/api/inject', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  setStatus(resp.ok ? `Injected ${data.anomaly.id}` : `Error: ${data.error}`);
+  refresh();
+}
+
+async function cancelAnomaly(id) {
+  await fetch(`/api/anomalies/${id}`, { method: 'DELETE' });
+  refresh();
+}
+
+async function runScenario(name) {
+  const resp = await fetch(`/api/scenarios/${name}/run`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{"speed": 1.0}' });
+  const data = await resp.json();
+  setStatus(resp.ok ? `Running scenario ${name} (${data.steps} steps)` : `Error: ${data.error}`);
+}
+
+async function loadScenarios() {
+  const resp = await fetch('/api/scenarios');
+  const data = await resp.json();
+  const div = document.getElementById('scenarios');
+  div.innerHTML = '';
+  for (const s of data.scenarios) {
+    const row = document.createElement('div');
+    row.style.marginBottom = '0.5rem';
+    row.innerHTML = `<b>${s.name}</b> (${s.steps} steps) — ${s.description} `;
+    const btn = document.createElement('button');
+    btn.textContent = 'Run';
+    btn.onclick = () => runScenario(s.name);
+    row.appendChild(btn);
+    div.appendChild(row);
+  }
+}
+
+async function toggleRandomPause() {
+  const btn = document.getElementById('pauseAllBtn');
+  const paused = btn.classList.contains('on');
+  await fetch(paused ? '/api/random/resume' : '/api/random/pause', { method: 'POST' });
+  refreshRandomStatus();
+}
+
+async function setProfile() {
+  const profile = document.getElementById('profileSelect').value;
+  await fetch('/api/random/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({profile}) });
+  refreshRandomStatus();
+}
+
+async function toggleSim(sim, enabled) {
+  await fetch(`/api/random/sims/${sim}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled}) });
+  refreshRandomStatus();
+}
+
+async function refreshRandomStatus() {
+  const resp = await fetch('/api/random/status');
+  const s = await resp.json();
+  const btn = document.getElementById('pauseAllBtn');
+  btn.textContent = s.paused ? 'Resume all random' : 'Pause all random';
+  btn.classList.toggle('on', s.paused);
+  document.getElementById('profileSelect').value = s.profile;
+
+  const simsDiv = document.getElementById('simToggles');
+  simsDiv.innerHTML = '';
+  for (const [sim, enabled] of Object.entries(s.sims)) {
+    const wrap = document.createElement('label');
+    wrap.className = 'sim-toggle';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = enabled;
+    cb.onchange = () => toggleSim(sim, cb.checked);
+    wrap.appendChild(cb);
+    wrap.appendChild(document.createTextNode(sim));
+    simsDiv.appendChild(wrap);
+  }
+  const typeCount = Object.keys(s.types || {}).length;
+  document.getElementById('randomStatus').textContent =
+    `seed=${s.seed} · max_concurrent=${s.max_concurrent} · ${typeCount} anomaly types configured`;
+}
+
+async function refresh() {
+  const now = Date.now() / 1000;
+  const activeResp = await fetch('/api/anomalies');
+  const activeData = await activeResp.json();
+  const tbody = document.querySelector('#active tbody');
+  tbody.innerHTML = '';
+  for (const a of activeData.active) {
+    const tr = document.createElement('tr');
+    const endsIn = Math.max(0, Math.round(a.end - now));
+    tr.innerHTML = `<td>${a.id}</td><td>${a.type}</td><td>${a.target}</td>` +
+      `<td><span class="pill ${a.owner}">${a.owner}</span></td>` +
+      `<td><span class="pill ${a.source}">${a.source}</span></td><td>${endsIn}s</td><td></td>`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Cancel';
+    btn.onclick = () => cancelAnomaly(a.id);
+    tr.lastElementChild.appendChild(btn);
+    tbody.appendChild(tr);
+  }
+
+  const logResp = await fetch('/api/log');
+  const logData = await logResp.json();
+  const logBody = document.querySelector('#log tbody');
+  logBody.innerHTML = '';
+  for (const e of logData.log.slice(-50).reverse()) {
+    const tr = document.createElement('tr');
+    const t = new Date((e.logged_at || 0) * 1000).toLocaleTimeString();
+    const fmt = (v) => v === undefined || v === null ? '' : new Date(v * 1000).toLocaleTimeString();
+    tr.innerHTML = `<td>${t}</td><td>${e.action || ''}</td><td>${e.source || ''}</td><td>${e.id || ''}</td>` +
+      `<td>${e.type || ''}</td><td>${e.target || ''}</td><td>${fmt(e.start)}</td><td>${fmt(e.end)}</td>`;
+    logBody.appendChild(tr);
+  }
+
+  refreshRandomStatus();
+}
+
+populateTypes();
+loadScenarios();
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

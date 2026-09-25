@@ -1,0 +1,10 @@
+/var/log/opengrid/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 640 opengrid opengrid
+    sharedscripts
+}

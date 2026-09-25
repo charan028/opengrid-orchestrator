@@ -1,0 +1,32 @@
+name: compound_stress
+description: >
+  Combines a market price spike, a bank overload and hub dropouts across two
+  zones, overlapping in time. The compound stress test for the demo: proves
+  the system degrades gracefully (commitment lock, feeder ceiling, and health
+  degraded mode) under several simultaneous failures instead of just one.
+steps:
+  - at_s: 0
+    type: price_spike
+    target: np6-905-cd
+    params: {value_usd_per_mwh: 5000}
+    duration: 300
+  - at_s: 15
+    type: bank_overload
+    target: BANK_12
+    params: {kva_over_rating_pct: 30}
+    duration: 240
+  - at_s: 30
+    type: hub_offline
+    target: HUB_0501
+    params: {}
+    duration: 180
+  - at_s: 45
+    type: zone_mass_disconnect
+    target: LZ_WEST
+    params: {}
+    duration: 120
+  - at_s: 60
+    type: http_429
+    target: np4-732-cd
+    params: {retry_after_s: 60}
+    duration: 180

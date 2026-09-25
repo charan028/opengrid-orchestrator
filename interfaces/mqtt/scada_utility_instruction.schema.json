@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/scada_utility_instruction.schema.json",
+  "title": "ScadaUtilityInstruction",
+  "description": "Simulated utility/ISO -> orchestrator, published on <root>/scada/instruction/<bank_id>, QoS 1. An L2 hard constraint (K5, G-15) -- never traded for commercial value.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["instruction_id", "bank_id", "kind", "issued_at", "issued_by"],
+  "properties": {
+    "instruction_id": { "type": "string", "format": "uuid" },
+    "bank_id": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "enum": ["LIMIT", "BLOCK", "ESTOP"] },
+    "limit_kw": {
+      "type": ["number", "null"],
+      "description": "Required and >=0 when kind == LIMIT; null otherwise."
+    },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" },
+    "issued_by": { "type": "string", "minLength": 1 }
+  }
+}

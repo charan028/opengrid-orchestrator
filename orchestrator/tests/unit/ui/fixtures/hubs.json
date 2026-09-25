@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "hub_id": "hub-0001",
+      "bank_id": "bank-01",
+      "zone": "LZ_SOUTH",
+      "soc_kwh": 9.8,
+      "p_kw": -2.1,
+      "health": "online",
+      "lat": 29.76,
+      "lon": -95.36
+    },
+    {
+      "hub_id": "hub-0002",
+      "bank_id": "bank-01",
+      "zone": "LZ_SOUTH",
+      "soc_kwh": 3.1,
+      "p_kw": 0.0,
+      "health": "fault",
+      "lat": 29.77,
+      "lon": -95.34
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{# stale_badge.html -- shows a value's data age (BUILD.md base contract partial). Params:
+   age_s: float|None (seconds since the value was observed), since_iso: str|None (ISO-8601 instant,
+   preferred -- lets og.js tick the age live client-side), stale_after_s: float|None (threshold). Every
+   param is optional; an unset age renders "age: unknown" and is left for og.js to fill in from
+   `data-since` client-side. #}
+{% set _age = age_s if (age_s is defined and age_s is not none) else none %}
+{% set _threshold = stale_after_s if (stale_after_s is defined and stale_after_s is not none) else none %}
+{% set _stale = (_age is not none and _threshold is not none and _age > _threshold) %}
+<span class="stale-badge"
+      {% if since_iso %}data-since="{{ since_iso }}"{% endif %}
+      {% if _threshold is not none %}data-stale-after="{{ _threshold }}"{% endif %}
+      data-stale="{{ 'true' if _stale else 'false' }}">
+  {%- if _age is none -%}
+    age: unknown
+  {%- else -%}
+    age: {{ '%.0f'|format(_age) }}s
+  {%- endif -%}
+</span>

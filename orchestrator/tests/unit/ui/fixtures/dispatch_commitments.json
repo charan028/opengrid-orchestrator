@@ -1,0 +1,26 @@
+{
+  "commitments": [
+    {
+      "commitment_id": "COMMIT-1",
+      "obligation_id": "OBL-1002",
+      "plan_id": "PLAN-9001",
+      "interval_start": "2026-09-25T18:00:00+00:00",
+      "interval_end": "2026-09-25T18:15:00+00:00",
+      "committed_kw": "40.0",
+      "variable_kind": "CONTINUOUS",
+      "supersedes": null,
+      "reason_code": "R-GATE-SELECT"
+    },
+    {
+      "commitment_id": "COMMIT-2",
+      "obligation_id": "OBL-1003",
+      "plan_id": "PLAN-9001",
+      "interval_start": "2026-09-25T18:00:00+00:00",
+      "interval_end": "2026-09-25T18:15:00+00:00",
+      "committed_kw": "8.0",
+      "variable_kind": "CONTINUOUS",
+      "supersedes": "COMMIT-0",
+      "reason_code": "R-COMMIT-LOCK-L1"
+    }
+  ]
+}

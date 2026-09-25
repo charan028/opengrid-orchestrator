@@ -1,0 +1,199 @@
+"""Tests for orchestration (`service.py`) and the public `opengrid.forecast` interface, using fakes for
+`HistoryProvider`/`ForecastBackend` (BUILD.md task instruction: "use fakes for other modules") in place
+of `opengrid.feeds` and Postgres. Covers TS-02-06's "recompute each 15-min gate" via the 96-step shape
+check, plus the low-history (2.5-day `HIST` import) and stale-feed degrade paths end to end.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+import opengrid.forecast as forecast
+from opengrid.core.models.platform import FeedObs
+from opengrid.forecast.models import ForecastRow
+from opengrid.forecast.service import compute_and_persist, rows_to_scenario_points
+from opengrid.platform.config import Config
+
+_NOW = datetime(2026, 7, 20, 12, 3, tzinfo=UTC)  # a Monday, mid-slot -- exercises floor_to_interval
+
+
+class FakeHistory:
+    """Structurally satisfies `HistoryProvider` (same shape as `opengrid.feeds`)."""
+
+    def __init__(self, observations: dict[str, list[FeedObs]], *, quality: str = "GOOD") -> None:
+        self._observations = observations
+        self._quality = quality
+
+    async def latest(self, series: str) -> FeedObs:
+        obs = self._observations.get(series)
+        if not obs:
+            raise LookupError(series)
+        latest = max(obs, key=lambda o: o.ts)
+        return latest.model_copy(update={"quality": self._quality})
+
+    async def window(self, series: str, t0: datetime, t1: datetime) -> list[FeedObs]:
+        return [o for o in self._observations.get(series, []) if t0 <= o.ts < t1]
+
+
+class FakeBackend:
+    """Structurally satisfies `ForecastBackend`, storing rows in memory."""
+
+    def __init__(self) -> None:
+        self.rows: list[ForecastRow] = []
+
+    async def upsert_rows(self, rows: list[ForecastRow]) -> None:
+        keys = {(r.series_key, r.kind, r.interval_start_utc) for r in rows}
+        self.rows = [r for r in self.rows if (r.series_key, r.kind, r.interval_start_utc) not in keys]
+        self.rows.extend(rows)
+
+    async def fetch_range(self, horizon_start: datetime, horizon_end: datetime) -> list[ForecastRow]:
+        return [r for r in self.rows if horizon_start <= r.interval_start_utc < horizon_end]
+
+
+def _obs(series: str, ts: datetime, value: float, *, quality: str = "GOOD") -> FeedObs:
+    return FeedObs(
+        source="ERCOT",
+        product="np6-905-cd",
+        series=series,
+        ts=ts,
+        value=value,
+        unit="usd_per_mwh",
+        quality=quality,
+        recorded_at=ts,
+    )
+
+
+def _rich_history(series: str, target: datetime) -> list[FeedObs]:
+    """~2 weeks of daily observations at every 15-min slot, ample for the direct-sample path."""
+    return [
+        _obs(series, target - timedelta(days=d, minutes=15 * step), 40.0 + step + d)
+        for d in range(14)
+        for step in range(96)
+    ]
+
+
+def _short_history(series: str, target: datetime) -> list[FeedObs]:
+    """2.5 days of observations, per the feeds agent's `HIST` import -- the short-history case."""
+    return [
+        _obs(series, target - timedelta(hours=h * 0.25), 50.0 + (h % 10)) for h in range(int(2.5 * 24 * 4))
+    ]
+
+
+def _cfg(**forecast_overrides: object) -> Config:
+    data = {
+        "forecast": {
+            "horizon_hours": 24,
+            "resolution_min": 15,
+            "price_series": ["HB_TEST"],
+            "load_series": ["LZ_TEST"],
+            **forecast_overrides,
+        }
+    }
+    return Config(data)
+
+
+@pytest.mark.asyncio
+async def test_compute_and_persist_produces_96_steps_per_series():
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory(
+        {
+            "HB_TEST": _rich_history("HB_TEST", horizon_start),
+            "LZ_TEST": _rich_history("LZ_TEST", horizon_start),
+        }
+    )
+    backend = FakeBackend()
+    rows = await compute_and_persist(_cfg(), history, backend, now=_NOW)
+
+    by_series: dict[str, list[ForecastRow]] = {}
+    for row in rows:
+        by_series.setdefault(row.series_key, []).append(row)
+
+    assert set(by_series) == {"HB_TEST", "LZ_TEST"}
+    for series_rows in by_series.values():
+        assert len(series_rows) == 96
+        assert sorted(r.horizon_step for r in series_rows) == list(range(96))
+        for row in series_rows:
+            assert row.p10 <= row.p50 <= row.p90
+    assert backend.rows == rows
+
+
+@pytest.mark.asyncio
+async def test_compute_and_persist_flags_not_for_firm_on_short_history():
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory({"HB_TEST": _short_history("HB_TEST", horizon_start)}, quality="GOOD")
+    backend = FakeBackend()
+    rows = await compute_and_persist(_cfg(load_series=[]), history, backend, now=_NOW)
+
+    assert len(rows) == 96
+    assert all(r.firm_fitness == "NOT_FOR_FIRM" for r in rows)
+    assert all(r.p10 <= r.p50 <= r.p90 for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_compute_and_persist_widens_band_when_series_stale():
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    fresh_history = FakeHistory({"HB_TEST": _rich_history("HB_TEST", horizon_start)}, quality="GOOD")
+    stale_history = FakeHistory({"HB_TEST": _rich_history("HB_TEST", horizon_start)}, quality="STALE")
+    fresh_rows = await compute_and_persist(_cfg(load_series=[]), fresh_history, FakeBackend(), now=_NOW)
+    stale_rows = await compute_and_persist(_cfg(load_series=[]), stale_history, FakeBackend(), now=_NOW)
+
+    fresh_by_step = {r.horizon_step: r for r in fresh_rows}
+    for stale_row in stale_rows:
+        fresh_row = fresh_by_step[stale_row.horizon_step]
+        assert stale_row.firm_fitness == "NOT_FOR_FIRM"
+        assert (stale_row.p90 - stale_row.p10) > (fresh_row.p90 - fresh_row.p10)
+
+
+@pytest.mark.asyncio
+async def test_compute_and_persist_skips_series_with_no_history_at_all():
+    history = FakeHistory({})
+    backend = FakeBackend()
+    rows = await compute_and_persist(_cfg(load_series=[]), history, backend, now=_NOW)
+    assert rows == []
+
+
+def test_rows_to_scenario_points_expands_three_weighted_points():
+    row = ForecastRow(
+        series_key="HB_TEST",
+        kind="price",
+        interval_start_utc=_NOW,
+        horizon_step=0,
+        p10=10.0,
+        p50=20.0,
+        p90=30.0,
+    )
+    points = rows_to_scenario_points([row])
+    assert len(points) == 3
+    by_scenario = {p.scenario: p for p in points}
+    assert by_scenario["P10"].value == 10.0
+    assert by_scenario["P50"].value == 20.0
+    assert by_scenario["P90"].value == 30.0
+    assert sum(p.probability for p in points) == pytest.approx(1.0)
+    assert all(p.series_key == "HB_TEST" and p.kind == "price" for p in points)
+
+
+@pytest.mark.asyncio
+async def test_public_interface_requires_configure_first():
+    import opengrid.forecast as fresh_forecast_module
+
+    fresh_forecast_module._state = None
+    with pytest.raises(RuntimeError, match="configure"):
+        await fresh_forecast_module.scenarios(_NOW, _NOW + timedelta(hours=1))
+
+
+@pytest.mark.asyncio
+async def test_public_interface_end_to_end_via_configure():
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory({"HB_TEST": _rich_history("HB_TEST", horizon_start)})
+    backend = FakeBackend()
+    forecast.configure(_cfg(load_series=[]), history=history, backend=backend)
+    try:
+        await forecast.run_forecast_cycle(now=_NOW)
+        points = await forecast.scenarios(horizon_start, horizon_start + timedelta(hours=1))
+        # 4 x 15-min steps in one hour, 3 scenarios each.
+        assert len(points) == 12
+        assert all(p.scenario in ("P10", "P50", "P90") for p in points)
+    finally:
+        forecast._state = None

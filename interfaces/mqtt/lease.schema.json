@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/lease.schema.json",
+  "title": "Lease",
+  "description": "Guardian -> hub, published on <root>/lease/<hub_id>, QoS 1, retained.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hub_id", "epoch", "expires_at", "issued_at"],
+  "properties": {
+    "hub_id": { "type": "string", "minLength": 1 },
+    "epoch": { "type": "integer", "minimum": 0 },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "issued_at": { "type": "string", "format": "date-time" }
+  }
+}
