@@ -41,6 +41,20 @@ def check_g01_reserve(
     return CheckOutcome("G-01", result.ok, result.reason, item.hub_id)
 
 
+def check_g01_energy_lease(
+    item: ProposedItem, hub: HubParams, soc_kwh: float, lease_ttl_h: float, *, margin_pct: float = 0.01
+) -> CheckOutcome:
+    """G-01-ENERGY/K1: independent of the instantaneous G-01 check, project the hub's OWN
+    guardian-read SoC across the command's full lease duration (`lease_ttl_h`, from the batch's own
+    `issued_at`/`expires_at`) and veto if the projected SoC would breach reserve (discharge) or
+    overfill above `e_kwh` (charge) before the lease expires -- capacity (kW) headroom alone does not
+    guarantee enough energy above reserve to sustain the command for its whole hold duration."""
+    result = core_limits.check_reserve_floor_over_lease(
+        soc_kwh, item.p_kw_setpoint, lease_ttl_h, hub, margin_pct=margin_pct
+    )
+    return CheckOutcome("G-01-ENERGY", result.ok, result.reason, item.hub_id)
+
+
 def check_g02_hub_power(item: ProposedItem, hub: HubParams, *, inverter_cap_kw: float) -> CheckOutcome:
     """K4: |P| bound per hub."""
     result = core_limits.check_hub_power(item.p_kw_setpoint, hub, inverter_cap_kw=inverter_cap_kw)

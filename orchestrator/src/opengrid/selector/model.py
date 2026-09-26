@@ -236,7 +236,20 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
         if not obligation_vars:
             continue
         total_kw = highs.qsum(obligation_vars)
-        obj_terms.append((c.value_per_mwh / 1000.0 - c.degradation_cost_per_kwh) * dt_h * total_kw)
+        # `degradation_cost_per_kwh` (02a S3.4's c_deg) prices the wear of actually *cycling* the
+        # battery -- it belongs on `MARKET` candidates (ERCOT_ENERGY spot arbitrage: charge low,
+        # discharge high, real round-trip throughput every interval). `FIRM` (HOME/DIST_DEFERRAL/
+        # PARTNER_CAPACITY) and `AS` (ERCOT_AS) candidates are *capacity holds* -- their value
+        # (`value_per_mwh`: a capacity payment or MCPC, not an energy-arbitrage spread) is priced per
+        # 02a S1's C3 as its own additive floor, separate from the cycling economics (spec line "C3 |
+        # The ONE additive floor (AS hold + robust firm energy)"). Charging them the full per-kWh
+        # cycling degradation anyway made every low-$/MWh capacity-hold candidate's objective
+        # coefficient strictly negative (e.g. a $5.37/MWh AS MCPC minus a $30/MWh-equivalent
+        # degradation cost) regardless of available headroom -- `x_o=0`/`q_o=0` was the solver's
+        # correct answer given that flawed input, identical in kind to the DIST_DEFERRAL
+        # `value_per_mwh=None` bug this same objective already had (`qa/merge-notes.md` S15).
+        degradation_usd_per_kwh = c.degradation_cost_per_kwh if c.category == "MARKET" else 0.0
+        obj_terms.append((c.value_per_mwh / 1000.0 - degradation_usd_per_kwh) * dt_h * total_kw)
     for co in inputs.committed:
         obligation_vars = vars_by_obligation.get(co.obligation_id, [])
         if not obligation_vars:

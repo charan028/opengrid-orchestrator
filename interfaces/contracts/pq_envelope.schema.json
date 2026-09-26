@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/contracts/pq_envelope.schema.json",
+  "title": "PowerQualityEnvelope",
+  "description": "Contract-side object, POST/GET body for /api/v1/contracts/{contract_id}/pq-envelope (06-service-profiles-and-power-quality.md S6.3). Mirrors og.pq_envelope (orchestrator/migrations/0010_service_profile.sql) and S2's field table.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pq_envelope_id", "customer_id", "phase_config"],
+  "properties": {
+    "pq_envelope_id": { "type": "string", "format": "uuid" },
+    "customer_id": { "type": "string", "format": "uuid" },
+    "phase_config": { "type": "string", "enum": ["1P", "SPLIT_PHASE", "3P"] },
+    "max_phase_imbalance_pct": { "type": "number", "minimum": 0, "default": 3.0 },
+    "voltage_band_pct": { "type": "number", "minimum": 0, "default": 5.0 },
+    "ride_through_class": { "type": "string", "default": "CATEGORY_III" },
+    "current_limit_a": { "type": ["number", "null"], "minimum": 0 },
+    "current_limit_scope": { "type": ["string", "null"], "enum": ["PER_PHASE", "SPECIFIC_LINE", null] },
+    "freq_tolerance_hz": { "type": "number", "minimum": 0, "default": 0.5 },
+    "rocof_limit_hz_s": { "type": ["number", "null"], "minimum": 0 },
+    "pf_min": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.9 },
+    "reactive_requirement": { "type": ["string", "null"] },
+    "thd_voltage_limit_pct": { "type": "number", "minimum": 0, "default": 5.0 },
+    "thd_current_limit_pct": { "type": "number", "minimum": 0, "default": 5.0 },
+    "flicker_pst_limit": { "type": ["number", "null"], "minimum": 0 }
+  },
+  "allOf": [
+    { "if": { "not": { "properties": { "current_limit_a": { "const": null } } } },
+      "then": { "required": ["current_limit_scope"] } }
+  ]
+}

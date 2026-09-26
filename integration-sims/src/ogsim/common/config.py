@@ -95,6 +95,18 @@ class FleetConfig:
     guardian_public_key_path_dev: str = ""
     safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
     safestop_public_key_path_dev: str = ""
+    # Per-inverter power-quality imperfection model (06-service-profiles-and-power-quality.md
+    # §3.1/§7.1/§7.3), seeded once per unit at build time plus a slow ambient drift each tick.
+    pq_freq_offset_std_hz: float = 0.01
+    pq_voltage_offset_std_pct: float = 0.5
+    pq_thd_current_median_pct: float = 2.0
+    pq_thd_current_p95_pct: float = 4.5
+    # false = diverse per-unit harmonic phase angles (cancellation regime, §3.2b); true = all
+    # units on one firmware batch share identical angles (stacking/worst-case regime).
+    pq_harmonic_phase_lock: bool = False
+    pq_ride_through_class_default: str = "CATEGORY_III"
+    # Remote-calibration rate limit, §5.5.4: at most one attempt per unit per rolling window.
+    pq_calibration_rate_limit_s: float = 86400.0
 
     def public_key_path(self) -> str:
         """Guardian public key path; dev override wins when set, so local
@@ -138,7 +150,32 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         guardian_public_key_path_dev=str(raw.get("guardian_public_key_path_dev", "")),
         safestop_public_key_path=str(raw.get("safestop_public_key_path", defaults.safestop_public_key_path)),
         safestop_public_key_path_dev=str(raw.get("safestop_public_key_path_dev", "")),
+        **_inverter_pq_fields(raw, defaults),
     )
+
+
+def _inverter_pq_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:
+    """Reads the optional `inverter_pq:` YAML block (§7.3), defaulting every field
+    independently so a partial or absent block never crashes config loading."""
+    block = raw.get("inverter_pq", {})
+    block = block if isinstance(block, dict) else {}
+    return {
+        "pq_freq_offset_std_hz": float(block.get("freq_offset_std_hz", defaults.pq_freq_offset_std_hz)),
+        "pq_voltage_offset_std_pct": float(
+            block.get("voltage_offset_std_pct", defaults.pq_voltage_offset_std_pct)
+        ),
+        "pq_thd_current_median_pct": float(
+            block.get("thd_current_median_pct", defaults.pq_thd_current_median_pct)
+        ),
+        "pq_thd_current_p95_pct": float(block.get("thd_current_p95_pct", defaults.pq_thd_current_p95_pct)),
+        "pq_harmonic_phase_lock": bool(block.get("harmonic_phase_lock", defaults.pq_harmonic_phase_lock)),
+        "pq_ride_through_class_default": str(
+            block.get("ride_through_class_default", defaults.pq_ride_through_class_default)
+        ),
+        "pq_calibration_rate_limit_s": float(
+            block.get("calibration_rate_limit_s", defaults.pq_calibration_rate_limit_s)
+        ),
+    }
 
 
 @dataclass(frozen=True)

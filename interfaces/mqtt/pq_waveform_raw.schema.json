@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/pq_waveform_raw.schema.json",
+  "title": "PqWaveformRawHeader",
+  "description": "Hub -> orchestrator, published on <root>/scada/wave/<zone>/<bank_id>/<hub_id>/raw, QoS 1, triggered only (06-service-profiles-and-power-quality.md S6.4a-b). This schema covers only the structured header; per S6.4a the payload is binary (not base64-in-JSON, which would add ~33% overhead) -- a small header matching this shape, followed by the raw sample block as int16 per-channel arrays in the fixed `channels` order at `sample_rate_hz`, for `cycles` cycles, optionally delta+generic compressed per `compression`. `samples` is included here only for validating the equivalent JSON representation used in tests/fixtures (04-mvp-s-test-plan.md TS-15a/TS-15b); it is never sent as JSON on the wire.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hub_id", "phase_connection", "ts", "sample_rate_hz", "cycles", "channels", "sync_source", "sync_quality_ns", "trigger_reason", "compression"],
+  "properties": {
+    "hub_id": { "type": "string", "minLength": 1 },
+    "phase_connection": { "type": "string", "enum": ["A", "B", "C", "AB", "BC", "CA", "ABC"] },
+    "ts": { "type": "string", "format": "date-time", "description": "Capture start time, PTP/GPS-disciplined reference, sub-millisecond precision." },
+    "sample_rate_hz": { "type": "number", "const": 7680 },
+    "cycles": { "type": "integer", "const": 10 },
+    "channels": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 6,
+      "items": { "type": "string", "enum": ["V", "I", "V_A", "V_B", "V_C", "I_A", "I_B", "I_C"] },
+      "description": "2 channels (V,I) for a 1P hub, 4 (V_A,V_B,I_A,I_B) for SPLIT_PHASE, 6 (V_A,V_B,V_C,I_A,I_B,I_C) for 3P, per phase_connection."
+    },
+    "sync_source": { "type": "string", "enum": ["ptp", "gps", "ntp_disciplined"] },
+    "sync_quality_ns": { "type": "number", "minimum": 0 },
+    "compression": { "type": "string", "enum": ["none", "delta_generic"] },
+    "trigger_reason": { "type": "string", "enum": ["PQ_DEVIATION", "API_REQUEST", "ROTATING_AUDIT", "CALIBRATION_VERIFICATION"] },
+    "samples": {
+      "description": "Test/fixture-only JSON representation: channel name -> array of int16 sample values (cycles * sample_rate_hz / 60 samples per channel). Absent on the real binary wire payload.",
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "integer", "minimum": -32768, "maximum": 32767 }
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-# MVP-S Canonical Invariants (K1–K13)
+# MVP-S Canonical Invariants (K1–K14)
 
 This is the single source of truth for invariant IDs. Every MVP-S document (02a, 02b, 03, 04) and every test uses
 these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-first-principles-review.md` §1.
@@ -26,12 +26,22 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
   eligible hubs (net of energy reserved for other obligations). A shortfall risk marks the obligation AT_RISK and
   raises ALR-ENERGY-SHORTFALL-RISK. A missing or stale SoC means zero discharge. The guardian projects each hub's SoC
   over the command's lease (G-01-ENERGY).
-- **K14 (proposed, MVP-S+): power-quality envelope.** Dispatch serving a customer must keep the aggregated per-phase
-  imbalance, voltage/frequency deviation and estimated THD within that customer's PowerQualityEnvelope. The guardian
-  checks this on its own inputs (proposed G-21…). Defined in `06-service-profiles-and-power-quality.md`; it becomes
-  canonical when the owner approves.
+- **K14 (canonical, MVP-S+, approved by owner 2026-09-25): power-quality envelope.** Dispatch serving a customer must
+  keep the aggregated per-phase imbalance, voltage/frequency deviation and THD within that customer's
+  PowerQualityEnvelope — both at selection (for uncommitted headroom) and continuously for already-committed,
+  `DELIVERING` obligations, with a corrective-action ladder (rebalance → substitute within the obligation → remote
+  recalibration where eligible → reactive/PF adjustment → exclude → `AT_RISK`) before any envelope breach is allowed
+  to stand. THD, imbalance and frequency/voltage deviation are measured from per-inverter waveform telemetry
+  wherever available; the modelled aggregation formulas are a pre-delivery planning/forecast cross-check only, not
+  the delivery-time source of truth. The guardian checks this on independent inputs (G-21…G-24), and a related
+  calibration-safety check (G-25) gates any remote inverter-recalibration command. Fully defined in
+  `06-service-profiles-and-power-quality.md`, including the asset-health/calibration workflow for inverters that
+  cannot be corrected remotely.
 
-Guardian check numbering in MVP-S: G-01 reserve · G-02 hub P · G-03 bank kVA · G-04 hub ramp · G-05 fleet ramp cap and
-stagger · G-06 feeder/bank ramp ceiling for firm events · G-09 ledger version · G-13 sequence/epoch/lease · G-14 trace
-pre-image present · G-15 L2 instruction · G-19 commitment lock · G-20 time quality. Other G-numbers are deferred to
-later releases.
+Guardian check numbering in MVP-S+: G-01 reserve · G-02 hub P · G-03 bank kVA · G-04 hub ramp · G-05 fleet ramp cap
+and stagger · G-06 feeder/bank ramp ceiling for firm events · G-09 ledger version · G-13 sequence/epoch/lease ·
+G-14 trace pre-image present · G-15 L2 instruction · G-19 commitment lock · G-20 time quality · **G-21 per-phase
+imbalance (K14) · G-22 THD estimate/measurement (K14) · G-23 frequency/voltage deviation (K14) · G-24 ride-through
+and asset-state conformance (K14) · G-25 calibration-command safety (K14; bounds, rate limit, no active
+non-default-envelope grant on the target hub)** — G-21..G-25 defined in `06-service-profiles-and-power-quality.md`
+§5.3/§6.7. Other G-numbers (G-07/08/10-12/16-18) are deferred to later releases.

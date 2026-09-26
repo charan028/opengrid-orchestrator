@@ -11,11 +11,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from opengrid.ledger import decode_interval_key
 from opengrid.selector import gate
 from opengrid.selector.types import CandidateOpportunity
 from unit.selector.factories import make_bank, zero_price_scenario
 
 OPPORTUNITY_ID = str(uuid4())
+OBLIGATION_ID = str(uuid4())  # deliberately distinct from OPPORTUNITY_ID -- see the FK-violation bug fix
 
 
 async def _fake_load_banks(horizon_start, horizon_end, bank_ids):
@@ -34,6 +36,7 @@ async def _fake_load_candidates(horizon_start, horizon_end, bank_ids, contract_s
     return (
         CandidateOpportunity(
             opportunity_id=OPPORTUNITY_ID,
+            obligation_id=OBLIGATION_ID,
             contract_id=str(uuid4()),
             eligible_bank_ids=("B1",),
             window_intervals=(0,),
@@ -88,8 +91,20 @@ async def test_run_gate_persists_and_reserves_the_selected_candidate(_wired):
     assert plan.solver_status == "OPTIMAL"
     assert plan.gate_kind == "SCHEDULED_15MIN"
     assert persisted["result"].selected_x[OPPORTUNITY_ID] is True
-    assert reserved["obligation_id"] == UUID(OPPORTUNITY_ID)
-    assert reserved["selected_kw"]["0"] == pytest.approx(10.0)
+    # Bug fix regression (combined-deploy pass): `ledger.reserve()` must be called with the real
+    # `obligation_id` (og.reservation's FK target), never `opportunity_id` -- confirmed live as
+    # `ForeignKeyViolation` the moment the selector actually selected something.
+    assert reserved["obligation_id"] == UUID(OBLIGATION_ID)
+    # Bug fix regression (combined-deploy pass): the key must be `encode_interval_key(bank_id, start,
+    # end)`, not the bare interval index -- `opengrid.ledger.reserve()`'s real `decode_interval_key`
+    # raised `ValueError` on the old `str(t)` shape the moment the selector actually selected something.
+    selected_kw = reserved["selected_kw"]
+    assert len(selected_kw) == 1
+    (key, amount) = next(iter(selected_kw.items()))
+    bank_id, interval_start, interval_end = decode_interval_key(key)
+    assert bank_id == "B1"
+    assert (interval_end - interval_start).total_seconds() == pytest.approx(15 * 60)
+    assert amount == pytest.approx(10.0)
 
 
 async def test_run_gate_never_reserves_against_a_fabricated_bank_id(monkeypatch, _wired):
@@ -114,6 +129,7 @@ async def test_run_gate_never_reserves_against_a_fabricated_bank_id(monkeypatch,
         return (
             CandidateOpportunity(
                 opportunity_id=OPPORTUNITY_ID,
+                obligation_id=OBLIGATION_ID,
                 contract_id=str(uuid4()),
                 eligible_bank_ids=bank_ids,
                 window_intervals=(0,),

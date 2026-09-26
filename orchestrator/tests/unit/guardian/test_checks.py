@@ -31,6 +31,27 @@ def test_g01_reserve_floor_positive():
     assert checks.check_g01_reserve(_item(), HUB, soc_kwh=20.0).ok
 
 
+def test_g01_energy_lease_negative_discharge_drains_below_reserve_before_lease_expires():
+    """K1: 3 kWh above reserve (10.84 - 7.84) can sustain 3 kW discharge for only ~1h before hitting
+    reserve; a 2h lease at that rate would breach reserve partway through even though the instantaneous
+    G-01 check (current SoC only) passes right now."""
+    r = checks.check_g01_energy_lease(_item(p_kw=-3.0), HUB, soc_kwh=10.84, lease_ttl_h=2.0)
+    assert not r.ok and r.rule_id == "G-01-ENERGY" and r.reason == "RESERVE_FLOOR_LEASE"
+    # The instantaneous check alone would have passed -- proving this is a genuinely independent check.
+    assert checks.check_g01_reserve(_item(p_kw=-3.0), HUB, soc_kwh=10.84).ok
+
+
+def test_g01_energy_lease_positive_ample_energy_for_whole_lease():
+    assert checks.check_g01_energy_lease(_item(p_kw=-3.0), HUB, soc_kwh=39.2, lease_ttl_h=2.0).ok
+
+
+def test_g01_energy_lease_negative_charge_overfills_before_lease_expires():
+    """Symmetric charge-direction projection: charging at 11 kW for a 3h lease from near-full SoC
+    would overfill above e_kwh partway through."""
+    r = checks.check_g01_energy_lease(_item(p_kw=11.0), HUB, soc_kwh=38.0, lease_ttl_h=3.0)
+    assert not r.ok and r.rule_id == "G-01-ENERGY" and r.reason == "CHARGE_CEILING_LEASE"
+
+
 def test_g02_hub_power_negative():
     r = checks.check_g02_hub_power(_item(p_kw=20.0), HUB, inverter_cap_kw=11.0)
     assert not r.ok and r.rule_id == "G-02"

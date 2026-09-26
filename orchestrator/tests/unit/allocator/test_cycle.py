@@ -27,7 +27,18 @@ _T0 = datetime(2026, 9, 26, 12, 0, 0, tzinfo=UTC)
 
 
 def _hub(hub_id: str, bank_id: str, kw: float, health: str = "OK") -> HubSnapshot:
-    return HubSnapshot(hub_id=hub_id, bank_id=bank_id, free_discharge_kw=kw, health=health)
+    # Ample soc_kwh/reserve_kwh (K1: not None) so `_cap_sustainable_discharge`'s lease-horizon energy
+    # cap is a no-op for tests that are exercising other behavior (tier allocation, PI, substitution,
+    # L2 instructions) -- energy-sufficiency-specific behavior gets its own dedicated tests below.
+    return HubSnapshot(
+        hub_id=hub_id,
+        bank_id=bank_id,
+        free_discharge_kw=kw,
+        health=health,
+        soc_kwh=1_000_000.0,
+        reserve_kwh=0.0,
+        e_kwh=1_000_000.0,
+    )
 
 
 def _bank(bank_id: str, cap: float, **kw) -> BankSnapshot:
@@ -278,6 +289,46 @@ def test_alloc_01_k2_hub_capacity_never_exceeded_across_obligations() -> None:
     shortfall = next(s for s in result.shortfalls if s.obligation_id == "o2")
     assert shortfall.shortfall_kw == 10.0
     assert shortfall.reason_code == reasons.R_COMMIT_LOCK_INFEASIBLE
+
+
+def test_energy_missing_soc_grants_zero_kw_not_rated_power() -> None:
+    """User requirement / K7: capacity (kW) alone is not enough -- a hub with NO live SoC/reserve
+    reading this cycle (soc_kwh=None, e.g. stale/offline/fault) must get 0 kW discharge, NEVER its
+    rated `free_discharge_kw`, even though nothing else about the cycle would otherwise stop it."""
+    hub = HubSnapshot(hub_id="h1", bank_id="b1", free_discharge_kw=50.0, health="OK")  # soc_kwh=None
+    fleet = FleetState(hubs=(hub,), banks=(_bank("b1", 100.0),))
+    ledger = LedgerView(calls=(_call("o1", "b1", "T1", 40.0, "DIST_DEFERRAL", ("h1",)),))
+
+    result = cycle(_T0, fleet, ledger, Schedule(), {}, ())
+
+    granted = {g.obligation_id: g.granted_kw for g in result.grants if not g.is_headroom}
+    assert granted.get("o1", 0.0) == 0.0  # never the hub's rated 50 kW/40 kW requested
+    shortfall = next(s for s in result.shortfalls if s.obligation_id == "o1")
+    assert shortfall.shortfall_kw == 40.0
+
+
+def test_energy_lease_horizon_caps_discharge_below_a_sliver_above_reserve() -> None:
+    """K1: a hub with only a sliver of energy above reserve cannot sustain its full rated power for the
+    WHOLE lease TTL, even though it has ample instantaneous kW headroom -- `hub_sustainable_discharge_kw`
+    over `lease_ttl_s` (not the 2 s tick) must bind before the hub's rated power does."""
+    # 1 kWh above reserve, eta_d default 0.9487: over a 3600 s (1 h) lease, sustainable power is capped
+    # at ~0.949 kW, far below the hub's rated 50 kW.
+    hub = HubSnapshot(
+        hub_id="h1",
+        bank_id="b1",
+        free_discharge_kw=50.0,
+        health="OK",
+        soc_kwh=8.84,
+        reserve_kwh=7.84,
+        e_kwh=39.2,
+    )
+    fleet = FleetState(hubs=(hub,), banks=(_bank("b1", 100.0),))
+    ledger = LedgerView(calls=(_call("o1", "b1", "T1", 40.0, "DIST_DEFERRAL", ("h1",)),))
+
+    result = cycle(_T0, fleet, ledger, Schedule(), {}, (), lease_ttl_s=3600.0)
+
+    granted = {g.obligation_id: g.granted_kw for g in result.grants if not g.is_headroom}
+    assert 0.0 < granted.get("o1", 0.0) < 1.0  # bound by energy, nowhere near the rated 50 kW
 
 
 @given(

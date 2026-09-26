@@ -41,6 +41,14 @@ WIRE_TYPE_TO_CATALOGUE_ID: dict[str, str] = {
     "SCADA_COMMS_LOSS": "comms_loss",
     "SCADA_UTILITY_INSTRUCTION": "utility_instruction",
     "SCADA_TIME_SKEW": "time_skew",
+    "SCADA_SITE_SAG_SWELL": "site_sag_swell",
+    # PQ / inverter imperfection (06-service-profiles-and-power-quality.md §7.2/§7.5).
+    "FLEET_FREQUENCY_DRIFT": "frequency_drift",
+    "FLEET_HARMONIC_INJECTION": "harmonic_injection",
+    "FLEET_PHASE_IMBALANCE_INJECTION": "phase_imbalance_injection",
+    "FLEET_CALIBRATION_DRIFT_CORRECTABLE": "calibration_drift_correctable",
+    "FLEET_CALIBRATION_DRIFT_HARDWARE": "calibration_drift_hardware",
+    "FLEET_REPLACE_INVERTER": "replace_inverter",
 }
 
 

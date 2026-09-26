@@ -209,6 +209,37 @@ def evaluate_scada_overload_alert(
     )
 
 
+def evaluate_energy_shortfall_risk_alert(
+    *,
+    obligation_id: str,
+    customer_id: str | None,
+    margin_kwh: float,
+    time_to_depletion_h: float | None,
+) -> AlertFinding:
+    """ALR-ENERGY-SHORTFALL-RISK (K1, continuous per-obligation energy-sufficiency check): a committed
+    obligation's eligible hubs no longer hold enough energy above reserve to sustain its remaining
+    delivery window. Always `critical` -- unlike the other alert rules here, this one is raised
+    directly by the allocator/engine energy-sufficiency hook the instant AT_RISK is detected (not
+    polled for by the health evaluator), so there is no severity threshold to size here; this function
+    exists so the health module owns exactly one place that names the rule/severity/summary shape,
+    matching every other `ALR-*` rule in this file (BUILD.md S1 "no duplicated functions")."""
+    return AlertFinding(
+        rule="ALR-ENERGY-SHORTFALL-RISK",
+        severity="critical",
+        summary=(
+            f"Obligation {obligation_id} energy margin {margin_kwh:.2f} kWh"
+            + (f", depletes in {time_to_depletion_h:.2f}h" if time_to_depletion_h is not None else "")
+        ),
+        condition_key=f"ALR-ENERGY-SHORTFALL-RISK:{obligation_id}",
+        detail={
+            "obligation_id": obligation_id,
+            "customer_id": customer_id,
+            "margin_kwh": margin_kwh,
+            "time_to_depletion_h": time_to_depletion_h,
+        },
+    )
+
+
 def evaluate_reserve_breach_alert(reserve_breach_count: float) -> AlertFinding | None:
     """ALR-RESERVE-BREACH: critical, page-equivalent (A10: must stay 0)."""
     if reserve_breach_count <= 0:

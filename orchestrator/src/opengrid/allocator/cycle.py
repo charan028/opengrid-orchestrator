@@ -43,6 +43,11 @@ from opengrid.core.physics import hub_sustainable_discharge_kw
 
 _EPS = 1e-9
 _DEFAULT_PRICE_THRESHOLD_USD_PER_MWH = 30.0
+# 02a S5's "hold horizon (the lease TTL, not 2 s)": how long a discharge grant must be SUSTAINABLE for,
+# not merely instantaneously safe -- K7's hold-the-last-setpoint-until-lease-expiry duration (00-
+# invariants.md K7: "30 s during events, 60 s otherwise"). The conservative (shorter) default is used
+# unless the caller knows the actual per-cycle lease TTL.
+_DEFAULT_LEASE_TTL_S = 30.0
 
 
 def cycle(
@@ -58,6 +63,7 @@ def cycle(
     dwell_states: MutableMapping[str, DwellState] | None = None,
     price_threshold_usd_per_mwh: float = _DEFAULT_PRICE_THRESHOLD_USD_PER_MWH,
     dt_c_s: float = 2.0,
+    lease_ttl_s: float = _DEFAULT_LEASE_TTL_S,
     stickiness: float = 0.2,
 ) -> CycleResult:
     """Run one S1-S7 cycle across every bank in `fleet_state`.
@@ -74,7 +80,7 @@ def cycle(
 
     hubs_by_bank: dict[str, list[HubSnapshot]] = {}
     for hub in fleet_state.hubs:
-        hubs_by_bank.setdefault(hub.bank_id, []).append(_cap_sustainable_discharge(hub, dt_c_s))
+        hubs_by_bank.setdefault(hub.bank_id, []).append(_cap_sustainable_discharge(hub, lease_ttl_s))
 
     calls_by_bank: dict[str, list[ObligationCall]] = {}
     for call in ledger_view.calls:
@@ -195,14 +201,26 @@ def cycle(
     )
 
 
-def _cap_sustainable_discharge(hub: HubSnapshot, dt_c_s: float) -> HubSnapshot:
-    """CORE-003/K1: when fleet supplies `soc_kwh`/`reserve_kwh`, further cap `free_discharge_kw` by
-    `hub_sustainable_discharge_kw` for this cycle's `dt_c_s` -- a sliver of energy just above reserve
-    must not be offered to water-filling/PI at the hub's full power rating for a whole interval. A
-    no-op when fleet has not (yet) supplied SoC/reserve for this hub (MVP-S: optional fields)."""
+def _cap_sustainable_discharge(hub: HubSnapshot, lease_ttl_s: float) -> HubSnapshot:
+    """CORE-003/K1: cap `free_discharge_kw` by the ENERGY the hub can sustain for the command's full
+    HOLD HORIZON -- the lease TTL (`lease_ttl_s`), not merely the 2 s tick -- via
+    `hub_sustainable_discharge_kw`. A sliver of energy just above reserve must not be offered to
+    water-filling/PI at the hub's full power rating for the whole lease duration; capacity (kW) alone
+    is not sufficient (user requirement: energy above reserve must be checked continuously).
+
+    K7/dispatch-live pass: when the fleet twin has NOT supplied a live `soc_kwh`/`reserve_kwh` reading
+    for this hub this cycle (`None` -- always the case for a stale/offline/fault hub,
+    `opengrid.fleet.hub_capabilities`), this is never trusted as "assume full power is safe". The
+    conservative fallback is 0 kW discharge capability, exactly like a hub the fleet twin already
+    excluded -- a missing or stale SoC reading must NEVER silently imply `free_discharge_kw` at face
+    value is safe to promise for the whole lease (this replaces a prior "trust it as-is" no-op that was
+    the reported silent full-power fallback bug).
+    """
     if hub.soc_kwh is None or hub.reserve_kwh is None:
-        return hub
-    dt_h = dt_c_s / 3600.0
+        if hub.free_discharge_kw <= 0.0:
+            return hub
+        return dataclasses_replace(hub, free_discharge_kw=0.0)
+    dt_h = lease_ttl_s / 3600.0
     sustainable_kw = hub_sustainable_discharge_kw(
         hub.soc_kwh, hub.reserve_kwh, hub.free_discharge_kw, dt_h, hub.eta_d
     )

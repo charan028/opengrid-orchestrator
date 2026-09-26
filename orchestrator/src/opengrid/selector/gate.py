@@ -16,7 +16,9 @@ from uuid import UUID, uuid4
 
 from opengrid import forecast, ledger
 from opengrid.core.models.engine import Plan
+from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.fleet import capability as fleet_capability
+from opengrid.fleet import hub_capabilities as fleet_hub_capabilities
 from opengrid.selector import db
 from opengrid.selector.extract import extract_plan
 from opengrid.selector.model import build_mode_o_model
@@ -60,10 +62,44 @@ async def compute_horizon(gate_kind: GateKind, now: datetime) -> tuple[datetime,
     return now, now + timedelta(hours=24)
 
 
+def _bank_energy_envelope(bank_id: str) -> tuple[float, float, float, float, float]:
+    """Live per-bank energy envelope from the fleet twin (user requirement: "energy above reserve
+    must be checked continuously" -- the selector must use the LIVE initial SoC per bank from the
+    twin, not a guessed/zero one). Aggregates `fleet.hub_capabilities(bank_id)` (already exposing
+    `soc_kwh`/`reserve_kwh`/`e_kwh`/`eta_d` per hub for exactly this purpose, per that function's own
+    docstring) over the hubs currently reporting live state (`soc_kwh is not None`, i.e. "online" this
+    instant) -- never over every configured hub regardless of health, which would silently invent an
+    unobserved SoC for an offline/stale hub.
+
+    Deliberately hardware-agnostic (no per-service or per-hub-model special-casing): whatever mix of
+    hub sizes a bank actually has (e.g. 39.2 kWh/11 kW single-unit vs 78.4 kWh/20 kW 2-unit homes) is
+    summed as reported by the twin, never assumed.
+
+    Returns `(capacity_kwh, reserve_kwh, initial_soc_kwh, eta_c, eta_d)`. When no hub on this bank is
+    currently online, returns `(0.0, 0.0, 0.0, DEFAULT_ETA_C, DEFAULT_ETA_D)` -- `BankSnapshot.capacity_kwh
+    <= 0` is the documented sentinel for "no energy envelope this cycle", which cleanly skips SoC
+    modeling for the bank (K7 degrade, don't trip) instead of pinning `soc == initial_soc` against
+    `[reserve_kwh, capacity_kwh]` bounds computed from a *different, larger* hub set than the live
+    reading -- which would make the model spuriously `INFEASIBLE_F1` under a partial/total fleet outage
+    (confirmed live 2026-09-25/26: every hub across all 40 banks went "offline" during an `og-engine`
+    restart loop)."""
+    hubs = fleet_hub_capabilities(bank_id)
+    online = [h for h in hubs if h.soc_kwh is not None and h.reserve_kwh is not None and h.e_kwh is not None]
+    if not online:
+        return 0.0, 0.0, 0.0, DEFAULT_ETA_C, DEFAULT_ETA_D
+    capacity_kwh = sum(h.e_kwh for h in online if h.e_kwh is not None)
+    reserve_kwh = sum(h.reserve_kwh for h in online if h.reserve_kwh is not None)
+    initial_soc_kwh = sum(h.soc_kwh for h in online if h.soc_kwh is not None)
+    eta_d = sum(h.eta_d for h in online) / len(online)
+    return capacity_kwh, reserve_kwh, initial_soc_kwh, DEFAULT_ETA_C, eta_d
+
+
 async def load_banks(
     horizon_start: datetime, horizon_end: datetime, bank_ids: tuple[str, ...]
 ) -> tuple[BankSnapshot, ...]:
-    """Bank discharge-capability snapshot via `fleet.capability` (02b S4), one call per bank/interval."""
+    """Bank discharge-capability snapshot via `fleet.capability` (02b S4), one call per bank/interval,
+    plus the bank's live energy envelope (`_bank_energy_envelope`, once per bank -- current SoC/
+    capacity/reserve are a live-now reading, not something that varies per future horizon interval)."""
     n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
     snapshots = []
     for bank_id in bank_ids:
@@ -72,7 +108,18 @@ async def load_banks(
             interval_start = horizon_start + timedelta(minutes=INTERVAL_MINUTES * t)
             cap = await fleet_capability(bank_id, interval_start)
             by_interval[t] = cap.max_discharge_kw
-        snapshots.append(BankSnapshot(bank_id=bank_id, max_discharge_kw=by_interval))
+        capacity_kwh, reserve_kwh, initial_soc_kwh, eta_c, eta_d = _bank_energy_envelope(bank_id)
+        snapshots.append(
+            BankSnapshot(
+                bank_id=bank_id,
+                max_discharge_kw=by_interval,
+                capacity_kwh=capacity_kwh,
+                reserve_kwh=reserve_kwh,
+                initial_soc_kwh=initial_soc_kwh,
+                eta_c=eta_c,
+                eta_d=eta_d,
+            )
+        )
     return tuple(snapshots)
 
 
@@ -154,6 +201,7 @@ async def load_candidates(
         candidates.append(
             CandidateOpportunity(
                 opportunity_id=str(row["opportunity_id"]),
+                obligation_id=str(row["obligation_id"]),
                 contract_id=str(row["contract_id"]),
                 eligible_bank_ids=bank_ids,
                 window_intervals=window_intervals,
@@ -275,13 +323,31 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
             result.selected_x.get(c.opportunity_id, False) or result.selected_q.get(c.opportunity_id, 0.0) > 0
         )
         if selected:
+            # Bug fix (combined-deploy pass): this used to key `selected_kw` by the bare interval index
+            # `str(t)`, but `opengrid.ledger.reserve()` requires each key to be
+            # `encode_interval_key(bank_id, interval_start, interval_end)` -- `decode_interval_key`
+            # raises `ValueError` on anything else (confirmed live: every ADMISSION/SCHEDULED_15MIN gate
+            # that actually selected a candidate crashed the whole tick with
+            # "malformed reservation interval key: '6'"). Also fixes a second, silent bug the old key
+            # shape hid: keying by `t` alone collides across banks sharing the same interval index, so a
+            # candidate split across two banks would have silently kept only the last bank's amount.
             selected_kw = {
-                str(t): Decimal(str(result.bank_interval_allocation.get((c.opportunity_id, b, t), 0.0)))
+                ledger.encode_interval_key(
+                    b,
+                    horizon_start + timedelta(minutes=INTERVAL_MINUTES * t),
+                    horizon_start + timedelta(minutes=INTERVAL_MINUTES * (t + 1)),
+                ): Decimal(str(result.bank_interval_allocation[(c.opportunity_id, b, t)]))
                 for t in c.window_intervals
                 for b in c.eligible_bank_ids
                 if (c.opportunity_id, b, t) in result.bank_interval_allocation
+                and result.bank_interval_allocation[(c.opportunity_id, b, t)] > 0
             }
-            await ledger.reserve(UUID(c.opportunity_id), selected_kw, plan_id)
+            # Bug fix (combined-deploy pass): `og.reservation.obligation_id` FK-references
+            # `og.obligation`, not `og.opportunity` -- `opengrid.contracts.admit`/`admit_priced` mint a
+            # fresh `obligation_id` distinct from `opportunity_id` for the OFFERED obligation created
+            # alongside the opportunity (`admission.py`). Passing `c.opportunity_id` here raised
+            # `ForeignKeyViolation` the moment a candidate was actually selected (confirmed live).
+            await ledger.reserve(UUID(c.obligation_id), selected_kw, plan_id)
 
     return Plan(
         plan_id=plan_id,

@@ -8,9 +8,18 @@
   "required": ["bank_id", "signal", "value", "unit", "quality", "ts"],
   "properties": {
     "bank_id": { "type": "string", "minLength": 1 },
-    "signal": { "type": "string", "enum": ["APPARENT_POWER_KVA", "REAL_POWER_KW", "VOLTAGE_PU", "CURRENT_A"] },
+    "signal": {
+      "type": "string",
+      "description": "Per-phase signals (06-service-profiles-and-power-quality.md S6.2) added additively; the schema's one-signal-per-message shape is unchanged -- a per-phase reading is three messages, matching the existing APPARENT_POWER_KVA pattern.",
+      "enum": [
+        "APPARENT_POWER_KVA", "REAL_POWER_KW", "VOLTAGE_PU", "CURRENT_A",
+        "VOLTAGE_A_PU", "VOLTAGE_B_PU", "VOLTAGE_C_PU",
+        "CURRENT_A_PHASE_A", "CURRENT_A_PHASE_B", "CURRENT_A_PHASE_C",
+        "FREQUENCY_HZ", "THD_V_PCT", "THD_I_PCT"
+      ]
+    },
     "value": { "type": "number" },
-    "unit": { "type": "string", "enum": ["kVA", "kW", "pu", "A"] },
+    "unit": { "type": "string", "enum": ["kVA", "kW", "pu", "A", "Hz", "%"] },
     "quality": {
       "type": "string",
       "enum": ["good", "stale", "missing", "out_of_range", "comm_fail"]

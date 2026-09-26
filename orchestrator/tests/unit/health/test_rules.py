@@ -13,6 +13,7 @@ from opengrid.health.rules import (
     classify_hub_health,
     derive_degraded_modes,
     evaluate_cycle_latency_alert,
+    evaluate_energy_shortfall_risk_alert,
     evaluate_feed_alert,
     evaluate_guardian_timeout_alert,
     evaluate_hub_offline_ratio_alert,
@@ -162,6 +163,26 @@ def test_feed_alert_critical_when_breaker_open() -> None:
 
 def test_process_down_alert_only_when_down() -> None:
     assert evaluate_process_down_alert(ProcessHealth("engine", "ok", NOW)) is None
+
+
+def test_energy_shortfall_risk_alert_shape() -> None:
+    finding = evaluate_energy_shortfall_risk_alert(
+        obligation_id="OBL-1", customer_id="CUST-A", margin_kwh=-3.5, time_to_depletion_h=0.75
+    )
+    assert finding.rule == "ALR-ENERGY-SHORTFALL-RISK"
+    assert finding.severity == "critical"
+    assert finding.condition_key == "ALR-ENERGY-SHORTFALL-RISK:OBL-1"
+    assert finding.detail["obligation_id"] == "OBL-1"
+    assert finding.detail["margin_kwh"] == -3.5
+    assert finding.detail["time_to_depletion_h"] == 0.75
+
+
+def test_energy_shortfall_risk_alert_handles_no_depletion_time() -> None:
+    finding = evaluate_energy_shortfall_risk_alert(
+        obligation_id="OBL-2", customer_id=None, margin_kwh=-1.0, time_to_depletion_h=None
+    )
+    assert "depletes in" not in finding.summary
+    assert finding.detail["time_to_depletion_h"] is None
     finding = evaluate_process_down_alert(ProcessHealth("engine", "down", NOW))
     assert finding is not None
     assert finding.rule == "ALR-PROCESS-DOWN"

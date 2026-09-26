@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/contracts/service_profile.schema.json",
+  "title": "ServiceProfile",
+  "description": "Contract-side object (not an MQTT message), validated at profile authoring and admission time per 03-decision-engine.md S2.7. Mirrors og.service_profile (orchestrator/migrations/0010_service_profile.sql). See docs/orchestrator/07-delivery/06-service-profiles-and-power-quality.md S1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "service_profile_id", "contract_id", "version", "control_primitive", "target_quantity",
+    "target_scope", "setpoint_source", "response_time_s", "ramp_limit", "accuracy_tolerance",
+    "deadband", "priority_tier", "mv_method", "settlement_metric", "pq_envelope_id", "failure_behaviour"
+  ],
+  "properties": {
+    "service_profile_id": { "type": "string", "format": "uuid" },
+    "contract_id": { "type": "string", "format": "uuid" },
+    "version": { "type": "integer", "minimum": 1 },
+    "control_primitive": {
+      "type": "string",
+      "enum": ["OPEN_LOOP_SCHEDULE", "CLOSED_LOOP_REGULATION", "PRICE_RESPONSE", "CAPACITY_HOLD",
+               "EVENT_SCHEDULE_TRACKING", "MODE_ISLAND_CONTROL"]
+    },
+    "target_quantity": {
+      "type": "string",
+      "enum": ["KW", "KVAR", "LINE_CURRENT_A", "PIPE_TO_SOIL_V", "BANK_KVA", "NET_POWER_MW", "NONE"]
+    },
+    "target_scope": { "type": "string", "enum": ["HUB", "BANK", "FEEDER", "CORRIDOR_LINE", "ADER", "SITE_METER"] },
+    "setpoint_source": { "type": "string", "enum": ["PLAN", "MEASURED_FEEDBACK", "ISO_INSTRUCTION", "PRICE_FEED", "CUSTOMER_API"] },
+    "feedback_signal_ref": { "type": ["string", "null"] },
+    "response_time_s": { "type": "number", "exclusiveMinimum": 0 },
+    "ramp_limit": { "type": "number", "exclusiveMinimum": 0 },
+    "ramp_limit_unit": { "type": "string", "enum": ["kw_per_min", "a_per_min", "kvar_per_min", "mw_per_min"] },
+    "sustain_duration_s": { "type": ["number", "null"], "minimum": 0 },
+    "accuracy_tolerance": { "type": "number", "minimum": 0 },
+    "deadband": { "type": "number", "minimum": 0 },
+    "priority_tier": { "type": "string", "enum": ["L0", "L1", "L2", "T1", "T2", "T3", "T4"] },
+    "mv_method": { "type": "string" },
+    "settlement_metric": { "type": "string" },
+    "pq_envelope_id": { "type": "string", "format": "uuid" },
+    "failure_behaviour": { "type": "string" }
+  },
+  "allOf": [
+    { "if": { "properties": { "setpoint_source": { "const": "MEASURED_FEEDBACK" } } },
+      "then": { "required": ["feedback_signal_ref"] } },
+    { "if": { "properties": { "control_primitive": { "const": "CLOSED_LOOP_REGULATION" } } },
+      "then": { "not": { "properties": { "target_quantity": { "const": "NONE" } } } } }
+  ]
+}

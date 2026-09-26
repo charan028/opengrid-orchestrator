@@ -60,6 +60,9 @@ class PgEngineBackend:
         return (now - last_ts).total_seconds()
 
     async def insert_command_batch(self, row: CommandBatchRow) -> None:
+        # K10: must be durably committed before `notify_guardian` wakes the guardian -- without an
+        # explicit commit, the row is not guaranteed visible to guardian's own connection when it polls
+        # `og.command_batch` right after the NOTIFY (qa/merge-notes.md S17 fix).
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 _INSERT_COMMAND_BATCH_SQL,
@@ -73,7 +76,9 @@ class PgEngineBackend:
                     "trace_pre_image_id": row.trace_pre_image_id,
                 },
             )
+            await conn.commit()
 
     async def notify_guardian(self, command_batch_id: UUID) -> None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_NOTIFY_SQL, {"payload": str(command_batch_id)})
+            await conn.commit()

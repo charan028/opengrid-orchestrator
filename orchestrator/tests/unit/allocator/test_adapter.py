@@ -65,7 +65,18 @@ async def test_ts_05_60_run_cycle_without_gateways_raises_not_implemented() -> N
 @pytest.mark.asyncio
 async def test_ts_05_61_run_cycle_builds_grant_rows_from_fakes() -> None:
     fleet_state = FleetState(
-        hubs=(HubSnapshot(hub_id="h1", bank_id="b1", free_discharge_kw=50.0),),
+        # K1: soc_kwh/reserve_kwh/e_kwh ample and not None -- see opengrid.allocator.cycle's
+        # `_cap_sustainable_discharge` (a hub with no live SoC reading gets 0 kW, never its rated power).
+        hubs=(
+            HubSnapshot(
+                hub_id="h1",
+                bank_id="b1",
+                free_discharge_kw=50.0,
+                soc_kwh=1_000_000.0,
+                reserve_kwh=0.0,
+                e_kwh=1_000_000.0,
+            ),
+        ),
         banks=(BankSnapshot(bank_id="b1", capability_kw=50.0, kva_rating=50.0),),
     )
     ledger_view = LedgerView(

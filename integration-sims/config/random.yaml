@@ -159,3 +159,32 @@ types:
     rate_per_hour: 0.1
     duration_s: [600, 3600]
     params: { home_load_kw: [4, 10] }
+  # ---- power quality / inverter imperfection (06-service-profiles-and-power-quality.md §7.2/§7.5) ----
+  frequency_drift:
+    rate_per_hour: 0.05
+    duration_s: [600, 3600]
+    params: { target_offset_hz: [0.1, 0.4] }
+  harmonic_injection:
+    rate_per_hour: 0.05
+    duration_s: [600, 3600]
+    params: { thd_target_pct: [5.0, 12.0] }
+  phase_imbalance_injection:
+    rate_per_hour: 0.05
+    duration_s: [600, 1800]
+    params: { bias_kw: [1.0, 4.0] }
+  calibration_drift_correctable:
+    rate_per_hour: 0.02
+    duration_s: [1800, 7200]
+    params: { target_freq_offset_hz: [0.1, 0.3], target_voltage_offset_pct: [1.0, 3.0] }
+  calibration_drift_hardware:
+    rate_per_hour: 0.01
+    duration_s: [1800, 7200]
+    params: { target_freq_offset_hz: [0.1, 0.3], target_voltage_offset_pct: [1.0, 3.0] }
+  site_sag_swell:
+    rate_per_hour: 0.05
+    duration_s: [1, 10]
+    params: { pu_level: [0.7, 0.9] }
+  replace_inverter:
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}

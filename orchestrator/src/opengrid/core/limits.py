@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from opengrid.core import reasons
-from opengrid.core.physics import BankParams, HubParams, recharge_headroom
+from opengrid.core.physics import BankParams, HubParams, project_soc_over_lease_kwh, recharge_headroom
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +33,32 @@ def check_reserve_floor(soc_kwh: float, params: HubParams, *, margin_pct: float 
     margin_kwh = params.e_kwh * margin_pct
     if soc_kwh < params.r_kwh + margin_kwh:
         return LimitResult.failed(reasons.R_RESERVE_FLOOR)
+    return LimitResult.passed()
+
+
+def check_reserve_floor_over_lease(
+    soc_kwh: float,
+    p_kw: float,
+    lease_ttl_h: float,
+    params: HubParams,
+    *,
+    margin_pct: float = 0.01,
+) -> LimitResult:
+    """G-01-ENERGY/K1: project the hub's reported SoC across the command's FULL lease duration (not
+    just the instant it is issued) and check it still clears reserve + margin throughout (discharge)
+    or never overfills above `e_kwh` (charge). A command whose power is well within the instantaneous
+    G-01 check can still drain a hub below reserve *before its lease expires* if the hub does not hold
+    enough energy above reserve for the whole lease -- capacity (kW) alone is not sufficient (user
+    requirement: energy above reserve must be checked continuously, not just power headroom).
+    """
+    projected = project_soc_over_lease_kwh(soc_kwh, p_kw, lease_ttl_h, params.eta_c, params.eta_d)
+    if p_kw < 0:  # discharging
+        margin_kwh = params.e_kwh * margin_pct
+        if projected < params.r_kwh + margin_kwh:
+            return LimitResult.failed(reasons.R_RESERVE_FLOOR_LEASE)
+    elif p_kw > 0:  # charging
+        if projected > params.e_kwh + 1e-9:
+            return LimitResult.failed(reasons.R_CHARGE_CEILING_LEASE)
     return LimitResult.passed()
 
 

@@ -19,13 +19,18 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid import fleet, ledger
+from opengrid.allocator.energy_sufficiency import (
+    EnergySufficiencyResult,
+    HubEnergyState,
+    evaluate_with_substitution,
+)
 from opengrid.allocator.models import (
     BankSnapshot,
     FleetState,
@@ -39,9 +44,41 @@ from opengrid.allocator.models import (
     Schedule,
 )
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
+from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK
+from opengrid.health.model import AlertFinding
+from opengrid.health.queries import raise_alert
+from opengrid.health.rules import evaluate_energy_shortfall_risk_alert
 from opengrid.ledger import GrantRecord
+from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
+
+# item 3's continuous energy-sufficiency check: every COMMITTED/DELIVERING obligation's remaining
+# committed draw against its bank(s), joined to the contract for customer_id and the obligation for
+# window_end. MVP-S reservations are bank-scoped (02a S1.9), so this check is scoped to (obligation,
+# bank) pairs exactly like `_ACTIVE_CALLS_SQL` above -- the same simplification already used for S1-S7.
+_UPSERT_ENERGY_STATUS_SQL = """
+INSERT INTO og.obligation_energy_status
+    (obligation_id, required_kwh, available_kwh, margin_kwh, time_to_depletion_h, at_risk,
+     used_substitution, computed_at)
+VALUES (%(obligation_id)s, %(required_kwh)s, %(available_kwh)s, %(margin_kwh)s,
+        %(time_to_depletion_h)s, %(at_risk)s, %(used_substitution)s, now())
+ON CONFLICT (obligation_id) DO UPDATE SET
+    required_kwh = EXCLUDED.required_kwh, available_kwh = EXCLUDED.available_kwh,
+    margin_kwh = EXCLUDED.margin_kwh, time_to_depletion_h = EXCLUDED.time_to_depletion_h,
+    at_risk = EXCLUDED.at_risk, used_substitution = EXCLUDED.used_substitution,
+    computed_at = EXCLUDED.computed_at
+"""
+
+_ENERGY_SUFFICIENCY_ROWS_SQL = """
+SELECT r.obligation_id, r.bank_id, r.amount, o.window_end, c.customer_id
+FROM og.reservation r
+JOIN og.obligation o ON o.obligation_id = r.obligation_id
+JOIN og.contract c ON c.contract_id = o.contract_id
+WHERE r.released_at IS NULL
+  AND r.kind = 'POWER_KW'
+  AND o.state IN ('COMMITTED', 'DELIVERING')
+"""
 
 # 02b's "current price" signal for the allocator's headroom/dwell threshold (S6) -- ERCOT settlement
 # point price (np6-905-cd, see opengrid.feeds.ercot's product map), the same product
@@ -129,6 +166,17 @@ class EngineFleetGateway:
                         bank_id=snap.bank_id,
                         free_discharge_kw=snap.free_discharge_kw,
                         health=_HEALTH_TO_ALLOCATOR.get(snap.health, "FAULT"),  # type: ignore[arg-type]
+                        # CORE-003/K1 (user requirement: energy above reserve checked continuously, not
+                        # just power headroom): live SoC/reserve/capacity/efficiency from the fleet
+                        # twin's own telemetry, so the allocator's `_cap_sustainable_discharge` can cap
+                        # `free_discharge_kw` by the ENERGY sustainable over the command's hold horizon.
+                        # `snap.soc_kwh` is already `None` for any hub the twin excluded this instant
+                        # (stale/offline/fault, `fleet._classify_health`) -- never a stale/missing
+                        # reading silently forwarded as "trust free_discharge_kw at face value".
+                        soc_kwh=snap.soc_kwh,
+                        reserve_kwh=snap.reserve_kwh,
+                        e_kwh=snap.e_kwh,
+                        eta_d=snap.eta_d,
                     )
                 )
         return FleetState(hubs=tuple(hubs), banks=tuple(banks))
@@ -253,6 +301,151 @@ class EngineLedgerGateway:
             "EngineLedgerGateway.record_substitution: og.grant has no reason_code column yet; "
             "see qa/merge-notes.md for the schema decision this needs before it can persist anything"
         )
+
+
+class EnergySufficiencyGateway:
+    """Continuous per-obligation ENERGY-sufficiency hook (K1, user requirement: energy above reserve
+    checked continuously, not just power headroom). Runs every allocator cycle, independent of the S1-S7
+    power-capability path (`opengrid.allocator.cycle`), for every COMMITTED/DELIVERING obligation.
+
+    Reads live SoC from the fleet twin and treats OTHER obligations sharing the same bank's committed
+    remaining energy as already-reserved (K2), distributed across the bank's online hubs proportional to
+    `free_discharge_kw` (the same heuristic `opengrid.engine._distribute_hub_items` uses for the
+    guardian hand-off) -- MVP-S reservations are bank-scoped, not hub-scoped (02a S1.9), so this is the
+    finest granularity the schema actually supports; documented here rather than silently assumed.
+
+    On AT_RISK (after trying substitution with the SAME bank's other online hubs first, S5.3's "hub
+    substitution is always allowed"): traces the finding and raises `ALR-ENERGY-SHORTFALL-RISK`
+    (`opengrid.health.queries.raise_alert`, the existing single writer of `og.alert` -- BUILD.md S1 "no
+    duplicated functions"). Commitment-lock rules are untouched: this NEVER reallocates capacity to a
+    different obligation (K13), it only observes and alerts.
+
+    No AT_RISK obligation-lifecycle transition exists in `opengrid.contracts.state_machine` (`DELIVERING
+    -> DELIVERING` requires `R-RENOM-GATE`, which this is not) -- per the build brief's own fallback,
+    AT_RISK is recorded via trace + alert only; `at_risk` stays a state-machine concept for whoever adds
+    a dedicated transition/reason code later.
+    """
+
+    def __init__(self, pool: AsyncConnectionPool, trace: TraceStore) -> None:
+        self._pool = pool
+        self._trace = trace
+
+    async def run(self, now: datetime) -> list[EnergySufficiencyResult]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ENERGY_SUFFICIENCY_ROWS_SQL)
+            rows = await cur.fetchall()
+
+        by_bank: dict[str, list[tuple[str, float, datetime, str | None]]] = {}
+        for obligation_id, bank_id, amount, window_end, customer_id in rows:
+            by_bank.setdefault(bank_id, []).append(
+                (str(obligation_id), float(amount), window_end, str(customer_id) if customer_id else None)
+            )
+
+        results: list[EnergySufficiencyResult] = []
+        for bank_id, obligations in by_bank.items():
+            try:
+                hub_snaps = fleet.hub_capabilities(bank_id)
+            except LookupError:
+                continue
+            online_hubs = [h for h in hub_snaps if h.health == "online"]
+            total_free_kw = sum(h.free_discharge_kw for h in online_hubs)
+            hub_states = [
+                HubEnergyState(
+                    hub_id=h.hub_id,
+                    soc_kwh=h.soc_kwh,
+                    reserve_kwh=h.reserve_kwh if h.reserve_kwh is not None else 0.0,
+                    eta_d=h.eta_d,
+                )
+                for h in online_hubs
+            ]
+
+            for obligation_id, committed_kw, window_end, customer_id in obligations:
+                remaining_window_h = max((window_end - now).total_seconds(), 0.0) / 3600.0
+
+                # K2: distribute every OTHER obligation on this bank's remaining required energy across
+                # the bank's online hubs, proportional to free_discharge_kw share -- the energy this
+                # obligation may NOT count as available.
+                reserved_kwh_by_hub: dict[str, float] = {}
+                if total_free_kw > 0:
+                    for other_id, other_kw, other_window_end, _other_customer in obligations:
+                        if other_id == obligation_id:
+                            continue
+                        other_remaining_h = max((other_window_end - now).total_seconds(), 0.0) / 3600.0
+                        other_required_kwh = other_kw * other_remaining_h
+                        for h in online_hubs:
+                            share = other_required_kwh * (h.free_discharge_kw / total_free_kw)
+                            reserved_kwh_by_hub[h.hub_id] = reserved_kwh_by_hub.get(h.hub_id, 0.0) + share
+
+                result = evaluate_with_substitution(
+                    obligation_id,
+                    committed_kw,
+                    remaining_window_h,
+                    hub_states,
+                    hub_states,
+                    reserved_kwh_by_hub,
+                )
+                results.append(result)
+                await self._record_status(result)
+                if result.at_risk:
+                    await self._record_at_risk(result, customer_id)
+        return results
+
+    async def _record_status(self, result: EnergySufficiencyResult) -> None:
+        """Persists EVERY cycle's result (not just AT_RISK ones) to `og.obligation_energy_status`, so
+        `GET /og/api/dispatch/opportunities`/the dispatch SSE stream can show a live
+        `energy_margin_kwh`/`time_to_depletion_h` for an obligation that is currently fine, not only a
+        trace/alert trail for the ones that weren't (merge task item 5). Best-effort: a status-row write
+        failure must never block the AT_RISK trace/alert path below, which is the safety-relevant one."""
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    _UPSERT_ENERGY_STATUS_SQL,
+                    {
+                        "obligation_id": result.obligation_id,
+                        "required_kwh": result.required_kwh,
+                        "available_kwh": result.available_kwh,
+                        "margin_kwh": result.margin_kwh,
+                        "time_to_depletion_h": result.time_to_depletion_h,
+                        "at_risk": result.at_risk,
+                        "used_substitution": result.used_substitution,
+                    },
+                )
+                await conn.commit()
+        except Exception:
+            logger.exception(
+                "failed to persist obligation_energy_status", extra={"obligation_id": result.obligation_id}
+            )
+
+    async def _record_at_risk(self, result: EnergySufficiencyResult, customer_id: str | None) -> None:
+        payload = {
+            "obligation_id": result.obligation_id,
+            "customer_id": customer_id,
+            "margin_kwh": result.margin_kwh,
+            "required_kwh": result.required_kwh,
+            "available_kwh": result.available_kwh,
+            "time_to_depletion_h": result.time_to_depletion_h,
+            "used_substitution": result.used_substitution,
+        }
+        await self._trace.append(
+            f"energy-sufficiency-{result.obligation_id}",
+            "ALERT",
+            "ENERGY_SHORTFALL_RISK",
+            payload,
+            reason_codes=[ALR_ENERGY_SHORTFALL_RISK],
+        )
+        finding: AlertFinding = evaluate_energy_shortfall_risk_alert(
+            obligation_id=result.obligation_id,
+            customer_id=customer_id,
+            margin_kwh=result.margin_kwh,
+            time_to_depletion_h=result.time_to_depletion_h,
+        )
+        try:
+            await raise_alert(self._pool, finding, opened_at=datetime.now(tz=UTC))
+        except Exception:
+            logger.exception(
+                "failed to raise ALR-ENERGY-SHORTFALL-RISK alert",
+                extra={"obligation_id": result.obligation_id},
+            )
 
 
 def build_gateways(

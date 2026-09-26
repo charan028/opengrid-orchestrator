@@ -366,12 +366,16 @@ class PgStore:
         clauses: list[str] = ["1=1"]
         params: list[Any] = []
         if state is not None:
-            clauses.append("state = %s")
+            clauses.append("o.state = %s")
             params.append(state)
         sql = f"""
-            SELECT obligation_id, opportunity_id, contract_id, service_type, tier, window_start,
-                   window_end, committed_qty_kw, state, at_risk, last_reason_code, version
-            FROM og.obligation WHERE {" AND ".join(clauses)} ORDER BY updated_at DESC LIMIT 500
+            SELECT o.obligation_id, o.opportunity_id, o.contract_id, o.service_type, o.tier,
+                   o.window_start, o.window_end, o.committed_qty_kw, o.state, o.at_risk,
+                   o.last_reason_code, o.version,
+                   es.margin_kwh AS energy_margin_kwh, es.time_to_depletion_h
+            FROM og.obligation o
+            LEFT JOIN og.obligation_energy_status es ON es.obligation_id = o.obligation_id
+            WHERE {" AND ".join(clauses)} ORDER BY o.updated_at DESC LIMIT 500
         """  # noqa: S608 -- clause fragments are hard-coded, values are bound as `%s` params
         rows = await self._fetch(sql, tuple(params))
         return [Obligation(**row) for row in rows]
