@@ -1,0 +1,38 @@
+# dev/config/fleet.2k.dev.yaml -- dev-only scale-run preset (docs/orchestrator/07-delivery/12-scale-test-plan.md):
+# fleet.dev.yaml with hub_count 2000 / bank_count 40 (50 hubs per bank, as production). Selected by
+# dev/docker-compose.scale.yml (OG_SCALE_PRESET=2k) for sim-fleet and the migrate container's seed step,
+# with scada.2k.dev.yaml for sim-scada, so all three agree on the hub/bank ids. The plan's own
+# integration-sims/config/fleet.10k.yaml ships with R2; this dev preset keeps the dev stack's
+# no-mqtt-key rule (see fleet.dev.yaml).
+
+hub_count: 2000
+bank_count: 40
+zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
+
+telemetry_interval_s: 2.0
+lease_ttl_s: 30.0
+lease_hold_after_expiry_s: 5.0
+stop_ramp_s: 4.0
+
+e_kwh_default: 39.2  # Base Power home battery, usable kWh (confirmed by Base, 2026-09-25).
+reserve_frac_default: 0.20
+p_kw_default: 11.0  # Base Power inverter, kW per battery unit (confirmed by Base, 2026-09-25); 2-unit homes = 20 kW
+eta_c: 0.9487
+eta_d: 0.9487
+self_discharge_kwh_per_h: 0.0005
+# feeder segment (~50 homes), not a single distribution transformer.
+bank_kva_rating_default: 600.0
+
+# Dual-unit homes (confirmed by Base, 2026-09-25): see integration-sims/config/fleet.yaml for the
+# full deterministic selection rule (must stay word-for-word identical between the two products).
+dual_unit_share: 0.2
+e_kwh_dual_unit: 78.4  # Dual-unit home usable kWh (2 Base Power battery units).
+p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
+
+# The dev override paths win over the plain paths (FleetConfig.public_key_path()/
+# safestop_key_path()) -- dev/scripts/gen-keys.* writes the matching .pub files here, and
+# docker-compose.yml bind-mounts dev/keys/ into the sim-fleet container at /app/dev/keys/.
+guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
+guardian_public_key_path_dev: /app/dev/keys/guardian-dev.pub
+safestop_public_key_path: /etc/opengrid/safestop_ed25519.pub
+safestop_public_key_path_dev: /app/dev/keys/safestop-dev.pub

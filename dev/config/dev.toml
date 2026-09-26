@@ -33,6 +33,9 @@ keepalive_s = 20
 
 [feeds.ercot]
 base_url = "http://127.0.0.1:8090/ercot"
+# See dev/config/docker.toml's identical setting -- points the ROPC token flow at sim-market's
+# stand-in instead of the real ercotb2c.b2clogin.com.
+token_url = "http://127.0.0.1:8090/token"
 subscription_key_env = "ERCOT_PUBLIC_API_KEY_PRIMARY"
 subscription_key_secondary_env = "ERCOT_PUBLIC_API_KEY_SECONDARY"
 username_env = "ERCOT_API_USER"
@@ -83,12 +86,16 @@ hysteresis_usd_per_mwh = 5
 key_path = "dev/keys/guardian-dev.key"
 verdict_timeout_ms = 300
 clock_offset_max_ms = 200
+# D-12 test operators (og-op-a/og-op-b) -- see dev/config/docker.toml's identical setting.
+stop_release_authorised_operators = ["og-op-a", "og-op-b"]
 
 [safestop]
 key_path = "dev/keys/safestop-dev.key"
 ramp_bank_s = 30
 ramp_zone_s = 60
 ramp_fleet_s = 120
+# See dev/config/docker.toml's identical setting (host-relative path here).
+guardian_public_key_path = "dev/keys/guardian-dev.pub"
 
 [health]
 heartbeat_interval_s = 5
@@ -114,6 +121,11 @@ bind_host = "127.0.0.1"
 bind_port = 8080
 sse_heartbeat_s = 15
 csrf_allowed_hosts = ["localhost:8080", "127.0.0.1:8080"]
+
+[api.roles]
+# D-12 test operators (og-op-a/og-op-b) -- see dev/config/docker.toml's identical setting.
+operator = ["operator", "og-op-a", "og-op-b"]
+viewer = ["viewer"]
 
 [ui]
 base_path = "/og"
