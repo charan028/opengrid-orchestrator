@@ -2,7 +2,7 @@
 
 Kept next to `docs/demo/README.md` (DEMO-2, release R2). Each item names the owner lane the lead routed it to
 and the demo step that depends on it. Status re-checked against R2 (`main` `6470cfa`); items resolved in R2 or
-earlier are listed at the end for the record. Items 12-16 concern the simulators and were not re-checked at R2.
+earlier are listed at the end for the record. Items 13-14 concern the simulators and were not re-checked at R2.
 
 ## Open
 
@@ -22,13 +22,15 @@ earlier are listed at the end for the record. Items 12-16 concern the simulators
    (`tests-e2e/functional` Q4 strict xfail).
 4. **The "Commitment-lock events (K13)" table is never populated** (owner: engine/ledger; steps 6, 8, 14). No
    code writes commitment rows with a lock reason or a `supersedes`; the demo points at the trace instead.
-5. **"SCADA silent" is never raised** (owner: health, ES07-S05; step 18). `health/__init__.py:364` never passes
-   the SCADA-silent input. (Feed stale, `NO_NEW_COMMITMENTS`, is enforced since R2.)
+5. **"SCADA silent" is shown only** (owner: engine, ES07-S05; step 18). R2 hotfix v3 (`afb26c2`) raises
+   `ALR-SCADA-SILENT` and `DIST_DEFERRAL_OPEN_LOOP` after 60 s without SCADA readings, but only the UI reads the
+   mode; the DIST_DEFERRAL loop keeps the last reading. (Feed stale, `NO_NEW_COMMITMENTS`, is enforced since R2,
+   and since hotfix v3 is set only by the price feed.)
 6. **Market anomalies need `og-feeds` on the simulator** (owner: lead; steps 7-8, 18).
    - The server polls live ERCOT/EIA/NWS, so `/ogsim/` market anomalies do not reach it until `[feeds.*]` points
      at `ogsim.market`.
-   - Since R2 the server's price freshness window is 2,700 s, longer than the `feed_outage_and_stale` scenario.
-     Step 18 therefore runs on the dev stack (600 s) unless the lead shortens the window for the run.
+   - Since R2 the price freshness window is 2,700 s (server and dev stack), longer than the
+     `feed_outage_and_stale` scenario. Step 18 therefore injects a 60-minute `stale_posting` during setup.
 7. **"LP value added (latest selector gate)" is never available** (owner: MERGE, API; step 21).
    `orchestrator/src/opengrid/api/routers/lp_value.py` exists but og-api does not mount it
    (`api/app.py:130-171`).
@@ -45,20 +47,24 @@ earlier are listed at the end for the record. Items 12-16 concern the simulators
 10. **The Hubs table shows at most 200 hubs** (owner: UI; step 3). The map draws every hub since R2.
 11. **The System Health processes and feeds tables, the Control-room banner and "Guardian escalations" reflect
     page load** (owner: UI; steps 2, 16, 18).
-12. **`tampered_unsigned_command` has no observable effect** (owner: sims; the forged-command moment is out of
+12. **The control plane's page behind `/ogsim/`** (owner: deploy/FLEET-SIM; "Before you start" item 6). Since
+    `afb26c2` the page honours `X-Forwarded-Prefix` or `OGSIM_CONTROL_BASE_PATH`
+    (`integration-sims/src/ogsim/control/app.py:63-71` there). Neither `deploy/apache/opengrid.conf` nor
+    `deploy/systemd/og-sim-control.service` sets them, so its calls still go to the domain root; the script uses
+    `curl`.
+13. **`tampered_unsigned_command` has no observable effect** (owner: sims; the forged-command moment is out of
     the script). Its self-test is never invoked on anomaly start, and no rejected ack reaches the orchestrator.
-13. **Legacy scenario files use ids the simulator does not know** (owner: sims; not used by the script).
+14. **Legacy scenario files use ids the simulator does not know** (owner: sims; not used by the script).
     `bank_overload_and_utility_limit`, `compound_stress` and `tampered_command` target `BANK_07`, `BANK_12`,
     `HUB_0501` and `HUB_0142`; the simulator's ids are `bank-NNN`/`hub-NNNNN`. A fix is on `wp/scenario-target-ids`.
-14. **Random mode resumes after a control-plane restart** (owner: sims; "Before you start" item 1). Pause is held
-    in memory only.
-15. **The control plane's web page calls `/api/...` by absolute path** (owner: sims; "Before you start" item 6).
-    Behind Apache's `/ogsim/` the buttons probably fail; the script uses `curl`.
-16. **No "stop scenario" verb** (owner: market). `POST /api/scenarios/{name}/run` has no matching stop, and
-    pending steps still fire after their first anomaly is cancelled.
 
 ## Resolved (R2 and earlier)
 
+- **R2 hotfix v3 (`afb26c2`):**
+  - **The random-mode pause is saved** across a control-plane restart.
+  - **The control plane's page** has Run, Stop and Stop all buttons.
+  - **Scenarios can be stopped:** `POST /api/scenarios/{name}/stop` and `/api/scenarios/stop-all` cancel the
+    pending steps and end what was injected.
 - **R2:**
   - **A guardian veto shows VETOED** with its rule ids (was: FAILED with "409 Conflict").
   - **A slow release shows PENDING**, not FAILED (the screen waits 15 s).
