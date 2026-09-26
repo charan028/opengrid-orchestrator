@@ -19,15 +19,37 @@ SELECTION_CAP = 100  # small in fixture mode so the "capped" note is exercised
 def _hub(i: int) -> dict[str, Any]:
     if i == 1:
         return {
-            "hub_id": "hub-0001", "bank_id": "bank-01", "zone": "LZ_SOUTH", "soc_kwh": 9.8, "e_kwh": 39.2,
-            "soc_pct": 25.0, "p_kw": -2.1, "health": "online", "health_label": "OK", "activity": "charging",
-            "rated_p_kw": 11.0, "lat": 29.76, "lon": -95.36, "last_seen_at": "2026-09-25T11:59:55+00:00",
+            "hub_id": "hub-0001",
+            "bank_id": "bank-01",
+            "zone": "LZ_SOUTH",
+            "soc_kwh": 9.8,
+            "e_kwh": 39.2,
+            "soc_pct": 25.0,
+            "p_kw": -2.1,
+            "health": "online",
+            "health_label": "OK",
+            "activity": "charging",
+            "rated_p_kw": 11.0,
+            "lat": 29.76,
+            "lon": -95.36,
+            "last_seen_at": "2026-09-25T11:59:55+00:00",
         }
     if i == 2:
         return {
-            "hub_id": "hub-0002", "bank_id": "bank-01", "zone": "LZ_SOUTH", "soc_kwh": 3.1, "e_kwh": 39.2,
-            "soc_pct": 7.9, "p_kw": 0.0, "health": "fault", "health_label": "FAULT", "activity": "idle",
-            "rated_p_kw": 11.0, "lat": 29.77, "lon": -95.34, "last_seen_at": "2026-09-25T11:58:00+00:00",
+            "hub_id": "hub-0002",
+            "bank_id": "bank-01",
+            "zone": "LZ_SOUTH",
+            "soc_kwh": 3.1,
+            "e_kwh": 39.2,
+            "soc_pct": 7.9,
+            "p_kw": 0.0,
+            "health": "fault",
+            "health_label": "FAULT",
+            "activity": "idle",
+            "rated_p_kw": 11.0,
+            "lat": 29.77,
+            "lon": -95.34,
+            "last_seen_at": "2026-09-25T11:58:00+00:00",
         }
     health = HEALTH[i % len(HEALTH)]
     soc_pct = float((i * 7) % 100)
@@ -48,7 +70,14 @@ def _hub(i: int) -> dict[str, Any]:
 
 
 HUBS = [_hub(i) for i in range(1, N_HUBS + 1)]
-_SORT = {"hub": "hub_id", "bank": "bank_id", "zone": "zone", "soc": "soc_pct", "kw": "p_kw", "health": "health"}
+_SORT = {
+    "hub": "hub_id",
+    "bank": "bank_id",
+    "zone": "zone",
+    "soc": "soc_pct",
+    "kw": "p_kw",
+    "health": "health",
+}
 
 
 def _multi(params: Any, key: str) -> list[str]:
@@ -116,7 +145,12 @@ def table(params: Any) -> dict[str, Any]:
 
 def selection(params: Any) -> dict[str, Any]:
     ids = [h["hub_id"] for h in _matching(params)]
-    return {"hub_ids": ids[:SELECTION_CAP], "count": min(len(ids), SELECTION_CAP), "capped": len(ids) > SELECTION_CAP, "max": SELECTION_CAP}
+    return {
+        "hub_ids": ids[:SELECTION_CAP],
+        "count": min(len(ids), SELECTION_CAP),
+        "capped": len(ids) > SELECTION_CAP,
+        "max": SELECTION_CAP,
+    }
 
 
 def search(params: Any) -> dict[str, Any]:
@@ -129,8 +163,14 @@ def search(params: Any) -> dict[str, Any]:
         items = [{"id": b, "zone": z} for b, z in banks if b.startswith(q)]
     else:
         items = [
-            {"id": h["hub_id"], "bank_id": h["bank_id"], "zone": h["zone"], "health": h["health"],
-             "health_label": h["health_label"], "rated_p_kw": h["rated_p_kw"]}
+            {
+                "id": h["hub_id"],
+                "bank_id": h["bank_id"],
+                "zone": h["zone"],
+                "health": h["health"],
+                "health_label": h["health_label"],
+                "rated_p_kw": h["rated_p_kw"],
+            }
             for h in HUBS
             if h["hub_id"].startswith(q)
         ]
@@ -139,8 +179,14 @@ def search(params: Any) -> dict[str, Any]:
 
 RELEASES = {
     "items": [
-        {"proposal_id": "22222222-2222-2222-2222-222222222222", "scope": "ZONE", "scope_ref": "LZ_SOUTH",
-         "requested_by": "alice", "reason": "storm passed", "age_s": 12.0}
+        {
+            "proposal_id": "22222222-2222-2222-2222-222222222222",
+            "scope": "ZONE",
+            "scope_ref": "LZ_SOUTH",
+            "requested_by": "alice",
+            "reason": "storm passed",
+            "age_s": 12.0,
+        }
     ]
 }
 
@@ -152,24 +198,62 @@ def detail(hub_id: str) -> dict[str, Any]:
     return {
         "hub_id": hub_id,
         "status": {
-            "health": hub["health"], "health_label": hub["health_label"], "online": hub["health"] != "offline",
-            "last_seen_at": hub["last_seen_at"], "age_s": 4.0, "activity": hub["activity"], "serving": [],
-            "p_kw": hub["p_kw"], "soc_kwh": hub["soc_kwh"], "soc_pct": hub["soc_pct"], "reserve_kwh": 7.84,
-            "reserve_pct": 20.0, "above_reserve_kwh": round(hub["soc_kwh"] - 7.84, 2), "fault_code": None,
+            "health": hub["health"],
+            "health_label": hub["health_label"],
+            "online": hub["health"] != "offline",
+            "last_seen_at": hub["last_seen_at"],
+            "age_s": 4.0,
+            "activity": hub["activity"],
+            "serving": [],
+            "p_kw": hub["p_kw"],
+            "soc_kwh": hub["soc_kwh"],
+            "soc_pct": hub["soc_pct"],
+            "reserve_kwh": 7.84,
+            "reserve_pct": 20.0,
+            "above_reserve_kwh": round(hub["soc_kwh"] - 7.84, 2),
+            "fault_code": None,
         },
         "telemetry": {
             "ts": hub["last_seen_at"],
             "fields": {"p_kw": hub["p_kw"], "soc_kwh": hub["soc_kwh"], "cell_temp_c": 27.5},
-            "raw": {"ts": hub["last_seen_at"], "p_kw": hub["p_kw"], "soc_kwh": hub["soc_kwh"], "cell_temp_c": 27.5},
+            "raw": {
+                "ts": hub["last_seen_at"],
+                "p_kw": hub["p_kw"],
+                "soc_kwh": hub["soc_kwh"],
+                "cell_temp_c": 27.5,
+            },
         },
         "alerts": [
-            {"severity": "warning", "rule": "ALR-HUB-STALE", "opened_at": "2026-09-25T11:00:00+00:00", "cleared_at": None}
+            {
+                "severity": "warning",
+                "rule": "ALR-HUB-STALE",
+                "opened_at": "2026-09-25T11:00:00+00:00",
+                "cleared_at": None,
+            }
         ],
-        "location": {"lat": 29.76, "lon": -95.36, "zone": hub["zone"], "bank_id": hub["bank_id"],
-                     "feeder_id": "F-12", "service_transformer_id": None},
-        "asset": {"install_date": None, "last_serviced_at": None, "units": 1, "rated_p_kw": 11.0,
-                  "rated_e_kwh": 39.2, "reserve_kwh": 7.84, "last_calibration": None},
-        "control": {"lease_epoch": 3, "lease_expires_at": None, "last_command_id": None, "last_command_verdict": None},
+        "location": {
+            "lat": 29.76,
+            "lon": -95.36,
+            "zone": hub["zone"],
+            "bank_id": hub["bank_id"],
+            "feeder_id": "F-12",
+            "service_transformer_id": None,
+        },
+        "asset": {
+            "install_date": None,
+            "last_serviced_at": None,
+            "units": 1,
+            "rated_p_kw": 11.0,
+            "rated_e_kwh": 39.2,
+            "reserve_kwh": 7.84,
+            "last_calibration": None,
+        },
+        "control": {
+            "lease_epoch": 3,
+            "lease_expires_at": None,
+            "last_command_id": None,
+            "last_command_verdict": None,
+        },
     }
 
 

@@ -143,11 +143,11 @@
       </tbody>
     </table>
   </div>
-  <nav class="fl-pager" aria-label="Pages">
+  <div class="fl-pager" role="group" aria-label="Pages">
     {% if first_url %}<a class="btn btn-sm" href="{{ first_url }}" id="fleet-first">First</a>{% endif %}
     {% if prev_url %}<a class="btn btn-sm" href="{{ prev_url }}" id="fleet-prev" rel="prev">Previous</a>{% endif %}
     {% if next_url %}<a class="btn btn-sm" href="{{ next_url }}" id="fleet-next" rel="next">Next</a>{% endif %}
-  </nav>
+  </div>
 </section>
 
 <section class="og-panel og-map-panel" aria-label="Fleet map">
