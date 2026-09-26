@@ -111,6 +111,34 @@ async def test_missing_trace_preimage_holds_never_signs(fakes, guardian_config, 
     assert "G-14" in verdict.vetoed_rule_ids
 
 
+async def test_g14_looks_up_the_preimage_by_the_batch_rows_trace_pointer(
+    fakes, guardian_config, signing_seed
+):
+    """The pre-image is its own trace row: guardian must look it up by `trace_pre_image_id`, never by
+    `command_batch_id` (which is not a trace id, so that lookup vetoed every batch as G-14 live)."""
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    batch = make_batch_row(proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+
+    await service.evaluate_and_sign(batch)
+
+    assert fakes.trace.preimage_refs_checked == [batch.trace_pre_image_id]
+
+
+async def test_batch_row_without_a_preimage_pointer_holds_never_signs(fakes, guardian_config, signing_seed):
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    batch = make_batch_row(proposal).model_copy(update={"trace_pre_image_id": None})
+    service = service_with(fakes, guardian_config, signing_seed)
+
+    verdict = await service.evaluate_and_sign(batch)
+
+    assert verdict.signature is None
+    assert "G-14" in verdict.vetoed_rule_ids
+    assert fakes.trace.preimage_refs_checked == []
+
+
 async def test_unknown_proposal_never_signs(fakes, guardian_config, signing_seed):
     batch = make_batch_row(make_proposal())  # never added to fakes.proposals
     service = service_with(fakes, guardian_config, signing_seed)

@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 
 from opengrid.core.crypto import sha256_hex_of_json, sign_payload
 from opengrid.core.models.engine import CommandBatchRow, Verdict, VerdictOutcome
+from opengrid.core.models.mqtt import CommandBatch
 from opengrid.guardian import checks
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
@@ -89,7 +90,11 @@ class GuardianService:
         if await self._is_stop_engaged(proposal.bank_id):
             violations.append(CheckOutcome("SAFE_STOP", False, "SAFE_STOP_ENGAGED", hub_id=proposal.bank_id))
 
-        preimage_exists = await self.ports.trace.exists_preimage(batch.command_batch_id)
+        # The pre-image is its own trace row; the batch row points at it by `trace_pre_image_id`
+        # (never by `command_batch_id`, which is not a trace id). No pointer means no pre-image.
+        preimage_exists = batch.trace_pre_image_id is not None and await self.ports.trace.exists_preimage(
+            batch.trace_pre_image_id
+        )
         g14 = checks.check_g14_trace_preimage(preimage_exists)
         if not g14.ok:
             violations.append(g14)
@@ -292,6 +297,14 @@ class GuardianService:
         ).inc()
         await self._trace_verdict(verdict)
         return verdict
+
+    def sign_command_batch(self, batch: CommandBatch) -> CommandBatch:
+        """Sign the command-batch envelope a hub will verify (interfaces/crypto.md S2.1). This is a
+        separate signature from the verdict's (S2.2): the verdict signature stays in `og.verdict` for
+        the audit trail, and is never what goes on the wire."""
+        return batch.model_copy(
+            update={"signature": sign_payload(self.signing_seed, batch.signing_payload())}
+        )
 
     def _inputs_hash(self, batch: CommandBatchRow) -> str:
         """sha256, hex -- domain-separated over (version_vector, ledger_version, batch_hash), per

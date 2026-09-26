@@ -48,6 +48,24 @@ def test_command_batch_signing_payload_excludes_signature_and_key_id():
     assert payload["bank_id"] == "bank-1"
 
 
+def test_command_batch_signing_payload_is_exactly_the_spec_fields():
+    """crypto.md S2.1 signs 7 fields; optional `precondition`/`lease` must not leak in (even as null),
+    or the hub's recomputed signing input differs and every batch fails BAD_SIGNATURE."""
+    batch = mqtt.CommandBatch(
+        batch_id=uuid4(),
+        bank_id="bank-1",
+        epoch=1,
+        seq=1,
+        issued_at=NOW,
+        expires_at=NOW,
+        items=[mqtt.CommandItem(hub_id="hub-1", p_kw_setpoint=-1.0, reason_code="SELECTOR")],
+        precondition=mqtt.CommandPrecondition(ledger_version=4),
+        key_id="guardian-2026a",
+        signature="sig",
+    )
+    assert tuple(sorted(batch.signing_payload())) == tuple(sorted(mqtt.COMMAND_BATCH_SIGNED_FIELDS))
+
+
 def test_ack_reject_reason_optional():
     ack = mqtt.Ack(hub_id="hub-1", batch_id=uuid4(), accepted=False, reject_reason="STALE_SEQ", ts=NOW)
     assert ack.reject_reason == "STALE_SEQ"
