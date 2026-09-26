@@ -19,7 +19,17 @@ from opengrid.forecast.quantiles import (
     InsufficientHistoryError,
     compute_slot_quantiles,
 )
+from opengrid.forecast.solar import apply_solar_shape, resolve_solar_shape_input
 from opengrid.platform.config import Config
+
+#: `og.feed_obs` series names `feeds.normalize` writes D-24's two solar-shape inputs under. Named here
+#: as plain strings rather than imported from `opengrid.feeds` -- `forecast` deliberately has no import
+#: dependency on `feeds` (see `backend.HistoryProvider`'s docstring: the two packages meet only through
+#: that structural Protocol, wired together by `feeds/main.py`, so either can move to its own process
+#: without a redesign). Must match `feeds.normalize.SOLAR_FORECAST_SERIES` / the NWS sky-cover series
+#: name exactly; `test_service.py` pins both against the real constants to catch drift.
+SOLAR_FORECAST_SERIES = "solar_forecast"
+NWS_SKY_COVER_SERIES = "sky_cover"
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +38,16 @@ logger = logging.getLogger(__name__)
 #: so the price series keys `feed_obs` actually carries are the same load-zone codes as `[fleet].zones`
 #: (e.g. `LZ_NORTH`) -- never a hub code -- which is why `price_series` below falls back to
 #: `fleet.zones` first, matching `load_series`'s existing fallback (README.md's canonical list).
-DEFAULT_PRICE_SERIES: tuple[str, ...] = ("LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST")
+DEFAULT_PRICE_SERIES: tuple[str, ...] = (
+    "LZ_NORTH",
+    "LZ_SOUTH",
+    "LZ_HOUSTON",
+    "LZ_WEST",
+    "LZ_AEN",
+    "LZ_CPS",
+    "LZ_LCRA",
+    "LZ_RAYBN",
+)
 
 #: 02a S3 "P10 = low, P50 = mid, P90 = high", weights per the stub docstring / 02a plan.scenario_set.
 SCENARIO_WEIGHTS: dict[str, float] = {"P10": 0.25, "P50": 0.5, "P90": 0.25}
@@ -58,6 +77,21 @@ DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE: dict[str, tuple[str, ...]] = {
     "LZ_NORTH": ("north", "northC"),
     "LZ_SOUTH": ("southern", "southC"),
     "LZ_WEST": ("west", "farWest"),
+    # Build phase, 2026-09-26 (market-model-two-markets.md S3a): Austin Energy and CPS Energy are
+    # regulated municipal utilities, not ERCOT competitive-area load zones, so they have no ERCOT
+    # weather-zone definition of their own -- this correspondence is APPROXIMATE (per the docstring
+    # above, doubly so here), based on rough geography only, pending an authoritative mapping from
+    # ERCOT/the utilities/public GIS (tracked in `integrations/regulated-utilities-austin-cps-2026-09.md`).
+    # Only takes effect once "LZ_AEN"/"LZ_CPS" are added to `[fleet].zones`/`[forecast].load_series`.
+    "LZ_AEN": ("southC",),
+    "LZ_CPS": ("southern", "southC"),
+    # D-24 build phase: LCRA (Lower Colorado River Authority) serves Central Texas around Austin, same
+    # rough geography as AEN/CPS above -> "southC". Rayburn Country EC serves North Texas around
+    # McKinney/Sherman (Collin/Fannin counties) -> "northC" rather than the Panhandle "north" zone.
+    # Equally approximate, same caveat as AEN/CPS: no authoritative ERCOT mapping for either, pending
+    # `integrations/regulated-utilities-austin-cps-2026-09.md`-style documentation for these two.
+    "LZ_LCRA": ("southC",),
+    "LZ_RAYBN": ("northC",),
 }
 
 
@@ -88,6 +122,13 @@ async def compute_and_persist(
         ).items()
     }
 
+    # D-24 solar-shape inputs, fetched once (ERCOT solar and NWS cloud cover are both system-wide, not
+    # per-zone -- see forecast/solar.py's module docstring) and passed to every price series below,
+    # rather than re-querying the same window once per zone.
+    horizon_end = horizon_start + timedelta(minutes=steps * resolution_min)
+    solar_mw_by_ts = await _window_by_ts(history, SOLAR_FORECAST_SERIES, horizon_start, horizon_end)
+    cloud_cover_by_ts = await _window_by_ts(history, NWS_SKY_COVER_SERIES, horizon_start, horizon_end)
+
     rows: list[ForecastRow] = []
     for series_key in price_series:
         rows.extend(
@@ -99,6 +140,8 @@ async def compute_and_persist(
                 horizon_start=horizon_start,
                 steps=steps,
                 resolution_min=resolution_min,
+                solar_mw_by_ts=solar_mw_by_ts,
+                cloud_cover_by_ts=cloud_cover_by_ts,
             )
         )
     for load_zone in load_series:
@@ -131,6 +174,20 @@ async def compute_and_persist(
     return rows
 
 
+async def _window_by_ts(
+    history: HistoryProvider, series: str, t0: datetime, t1: datetime
+) -> dict[datetime, float]:
+    """`{ts: value}` for one `feed_obs` series over `[t0, t1)` -- the shape `forecast.solar` wants for
+    both the ERCOT solar signal and the NWS cloud-cover signal. Empty on `LookupError` or no rows: both
+    are optional D-24 inputs (BUILD.md K7 "degrade, don't trip" -- missing solar/cloud data must not
+    stop price forecasting, only fall it back to plain quantile persistence)."""
+    try:
+        obs = await history.window(series, t0, t1)
+    except LookupError:
+        return {}
+    return {row.ts: row.value for row in obs}
+
+
 async def _compute_series(
     history: HistoryProvider,
     *,
@@ -140,11 +197,17 @@ async def _compute_series(
     horizon_start: datetime,
     steps: int,
     resolution_min: int,
+    solar_mw_by_ts: dict[datetime, float] | None = None,
+    cloud_cover_by_ts: dict[datetime, float] | None = None,
 ) -> list[ForecastRow]:
     """Compute one forecast series (persisted under `series_key`) from one or more underlying
     `feed_obs` series (`history_series_keys`) -- for `price` these are always the same single key; for
     `load` they are the load zone's mapped weather zones (`DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE`), summed
-    per timestamp so a load zone's forecast reflects its whole footprint, not one arbitrary zone."""
+    per timestamp so a load zone's forecast reflects its whole footprint, not one arbitrary zone.
+
+    `solar_mw_by_ts`/`cloud_cover_by_ts` (only meaningful for `kind="price"`; D-24) reshape each price
+    slot's quantile-persistence baseline for that interval's solar strength -- see `forecast.solar`.
+    Left as plain persistence (untouched) for any interval neither signal covers."""
     stale = False
     for key in history_series_keys:
         try:
@@ -180,15 +243,23 @@ async def _compute_series(
                 extra={"series_key": series_key, "kind": kind, "interval_start": target_start.isoformat()},
             )
             continue
+        p10, p50, p90 = slot.p10, slot.p50, slot.p90
+        if kind == "price":
+            shape = resolve_solar_shape_input(
+                target_start,
+                solar_mw_by_ts=solar_mw_by_ts,
+                cloud_cover_pct=(cloud_cover_by_ts or {}).get(target_start),
+            )
+            p10, p50, p90 = apply_solar_shape((p10, p50, p90), shape)
         rows.append(
             ForecastRow(
                 series_key=series_key,
                 kind=kind,
                 interval_start_utc=target_start,
                 horizon_step=step,
-                p10=slot.p10,
-                p50=slot.p50,
-                p90=slot.p90,
+                p10=p10,
+                p50=p50,
+                p90=p90,
                 firm_fitness=slot.firm_fitness,
             )
         )

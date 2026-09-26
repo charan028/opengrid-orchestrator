@@ -11,7 +11,24 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-ServiceType = Literal["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY", "DATA_CENTER"]
+from opengrid.core.models.market import Market, UtilityId
+
+# Mirrors og.contract's service_type CHECK (migration 0025 owns the full list). REGULATED_CAPACITY: a
+# regulated utility's capacity contract (08 S3). PJM_CAPACITY, MOBILE_STORAGE, LARGE_LOAD: owner
+# decision 2026-09-26; their profiles and settle rules are built separately.
+ServiceType = Literal[
+    "HOME",
+    "ERCOT_ENERGY",
+    "ERCOT_AS",
+    "DIST_DEFERRAL",
+    "PARTNER_CAPACITY",
+    "DATA_CENTER",
+    "PIPELINE_AC",
+    "REGULATED_CAPACITY",
+    "PJM_CAPACITY",
+    "MOBILE_STORAGE",
+    "LARGE_LOAD",
+]
 Tier = Literal["L0", "L1", "L2", "T1", "T2", "T3", "T4"]
 
 
@@ -36,6 +53,10 @@ class Contract(_Row):
     degradation_cost: Decimal = Decimal("0.03")
     fallback_allowed: bool = False
     status: Literal["ACTIVE", "SUSPENDED", "ENDED"] = "ACTIVE"
+    # Two-market model (08 S3, migration 0025). FREE (ERCOT) unless the contract is with a regulated
+    # utility; `utility_id` is set iff `market == "REGULATED"` (a DB CHECK enforces it).
+    market: Market = "FREE"
+    utility_id: UtilityId | None = None
 
 
 VariableKind = Literal["CONTINUOUS", "SEMI_CONTINUOUS", "BINARY"]

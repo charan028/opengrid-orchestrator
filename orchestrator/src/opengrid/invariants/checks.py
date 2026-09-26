@@ -54,7 +54,7 @@ def find_reserve_breaches(
 
 
 def compute_bank_capabilities_kw(
-    hub_rows: list[tuple[str, float, float, float, float, float, float, float, float, str]],
+    hub_rows: list[tuple[str, float, float, float, float, float, float, float, float, str, int | None]],
 ) -> dict[str, float]:
     """K2's ceiling: the SAME discharge-capability formula the ledger's admission check uses
     (`opengrid.core.physics.hub_capability`/`bank_capability`, the pure functions
@@ -69,19 +69,32 @@ def compute_bank_capabilities_kw(
     private runtime, which `opengrid.invariants`' whole design (independent, read-only, DB-only) requires
     anyway.
 
-    `hub_rows`: `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health)` --
-    one row per hub. A hub whose persisted `health` (`opengrid.health`'s own classification) is not
+    `hub_rows`: `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health,
+    units)` -- one row per hub. `units` (`og.hub.units`, migration 0032; `None` on a database that predates
+    it) feeds `hub_capability`'s unit-capped rating, which fails closed to one unit when unknown. A hub whose persisted `health` (`opengrid.health`'s own classification) is not
     `"online"` contributes zero discharge capability, matching `opengrid.fleet.capability`'s exclusion
     rule; every bank appears in the result even if every one of its hubs is excluded (capability 0.0),
     so a caller's `.get(bank_id, ...)` never has to guess a bank's ceiling from having no rows for it.
     """
     discharge_kw_by_bank: dict[str, list[float]] = {}
     bank_params_by_bank: dict[str, BankParams] = {}
-    for bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health in hub_rows:
+    for (
+        bank_id,
+        kva_rating,
+        reserve_kva,
+        e_kwh,
+        r_kwh,
+        p_kw,
+        eta_c,
+        eta_d,
+        soc_kwh,
+        health,
+        units,
+    ) in hub_rows:
         bank_params_by_bank.setdefault(bank_id, BankParams(kva_rating=kva_rating, reserve_kva=reserve_kva))
         if health != "online":
             continue
-        hub_params = HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d)
+        hub_params = HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d, units=units)
         discharge_kw, _charge_kw = hub_capability(soc_kwh, hub_params)
         discharge_kw_by_bank.setdefault(bank_id, []).append(discharge_kw)
     return {
@@ -506,3 +519,170 @@ def find_orphan_commitments(
         )
         for commitment_id, obligation_id, interval_start, obligation_state in rows
     ]
+
+
+_AS_HOLD_TOLERANCE_KWH = 1e-6
+
+
+def find_as_hold_violations(
+    rows: list[tuple[str, str, float, int, float]],
+) -> list[Violation]:
+    """AS capacity hold compliance (00-invariants.md S2.6/S6; migration 0020's "an award keeps
+    committed_kw x duration / eta_d above the reserve floor"): while an `og.as_deployment` window covers
+    an ERCOT_AS obligation, the energy actually deliverable from its reserved banks (already net of the
+    reserve floor and discharge efficiency -- `opengrid.core.physics.hub_available_energy_kwh`, summed in
+    SQL) must stay at or above what sustaining `committed_kw` for the product's full `duration_minutes`
+    would draw. A hold that has already fallen below its requirement (e.g. SoC drifted down between
+    deployments, or a hub went offline) is exactly the condition 0020 exists to prevent from being
+    invisible until ERCOT actually calls the award.
+
+    `rows`: `(deployment_id, obligation_id, committed_kw, duration_minutes, held_kwh)` -- `held_kwh`
+    already summed across every bank reserved for that obligation's active interval
+    (`invariants.queries.fetch_as_hold_candidates`); this function only compares it to the requirement.
+    `dedupe_key` is the deployment id: the SAME deployment window falling short across repeated scans is
+    one ongoing violation, not one per run.
+    """
+    violations = []
+    for deployment_id, obligation_id, committed_kw, duration_minutes, held_kwh in rows:
+        required_kwh = committed_kw * (duration_minutes / 60.0)
+        if held_kwh < required_kwh - _AS_HOLD_TOLERANCE_KWH:
+            violations.append(
+                Violation(
+                    scope={"deployment_id": deployment_id, "obligation_id": obligation_id},
+                    dedupe_key=deployment_id,
+                    detail={
+                        "committed_kw": committed_kw,
+                        "duration_minutes": duration_minutes,
+                        "required_kwh": required_kwh,
+                        "held_kwh": held_kwh,
+                    },
+                )
+            )
+    return violations
+
+
+_FLOW_LIMIT_TOLERANCE_KW = 1e-6
+
+
+def find_flow_limit_violations(
+    rows: list[tuple[str, str, float, float | None, float | None]],
+) -> list[Violation]:
+    """Discharge-flow limit (00-invariants.md S2.6/S6; 09-optimizer-dispatcher-update.md G-26..G-29/G-31):
+    a measured net power exceeding its own physical/contractual ceiling, at any of the five levels the
+    guardian itself enforces against (migrations 0027/0029) -- independently re-derived here, not reused
+    from the guardian's own runtime.
+
+    `rows`: `(scope_kind, scope_id, net_kw, forward_limit_kw, reverse_limit_kw)`, one row per
+    scope instance, already aggregated in SQL (`invariants.queries.fetch_flow_limit_candidates`):
+      * `"home_meter"`   -- one hub's `og.hub_state.meter_kw` vs. its own `og.hub.export_limit_kw`
+                            (G-26; forward/import has no configured limit here, so `forward_limit_kw`
+                            is always `None` for this scope).
+      * `"hub_discharge_derate"` -- one hub's `p_kw` vs. its own telemetry-reported `p_dis_max_kw`
+                            (0027; the BMS's OWN derated ceiling, not the hub's static nameplate `p_kw`
+                            rating -- a hub can derate itself below nameplate and this must track that).
+      * `"transformer"`  -- `SUM(p_kw)` of every hub naming a `og.service_transformer` row, vs. its
+                            `rating_kva` (G-27; symmetric, same ceiling both directions).
+      * `"feeder"`       -- `SUM(p_kw)` of every hub on a bank naming a `og.feeder_limit` row, vs. its
+                            `thermal_kw` (forward/import) and `reverse_kw` (reverse/export) (G-28).
+      * `"substation"`   -- `SUM(p_kw)` of every hub on a bank under a `og.substation_limit` row, vs.
+                            its `rating_kva` (forward) and `reverse_kw` (reverse) (G-29).
+
+    Sign convention matches the rest of this package: `net_kw` positive = import/charge (checked against
+    `forward_limit_kw`), negative = export/discharge (checked against `reverse_limit_kw`, compared on
+    magnitude). A `None` limit means that field is absent for that scope instance (no configured row, or
+    a telemetry field a hub hasn't reported yet) -- schema-adaptive per the task brief: that direction is
+    simply not checked, never treated as a zero ceiling. Transformer/feeder/substation P_max derating
+    beyond `hub_discharge_derate`'s own per-hub telemetry is not separately measured -- 0027 ships no
+    aggregate-level derate field, only the per-hub one already covered above.
+    """
+    violations = []
+    for scope_kind, scope_id, net_kw, forward_limit_kw, reverse_limit_kw in rows:
+        if (
+            net_kw < 0
+            and reverse_limit_kw is not None
+            and -net_kw > reverse_limit_kw + _FLOW_LIMIT_TOLERANCE_KW
+        ):
+            violations.append(
+                Violation(
+                    scope={"scope_kind": scope_kind, "scope_id": scope_id, "direction": "reverse"},
+                    dedupe_key=f"{scope_kind}|{scope_id}|reverse",
+                    detail={"net_kw": net_kw, "reverse_limit_kw": reverse_limit_kw},
+                )
+            )
+        elif (
+            net_kw > 0
+            and forward_limit_kw is not None
+            and net_kw > forward_limit_kw + _FLOW_LIMIT_TOLERANCE_KW
+        ):
+            violations.append(
+                Violation(
+                    scope={"scope_kind": scope_kind, "scope_id": scope_id, "direction": "forward"},
+                    dedupe_key=f"{scope_kind}|{scope_id}|forward",
+                    detail={"net_kw": net_kw, "forward_limit_kw": forward_limit_kw},
+                )
+            )
+    return violations
+
+
+def find_anchor_staleness_violation(
+    *, last_published_at: datetime | None, now: datetime, max_age_s: float
+) -> Violation | None:
+    """K11 external anchoring verification: the chain head hash must actually have been published
+    (`opengrid.trace.anchoring.publish_anchor`) within `max_age_s` (the task brief's "every 15 min",
+    passed with headroom by the caller -- see `invariants.__init__`'s own cadence constant). `None`
+    (never anchored yet) is reported as stale rather than silently skipped -- a database that has NEVER
+    anchored is exactly the fail-safe gap this check exists to catch, not a clean state.
+    """
+    if last_published_at is None:
+        return Violation(
+            scope={"check": "anchor_freshness"},
+            dedupe_key="never_anchored",
+            detail={"last_published_at": None, "max_age_s": max_age_s},
+        )
+    age_s = (now - last_published_at).total_seconds()
+    if age_s > max_age_s:
+        return Violation(
+            scope={"check": "anchor_freshness"},
+            dedupe_key=f"stale|{last_published_at.isoformat()}",
+            detail={
+                "last_published_at": last_published_at.isoformat(),
+                "age_s": age_s,
+                "max_age_s": max_age_s,
+            },
+        )
+    return None
+
+
+def find_territory_violations(
+    rows: list[tuple[str, str, str, str, str, tuple[str, ...], datetime]],
+) -> list[Violation]:
+    """K15 territory (00-invariants.md S2.6/S6, migration 0025's market model): a REGULATED obligation
+    delivered (a real, non-headroom grant) from a bank whose zone is outside its utility's own
+    `territory_zones`. A FREE-market obligation has no utility at all and never reaches this function
+    (`invariants.queries.fetch_territory_candidates` joins `og.contract.market = 'REGULATED'` in SQL, so
+    every row here already names a utility to check against).
+
+    `rows`: `(grant_id, obligation_id, bank_id, zone, utility_id, territory_zones, created_at)` --
+    pre-joined in SQL (`fetch_territory_candidates`); this function only decides membership, so it stays
+    unit-testable without a database.
+
+    `dedupe_key` is `f"{obligation_id}|{bank_id}"`, not the grant id: the same obligation/bank pairing
+    delivering out-of-territory across many grant cycles is ONE ongoing territory violation, not one per
+    cycle (mirrors K13/K2's "a persisting condition is the same violation" idempotency, avoiding a
+    violation row per allocator cycle for a chronic misconfiguration)."""
+    violations = []
+    for grant_id, obligation_id, bank_id, zone, utility_id, territory_zones, created_at in rows:
+        if zone not in territory_zones:
+            violations.append(
+                Violation(
+                    scope={"obligation_id": obligation_id, "bank_id": bank_id, "utility_id": utility_id},
+                    dedupe_key=f"{obligation_id}|{bank_id}",
+                    detail={
+                        "grant_id": grant_id,
+                        "zone": zone,
+                        "territory_zones": list(territory_zones),
+                        "detected_at": created_at.isoformat(),
+                    },
+                )
+            )
+    return violations

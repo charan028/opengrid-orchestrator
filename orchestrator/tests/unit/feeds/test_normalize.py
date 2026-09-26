@@ -137,9 +137,9 @@ def test_ercot_wind_actual_and_forecast_two_series() -> None:
         ],
     }
     rows = ercot_wind_to_feed_obs(payload, product="np4-732-cd", recorded_at=RECORDED_AT)
-    assert {r.series for r in rows} == {"actual", "forecast"}
-    actual = next(r for r in rows if r.series == "actual")
-    forecast = next(r for r in rows if r.series == "forecast")
+    assert {r.series for r in rows} == {"wind_actual", "wind_forecast"}
+    actual = next(r for r in rows if r.series == "wind_actual")
+    forecast = next(r for r in rows if r.series == "wind_forecast")
     assert actual.value == pytest.approx(5000.0)  # genSystemWide
     assert forecast.value == pytest.approx(5200.0)  # STWPFSystemWide
 
@@ -161,7 +161,7 @@ def test_ercot_wind_null_actual_skipped_for_forecast_horizon_row() -> None:
         ],
     }
     rows = ercot_wind_to_feed_obs(payload, product="np4-732-cd", recorded_at=RECORDED_AT)
-    assert {r.series for r in rows} == {"forecast"}
+    assert {r.series for r in rows} == {"wind_forecast"}
 
 
 def test_ercot_solar_uses_stppf_forecast_column() -> None:
@@ -180,7 +180,7 @@ def test_ercot_solar_uses_stppf_forecast_column() -> None:
         ],
     }
     rows = ercot_solar_to_feed_obs(payload, product="np4-737-cd", recorded_at=RECORDED_AT)
-    assert {r.series for r in rows} == {"actual", "forecast"}
+    assert {r.series for r in rows} == {"solar_actual", "solar_forecast"}
 
 
 def test_ercot_as_price_uppercase_mcpc_and_hour_ending_maps_to_utc() -> None:
@@ -283,6 +283,22 @@ def test_nws_forecast_three_series_and_f_to_c() -> None:
     temp = next(r for r in rows if r.series == "temperature")
     assert temp.value == pytest.approx((91 - 32) * 5 / 9)
     assert temp.source == "NWS"
+
+
+def test_wind_and_solar_series_names_never_collide() -> None:
+    """`FeedStore.latest`/`window` key `og.feed_obs` by `series` alone, with no `product` filter -- so
+    wind and solar (both "system-wide actual + forecast" products) must never share a bare
+    `"actual"`/`"forecast"` series name, or a caller reading one product's series through
+    `opengrid.feeds`'s fixed `latest()`/`window()` interface would silently also get the other's rows."""
+    from opengrid.feeds.normalize import (
+        SOLAR_ACTUAL_SERIES,
+        SOLAR_FORECAST_SERIES,
+        WIND_ACTUAL_SERIES,
+        WIND_FORECAST_SERIES,
+    )
+
+    names = {WIND_ACTUAL_SERIES, WIND_FORECAST_SERIES, SOLAR_ACTUAL_SERIES, SOLAR_FORECAST_SERIES}
+    assert len(names) == 4
 
 
 def test_nws_missing_periods_raises() -> None:

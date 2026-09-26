@@ -6,6 +6,6 @@ description: >
 steps:
   - at_s: 0
     type: tampered_unsigned_command
-    target: HUB_0142
+    target: hub-00142
     params: {}
     duration: 30

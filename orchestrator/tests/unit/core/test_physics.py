@@ -47,6 +47,32 @@ def test_hub_capability_respects_reserve():
     assert charge == 0.0  # full, no charge headroom
 
 
+def test_hub_capability_dual_unit_home_is_capped_at_20_kw():
+    """K2/G-02: a full dual-unit home (78.4 kWh) mis-seeded at 24 kW is offered at 20 kW, not 24 or 22."""
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=24.0, units=2)
+    discharge, charge = hub_capability(60.0, dual, dt_h=0.01)
+    assert discharge == 20.0
+    assert charge == 20.0
+
+
+def test_hub_capability_single_unit_mis_seeded_is_held_to_11_kw():
+    single = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=20.0, units=1)
+    discharge, charge = hub_capability(20.0, single, dt_h=0.01)
+    assert discharge == 11.0
+    assert charge == 11.0
+
+
+def test_hub_capability_unknown_units_fails_closed_to_one_unit():
+    unknown = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0)
+    discharge, _charge = hub_capability(60.0, unknown, dt_h=0.01)
+    assert discharge == 11.0
+
+
+def test_hub_capability_p_kw_below_unit_rating_still_binds():
+    discharge, _charge = hub_capability(10.0, HUB, dt_h=0.01)
+    assert discharge == HUB.p_kw
+
+
 def test_bank_capability_caps_at_rating():
     bank = BankParams(kva_rating=10.0, reserve_kva=1.0)
     assert bank_capability([5.0, 5.0, 5.0], bank) == 9.0

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -18,6 +18,8 @@ from uuid import UUID, uuid4
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.models.market import Utility, UtilityId
+from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK
 from opengrid.settle.backend import (
     ExistingInvoiceLineRow,
     ExistingMeterInterval,
@@ -31,12 +33,14 @@ from opengrid.settle.models import (
     PenaltyParams,
     PowerSample,
     QualityFlag,
+    ZoneChargeEnergy,
 )
 
 _FETCH_CONTEXT_SQL = """
 SELECT
     o.obligation_id, o.contract_id, o.service_type, o.committed_qty_kw,
     c.penalty_alpha, c.penalty_beta, c.penalty_theta, c.degradation_cost, c.customer_id,
+    c.market, c.utility_id,
     opp.value_per_mwh,
     COALESCE(
         (SELECT sp.setpoint_source FROM og.service_profile sp
@@ -44,11 +48,18 @@ SELECT
          ORDER BY sp.version DESC LIMIT 1) = 'MEASURED_FEEDBACK',
         false
     ) AS is_need_basis,
-    (SELECT b.zone
-     FROM og.reservation r JOIN og.bank b ON b.bank_id = r.bank_id::text
-     WHERE r.obligation_id = o.obligation_id
-     GROUP BY b.zone
-     ORDER BY sum(r.amount) DESC, b.zone
+    -- The reservation's bank_id names either an og.bank (HOME_BANK) or an og.asset (SUBSTATION, 09
+    -- D11/migration 0025) -- a substation asset has no og.bank row of its own, so this falls back to
+    -- og.asset's zone when og.bank has no match.
+    (SELECT z FROM (
+        SELECT r.amount, COALESCE(b.zone, a.zone) AS z
+        FROM og.reservation r
+        LEFT JOIN og.bank b ON b.bank_id = r.bank_id::text
+        LEFT JOIN og.asset a ON a.asset_id = r.bank_id::text
+        WHERE r.obligation_id = o.obligation_id
+     ) sub
+     GROUP BY z
+     ORDER BY sum(amount) DESC, z
      LIMIT 1) AS zone
 FROM og.obligation o
 JOIN og.contract c ON c.contract_id = o.contract_id
@@ -61,7 +72,7 @@ SELECT c.customer_id FROM og.obligation o JOIN og.contract c ON c.contract_id = 
 WHERE o.obligation_id = %(obligation_id)s
 """
 
-#: D-18 need-basis settlement: the customer's measured site demand for the interval (migration 0015's
+#: D-18 need-basis settlement: the customer's measured site demand for the interval (migration 0026's
 #: `og.customer_site_meter_reading`), summed across the customer's site(s) per timestamp (a customer
 #: with more than one DATA_CENTER site would otherwise undercount its true need) then averaged over
 #: the interval. `customer_site_meter_reading.customer_id` is text (an external site-ingest key), so
@@ -167,6 +178,36 @@ SELECT b.m AS ts,
 FROM bank_kw b LEFT JOIN share s USING (m, bank_id)
 GROUP BY b.m
 ORDER BY b.m
+"""
+
+#: 09 D5's M1 delivery charge, fleet-level proxy per load zone (review fix 2026-09-26: the previous
+#: per-obligation query only counted charging DURING the obligation's own delivery interval, when its banks
+#: are discharging, so M1 settled at ~$0). Every charging sample of every hub in the zone over the window
+#: (`p_kw > 0` is charging -- `_FETCH_TELEMETRY_SQL` meters discharge as `-p_kw`): the charging power, and
+#: the part of it the grid supplied, i.e. beyond the home's PV surplus (`pv_kw - home_load_kw`, migration
+#: 0027; NULL PV = no PV, NULL home load = none, so all PV counts as surplus). Summed over the same samples,
+#: so `ZoneChargeEnergy.grid_share` is cadence-independent.
+_FETCH_ZONE_CHARGE_SQL = """
+SELECT
+    coalesce(sum(t.p_kw), 0) AS charge_kw_sum,
+    coalesce(sum(greatest(
+        t.p_kw - greatest(coalesce(t.pv_kw, 0) - greatest(coalesce(t.home_load_kw, 0), 0), 0), 0
+    )), 0) AS grid_charge_kw_sum
+FROM og.telemetry t JOIN og.hub h USING (hub_id)
+WHERE h.zone = %(zone)s AND t.ts >= %(window_start)s AND t.ts < %(window_end)s AND t.p_kw > 0
+"""
+
+#: ALR-ENERGY-SHORTFALL-RISK open for the obligation at any time in the interval. The rule's detail
+#: carries `obligation_id` (`opengrid.health.rules.evaluate_energy_shortfall_risk_alert`), mirrored into
+#: `scope_ref` since migration 0031.
+_FETCH_SHORTFALL_RISK_OPEN_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM og.alert
+    WHERE rule = %(rule)s
+      AND coalesce(scope_ref, detail ->> 'obligation_id') = %(obligation_id)s
+      AND opened_at < %(interval_end)s
+      AND (cleared_at IS NULL OR cleared_at > %(interval_start)s)
+)
 """
 
 _FETCH_ACTIVE_METER_SQL = """
@@ -289,14 +330,19 @@ VALUES (%(id)s, %(obligation_id)s, %(interval_start)s, %(interval_end)s, %(reven
         %(forgone_upside)s, %(version)s)
 """
 
-#: 09 D5's M1 delivery charge: kWh actually drawn from the grid to charge this interval, for the
-#: obligation's bank(s). MVP-S has no per-obligation charging-interval attribution yet (the allocator
-#: does not record which cycles charged which obligation's energy, nor which charging kWh was solar
-#: vs grid) -- documented gap, same class as `_FETCH_CHARGING_COST_PROXY_SQL`'s. Always 0 today.
-_GRID_CHARGED_KWH_NOT_YET_ATTRIBUTED = Decimal("0")
+#: `og.utility` (migration 0025), field names matching `opengrid.core.models.market.Utility` exactly.
+_FETCH_UTILITY_SQL = """
+SELECT utility_id, name, territory_zones, capacity_product, payment_basis, capacity_price_usd_per_kw,
+       charging_tariff_kind, off_peak_rate_usd_per_kwh, mid_peak_rate_usd_per_kwh,
+       on_peak_rate_usd_per_kwh, charging_adder_usd_per_kwh, solar_cost_usd_per_kwh,
+       solar_share_floor, free_access_granted, tariff_ref, source_note
+FROM og.utility
+WHERE utility_id = %(utility_id)s
+"""
 
 
 _logger = logging.getLogger(__name__)
+_ZONE_CHARGE_CACHE_MAX = 256  # (zone, window) entries; cleared wholesale when full
 _ZERO = Decimal("0")
 _KWH_PER_MWH = Decimal("1000")
 
@@ -347,6 +393,9 @@ class PgSettleBackend:
     process, per `opengrid.platform.db.make_pool`."""
 
     pool: AsyncConnectionPool
+    _zone_charge_cache: dict[tuple[str, datetime, datetime], ZoneChargeEnergy] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
     async def fetch_context(
         self, obligation_id: UUID, interval_start: datetime | None = None
@@ -432,6 +481,8 @@ class PgSettleBackend:
             wholesale_price_per_kwh=wholesale_price_per_kwh,
             wholesale_price_flag=wholesale_flag,
             zone=row["zone"],
+            market=row["market"],
+            utility_id=row["utility_id"],
         )
 
     async def fetch_measured_need_kwh(
@@ -666,17 +717,44 @@ class PgSettleBackend:
         # this interval rather than fabricate one (BUILD.md S5a: "no silent fallbacks").
         return None
 
-    async def fetch_grid_charged_kwh(
-        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
-    ) -> Decimal:
-        # See `_GRID_CHARGED_KWH_NOT_YET_ATTRIBUTED`'s docstring: no per-obligation charging
-        # attribution exists yet, so M1 never overcharges by guessing -- it settles as 0 (logged) until
-        # that attribution lands, rather than silently assuming some fraction of fleet charging.
-        _logger.info(
-            "settle M1 delivery charge: no per-obligation charging-kWh attribution yet, settling as 0",
-            extra={"obligation_id": str(obligation_id), "interval_start": interval_start.isoformat()},
+    async def fetch_zone_charge_energy(
+        self, zone: str, window_start: datetime, window_end: datetime
+    ) -> ZoneChargeEnergy:
+        # Cached per (zone, window): settle asks for the same trailing window for every obligation of a
+        # zone in a cycle, and the scan covers a whole day of that zone's charging samples.
+        key = (zone, window_start, window_end)
+        cached = self._zone_charge_cache.get(key)
+        if cached is not None:
+            return cached
+        async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _FETCH_ZONE_CHARGE_SQL, {"zone": zone, "window_start": window_start, "window_end": window_end}
+            )
+            row = await cur.fetchone()
+        energy = ZoneChargeEnergy(
+            charge_kw_sum=Decimal(str(row["charge_kw_sum"])) if row else Decimal("0"),
+            grid_charge_kw_sum=Decimal(str(row["grid_charge_kw_sum"])) if row else Decimal("0"),
         )
-        return _GRID_CHARGED_KWH_NOT_YET_ATTRIBUTED
+        if len(self._zone_charge_cache) >= _ZONE_CHARGE_CACHE_MAX:
+            self._zone_charge_cache.clear()
+        self._zone_charge_cache[key] = energy
+        return energy
+
+    async def fetch_shortfall_risk_open(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> bool:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _FETCH_SHORTFALL_RISK_OPEN_SQL,
+                {
+                    "rule": ALR_ENERGY_SHORTFALL_RISK,
+                    "obligation_id": str(obligation_id),
+                    "interval_start": interval_start,
+                    "interval_end": interval_end,
+                },
+            )
+            row = await cur.fetchone()
+        return bool(row[0]) if row else False
 
     async def fetch_best_competing_value_per_kwh(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
@@ -684,6 +762,25 @@ class PgSettleBackend:
         # MVP-S: populated once the selector's "relaxed-commitment" shadow re-solve (02a S7.4) lands;
         # until then settle reports forgone_upside = 0 rather than guess (no silent fallback).
         return None
+
+    async def fetch_pjm_emergency_rate(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal | None:
+        # No live PJM emergency-hour declaration feed yet (services_extra.py's docstring, PJM stays
+        # simulated) -- never guess an emergency hour happened; logged, not silent (BUILD.md S5a).
+        _logger.info(
+            "settle: no PJM emergency-hour declaration feed yet, treating interval as routine",
+            extra={"obligation_id": str(obligation_id), "interval_start": interval_start.isoformat()},
+        )
+        return None
+
+    async def fetch_utility(self, utility_id: UtilityId) -> Utility | None:
+        async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_FETCH_UTILITY_SQL, {"utility_id": utility_id})
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return Utility(**row)
 
     async def fetch_invoice_lines_for_period(
         self, contract_id: UUID, period_start: date, period_end: date

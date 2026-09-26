@@ -42,6 +42,22 @@ RunGate = Callable[..., Awaitable[object]]
 RaiseAlert = Callable[[AlertFinding], Awaitable[object]]
 OnRenomination = Callable[[UUID, UUID | None], Awaitable[object]]
 ClearFailure = Callable[[str, UUID | None], Awaitable[object]]
+#: True while `og.degraded_mode_state` holds NO_NEW_COMMITMENTS (02b S6.5 row 1: a feed crossed STALE).
+NoNewCommitments = Callable[[], Awaitable[bool]]
+
+NO_NEW_COMMITMENTS = "NO_NEW_COMMITMENTS"
+
+
+async def intake_blocked(no_new_commitments: NoNewCommitments | None) -> bool:
+    """Whether intake must not turn opportunities into candidates now. An unreadable degraded-mode state
+    blocks it (fail closed): no new commitment is ever built on feeds that may be stale."""
+    if no_new_commitments is None:
+        return False
+    try:
+        return await no_new_commitments()
+    except Exception:
+        logger.exception("degraded-mode state unreadable; intake blocked (fail closed)")
+        return True
 
 
 def gate_failure_matches(gate_kind: str, contract_scope: UUID | None) -> Callable[[dict[str, Any]], bool]:
@@ -62,6 +78,7 @@ async def run_due_gates(
     observe_duration: Callable[[str, float], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
     clear_failure: ClearFailure | None = None,
+    no_new_commitments: NoNewCommitments | None = None,
 ) -> int:
     """Run intake then the selector gate for each trigger. Returns the number of gates that failed.
     `observe_duration(gate_kind, seconds)` receives each gate's wall time (intake + gate), failed or not."""
@@ -78,6 +95,7 @@ async def run_due_gates(
                 raise_alert=raise_alert,
                 on_renomination=on_renomination,
                 clear_failure=clear_failure,
+                no_new_commitments=no_new_commitments,
             )
         finally:
             if observe_duration is not None:
@@ -96,16 +114,27 @@ async def _run_one(
     raise_alert: RaiseAlert,
     on_renomination: OnRenomination | None,
     clear_failure: ClearFailure | None = None,
+    no_new_commitments: NoNewCommitments | None = None,
 ) -> bool:
     """One trigger: intake, then the gate, then its re-nomination points. Returns True if the gate failed."""
     scope = {"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
     logger.info("running gate", extra=scope)
     # Intake generates this gate's OFFERED opportunities from live feeds first; a feed hiccup must
-    # not block the gate itself.
-    try:
-        await run_intake(trigger.gate_kind, trigger.contract_scope, now=now)
-    except Exception:
-        logger.exception("intake failed ahead of gate -- running the gate anyway", extra=scope)
+    # not block the gate itself. Under NO_NEW_COMMITMENTS (a feed crossed STALE) intake is skipped, so no
+    # new candidate reaches the gate; the gate still runs for what is already committed (K13).
+    if await intake_blocked(no_new_commitments):
+        logger.warning("intake skipped: NO_NEW_COMMITMENTS", extra=scope)
+        try:
+            await trace.append(
+                _GATE_TRACE_STREAM, "ALERT", "INTAKE_SKIPPED", {**scope, "mode": NO_NEW_COMMITMENTS}
+            )
+        except Exception:
+            logger.exception("could not trace a skipped intake", extra=scope)
+    else:
+        try:
+            await run_intake(trigger.gate_kind, trigger.contract_scope, now=now)
+        except Exception:
+            logger.exception("intake failed ahead of gate -- running the gate anyway", extra=scope)
     try:
         plan = await run_gate(trigger.gate_kind, trigger.contract_scope)
     except Exception as exc:

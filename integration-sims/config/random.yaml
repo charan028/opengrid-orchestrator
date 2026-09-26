@@ -18,6 +18,7 @@ sims:
   market: { enabled: true }
   scada: { enabled: true }
   fleet: { enabled: true }
+  customer: { enabled: true }
 
 profiles:
   calm: { rate_multiplier: 0.25, duration_multiplier: 0.75 }
@@ -67,6 +68,17 @@ types:
     rate_per_hour: 0.05
     duration_s: [1800, 7200]
     params: { temperature_c: [35, 46], wind_kph: [60, 110] }
+  # Manual/scenario-only for now (rate 0.0, same convention as replace_inverter below): both are
+  # declared/recalled ISO-style events a scenario or the control API drives deliberately, not a random
+  # background nuisance (build phase, 2026-09-26).
+  pjm_emergency_performance_event:
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  as_deployment:
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
 
   # ---- SCADA ----
   bank_overload:
@@ -159,6 +171,16 @@ types:
     rate_per_hour: 0.1
     duration_s: [600, 3600]
     params: { home_load_kw: [4, 10] }
+  # Manual/scenario-only (build phase, 2026-09-26): a mobile trailer deployment/relocation is a
+  # deliberate dispatch decision, never a random background nuisance.
+  mobile_deployment_start:
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  mobile_deployment_relocate:
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
   # ---- power quality / inverter imperfection (06-service-profiles-and-power-quality.md §7.2/§7.5) ----
   frequency_drift:
     rate_per_hour: 0.05
@@ -188,3 +210,37 @@ types:
     rate_per_hour: 0.0
     duration_s: [0, 0]
     params: {}
+
+  # ---- customer operators (low default weights: real-customer-facing events) ----
+  load_step_datacenter:
+    rate_per_hour: 0.05
+    duration_s: [120, 600]
+    params: { step_kw: [200, 800] }
+  pipeline_current_surge:
+    rate_per_hour: 0.05
+    duration_s: [60, 300]
+    params: { surge_a: [5, 25] }
+  request_burst:
+    rate_per_hour: 0.02
+    duration_s: [1, 5]
+    params: { count: [3, 8] }
+  malformed_request:
+    rate_per_hour: 0.02
+    duration_s: [1, 5]
+    params: {}
+  late_cancellation:
+    rate_per_hour: 0.01
+    duration_s: [1, 5]
+    params: {}
+  invoice_dispute:
+    rate_per_hour: 0.01
+    duration_s: [1, 5]
+    params: {}
+  site_meter_stale:
+    rate_per_hour: 0.02
+    duration_s: [300, 1200]
+    params: {}
+  large_load_curtailment_request:
+    rate_per_hour: 0.02
+    duration_s: [120, 600]
+    params: { step_kw: [1000, 3000] }

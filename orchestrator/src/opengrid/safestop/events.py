@@ -4,6 +4,7 @@ hands the result to the Postgres backend and the MQTT publisher.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -26,6 +27,16 @@ _WIRE_SCOPE: dict[Scope, Literal["fleet", "zone", "bank"]] = {
 
 class InvalidScopeReferenceError(ValueError):
     """Raised when `scope_ref` doesn't match what `scope` requires (e.g. a non-empty ref for FLEET)."""
+
+
+#: A zone/bank ref becomes one MQTT topic level (`stop/bank/<ref>/<stop_id>`): no `/`, `+`, `#`,
+#: whitespace or control characters, so a ref can never widen or redirect the stop topic.
+_SAFE_SCOPE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def is_safe_scope_ref(scope_ref: str) -> bool:
+    """Whether `scope_ref` is usable as a single stop-topic level (see `_SAFE_SCOPE_REF_RE`)."""
+    return _SAFE_SCOPE_REF_RE.fullmatch(scope_ref) is not None
 
 
 def ramp_window_s(scope: Scope) -> int:

@@ -80,6 +80,33 @@ async def _degraded_modes(pool: AsyncConnectionPool | None) -> list[str]:
     return sorted(mode for mode, _since in rows)
 
 
+async def _merge_alert_scopes(pool: AsyncConnectionPool | None, alerts: list[Alert]) -> list[Alert]:
+    """R2 item 1: `og.alert.scope_kind`/`scope_ref` (migration 0024) so the UI stops parsing `summary`
+    text for which bank/zone/process an alert is about. `api.store`'s own alert queries (`list_alerts`/
+    `health_snapshot`/`ack_alert`) don't select these two new columns yet -- rather than wait on that
+    api-owned follow-up, this does one direct supplementary read here (same pattern as `_degraded_modes`)
+    and merges the values onto the `Alert` objects already fetched. Degrades to the alerts unchanged
+    (`scope_kind`/`scope_ref` stay `None`, their model default) on a missing pool or a read failure
+    (K7: degrade, don't trip)."""
+    ids = [a.id for a in alerts if a.id is not None]
+    if pool is None or not ids:
+        return alerts
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT id, scope_kind, scope_ref FROM og.alert WHERE id = ANY(%s)", (ids,))
+            rows = await cur.fetchall()
+    except Exception:
+        logger.warning("alert scope read failed", exc_info=True)
+        return alerts
+    scopes = {row[0]: (row[1], row[2]) for row in rows}
+    return [
+        alert.model_copy(update={"scope_kind": scopes[alert.id][0], "scope_ref": scopes[alert.id][1]})
+        if alert.id in scopes
+        else alert
+        for alert in alerts
+    ]
+
+
 def _feed_payload(f: Any) -> dict[str, Any]:
     return {
         "source": f.source,
@@ -99,6 +126,7 @@ async def _health_payload(store: StoreProtocol, pool: AsyncConnectionPool | None
     net_margin_usd = await _todays_net_margin(store)
     invariants = await _invariants_summary(pool)
     degraded_modes = await _degraded_modes(pool)
+    scoped_alerts = await _merge_alert_scopes(pool, snapshot.open_alerts)
     return {
         "status": "ok",
         "as_of": datetime.now(UTC).isoformat(),
@@ -108,7 +136,7 @@ async def _health_payload(store: StoreProtocol, pool: AsyncConnectionPool | None
         },
         "feeds": [_feed_payload(f) for f in snapshot.feeds],
         "hub_health_counts": snapshot.hub_health_counts,
-        "alerts": [_alert_payload(a) for a in snapshot.open_alerts],
+        "alerts": [_alert_payload(a) for a in scoped_alerts],
         "open_alert_count": len(snapshot.open_alerts),
         "fleet_mw": fleet_mw,
         "fleet_mwh": None,  # not yet tracked -- `settle` owns real delivered-MWh accounting (02a S7)
@@ -168,10 +196,14 @@ async def stream_alerts(
     store: Annotated[StoreProtocol, Depends(get_store)],
     cfg: Annotated[Config, Depends(get_config)],
     _identity: Annotated[Identity, Depends(require_viewer)],
+    # Trailing + defaulted, matching `stream_health`'s own note: callable directly in tests without a
+    # real pool.
+    pool: Annotated[AsyncConnectionPool | None, Depends(_get_optional_pool)] = None,
 ) -> EventSourceResponse:
     async def fetch() -> dict[str, Any]:
         alerts = await store.list_alerts(open_only=True)
-        return {"open_alerts": [_alert_payload(a) for a in alerts]}
+        scoped_alerts = await _merge_alert_scopes(pool, alerts)
+        return {"open_alerts": [_alert_payload(a) for a in scoped_alerts]}
 
     return sse_response(request, interval_s=2.0, heartbeat_s=cfg.get("api.sse_heartbeat_s", 15), fetch=fetch)
 
@@ -184,6 +216,10 @@ def _alert_payload(alert: Alert) -> dict[str, Any]:
         "summary": alert.summary,
         "opened_at": alert.opened_at.isoformat(),
         "acked_by": alert.acked_by,
+        # R2 item 1 (migration 0024): structured scope so the UI stops parsing `summary` text. `None`
+        # for an alert this payload didn't merge scope onto (e.g. `stream_alerts`, unscoped alerts).
+        "scope_kind": alert.scope_kind,
+        "scope_ref": alert.scope_ref,
     }
 
 

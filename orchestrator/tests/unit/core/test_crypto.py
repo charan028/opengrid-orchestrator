@@ -1,7 +1,7 @@
 import math
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from opengrid.core.crypto import (
@@ -163,6 +163,8 @@ _BMP_KEY_TEXT = st.text(
 )
 
 
+# No deadline: Ed25519 signing is CPU-bound and the full suite runs loaded; this is a correctness property.
+@settings(deadline=None)
 @given(st.dictionaries(_BMP_KEY_TEXT, st.integers(min_value=-1000, max_value=1000)))
 def test_sign_verify_property(payload):
     # CORE-002: keys are restricted to the Basic Multilingual Plane (surrogates excluded) -- a

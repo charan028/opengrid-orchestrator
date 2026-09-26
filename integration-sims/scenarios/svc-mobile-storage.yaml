@@ -1,0 +1,30 @@
+name: svc_mobile_storage
+description: >
+  A mobile battery/trailer deployment and mid-contract relocation for a MOBILE_STORAGE contract
+  (config/service_profiles/mobile_storage.toml, owner decision 2026-09-26). Proves: the profile's
+  `site_id` (and its `feedback_signal_ref`/M&V point) changes cleanly between two deployments of the
+  SAME trailer without touching the template (tests/unit/profiles/test_mobile_storage_profile.py's
+  relocation test covers the row-shape side of this; this scenario covers the simulated timeline),
+  and that delivered kW to the site meter is metered from the moment of arrival (SoC-on-arrival is the
+  deployment's starting condition, not a control-law parameter -- see the toml file's header note).
+
+  Step types "mobile_deployment_start"/"mobile_deployment_relocate" are NOT YET in ogsim's anomaly
+  catalogue (integration-sims/src/ogsim/control/catalogue.py) -- see the SERVICES agent's 2026-09-26
+  report for the FLEET-SIM wiring line needed before `ogsim.control.injector.Injector` can execute
+  this step; `ogsim.control.scenarios.load_scenario` parses this file today regardless.
+steps:
+  - at_s: 0
+    type: mobile_deployment_start
+    target: trailer-mb-01
+    params: {site_id: "site-warehouse-01", committed_kw: 500.0, arrival_soc_pct: 92.0}
+    duration: 14400
+  - at_s: 14400
+    type: mobile_deployment_relocate
+    target: trailer-mb-01
+    params: {from_site_id: "site-warehouse-01", to_site_id: "site-drilling-pad-07", committed_kw: 500.0}
+    duration: 0
+  - at_s: 14700
+    type: mobile_deployment_start
+    target: trailer-mb-01
+    params: {site_id: "site-drilling-pad-07", committed_kw: 500.0, arrival_soc_pct: 78.0}
+    duration: 14400

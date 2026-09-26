@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import tomllib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,13 @@ from typing import Any
 from prometheus_client import Gauge
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.allocator.pq_eligibility import EligibilityConfig, HubPqCandidate, evaluate_hub_eligibility
+from opengrid.allocator.models import PqDispatchContext
+from opengrid.allocator.pq_eligibility import (
+    EligibilityConfig,
+    EligibilityResult,
+    HubPqCandidate,
+    evaluate_hub_eligibility,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,30 +81,33 @@ def load_profile_configs(directory: Path = PROFILES_DIR) -> dict[str, Eligibilit
 class _ProfileEligibility:
     hubs_by_bank: dict[str, set[str]] = field(default_factory=dict)
     kw_by_bank: dict[str, float] = field(default_factory=dict)
+    #: The S5.2 verdicts (filter + diversity weights) the allocator applies in the cycle.
+    result: EligibilityResult = field(default_factory=lambda: EligibilityResult(()))
 
 
 _configs: dict[str, EligibilityConfig] = {}
 _state: dict[str, _ProfileEligibility] = {}
+#: Characterized hubs from the last refresh: phase connection and PQ candidate (the S5.4 ladder ranks
+#: an obligation's hubs by deviation from these).
+_phase_by_hub: dict[str, str] = {}
+_candidates: dict[str, HubPqCandidate] = {}
 
 
 def configure(configs: dict[str, EligibilityConfig]) -> None:
     global _configs
     _configs = dict(configs)
     _state.clear()
+    _phase_by_hub.clear()
+    _candidates.clear()
 
 
 def is_pq_sensitive(service_type: str) -> bool:
     return service_type in _configs
 
 
-def compute(
-    rows: list[tuple[Any, ...]], configs: dict[str, EligibilityConfig]
-) -> dict[str, _ProfileEligibility]:
-    """Pure: evaluate every profile over the online hubs in `rows` (`_ROWS_SQL` shape)."""
-    online = [r for r in rows if r[14] == "online"]
-    bank_of = {r[0]: r[1] for r in online}
-    rated_of = {r[0]: float(r[2]) for r in online}
-    candidates = [
+def candidates_of(rows: Sequence[tuple[Any, ...]]) -> list[HubPqCandidate]:
+    """`_ROWS_SQL` rows as S5.2 candidates."""
+    return [
         HubPqCandidate(
             hub_id=r[0],
             phase_connection=r[3],
@@ -112,12 +122,41 @@ def compute(
             ride_through_class=r[12],
             asset_state=r[13],
         )
-        for r in online
+        for r in rows
     ]
+
+
+def dispatch_context(excluded_by_obligation: Mapping[str, frozenset[str]] | None = None) -> PqDispatchContext:
+    """The allocator cycle's S5.2 inputs: every PQ-sensitive profile's verdicts (a profile not yet
+    refreshed has an empty result, so no hub is eligible: fail closed), the hubs' phase connections, and
+    the S5.4 ladder's exclusions."""
+    return PqDispatchContext(
+        results_by_service={
+            service: _state.get(service, _ProfileEligibility()).result for service in _configs
+        },
+        phase_by_hub_id=dict(_phase_by_hub),
+        excluded_by_obligation=dict(excluded_by_obligation or {}),
+    )
+
+
+def candidate(hub_id: str) -> HubPqCandidate | None:
+    """The last refresh's characterization of `hub_id` (for the S5.4 ladder's hub ranking)."""
+    return _candidates.get(hub_id)
+
+
+def compute(
+    rows: list[tuple[Any, ...]], configs: dict[str, EligibilityConfig]
+) -> dict[str, _ProfileEligibility]:
+    """Pure: evaluate every profile over the online hubs in `rows` (`_ROWS_SQL` shape)."""
+    online = [r for r in rows if r[14] == "online"]
+    bank_of = {r[0]: r[1] for r in online}
+    rated_of = {r[0]: float(r[2]) for r in online}
+    candidates = candidates_of(online)
     result: dict[str, _ProfileEligibility] = {}
     for service_type, cfg in configs.items():
-        state = _ProfileEligibility()
-        for hub_id in evaluate_hub_eligibility(candidates, cfg).eligible_hub_ids:
+        evaluated = evaluate_hub_eligibility(candidates, cfg)
+        state = _ProfileEligibility(result=evaluated)
+        for hub_id in evaluated.eligible_hub_ids:
             bank_id = bank_of[hub_id]
             state.hubs_by_bank.setdefault(bank_id, set()).add(hub_id)
             state.kw_by_bank[bank_id] = state.kw_by_bank.get(bank_id, 0.0) + rated_of[hub_id]
@@ -135,6 +174,10 @@ async def refresh(pool: AsyncConnectionPool) -> None:
     computed = compute(rows, _configs)
     _state.clear()
     _state.update(computed)
+    _phase_by_hub.clear()
+    _phase_by_hub.update({str(r[0]): str(r[3]) for r in rows})
+    _candidates.clear()
+    _candidates.update({c.hub_id: c for c in candidates_of(rows)})
     for service_type, state in computed.items():
         pq_eligible_kw.labels(service_type=service_type).set(sum(state.kw_by_bank.values()))
         pq_eligible_hubs.labels(service_type=service_type).set(

@@ -24,6 +24,20 @@ CHECK_K13_RESTORE_LAG = "K13_RESTORE_LAG"
 CHECK_ORPHAN_RESERVATION = "ORPHAN_RESERVATION"
 CHECK_ORPHAN_COMMITMENT = "ORPHAN_COMMITMENT"
 CHECK_TRACE_VERIFY = "TRACE_VERIFY"
+#: K15 territory (00-invariants.md S2.6/S6, migration 0025's market model): a REGULATED obligation
+#: delivered from a bank/zone outside its utility's territory_zones.
+CHECK_K15_TERRITORY = "K15_TERRITORY"
+#: AS capacity hold compliance (00-invariants.md S2.6/S6, migration 0020): held energy below what
+#: sustaining the committed kW for the product's full duration would require, while an as_deployment
+#: window is active.
+CHECK_AS_HOLD = "AS_HOLD"
+#: Discharge-flow limit (00-invariants.md S2.6/S6, migration 0025): a substation asset's net power
+#: exceeding its own POI import/export limit. Transformer/feeder limits and P_max derating are not yet
+#: measured -- no telemetry field exists for them (see checks.find_flow_limit_violations).
+CHECK_FLOW_LIMIT = "FLOW_LIMIT"
+#: K11 external anchoring verification: the chain head hash has not been published outside the database
+#: recently enough (or has never been published at all).
+CHECK_ANCHOR_FRESHNESS = "ANCHOR_FRESHNESS"
 
 ALL_CHECKS: tuple[str, ...] = (
     CHECK_K1_RESERVE_BREACH,
@@ -34,6 +48,10 @@ ALL_CHECKS: tuple[str, ...] = (
     CHECK_ORPHAN_RESERVATION,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_TRACE_VERIFY,
+    CHECK_K15_TERRITORY,
+    CHECK_AS_HOLD,
+    CHECK_FLOW_LIMIT,
+    CHECK_ANCHOR_FRESHNESS,
 )
 
 
@@ -117,6 +135,7 @@ class InvariantsSummary:
     restore_lag: int
     orphan_reservations: int
     orphan_commitments: int
+    territory_violations: int
     as_of: datetime | None
 
     @staticmethod
@@ -132,5 +151,6 @@ class InvariantsSummary:
             restore_lag=0,
             orphan_reservations=0,
             orphan_commitments=0,
+            territory_violations=0,
             as_of=None,
         )

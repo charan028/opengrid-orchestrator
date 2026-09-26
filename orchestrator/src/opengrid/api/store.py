@@ -236,6 +236,11 @@ class StoreProtocol(Protocol):
 
     async def list_active_as_deployments(self) -> list[dict[str, Any]]: ...
 
+    async def get_as_award(self, obligation_id: UUID) -> dict[str, Any] | None:
+        """`{service_type, state, duration_minutes}` of an obligation (its product rule's full-deployment
+        duration), or None if it does not exist -- the AS deployment route's validation read."""
+        ...
+
     async def cancel_as_deployment(self, deployment_id: UUID) -> bool:
         """End an active deployment now (sets `cancelled_at`; never a delete). False if none active."""
         ...
@@ -726,6 +731,19 @@ class PgStore:
             (deployment_id, obligation_id, start_at, end_at, requested_by, reason),
         )
         return deployment_id
+
+    async def get_as_award(self, obligation_id: UUID) -> dict[str, Any] | None:
+        return _row_or_none(
+            await self._fetch(
+                """
+                SELECT o.service_type, o.state,
+                       (SELECT MAX(pr.duration_minutes) FROM og.product_rule pr
+                        WHERE pr.contract_id = o.contract_id) AS duration_minutes
+                FROM og.obligation o WHERE o.obligation_id = %s
+                """,
+                (obligation_id,),
+            )
+        )
 
     async def list_active_as_deployments(self) -> list[dict[str, Any]]:
         return await self._fetch(

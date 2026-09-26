@@ -114,6 +114,46 @@ CATALOGUE: list[AnomalyType] = [
         wire_type="MARKET_SLOW_RESPONSE",
     ),
     AnomalyType(
+        id="pjm_emergency_performance_event",
+        owner="market",
+        target_kind="pjm zone (e.g. pjm-zone-aep-01)",
+        params={
+            "committed_kw": {"type": "number", "default": 5000.0},
+            "declared_by": {"type": "string", "default": "SIMULATED_ISO_INSTRUCTION"},
+            "recall": {"type": "boolean", "default": False},
+        },
+        description=(
+            "Declares (or recalls, `recall: true`) a simulated PJM RPM capacity-performance emergency "
+            "event for a PJM_CAPACITY contract (config/service_profiles/pjm_capacity.toml). PJM stays "
+            "fully simulated -- this is the only source of a declared emergency-performance hour. "
+            "Registered 2026-09-26 for `svc-pjm-capacity.yaml` (SERVICES agent); shares the same "
+            "market-side deployment-event mechanism as `as_deployment` below."
+        ),
+        wire_type="MARKET_PJM_EMERGENCY_PERFORMANCE_EVENT",
+    ),
+    AnomalyType(
+        id="as_deployment",
+        owner="market",
+        target_kind="AS product (e.g. RRS, REGUP, ECRS) or *",
+        params={
+            "service": {
+                "type": "string",
+                "default": "RRS",
+                "enum": ["REGUP", "REGDN", "RRS", "NSPIN", "ECRS"],
+            },
+            "deployed_mw": {"type": "number", "default": 50.0},
+            "recall": {"type": "boolean", "default": False},
+        },
+        description=(
+            "Publishes a simulated ERCOT AS deployment instruction (build phase 2026-09-26, FLEET-SIM): "
+            "the engine treats this exactly like an operator/ISO deployment (`og.as_deployment`), "
+            "randomly (Poisson, `ogsim.control.random_engine`) or via manual/scenario injection. "
+            "`recall: true` ends a deployment already in progress. See "
+            "`ogsim.market.as_deployment`/the FLEET-SIM build report's DISPATCH wiring notes."
+        ),
+        wire_type="MARKET_AS_DEPLOYMENT",
+    ),
+    AnomalyType(
         id="nws_extreme_weather",
         owner="market",
         target_kind="nws",
@@ -331,6 +371,41 @@ CATALOGUE: list[AnomalyType] = [
         wire_type="FLEET_RESERVE_FLOOR_PRESSURE",
         wire_target_kind="hub",
     ),
+    AnomalyType(
+        id="mobile_deployment_start",
+        owner="fleet",
+        target_kind="asset (mobile trailer, e.g. trailer-mb-01)",
+        params={
+            "site_id": {"type": "string", "default": ""},
+            "committed_kw": {"type": "number", "default": 500.0},
+            "arrival_soc_pct": {"type": "number", "default": 90.0},
+        },
+        description=(
+            "Deploys a mobile battery/trailer asset to `site_id` for a MOBILE_STORAGE contract "
+            "(config/service_profiles/mobile_storage.toml): delivered kW is metered from the moment of "
+            "arrival, with `arrival_soc_pct` as the deployment's starting condition. Registered "
+            "2026-09-26 for `svc-mobile-storage.yaml` (SERVICES agent)."
+        ),
+        wire_type="FLEET_MOBILE_DEPLOYMENT_START",
+        wire_target_kind="asset",
+    ),
+    AnomalyType(
+        id="mobile_deployment_relocate",
+        owner="fleet",
+        target_kind="asset (mobile trailer)",
+        params={
+            "from_site_id": {"type": "string", "default": ""},
+            "to_site_id": {"type": "string", "default": ""},
+            "committed_kw": {"type": "number", "default": 500.0},
+        },
+        description=(
+            "Mid-contract relocation of a mobile trailer already deployed by `mobile_deployment_start`: "
+            "changes `site_id` (and its feedback-signal/M&V point) cleanly between two sites for the "
+            "SAME trailer, without touching the profile template."
+        ),
+        wire_type="FLEET_MOBILE_DEPLOYMENT_RELOCATE",
+        wire_target_kind="asset",
+    ),
     # ---- Power quality / inverter imperfection (owner: fleet, 06-service-profiles-and-
     # power-quality.md §7.2/§7.5) -- applied by ogsim.fleet.pq.PqAnomalyManager. ----
     AnomalyType(
@@ -427,12 +502,93 @@ CATALOGUE: list[AnomalyType] = [
         wire_type="FLEET_REPLACE_INVERTER",
         wire_target_kind="hub",
     ),
+    # ---- Customer operators (owner: customer, applied by ogsim.customer over MQTT and the
+    # orchestrator's customer API) ----
+    AnomalyType(
+        id="load_step_datacenter",
+        owner="customer",
+        target_kind="site",
+        params={"step_kw": {"type": "number", "default": 500.0}},
+        description="Steps a DATA_CENTER site's real-power draw up sharply (load step).",
+        wire_type="CUSTOMER_LOAD_STEP",
+        wire_target_kind="site",
+    ),
+    AnomalyType(
+        id="pipeline_current_surge",
+        owner="customer",
+        target_kind="corridor",
+        params={"surge_a": {"type": "number", "default": 20.0}},
+        description="Surges a PIPELINE_AC corridor's induced AC current above its mitigation limit.",
+        wire_type="CUSTOMER_PIPELINE_CURRENT_SURGE",
+        wire_target_kind="corridor",
+    ),
+    AnomalyType(
+        id="request_burst",
+        owner="customer",
+        target_kind="customer",
+        params={"count": {"type": "integer", "default": 5}},
+        description="Submits a burst of opportunity/service requests in quick succession.",
+        wire_type="CUSTOMER_REQUEST_BURST",
+        wire_target_kind="customer",
+    ),
+    AnomalyType(
+        id="malformed_request",
+        owner="customer",
+        target_kind="customer",
+        params={},
+        description="Submits a malformed or oversize request; must be rejected (R-ADMIT-REJECT).",
+        wire_type="CUSTOMER_MALFORMED_REQUEST",
+        wire_target_kind="customer",
+    ),
+    AnomalyType(
+        id="late_cancellation",
+        owner="customer",
+        target_kind="customer",
+        params={},
+        description="Requests cancellation of an obligation inside its contractual notice window.",
+        wire_type="CUSTOMER_LATE_CANCELLATION",
+        wire_target_kind="customer",
+    ),
+    AnomalyType(
+        id="invoice_dispute",
+        owner="customer",
+        target_kind="customer",
+        params={"reason_code": {"type": "string", "default": "USAGE_MISMATCH"}},
+        description="Disputes the customer's most recent invoice.",
+        wire_type="CUSTOMER_INVOICE_DISPUTE",
+        wire_target_kind="customer",
+    ),
+    AnomalyType(
+        id="large_load_curtailment_request",
+        owner="customer",
+        target_kind="site",
+        params={"step_kw": {"type": "number", "default": 2000.0}},
+        description=(
+            "A large flexible load's own curtailment/ride-through load-step signal for a LARGE_LOAD "
+            "contract (config/service_profiles/large_load.toml). Mirrors `load_step_datacenter`'s wire "
+            "shape 1:1 (both are a generic CUSTOMER load step at a site meter) but is correctly "
+            "described for LARGE_LOAD rather than DATA_CENTER. Registered 2026-09-26 for "
+            "`svc-large-load.yaml` (SERVICES agent), which had used `load_step_datacenter` as a stand-in."
+        ),
+        wire_type="CUSTOMER_LARGE_LOAD_CURTAILMENT_REQUEST",
+        wire_target_kind="site",
+    ),
+    AnomalyType(
+        id="site_meter_stale",
+        owner="customer",
+        target_kind="site",
+        params={},
+        description="Stops publishing a DATA_CENTER site's meter readings (stale telemetry).",
+        wire_type="CUSTOMER_SITE_METER_STALE",
+        wire_target_kind="site",
+    ),
 ]
 
 BY_ID: dict[str, AnomalyType] = {a.id: a for a in CATALOGUE}
 MARKET_TYPES = {a.id for a in CATALOGUE if a.owner == "market"}
 SCADA_TYPES = {a.id for a in CATALOGUE if a.owner == "scada"}
 FLEET_TYPES = {a.id for a in CATALOGUE if a.owner == "fleet"}
+CUSTOMER_TYPES = {a.id for a in CATALOGUE if a.owner == "customer"}
 
 
 def owner_of(anomaly_type: str) -> str | None:
@@ -450,6 +606,8 @@ _REF_PREFIX_TO_WIRE_KIND: tuple[tuple[str, str], ...] = (
     ("hub", "hub"),
     ("lz_", "zone"),
     ("zone", "zone"),
+    ("site", "site"),
+    ("corridor", "corridor"),
 )
 
 

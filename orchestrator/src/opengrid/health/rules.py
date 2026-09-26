@@ -114,13 +114,16 @@ def evaluate_feed_alert(
 ) -> AlertFinding | None:
     """ALR-FEED-STALE (warning) / ALR-FEED-LGV-EXHAUSTED (critical, breaker open with no fallback)."""
     key = f"{feed_status.source}:{feed_status.product}"
+    # Structured scope (migration 0024), additive alongside the existing "source"/"product" keys
+    # `condition_key_for` already reads -- see `opengrid.health.queries.raise_alert`'s docstring.
+    scope = {"scope_kind": "FEED", "scope_ref": key}
     if feed_status.breaker_open:
         return AlertFinding(
             rule="ALR-FEED-LGV-EXHAUSTED",
             severity="critical",
             summary=f"Feed {key} circuit breaker open, last-good-value window exhausted",
             condition_key=f"ALR-FEED-LGV-EXHAUSTED:{key}",
-            detail={"source": feed_status.source, "product": feed_status.product},
+            detail={"source": feed_status.source, "product": feed_status.product, **scope},
         )
     if is_stale(feed_status.last_value_at, staleness_threshold_s, now=now):
         return AlertFinding(
@@ -128,7 +131,7 @@ def evaluate_feed_alert(
             severity="warning",
             summary=f"Feed {key} stale for over {staleness_threshold_s:.0f}s",
             condition_key=f"ALR-FEED-STALE:{key}",
-            detail={"source": feed_status.source, "product": feed_status.product},
+            detail={"source": feed_status.source, "product": feed_status.product, **scope},
         )
     return None
 
@@ -197,7 +200,11 @@ def evaluate_process_down_alert(process_health: ProcessHealth) -> AlertFinding |
         severity="critical",
         summary=f"Process {process_health.process} heartbeat missing",
         condition_key=f"ALR-PROCESS-DOWN:{process_health.process}",
-        detail={"process": process_health.process},
+        detail={
+            "process": process_health.process,
+            "scope_kind": "PROCESS",
+            "scope_ref": process_health.process,
+        },
     )
 
 
@@ -218,7 +225,7 @@ def evaluate_hub_offline_ratio_alert(
         severity=severity,
         summary=f"Zone {zone} hub offline ratio {ratio:.1%}",
         condition_key=f"ALR-HUB-OFFLINE-RATIO:{zone}",
-        detail={"zone": zone, "ratio": ratio, "total": counts.total},
+        detail={"zone": zone, "ratio": ratio, "total": counts.total, "scope_kind": "ZONE", "scope_ref": zone},
     )
 
 
@@ -302,7 +309,14 @@ def evaluate_scada_overload_alert(
         severity=severity,
         summary=f"Bank {bank_id} SCADA load {load_kva:.1f} kVA over rating {kva_rating:.1f} kVA ({ratio:.0%})",
         condition_key=f"ALR-SCADA-OVERLOAD:{bank_id}",
-        detail={"bank_id": bank_id, "load_kva": load_kva, "kva_rating": kva_rating, "ratio": ratio},
+        detail={
+            "bank_id": bank_id,
+            "load_kva": load_kva,
+            "kva_rating": kva_rating,
+            "ratio": ratio,
+            "scope_kind": "BANK",
+            "scope_ref": bank_id,
+        },
     )
 
 
@@ -333,6 +347,8 @@ def evaluate_energy_shortfall_risk_alert(
             "customer_id": customer_id,
             "margin_kwh": margin_kwh,
             "time_to_depletion_h": time_to_depletion_h,
+            "scope_kind": "OBLIGATION",
+            "scope_ref": obligation_id,
         },
     )
 
@@ -347,4 +363,97 @@ def evaluate_reserve_breach_alert(reserve_breach_count: float) -> AlertFinding |
         summary=f"Reserve-floor breach counter at {reserve_breach_count:.0f} (must be 0, A10)",
         condition_key="ALR-RESERVE-BREACH",
         detail={"count": reserve_breach_count},
+    )
+
+
+def evaluate_limit_proximity_alert(
+    *,
+    rule: str,
+    scope_kind: str,
+    scope_ref: str,
+    value: float | None,
+    limit: float,
+    unit: str,
+    consecutive_cycles: int,
+    warn_ratio: float,
+    required_consecutive_cycles: int,
+) -> AlertFinding | None:
+    """Generic "sustained limit proximity" rule (R2 item 3, prepared ahead of FLEET-SIM landing meter
+    export / temperature telemetry -- see `evaluate_meter_export_limit_alert`/
+    `evaluate_temperature_limit_alert`, its two named wrappers below). Warning once a reading has stayed
+    at or above `warn_ratio` of its limit for `required_consecutive_cycles` consecutive cycles in a row --
+    mirrors `evaluate_cycle_latency_alert`'s consecutive-breach pattern, so a momentary spike doesn't
+    raise an alert but a sustained one does. `value=None` (no reading yet) never alerts, same rule as
+    `evaluate_scada_overload_alert`'s "no reading yet is not an overload"."""
+    if value is None or limit <= 0:
+        return None
+    ratio = value / limit
+    if ratio < warn_ratio or consecutive_cycles < required_consecutive_cycles:
+        return None
+    return AlertFinding(
+        rule=rule,
+        severity="warning",
+        summary=(
+            f"{scope_kind} {scope_ref} {value:.1f}{unit} at {ratio:.0%} of limit {limit:.1f}{unit}, "
+            f"sustained {consecutive_cycles} cycles"
+        ),
+        condition_key=f"{rule}:{scope_ref}",
+        detail={
+            "scope_kind": scope_kind,
+            "scope_ref": scope_ref,
+            "value": value,
+            "limit": limit,
+            "ratio": ratio,
+            "consecutive_cycles": consecutive_cycles,
+        },
+    )
+
+
+def evaluate_meter_export_limit_alert(
+    hub_id: str,
+    export_kw: float | None,
+    limit_kw: float,
+    consecutive_cycles: int,
+    *,
+    thresholds: HealthThresholds,
+) -> AlertFinding | None:
+    """ALR-METER-EXPORT-LIMIT (warning): a hub's meter-reported export power sustained near its limit.
+
+    NOT YET WIRED into `evaluate_alerts()`: FLEET-SIM hasn't landed meter-export telemetry (no
+    `og.hub_state`/`og.feed_obs` column for it yet). Prepared now so wiring it in once that telemetry
+    exists is a `queries.fetch_*` call plus one line in `evaluate_alerts()`, not a new design."""
+    return evaluate_limit_proximity_alert(
+        rule="ALR-METER-EXPORT-LIMIT",
+        scope_kind="HUB",
+        scope_ref=hub_id,
+        value=export_kw,
+        limit=limit_kw,
+        unit="kW",
+        consecutive_cycles=consecutive_cycles,
+        warn_ratio=thresholds.meter_export_warn_ratio,
+        required_consecutive_cycles=thresholds.limit_proximity_sustained_cycles,
+    )
+
+
+def evaluate_temperature_limit_alert(
+    hub_id: str,
+    temperature_c: float | None,
+    limit_c: float,
+    consecutive_cycles: int,
+    *,
+    thresholds: HealthThresholds,
+) -> AlertFinding | None:
+    """ALR-TEMPERATURE-LIMIT (warning): a hub's reported inverter/battery temperature sustained near its
+    limit. NOT YET WIRED into `evaluate_alerts()` -- see `evaluate_meter_export_limit_alert`'s docstring;
+    same situation, same telemetry gap (FLEET-SIM hasn't landed temperature readings yet)."""
+    return evaluate_limit_proximity_alert(
+        rule="ALR-TEMPERATURE-LIMIT",
+        scope_kind="HUB",
+        scope_ref=hub_id,
+        value=temperature_c,
+        limit=limit_c,
+        unit="C",
+        consecutive_cycles=consecutive_cycles,
+        warn_ratio=thresholds.temperature_warn_ratio,
+        required_consecutive_cycles=thresholds.limit_proximity_sustained_cycles,
     )

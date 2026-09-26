@@ -38,4 +38,7 @@ def extract_plan(
         bank_capacity_duals=dict(outcome.bank_capacity_duals),
         soc_by_bank_interval_scenario=dict(primal.soc),
         charge_by_bank_interval_scenario=dict(primal.charge),
+        solar_charge_by_bank_interval_scenario=dict(primal.solar_charge),
+        stored_energy_value=dict(outcome.stored_energy_value),
+        stage_r_objective=outcome.stage_r_objective,
     )

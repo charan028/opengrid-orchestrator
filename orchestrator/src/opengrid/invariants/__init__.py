@@ -17,7 +17,7 @@ Structure (BUILD.md S5a "pure logic separated from I/O", mirroring `opengrid.hea
   * `checks`      -- pure violation-detection logic, no I/O, unit-testable against seeded fixtures.
   * `queries`     -- all Postgres I/O, including `read_summary()` (the API's read path) and the
                       `og.invariant_check`/`og.invariant_violation` persistence (migrations/
-                      0014_invariant_checks.sql, 0015_invariant_violation_dedupe_and_trace_watermark.sql).
+                      0014_invariant_checks.sql, 0017_invariant_violation_dedupe_and_trace_watermark.sql).
   * `trace_verify`-- scheduled K11 verification, built on `opengrid.trace.store.TraceStore.verify`.
   * this module   -- wiring: `configure()`/`run_due()`, called as a small hook from
                       `opengrid.health.configure()`/`evaluate_once()` (see that package's own docstring
@@ -45,11 +45,15 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.invariants import checks, queries
 from opengrid.invariants import trace_verify as _trace_verify
 from opengrid.invariants.models import (
+    CHECK_ANCHOR_FRESHNESS,
+    CHECK_AS_HOLD,
+    CHECK_FLOW_LIMIT,
     CHECK_K1_RESERVE_BREACH,
     CHECK_K2_DOUBLE_SOLD,
     CHECK_K13_LOCK_VIOLATION,
     CHECK_K13_OUTAGE_GAP,
     CHECK_K13_RESTORE_LAG,
+    CHECK_K15_TERRITORY,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_ORPHAN_RESERVATION,
     CHECK_TRACE_VERIFY,
@@ -61,13 +65,16 @@ from opengrid.invariants.queries import read_summary
 from opengrid.platform import metrics
 from opengrid.platform.config import Config
 from opengrid.platform.process import Cadence
-from opengrid.trace.pg_backend import PgTraceBackend
+from opengrid.trace import anchoring
+from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
 from opengrid.trace.store import TraceStore
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_INTERVAL_S = 60.0  # K1/K2/K13/orphan checks
 _DEFAULT_TRACE_VERIFY_INTERVAL_S = 300.0  # K11: "every N minutes" (task brief) -- default 5 min
+_DEFAULT_ANCHOR_INTERVAL_S = 900.0  # K11 external anchoring: "every 15 min" (task brief)
+_ANCHOR_STALE_MULTIPLIER = 2.0  # freshness check tolerance: flag only once a cycle was clearly missed
 _DEFAULT_K2_LOOKBACK_S = 3600.0  # K2's rolling aggregation window: 1h back from "now"
 _DEFAULT_K1_TIME_BUDGET_S = 5.0  # K1's per-run loop cap -- see _run_reserve_breach_check
 _DEFAULT_K1_SAFETY_MARGIN_S = 30.0  # K1's upper-bound holdback for late/buffered writes and clock skew
@@ -80,6 +87,9 @@ _pool: AsyncConnectionPool | None = None
 _trace_store: TraceStore | None = None
 _cadence: Cadence | None = None
 _trace_cadence: Cadence | None = None
+_anchor_cadence: Cadence | None = None
+_anchor_interval_s: float = _DEFAULT_ANCHOR_INTERVAL_S
+_config: Config | None = None
 _k2_lookback_s: float = _DEFAULT_K2_LOOKBACK_S
 _k13_max_grant_gap_s: float = checks.DEFAULT_K13_MAX_GRANT_GAP_S
 _k1_time_budget_s: float = _DEFAULT_K1_TIME_BUDGET_S
@@ -94,16 +104,22 @@ def configure(pool: AsyncConnectionPool, cfg: Config) -> None:
         _trace_store, \
         _cadence, \
         _trace_cadence, \
+        _anchor_cadence, \
+        _anchor_interval_s, \
+        _config, \
         _k2_lookback_s, \
         _k13_max_grant_gap_s, \
         _k1_time_budget_s, \
         _k1_safety_margin_s
     _pool = pool
-    _trace_store = TraceStore(PgTraceBackend(pool))
+    _config = cfg
+    _trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
     _cadence = Cadence(float(cfg.get("invariants.interval_s", _DEFAULT_INTERVAL_S)))
     _trace_cadence = Cadence(
         float(cfg.get("invariants.trace_verify_interval_s", _DEFAULT_TRACE_VERIFY_INTERVAL_S))
     )
+    _anchor_interval_s = float(cfg.get("trace.anchor_interval_s", _DEFAULT_ANCHOR_INTERVAL_S))
+    _anchor_cadence = Cadence(_anchor_interval_s)
     _k2_lookback_s = float(cfg.get("invariants.k2_lookback_s", _DEFAULT_K2_LOOKBACK_S))
     _k13_max_grant_gap_s = float(
         cfg.get("invariants.k13_max_grant_gap_s", checks.DEFAULT_K13_MAX_GRANT_GAP_S)
@@ -152,6 +168,11 @@ async def run_due() -> None:
             await run_trace_verify_once()
         except Exception:
             logger.exception("invariants.run_trace_verify_once failed")
+    if _anchor_cadence is not None and _anchor_cadence.due():
+        try:
+            await run_anchor_publish_once()
+        except Exception:
+            logger.exception("invariants.run_anchor_publish_once failed")
 
 
 async def run_once() -> dict[str, CheckOutcome]:
@@ -167,6 +188,10 @@ async def run_once() -> dict[str, CheckOutcome]:
         (CHECK_K2_DOUBLE_SOLD, _run_double_sold_check),
         (CHECK_ORPHAN_RESERVATION, _run_orphan_reservation_check),
         (CHECK_ORPHAN_COMMITMENT, _run_orphan_commitment_check),
+        (CHECK_K15_TERRITORY, _run_territory_check),
+        (CHECK_AS_HOLD, _run_as_hold_check),
+        (CHECK_FLOW_LIMIT, _run_flow_limit_check),
+        (CHECK_ANCHOR_FRESHNESS, _run_anchor_freshness_check),
     ):
         try:
             outcomes[check_name] = await runner(pool, now)
@@ -436,6 +461,111 @@ async def _run_orphan_commitment_check(pool: AsyncConnectionPool, now: datetime)
     return outcome
 
 
+async def _run_territory_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:
+    """K15: every REGULATED-contract grant since the watermark, checked against its delivering bank's
+    zone vs. the contract's utility's `territory_zones` (`checks.find_territory_violations`). Same
+    incremental-cursor shape as K13's own commitment scan (`fetch_lock_commitment_candidates`) --
+    `created_at`-ordered, bounded by `limit`."""
+    start = time.perf_counter()
+    state = await queries.get_check_state(pool, CHECK_K15_TERRITORY)
+    since = _parse_ts(state.watermark.get("since")) or _EPOCH
+    rows, new_watermark = await queries.fetch_territory_candidates(pool, since=since, now=now)
+    violations = checks.find_territory_violations(rows)
+    outcome = CheckOutcome(
+        CHECK_K15_TERRITORY, tuple(violations), {"since": (new_watermark or since).isoformat()}
+    )
+    newly_inserted = await _persist_and_meter(
+        pool,
+        CHECK_K15_TERRITORY,
+        outcome,
+        prior_total=state.total_violations,
+        run_ms=int((time.perf_counter() - start) * 1000),
+    )
+    if newly_inserted:
+        metrics.territory_violations_total.inc(len(newly_inserted))
+    return outcome
+
+
+async def _run_as_hold_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:
+    """AS capacity hold compliance (migration 0020): re-scans every currently-active `og.as_deployment`
+    window every run (bounded by how many deployments can be simultaneously active, not a growing
+    history) -- there is no meaningful watermark for "is this still true right now"."""
+    start = time.perf_counter()
+    state = await queries.get_check_state(pool, CHECK_AS_HOLD)
+    rows = await queries.fetch_as_hold_candidates(pool, now=now)
+    violations = checks.find_as_hold_violations(rows)
+    outcome = CheckOutcome(CHECK_AS_HOLD, tuple(violations), {})
+    newly_inserted = await _persist_and_meter(
+        pool,
+        CHECK_AS_HOLD,
+        outcome,
+        prior_total=state.total_violations,
+        run_ms=int((time.perf_counter() - start) * 1000),
+    )
+    if newly_inserted:
+        metrics.as_hold_violations_total.inc(len(newly_inserted))
+    return outcome
+
+
+async def _run_flow_limit_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:
+    """Discharge-flow limit (migration 0025's POI import/export; transformer/feeder limits and P_max
+    derating are skipped -- no telemetry field exists yet, see `checks.find_flow_limit_violations`).
+    Re-scans every substation asset's CURRENT aggregated power every run, same as the AS-hold check
+    above -- a point-in-time snapshot, not a growing history."""
+    start = time.perf_counter()
+    state = await queries.get_check_state(pool, CHECK_FLOW_LIMIT)
+    rows = await queries.fetch_flow_limit_candidates(pool)
+    violations = checks.find_flow_limit_violations(rows)
+    outcome = CheckOutcome(CHECK_FLOW_LIMIT, tuple(violations), {})
+    newly_inserted = await _persist_and_meter(
+        pool,
+        CHECK_FLOW_LIMIT,
+        outcome,
+        prior_total=state.total_violations,
+        run_ms=int((time.perf_counter() - start) * 1000),
+    )
+    if newly_inserted:
+        metrics.flow_limit_violations_total.inc(len(newly_inserted))
+    return outcome
+
+
+async def _run_anchor_freshness_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:
+    """K11 external anchoring verification (task brief: "verification checks the anchors"): the chain
+    head hash must have been published outside the database within `_ANCHOR_STALE_MULTIPLIER x
+    anchor_interval_s` -- enough slack that one merely-slow cycle never false-positives, while a
+    genuinely stuck/crashed publisher still gets caught within two missed cycles. A single-row
+    point-in-time check (no watermark, mirrors AS-hold/flow-limit above)."""
+    start = time.perf_counter()
+    state = await queries.get_check_state(pool, CHECK_ANCHOR_FRESHNESS)
+    last_published_at = await queries.fetch_latest_anchor_published_at(pool)
+    violation = checks.find_anchor_staleness_violation(
+        last_published_at=last_published_at, now=now, max_age_s=_anchor_interval_s * _ANCHOR_STALE_MULTIPLIER
+    )
+    violations = [violation] if violation is not None else []
+    outcome = CheckOutcome(CHECK_ANCHOR_FRESHNESS, tuple(violations), {})
+    newly_inserted = await _persist_and_meter(
+        pool,
+        CHECK_ANCHOR_FRESHNESS,
+        outcome,
+        prior_total=state.total_violations,
+        run_ms=int((time.perf_counter() - start) * 1000),
+    )
+    if newly_inserted:
+        metrics.anchor_freshness_violations_total.inc(len(newly_inserted))
+    return outcome
+
+
+async def run_anchor_publish_once() -> anchoring.AnchorResult:
+    """K11 external anchoring (task brief: publish the chain head hash outside the database every ~15
+    min). Reuses `TraceStore.checkpoint()`/`opengrid.trace.anchoring.publish_anchor` -- this function is
+    only the scheduling wrapper `run_due()`'s own `_anchor_cadence` calls."""
+    pool = _require_pool()
+    trace_store = _require_trace_store()
+    if _config is None:
+        raise RuntimeError("opengrid.invariants.configure() must be called before use")
+    return await anchoring.publish_anchor(pool, trace_store, _config)
+
+
 async def run_trace_verify_once() -> _trace_verify.TraceVerifyOutcome:
     """K11: discover any new trace stream since the last discovery cursor, verify every known stream's
     new segments since its OWN row's resume point (`og.invariant_trace_watermark`), and raise/clear
@@ -479,6 +609,7 @@ __all__ = [
     "InvariantsSummary",
     "configure",
     "read_summary",
+    "run_anchor_publish_once",
     "run_due",
     "run_once",
     "run_trace_verify_once",

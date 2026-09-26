@@ -1,0 +1,26 @@
+name: svc_large_load
+description: >
+  A large flexible load's own curtailment/ride-through signal for a LARGE_LOAD contract
+  (config/service_profiles/large_load.toml, owner decision 2026-09-26; the crypto/data-load-curtailing
+  variant of the task brief). Proves: the fleet tracks the customer-declared load-following schedule
+  (setpoint_source = CUSTOMER_API) to its compliance band at grid-code-minimum PQ (S4.b's explicit
+  contrast with DATA_CENTER -- no PQ envelope tightening), and that a bank overload arriving mid-event
+  does not let the fleet drop below the committed floor (K13 unchanged).
+
+  Reuses the existing "load_step_datacenter" catalogue entry (owner: customer,
+  integration-sims/src/ogsim/control/catalogue.py) as a stand-in load-step trigger, since its wire
+  shape (CUSTOMER_LOAD_STEP at a site) is generic to any site-metered customer load, not
+  DATA_CENTER-specific in mechanism -- only its description names DATA_CENTER. A LARGE_LOAD-specific
+  "large_load_curtailment_request" type (mirroring it 1:1, correctly described) is the cleaner long-term
+  fix; see the SERVICES agent's 2026-09-26 report for that FLEET-SIM/customer wiring line.
+steps:
+  - at_s: 0
+    type: load_step_datacenter
+    target: site-large-load-crypto-01
+    params: {step_kw: 2000.0}
+    duration: 1800
+  - at_s: 300
+    type: bank_overload
+    target: bank-009
+    params: {kva_over_rating_pct: 20}
+    duration: 600

@@ -13,7 +13,9 @@ Submodules:
     extract         -- turns a solved model into an `ExtractedPlan`.
     validate        -- independent re-derivation of K1/K2/K13/product-rule constraints from raw numbers.
     rule_fallback   -- F2: firm-then-AS-then-market greedy selector; also the KPI-22 baseline.
-    db              -- selector's own read-only queries (`og.commitment` et al.).
+    value           -- one net-value evaluator for LP and rule plans; the ES05-S07 shadow comparison.
+    energy_value    -- 09 D7 stored-energy value per bank/interval; DISPATCH's read API.
+    db              -- selector's read-only queries (`og.commitment` et al.) and its analytics tables.
     gate            -- orchestration: `run_gate`/`solve_gate`, the horizon/loader plumbing.
 """
 

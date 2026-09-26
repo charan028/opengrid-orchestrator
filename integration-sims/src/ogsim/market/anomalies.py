@@ -16,6 +16,12 @@ Market anomaly types implemented here:
   malformed_payload    params: {}                               -> intentionally broken JSON body
   slow_response        params: {latency_s (default 5)}          -> added latency
   nws_extreme_weather  params: {condition, temperature_c, wind_kph} -> NWS forecast override
+  as_deployment        params: {service, deployed_mw, recall}     -> simulated ERCOT AS deployment
+                                                                      instruction (build phase,
+                                                                      2026-09-26); see
+                                                                      `data.active_as_deployment` and
+                                                                      `routes_admin`'s
+                                                                      `GET /admin/as_deployment`.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ MARKET_ANOMALY_TYPES = {
     "malformed_payload",
     "slow_response",
     "nws_extreme_weather",
+    "as_deployment",
 }
 
 

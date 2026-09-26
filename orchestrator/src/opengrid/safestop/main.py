@@ -11,6 +11,10 @@ Request intake (02b S8's two-step `POST /og/api/safestop` then `/confirm`): `og-
 (PROPOSE) or `{"action": "CONFIRM", "proposal_id": <uuid>}` (CONFIRM). `og-safestop` only calls
 `engage()` after a matching CONFIRM arrives within `confirm_window_s` of the PROPOSE -- a single
 message can never stop the fleet (TS-10-03).
+
+Utility L2 intake (K5/K8): a background task (`l2_intake.run_l2_instruction_listener`, its own MQTT
+connection `safestop-l2`) engages a BANK stop on every unexpired BLOCK/ESTOP `ScadaUtilityInstruction`,
+once per instruction id.
 """
 
 from __future__ import annotations
@@ -36,8 +40,9 @@ from opengrid.safestop.confirmation import (
     UnknownProposalError,
 )
 from opengrid.safestop.keys import load_signing_key
+from opengrid.safestop.l2_intake import run_l2_instruction_listener
 from opengrid.safestop.mqtt_publish import AiomqttStopPublisher
-from opengrid.safestop.pg_backend import PgStopEventBackend, listen_for_requests
+from opengrid.safestop.pg_backend import PgStopEventBackend, listen_for_requests, retry_trace_conflict
 from opengrid.safestop.service import SafestopService
 from opengrid.safestop.trace_backend import PgSafestopTraceBackend
 from opengrid.trace import TraceStore
@@ -46,6 +51,8 @@ logger = logging.getLogger("opengrid.safestop.main")
 
 PROCESS_NAME = "safestop"
 DEFAULT_KEY_ID = "safestop-2026a"
+MQTT_USERNAME = "og_safestop"
+MQTT_PASSWORD_ENV = "OG_MQTT_SAFESTOP_PASSWORD"  # noqa: S105 -- an env-var name, not a secret
 DEFAULT_HEARTBEAT_INTERVAL_S = 5.0
 DEFAULT_GUARDIAN_PUBLIC_KEY_PATH = "/etc/opengrid/guardian_ed25519.pub"
 GUARDIAN_PUBLIC_KEY_LENGTH = 32
@@ -126,8 +133,8 @@ async def main(cfg: Config | None = None) -> None:
     stop_key = load_signing_key(key_id, cfg)
 
     pool = await make_pool(cfg)
-    mqtt_username = "og_safestop"
-    mqtt_password = os.environ.get("OG_MQTT_SAFESTOP_PASSWORD", "")
+    mqtt_username = MQTT_USERNAME
+    mqtt_password = os.environ.get(MQTT_PASSWORD_ENV, "")
 
     backend = PgStopEventBackend(pool)
     trace = TraceStore(PgSafestopTraceBackend(pool))
@@ -148,6 +155,21 @@ async def main(cfg: Config | None = None) -> None:
         release_retain_s = float(cfg.get("safestop.release_retain_s", DEFAULT_RELEASE_RETAIN_S))
 
         intake_task = asyncio.create_task(_request_intake_loop(pool, broker))
+
+        async def _l2_engage(bank_id: str, reason: str, initiator_ref: str) -> UUID:
+            return await retry_trace_conflict(
+                lambda: service.engage("BANK", bank_id, reason, initiator_ref, initiator_kind="UTILITY")
+            )
+
+        l2_task = asyncio.create_task(
+            run_l2_instruction_listener(
+                cfg,
+                username=mqtt_username,
+                password=mqtt_password,
+                engage_fn=_l2_engage,
+                already_acted_fn=backend.has_l2_engage,
+            )
+        )
         try:
 
             async def _tick() -> None:
@@ -160,9 +182,10 @@ async def main(cfg: Config | None = None) -> None:
 
             await run_forever(_tick, interval_s=heartbeat_interval_s, process_name=PROCESS_NAME)
         finally:
-            intake_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await intake_task
+            for task in (intake_task, l2_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             await pool.close()
             safestop.configure_service(None)
 

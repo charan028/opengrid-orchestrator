@@ -86,6 +86,28 @@ if [ ! -f "$HTFILE" ]; then
 else
   echo "$HTFILE already exists, leaving it and $CREDS untouched"
 fi
+
+# K8 two-person stop RELEASE: every operator in [guardian].stop_release_authorised_operators needs an
+# Apache account (opengrid.conf requires them), else a fresh install cannot release a safe stop. Missing
+# accounts are created with generated passwords appended to $CREDS (0600, never printed); existing ones
+# are left untouched. Replace these D-12 test accounts with real per-person accounts (RUNBOOK.md).
+echo "== htpasswd: two-person release operators =="
+TOML="$SRC_DIR/../orchestrator/config/orchestrator.toml"
+RELEASE_USERS="$(python3 -c 'import sys, tomllib
+cfg = tomllib.load(open(sys.argv[1], "rb"))
+print(" ".join(cfg.get("guardian", {}).get("stop_release_authorised_operators", [])))' "$TOML")"
+for user in $RELEASE_USERS; do
+  if cut -d: -f1 "$HTFILE" | grep -qx -- "$user"; then
+    echo "$user: already present"
+    continue
+  fi
+  pass="$(openssl rand -base64 24)"
+  htpasswd -iB "$HTFILE" "$user" <<<"$pass"
+  touch "$CREDS"; chmod 600 "$CREDS"; chown root:root "$CREDS"
+  echo "$user: $pass" >> "$CREDS"
+  unset pass
+  echo "$user: created (password in $CREDS, not displayed)"
+done
 chown root:www-data "$HTFILE"
 chmod 640 "$HTFILE"
 

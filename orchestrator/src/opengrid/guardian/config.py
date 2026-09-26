@@ -87,10 +87,34 @@ class GuardianConfig:
     escalation_conservative_ratio: float = 0.05
     escalation_stop_request_after: int = 3
     escalation_idle_clear_ticks: int = 30
+    #: K7 hysteresis: consecutive good ticks (veto ratio <= ratio x clear factor) before a CONSERVATIVE
+    #: scope clears (`opengrid.guardian.escalation`).
+    escalation_clear_after_good_ticks: int = 3
+    escalation_clear_ratio_factor: float = 0.5
     #: K8: operators allowed to request/approve a stop RELEASE. Empty = no release is ever signed.
     stop_release_authorised_operators: frozenset[str] = frozenset()
     stop_release_max_age_s: float = DEFAULT_STOP_RELEASE_MAX_AGE_S
     stop_release_max_clock_skew_s: float = DEFAULT_STOP_RELEASE_MAX_CLOCK_SKEW_S
+    #: 09 S2.6 flow limits. `flow_telemetry_required` False: a hub that has NEVER reported a flow field
+    #: (meter, cell temperature, BMS limits, peak budget) is checked against the static limits below; a
+    #: reported value that goes stale always fails closed. True (go-live): never-reported is stale too.
+    flow_telemetry_required: bool = False
+    flow_max_age_s: float = DEFAULT_BANK_LOAD_MAX_AGE_S
+    unknown_temp_factor: float = 0.5  # G-02 f_T for an unknown/stale cell temperature (0 = strict)
+    load_drop_kw: float = 0.5  # G-26 Delta L over the lease
+    #: G-26 static premise defaults while og.hub carries none (migration 0029 columns NULL). None = unknown.
+    default_export_limit_kw: float | None = 20.0
+    default_service_kw: float = 48.0  # 200 A at 240 V
+    default_pv_rated_kw: float = 0.0
+    xfmr_forward_pct: float = 1.0  # G-27 rho_xf
+    xfmr_reverse_pct: float = 1.0  # G-27 rho_rev
+    xfmr_max_stale_fraction: float = 0.2  # G-27: above this, any increase of |F| is vetoed
+    unmapped_xfmr_kva_per_home: float = 5.0  # G-27 S_def for a hub with no transformer mapping
+    feeder_thermal_pct: float = 0.95  # G-28 rho_th
+    #: G-28 static feeder limits while no feeder row exists (None = unknown: any increase vetoed).
+    default_feeder_thermal_kw: float | None = 10_000.0
+    default_feeder_reverse_kw: float | None = 3_000.0
+    substation_pct: float = 0.95  # G-29 rho
 
 
 def _clock_source(value: object) -> ClockSource:
@@ -162,6 +186,8 @@ def load_guardian_config(cfg: Config) -> GuardianConfig:
         escalation_conservative_ratio=float(cfg.get("guardian.escalation_conservative_ratio", 0.05)),
         escalation_stop_request_after=int(cfg.get("guardian.escalation_stop_request_after", 3)),
         escalation_idle_clear_ticks=int(cfg.get("guardian.escalation_idle_clear_ticks", 30)),
+        escalation_clear_after_good_ticks=int(cfg.get("guardian.escalation_clear_after_good_ticks", 3)),
+        escalation_clear_ratio_factor=float(cfg.get("guardian.escalation_clear_ratio_factor", 0.5)),
         stop_release_authorised_operators=frozenset(
             str(op) for op in cfg.get("guardian.stop_release_authorised_operators", []) or []
         ),
@@ -171,4 +197,30 @@ def load_guardian_config(cfg: Config) -> GuardianConfig:
         stop_release_max_clock_skew_s=float(
             cfg.get("guardian.stop_release_max_clock_skew_s", DEFAULT_STOP_RELEASE_MAX_CLOCK_SKEW_S)
         ),
+        flow_telemetry_required=bool(cfg.get("guardian.flow.telemetry_required", False)),
+        flow_max_age_s=float(cfg.get("guardian.flow.max_age_s", DEFAULT_BANK_LOAD_MAX_AGE_S)),
+        unknown_temp_factor=float(cfg.get("guardian.flow.unknown_temp_factor", 0.5)),
+        load_drop_kw=float(cfg.get("guardian.flow.load_drop_kw", 0.5)),
+        default_export_limit_kw=_optional_float(cfg.get("guardian.flow.default_export_limit_kw", 20.0)),
+        default_service_kw=float(cfg.get("guardian.flow.default_service_kw", 48.0)),
+        default_pv_rated_kw=float(cfg.get("guardian.flow.default_pv_rated_kw", 0.0)),
+        xfmr_forward_pct=float(cfg.get("guardian.flow.xfmr_forward_pct", 1.0)),
+        xfmr_reverse_pct=float(cfg.get("guardian.flow.xfmr_reverse_pct", 1.0)),
+        xfmr_max_stale_fraction=float(cfg.get("guardian.flow.xfmr_max_stale_fraction", 0.2)),
+        unmapped_xfmr_kva_per_home=float(cfg.get("guardian.flow.unmapped_xfmr_kva_per_home", 5.0)),
+        feeder_thermal_pct=float(cfg.get("guardian.flow.feeder_thermal_pct", 0.95)),
+        default_feeder_thermal_kw=_optional_float(
+            cfg.get("guardian.flow.default_feeder_thermal_kw", 10_000.0)
+        ),
+        default_feeder_reverse_kw=_optional_float(
+            cfg.get("guardian.flow.default_feeder_reverse_kw", 3_000.0)
+        ),
+        substation_pct=float(cfg.get("guardian.flow.substation_pct", 0.95)),
     )
+
+
+def _optional_float(value: object) -> float | None:
+    """A TOML value where the string "unknown" (TOML has no null) means unknown."""
+    if value is None or value == "unknown":
+        return None
+    return float(str(value))

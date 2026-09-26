@@ -98,6 +98,23 @@ def resolve_tariff(tariffs: list[TdspTariff], tdsp: str | None, as_of: date) -> 
     return max(candidates, key=lambda t: t.effective_from)
 
 
+def grid_charged_kwh_for_delivery(
+    delivered_kwh: Decimal, *, eta_c: Decimal, eta_d: Decimal, grid_share: Decimal
+) -> Decimal:
+    """The grid-drawn charging kWh one obligation-interval's delivery stands for (09 D5's M1 base):
+    the AC energy that had to be charged to discharge `delivered_kwh` (delivered / (eta_c x eta_d)), times
+    the zone's grid share of charging (`ZoneChargeEnergy.grid_share`: behind-the-meter PV surplus never
+    pays M1). Owner decision 2026-09-26: the FULL delivery charge applies to that energy (no Wholesale
+    Storage Load or ADER exemption).
+
+    Why by delivery and not by time: settle books one obligation-interval at a time, and charging happens
+    in OTHER intervals (overnight, midday) where no obligation is delivering -- attributing only the
+    charging seen during the delivery interval itself settled M1 at ~$0 (review finding, 2026-09-26)."""
+    if delivered_kwh <= 0 or eta_c <= 0 or eta_d <= 0:
+        return _ZERO
+    return delivered_kwh / (eta_c * eta_d) * grid_share
+
+
 def m1_delivery_charge(grid_charged_kwh: Decimal, tariff: TdspTariff | None) -> Decimal:
     """09 D5's M1 charge on `grid_charged_kwh` -- kWh actually drawn from the grid to charge (the
     caller excludes behind-the-meter solar and any regulated-territory asset before calling this;

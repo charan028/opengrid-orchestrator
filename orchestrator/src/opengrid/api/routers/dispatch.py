@@ -62,11 +62,17 @@ async def create_opportunity(
 _AS_DEPLOYMENT_MAX_MINUTES = 240
 
 
+#: Obligation states an AS award can be deployed in (a held award inside its window).
+_DEPLOYABLE_STATES = frozenset({"COMMITTED", "DELIVERING", "SHORTFALL"})
+
+
 class AsDeploymentCreate(BaseModel):
-    """Operator-triggered ERCOT_AS deployment (the demo's stand-in for an ERCOT deployment instruction).
-    `obligation_id` omitted deploys every held ERCOT_AS award."""
+    """Operator-triggered ERCOT_AS deployment of ONE award (the demo's stand-in for an ERCOT deployment
+    instruction). A fleet-wide deployment is refused: it would discharge every held award at once, which
+    needs a two-person approval this route does not provide (review finding, 2026-09-26)."""
 
     obligation_id: UUID | None = None
+    scope: str | None = None
     duration_minutes: int = Field(default=15, ge=1, le=_AS_DEPLOYMENT_MAX_MINUTES)
     reason: str = Field(min_length=1, max_length=200)
 
@@ -78,11 +84,35 @@ async def create_as_deployment(
     trace_store: Annotated[TraceStore, Depends(get_trace_store)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
-    """Deploy held ERCOT_AS award(s) now: while active, the allocator discharges them up to their
-    committed kW (an AS award is otherwise a 0 kW capacity hold). Traced before it takes effect (K10)."""
+    """Deploy one held ERCOT_AS award now: while active, the allocator discharges it up to its committed
+    kW (an AS award is otherwise a 0 kW capacity hold). The award must exist, be ERCOT_AS and be
+    deployable now (404/409 otherwise), and the duration is capped by its product (ECRS 60 min, Non-Spin
+    240). Traced before it takes effect (K10)."""
+    if body.obligation_id is None:
+        detail = (
+            "a fleet-wide AS deployment needs a two-person approval and is not supported; deploy one award"
+            if (body.scope or "").upper() == "ALL"
+            else "obligation_id is required"
+        )
+        raise HTTPException(
+            status.HTTP_409_CONFLICT if body.scope else status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail
+        )
+    award = await store.get_as_award(body.obligation_id)
+    if award is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no such obligation")
+    if award["service_type"] != "ERCOT_AS":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="obligation is not an ERCOT_AS award")
+    if award["state"] not in _DEPLOYABLE_STATES:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=f"award is {award['state']}, not deployable")
+    max_minutes = int(award.get("duration_minutes") or _AS_DEPLOYMENT_MAX_MINUTES)
+    if body.duration_minutes > max_minutes:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"duration {body.duration_minutes} min exceeds the award's product limit ({max_minutes} min)",
+        )
     start_at = datetime.now(UTC)
     end_at = start_at + timedelta(minutes=body.duration_minutes)
-    target = str(body.obligation_id) if body.obligation_id else "ERCOT_AS:ALL"
+    target = str(body.obligation_id)
     trace_ref = await trace_store.append(
         stream_id=f"operator_action:{identity.user}",
         decision_type="OPERATOR_ACTION",
@@ -112,7 +142,7 @@ async def create_as_deployment(
     )
     return {
         "deployment_id": str(deployment_id),
-        "obligation_id": str(body.obligation_id) if body.obligation_id else None,
+        "obligation_id": str(body.obligation_id),
         "start_at": start_at.isoformat(),
         "end_at": end_at.isoformat(),
         "trace_id": str(trace_ref.trace_id),

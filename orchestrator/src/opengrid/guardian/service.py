@@ -21,24 +21,40 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+from prometheus_client import Counter
+
+from opengrid.core import limits as core_limits
 from opengrid.core import reasons
 from opengrid.core.crypto import sha256_hex_of_json, sign_payload
 from opengrid.core.models.engine import CommandBatchRow, Verdict, VerdictOutcome
+from opengrid.core.models.market import ERCOT_COMPETITIVE
 from opengrid.core.models.mqtt import CommandBatch, StopEvent
 from opengrid.core.models.pq import CalibrationBounds as WireCalibrationBounds
 from opengrid.core.models.pq import CalibrationCommand, CalibrationCorrection
 from opengrid.core.physics import bank_capability, hub_ramp_kw_per_s, hub_sustainable_discharge_kw
 from opengrid.core.pq.constants import CALIBRATION_MIN_INTERVAL_S_DEFAULT
-from opengrid.guardian import checks, pq_checks, stop_release
+from opengrid.guardian import checks, flow_checks, pq_checks, stop_release
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.escalation import BatchOutcome, vetoed_command_count
-from opengrid.guardian.ports import BankSnapshot, GuardianPorts, ProposedBatch, ReleaseRequest
+from opengrid.guardian.ports import (
+    ActiveObligation,
+    AggregateFlow,
+    BankSnapshot,
+    GuardianPorts,
+    HubSite,
+    HubSnapshot,
+    ProposedBatch,
+    ProposedItem,
+    ReleaseRequest,
+    ServiceTransformer,
+)
 from opengrid.guardian.pq_ports import (
     CalibrationFleetUsage,
     CalibrationLedgerPort,
     ProposedCalibrationCommand,
 )
+from opengrid.market.territory import MarketRef, check_territory, territory_of_zone
 from opengrid.platform.metrics import guardian_clock_offset_ms, guardian_verdicts_total
 
 logger = logging.getLogger(__name__)
@@ -47,7 +63,15 @@ _MAX_CYCLE_HISTORY = 64  # bound the in-memory ramp accumulators; MVP-S runs a 2
 _MAX_EVALUATED_PROPOSALS = 256
 #: K12: raised while G-20 holds every signature.
 CLOCK_ALERT_RULE = "ALR-CLOCK-QUALITY"  # > one tick's pending batches (main.py fetches at most 50 per tick)
-_ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04", "G-24"})
+_ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04", "G-24", "G-26", "G-27", "G-31", "G-33"})
+#: G-27: hubs checked as a group of one because they have no service-transformer mapping.
+XFMR_UNMAPPED_ALERT_RULE = "ALR-XFMR-UNMAPPED"
+#: K11: a verdict's GUARDIAN_VERDICT trace row could not be written (the verdict itself stands).
+TRACE_VERDICT_ALERT_RULE = "ALR-TRACE-VERDICT-WRITE-FAILED"
+guardian_trace_verdict_failures_total = Counter(
+    "og_guardian_trace_verdict_failures_total",
+    "Guardian verdicts whose GUARDIAN_VERDICT audit trace row could not be written (K11).",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +81,9 @@ class _OverrideEvidence:
     l2_instruction_active: bool
     bank_capability_kw: float | None  # from member hubs the guardian sees live; stale ones count 0
     bank_capability_upper_kw: float | None  # the same with every stale hub at its full rating
+    #: the upper bound over only the hubs passing G-24 for a PQ-sensitive obligation; None when the bank has
+    #: no active non-default PQ envelope (or no PQ reads)
+    pq_capability_upper_kw: float | None = None
 
 
 #: G-24's required ride-through class for a PQ-sensitive (non-default-envelope) obligation: the only such
@@ -101,6 +128,8 @@ class GuardianService:
     _feeder_delta_by_cycle: OrderedDict[tuple[str, str], float] = field(
         default_factory=OrderedDict, init=False
     )
+    _gross_step_by_cycle: OrderedDict[str, float] = field(default_factory=OrderedDict, init=False)
+    _flow_delta_by_cycle: OrderedDict[tuple[str, str], float] = field(default_factory=OrderedDict, init=False)
 
     _evaluated: OrderedDict[UUID, ProposedBatch] = field(default_factory=OrderedDict, init=False)
     _clock_alert_open: bool = field(default=False, init=False)
@@ -240,6 +269,7 @@ class GuardianService:
             violations.append(g13)
 
         violations.extend(await self._check_hubs_and_bank(proposal))
+        violations.extend(await self._check_territory(proposal))
         violations.extend(await self._check_power_quality(proposal))
         violations.extend(await self._check_l2_boundary(proposal))
         violations.extend(await self._check_commitment_lock(proposal))
@@ -256,15 +286,27 @@ class GuardianService:
     async def _check_hubs_and_bank(self, proposal: ProposedBatch) -> list[CheckOutcome]:
         violations: list[CheckOutcome] = []
         fleet_delta_kw = 0.0
+        gross_step_kw = 0.0
         additional_charge_kw = 0.0
+        snapshots: dict[str, HubSnapshot] = {}
+        sites: dict[str, HubSite | None] = {}
+        topology = self.ports.topology
+        policy = self._flow_policy()
 
-        lease_ttl_h = max((proposal.expires_at - self.now_fn()).total_seconds(), 0.0) / 3600.0
+        lease_ttl_s = max((proposal.expires_at - self.now_fn()).total_seconds(), 0.0)
+        lease_ttl_h = lease_ttl_s / 3600.0
 
-        for item in proposal.items:
+        # A hub may carry several items (one per obligation) and executes their SUM: every hub-level limit
+        # (reserve, energy over the lease, power, meter, ramp) is checked on that sum, never per item.
+        hub_items = checks.hub_setpoints(proposal.items)
+        for item in hub_items:
             hub = await self.ports.hubs.snapshot(item.hub_id)
             if hub is None:
                 violations.append(CheckOutcome("G-01", False, "HUB_UNKNOWN", item.hub_id))
                 continue
+            snapshots[item.hub_id] = hub
+            site = await topology.hub_site(item.hub_id) if topology is not None else None
+            sites[item.hub_id] = site
             if hub.health != "online" and item.p_kw_setpoint < 0:
                 # K1 (NOTICES #1): a stale or faulted SoC means zero discharge -- never sign on the
                 # last reading the guardian happened to see.
@@ -281,9 +323,11 @@ class GuardianService:
             )
             if not g01_energy.ok:
                 violations.append(g01_energy)
-            g02 = checks.check_g02_hub_power(item, hub.params, inverter_cap_kw=self.config.inverter_cap_kw)
-            if not g02.ok:
-                violations.append(g02)
+            violations.extend(self._check_hub_power(item, hub, site, lease_ttl_s, policy))
+            if topology is not None:
+                g26 = flow_checks.check_g26_home_meter(item, hub, site, policy)
+                if not g26.ok:
+                    violations.append(g26)
 
             g04 = checks.check_g04_hub_ramp(
                 item, hub.prev_p_kw, self.config.cycle_interval_s, hub_ramp_kw_per_s(hub.params)
@@ -292,6 +336,7 @@ class GuardianService:
                 violations.append(g04)
 
             fleet_delta_kw += item.p_kw_setpoint - hub.prev_p_kw
+            gross_step_kw += abs(item.p_kw_setpoint - hub.prev_p_kw)
             additional_charge_kw += max(item.p_kw_setpoint, 0.0) - max(hub.prev_p_kw, 0.0)
 
         bank = await self.ports.banks.snapshot(proposal.bank_id)
@@ -312,6 +357,15 @@ class GuardianService:
         )
         if not g05.ok:
             violations.append(g05)
+        # K4 stagger: the GROSS step of every hub moved in this tick, across every bank's batch.
+        cumulative_gross = self._accumulate(self._gross_step_by_cycle, proposal.cycle_id, gross_step_kw)
+        sync = core_limits.check_synchronized_step(
+            cumulative_gross,
+            self.config.cycle_interval_s,
+            discretionary_cap_kw_per_min=self.config.discretionary_ramp_cap_kw_per_min,
+        )
+        if not sync.ok and gross_step_kw > 0:
+            violations.append(CheckOutcome("G-05", False, sync.reason))
 
         if bank is not None and bank.feeder_id is not None:
             feeder_key = (proposal.cycle_id, bank.feeder_id)
@@ -324,7 +378,214 @@ class GuardianService:
             )
             if not g06.ok:
                 violations.append(g06)
+            if not proposal.is_firm_event and topology is not None:
+                # F6/G-32: the feeder ramp binds non-firm steps too.
+                g32 = core_limits.check_feeder_ramp(
+                    cumulative_feeder,
+                    self.config.cycle_interval_s,
+                    ceiling,
+                    reason=reasons.R_FEEDER_RAMP_NON_FIRM,
+                )
+                if not g32.ok:
+                    violations.append(CheckOutcome("G-32", False, g32.reason, bank.feeder_id))
 
+        if topology is not None:
+            violations.extend(
+                await self._check_flows(proposal, hub_items, bank, snapshots, sites, fleet_delta_kw, policy)
+            )
+        return violations
+
+    def _flow_policy(self) -> flow_checks.FlowPolicy:
+        c = self.config
+        return flow_checks.FlowPolicy(
+            telemetry_required=c.flow_telemetry_required,
+            max_age_s=c.flow_max_age_s,
+            unknown_temp_factor=c.unknown_temp_factor,
+            load_drop_kw=c.load_drop_kw,
+            inverter_cap_kw=c.inverter_cap_kw,
+            default_pv_rated_kw=c.default_pv_rated_kw,
+            default_service_kw=c.default_service_kw,
+            xfmr_forward_pct=c.xfmr_forward_pct,
+            xfmr_reverse_pct=c.xfmr_reverse_pct,
+            xfmr_max_stale_fraction=c.xfmr_max_stale_fraction,
+            unmapped_xfmr_kva_per_home=c.unmapped_xfmr_kva_per_home,
+        )
+
+    def _check_hub_power(
+        self,
+        item: ProposedItem,
+        hub: HubSnapshot,
+        site: HubSite | None,
+        lease_ttl_s: float,
+        policy: flow_checks.FlowPolicy,
+    ) -> list[CheckOutcome]:
+        """G-02 (derated P_max(SoC, T), continuous) and G-31 (above continuous only within the peak allowance,
+        F5). An above-continuous setpoint is G-31's alone: G-02 then bounds it by the derated PEAK."""
+        continuous = core_limits.continuous_power_kw(hub.params, inverter_cap_kw=self.config.inverter_cap_kw)
+        peak_kw: float | None = None
+        if self.ports.topology is not None and abs(item.p_kw_setpoint) > continuous + 1e-9:
+            g31 = flow_checks.check_g31_peak(item, hub, site, lease_ttl_s, policy)
+            if not g31.ok:
+                return [g31]
+            peak_kw = site.peak_kw if site is not None else None
+        g02 = flow_checks.check_g02_derated(item, hub, policy, peak_kw=peak_kw)
+        return [] if g02.ok else [g02]
+
+    async def _check_flows(
+        self,
+        proposal: ProposedBatch,
+        hub_items: list[ProposedItem],
+        bank: BankSnapshot | None,
+        snapshots: dict[str, HubSnapshot],
+        sites: dict[str, HubSite | None],
+        bank_delta_kw: float,
+        policy: flow_checks.FlowPolicy,
+    ) -> list[CheckOutcome]:
+        """G-27 (group), G-28, G-29, G-30 on the guardian's own reads (09 S2.6)."""
+        topology = self.ports.topology
+        if topology is None:
+            return []
+        violations = await self._check_transformers(proposal.bank_id, hub_items, snapshots, sites, policy)
+        age = self.config.flow_max_age_s
+        feeder_id = bank.feeder_id if bank is not None else None
+        aggregates: list[tuple[str, AggregateFlow | None, str, str]] = [
+            (
+                "G-28",
+                await topology.feeder_flow(feeder_id) if feeder_id is not None else None,
+                reasons.R_FEEDER_REVERSE_FLOW,
+                reasons.R_FEEDER_THERMAL_LIMIT,
+            ),
+            (
+                "G-29",
+                await topology.substation_flow(proposal.bank_id),
+                reasons.R_SUBSTATION_LIMIT,
+                reasons.R_SUBSTATION_LIMIT,
+            ),
+            (
+                "G-30",
+                await topology.territory_flow(proposal.bank_id),
+                reasons.R_TERRITORY_EXPORT,
+                reasons.R_TERRITORY_EXPORT,
+            ),
+        ]
+        for rule_id, flow, reverse_reason, forward_reason in aggregates:
+            if flow is None:
+                continue
+            key = (proposal.cycle_id, f"{rule_id}:{flow.ref}")
+            prior = self._flow_delta_by_cycle.get(key, 0.0)
+            cumulative = self._accumulate(self._flow_delta_by_cycle, key, bank_delta_kw)
+            outcome = flow_checks.check_aggregate_flow(
+                rule_id,
+                flow,
+                prior,
+                cumulative,
+                max_age_s=age,
+                reverse_reason=reverse_reason,
+                forward_reason=forward_reason,
+                ref=flow.ref,
+            )
+            if not outcome.ok:
+                violations.append(outcome)
+        poi = await topology.poi_limit(proposal.bank_id)
+        if poi is not None:
+            g29 = flow_checks.check_g29_poi(poi, sum(item.p_kw_setpoint for item in proposal.items))
+            if not g29.ok:
+                violations.append(g29)
+        return violations
+
+    async def _check_transformers(
+        self,
+        bank_id: str,
+        hub_items: list[ProposedItem],
+        snapshots: dict[str, HubSnapshot],
+        sites: dict[str, HubSite | None],
+        policy: flow_checks.FlowPolicy,
+    ) -> list[CheckOutcome]:
+        """G-27: every service transformer the batch touches, over ALL its members' meters. A violation vetoes
+        every item under that transformer (group-level); an unmapped hub is a group of one at the default
+        per-home rating (and ALR-XFMR-UNMAPPED)."""
+        topology = self.ports.topology
+        if topology is None:
+            return []
+        groups: dict[str, tuple[ServiceTransformer, list[ProposedItem]]] = {}
+        unmapped = False
+        for item in hub_items:
+            hub = snapshots.get(item.hub_id)
+            if hub is None:
+                continue
+            site = sites.get(item.hub_id)
+            transformer = (
+                await topology.transformer(site.transformer_id)
+                if site is not None and site.transformer_id is not None
+                else None
+            )
+            if transformer is None:
+                unmapped = True
+                transformer = ServiceTransformer(
+                    f"unmapped:{item.hub_id}", policy.unmapped_xfmr_kva_per_home, (item.hub_id,)
+                )
+            groups.setdefault(transformer.transformer_id, (transformer, []))[1].append(item)
+        if unmapped:
+            await self._alert_unmapped_transformer(bank_id)
+
+        violations: list[CheckOutcome] = []
+        for transformer, items in groups.values():
+            members: dict[str, flow_checks.TransformerMember] = {}
+            for hub_id in transformer.members:
+                hub = snapshots.get(hub_id) or await self.ports.hubs.snapshot(hub_id)
+                site = sites[hub_id] if hub_id in sites else await topology.hub_site(hub_id)
+                members[hub_id] = flow_checks.TransformerMember(hub, site)
+            delta = sum(item.p_kw_setpoint - snapshots[item.hub_id].prev_p_kw for item in items)
+            ok, reason = flow_checks.check_g27_transformer(transformer, members, delta, policy)
+            if not ok:
+                violations.extend(CheckOutcome("G-27", False, reason, item.hub_id) for item in items)
+        return violations
+
+    async def _alert_unmapped_transformer(self, bank_id: str) -> None:
+        alerts = self.ports.alerts
+        if alerts is None:
+            return
+        try:
+            await alerts.raise_alert(
+                XFMR_UNMAPPED_ALERT_RULE,
+                "warning",
+                "hubs without a service-transformer mapping: G-27 checks each as a group of one (09 S2.6)",
+                bank_id,
+                {"bank_id": bank_id, "default_kva_per_home": self.config.unmapped_xfmr_kva_per_home},
+            )
+        except Exception:
+            logger.exception("failed to raise %s", XFMR_UNMAPPED_ALERT_RULE)
+
+    async def _check_territory(self, proposal: ProposedBatch) -> list[CheckOutcome]:
+        """G-33/K15: every item's hub territory against its obligation's market (headroom is FREE), via
+        `market.check_territory` on the guardian's own contract and zone reads."""
+        port = self.ports.territory
+        if port is None:
+            return []
+        zone_territory = port.zone_territory()
+        markets: dict[UUID, MarketRef | None] = {}
+        violations: list[CheckOutcome] = []
+        for item in proposal.items:
+            if item.obligation_id is None:
+                ref: MarketRef | None = flow_checks.HEADROOM_MARKET
+            else:
+                if item.obligation_id not in markets:
+                    markets[item.obligation_id] = flow_checks.obligation_market_ref(
+                        await port.obligation_market(item.obligation_id)
+                    )
+                ref = markets[item.obligation_id]
+            zone = await port.hub_zone(item.hub_id)
+            territory = territory_of_zone(zone, zone_territory)
+            free_access = (
+                await port.free_access(territory)
+                if territory is not None and territory != ERCOT_COMPETITIVE
+                else False
+            )
+            outcome = flow_checks.check_g33_territory(
+                item, ref=ref, zone=zone, zone_territory=zone_territory, free_access=free_access
+            )
+            if not outcome.ok:
+                violations.append(outcome)
         return violations
 
     def _check_bank_loading(
@@ -744,6 +1005,18 @@ class GuardianService:
                 if not need.ok:
                     violations.append(need)
                 continue
+            if reason_code in checks.TERRITORY_BLOCK_REASONS and checks.g19_reduction_below_floor(
+                new_kw, frozen_kw, prior_kw
+            ):
+                # K15: an obligation this bank may not serve (G-33 would veto serving it) -- signed only when
+                # the guardian's own territory check agrees.
+                territory = checks.check_g19_territory_block(
+                    obligation_key,
+                    guardian_block=await self._territory_block(obligation.obligation_id, proposal),
+                )
+                if not territory.ok:
+                    violations.append(territory)
+                continue
             # A best-effort partial grant after a mid-window SHORTFALL carries the shortfall reason; it is
             # the override it maps to, and is corroborated below exactly like one.
             reason_code = checks.g19_lock_reason(reason_code)
@@ -762,6 +1035,11 @@ class GuardianService:
                 continue
             if evidence is None:
                 evidence = await self._override_evidence(proposal)
+            pq_floor_kw: float | None = None
+            if evidence.pq_capability_upper_kw is not None and await self._is_pq_sensitive(
+                obligation.obligation_id
+            ):
+                pq_floor_kw = await self._pq_floor_kw(active_obligations)
             corroborated = checks.check_g19_override_evidence(
                 obligation_key,
                 reason_code,
@@ -769,10 +1047,35 @@ class GuardianService:
                 bank_capability_kw=evidence.bank_capability_kw,
                 bank_capability_upper_kw=evidence.bank_capability_upper_kw,
                 committed_floor_kw=committed_floor_kw,
+                pq_capability_upper_kw=evidence.pq_capability_upper_kw if pq_floor_kw is not None else None,
+                pq_floor_kw=pq_floor_kw,
             )
             if not corroborated.ok:
                 violations.append(corroborated)
         return violations
+
+    async def _is_pq_sensitive(self, obligation_id: UUID) -> bool:
+        from opengrid.assets.repo import PQ_SENSITIVE_SERVICE_TYPES  # the one definition of the set
+
+        as_port = self.ports.as_awards
+        return as_port is not None and await as_port.service_type(obligation_id) in PQ_SENSITIVE_SERVICE_TYPES
+
+    async def _territory_block(self, obligation_id: UUID, proposal: ProposedBatch) -> str | None:
+        """The guardian's own K15 verdict on serving `obligation_id` from this batch's bank
+        (`market.check_territory`, the G-33 predicate): the block reason, or None when it may be served.
+        None too when there is nothing to read with (no territory port, no hub in the batch)."""
+        port = self.ports.territory
+        if port is None or not proposal.items:
+            return None
+        ref = flow_checks.obligation_market_ref(await port.obligation_market(obligation_id))
+        zone = await port.hub_zone(proposal.items[0].hub_id)
+        territory = territory_of_zone(zone, port.zone_territory())
+        free_access = (
+            await port.free_access(territory)
+            if territory is not None and territory != ERCOT_COMPETITIVE
+            else False
+        )
+        return check_territory(ref, territory, free_access=free_access)
 
     async def _setpoint_source(self, obligation_id: UUID) -> str | None:
         port = self.ports.service_profiles
@@ -796,22 +1099,93 @@ class GuardianService:
         lease_h = (
             max((proposal.expires_at - self.now_fn()).total_seconds(), self.config.cycle_interval_s) / 3600.0
         )
+        policy = self._flow_policy()
         seen: list[float] = []
         unseen_upper: list[float] = []
         for hub in members:
-            if hub.health == "online":
-                seen.append(
-                    hub_sustainable_discharge_kw(
-                        hub.soc_kwh, hub.params.r_kwh, hub.params.p_kw, lease_h, hub.params.eta_d
-                    )
-                )
-            elif hub.health == "stale":
-                unseen_upper.append(max(hub.params.p_kw, 0.0))
+            kw, is_seen = self._evidence_kw(hub, policy, lease_h)
+            if kw is not None:
+                (seen if is_seen else unseen_upper).append(kw)
         return _OverrideEvidence(
             l2_instruction_active=instruction is not None,
             bank_capability_kw=bank_capability(seen, bank.params),
             bank_capability_upper_kw=bank_capability(seen + unseen_upper, bank.params),
+            pq_capability_upper_kw=await self._pq_capability_upper_kw(
+                proposal.bank_id, bank, policy, lease_h
+            ),
         )
+
+    def _evidence_kw(
+        self, hub: HubSnapshot, policy: flow_checks.FlowPolicy, lease_h: float
+    ) -> tuple[float | None, bool]:
+        """One member hub's contribution to G-19's capability evidence: `(kW, seen live)`. Online: the
+        allocator's own bound (F1 derating by SoC and temperature, the BMS limit, the unit rating --
+        `derated_bounds`, any unknown temperature at the configured factor), energy-limited over the lease,
+        so a derating shortfall is corroborated. Stale: its full rating (upper bound only). Offline or fault:
+        nothing."""
+        if hub.health == "online":
+            derated_kw = flow_checks.derated_bounds(hub, policy, static_temp_unknown=True).discharge_kw
+            return hub_sustainable_discharge_kw(
+                hub.soc_kwh, hub.params.r_kwh, derated_kw, lease_h, hub.params.eta_d
+            ), True
+        if hub.health == "stale":
+            return max(hub.params.p_kw, 0.0), False
+        return None, False
+
+    async def _pq_capability_upper_kw(
+        self, bank_id: str, bank: BankSnapshot, policy: flow_checks.FlowPolicy, lease_h: float
+    ) -> float | None:
+        """K14: the upper-bound capability of only the member hubs that pass the guardian's own G-24 asset
+        conformance for a PQ-sensitive obligation. None -- no PQ evidence -- when the bank carries no active
+        non-default envelope, or its membership cannot be read."""
+        pq, members_port = self.ports.pq, self.ports.bank_members
+        if pq is None or members_port is None or await pq.envelopes.tightest_active_limits(bank_id) is None:
+            return None
+        hub_ids = await members_port.member_hub_ids(bank_id)
+        if not hub_ids:
+            return None
+        eligible: list[float] = []
+        for hub_id in hub_ids:
+            hub = await self.ports.hubs.snapshot(hub_id)
+            if hub is None or not await self._pq_eligible(hub_id):
+                continue
+            kw, _seen = self._evidence_kw(hub, policy, lease_h)
+            if kw is not None:
+                eligible.append(kw)
+        return bank_capability(eligible, bank.params)
+
+    async def _pq_floor_kw(self, active_obligations: list[ActiveObligation]) -> float | None:
+        """The bank's committed kW on PQ-sensitive service types, on the guardian's own obligation reads.
+        None when any obligation's service type cannot be read (no PQ evidence then)."""
+        from opengrid.assets.repo import PQ_SENSITIVE_SERVICE_TYPES  # the one definition of the set
+
+        as_port = self.ports.as_awards
+        if as_port is None:
+            return None
+        floor = 0.0
+        for obligation in active_obligations:
+            service_type = await as_port.service_type(obligation.obligation_id)
+            if service_type is None:
+                return None
+            if service_type in PQ_SENSITIVE_SERVICE_TYPES:
+                floor += float(obligation.frozen_kw)
+        return floor
+
+    async def _pq_eligible(self, hub_id: str) -> bool:
+        """G-24 for a PQ-sensitive obligation on the guardian's own asset read (unknown asset: ineligible)."""
+        pq = self.ports.pq
+        if pq is None:
+            return False
+        asset = await pq.hub_assets.snapshot(hub_id)
+        if asset is None:
+            return False
+        return pq_checks.check_g24_asset_conformance(
+            hub_id,
+            asset_state=asset.asset_state,
+            hub_ride_through_class=asset.ride_through_class,
+            envelope_ride_through_class=SENSITIVE_RIDE_THROUGH_CLASS,
+            pq_sensitive=True,
+        ).ok
 
     @staticmethod
     def _accumulate(store: OrderedDict[Any, float], key: Any, delta: float) -> float:
@@ -878,8 +1252,27 @@ class GuardianService:
         # G-14 before signing, and `main.py` durably inserts this verdict (with its signature) into
         # og.verdict before anything is published -- a failed insert publishes nothing. The GUARDIAN_VERDICT
         # trace is K11 audit on top; losing it must not change the decision (K7, TS property K07).
-        await self._trace_verdict(verdict, violations or [])
+        if not await self._trace_verdict(verdict, violations or []):
+            await self._alert_trace_verdict_failure(verdict)
         return verdict
+
+    async def _alert_trace_verdict_failure(self, verdict: Verdict) -> None:
+        """A GUARDIAN_VERDICT trace row could not be written: counted and raised as a warning (once while
+        open, `PgAlertPort`), never a change to the verdict itself (K7 -- see `_finalize`). Best-effort."""
+        guardian_trace_verdict_failures_total.inc()
+        alerts = self.ports.alerts
+        if alerts is None:
+            return
+        try:
+            await alerts.raise_alert(
+                TRACE_VERDICT_ALERT_RULE,
+                "warning",
+                "guardian verdict trace write failed: the K11 audit row for a verdict is missing",
+                TRACE_VERDICT_ALERT_RULE,
+                {"command_batch_id": str(verdict.command_batch_id), "outcome": verdict.outcome},
+            )
+        except Exception:
+            logger.exception("failed to raise %s", TRACE_VERDICT_ALERT_RULE)
 
     def sign_command_batch(self, batch: CommandBatch) -> CommandBatch:
         """Sign the command-batch envelope a hub will verify (interfaces/crypto.md S2.1). This is a

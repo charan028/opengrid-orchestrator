@@ -44,7 +44,7 @@ from opengrid.settle import close_settled_obligations, configure, run_settle_cyc
 from opengrid.settle.pg_backend import PgSettleBackend
 from opengrid.settle.tariffs import TdspTariff, load_tdsp_tariffs, resolve_tdsp_tariffs_path
 from opengrid.trace import TraceStore
-from opengrid.trace.pg_backend import PgTraceBackend
+from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
 
 _PROCESS_NAME = "settle"  # must match opengrid.health.model.ALL_PROCESSES
 _DEFAULT_SETTLE_INTERVAL_S = 60.0
@@ -208,7 +208,7 @@ async def _run() -> None:
     logger = configure_logging(_PROCESS_NAME)
     cfg = load_config(os.environ.get("OG_CONFIG"))
     pool = await make_pool(cfg)
-    trace_store = TraceStore(PgTraceBackend(pool))
+    trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
     # 09 D5's M1 TDSP delivery charge: loaded once at startup, never re-read per settlement cycle.
     # Missing/malformed tdsp_tariffs.toml degrades to "M1 disabled" (delivery_charge settles as 0),
     # logged loudly rather than crashing og-settle over a pricing config file (K7 "degrade, don't

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from opengrid.invariants import checks
 
 NOW = datetime(2026, 9, 26, 12, 0, 0, tzinfo=UTC)
@@ -77,18 +79,30 @@ def test_find_double_sold_treats_bank_with_no_capability_row_as_zero_capacity() 
 
 def test_compute_bank_capabilities_kw_excludes_offline_hubs_and_caps_at_bank_rating() -> None:
     hub_rows = [
-        # (bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health)
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online"),
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online"),
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "offline"),  # excluded
+        # (bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health, units)
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online", 1),
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online", 1),
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "offline", 1),  # excluded
     ]
     result = checks.compute_bank_capabilities_kw(hub_rows)
     # Two online hubs, each can discharge up to their p_kw (11.0): 22.0 kW, well under the 600 kW cap.
     assert result["bank-000"] == 22.0
 
 
+def test_compute_bank_capabilities_kw_applies_the_unit_cap() -> None:
+    """K2 units (migration 0032): a dual-unit home counts at 20 kW; a single-unit home mis-seeded at 20 kW
+    and a home with an unknown unit count (pre-0032 database) both fail closed to 11 kW."""
+    hub_rows: list[tuple[str, float, float, float, float, float, float, float, float, str, int | None]] = [
+        ("bank-000", 600.0, 0.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", 2),
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 20.0, 0.9487, 0.9487, 39.2, "online", 1),
+        ("bank-000", 600.0, 0.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", None),
+    ]
+    result = checks.compute_bank_capabilities_kw(hub_rows)
+    assert result["bank-000"] == pytest.approx(20.0 + 11.0 + 11.0)
+
+
 def test_compute_bank_capabilities_kw_includes_bank_with_all_hubs_excluded() -> None:
-    hub_rows = [("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 1.0, "fault")]
+    hub_rows = [("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 1.0, "fault", 1)]
     result = checks.compute_bank_capabilities_kw(hub_rows)
     assert result["bank-000"] == 0.0
 
@@ -513,3 +527,112 @@ def test_find_orphan_commitments_wraps_every_prefiltered_row() -> None:
 
 def test_find_orphan_commitments_clean_on_no_rows() -> None:
     assert checks.find_orphan_commitments([]) == []
+
+
+# --- K15 territory -------------------------------------------------------------------------------------
+
+
+def test_find_territory_violations_detects_bank_outside_territory() -> None:
+    rows = [("grant-1", "ob-1", "bank-000", "LZ_HOUSTON", "AUSTIN_ENERGY", ("LZ_AEN",), NOW)]
+    violations = checks.find_territory_violations(rows)
+    assert len(violations) == 1
+    assert violations[0].scope == {
+        "obligation_id": "ob-1",
+        "bank_id": "bank-000",
+        "utility_id": "AUSTIN_ENERGY",
+    }
+    assert violations[0].dedupe_key == "ob-1|bank-000"
+    assert violations[0].detail["zone"] == "LZ_HOUSTON"
+
+
+def test_find_territory_violations_clean_when_zone_in_territory() -> None:
+    rows = [("grant-1", "ob-1", "bank-000", "LZ_AEN", "AUSTIN_ENERGY", ("LZ_AEN", "LZ_CPS"), NOW)]
+    assert checks.find_territory_violations(rows) == []
+
+
+def test_find_territory_violations_dedupes_repeated_grants_same_obligation_bank() -> None:
+    """Same ongoing mismatch across many grant cycles is ONE violation, not one per grant."""
+    rows = [
+        ("grant-1", "ob-1", "bank-000", "LZ_HOUSTON", "AUSTIN_ENERGY", ("LZ_AEN",), NOW),
+        (
+            "grant-2",
+            "ob-1",
+            "bank-000",
+            "LZ_HOUSTON",
+            "AUSTIN_ENERGY",
+            ("LZ_AEN",),
+            NOW + timedelta(seconds=2),
+        ),
+    ]
+    violations = checks.find_territory_violations(rows)
+    assert {v.dedupe_key for v in violations} == {"ob-1|bank-000"}
+
+
+# --- AS capacity hold compliance ------------------------------------------------------------------------
+
+
+def test_find_as_hold_violations_detects_held_energy_below_requirement() -> None:
+    # committed 100 kW for 240 min (4h) requires 400 kWh held; only 250 kWh actually held.
+    rows = [("dep-1", "ob-1", 100.0, 240, 250.0)]
+    violations = checks.find_as_hold_violations(rows)
+    assert len(violations) == 1
+    assert violations[0].dedupe_key == "dep-1"
+    assert violations[0].detail["required_kwh"] == 400.0
+    assert violations[0].detail["held_kwh"] == 250.0
+
+
+def test_find_as_hold_violations_clean_when_held_energy_sufficient() -> None:
+    rows = [("dep-1", "ob-1", 100.0, 240, 400.0)]  # exactly at requirement
+    assert checks.find_as_hold_violations(rows) == []
+
+
+# --- Discharge-flow limit (home meter, hub discharge derate, transformer, feeder, substation) -----------
+
+
+def test_find_flow_limit_violations_detects_home_export_over_meter_limit() -> None:
+    rows = [("home_meter", "hub-1", -12.0, None, 10.0)]  # exporting 12 kW against a 10 kW export limit
+    violations = checks.find_flow_limit_violations(rows)
+    assert len(violations) == 1
+    assert violations[0].scope == {"scope_kind": "home_meter", "scope_id": "hub-1", "direction": "reverse"}
+
+
+def test_find_flow_limit_violations_detects_discharge_over_derated_p_dis_max() -> None:
+    # p_dis_max_kw (the BMS's own derated ceiling) is below the hub's nameplate rating.
+    rows = [("hub_discharge_derate", "hub-1", -8.0, None, 5.0)]
+    violations = checks.find_flow_limit_violations(rows)
+    assert len(violations) == 1
+    assert violations[0].detail["net_kw"] == -8.0
+
+
+def test_find_flow_limit_violations_detects_transformer_overload_either_direction() -> None:
+    export_over = [("transformer", "xfmr-1", -60.0, 50.0, 50.0)]
+    import_over = [("transformer", "xfmr-1", 60.0, 50.0, 50.0)]
+    assert [v.scope["direction"] for v in checks.find_flow_limit_violations(export_over)] == ["reverse"]
+    assert [v.scope["direction"] for v in checks.find_flow_limit_violations(import_over)] == ["forward"]
+
+
+def test_find_flow_limit_violations_detects_feeder_asymmetric_limits() -> None:
+    # thermal_kw (forward/import) = 100, reverse_kw (export) = 40 -- deliberately asymmetric.
+    within_reverse = [("feeder", "feeder-1", -35.0, 100.0, 40.0)]
+    over_reverse = [("feeder", "feeder-1", -45.0, 100.0, 40.0)]
+    assert checks.find_flow_limit_violations(within_reverse) == []
+    assert len(checks.find_flow_limit_violations(over_reverse)) == 1
+
+
+def test_find_flow_limit_violations_detects_substation_overload() -> None:
+    rows = [("substation", "sub-1", -21_000.0, 20_000.0, 20_000.0)]
+    violations = checks.find_flow_limit_violations(rows)
+    assert len(violations) == 1
+    assert violations[0].scope["scope_id"] == "sub-1"
+
+
+def test_find_flow_limit_violations_clean_within_limits() -> None:
+    rows = [("home_meter", "hub-1", -5.0, None, 10.0)]
+    assert checks.find_flow_limit_violations(rows) == []
+
+
+def test_find_flow_limit_violations_skips_when_limit_absent() -> None:
+    """Schema-adaptive: a `None` limit means the field is absent for that scope -- never treated as a
+    zero ceiling that would flag everything."""
+    rows = [("home_meter", "hub-1", -99999.0, None, None)]
+    assert checks.find_flow_limit_violations(rows) == []

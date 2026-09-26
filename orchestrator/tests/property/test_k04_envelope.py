@@ -39,12 +39,14 @@ _banks = st.builds(
 def test_k04_hub_power_is_bounded_by_the_homes_rating_and_the_per_unit_cap_times_units(
     p_kw, hub, inverter_cap_kw, units
 ):
-    """The home's own rated power always binds; the per-unit inverter cap binds only times a KNOWN unit
-    count (it is never a per-home cap -- that vetoed every 20 kW dual-unit home above 11 kW)."""
+    """The home's own rated power always binds, and so does its unit rating: the per-unit inverter cap for
+    one unit, min(2 x cap, 20 kW) for a dual-unit home. An unknown or out-of-range count fails closed to
+    one unit, so a mis-seeded p_kw never lifts the cap on its own."""
     hub = replace(hub, units=units)
     result = check_hub_power(p_kw, hub, inverter_cap_kw=inverter_cap_kw)
 
-    cap = hub.p_kw if units is None else min(hub.p_kw, inverter_cap_kw * units)
+    unit_cap = min(2 * inverter_cap_kw, 20.0) if units == 2 else inverter_cap_kw
+    cap = min(hub.p_kw, unit_cap)
     assert result.ok == (abs(p_kw) <= cap + _EPSILON)
 
 
