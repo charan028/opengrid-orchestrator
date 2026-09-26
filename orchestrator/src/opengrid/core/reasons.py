@@ -58,5 +58,13 @@ R_FLEET_RAMP_CAP = "FLEET_RAMP_CAP"
 R_FEEDER_RAMP_CEILING = "FEEDER_RAMP_CEILING"
 R_ONE_BUYER_EXCEEDED = "ONE_BUYER_EXCEEDED"
 
+# --- G-01-ENERGY: lease-duration energy projection (K1), independent of the instantaneous G-01 check
+R_RESERVE_FLOOR_LEASE = "RESERVE_FLOOR_LEASE"
+R_CHARGE_CEILING_LEASE = "CHARGE_CEILING_LEASE"
+
+# --- Continuous per-obligation energy-sufficiency check (K1, 03-decision-engine.md S8.11) ----------
+R_ENERGY_SOC_MISSING = "R-ENERGY-SOC-MISSING"
+ALR_ENERGY_SHORTFALL_RISK = "ALR-ENERGY-SHORTFALL-RISK"
+
 # --- Gateway/dependency timeout handling (ALLOC-05: allocator run_cycle) --------------------------
 R_GATEWAY_TIMEOUT = "R-GATEWAY-TIMEOUT"

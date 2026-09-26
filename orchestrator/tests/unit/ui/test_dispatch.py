@@ -43,6 +43,19 @@ def test_pipeline_view_groups_by_state_across_all_customers() -> None:
     assert by_state["FULFILLED_OR_SHORTFALL"]["count"] == 2
     at_risk_ids = {item["obligation_id"] for item in by_state["DELIVERING"]["items"] if item["at_risk"]}
     assert at_risk_ids == {"OBL-1003"}
+    at_risk_item = next(
+        item for item in by_state["DELIVERING"]["items"] if item["obligation_id"] == "OBL-1003"
+    )
+    assert at_risk_item["energy_margin_kwh"] == -3.5
+    assert at_risk_item["time_to_depletion_h"] == 0.75
+
+
+def test_pipeline_view_defaults_energy_fields_to_none_when_absent() -> None:
+    view = pipeline_view([{"obligation_id": "X", "state": "COMMITTED", "committed_qty_kw": 5.0}], now=_NOW)
+    by_state = {column["state"]: column for column in view["columns"]}
+    item = by_state["COMMITTED"]["items"][0]
+    assert item["energy_margin_kwh"] is None
+    assert item["time_to_depletion_h"] is None
 
 
 def test_pipeline_view_ignores_unknown_states() -> None:

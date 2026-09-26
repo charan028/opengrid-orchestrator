@@ -38,3 +38,14 @@ guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
 # Local/dev override (hex or base64 32-byte Ed25519 public key), takes
 # precedence over guardian_public_key_path when non-empty:
 guardian_public_key_path_dev: ""
+
+# Per-inverter power-quality imperfection model (06-service-profiles-and-power-quality.md
+# §3.1/§7.1/§7.3). One unit per hub; dual-unit homes (above) get two independently-seeded units.
+inverter_pq:
+  freq_offset_std_hz: 0.01
+  voltage_offset_std_pct: 0.5
+  thd_current_median_pct: 2.0
+  thd_current_p95_pct: 4.5
+  harmonic_phase_lock: false   # false = diverse (cancellation regime), true = locked (stacking regime)
+  ride_through_class_default: CATEGORY_III
+  calibration_rate_limit_s: 86400.0  # at most one remote-calibration attempt per unit per 24h

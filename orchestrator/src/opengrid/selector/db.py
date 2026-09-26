@@ -30,11 +30,12 @@ _FROZEN_COMMITMENTS_SQL = """
 _BANK_IDS_SQL = "SELECT bank_id FROM og.bank ORDER BY bank_id"
 
 _OFFERED_OPPORTUNITIES_SQL = """
-    SELECT o.opportunity_id, o.contract_id, o.window_start, o.window_end, o.requested_kw,
-           o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
+    SELECT o.opportunity_id, ob.obligation_id, o.contract_id, o.window_start, o.window_end,
+           o.requested_kw, o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
            pr.variable_kind, pr.min_qty_kw, pr.increment_kw
     FROM og.opportunity o
     JOIN og.contract c ON c.contract_id = o.contract_id
+    JOIN og.obligation ob ON ob.opportunity_id = o.opportunity_id
     LEFT JOIN og.product_rule pr ON pr.product_rule_id = o.product_rule_id
     WHERE o.state = 'OFFERED'
       AND o.window_start < %(horizon_end)s AND o.window_end > %(horizon_start)s

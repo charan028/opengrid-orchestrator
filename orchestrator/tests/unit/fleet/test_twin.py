@@ -180,7 +180,7 @@ async def test_flush_reclassifies_hubs_that_stopped_publishing_without_new_telem
     later = now + timedelta(seconds=45)
     assert fleet.hub_health("h1", now=later) == "offline"
     await fleet.flush(now=later)
-    assert backend.upserted[-1].health == "stale"  # HubState model has no "offline" literal
+    assert backend.upserted[-1].health == "offline"  # persisted with the full health vocabulary
 
 
 async def test_unknown_bank_raises_lookup_error() -> None:

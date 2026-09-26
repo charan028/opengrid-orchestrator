@@ -1,8 +1,9 @@
 # OpenGrid Orchestrator — Build Brief (MVP-S)
 
 Read this first, then `docs/team/NOTICES.md` (requirement changes). The design is fixed by the approved documents in
-`docs/orchestrator/07-delivery/` in this repo. The lead's workspace path `D:\Projects\OpenGrid\docs\orchestrator\` is
-the same set; the repo copy is what contributors use.
+`docs/orchestrator/` in this repo. **The repo copy is the single source of truth for all specifications.** Edit it
+here and push it with the related change. No Word files (`.doc`, `.docx`) in the repo; Markdown only. Project dates in
+documents use the actual date of the change.
 
 - `00-invariants.md` — canonical K1–K13 and guardian checks (G-01…G-20);
 - `01-saturday-delivery-plan.md` — scope, acceptance A1–A11, rules in §7a;

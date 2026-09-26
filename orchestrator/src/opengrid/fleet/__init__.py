@@ -25,7 +25,14 @@ from typing import Any, Literal, NamedTuple, Protocol
 
 from opengrid.core.models.mqtt import ScadaBankSignal, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.platform import Bank, Hub, HubState
-from opengrid.core.physics import BankParams, HubParams, bank_capability, hub_capability, recharge_headroom
+from opengrid.core.physics import (
+    DEFAULT_ETA_D,
+    BankParams,
+    HubParams,
+    bank_capability,
+    hub_capability,
+    recharge_headroom,
+)
 from opengrid.core.timeutil import is_stale
 from opengrid.platform.config import Config
 from opengrid.platform.metrics import hubs as hubs_gauge
@@ -57,6 +64,14 @@ class HubCapabilitySnapshot(NamedTuple):
     free_discharge_kw: float  # reserve-safe (K1): from hub_capability(), 0.0 if not "online"
     health: HubHealth
     last_seen_at: datetime | None
+    # Energy-sufficiency pass (K1, user requirement "energy above reserve must be checked
+    # continuously"): live SoC/reserve/capacity/efficiency so `opengrid.engine.gateways` can populate
+    # the allocator's `HubSnapshot` fully -- `None` only for a hub excluded this instant (stale/offline/
+    # fault), matching `free_discharge_kw=0.0`'s own "don't trust it" contract above.
+    soc_kwh: float | None = None
+    reserve_kwh: float | None = None
+    e_kwh: float | None = None
+    eta_d: float = DEFAULT_ETA_D
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,13 +317,8 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
         fresh_by_zone.setdefault(runtime.zone, []).append(fresh)
         if runtime.last_seen_at is None:
             continue
-        # HubState.health (core.models.platform) is Literal["online","stale","fault"] -- "offline" is a
-        # twin-internal (and capability-exclusion) distinction only; persist it as "stale" so the stored
-        # row still round-trips through the fixed row model. In-memory classification above (and
-        # capability()'s exclusion set) keeps the finer-grained offline distinction.
-        persisted_health: Literal["online", "stale", "fault"] = (
-            classification if classification != "offline" else "stale"  # type: ignore[assignment]
-        )
+        # HubState.health accepts the full vocabulary (online/stale/offline/fault), so persist as classified.
+        persisted_health: Literal["online", "stale", "offline", "fault"] = classification  # type: ignore[assignment]
         states.append(
             HubState(
                 hub_id=runtime.hub_id,
@@ -472,8 +482,14 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
             fault_code=runtime.fault_code, last_seen_at=runtime.last_seen_at, now=now
         )
         free_discharge_kw = 0.0
+        soc_kwh: float | None = None
+        reserve_kwh: float | None = None
+        e_kwh: float | None = None
         if classification == "online":
             free_discharge_kw, _charge_kw = hub_capability(runtime.soc_kwh, runtime.params)
+            soc_kwh = runtime.soc_kwh
+            reserve_kwh = runtime.params.r_kwh
+            e_kwh = runtime.params.e_kwh
         snapshots.append(
             HubCapabilitySnapshot(
                 hub_id=hub_id,
@@ -481,6 +497,10 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
                 free_discharge_kw=free_discharge_kw,
                 health=classification,
                 last_seen_at=runtime.last_seen_at,
+                soc_kwh=soc_kwh,
+                reserve_kwh=reserve_kwh,
+                e_kwh=e_kwh,
+                eta_d=runtime.params.eta_d,
             )
         )
     return snapshots

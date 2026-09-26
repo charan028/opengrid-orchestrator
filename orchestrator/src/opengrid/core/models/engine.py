@@ -97,6 +97,12 @@ class Obligation(_Row):
     at_risk: bool = False
     last_reason_code: str | None = None
     version: int = 1
+    # Latest continuous energy-sufficiency snapshot (opengrid.allocator.energy_sufficiency,
+    # og.obligation_energy_status, migrations/0009) -- None until the allocator's
+    # EnergySufficiencyGateway has evaluated this obligation at least once (e.g. it isn't
+    # COMMITTED/DELIVERING yet). The UI (dispatch.html) renders "--" for either field when None.
+    energy_margin_kwh: Decimal | None = None
+    time_to_depletion_h: Decimal | None = None
 
 
 class Commitment(_Row):
@@ -268,6 +274,10 @@ DecisionType = Literal[
     "FEED_CHANGE",
     "ALERT",
     "SETTLEMENT",
+    # MVP-S+ additions (06-service-profiles-and-power-quality.md S5.5.7, S8.5; migrations/0011_asset_health.sql
+    # extends og.trace's decision_type CHECK constraint to match):
+    "ASSET_STATE_TRANSITION",
+    "CALIBRATION_ATTEMPT",
 ]
 
 

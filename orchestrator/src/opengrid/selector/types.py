@@ -86,6 +86,7 @@ class CandidateOpportunity:
     """
 
     opportunity_id: str
+    obligation_id: str
     contract_id: str
     eligible_bank_ids: tuple[str, ...]
     window_intervals: tuple[int, ...]

@@ -161,7 +161,10 @@ def test_time_skew_offsets_timestamp_and_reverts(engine: ScadaEngine) -> None:
 
 def test_auto_limit_rule_fires_on_sustained_overload(engine: ScadaEngine) -> None:
     bank_id = engine.bank_ids[0]
-    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 200.0}, 0.0, 100.0)
+    # 700% (8x baseline feeder load) comfortably clears the 600 kVA feeder-segment rating
+    # (bank_kva_rating_default, confirmed by Base 2026-09-25) regardless of the diurnal/per-bank
+    # multiplier applied to the ~200 kW synthetic background load.
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 0.0, 100.0)
     engine.tick(1.0)
     _, instructions = engine.tick(2.0)
     assert dict(instructions)[f"scada/instruction/{bank_id}"]["kind"] == "LIMIT"

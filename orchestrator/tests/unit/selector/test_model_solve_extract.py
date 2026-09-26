@@ -99,7 +99,7 @@ def test_zero_value_firm_candidate_with_degradation_cost_is_never_selected():
     bank = make_bank("B1", 500.0, range(1))
     scenario = zero_price_scenario(range(1))
     unpriced = semi_continuous_candidate(
-        "deferral-o1", 500.0, 1.0, 1.0, 0.0, (0,), ("B1",), degradation_cost_per_kwh=0.03
+        "deferral-o1", 500.0, 1.0, 1.0, 0.0, (0,), ("B1",), category="FIRM", degradation_cost_per_kwh=0.03
     )
     inputs = simple_inputs((bank,), (scenario,), (), (unpriced,), n_intervals=1)
 
@@ -113,7 +113,7 @@ def test_zero_value_firm_candidate_with_degradation_cost_is_never_selected():
     # The real fix: intake records a real capacity-payment value (e.g. $120/MWh), which clears the
     # degradation cost and flips the optimum to fully select the candidate.
     priced = semi_continuous_candidate(
-        "deferral-o1", 500.0, 1.0, 1.0, 120.0, (0,), ("B1",), degradation_cost_per_kwh=0.03
+        "deferral-o1", 500.0, 1.0, 1.0, 120.0, (0,), ("B1",), category="FIRM", degradation_cost_per_kwh=0.03
     )
     inputs_priced = simple_inputs((bank,), (scenario,), (), (priced,), n_intervals=1)
     built_priced = build_mode_o_model(inputs_priced)
@@ -125,6 +125,56 @@ def test_zero_value_firm_candidate_with_degradation_cost_is_never_selected():
 
     ok, violations = validate_plan(inputs_priced, plan_priced)
     assert ok, violations
+
+
+def test_as_capacity_hold_is_not_charged_cycling_degradation_cost():
+    """Regression, real-shaped (live 2026-09-25/26 diagnosis after the S15 intake fix deployed): once
+    intake correctly generated `ERCOT_AS` opportunities (`value_per_mwh=5.37` -- a real live NSPIN MCPC,
+    `og.opportunity` dump), the LP *still* never selected any of them, even with real bank capacity.
+    `model.py`'s objective previously charged every candidate the full cycling `degradation_cost_per_kwh`
+    (0.03 $/kWh = $30/MWh-equivalent, `0002_seed_demo.sql`) regardless of `category` -- for a capacity
+    *hold* (AS/FIRM), whose value is a capacity payment/MCPC, not an energy-arbitrage spread, that
+    overwhelmed any realistic MCPC ($5.37/MWh << $30/MWh), so the objective coefficient
+    (`value_per_mwh/1000 - degradation_cost_per_kwh`) was always negative and `q_o=0` was the solver's
+    correct answer given that flawed cost basis -- not an infeasibility, not a units/window bug. Fixed:
+    `degradation_cost_per_kwh` now only applies to `MARKET` (real energy-cycling) candidates."""
+    bank = make_bank("B1", 500.0, range(1))
+    scenario = zero_price_scenario(range(1))
+    as_candidate = semi_continuous_candidate(
+        "as-o1", 500.0, 100.0, 100.0, 5.37, (0,), ("B1",), category="AS", degradation_cost_per_kwh=0.03
+    )
+    inputs = simple_inputs((bank,), (scenario,), (), (as_candidate,), n_intervals=1)
+
+    built = build_mode_o_model(inputs)
+    outcome = highs_solve(built, FAST_SETTINGS)
+    plan = extract_plan(built, outcome, "L-ID")
+
+    assert outcome.status == "OPTIMAL"
+    assert plan.selected_q["as-o1"] == 500.0  # fully selected: no cycling degradation charged against it
+
+    ok, violations = validate_plan(inputs, plan)
+    assert ok, violations
+
+    # Same numbers, but MARKET (real energy cycling): the degradation cost still applies and correctly
+    # blocks selection -- this fix must not accidentally exempt ERCOT_ENERGY candidates too.
+    market_candidate = semi_continuous_candidate(
+        "market-o1",
+        500.0,
+        100.0,
+        100.0,
+        5.37,
+        (0,),
+        ("B1",),
+        category="MARKET",
+        degradation_cost_per_kwh=0.03,
+    )
+    inputs_market = simple_inputs((bank,), (scenario,), (), (market_candidate,), n_intervals=1)
+    built_market = build_mode_o_model(inputs_market)
+    outcome_market = highs_solve(built_market, FAST_SETTINGS)
+    plan_market = extract_plan(built_market, outcome_market, "L-ID")
+
+    assert outcome_market.status == "OPTIMAL"
+    assert plan_market.selected_q.get("market-o1", 0.0) == 0.0
 
 
 def test_c16_non_anticipativity_is_structural():

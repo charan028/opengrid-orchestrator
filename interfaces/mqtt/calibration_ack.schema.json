@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/calibration_ack.schema.json",
+  "title": "CalibrationAck",
+  "description": "Hub -> orchestrator, published on <root>/ack/cal/<hub_id>, QoS 1 (06-service-profiles-and-power-quality.md S6.7).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["calibration_id", "hub_id", "applied", "applied_at", "resulting_offsets", "status"],
+  "properties": {
+    "calibration_id": { "type": "string", "format": "uuid" },
+    "hub_id": { "type": "string", "minLength": 1 },
+    "applied": { "type": "boolean" },
+    "applied_at": { "type": "string", "format": "date-time" },
+    "resulting_offsets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["freq_hz", "voltage_pct", "phase_deg"],
+      "properties": {
+        "freq_hz": { "type": "number" },
+        "voltage_pct": { "type": "number" },
+        "phase_deg": { "type": "number" }
+      }
+    },
+    "status": { "type": "string", "enum": ["APPLIED", "REJECTED", "EXPIRED"] }
+  }
+}

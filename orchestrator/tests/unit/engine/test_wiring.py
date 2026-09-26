@@ -12,6 +12,41 @@ from uuid import UUID, uuid4
 from opengrid import engine
 from opengrid.core.models.engine import CommandBatchRow, Grant
 
+NOW = datetime(2026, 9, 26, 18, 0, 0, tzinfo=UTC)
+
+
+@dataclass
+class FakeTraceStore:
+    """Stands in for `opengrid.trace.TraceStore`: records every append and hands back a fresh
+    `trace_id` each time, exactly like the real store's `TraceRecordRef`."""
+
+    appended: list[tuple[str, str, str, dict]] = field(default_factory=list)
+
+    async def append(self, stream_id: str, decision_type: str, event_class: str, payload: dict):
+        from opengrid.trace.store import TraceRecordRef
+
+        self.appended.append((stream_id, decision_type, event_class, payload))
+        return TraceRecordRef(trace_id=uuid4(), stream_id=stream_id, seq=len(self.appended), hash="h")
+
+
+@dataclass
+class FakeHubCap:
+    hub_id: str
+    bank_id: str
+    free_discharge_kw: float
+    health: str = "online"
+
+
+class FakeFleetModule:
+    """Stands in for the `opengrid.fleet` module's `hub_capabilities` -- only what
+    `_distribute_hub_items` calls."""
+
+    def __init__(self, hubs_by_bank: dict[str, list[FakeHubCap]] | None = None) -> None:
+        self._hubs_by_bank = hubs_by_bank or {}
+
+    def hub_capabilities(self, bank_id: str) -> list[FakeHubCap]:
+        return self._hubs_by_bank.get(bank_id, [])
+
 
 @dataclass
 class FakeEngineBackend:
@@ -104,26 +139,59 @@ def test_multiple_pending_admissions_each_get_their_own_trigger() -> None:
 
 def test_build_command_batch_row_counts_only_non_headroom_grants() -> None:
     grants = [_grant(kw="10"), _grant(kw="5", headroom=True)]
-    row = engine.build_command_batch_row(cycle_id="c1", bank_id="b1", grants=grants, ledger_version=7)
+    row = engine.build_command_batch_row(
+        command_batch_id=uuid4(),
+        trace_pre_image_id=uuid4(),
+        cycle_id="c1",
+        bank_id="b1",
+        grants=grants,
+        ledger_version=7,
+    )
     assert row.command_count == 1
     assert row.cycle_id == "c1"
     assert row.ledger_version == 7
     assert row.submission_id == "c1:b1"
     assert len(row.merkle_root) == 64  # sha256 hex digest
+    assert row.trace_pre_image_id is not None
 
 
 def test_build_command_batch_row_is_deterministic_for_the_same_grants() -> None:
     grants = [_grant(kw="10")]
-    row1 = engine.build_command_batch_row(cycle_id="c1", bank_id="b1", grants=grants, ledger_version=1)
-    row2 = engine.build_command_batch_row(cycle_id="c1", bank_id="b1", grants=grants, ledger_version=1)
+    row1 = engine.build_command_batch_row(
+        command_batch_id=uuid4(),
+        trace_pre_image_id=uuid4(),
+        cycle_id="c1",
+        bank_id="b1",
+        grants=grants,
+        ledger_version=1,
+    )
+    row2 = engine.build_command_batch_row(
+        command_batch_id=uuid4(),
+        trace_pre_image_id=uuid4(),
+        cycle_id="c1",
+        bank_id="b1",
+        grants=grants,
+        ledger_version=1,
+    )
     assert row1.merkle_root == row2.merkle_root  # same content -> same hash (JCS canonicalization)
 
 
 async def test_propose_batch_to_guardian_persists_and_notifies() -> None:
     backend = FakeEngineBackend()
+    trace = FakeTraceStore()
+    fleet_module = FakeFleetModule({"b1": [FakeHubCap("h1", "b1", 10.0)]})
     grants = [_grant(kw="10")]
     batch_id = await engine.propose_batch_to_guardian(
-        backend=backend, cycle_id="c1", bank_id="b1", grants=grants, ledger_version=2
+        backend=backend,
+        trace=trace,
+        fleet_module=fleet_module,
+        cycle_id="c1",
+        bank_id="b1",
+        grants=grants,
+        ledger_version=2,
+        epoch=1,
+        seq=1,
+        now=NOW,
     )
     assert batch_id is not None
     assert backend.inserted_batches[0].command_batch_id == batch_id
@@ -132,12 +200,61 @@ async def test_propose_batch_to_guardian_persists_and_notifies() -> None:
 
 async def test_propose_batch_to_guardian_skips_empty_grant_sets() -> None:
     backend = FakeEngineBackend()
+    trace = FakeTraceStore()
+    fleet_module = FakeFleetModule()
     batch_id = await engine.propose_batch_to_guardian(
-        backend=backend, cycle_id="c1", bank_id="b1", grants=[], ledger_version=2
+        backend=backend,
+        trace=trace,
+        fleet_module=fleet_module,
+        cycle_id="c1",
+        bank_id="b1",
+        grants=[],
+        ledger_version=2,
+        epoch=1,
+        seq=1,
+        now=NOW,
     )
     assert batch_id is None
     assert backend.inserted_batches == []
     assert backend.notified == []
+
+
+async def test_propose_batch_to_guardian_writes_trace_preimage_before_insert_and_notify() -> None:
+    """qa/merge-notes.md S17: the RT_ALLOCATION trace pre-image must be written, and its `trace_id`
+    threaded through as `og.command_batch.trace_pre_image_id`, BEFORE the batch row is inserted and the
+    guardian is notified (K10) -- this is the exact ordering whose absence caused every guardian verdict
+    to VETO on G-14 `PROPOSAL_NOT_FOUND`."""
+    backend = FakeEngineBackend()
+    trace = FakeTraceStore()
+    fleet_module = FakeFleetModule({"b1": [FakeHubCap("h1", "b1", 10.0)]})
+    grants = [_grant(kw="10")]
+
+    batch_id = await engine.propose_batch_to_guardian(
+        backend=backend,
+        trace=trace,
+        fleet_module=fleet_module,
+        cycle_id="c1",
+        bank_id="b1",
+        grants=grants,
+        ledger_version=2,
+        epoch=1,
+        seq=1,
+        now=NOW,
+    )
+
+    assert len(trace.appended) == 1
+    stream_id, decision_type, event_class, payload = trace.appended[0]
+    assert stream_id == "allocator-b1"
+    assert decision_type == "RT_ALLOCATION"
+    assert event_class == "RT_ALLOCATION"
+    assert payload["command_batch_id"] == str(batch_id)
+    assert payload["items"]  # hub-level items were distributed, not left empty
+    assert payload["items"][0]["hub_id"] == "h1"
+    assert payload["items"][0]["p_kw_setpoint"] < 0  # discharge, +charge/-discharge convention
+
+    inserted = backend.inserted_batches[0]
+    assert inserted.trace_pre_image_id is not None
+    assert inserted.command_batch_id == batch_id
 
 
 # --- guardian-hold degraded mode (02b S6.5) --------------------------------------------------------

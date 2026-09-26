@@ -16,6 +16,21 @@
     "health": { "type": "string", "enum": ["online", "stale", "fault"] },
     "seq": { "type": "integer", "minimum": 0 },
     "epoch": { "type": "integer", "minimum": 0 },
-    "fault_code": { "type": ["string", "null"] }
+    "fault_code": { "type": ["string", "null"] },
+    "pq": {
+      "description": "Per-phase electrical quality (06-service-profiles-and-power-quality.md S6.1). Optional and additive: existing consumers that ignore unknown fields keep working unchanged.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "v_rms": { "type": "number", "description": "line-neutral or line-line RMS voltage, V" },
+        "i_rms": { "type": "number", "description": "RMS current, A" },
+        "q_kvar": { "type": "number" },
+        "freq_hz": { "type": "number" },
+        "pf": { "type": "number", "minimum": -1, "maximum": 1 },
+        "thd_v_pct": { "type": "number", "minimum": 0 },
+        "thd_i_pct": { "type": "number", "minimum": 0 },
+        "phase": { "type": "string", "enum": ["A", "B", "C", "AB", "BC", "CA", "ABC"] }
+      }
+    }
   }
 }
