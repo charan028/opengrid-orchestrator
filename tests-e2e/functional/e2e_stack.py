@@ -36,6 +36,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEV_SECRETS = REPO_ROOT / "dev" / "secrets"
 DEV_ENV = REPO_ROOT / "dev" / ".env"
 INTERVAL = timedelta(minutes=15)
+#: Present only on a deployed OpenGrid host. There the defaults below are the PRODUCTION og-api, simulator
+#: control plane and database, so the suites refuse to run unless every target is set explicitly.
+PRODUCTION_HOST_MARKER = Path("/etc/opengrid")
+EXPLICIT_TARGETS = ("OG_E2E_API", "OG_E2E_CONTROL", "OG_E2E_DSN")
 
 #: How long an admission gate normally takes to decide a fresh contract's offer (next 2 s engine tick + solve).
 GATE_TIMEOUT_S = 90.0
@@ -136,6 +140,13 @@ class Stack:
 
     def reachable(self) -> str | None:
         """None when the stack answers, else why not (used to skip the whole suite cleanly)."""
+        if PRODUCTION_HOST_MARKER.exists():
+            missing = [name for name in EXPLICIT_TARGETS if not os.environ.get(name)]
+            if missing:
+                return (
+                    f"refusing the default targets on a production host ({PRODUCTION_HOST_MARKER} exists); "
+                    f"set {', '.join(missing)} to a dev stack"
+                )
         try:
             resp = self.get("/fleet/summary")
         except httpx.HTTPError as exc:
