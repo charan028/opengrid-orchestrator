@@ -96,27 +96,50 @@ def _optional_pool(request: Request) -> AsyncConnectionPool | None:
 
 async def snapshot(store: StoreProtocol, pool: AsyncConnectionPool | None) -> dict[str, Any]:
     """The read-only view the copilot reasons over: exactly what the console's own GET handlers return
-    to a viewer, nothing more. Each part degrades to empty on its own."""
+    to a viewer, nothing more.
+
+    A read that fails is named in `unavailable` rather than left as an empty value, so the copilot says
+    "can't verify right now" instead of "nothing wrong". The invariant counters count as unavailable
+    whenever the health route could not measure them (`invariants_checked_at` is None: its own read
+    failed or there is no pool), because the route then reports zeros that were never measured.
+    `commitment_switches` is left out: the health route reports it as a constant, not a measurement.
+    """
     reader = cast(StoreProtocol, ReadOnlyStore(store))
+    unavailable: list[str] = []
     health: dict[str, Any] = {}
     obligations: list[dict[str, Any]] = []
     try:
         health = await health_routes.get_health(store=reader, pool=pool)
     except Exception as exc:
         logger.info("copilot snapshot: health unavailable (%s)", type(exc).__name__)
+        unavailable.append("health")
     try:
         rows = await dispatch_routes.list_opportunities(store=reader, _identity=AI_AGENT_IDENTITY, state=None)
         obligations = rows[:_MAX_OBLIGATIONS]
     except Exception as exc:
         logger.info("copilot snapshot: obligations unavailable (%s)", type(exc).__name__)
-    counts = dict(health.get("hub_health_counts") or {})
-    health_view: dict[str, Any] = {
-        key: health.get(key)
-        for key in ("reserve_breaches", "double_sold_kwh", "commitment_switches", "lock_violations")
-        if key in health
+        unavailable.append("obligations")
+    health_view: dict[str, Any] = {}
+    if "health" not in unavailable:
+        if health.get("invariants_checked_at") is None:
+            unavailable.append("invariants")
+        else:
+            health_view.update(
+                {
+                    key: health[key]
+                    for key in ("reserve_breaches", "double_sold_kwh", "lock_violations")
+                    if key in health
+                }
+            )
+        health_view["alerts"] = list(health.get("alerts") or [])[:_MAX_ALERTS]
+    view: dict[str, Any] = {
+        "health": health_view,
+        "hubs": {"counts": dict(health.get("hub_health_counts") or {})},
+        "unavailable": unavailable,
     }
-    health_view["alerts"] = list(health.get("alerts") or [])[:_MAX_ALERTS]
-    return {"health": health_view, "hubs": {"counts": counts}, "obligations": obligations}
+    if "obligations" not in unavailable:
+        view["obligations"] = obligations
+    return view
 
 
 @router.post("/ask", response_model=AskResponse)

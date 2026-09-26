@@ -90,6 +90,7 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         "tier",
         "total",
         "trace_id",
+        "unavailable",
         "value_per_mwh",
         "window_end",
         "window_start",

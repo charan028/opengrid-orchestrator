@@ -35,17 +35,65 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+#: The snapshot key that lists the sources whose read failed (set by the API router's `snapshot`).
+UNAVAILABLE_KEY = "unavailable"
+
+#: What each source is called in a "can't verify" answer, and where the operator would look for it.
+_SOURCES: dict[str, tuple[str, str]] = {
+    "obligations": ("obligation data", "/og/api/dispatch/opportunities"),
+    "invariants": ("invariant data", "/og/api/health"),
+    "alerts": ("alert data", "/og/api/health"),
+    "hubs": ("hub health data", "/og/api/health"),
+}
+
+_INVARIANT_FIELDS = ("reserve_breaches", "double_sold_kwh")
+
+
+def unavailable_sources(context: dict[str, Any]) -> frozenset[str]:
+    """Which sources this snapshot cannot vouch for: those the router flagged as failed, plus any whose
+    data is simply absent. Absence is never read as "nothing to report"."""
+    flagged = {str(name) for name in (context.get(UNAVAILABLE_KEY) or [])}
+    health = context.get("health")
+    hubs = context.get("hubs")
+    if "health" in flagged:
+        flagged |= {"invariants", "alerts", "hubs"}
+    if "obligations" not in context:
+        flagged.add("obligations")
+    if not isinstance(health, dict) or any(field not in health for field in _INVARIANT_FIELDS):
+        flagged.add("invariants")
+    if not isinstance(health, dict) or "alerts" not in health:
+        flagged.add("alerts")
+    if not isinstance(hubs, dict) or not hubs.get("counts"):
+        flagged.add("hubs")
+    return frozenset(flagged & set(_SOURCES))
+
+
+def _cannot_verify(source: str) -> CopilotAnswer:
+    """The honest answer when the data behind a question could not be read: never a default "OK"."""
+    what, path = _SOURCES[source]
+    return CopilotAnswer(
+        text=f"Can't verify right now: {what} unavailable.",
+        tier="deterministic",
+        refusal_reason=f"{source}_unavailable",
+        citations=[Citation(source=path, ref=f"{source}_unavailable", label=f"{what} unavailable")],
+    )
+
+
 def answer(question: str, context: dict[str, Any]) -> CopilotAnswer | None:
     """The deterministic answer to `question`, or None when no handler applies.
 
-    `context` is the already-redacted read-only snapshot the API router assembled: `health`,
-    `obligations` and `hubs`.
+    `context` is the read-only snapshot the API router assembled: `health`, `obligations`, `hubs`, and
+    `unavailable` (the sources whose read failed). A handler whose source is unavailable answers "can't
+    verify right now", never the value an empty source would imply.
     """
     obligations: list[dict[str, Any]] = list(context.get("obligations") or [])
     health: dict[str, Any] = dict(context.get("health") or {})
     hubs: dict[str, Any] = dict(context.get("hubs") or {})
+    missing = unavailable_sources(context)
 
     if _matches(question, _AT_RISK):
+        if "obligations" in missing:
+            return _cannot_verify("obligations")
         flagged = [o for o in obligations if o.get("at_risk")]
         if not flagged:
             return CopilotAnswer(
@@ -75,6 +123,8 @@ def answer(question: str, context: dict[str, Any]) -> CopilotAnswer | None:
         )
 
     if _matches(question, _DECLINED):
+        if "obligations" in missing:
+            return _cannot_verify("obligations")
         offered = [o for o in obligations if o.get("state") == "OFFERED"]
         priced = [o for o in offered if o.get("value_per_mwh") is not None]
         under = [
@@ -115,25 +165,36 @@ def answer(question: str, context: dict[str, Any]) -> CopilotAnswer | None:
             )
 
     if _matches(question, _PROMISES):
+        if "invariants" in missing:
+            return _cannot_verify("invariants")
         breaches = int(_number(health.get("reserve_breaches")))
         double_sold = int(_number(health.get("double_sold_kwh")))
-        switches = int(_number(health.get("commitment_switches")))
+        # Commitment switches have no measuring check yet; the health route reports a constant for them,
+        # which the snapshot leaves out. Unmeasured is said as such, and never counted as "held".
+        switches_measured = "commitment_switches" in health
+        switches = int(_number(health.get("commitment_switches"))) if switches_measured else 0
         broken = breaches + double_sold + switches
-        state = (
-            "Every promise has held today."
-            if broken == 0
-            else f"{broken} promise{'' if broken == 1 else 's'} broke today."
+        if broken:
+            state = f"{broken} promise{'' if broken == 1 else 's'} broke today."
+        elif switches_measured:
+            state = "Every promise has held today."
+        else:
+            state = "No reserve breach or double sale is recorded today."
+        switch_text = (
+            f"commitment switches {switches}" if switches_measured else "commitment switches not measured"
         )
         return CopilotAnswer(
             text=(
-                f"{state} Reserve breaches {breaches}, kWh sold twice {double_sold}, commitment "
-                f"switches {switches}. Each is counted every two-second cycle and written to the trace."
+                f"{state} Reserve breaches {breaches}, kWh sold twice {double_sold}, {switch_text}. "
+                "Each measured counter is checked continuously and written to the trace."
             ),
             tier="deterministic",
             citations=[Citation(source="/og/api/health", ref="invariants", label="live health counters")],
         )
 
     if _matches(question, _COMMITTED):
+        if "obligations" in missing:
+            return _cannot_verify("obligations")
         committed = [o for o in obligations if o.get("state") in ("COMMITTED", "DELIVERING")]
         total_kw = sum(_number(o.get("committed_qty_kw")) for o in committed)
         if committed:
@@ -159,6 +220,8 @@ def answer(question: str, context: dict[str, Any]) -> CopilotAnswer | None:
         )
 
     if _matches(question, _FLEET):
+        if "hubs" in missing:
+            return _cannot_verify("hubs")
         counts = {k: int(_number(v)) for k, v in (hubs.get("counts") or {}).items()}
         total = sum(counts.values())
         if total:
@@ -170,6 +233,8 @@ def answer(question: str, context: dict[str, Any]) -> CopilotAnswer | None:
             )
 
     if _matches(question, _ALERTS):
+        if "alerts" in missing:
+            return _cannot_verify("alerts")
         alerts = list(health.get("alerts") or [])
         if not alerts:
             return CopilotAnswer(
