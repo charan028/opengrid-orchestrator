@@ -213,3 +213,54 @@ def invoice_view(
 def last_updated(view: dict[str, Any], key: str) -> str | None:
     value = (view.get("last_updated") or {}).get(key)
     return str(value) if value else None
+
+
+PER_KW_PATH = "/og/api/profitability/per-kw"
+_MARKET_LABELS = {"REGULATED": "Regulated market (AE / CPS)", "FREE": "Free market (ERCOT competitive)"}
+
+
+def _kw_row(label: str, kind: str, econ: dict[str, Any], *, title: str = "") -> dict[str, Any]:
+    def opt(key: str) -> float | None:
+        value = econ.get(key)
+        return float(value) if value not in (None, "") else None
+
+    return {
+        "label": label,
+        "kind": kind,
+        "title": title,
+        "kw_basis": opt("kw_basis"),
+        "in_per_kw": opt("in_usd_per_kw_yr"),
+        "out_per_kw": opt("out_usd_per_kw_yr"),
+        "net_per_kw": opt("net_usd_per_kw_yr"),
+        "payback_years": opt("effective_payback_years")
+        if econ.get("effective_payback_years") is not None
+        else opt("payback_years"),
+        "meets_target": econ.get("meets_target"),
+    }
+
+
+def per_kw_view(payload: dict[str, Any] | None, view: dict[str, Any]) -> dict[str, Any] | None:
+    """$/kW-yr in vs out, net and payback: fleet, per market, per contract (contract labels from the same
+    settlement view as the tables), plus the hardware reference. `None` when the endpoint is unavailable."""
+    if not payload:
+        return None
+    contracts, _ = _index(view)
+    rows = [_kw_row("Fleet", "fleet", payload.get("fleet") or {})]
+    for market, econ in (payload.get("markets") or {}).items():
+        rows.append(_kw_row(_MARKET_LABELS.get(market, market), "market", econ or {}))
+    for econ in payload.get("contracts") or []:
+        ref = str(econ.get("scope_ref", ""))
+        c = contracts.get(ref)
+        label = c["label"] if c else (ref if econ.get("scope_kind") != "CONTRACT" else f"contract {ref[-3:]}")
+        rows.append(_kw_row(label, "contract", econ, title=ref))
+    unit = payload.get("illustrative_home_unit")
+    if unit:
+        rows.append(_kw_row("Illustrative home unit (reference)", "reference", unit))
+    return {
+        "rows": rows,
+        "method_version": payload.get("method_version"),
+        "period_hours": payload.get("period_hours"),
+        "hardware_view_usd_per_kw": num(payload.get("hardware_view_usd_per_kw")),
+        "target_payback_years": num(payload.get("target_payback_years")),
+        "shadow_value_added": payload.get("shadow_value_added"),
+    }

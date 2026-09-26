@@ -19,7 +19,14 @@ from fastapi.responses import HTMLResponse
 
 from opengrid.ui.api_client import ApiUnavailable, get_json
 from opengrid.ui.role import is_operator, role_of
-from opengrid.ui.settlement import SETTLEMENT_VIEW_PATH, filter_options, last_updated, pnl_view
+from opengrid.ui.settlement import (
+    PER_KW_PATH,
+    SETTLEMENT_VIEW_PATH,
+    filter_options,
+    last_updated,
+    per_kw_view,
+    pnl_view,
+)
 from opengrid.ui.templating import templates
 
 logger = logging.getLogger(__name__)
@@ -138,6 +145,17 @@ async def profitability_page(
         logger.warning("profitability: %s unavailable: %s", SETTLEMENT_VIEW_PATH, exc)
         degraded = str(exc)
 
+    per_kw: dict[str, Any] | None = None
+    per_kw_note: str | None = None
+    try:
+        raw_kw = await get_json(PER_KW_PATH)
+        per_kw = raw_kw if isinstance(raw_kw, dict) else None
+    except ApiUnavailable as exc:
+        per_kw_note = {
+            403: "Operator role required for the $/kW view.",
+            404: "The $/kW view is not available on this deployment yet.",
+        }.get(exc.status_code or 0, f"The $/kW view is unavailable: {exc}")
+
     filters = {"service": service, "day": day, "customer": customer, "contract": contract}
     return templates.TemplateResponse(
         request,
@@ -149,6 +167,8 @@ async def profitability_page(
             "filters": filters,
             "options": filter_options(view),
             "pnl": pnl_view(view, customer=customer, contract=contract, service=service, day=day),
+            "per_kw": per_kw_view(per_kw, view),
+            "per_kw_note": per_kw_note,
             "last_settled_at": last_updated(view, "pnl"),
             "generated_at": now.isoformat(),
             "degraded": degraded,
