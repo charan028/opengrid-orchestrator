@@ -103,7 +103,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     backend = _require_backend()
     trace_store = _require_trace_store()
 
-    ctx = await backend.fetch_context(obligation_id)
+    ctx = await backend.fetch_context(obligation_id, interval_start)
     duration_hours = _duration_hours(interval_start, interval_end)
     interval_minutes = int(duration_hours * Decimal("60"))
 
@@ -211,6 +211,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     drafts = draft_invoice_lines(
         service_type=ctx.service_type,
         delivered_kwh=metering.delivered_kwh,
+        committed_kwh=committed_kwh,
         price_per_kwh=ctx.price_per_kwh,
         revenue=pnl.revenue,
         performance_factor=performance_factor,
@@ -249,6 +250,8 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
                 "delivered_kwh": str(metering.delivered_kwh),
                 "net_value": str(pnl.net_value),
                 "quality_flag": metering.quality_flag,
+                "wholesale_price_per_kwh": str(ctx.wholesale_price_per_kwh),
+                "wholesale_price_flag": ctx.wholesale_price_flag,
             },
         )
 

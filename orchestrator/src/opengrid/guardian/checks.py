@@ -58,7 +58,8 @@ def check_g01_energy_lease(
 
 
 def check_g02_hub_power(item: ProposedItem, hub: HubParams, *, inverter_cap_kw: float) -> CheckOutcome:
-    """K4: |P| bound per hub."""
+    """K4: |P| bound per hub -- the home's own rated power; `inverter_cap_kw` is per unit (see
+    `core.limits.check_hub_power`)."""
     result = core_limits.check_hub_power(item.p_kw_setpoint, hub, inverter_cap_kw=inverter_cap_kw)
     return CheckOutcome("G-02", result.ok, result.reason, item.hub_id)
 

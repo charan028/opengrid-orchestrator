@@ -880,3 +880,24 @@ async def test_best_effort_l2_shortfall_needs_an_active_instruction(fakes, guard
     assert (
         await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(make_batch_row(proposal))
     ).outcome == "PASS"
+
+
+async def test_default_guardian_signs_a_dual_unit_home_at_its_20_kw_rating(
+    fakes, guardian_config, signing_seed
+):
+    """Demo-critical regression: with the default config (11 kW per-unit inverter cap) every dual-unit
+    (20 kW) home command above 11 kW was vetoed by G-02."""
+    assert guardian_config.inverter_cap_kw == 11.0
+    proposal = make_proposal(p_kw_setpoint=-20.0)
+    wire_default_passing_scenario(fakes, proposal)
+    hub = make_hub_snapshot(soc_kwh=60.0, prev_p_kw=-20.0, p_kw=20.0)
+    fakes.hubs.hubs[proposal.items[0].hub_id] = replace(
+        hub, params=replace(hub.params, e_kwh=78.4, r_kwh=15.68)
+    )
+    fakes.banks.banks[BANK_ID] = make_bank_snapshot(bank_load_kva=100.0, kva_rating=600.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert "G-02" not in verdict.vetoed_rule_ids and verdict.outcome == "PASS"

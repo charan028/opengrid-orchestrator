@@ -393,11 +393,14 @@ class FakeStore:
         trace_id,
         confirmed_at,
         approver_ref=None,
+        created_at=None,
     ) -> UUID:
         action_id = uuid4()
         self.operator_actions.append(
             {
                 "operator_action_id": action_id,
+                # PgStore: coalesce(created_at, now()) -- now() is the INSERT time
+                "created_at": created_at if created_at is not None else datetime.now(UTC),
                 "operator_ref": operator_ref,
                 "action_kind": action_kind,
                 "target_ref": target_ref,

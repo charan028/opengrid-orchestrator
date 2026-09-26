@@ -136,6 +136,7 @@ class _ReleaseRequest:
     scope_ref: str
     reason: str
     requested_by: str
+    requested_at: datetime
 
 
 @router.post("/{scope}/{scope_id}/release", status_code=status.HTTP_202_ACCEPTED)
@@ -150,7 +151,7 @@ async def request_release(
     stop-only key can never sign a RELEASE; the guardian signs one only for a request approved by a
     SECOND authorised operator (`approve_release`, `opengrid.guardian.stop_release`)."""
     scope_kind, scope_ref = _normalise_scope(scope, scope_id)
-    request = _ReleaseRequest(scope_kind, scope_ref, body.reason, identity.user)
+    request = _ReleaseRequest(scope_kind, scope_ref, body.reason, identity.user, datetime.now(UTC))
     summary = f"Release safe stop on {scope_kind}:{scope_ref} ({body.reason}); needs a second operator"
     proposal = proposals.create(_RELEASE_PROPOSAL_KIND, request, summary, identity.user)
     return ProposalAccepted(proposal_id=proposal.proposal_id, summary=summary, expires_in_s=60.0)
@@ -207,6 +208,9 @@ async def approve_release(
         trace_id=trace_ref.trace_id,
         confirmed_at=since,
         approver_ref=identity.user,
+        # The guardian reads created_at as requested_at and refuses approved_at < requested_at: the
+        # row's created_at is operator A's request time, never the (later) insert time.
+        created_at=request.requested_at,
     )
     released = await _poll_for_stop_action(
         store,

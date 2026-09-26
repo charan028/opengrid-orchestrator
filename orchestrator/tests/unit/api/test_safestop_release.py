@@ -5,10 +5,13 @@ the RELEASE and answers 200 (released) or 202 (still pending with the guardian).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
+from opengrid.guardian.ports import EngagedStop, ReleaseRequest
+from opengrid.guardian.stop_release import check_stop_release
 from opengrid.platform.config import Config
 
 ALICE = {"X-Remote-User": "alice"}
@@ -75,6 +78,41 @@ def test_fleet_scope_is_normalised(client, fake_store) -> None:
     client.post(f"/og/api/safestop/release/{proposal_id}/approve", headers=BOB)
     (action,) = [a for a in fake_store.operator_actions if a["action_kind"] == "SAFE_STOP_RELEASE"]
     assert action["target_ref"] == "FLEET:FLEET"
+
+
+def test_the_recorded_release_passes_the_guardians_freshness_check(client, fake_store) -> None:
+    """Regression (live 2026-09-26 10:18, bank-034): the guardian reads `requested_at` = the row's
+    `created_at` and `approved_at` = `confirmed_at`. og-api stamped `confirmed_at` BEFORE the insert,
+    so `created_at` (DB now()) was always later: every real release was refused APPROVAL_STALE.
+    The row must carry the request time as `created_at` and the approval time as `confirmed_at`."""
+    engaged_at = datetime.now(UTC) - timedelta(seconds=30)
+    proposal_id = _request(client)
+    client.post(f"/og/api/safestop/release/{proposal_id}/approve", headers=BOB)
+    (action,) = [a for a in fake_store.operator_actions if a["action_kind"] == "SAFE_STOP_RELEASE"]
+
+    request = ReleaseRequest(
+        operator_action_id=action["operator_action_id"],
+        requested_by=action["operator_ref"],
+        approved_by=action["approver_ref"],
+        scope_kind="BANK",
+        scope_ref="bank-01",
+        reason="clear",
+        requested_at=action["created_at"],
+        approved_at=action["confirmed_at"],
+        trace_id=action["trace_id"],
+    )
+    outcome = check_stop_release(
+        request,
+        now=datetime.now(UTC),
+        engaged=[EngagedStop(stop_id=uuid4(), initiator_kind="SAFESTOP_AUTHORITY", engaged_at=engaged_at)],
+        active_instruction_kinds=(),
+        authorised_operators=("alice", "bob"),
+        approval_max_age_s=60.0,
+        max_clock_skew_s=5.0,
+        request_traced=True,
+    )
+    assert outcome.ok, outcome.reason
+    assert action["created_at"] <= action["confirmed_at"]
 
 
 def test_approval_is_single_use(client) -> None:

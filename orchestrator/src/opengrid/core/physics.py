@@ -29,6 +29,7 @@ class HubParams:
     eta_d: float = DEFAULT_ETA_D
     self_discharge_kwh_per_h: float = DEFAULT_SELF_DISCHARGE_KWH_PER_H
     ramp_kw_per_s: float | None = None  # None = the 02a S6.1 firm default, see `hub_ramp_kw_per_s`
+    units: int | None = None  # battery/inverter units in the home when known (G-02 per-unit cap), else None
 
 
 def hub_ramp_kw_per_s(params: HubParams) -> float:

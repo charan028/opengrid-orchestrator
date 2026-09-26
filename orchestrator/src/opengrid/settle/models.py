@@ -100,3 +100,8 @@ class ObligationSettlementContext:
     penalty: PenaltyParams | None
     period_start: date
     period_end: date
+    #: Where `wholesale_price_per_kwh` came from (`opengrid.settle.pg_backend`): "SPP" = the bank
+    #: zone's real-time settlement point price for this interval, "SPP_PRIOR" = the nearest earlier
+    #: SPP within 1 h (this interval's not yet published), "MISSING" = no SPP within 1 h (energy
+    #: cost 0, logged). Never the contract's own price.
+    wholesale_price_flag: str = "SPP"

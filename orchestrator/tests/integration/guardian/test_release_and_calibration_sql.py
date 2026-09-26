@@ -43,3 +43,9 @@ async def test_calibration_and_bank_queries_run(pool):
     last = await pq_repo.PgCalibrationHistoryPort(pool).last_attempt_epoch_s("hub-00000")
     assert last is None or isinstance(last, float)
     await repo.PgBankStatePort(pool).snapshot("bank-000")
+
+
+async def test_service_profile_query_runs(pool):
+    from uuid import uuid4
+
+    assert await repo.PgServiceProfilePort(pool).setpoint_source(uuid4()) is None

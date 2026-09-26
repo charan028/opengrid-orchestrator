@@ -61,7 +61,9 @@ class FakeSettleBackend:
     meter_interval_insert_log: list[tuple[UUID, datetime]] = field(default_factory=list)
     pnl_insert_log: list[tuple[UUID, datetime]] = field(default_factory=list)
 
-    async def fetch_context(self, obligation_id: UUID) -> ObligationSettlementContext:
+    async def fetch_context(
+        self, obligation_id: UUID, interval_start: datetime | None = None
+    ) -> ObligationSettlementContext:
         return self.obligations[obligation_id].context
 
     async def fetch_power_samples(

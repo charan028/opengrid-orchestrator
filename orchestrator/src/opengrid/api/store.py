@@ -214,9 +214,11 @@ class StoreProtocol(Protocol):
         trace_id: UUID | None,
         confirmed_at: datetime | None,
         approver_ref: str | None = None,
+        created_at: datetime | None = None,
     ) -> UUID:
         """`approver_ref` defaults to `operator_ref` (single-operator actions); the two-person stop
-        RELEASE passes the second operator."""
+        RELEASE passes the second operator, and `created_at` = when operator A requested it (the
+        guardian's `requested_at`; defaults to the insert time)."""
         ...
 
 
@@ -659,14 +661,15 @@ class PgStore:
         trace_id: UUID | None,
         confirmed_at: datetime | None,
         approver_ref: str | None = None,
+        created_at: datetime | None = None,
     ) -> UUID:
         action_id = uuid4()
         await self._execute(
             """
             INSERT INTO og.operator_action
                 (operator_action_id, operator_ref, action_kind, target_ref, tier, reason,
-                 confirmed_at, approver_ref, trace_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 confirmed_at, approver_ref, trace_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, coalesce(%s, now()))
             """,
             (
                 action_id,
@@ -678,6 +681,7 @@ class PgStore:
                 confirmed_at,
                 approver_ref if approver_ref is not None else operator_ref,
                 trace_id,
+                created_at,
             ),
         )
         return action_id

@@ -63,8 +63,10 @@ def check_reserve_floor_over_lease(
 
 
 def check_hub_power(p_kw: float, params: HubParams, *, inverter_cap_kw: float = 11.0) -> LimitResult:
-    """G-02/K4: |P| <= min(inverter cap, per-hub cap)."""
-    cap = min(inverter_cap_kw, params.p_kw)
+    """G-02/K4: |P| <= the home's own rated power `params.p_kw` (11 kW single unit, 20 kW dual unit).
+    `inverter_cap_kw` is a PER-UNIT limit: it also binds, times the unit count, only when the unit count
+    is known (`params.units`). It is never a per-home cap -- that vetoed every dual-unit home above 11 kW."""
+    cap = params.p_kw if params.units is None else min(params.p_kw, inverter_cap_kw * params.units)
     if abs(p_kw) > cap + 1e-9:
         return LimitResult.failed(reasons.R_HUB_POWER_LIMIT)
     return LimitResult.passed()

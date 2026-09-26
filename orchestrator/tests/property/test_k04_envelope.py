@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -31,11 +33,17 @@ _banks = st.builds(
 )
 
 
-@given(_kw, _hubs, _positive)
-def test_k04_hub_power_is_bounded_by_the_smaller_of_inverter_and_hub_limit(p_kw, hub, inverter_cap_kw):
+@given(_kw, _hubs, _positive, st.one_of(st.none(), st.integers(min_value=1, max_value=4)))
+def test_k04_hub_power_is_bounded_by_the_homes_rating_and_the_per_unit_cap_times_units(
+    p_kw, hub, inverter_cap_kw, units
+):
+    """The home's own rated power always binds; the per-unit inverter cap binds only times a KNOWN unit
+    count (it is never a per-home cap -- that vetoed every 20 kW dual-unit home above 11 kW)."""
+    hub = replace(hub, units=units)
     result = check_hub_power(p_kw, hub, inverter_cap_kw=inverter_cap_kw)
 
-    assert result.ok == (abs(p_kw) <= min(inverter_cap_kw, hub.p_kw) + _EPSILON)
+    cap = hub.p_kw if units is None else min(hub.p_kw, inverter_cap_kw * units)
+    assert result.ok == (abs(p_kw) <= cap + _EPSILON)
 
 
 @given(_kw, _kw, _seconds, _positive)

@@ -34,6 +34,22 @@ def test_hub_power_limit():
     assert not check_hub_power(11.5, HUB).ok
 
 
+def test_dual_unit_home_is_capped_at_its_own_rating_not_one_inverter():
+    """Regression: min(inverter_cap_kw=11, p_kw) capped the 20 kW dual-unit homes at 11 kW."""
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0)
+    single = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0)
+    assert check_hub_power(20.0, dual, inverter_cap_kw=11.0).ok
+    assert check_hub_power(-20.0, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(21.0, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(11.5, single, inverter_cap_kw=11.0).ok
+
+
+def test_per_unit_cap_binds_times_a_known_unit_count():
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=24.0, units=2)
+    assert check_hub_power(22.0, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(22.5, dual, inverter_cap_kw=11.0).ok
+
+
 def test_bank_kva_limit():
     assert check_bank_kva(50.0, 5.0, BANK).ok
     assert not check_bank_kva(70.0, 20.0, BANK).ok

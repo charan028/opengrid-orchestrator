@@ -123,6 +123,50 @@ def test_default_energy_series_key_is_a_load_zone_not_a_hub_code() -> None:
     assert intake.DEFAULT_ENERGY_SERIES_KEY.startswith("LZ_")
 
 
+def test_energy_series_key_for_zone_uses_the_banks_own_zone() -> None:
+    """Bug regression: every contract's energy candidates used to be priced against `LZ_HOUSTON`
+    regardless of which bank(s) actually backed the capacity. A North bank must price against
+    `LZ_NORTH`, not the Houston default."""
+    assert intake.energy_series_key_for_zone("LZ_NORTH") == "LZ_NORTH"
+
+
+def test_energy_series_key_for_zone_falls_back_to_houston_and_logs(caplog) -> None:
+    """A missing/unknown bank zone is a documented, logged fallback (BUILD.md S5a "no silent
+    fallbacks"), never a silent one."""
+    with caplog.at_level("WARNING"):
+        result = intake.energy_series_key_for_zone(None)
+    assert result == intake.DEFAULT_ENERGY_SERIES_KEY
+    assert any("load zone" in record.message for record in caplog.records)
+
+
+def test_energy_series_key_for_zone_rejects_unknown_zone_strings() -> None:
+    """A zone string that isn't one of the fleet's known `FLEET_ZONES` is treated the same as missing
+    -- it falls back rather than being passed through to `feeds.ercot` unchecked."""
+    assert intake.energy_series_key_for_zone("LZ_MADE_UP") == intake.DEFAULT_ENERGY_SERIES_KEY
+
+
+async def test_configure_bank_zone_overrides_energy_series_key(
+    repo: FakeContractsRepo, trace: TraceStore
+) -> None:
+    """`configure(..., bank_zone="LZ_NORTH")` must price ERCOT_ENERGY candidates against `LZ_NORTH`,
+    not the `LZ_HOUSTON` default -- this is the fix for the "every home priced at Houston" bug."""
+    energy_contract = make_contract(service_type="ERCOT_ENERGY")
+    await repo.upsert_contract(energy_contract)
+    await repo.upsert_product_rule(
+        make_product_rule(energy_contract.contract_id, product_code="ENERGY", variable_kind="CONTINUOUS")
+    )
+    market = FakeMarketDataPort(energy_prices={"LZ_NORTH": 10.0})
+    forecast = FakeForecastScenarios(series_key="LZ_NORTH", price_by_interval=_forecast_prices())
+    intake.configure(repo, trace, market, forecast_scenarios=forecast, bank_zone="LZ_NORTH")
+    try:
+        created = await intake.run_intake_gate("SCHEDULED_15MIN", now=NOW)
+    finally:
+        intake.reset_for_testing()
+
+    assert len(created) > 0
+    assert market.energy_prices.get("LZ_HOUSTON") is None  # never priced against Houston
+
+
 async def test_intake_never_overlaps_a_committed_obligation(repo: FakeContractsRepo) -> None:
     contracts_by_role = await _seed_five_customers(repo)
     energy_contract = contracts_by_role["energy"]

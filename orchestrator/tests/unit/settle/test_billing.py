@@ -21,6 +21,7 @@ def test_home_posts_no_invoice_lines():
     lines = draft_invoice_lines(
         service_type="HOME",
         delivered_kwh=Decimal("10"),
+        committed_kwh=Decimal("10"),
         price_per_kwh=Decimal("0.10"),
         revenue=Decimal("1.00"),
         performance_factor=Decimal("1"),
@@ -33,6 +34,7 @@ def test_ercot_energy_posts_one_energy_line():
     lines = draft_invoice_lines(
         service_type="ERCOT_ENERGY",
         delivered_kwh=Decimal("100"),
+        committed_kwh=Decimal("100"),
         price_per_kwh=Decimal("0.10"),
         revenue=Decimal("10.00"),
         performance_factor=Decimal("1"),
@@ -44,13 +46,15 @@ def test_ercot_energy_posts_one_energy_line():
 
 
 def test_dist_deferral_capacity_payment_scaled_by_performance_factor():
-    """Hand computation: revenue 10.00 * performance_factor 0.8 = 8.00 (02a S7.3: "x performance
-    factor")."""
+    """Hand computation: committed_kwh 100 * price 0.10 * performance_factor 0.8 = 8.00 (02a S7.3:
+    "x performance factor"). `revenue` here is deliberately smaller/unrelated to show the amount is
+    NOT derived from it (that was the double-counting bug -- see billing.draft_invoice_lines)."""
     lines = draft_invoice_lines(
         service_type="DIST_DEFERRAL",
-        delivered_kwh=Decimal("100"),
+        delivered_kwh=Decimal("80"),
+        committed_kwh=Decimal("100"),
         price_per_kwh=Decimal("0.10"),
-        revenue=Decimal("10.00"),
+        revenue=Decimal("8.00"),
         performance_factor=Decimal("0.8"),
         penalty_amount=Decimal("0"),
     )
@@ -59,10 +63,35 @@ def test_dist_deferral_capacity_payment_scaled_by_performance_factor():
     assert lines[0].amount == Decimal("8.00")
 
 
+def test_partner_capacity_80pct_delivery_bills_80pct_of_committed_payment():
+    """Bug regression: 80% delivery must bill 80% of the committed payment (price * committed_kwh),
+    not ~64% (price * delivered_kwh * performance_factor, the old double-counted formula). Committed
+    payment in full is 100 kWh * $0.10 = $10.00; at 80% performance that is $8.00, not $6.40."""
+    committed_kwh = Decimal("100")
+    price_per_kwh = Decimal("0.10")
+    performance_factor = Decimal("0.8")
+    delivered_kwh = committed_kwh * performance_factor  # 80
+
+    lines = draft_invoice_lines(
+        service_type="PARTNER_CAPACITY",
+        delivered_kwh=delivered_kwh,
+        committed_kwh=committed_kwh,
+        price_per_kwh=price_per_kwh,
+        revenue=price_per_kwh * delivered_kwh,
+        performance_factor=performance_factor,
+        penalty_amount=Decimal("0"),
+    )
+    assert len(lines) == 1
+    assert lines[0].line_type == "CAPACITY_PAYMENT"
+    assert lines[0].amount == Decimal("8.00")
+    assert lines[0].amount != Decimal("6.40")  # the old, buggy result
+
+
 def test_ld_penalty_line_added_when_penalty_positive():
     lines = draft_invoice_lines(
         service_type="ERCOT_AS",
         delivered_kwh=Decimal("100"),
+        committed_kwh=Decimal("100"),
         price_per_kwh=Decimal("0.10"),
         revenue=Decimal("10.00"),
         performance_factor=Decimal("1"),

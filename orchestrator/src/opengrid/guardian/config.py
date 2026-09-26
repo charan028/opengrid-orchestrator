@@ -12,6 +12,8 @@ from opengrid.platform.config import Config
 ClockSource = Literal["kernel", "chrony"]
 CalibrationSyncSource = Literal["ptp", "gps", "ntp_disciplined"]
 
+#: G-02: PER-UNIT inverter limit (one Base Power unit). It binds times a home's unit count only when that
+#: count is known (HubParams.units); the per-home cap is always the home's own rating (HubParams.p_kw).
 DEFAULT_INVERTER_CAP_KW = 11.0
 DEFAULT_BANK_LOADING_PCT = 0.95
 DEFAULT_RESERVE_MARGIN_PCT = 0.01
