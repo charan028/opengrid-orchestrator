@@ -1,7 +1,8 @@
 # OpenGrid Orchestrator — MVP-S+ Traceability Matrix
 
 As of: branch `wp/docs-lane` on main `6470cfa` (R2), 2026-09-26. Re-verified at R2, with R2 line numbers: ES03-S06,
-ES05-S10, ES06-S09, ES07-S02, ES19-S02…S05, K4 (and K4 extended), K11, K15, G-26…G-33 and `CHECK_AS_HOLD`. Every
+ES05-S10, ES06-S09, ES07-S02, ES19-S02…S05, K4 (and K4 extended), K11, K15, G-26…G-33 and `CHECK_AS_HOLD`; ES07-S02
+and ES07-S05 also at R2 hotfix v3 (`afb26c2`, refs marked as such). Every
 other row, and every `file:line` in it, is as verified at `434d230` (the first version of this matrix); lines may
 have moved since.
 
@@ -142,10 +143,10 @@ where it has one (cross-reference to §4).
 | Story | Title | Status | Code | Test | Gap / note |
 |---|---|---|---|---|---|
 | ES07-S01 | Module heartbeats + `/status` + `/metrics` | in build | `o/platform/heartbeat.py:26` (`write_heartbeat`, called by all 6 orchestrator processes); `o/engine/metrics.py:56` | `t/unit/platform/test_heartbeat.py::test_write_heartbeat_upserts_expected_row`; `t/unit/engine/test_metrics.py::test_endpoint_uses_the_configured_port_on_loopback` | Heartbeat is built and tested for all 6 processes. A Prometheus `/metrics` HTTP server is only started by **engine** and **guardian** (`start_http_server` calls found only there) — feeds/safestop/settle/api never expose one. No literal `/status` route exists anywhere. |
-| ES07-S02 | Feed-stale degraded mode: no new commitments | in build (R2: enforced at two gates) | `o/health/model.py:22-23` (`DegradedMode` literal); `o/health/rules.py:100-101`. At R2 the mode is enforced: the intake gate skips intake (`o/engine/gates.py:51-60`, `:123-132`) and the selector gate withholds every candidate, treating an unreadable mode as active (`o/selector/gate.py:532-602`) | `t/unit/health/test_rules.py::test_feed_stale_yields_no_new_commitments:186` | Not checked at contract admission (operator CRUD/admit) or at customer-API submission; that the transition is traced was not verified. At `434d230` nothing read the flag. |
+| ES07-S02 | Feed-stale degraded mode: no new commitments | in build (R2: enforced at two gates) | `o/health/model.py:22-23` (`DegradedMode` literal); `o/health/rules.py:100-101`. At R2 the mode is enforced: the intake gate skips intake (`o/engine/gates.py:51-60`, `:123-132`) and the selector gate withholds every candidate, treating an unreadable mode as active (`o/selector/gate.py:532-602`) | `t/unit/health/test_rules.py::test_feed_stale_yields_no_new_commitments:186` | Not checked at contract admission (operator CRUD/admit) or at customer-API submission; that the transition is traced was not verified. At `434d230` nothing read the flag. Since R2 hotfix v3 (`afb26c2`) only `[health] firm_blocking_feeds` (default the ERCOT price, `o/health/rules.py:139` there) sets the mode. |
 | ES07-S03 | Hub health: online/stale/fault | built | `o/health/rules.py:66-77` (`classify_hub_health`) | `t/unit/health/test_rules.py:91-117` (4 tests); `t/unit/fleet/test_twin.py::test_hub_health_classifies_fault_independent_of_timing` | Cross-checked directly against the fleet twin's own classification. |
 | ES07-S04 | Cycle latency + engine-down degraded mode | built | `o/health/model.py:24`; `o/engine/latency.py:74`; `o/health/rules.py:225-265` | `t/unit/health/test_rules.py::test_engine_down_yields_hold_local_autonomy:192`; `t/unit/engine/test_latency.py` (10 tests); `e2e/perf/test_metrics.py` | The 2k-hub/30-min p99 < 500ms claim itself is measured by a manual perf-harness script (`e2e/perf/capture.py`), not a CI-asserted test — see §5. |
-| ES07-S05 | Guardian-down (HOLD) + SCADA-silent (`DIST_DEFERRAL_OPEN_LOOP`) | in build | `o/health/model.py:22-27` (4 `DegradedMode` values); `o/health/rules.py:92-109` (`derive_degraded_modes`) | `t/unit/health/test_rules.py::test_guardian_down_yields_hold:198`, `::test_degraded_modes_can_combine:204`; `t/unit/ui/test_degraded_and_escalation.py::test_banner_text_joins_labels_and_keeps_unknown_codes:57` (exercises the `DIST_DEFERRAL_OPEN_LOOP` label) | `HOLD` (guardian-down) is fully live. `DIST_DEFERRAL_OPEN_LOOP` is defined and covered for banner-text formatting only — its **sole production caller**, `o/health/__init__.py:364`, never passes the `dist_deferral_scada_silent` argument, so this mode can never actually be produced in production today (built dark for this half). |
+| ES07-S05 | Guardian-down (HOLD) + SCADA-silent (`DIST_DEFERRAL_OPEN_LOOP`) | in build (`afb26c2`: raised, display-only) | `o/health/model.py:22-27` (4 `DegradedMode` values); `o/health/rules.py:92-109` (`derive_degraded_modes`); at `afb26c2`: `o/health/rules.py:204-240` (`is_scada_silent`, `ALR-SCADA-SILENT`), wired `o/health/__init__.py:377` | `t/unit/health/test_rules.py::test_guardian_down_yields_hold:198`, `::test_degraded_modes_can_combine:204`; `t/unit/ui/test_degraded_and_escalation.py::test_banner_text_joins_labels_and_keeps_unknown_codes:57` (exercises the `DIST_DEFERRAL_OPEN_LOOP` label) | `HOLD` (guardian-down) is fully live. At `434d230` and `6470cfa` `DIST_DEFERRAL_OPEN_LOOP` could never be produced (its sole caller never passed `dist_deferral_scada_silent`). Since R2 hotfix v3 (`afb26c2`) it is set after 60 s without any SCADA reading, fleet-wide rather than per bank, never before the first reading. Tests at `afb26c2`: `t/unit/health/test_rules.py:218`, `t/unit/health/test_init.py:389,402,416,431`. Only the UI reads the mode; the PI loop does not fall back to open loop. |
 
 ### ES08 — Settlement (M&V, billing, profitability)
 
@@ -351,9 +352,9 @@ heading is §7 (content is correct); D-19's decision-log "Affects: 04-external-d
 
 - **ES07-S02** — the selector-side enforcement of "no new commitments while a feed is stale" has no code and no
   test at all; only the health/alerting half is built (see §2).
-- **ES07-S05** — `DIST_DEFERRAL_OPEN_LOOP` is permanently unreachable in production: its sole caller
-  (`o/health/__init__.py:364`) never passes the flag that would ever set it `True`. Tested only for banner-text
-  formatting, never for the condition that should trigger it.
+- **ES07-S05** — at `434d230`/`6470cfa`, `DIST_DEFERRAL_OPEN_LOOP` was unreachable in production (its sole caller
+  never passed the flag). R2 hotfix v3 (`afb26c2`) sets it after 60 s without SCADA readings and tests that, but
+  nothing but the UI reads it.
 - **ES08-S04** — `compute_value_added_by_lp`/`compute_forgone_upside` are tested only against fixtures; the real
   data feed (`o/settle/pg_backend.py:661-667,681-686`) is stubbed to `None`/0 in production (built dark).
 - **A11 / ES05-S06 / ES07-S04** — the single most-cited non-functional target ("RT cycle p99 < 500ms at 2,000

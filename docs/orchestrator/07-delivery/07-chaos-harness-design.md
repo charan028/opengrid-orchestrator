@@ -447,9 +447,15 @@ Modes (lead default, §13 Q4):
 - TS-C-01 (feeds), TS-C-02 (engine), TS-C-03 (guardian), TS-C-03b (safestop) and TS-C-04 (sims) also run in mode H.
   TS-C-01's mode H asserts the NO_NEW_COMMITMENTS gate. R2 (`main` `6470cfa`) built it: og-engine skips intake
   (`o/engine/gates.py:51-60`) and the selector gate selects nothing new (`o/selector/gate.py:532-602`), so the row
-  is expected to pass. Its hold must outlast the chaos config's `[feeds.staleness] ercot_price_fresh_s`. That is
-  600 s in `test.toml:43-49`, which `chaos.toml` inherits; production uses 2,700 s since the R2 hotfix, so
-  `chaos.toml` must keep the short window.
+  is expected to pass. Its hold must outlast the chaos config's `[feeds.staleness] ercot_price_fresh_s`.
+  `test.toml:43-49`, which `chaos.toml` extends, still has 600 s for price and 1,800 s for load. Now that R2
+  enforces NO_NEW_COMMITMENTS, those windows put a sim-fed workspace into the mode for part of every 15-min
+  price interval and every load hour: the simulator stamps observations at the interval start, as ERCOT does
+  (seen on the dev stack running R2). That would disturb every other row.
+  - `chaos.toml` should take base's 2,700 s and 172,800 s, as the dev stack does (PR #35).
+  - TS-C-01 mode H then needs a price feed held down for more than 2,700 s, about 50 minutes, which is too long
+    for the nightly window (§13 Q4). It needs its own slot, or a `stale_posting` injection started before the
+    campaign.
 - TS-06-23 is mode H by definition.
 
 In an R-only row (TS-C-05, TS-C-06) the outage lasts only the restart gap: `RestartSec` plus startup,
@@ -679,7 +685,7 @@ The lead answered these on 2026-09-26. Each answer is the default until the owne
    - `og-feeds`' degraded mode ("no new commitments") is not reached in the restart gap; TS-02-05/07 cover it with a
      stubbed stale feed. The 2026-09-26 review found that mode displayed but not enforced. R2 enforces it at the
      intake and selector gates (not at contract admission). The mode-H `og-feeds` kill, held past the chaos
-     config's 600 s window, tests that enforcement end to end.
+     config's price window (2,700 s with base's values; see §7), tests that enforcement end to end.
    - For `og-settle` and `og-api`, the outage behaviour is observed only for the restart gap: settlement and health
      evaluation pause, and the console is lost.
 5. **Cadence.** *Lead default, pending owner confirmation:* nightly (the §14 timer, 00:30 to 02:45), plus on demand
