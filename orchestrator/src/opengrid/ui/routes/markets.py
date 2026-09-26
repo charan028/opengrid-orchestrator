@@ -34,6 +34,24 @@ _SERIES_LABELS: dict[str, str] = {
     "as_price": "AS price ($/MW)",
 }
 
+# What `GET /og/api/markets/series` needs for each screen series (found on the first live run: the API
+# filters on the raw `feed_obs.series` value, which is a zone / sub-series name, never "price" or "load",
+# so every chart came back empty). One product per screen series; `series` narrows to one sub-series
+# where the product carries several kinds of rows, and is left open where the sub-series are the four
+# load zones, which `series_chart_view` then plots as one line each. Product ids: `[feeds.ercot].products`.
+_SERIES_QUERY: dict[str, dict[str, str]] = {
+    "price": {"product": "np6-905-cd"},  # settlement point prices, one line per LZ_* zone
+    "load": {"product": "np6-345-cd", "series_key": "total"},
+    "wind": {"product": "np4-732-cd", "series_key": "actual"},
+    "solar": {"product": "np4-737-cd", "series_key": "actual"},
+    "as_price": {"product": "np4-188-cd", "series_key": "RRS"},
+}
+
+# `og.forecast.series_key` is a load zone (`opengrid.forecast.service` forecasts each LZ_* zone for kind
+# "price"/"load"); `series_key="price"` matched nothing live. The band shows one zone.
+# ponytail: fixed zone; add a zone selector to the screen if operators need the others.
+_FORECAST_ZONE = "LZ_NORTH"
+
 # `feed_status.source` values map to the LIVE/SIM/HIST badge (02b S8: "colour-blind-safe status
 # colours ... not colour alone"). A source not in this map is shown as LIVE by default since the real
 # feeds (ercot/eia/nws) are the common case; SIM and history-replay sources are the exceptions.
@@ -51,24 +69,35 @@ def _age_seconds(ts: datetime, *, now: datetime) -> float:
 def series_chart_view(observations: list[dict[str, Any]], *, series_key: str) -> dict[str, Any]:
     """One ECharts line-chart option per market series (price/load/wind/solar/AS), 02b S8 screen 4."""
     points = sorted(observations, key=lambda obs: obs["ts"])
+    # One ECharts line per distinct `series` value (the four load zones for the price product); a
+    # single-series product still renders as one line named after the screen series.
+    by_series: dict[str, list[dict[str, Any]]] = {}
+    for point in points:
+        by_series.setdefault(str(point.get("series") or series_key), []).append(point)
+    x_axis = sorted({point["ts"] for point in points})
+    lines = [
+        {
+            "type": "line",
+            "name": name if len(by_series) > 1 else _SERIES_LABELS.get(series_key, series_key),
+            "data": [{p["ts"]: p["value"] for p in pts}.get(ts) for ts in x_axis],
+            "showSymbol": False,
+        }
+        for name, pts in by_series.items()
+    ]
+    latest_ts = x_axis[-1] if x_axis else None
+    latest = [p["value"] for p in points if p["ts"] == latest_ts]
     return {
         "series_key": series_key,
         "label": _SERIES_LABELS.get(series_key, series_key),
         "chart_option": {
-            "xAxis": {"type": "category", "data": [point["ts"] for point in points]},
+            "xAxis": {"type": "category", "data": x_axis},
             "yAxis": {"type": "value"},
-            "series": [
-                {
-                    "type": "line",
-                    "name": _SERIES_LABELS.get(series_key, series_key),
-                    "data": [point["value"] for point in points],
-                    "showSymbol": False,
-                }
-            ],
+            "legend": {"show": len(lines) > 1},
+            "series": lines,
             "tooltip": {"trigger": "axis"},
         },
-        "latest_value": points[-1]["value"] if points else None,
-        "latest_ts": points[-1]["ts"] if points else None,
+        "latest_value": round(sum(latest) / len(latest), 2) if latest else None,
+        "latest_ts": latest_ts,
         "unit": points[-1].get("unit") if points else None,
         "point_count": len(points),
     }
@@ -173,7 +202,7 @@ async def markets_page(request: Request) -> HTMLResponse:
 
     for series_key in SERIES_KEYS:
         try:
-            observations = await get_json("/og/api/markets/series", params={"series_key": series_key})
+            observations = await get_json("/og/api/markets/series", params=_SERIES_QUERY[series_key])
             series_charts.append(
                 series_chart_view(
                     observations if isinstance(observations, list) else [], series_key=series_key
@@ -189,7 +218,7 @@ async def markets_page(request: Request) -> HTMLResponse:
         # rejects anything else. This screen's forecast band is the wholesale price forecast, so "price"
         # is both a valid kind and the correct one; "quantiles" (fixed here, BUILD.md code-review round
         # item 6) was never a valid `kind` value and would have 422'd against a real `og-api`.
-        forecast = await get_json("/og/api/forecast", params={"series_key": "price", "kind": "price"})
+        forecast = await get_json("/og/api/forecast", params={"series_key": _FORECAST_ZONE, "kind": "price"})
     except ApiUnavailable as exc:
         logger.warning("markets: forecast unavailable: %s", exc)
         degraded = degraded or str(exc)
