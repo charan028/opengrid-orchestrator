@@ -75,7 +75,30 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/fleet/hubs": _load("hubs.json"),
         "/og/api/fleet/hubs/hub-0001": hub_detail,
         "/og/api/fleet/hubs/hub-0002": {**hub_detail, "hub_id": "hub-0002"},
-        "/og/api/dispatch/opportunities": _load("dispatch_obligations.json"),
+        # plus two awarded AS obligations (ECRS, NSPIN) so the AS deployment form renders
+        "/og/api/dispatch/opportunities": [
+            *_load("dispatch_obligations.json"),
+            *[
+                {
+                    "obligation_id": oid,
+                    "opportunity_id": oid,
+                    "contract_id": cid,
+                    "service_type": "ERCOT_AS",
+                    "tier": "T2",
+                    "state": "COMMITTED",
+                    "committed_qty_kw": "500.000",
+                    "at_risk": False,
+                    "last_reason_code": None,
+                    "window_start": "2026-09-26T19:00:00+00:00",
+                    "window_end": "2026-09-26T20:00:00+00:00",
+                    "version": 1,
+                }
+                for oid, cid in (
+                    ("aaaa0001-0000-0000-0000-00000000a5a1", "00000000-0000-7000-8000-000000000d03"),
+                    ("aaaa0002-0000-0000-0000-00000000a5a2", "00000000-0000-7000-8000-000000000d09"),
+                )
+            ],
+        ],
         "/og/api/dispatch/as-deployments": [],
         "/og/api/dispatch/plan/latest": _load("dispatch_plan.json"),
         "/og/api/ledger/BANK-0001/timeline": timeline,
@@ -83,6 +106,18 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/forecast": _load("markets_forecast.json"),
         "/og/api/profitability/summary": _load("profitability_summary.json"),
         "/og/api/views/settlement": _load("views_settlement.json"),
+        "/og/api/contracts": [
+            {
+                "contract_id": "00000000-0000-7000-8000-000000000d03",
+                "variant": "ECRS",
+                "service_type": "ERCOT_AS",
+            },
+            {
+                "contract_id": "00000000-0000-7000-8000-000000000d09",
+                "variant": "NSPIN",
+                "service_type": "ERCOT_AS",
+            },
+        ],
         "/og/api/profitability/per-kw": _load("profitability_per_kw.json"),
         "/og/api/profitability/lp-value": _load("profitability_lp_value.json"),
         "/og/api/work-orders": _load("pq_work_orders.json"),

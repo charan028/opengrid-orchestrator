@@ -110,9 +110,27 @@ def test_as_award_product_comes_from_the_contract() -> None:
         [{"contract_id": "d03", "variant": "ECRS"}, {"contract_id": "d09", "variant": "NSPIN"}]
     )
     awards = [
-        {"service_type": "ERCOT_AS", "obligation_id": "o1", "contract_id": "d03", "committed_qty_kw": "100"},
-        {"service_type": "ERCOT_AS", "obligation_id": "o2", "contract_id": "d09", "committed_qty_kw": "100"},
-        {"service_type": "ERCOT_AS", "obligation_id": "o3", "contract_id": "dxx", "committed_qty_kw": "100"},
+        {
+            "service_type": "ERCOT_AS",
+            "obligation_id": "o1",
+            "contract_id": "d03",
+            "state": "COMMITTED",
+            "committed_qty_kw": "100",
+        },
+        {
+            "service_type": "ERCOT_AS",
+            "obligation_id": "o2",
+            "contract_id": "d09",
+            "state": "COMMITTED",
+            "committed_qty_kw": "100",
+        },
+        {
+            "service_type": "ERCOT_AS",
+            "obligation_id": "o3",
+            "contract_id": "dxx",
+            "state": "COMMITTED",
+            "committed_qty_kw": "100",
+        },
     ]
     rows = {
         r["obligation_id"]: r
