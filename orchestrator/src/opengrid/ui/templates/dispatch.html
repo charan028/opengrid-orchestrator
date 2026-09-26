@@ -23,7 +23,7 @@
 </style>
 
 <section class="og-panel" aria-labelledby="pipeline-heading">
-  <h2 id="pipeline-heading">Opportunity pipeline ({{ pipeline.customer_count }} customers, {{ pipeline.total }} obligations)</h2>
+  <h2 id="pipeline-heading">Opportunity pipeline ({{ pipeline.customer_count }} customers, {{ pipeline.open }} open{% if pipeline.closed %}, {{ pipeline.closed }} expired or rejected{% endif %})</h2>
   <p>{% with since_iso=pipeline.generated_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
   <div class="og-kanban">
     {% for column in pipeline.columns %}
@@ -58,7 +58,7 @@
     <dl>
       <dt>Mode</dt><dd>{{ plan.mode_label }} ({{ plan.plan_mode }})</dd>
       <dt>Gate</dt><dd>{{ plan.gate_kind }}</dd>
-      <dt>Horizon</dt><dd>{{ plan.horizon_start }} &ndash; {{ plan.horizon_end }}</dd>
+      <dt>Horizon</dt><dd>{{ plan.horizon_display }}</dd>
       <dt>Solver status</dt><dd>{{ plan.solver_status }}</dd>
       {% if plan.solver_gap_pct is not none %}<dt>Solver gap</dt><dd>{{ "%.2f"|format(plan.solver_gap_pct) }}%</dd>{% endif %}
       {% if plan.solver_time_ms is not none %}<dt>Solve time</dt><dd>{{ plan.solver_time_ms }} ms</dd>{% endif %}
