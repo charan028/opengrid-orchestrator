@@ -3,7 +3,11 @@
 ## Authentication and roles
 
 Apache terminates HTTP Basic Auth and forwards the authenticated name in the `X-Remote-User` header, after
-stripping any value a client sent. `og-api` binds to loopback only, so it trusts that header and nothing else.
+stripping any value a client sent. Loopback is not a trust boundary on the base server (simulators and other
+local processes can reach `og-api`), so `og-api` believes `X-Remote-User` only when the request also carries
+`X-OG-Proxy-Auth` equal to the shared secret `OG_API_PROXY_SECRET`. Apache sets that header (after unsetting
+any client value); nothing else is given the secret. No secret configured, no header, or a wrong one: `401`.
+The role is derived from the identity alone (`[api.roles]`, below); no client-supplied role header is trusted.
 
 | Role | Can do | How an identity gets it |
 |---|---|---|
@@ -27,7 +31,7 @@ header and accepts only connections that originate from loopback.
 | `POST /og/api/scenario/{name}` | Trigger a simulator scenario |
 | `POST /og/api/admin/seed-fleet-topology` | Re-run the idempotent hub and bank seed |
 
-Non-mapped identities get `403`, a missing header gets `401`.
+Non-mapped identities get `403`; a missing identity header or a missing/wrong proxy secret gets `401`.
 
 ## CSRF (browsers)
 
