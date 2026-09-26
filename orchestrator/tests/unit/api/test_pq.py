@@ -78,7 +78,6 @@ def pq_client(
     fake_store, fake_trace_store, fake_proposals, fake_config, pq_store, asset_ports, publisher
 ) -> TestClient:
     app = create_app()
-    app.include_router(pq.router)
     app.dependency_overrides[get_store] = lambda: fake_store
     app.dependency_overrides[get_trace_store] = lambda: fake_trace_store
     app.dependency_overrides[get_proposals] = lambda: fake_proposals
@@ -427,3 +426,20 @@ def test_calibrate_confirm_unknown_proposal_is_404(pq_client) -> None:
 def test_calibrate_requires_a_reason(pq_client) -> None:
     resp = pq_client.post(f"/og/api/hubs/{HUB}/calibrate", headers=OPERATOR_HEADERS, json={"reason": ""})
     assert resp.status_code == 422
+
+
+def test_create_app_mounts_the_pq_router() -> None:
+    """The one-line mount in `api/app.py` (merge of #17): every WP-J path is served by `create_app()`."""
+    paths = set(create_app().openapi()["paths"])
+    for path in (
+        "/og/api/hubs/{hub_id}/waveform",
+        "/og/api/hubs/{hub_id}/spectrum",
+        "/og/api/banks/{bank_id}/pq",
+        "/og/api/obligations/{obligation_id}/pq-compliance",
+        "/og/api/hubs/{hub_id}/asset-health",
+        "/og/api/hubs/{hub_id}/calibration-history",
+        "/og/api/work-orders",
+        "/og/api/hubs/{hub_id}/waveform-capture",
+        "/og/api/hubs/{hub_id}/calibrate",
+    ):
+        assert path in paths, path
