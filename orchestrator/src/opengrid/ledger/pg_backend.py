@@ -193,6 +193,10 @@ class PgGrantBackend:
         if not records:
             return
         async with self._pool.connection() as conn, conn.transaction():
+            # One grant set per 2 s cycle, re-derived every cycle: commit without waiting on the WAL
+            # fsync (see opengrid.fleet.pg_backend._ASYNC_COMMIT_SQL). Reservations/commitments above
+            # keep synchronous commit (K2/K13 durability).
+            await conn.execute("SET LOCAL synchronous_commit TO OFF")
             for record in records:
                 await conn.execute(
                     """

@@ -76,6 +76,10 @@ class EngineBackend(Protocol):
         """Seconds since `process`'s last heartbeat, or `None` if it has never reported one."""
         ...
 
+    async def next_epoch(self) -> int:
+        """K6: an epoch strictly greater than any the guardian has accepted (`og.lease_state`)."""
+        ...
+
     async def insert_command_batch(self, row: CommandBatchRow) -> None: ...
 
     async def notify_guardian(self, command_batch_id: UUID) -> None:
@@ -309,10 +313,10 @@ class _EngineState:
     lifecycle_backend: LifecycleBackend | None = None
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S
     cycle_seq: int = 0
-    # MVP-S simplification: a single static epoch for the process lifetime (00-invariants.md K6's
-    # "epochs increase strictly" is satisfied trivially -- a real epoch bump on guardian/engine restart
-    # recovery is `MVP-J` scope, tracked separately; `seq` alone (monotonic per tick) already gives every
-    # batch a strictly-increasing freshness key within this epoch, which is all G-13 needs for MVP-S).
+    # K6: one epoch per engine process, strictly above every (epoch, seq) the guardian has durably
+    # accepted (`EngineBackend.next_epoch`); `seq` (per tick) orders batches within it. A fixed epoch
+    # restarted `seq` at 1 below the guardian's high-water mark, so every batch after an engine restart
+    # was VETOED on G-13 (live 2026-09-26).
     epoch: int = 1
 
 
@@ -512,7 +516,9 @@ async def main(cfg: Config) -> None:
             ),
             lifecycle_backend=backend,
             lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
+            epoch=await backend.next_epoch(),
         )
+        logger.info("engine epoch", extra={"epoch": state.epoch})
 
         mqtt_password = resolve_secret("OG_MQTT_ENGINE_PASSWORD")
         async with build_client(

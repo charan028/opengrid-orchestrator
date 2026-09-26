@@ -84,7 +84,8 @@ async def test_record_scada_observations_maps_quality_and_commits_once(
 
     await backend.record_scada_observations(signals)
 
-    sql, rows = cursor.executed[0]
+    assert cursor.executed[0][0] == "SET LOCAL synchronous_commit TO OFF"  # soft state, see pg_backend
+    sql, rows = cursor.executed[1]
     assert "og.feed_obs" in sql
     assert [r["bank_id"] for r in rows] == ["bank-000", "bank-001"]
     assert {r["series"] for r in rows} == {"APPARENT_POWER_KVA"}

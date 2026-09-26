@@ -35,6 +35,7 @@ SELECT DISTINCT contract_id FROM og.renomination_point
 WHERE scheduled_at <= %(now)s AND exercised_at IS NULL
 """
 _HEARTBEAT_TS_SQL = "SELECT ts FROM og.heartbeat WHERE process = %(process)s"
+_NEXT_EPOCH_SQL = "SELECT COALESCE(MAX(epoch), 0) + 1 FROM og.lease_state"
 _INSERT_COMMAND_BATCH_SQL = """
 INSERT INTO og.command_batch
     (command_batch_id, cycle_id, ledger_version, submission_id, command_count, merkle_root,
@@ -84,6 +85,12 @@ class PgEngineBackend:
             return None
         last_ts: datetime = row[0]
         return (now - last_ts).total_seconds()
+
+    async def next_epoch(self) -> int:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_NEXT_EPOCH_SQL)
+            row = await cur.fetchone()
+        return int(row[0]) if row else 1
 
     async def insert_command_batch(self, row: CommandBatchRow) -> None:
         # K10: must be durably committed before `notify_guardian` wakes the guardian -- without an

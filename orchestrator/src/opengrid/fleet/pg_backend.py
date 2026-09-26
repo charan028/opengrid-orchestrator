@@ -62,6 +62,12 @@ _UPSERT_HUB_STATE_CONFLICT_SET = sql.SQL(
 )
 _COPY_TELEMETRY_SQL = "COPY og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health) FROM STDIN"
 
+# Telemetry, hub_state and SCADA readings are soft state re-sent every 2 s: their transactions commit
+# asynchronously (WAL still written, just not fsync-waited). On the base server a WAL fsync took ~0.5 s
+# (live 2026-09-26: 4 commits/s, disk 100% busy), so waiting on it in every 2 s flush stalled the engine
+# tick for seconds and aged every hub to stale. Ledger/commitment/trace writes keep synchronous commit.
+_ASYNC_COMMIT_SQL = "SET LOCAL synchronous_commit TO OFF"
+
 
 class PgFleetBackend:
     """`FleetBackend` implementation over a `psycopg_pool.AsyncConnectionPool`."""
@@ -118,6 +124,7 @@ class PgFleetBackend:
             sql.SQL(", ").join([sql.Placeholder()] * len(_UPSERT_HUB_STATE_COLUMNS))
         )
         async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ASYNC_COMMIT_SQL)
             for start in range(0, len(states), chunk_size):
                 chunk = states[start : start + chunk_size]
                 values_sql = sql.SQL(", ").join([row_placeholder] * len(chunk))
@@ -144,15 +151,13 @@ class PgFleetBackend:
     async def copy_telemetry(self, rows: list[TelemetryRow]) -> None:
         if not rows:
             return
-        async with (
-            self._pool.connection() as conn,
-            conn.cursor() as cur,
-            cur.copy(_COPY_TELEMETRY_SQL) as copy,
-        ):
-            for row in rows:
-                await copy.write_row(
-                    (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health)
-                )
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ASYNC_COMMIT_SQL)
+            async with cur.copy(_COPY_TELEMETRY_SQL) as copy:
+                for row in rows:
+                    await copy.write_row(
+                        (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health)
+                    )
 
     async def record_scada_observations(self, signals: list[ScadaBankSignal]) -> None:
         """All buffered readings in one statement batch and one commit (called from `fleet.flush`)."""
@@ -170,5 +175,6 @@ class PgFleetBackend:
             for s in signals
         ]
         async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ASYNC_COMMIT_SQL)
             await cur.executemany(_INSERT_SCADA_FEED_OBS_SQL, rows)
             await conn.commit()
