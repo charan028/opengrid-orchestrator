@@ -17,16 +17,26 @@ Everywhere below, `<root>` stands for that configured prefix.
 | `<root>/scada/<bank_id>` | SCADA → orchestrator | 0 | No | `og_sim` (simulated utility SCADA) | `og_engine` (`DIST_DEFERRAL` PI loop) | `scada_bank_signal.schema.json` |
 | `<root>/scada/instruction/<bank_id>` | SCADA/utility → orchestrator | 1 | No | `og_sim` or utility system | `og_engine`, `og_guardian` (G-15) | `scada_utility_instruction.schema.json` |
 | `<root>/scenario/cmd` | api/operator → sim | 1 | No | `og_api` (scenario panel) | `og_sim` | `scenario_control.schema.json` |
+| `<root>/scada/wave/<zone>/<bank_id>/<hub_id>/summary` | hub → orchestrator | 0 | No | `og_sim` (or a real hub) | `og_engine` (allocator PQ self-check), the wave-ingestion service | `pq_waveform_summary.schema.json` |
+| `<root>/scada/wave/<zone>/<bank_id>/<hub_id>/raw` | hub → orchestrator | 1 | No | `og_sim` (or a real hub), triggered only | the wave-ingestion service, `og_guardian` (G-22 fallback evidence) | `pq_waveform_raw.schema.json` |
+| `<root>/scada/wave/<zone>/<bank_id>/<hub_id>/request` | orchestrator → hub | 1 | No | `og_api` / `og_engine` (on-demand capture trigger) | `og_sim` | `waveform_capture_request.schema.json` |
+| `<root>/cmd/cal/<hub_id>` | guardian → hub | 1 | No | `og_guardian` | `og_sim` hub task for that hub | `calibration_command.schema.json` |
+| `<root>/ack/cal/<hub_id>` | hub → orchestrator | 1 | No | `og_sim` (or a real hub) | `og_engine`, `og_guardian` | `calibration_ack.schema.json` |
 
 `<scope>` for `<root>/stop/*` is one of `fleet`, `zone/<zone>`, `bank/<bank_id>`; `<id>` is the `stop_event`
 UUID. A retained **empty payload** on a given `<root>/stop/<scope>/<id>` clears that stop (release).
 
 ## QoS rationale
 
-- **QoS 0** (`tel`, `scada`): high-frequency, loss-tolerant. A missed sample is covered 2s later and only
-  feeds the freshness/health model, never a hard safety decision on its own.
-- **QoS 1** (`cmd`, `ack`, `lease`, `stop`, `scenario`, `scada/instruction`): at-least-once; consumers
-  de-duplicate by `batch_id`/`seq` (commands/acks) or by retained-message semantics (`lease`, `stop`).
+- **QoS 0** (`tel`, `scada`, `scada/wave/.../summary`): high-frequency, loss-tolerant. A missed sample is
+  covered 2s later (or at the next telemetry period) and only feeds the freshness/health model or the PQ
+  monitoring loop's rolling baseline, never a hard safety decision on its own.
+- **QoS 1** (`cmd`, `ack`, `lease`, `stop`, `scenario`, `scada/instruction`, `scada/wave/.../raw`,
+  `scada/wave/.../request`, `cmd/cal`, `ack/cal`): at-least-once; consumers de-duplicate by
+  `batch_id`/`seq`/`calibration_id`/`request_id` (commands/acks/requests) or by retained-message semantics
+  (`lease`, `stop`). A triggered raw waveform capture and a calibration command are each a one-shot,
+  operationally significant exchange, so at-most-once (QoS 0) is not acceptable for them even though the
+  periodic summary channel tolerates loss.
 - **Retained** (`lease`, `stop`): a hub that connects or reconnects mid-lease or mid-stop immediately gets
   the current state without waiting for the next publish.
 
@@ -35,8 +45,11 @@ UUID. A retained **empty payload** on a given `<root>/stop/<scope>/<id>` clears 
 One MQTT user per process that touches the broker: `og_engine`, `og_guardian`, `og_safestop`, `og_sim`,
 `og_api`. `feeds` and `settle` never touch MQTT. Each user's ACL is scoped to exactly the rows above (e.g.
 `og_guardian` may publish `cmd/#` and `lease/#`, subscribe to nothing; `og_sim` may publish `tel/#`,
-`ack/#`, `scada/#` and subscribe to `cmd/#`, `stop/#`, `lease/#`, `scenario/cmd`). No anonymous access, no
-wildcard publish outside the configured root.
+`ack/#`, `scada/#` (including `scada/wave/#`) and `ack/cal/#`, and subscribe to `cmd/#` (including
+`cmd/cal/#`), `stop/#`, `lease/#`, `scenario/cmd` and `scada/wave/+/+/+/request`). No anonymous access, no
+wildcard publish outside the configured root. `og_guardian`'s existing `cmd/#` publish scope already covers
+`cmd/cal/<hub_id>` -- no new ACL grant is needed for the calibration command itself, only for the new
+`scada/wave/#` / `ack/cal/#` topics.
 
 ## Command freshness fields (K6)
 

@@ -36,7 +36,9 @@
     "committed_qty_kw": 8.0,
     "state": "DELIVERING",
     "at_risk": true,
-    "last_reason_code": "FEEDER_OVERLOAD"
+    "last_reason_code": "FEEDER_OVERLOAD",
+    "energy_margin_kwh": -3.5,
+    "time_to_depletion_h": 0.75
   },
   {
     "obligation_id": "OBL-1004",

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/waveform_capture_request.schema.json",
+  "title": "WaveformCaptureRequest",
+  "description": "Orchestrator -> hub, published on <root>/scada/wave/<zone>/<bank_id>/<hub_id>/request, QoS 1, on-demand capture trigger (06-service-profiles-and-power-quality.md S6.4b). The hub responds by publishing on the matching .../raw topic (pq_waveform_raw.schema.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "hub_id", "trigger_reason", "issued_at", "expires_at"],
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "hub_id": { "type": "string", "minLength": 1 },
+    "trigger_reason": { "type": "string", "enum": ["PQ_DEVIATION", "API_REQUEST", "ROTATING_AUDIT", "CALIBRATION_VERIFICATION"] },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time", "description": "The hub ignores the request if it cannot capture and publish before this deadline." }
+  }
+}

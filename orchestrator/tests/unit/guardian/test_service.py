@@ -363,6 +363,30 @@ async def test_unknown_hub_fails_closed(fakes, guardian_config, signing_seed):
     assert "G-01" in verdict.vetoed_rule_ids
 
 
+async def test_g01_energy_lease_vetoes_discharge_that_drains_below_reserve_within_lease(
+    fakes, guardian_config, signing_seed
+):
+    """K1: a command well within instantaneous power/reserve bounds can still be vetoed once the
+    guardian projects the hub's OWN independently-read SoC across the command's full lease -- capacity
+    (kW) headroom alone is not enough; energy above reserve must hold for the whole hold duration."""
+    from dataclasses import replace
+
+    proposal = make_proposal(p_kw_setpoint=-30.0)
+    proposal = replace(proposal, expires_at=proposal.issued_at + timedelta(hours=1))
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.hubs.hubs["hub-0001"] = make_hub_snapshot(soc_kwh=10.0, p_kw=30.0)
+    batch = make_batch_row(proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+
+    verdict = await service.evaluate_and_sign(batch)
+
+    assert verdict.signature is None
+    assert "G-01-ENERGY" in verdict.vetoed_rule_ids
+    # The instantaneous G-01 check alone passes (soc 10.0 > reserve 7.84 + margin) -- proving this is a
+    # genuinely independent, additional check, not a duplicate of G-01.
+    assert "G-01" not in verdict.vetoed_rule_ids
+
+
 async def test_verdict_is_traced_on_pass(fakes, guardian_config, signing_seed):
     proposal = make_proposal()
     wire_default_passing_scenario(fakes, proposal)

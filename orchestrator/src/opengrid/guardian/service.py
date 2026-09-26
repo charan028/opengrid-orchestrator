@@ -32,7 +32,7 @@ from opengrid.platform.metrics import guardian_clock_offset_ms, guardian_verdict
 logger = logging.getLogger(__name__)
 
 _MAX_CYCLE_HISTORY = 64  # bound the in-memory ramp accumulators; MVP-S runs a 2s cycle, never GC-free
-_ITEM_LEVEL_RULES = frozenset({"G-01", "G-02", "G-04"})
+_ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04"})
 
 
 def _iso_z(dt: datetime) -> str:
@@ -90,8 +90,12 @@ class GuardianService:
         if await self._is_stop_engaged(proposal.bank_id):
             violations.append(CheckOutcome("SAFE_STOP", False, "SAFE_STOP_ENGAGED", hub_id=proposal.bank_id))
 
-        # The pre-image is its own trace row; the batch row points at it by `trace_pre_image_id`
-        # (never by `command_batch_id`, which is not a trace id). No pointer means no pre-image.
+        # K10/G-14: the durable pre-image is `og.trace.trace_id == batch.trace_pre_image_id` (the DDL's
+        # own FK, 02a S1.11) -- NOT `batch.command_batch_id` itself, which is a different id entirely
+        # (root cause of the "100% of verdicts VETO on G-14" incident, qa/merge-notes.md S17: this used
+        # to check `exists_preimage(batch.command_batch_id)`, which can only ever coincidentally match a
+        # trace row's own randomly-generated `trace_id`). A batch with no `trace_pre_image_id` at all
+        # was never traced and fails closed without a wasted DB round-trip.
         preimage_exists = batch.trace_pre_image_id is not None and await self.ports.trace.exists_preimage(
             batch.trace_pre_image_id
         )
@@ -136,6 +140,8 @@ class GuardianService:
         fleet_delta_kw = 0.0
         additional_charge_kw = 0.0
 
+        lease_ttl_h = max((proposal.expires_at - self.now_fn()).total_seconds(), 0.0) / 3600.0
+
         for item in proposal.items:
             hub = await self.ports.hubs.snapshot(item.hub_id)
             if hub is None:
@@ -147,6 +153,11 @@ class GuardianService:
             )
             if not g01.ok:
                 violations.append(g01)
+            g01_energy = checks.check_g01_energy_lease(
+                item, hub.params, hub.soc_kwh, lease_ttl_h, margin_pct=self.config.reserve_margin_pct
+            )
+            if not g01_energy.ok:
+                violations.append(g01_energy)
             g02 = checks.check_g02_hub_power(item, hub.params, inverter_cap_kw=self.config.inverter_cap_kw)
             if not g02.ok:
                 violations.append(g02)

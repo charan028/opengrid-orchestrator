@@ -38,7 +38,8 @@ class HubState(_Row):
     hub_id: str
     soc_kwh: float
     p_kw: float
-    health: Literal["online", "stale", "fault"] = "online"
+    # Full hub-health vocabulary used across fleet/health/api; "offline" is persisted by the health evaluator.
+    health: Literal["online", "stale", "offline", "fault"] = "online"
     lease_epoch: int = 0
     lease_expires_at: datetime | None = None
     last_command_id: UUID | None = None

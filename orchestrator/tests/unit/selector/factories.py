@@ -43,6 +43,7 @@ def binary_candidate(
 ) -> CandidateOpportunity:
     return CandidateOpportunity(
         opportunity_id=opportunity_id,
+        obligation_id=opportunity_id,
         contract_id=f"contract-{opportunity_id}",
         eligible_bank_ids=eligible_banks,
         window_intervals=window,
@@ -68,6 +69,7 @@ def continuous_candidate(
 ) -> CandidateOpportunity:
     return CandidateOpportunity(
         opportunity_id=opportunity_id,
+        obligation_id=opportunity_id,
         contract_id=f"contract-{opportunity_id}",
         eligible_bank_ids=eligible_banks,
         window_intervals=window,
@@ -90,10 +92,12 @@ def semi_continuous_candidate(
     window: tuple[int, ...],
     eligible_banks: tuple[str, ...],
     *,
+    category: str = "MARKET",
     degradation_cost_per_kwh: float = 0.0,
 ) -> CandidateOpportunity:
     return CandidateOpportunity(
         opportunity_id=opportunity_id,
+        obligation_id=opportunity_id,
         contract_id=f"contract-{opportunity_id}",
         eligible_bank_ids=eligible_banks,
         window_intervals=window,
@@ -102,6 +106,7 @@ def semi_continuous_candidate(
         variable_kind="SEMI_CONTINUOUS",
         min_qty_kw=min_qty_kw,
         increment_kw=increment_kw,
+        category=category,  # type: ignore[arg-type]
         degradation_cost_per_kwh=degradation_cost_per_kwh,
     )
 

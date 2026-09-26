@@ -26,8 +26,8 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, Protocol
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 import aiomqtt
@@ -42,12 +42,17 @@ from opengrid.platform.process import run_forever
 
 if TYPE_CHECKING:
     from opengrid.allocator.gateways import FleetGateway, LedgerGateway, ScadaGateway, ScheduleGateway
+    from opengrid.engine.gateways import EnergySufficiencyGateway
+    from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
 
 PROCESS_NAME = "engine"
 GATE_INTERVAL_MINUTES = 15
 GUARDIAN_PROCESS_NAME = "guardian"
+# K7: how long a signed command batch's lease holds (00-invariants.md K7's "30 s during events, 60 s
+# otherwise" -- the conservative default, matching opengrid.allocator.cycle's own lease-horizon default).
+DEFAULT_LEASE_TTL_S = 30.0
 
 
 class EngineBackend(Protocol):
@@ -111,14 +116,22 @@ class GateScheduler:
 
 
 def build_command_batch_row(
-    *, cycle_id: str, bank_id: str, grants: list[Grant], ledger_version: int
+    *,
+    command_batch_id: UUID,
+    trace_pre_image_id: UUID,
+    cycle_id: str,
+    bank_id: str,
+    grants: list[Grant],
+    ledger_version: int,
 ) -> CommandBatchRow:
     """S8 command build (02a S5.1/S6): summarize one bank's grants for this cycle into the
     `og.command_batch` row engine hands to guardian. `merkle_root` here is a single SHA-256 over the
     JCS-canonical grant list (a placeholder single-leaf "tree" -- MVP-S has no need for inclusion
-    proofs); guardian/allocator derive the actual signed per-hub `CommandItem` list independently from
-    `grant`/`hub_state` before publishing to MQTT.
-    """
+    proofs). `trace_pre_image_id` is REQUIRED and must be the `trace_id` of an ALREADY-COMMITTED
+    `RT_ALLOCATION` trace row (K10: "no command is signed unless its decision pre-image is durably
+    written to the trace") -- callers get it from `TraceStore.append()`'s return value, never invent
+    their own (qa/merge-notes.md S17: a `None`/mismatched id here is why every guardian verdict was
+    VETOED on G-14 before this fix)."""
     payload = [
         {
             "obligation_id": str(g.obligation_id) if g.obligation_id else None,
@@ -129,31 +142,104 @@ def build_command_batch_row(
         for g in grants
     ]
     return CommandBatchRow(
-        command_batch_id=uuid4(),
+        command_batch_id=command_batch_id,
         cycle_id=cycle_id,
         ledger_version=ledger_version,
         submission_id=f"{cycle_id}:{bank_id}",
         command_count=sum(1 for g in grants if not g.is_headroom),
         merkle_root=sha256_hex_of_json(payload),
-        trace_pre_image_id=None,
+        trace_pre_image_id=trace_pre_image_id,
     )
+
+
+def _distribute_hub_items(bank_id: str, grants: list[Grant], *, fleet_module: Any) -> list[dict[str, object]]:
+    """S8 command build (02a S1.10: "per-hub detail ... derivable from the command log referenced by
+    command_batch_id"): distribute each bank-level `Grant`'s kW across the bank's currently-online hubs,
+    proportional to each hub's `free_discharge_kw` share -- the per-hub `ProposedItem` list guardian's
+    G-01/G-01-ENERGY/G-02/G-04 checks need, since `og.grant` itself is bank-aggregate only (02a S1.10).
+    Every MVP-S grant (committed delivery or price-responsive spot export) is a DISCHARGE amount, so
+    `p_kw_setpoint` is the negative of the hub's share (opengrid.core.physics' +charge/-discharge
+    convention). A bank with no online/free hubs this cycle contributes no items -- the guardian's
+    per-item checks then have nothing to (dis)approve, matching K7 degrade-don't-trip.
+    """
+    hubs = [
+        h for h in fleet_module.hub_capabilities(bank_id) if h.health == "online" and h.free_discharge_kw > 0
+    ]
+    total_free_kw = sum(h.free_discharge_kw for h in hubs)
+    items: list[dict[str, object]] = []
+    if not hubs or total_free_kw <= 0:
+        return items
+    for grant in grants:
+        granted_kw = float(grant.granted_kw)
+        if granted_kw <= 0:
+            continue
+        reason_code = "R-GRANT-HEADROOM" if grant.is_headroom else "R-GRANT-COMMITTED"
+        for hub in hubs:
+            share_kw = granted_kw * (hub.free_discharge_kw / total_free_kw)
+            if share_kw <= 1e-9:
+                continue
+            items.append(
+                {
+                    "hub_id": hub.hub_id,
+                    "p_kw_setpoint": -share_kw,
+                    "reason_code": reason_code,
+                    "obligation_id": str(grant.obligation_id) if grant.obligation_id else None,
+                    "obligation_granted_kw": str(grant.granted_kw) if grant.obligation_id else None,
+                }
+            )
+    return items
 
 
 async def propose_batch_to_guardian(
     *,
     backend: EngineBackend,
+    trace: TraceStore,
+    fleet_module: Any,
     cycle_id: str,
     bank_id: str,
     grants: list[Grant],
     ledger_version: int,
+    epoch: int,
+    seq: int,
+    now: datetime,
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
 ) -> UUID | None:
-    """Build and persist this bank's command-batch summary and notify `og-guardian` (see module
-    docstring). Returns the new `command_batch_id`, or `None` if there is nothing to propose (empty
-    grant set -- nothing changed this cycle, no reason to wake the guardian)."""
+    """Build this bank's command-batch summary, durably write its `RT_ALLOCATION` decision pre-image to
+    the trace FIRST (K10), then persist `og.command_batch` (carrying that SAME trace row's id as
+    `trace_pre_image_id`) and only THEN notify `og-guardian` (see module docstring) -- in that order, so
+    the guardian can never be woken for a batch whose pre-image is not yet committed (qa/merge-notes.md
+    S17's incident: previously no `RT_ALLOCATION` trace row was written at all, `trace_pre_image_id` was
+    always `None`, and every verdict VETOed on G-14 `PROPOSAL_NOT_FOUND`). Returns the new
+    `command_batch_id`, or `None` if there is nothing to propose (empty grant set -- nothing changed
+    this cycle, no reason to wake the guardian)."""
     if not grants:
         return None
+
+    command_batch_id = uuid4()
+    issued_at = now
+    expires_at = now + timedelta(seconds=lease_ttl_s)
+    items = _distribute_hub_items(bank_id, grants, fleet_module=fleet_module)
+    trace_payload = {
+        "command_batch_id": str(command_batch_id),
+        "bank_id": bank_id,
+        "cycle_id": cycle_id,
+        "epoch": epoch,
+        "seq": seq,
+        "issued_at": issued_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "ledger_version": ledger_version,
+        "items": items,
+        "is_firm_event": False,
+    }
+    trace_ref = await trace.append(f"allocator-{bank_id}", "RT_ALLOCATION", "RT_ALLOCATION", trace_payload)
+
     row = build_command_batch_row(
-        cycle_id=cycle_id, bank_id=bank_id, grants=grants, ledger_version=ledger_version
+        command_batch_id=command_batch_id,
+        trace_pre_image_id=trace_ref.trace_id,
+        cycle_id=cycle_id,
+        bank_id=bank_id,
+        grants=grants,
+        ledger_version=ledger_version,
     )
     await backend.insert_command_batch(row)
     await backend.notify_guardian(row.command_batch_id)
@@ -176,6 +262,7 @@ async def guardian_is_available(
 class _EngineState:
     cfg: Config
     backend: EngineBackend
+    trace: TraceStore
     gate_scheduler: GateScheduler
     cycle_interval_s: float
     heartbeat_interval_s: float
@@ -186,7 +273,14 @@ class _EngineState:
     ledger_gateway: LedgerGateway
     scada_gateway: ScadaGateway
     schedule_gateway: ScheduleGateway
+    energy_sufficiency_gateway: EnergySufficiencyGateway | None = None
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S
     cycle_seq: int = 0
+    # MVP-S simplification: a single static epoch for the process lifetime (00-invariants.md K6's
+    # "epochs increase strictly" is satisfied trivially -- a real epoch bump on guardian/engine restart
+    # recovery is `MVP-J` scope, tracked separately; `seq` alone (monotonic per tick) already gives every
+    # batch a strictly-increasing freshness key within this epoch, which is all G-13 needs for MVP-S).
+    epoch: int = 1
 
 
 async def _engine_tick(state: _EngineState) -> None:
@@ -237,6 +331,15 @@ async def _engine_tick(state: _EngineState) -> None:
         schedule_gateway=state.schedule_gateway,
         now=now,
     )
+
+    # K1 (user requirement: energy above reserve checked continuously, EVERY cycle, not just power
+    # headroom): independent of the S1-S7 power-capability path above. Degrade, don't trip (K7) -- a
+    # failure here must never block the allocator's own grant/guardian handoff this cycle.
+    if state.energy_sufficiency_gateway is not None:
+        try:
+            await state.energy_sufficiency_gateway.run(now)
+        except Exception:
+            logger.exception("energy-sufficiency check failed this cycle", extra={"cycle_id": cycle_id})
     if not await guardian_is_available(
         state.backend, now=now, miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold
     ):
@@ -252,10 +355,16 @@ async def _engine_tick(state: _EngineState) -> None:
     for bank_id, bank_grants in grants_by_bank.items():
         await propose_batch_to_guardian(
             backend=state.backend,
+            trace=state.trace,
+            fleet_module=fleet,
             cycle_id=cycle_id,
             bank_id=bank_id,
             grants=bank_grants,
             ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+            epoch=state.epoch,
+            seq=state.cycle_seq,
+            now=now,
+            lease_ttl_s=state.lease_ttl_s,
         )
 
     _ = contracts  # imported for process-wiring completeness; admission itself is api/contracts' own path
@@ -272,7 +381,7 @@ async def main(cfg: Config) -> None:
     import opengrid.feeds as feeds_mod
     import opengrid.fleet as fleet_mod
     import opengrid.ledger as ledger_mod
-    from opengrid.engine.gateways import FleetCapabilityProvider, build_gateways
+    from opengrid.engine.gateways import EnergySufficiencyGateway, FleetCapabilityProvider, build_gateways
     from opengrid.engine.pg_backend import PgEngineBackend
     from opengrid.fleet.pg_backend import PgFleetBackend
     from opengrid.forecast import configure as configure_forecast
@@ -324,9 +433,12 @@ async def main(cfg: Config) -> None:
         from opengrid.trace import TraceStore
         from opengrid.trace.pg_backend import PgTraceBackend
 
+        # One TraceStore instance for this process (shared with intake) -- `propose_batch_to_guardian`
+        # writes each cycle's RT_ALLOCATION pre-image through this same store (qa/merge-notes.md S17).
+        trace_store = TraceStore(PgTraceBackend(pool))
         configure_intake(
             PgContractsRepo(pool),
-            TraceStore(PgTraceBackend(pool)),
+            trace_store,
             PgMarketDataPort(pool),
             forecast_scenarios=forecast_scenarios,
         )
@@ -336,6 +448,7 @@ async def main(cfg: Config) -> None:
         state = _EngineState(
             cfg=cfg,
             backend=backend,
+            trace=trace_store,
             gate_scheduler=GateScheduler(),
             cycle_interval_s=float(cfg.get("allocator.cycle_interval_s", 2.0)),
             heartbeat_interval_s=float(cfg.get("health.heartbeat_interval_s", 5.0)),
@@ -346,6 +459,8 @@ async def main(cfg: Config) -> None:
             ledger_gateway=ledger_gateway,
             scada_gateway=scada_gateway,
             schedule_gateway=schedule_gateway,
+            energy_sufficiency_gateway=EnergySufficiencyGateway(pool, trace_store),
+            lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
         )
 
         mqtt_password = resolve_secret("OG_MQTT_ENGINE_PASSWORD")

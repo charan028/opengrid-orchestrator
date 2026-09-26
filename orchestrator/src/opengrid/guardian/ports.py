@@ -74,7 +74,7 @@ class HubSnapshot:
     params: HubParams
     soc_kwh: float
     prev_p_kw: float
-    health: Literal["online", "stale", "fault"]
+    health: Literal["online", "stale", "offline", "fault"]
 
 
 @dataclass(frozen=True, slots=True)

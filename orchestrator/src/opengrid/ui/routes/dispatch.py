@@ -6,6 +6,13 @@ baseline), a real-time grants/substitutions feed, and commitment-lock events (K1
 first paint comes from `opengrid.ui.api_client.get_json` (a plain HTTP call to `og-api`, 02b S7.1);
 live updates after first paint are the browser's job via `og.sse("/og/api/stream/dispatch", ...)`. The
 view-model functions below are pure and unit-tested against JSON fixtures, no HTTP or DB involved.
+
+API field needed (not owned here, `opengrid.api`'s router): each row from
+`/og/api/dispatch/opportunities` (and the `/og/api/stream/dispatch` SSE payload's `opportunities` list)
+for a `COMMITTED`/`DELIVERING` obligation should carry `energy_margin_kwh` (float) and
+`time_to_depletion_h` (float | null) -- the continuous per-obligation energy-sufficiency check's output
+(K1, `opengrid.allocator.energy_sufficiency.EnergySufficiencyResult`). `pipeline_view` below already
+passes these through when present and degrades to `None` when absent.
 """
 
 from __future__ import annotations
@@ -66,6 +73,13 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
                 "at_risk": bool(row.get("at_risk", False)),
                 "reason_code": row.get("last_reason_code") or row.get("reason_code"),
                 "raw_state": state,
+                # K1 continuous energy-sufficiency (build brief item 5): per-committed-obligation energy
+                # margin (kWh, available - required above reserve) and time-to-depletion (hours) at the
+                # current committed draw rate. `None` when the API has not (yet) computed/attached these
+                # -- see this module's docstring / the caller's final report for the API fields needed
+                # (`energy_margin_kwh`, `time_to_depletion_h`) on `/og/api/dispatch/opportunities` rows.
+                "energy_margin_kwh": row.get("energy_margin_kwh"),
+                "time_to_depletion_h": row.get("time_to_depletion_h"),
             }
         )
     return {

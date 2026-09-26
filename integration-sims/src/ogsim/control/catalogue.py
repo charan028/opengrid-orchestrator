@@ -331,6 +331,102 @@ CATALOGUE: list[AnomalyType] = [
         wire_type="FLEET_RESERVE_FLOOR_PRESSURE",
         wire_target_kind="hub",
     ),
+    # ---- Power quality / inverter imperfection (owner: fleet, 06-service-profiles-and-
+    # power-quality.md §7.2/§7.5) -- applied by ogsim.fleet.pq.PqAnomalyManager. ----
+    AnomalyType(
+        id="frequency_drift",
+        owner="fleet",
+        target_kind="hub",
+        params={"target_offset_hz": {"type": "number", "default": 0.3}},
+        description="Ramps an inverter's frequency offset toward a target (PLL fault/firmware regression).",
+        wire_type="FLEET_FREQUENCY_DRIFT",
+        wire_target_kind="hub",
+    ),
+    AnomalyType(
+        id="harmonic_injection",
+        owner="fleet",
+        target_kind="hub",
+        params={
+            "thd_target_pct": {"type": "number", "default": 8.0},
+            "order": {"type": "integer", "default": 5, "enum": [3, 5, 7]},
+        },
+        description="Steps THD_I up and reweights harmonics toward one order (failing DC-link/PWM fault).",
+        wire_type="FLEET_HARMONIC_INJECTION",
+        wire_target_kind="hub",
+    ),
+    AnomalyType(
+        id="phase_imbalance_injection",
+        owner="fleet",
+        target_kind="hub or zone",
+        params={"bias_kw": {"type": "number", "default": 2.0}},
+        description=(
+            "Biases a hub's effective dispatched kW to skew one phase's aggregate (fleet-side "
+            "companion to the SCADA-side `phase_imbalance` reporting artifact)."
+        ),
+        wire_type="FLEET_PHASE_IMBALANCE_INJECTION",
+        wire_target_kind="hub",
+    ),
+    AnomalyType(
+        id="calibration_drift_correctable",
+        owner="fleet",
+        target_kind="hub",
+        params={
+            "target_freq_offset_hz": {"type": "number", "default": 0.2},
+            "target_voltage_offset_pct": {"type": "number", "default": 2.0},
+        },
+        description=(
+            "Drifts frequency/voltage/phase-angle offsets toward a target; a subsequent "
+            "CalibrationCommand fully or partially removes the drift (§5.5.4 ladder CORRECTED/IMPROVED)."
+        ),
+        wire_type="FLEET_CALIBRATION_DRIFT_CORRECTABLE",
+        wire_target_kind="hub",
+    ),
+    AnomalyType(
+        id="calibration_drift_hardware",
+        owner="fleet",
+        target_kind="hub",
+        params={
+            "target_freq_offset_hz": {"type": "number", "default": 0.2},
+            "target_voltage_offset_pct": {"type": "number", "default": 2.0},
+        },
+        description=(
+            "Same drift symptom as calibration_drift_correctable, but no CalibrationCommand has any "
+            "effect (simulated failed component) -- exercises the DEGRADED/replacement escalation path."
+        ),
+        wire_type="FLEET_CALIBRATION_DRIFT_HARDWARE",
+        wire_target_kind="hub",
+    ),
+    AnomalyType(
+        id="site_sag_swell",
+        owner="scada",
+        target_kind="bank",
+        params={
+            "mode": {"type": "string", "default": "sag", "enum": ["sag", "swell"]},
+            "pu_level": {"type": "number", "default": 0.85},
+        },
+        description=(
+            "Dips or raises reported per-phase voltage to a configured pu level, IEEE 1159 sag/swell "
+            "shaped, testing ride-through and G-23 (implemented by ogsim.scada, not this agent's lane)."
+        ),
+        wire_type="SCADA_SITE_SAG_SWELL",
+        wire_target_kind="bank",
+    ),
+    AnomalyType(
+        id="replace_inverter",
+        owner="fleet",
+        target_kind="hub",
+        params={
+            "new_serial": {"type": "string", "default": ""},
+            "new_firmware": {"type": "string", "default": ""},
+        },
+        description=(
+            "Physical inverter replacement (§ terminology: never a dispatch 'swap'): resets a hub's "
+            "unit(s) to freshly-drawn 'new unit' offsets/serial and clears any active calibration-drift "
+            "anomaly on it. An instantaneous control action, not a timed anomaly."
+        ),
+        wire_type="FLEET_REPLACE_INVERTER",
+        wire_target_kind="hub",
+    ),
 ]
 
 BY_ID: dict[str, AnomalyType] = {a.id: a for a in CATALOGUE}
