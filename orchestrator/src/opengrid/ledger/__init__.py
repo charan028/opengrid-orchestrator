@@ -66,9 +66,10 @@ R_ALREADY_COMMITTED = "R-COMMIT-ALREADY-COMMITTED"
 class ReservationError(Exception):
     """Raised by `reserve()` with `.reason_code` set (e.g. `R-COMMIT-LOCK-INFEASIBLE`)."""
 
-    def __init__(self, reason_code: str) -> None:
+    def __init__(self, reason_code: str, detail: dict[str, object] | None = None) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+        self.detail: dict[str, object] = detail or {}
 
 
 class CommitmentLockViolation(ReservationError):  # noqa: N818 -- name fixed by BUILD.md's task brief (K13)
@@ -326,7 +327,16 @@ class ReservationLedger:
                 capability_kw = await self._capability.capability_kw(bank_id, interval_start)
                 result: LimitResult = check_one_buyer([*existing_kw, float(kw)], float(capability_kw))
                 if not result.ok:
-                    raise ReservationError("R-COMMIT-LOCK-INFEASIBLE")
+                    raise ReservationError(
+                        "R-COMMIT-LOCK-INFEASIBLE",
+                        {
+                            "bank_id": bank_id,
+                            "interval_start": interval_start.isoformat(),
+                            "requested_kw": float(kw),
+                            "reserved_by_others_kw": sum(existing_kw),
+                            "capability_kw": float(capability_kw),
+                        },
+                    )
 
             version = await self._bump_version()
             records = [

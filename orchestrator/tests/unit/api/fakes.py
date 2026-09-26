@@ -226,7 +226,7 @@ class FakeStore:
             Reservation(
                 reservation_id=uuid4(),
                 obligation_id=uuid4(),
-                bank_id=uuid4(),
+                bank_id=SAMPLE_BANK_ID,
                 kind="POWER_KW",
                 amount=Decimal("50"),
                 interval_start=_now(),
@@ -246,7 +246,7 @@ class FakeStore:
                 grant_id=uuid4(),
                 cycle_id="cycle-1",
                 obligation_id=uuid4(),
-                bank_id=uuid4(),
+                bank_id=SAMPLE_BANK_ID,
                 granted_kw=Decimal("50"),
                 is_headroom=False,
                 ledger_version=1,

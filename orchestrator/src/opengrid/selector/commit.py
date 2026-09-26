@@ -104,13 +104,28 @@ async def _reserve_with_substitute(
         await ledger.reserve(obligation_id, selected_kw, plan_id, variable_kind=candidate.variable_kind)
         return True
     except ledger.ReservationError as exc:
+        _log_refusal(obligation_id, "planned", exc)
         if exc.reason_code != R_COMMIT_LOCK_INFEASIBLE:
             return False
     substitute = await replace_on_live_headroom(candidate, selected_kw)
     if substitute is None:
+        logger.info("no live-headroom substitute", extra={"obligation_id": str(obligation_id)})
         return False
     try:
         await ledger.reserve(obligation_id, substitute, plan_id, variable_kind=candidate.variable_kind)
-    except ledger.ReservationError:
+    except ledger.ReservationError as exc:
+        _log_refusal(obligation_id, "substitute", exc)
         return False
     return True
+
+
+def _log_refusal(obligation_id: UUID, attempt: str, exc: ledger.ReservationError) -> None:
+    logger.info(
+        "reservation refused",
+        extra={
+            "obligation_id": str(obligation_id),
+            "attempt": attempt,
+            "reason_code": exc.reason_code,
+            **exc.detail,
+        },
+    )

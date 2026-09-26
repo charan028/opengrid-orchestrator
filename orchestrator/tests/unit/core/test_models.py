@@ -193,7 +193,7 @@ def test_plan_reservation_grant_command_batch_verdict_stop_event():
     reservation = engine.Reservation(
         reservation_id=uuid4(),
         obligation_id=uuid4(),
-        bank_id=uuid4(),
+        bank_id="bank-000",
         kind="POWER_KW",
         amount=Decimal("10"),
         interval_start=NOW,
@@ -205,7 +205,7 @@ def test_plan_reservation_grant_command_batch_verdict_stop_event():
     grant = engine.Grant(
         grant_id=uuid4(),
         cycle_id="c1",
-        bank_id=uuid4(),
+        bank_id="bank-000",
         granted_kw=Decimal("5"),
         ledger_version=1,
     )

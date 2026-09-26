@@ -50,6 +50,13 @@ async def test_ts_05_02_reserve_refuses_to_exceed_capability(ledger: Reservation
     with pytest.raises(ReservationError) as exc_info:
         await ledger.reserve(uuid4(), {_key(): Decimal(20)}, uuid4())
     assert exc_info.value.reason_code == "R-COMMIT-LOCK-INFEASIBLE"
+    assert exc_info.value.detail == {
+        "bank_id": "bank-1",
+        "interval_start": T0.isoformat(),
+        "requested_kw": 20.0,
+        "reserved_by_others_kw": 40.0,
+        "capability_kw": 50.0,
+    }
     # the failed attempt must not have written anything (all-or-nothing)
     assert await ledger.free_headroom("bank-1", T0) == Decimal(10)
 

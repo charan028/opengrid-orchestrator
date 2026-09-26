@@ -144,7 +144,7 @@ class Plan(_Row):
 class Reservation(_Row):
     reservation_id: UUID
     obligation_id: UUID
-    bank_id: UUID
+    bank_id: str  # topology id (`bank-000`); og.reservation.bank_id is text since migration 0004
     kind: Literal["POWER_KW", "ENERGY_KWH"]
     amount: Decimal
     interval_start: datetime
@@ -158,7 +158,7 @@ class Grant(_Row):
     grant_id: UUID
     cycle_id: str
     obligation_id: UUID | None = None
-    bank_id: UUID
+    bank_id: str  # topology id (`bank-000`); og.grant.bank_id is text since migration 0004
     granted_kw: Decimal
     is_headroom: bool = False
     ledger_version: int

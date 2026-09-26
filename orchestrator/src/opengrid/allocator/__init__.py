@@ -17,7 +17,7 @@ import logging
 from collections.abc import Awaitable
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from opengrid.allocator import reasons
 from opengrid.allocator.cycle import cycle
@@ -169,20 +169,28 @@ async def _substitute_hub(
     await ledger.record_substitution(obligation_id, from_hub_id, to_hub_id, reason_code)
 
 
+def _obligation_uuid(obligation_id: str | None) -> UUID | None:
+    """The obligation's real UUID. Only a non-UUID string id (test fakes) is mapped to a stable UUIDv5 --
+    hashing a real id would detach the grant from its obligation (guardian/settle lookups)."""
+    if not obligation_id:
+        return None
+    try:
+        return UUID(obligation_id)
+    except ValueError:
+        return uuid5(NAMESPACE_URL, obligation_id)
+
+
 def _to_grant_row(cycle_id: str, ledger_version: int, grant: ProposedGrant) -> Grant:
-    """Convert one pure-logic `ProposedGrant` into a persisted `Grant` row. Bank/obligation ids are
-    deterministically derived UUIDv5s over their string ids (MVP-S's pure core works in plain
-    strings for numpy-friendliness; production bank/obligation ids are already UUIDs end to end, so
-    this derivation only matters for the string ids fakes/tests use).
-    """
-    obligation_uuid = uuid5(NAMESPACE_URL, grant.obligation_id) if grant.obligation_id else None
+    """Convert one pure-logic `ProposedGrant` into a `Grant` row. `bank_id` stays the topology's text id
+    (`bank-000`, `og.bank`/`og.grant.bank_id` are text since migration 0004) -- the engine looks the bank
+    up in the fleet twin by it."""
     return Grant(
         grant_id=uuid5(
             NAMESPACE_URL, f"{cycle_id}:{grant.bank_id}:{grant.obligation_id}:{grant.is_headroom}"
         ),
         cycle_id=cycle_id,
-        obligation_id=obligation_uuid,
-        bank_id=uuid5(NAMESPACE_URL, grant.bank_id),
+        obligation_id=_obligation_uuid(grant.obligation_id),
+        bank_id=grant.bank_id,
         granted_kw=Decimal(str(round(grant.granted_kw, 3))),
         is_headroom=grant.is_headroom,
         ledger_version=ledger_version,

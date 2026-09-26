@@ -104,6 +104,48 @@ async def test_ts_05_61_run_cycle_builds_grant_rows_from_fakes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_cycle_grant_rows_keep_the_real_bank_and_obligation_ids() -> None:
+    """Regression (live 2026-09-26): grant rows carried `uuid5(bank_id)` and `uuid5(obligation_id)`, so
+    the engine asked the fleet twin for bank `bdb1788d-...` (LookupError, every tick with a committed
+    grant failed before proposing a batch) and the guardian could never match the obligation."""
+    obligation_id = "3b60e803-dabf-4df9-a284-1386c0426952"
+    fleet_state = FleetState(
+        hubs=(
+            HubSnapshot(
+                hub_id="hub-00001",
+                bank_id="bank-000",
+                free_discharge_kw=50.0,
+                soc_kwh=1_000_000.0,
+                reserve_kwh=0.0,
+                e_kwh=1_000_000.0,
+            ),
+        ),
+        banks=(BankSnapshot(bank_id="bank-000", capability_kw=50.0, kva_rating=600.0),),
+    )
+    ledger_view = LedgerView(
+        calls=(
+            ObligationCall(
+                obligation_id=obligation_id,
+                bank_id="bank-000",
+                service_type="ERCOT_ENERGY",
+                tier="T2",
+                committed_kw=20.0,
+                eligible_hub_ids=("hub-00001",),
+            ),
+        )
+    )
+
+    grants = await run_cycle(
+        "cycle-2",
+        fleet=FakeFleetGateway(fleet_state, ("bank-000",)),
+        ledger=FakeLedgerGateway(ledger_view),
+        now=_T0,
+    )
+
+    assert [(g.bank_id, str(g.obligation_id)) for g in grants] == [("bank-000", obligation_id)]
+
+
+@pytest.mark.asyncio
 async def test_ts_05_62_substitute_hub_rejects_wrong_reason_code() -> None:
     with pytest.raises(ValueError, match="R-SUBSTITUTION"):
         await substitute_hub("o1", "h1", "h2", "R-NOT-A-VALID-REASON")
