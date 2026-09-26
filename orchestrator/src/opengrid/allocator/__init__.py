@@ -25,7 +25,7 @@ from opengrid.allocator.gateways import FleetGateway, LedgerGateway, ScadaGatewa
 from opengrid.allocator.models import CycleResult, DwellState, PiState, ProposedGrant, Schedule
 from opengrid.core.models.engine import Grant
 
-__all__ = ["cycle", "run_cycle", "substitute_hub"]
+__all__ = ["configure", "cycle", "run_cycle", "substitute_hub"]
 
 logger = logging.getLogger(__name__)
 
@@ -131,17 +131,33 @@ async def run_cycle(
     )
 
     await ledger.persist_grants(cycle_id, list(result.grants))
+    if result.substitutions:
+        # S5.3: every automatic hub swap is recorded; a recording failure never costs the cycle (K7).
+        try:
+            await ledger.record_substitution_events(cycle_id, list(result.substitutions))
+        except Exception:
+            logger.exception("failed to record hub substitutions", extra={"cycle_id": cycle_id})
     ledger_version = await ledger.ledger_version()
     grants = [_to_grant_row(cycle_id, ledger_version, g) for g in result.grants]
     _last_grants[:] = grants
     return grants
 
 
+_ledger_gateway: LedgerGateway | None = None
+
+
+def configure(ledger: LedgerGateway) -> None:
+    """Wire the process's `LedgerGateway` for `substitute_hub` (called once by `opengrid.engine.main`;
+    `run_cycle` takes its gateways per call)."""
+    global _ledger_gateway
+    _ledger_gateway = ledger
+
+
 async def substitute_hub(obligation_id: str, from_hub_id: str, to_hub_id: str, reason_code: str) -> None:
     """Swap which hub realizes an obligation's unchanged `committed_kw` -- a `grant`-table change with
     reason `R-SUBSTITUTION`, always allowed, never a `commitment` write (02a S5.3, K13 exception list).
-    """
-    await _substitute_hub(obligation_id, from_hub_id, to_hub_id, reason_code, ledger=None)
+    Uses the gateway wired by `configure()` (it passed `ledger=None` before, so every call raised)."""
+    await _substitute_hub(obligation_id, from_hub_id, to_hub_id, reason_code, ledger=_ledger_gateway)
 
 
 async def _substitute_hub(

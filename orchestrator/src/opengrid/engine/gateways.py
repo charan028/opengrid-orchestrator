@@ -42,9 +42,10 @@ from opengrid.allocator.models import (
     ProposedGrant,
     ScadaSample,
     Schedule,
+    SubstitutionEvent,
 )
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
-from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK
+from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, R_SUBSTITUTION
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.health.rules import evaluate_energy_shortfall_risk_alert
@@ -249,8 +250,9 @@ class EngineLedgerGateway:
     `opengrid.ledger.persist_grants`/`ledger_version` for the writes (BUILD.md S1 "no duplicated
     functions": the actual grant-persistence logic lives in exactly one place, `opengrid.ledger`)."""
 
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(self, pool: AsyncConnectionPool, trace: TraceStore | None = None) -> None:
         self._pool = pool
+        self._trace = trace
 
     async def ledger_view(self, bank_ids: Sequence[str], interval_start: datetime) -> LedgerView:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -307,14 +309,37 @@ class EngineLedgerGateway:
     async def record_substitution(
         self, obligation_id: str, from_hub_id: str, to_hub_id: str, reason_code: str
     ) -> None:
-        """Deferred (merge task item 2 targeted `run_cycle`'s automatic 2 s loop, which never calls
-        this -- only `opengrid.allocator.substitute_hub`'s manual/API-triggered path does). `og.grant`
-        has no `reason_code` column to record *why* a swap happened, so persisting one honestly needs a
-        schema decision, not a guessed column -- raising rather than silently no-op-ing or inventing a
-        shape (BUILD.md S5a "no silent fallbacks"). See qa/merge-notes.md."""
-        raise NotImplementedError(
-            "EngineLedgerGateway.record_substitution: og.grant has no reason_code column yet; "
-            "see qa/merge-notes.md for the schema decision this needs before it can persist anything"
+        """S5.3: a manual hub swap is recorded as a `SUBSTITUTION` trace event carrying its reason code
+        (`og.grant` has no reason column; the trace is the audit record, 02a S8.1). The next cycle's
+        grants realize the swap -- the obligation's commitment is never written (K13)."""
+        await self._trace_substitution(
+            {"obligation_id": obligation_id, "from_hub_ids": [from_hub_id], "to_hub_ids": [to_hub_id]},
+            reason_code,
+        )
+
+    async def record_substitution_events(self, cycle_id: str, events: Sequence[SubstitutionEvent]) -> None:
+        """S5.3: the automatic swaps one 2 s cycle made, one `SUBSTITUTION` trace event each."""
+        for event in events:
+            await self._trace_substitution(
+                {
+                    "cycle_id": cycle_id,
+                    "obligation_id": event.obligation_id,
+                    "bank_id": event.bank_id,
+                    "from_hub_ids": list(event.from_hub_ids),
+                    "to_hub_ids": list(event.to_hub_ids),
+                },
+                R_SUBSTITUTION,
+            )
+
+    async def _trace_substitution(self, payload: dict[str, object], reason_code: str) -> None:
+        if self._trace is None:
+            raise RuntimeError("EngineLedgerGateway was built without a TraceStore; substitutions need one")
+        await self._trace.append(
+            f"substitution-{payload['obligation_id']}",
+            "SUBSTITUTION",
+            "SUBSTITUTION",
+            payload,
+            reason_codes=[reason_code],
         )
 
 
@@ -484,9 +509,14 @@ class EnergySufficiencyGateway:
 
 
 def build_gateways(
-    pool: AsyncConnectionPool,
+    pool: AsyncConnectionPool, trace: TraceStore | None = None
 ) -> tuple[EngineFleetGateway, EngineLedgerGateway, EngineScadaGateway, EngineScheduleGateway]:
     """Convenience constructor for `opengrid.engine.main`: one of each gateway, built once per process
     (the fleet/scada gateways hold no state of their own; the ledger/schedule gateways hold the shared
-    pool)."""
-    return EngineFleetGateway(), EngineLedgerGateway(pool), EngineScadaGateway(), EngineScheduleGateway(pool)
+    pool, and the ledger gateway the process's trace store for substitution events)."""
+    return (
+        EngineFleetGateway(),
+        EngineLedgerGateway(pool, trace),
+        EngineScadaGateway(),
+        EngineScheduleGateway(pool),
+    )

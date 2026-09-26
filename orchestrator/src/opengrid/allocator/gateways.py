@@ -23,6 +23,7 @@ from opengrid.allocator.models import (
     ProposedGrant,
     ScadaSample,
     Schedule,
+    SubstitutionEvent,
 )
 
 
@@ -59,6 +60,10 @@ class LedgerGateway(Protocol):
         """S5.3: persist a single manual/one-off hub swap for `obligation_id` as a `grant`-table
         change with `reason_code` (always `R-SUBSTITUTION`) -- never a `commitment` write.
         """
+        ...
+
+    async def record_substitution_events(self, cycle_id: str, events: Sequence[SubstitutionEvent]) -> None:
+        """S5.3: record the automatic hub substitutions one 2 s cycle made (trace, `R-SUBSTITUTION`)."""
         ...
 
 

@@ -12,7 +12,9 @@ from uuid import uuid4
 import pytest
 
 from opengrid import fleet, ledger
+from opengrid.allocator.models import SubstitutionEvent
 from opengrid.core.models.platform import Bank, Hub
+from opengrid.engine import gateways as gw
 from opengrid.engine.gateways import (
     EngineFleetGateway,
     EngineLedgerGateway,
@@ -279,3 +281,25 @@ async def test_fleet_capability_provider_reads_max_discharge_kw():
     provider = FleetCapabilityProvider()
     kw = await provider.capability_kw("bank-000", datetime.now(UTC))
     assert isinstance(kw, Decimal)
+
+
+async def test_ledger_gateway_records_substitutions_as_trace_events() -> None:
+    """S5.3: hub swaps are recorded as SUBSTITUTION trace events with reason R-SUBSTITUTION (it raised
+    NotImplementedError before, so no swap was ever recorded)."""
+    appended: list[tuple] = []
+
+    class _Trace:
+        async def append(self, stream_id, decision_type, event_class, payload, reason_codes=None):
+            appended.append((stream_id, decision_type, payload, reason_codes))
+
+    gateway = gw.EngineLedgerGateway(pool=None, trace=_Trace())  # type: ignore[arg-type]
+    await gateway.record_substitution("o1", "h1", "h2", "R-SUBSTITUTION")
+    await gateway.record_substitution_events(
+        "c1", [SubstitutionEvent(obligation_id="o2", bank_id="b1", from_hub_ids=("h3",), to_hub_ids=("h4",))]
+    )
+
+    assert [(a[0], a[1], a[3]) for a in appended] == [
+        ("substitution-o1", "SUBSTITUTION", ["R-SUBSTITUTION"]),
+        ("substitution-o2", "SUBSTITUTION", ["R-SUBSTITUTION"]),
+    ]
+    assert appended[1][2]["bank_id"] == "b1"

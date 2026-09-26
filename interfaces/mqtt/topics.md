@@ -9,7 +9,7 @@ Everywhere below, `<root>` stands for that configured prefix.
 
 | Topic | Direction | QoS | Retain | Publisher | Subscriber(s) | Schema |
 |---|---|---|---|---|---|---|
-| `<root>/tel/<zone>/<bank_id>/<hub_id>` | hub → orchestrator | 0 | No | `og_sim` (or a real hub) | `og_engine`, `og_api` (sampled SSE) | `telemetry.schema.json` |
+| `<root>/tel/<zone>/<bank_id>/<hub_id>` | hub → orchestrator | 0 | No | `og_sim` (or a real hub) | `og_engine` (fleet twin), `og_guardian` (its own hub-state read, GUARD-02); `og_api` does not subscribe -- its SSE streams poll Postgres | `telemetry.schema.json` |
 | `<root>/cmd/<bank_id>/batch` | guardian → hubs | 1 | No | `og_guardian` | `og_sim` hub tasks for that bank | `command_batch.schema.json` |
 | `<root>/ack/<hub_id>` | hub → orchestrator | 1 | No | `og_sim` (or a real hub) | `og_engine`, `og_guardian` | `ack.schema.json` |
 | `<root>/stop/<scope>/<id>` | safestop → hubs | 1 | **Yes** | `og_safestop` | all hubs in scope, `og_api` | `stop.schema.json` |

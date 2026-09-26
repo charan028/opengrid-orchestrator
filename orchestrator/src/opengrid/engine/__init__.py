@@ -410,6 +410,7 @@ async def main(cfg: Config) -> None:
     itself (it is the only module that knows which series matters per contract, 02b S6.5); an
     unavailable guardian is enforced here (`guardian_is_available`, "hold, don't pile up batches").
     """
+    import opengrid.allocator as allocator_mod
     import opengrid.contracts as contracts_mod
     import opengrid.feeds as feeds_mod
     import opengrid.fleet as fleet_mod
@@ -488,7 +489,8 @@ async def main(cfg: Config) -> None:
         logger.info("released uncommitted reservations at start-up", extra={"released_count": released})
 
         backend = PgEngineBackend(pool)
-        fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool)
+        fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool, trace_store)
+        allocator_mod.configure(ledger_gateway)
         state = _EngineState(
             cfg=cfg,
             backend=backend,
