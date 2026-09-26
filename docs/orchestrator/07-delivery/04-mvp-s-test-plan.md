@@ -327,9 +327,14 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 Next-phase ids, carried over unchanged from `09-optimizer-dispatcher-update.md` §7 (the source of truth for their
 formulas and fixtures). They cover the two-market model (D-20), the new territory invariant **K15** (a regulated
 obligation uses only assets inside its territory; no net reverse flow at the territory boundary) and the
-discharge-flow limits F1–F7 with guardian checks **G-26…G-32** (D-26, D-27). None of this is MVP-S scope; the
+discharge-flow limits F1–F7 with guardian checks **G-26…G-33** (D-26, D-27). None of this is MVP-S scope; the
 ids are reserved here so the stories in `03` and these tests stay traceable. Kinds: P property, N negative,
 U unit, S scenario, B benchmark.
+
+Guardian numbering follows the built scheme (as in PR #24's `03-mvp-s-epics-stories.md`), not `09`'s draft: G-26 home
+meter, G-27 service transformer, G-28 feeder, G-29 substation, G-30 territory export (K15c), G-31 sustained vs
+peak, G-32 non-firm feeder ramp, G-33 market segregation (K15). The AS/firm energy hold is not a guardian check; it
+is tested at the engine/allocator (C3′ and the energy-sufficiency check).
 
 | Story | Scope | Acceptance |
 |---|---|---|
@@ -347,9 +352,9 @@ U unit, S scenario, B benchmark.
 | ES19-S12 | F1 derating (allocator + G-02) | TS-19-20, 21, 22 |
 | ES19-S13 | F2 home export (allocator + G-26) | TS-19-23, 24, 25 |
 | ES19-S14 | F3 transformer, feeder, substation (allocator + G-27/28/29) | TS-19-26 … 30 |
-| ES19-S15 | F4 territory boundary (G-29/30) | TS-19-31, 32 |
+| ES19-S15 | F4 territory: market segregation (G-33) and boundary export (G-29/30) | TS-19-31, 32 |
 | ES19-S16 | F5 peak vs sustained (G-31) | TS-19-33, 34 |
-| ES19-S17 | F6 substation ramp; F7 hold (G-32) | TS-19-35, 36, 37 |
+| ES19-S17 | F6 non-firm feeder/substation ramp (G-32); F7 AS/firm energy hold at the engine/allocator (C3′, energy sufficiency; not a G-check) | TS-19-35, 36, 37 |
 | ES19-S18 | checker K4_*/K15_*/K13_ENERGY_HOLD | TS-19-38, 39, 40 |
 | ES19-S19 | performance at scale | TS-19-41 |
 
@@ -385,13 +390,13 @@ U unit, S scenario, B benchmark.
 | TS-19-28 | N | G-28: two individually safe bank batches jointly reversing the feeder are vetoed |
 | TS-19-29 | N | G-28: stale feeder SCADA vetoes increases, passes relief |
 | TS-19-30 | N | G-29: POI export > limit vetoed; stale substation SCADA vetoes increases |
-| TS-19-31 | N | G-30: an AE hub on an Oncor obligation is vetoed; an AE hub on FREE headroom with access 0 is vetoed |
-| TS-19-32 | P | G-29/C25(c): Base net injection at territory boundary substations ≤ 0 in all fixtures |
+| TS-19-31 | N | G-33 (market segregation): an AE hub on an Oncor obligation is vetoed; an AE hub on FREE headroom with access 0 is vetoed |
+| TS-19-32 | P | G-30 territory export with G-29 (C25(c)): Base net injection at territory boundary substations ≤ 0 in all fixtures |
 | TS-19-33 | N | G-31: a lease > $\tau^{pk}$ above continuous is vetoed; a missing budget blocks above continuous |
 | TS-19-34 | S | DC bridge uses the peak for ≤ $\tau^{pk}$, then steps down on lease expiry |
 | TS-19-35 | N | a substation asset step > $\rho_s\Delta t$ is vetoed (G-04 generalised) |
-| TS-19-36 | P | G-32: headroom never erodes the AS/firm hold |
-| TS-19-37 | N | G-32: Non-Spin 100 kW with 350 kWh above the floor → any headroom discharge is vetoed |
+| TS-19-36 | P | Engine/allocator (C3′, energy sufficiency): headroom discharge never erodes the AS/firm energy hold |
+| TS-19-37 | N | Engine/allocator: Non-Spin 100 kW with 350 kWh above the floor → no headroom discharge is granted |
 | TS-19-38 | U | the checker flags each seeded K4 violation class exactly once |
 | TS-19-39 | U | the checker flags K15 market and export violations |
 | TS-19-40 | U | the checker flags `K13_ENERGY_HOLD` |
