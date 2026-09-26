@@ -19,7 +19,7 @@ header and accepts only connections that originate from loopback.
 |---|---|
 | `POST /og/api/fleet/command` and `.../{proposal_id}/confirm` | Manual hub or bank setpoint (two-step) |
 | `POST /og/api/safestop` and `.../{proposal_id}/confirm` | Engage a scoped safe stop (two-step) |
-| `POST /og/api/safestop/{scope}/{scope_id}/release` | Release a stop (always `501` today) |
+| `POST /og/api/safestop/{scope}/{scope_id}/release` and `/og/api/safestop/release/{proposal_id}/approve` | Release a stop (two-person) |
 | `POST /og/api/contracts`, `PATCH /og/api/contracts/{contract_id}` | Create or change a contract |
 | `POST /og/api/opportunities` | Create an opportunity |
 | `PUT /og/api/retention` | Change a trace retention policy |
@@ -65,8 +65,21 @@ POST /og/api/fleet/command/{id}/confirm
 | `404` | Unknown proposal, or a proposal of the other kind |
 
 Safe stop follows the same two steps (`POST /og/api/safestop`, then `/{proposal_id}/confirm`), returning `503` if no
-`og-safestop` ENGAGE row appears in time. **Release always returns `501`**: the stop-only key cannot release, and the
-guardian's two-person release path is not built yet. The attempt is still recorded.
+`og-safestop` ENGAGE row appears in time.
+
+Release needs **two different operators** (K8). The stop-only key in `og-safestop` can never release, so only the
+guardian signs a release, and only after a second operator approves it:
+
+```
+POST /og/api/safestop/{scope}/{scope_id}/release        -> 202 {proposal_id}   (operator A; nothing released yet)
+POST /og/api/safestop/release/{proposal_id}/approve     -> 200 released, 202 still pending
+```
+
+- The approver must not be the requester (`403`).
+- Approval writes one `og.operator_action` (`SAFE_STOP_RELEASE`, tier `TIER2`) recording both operators. The guardian
+  checks it (allow-list, distinct operators, age, scope still engaged) before signing, and `og-safestop` relays it.
+- `202` from approve means the guardian has not released yet. It may refuse, for example on an empty allow-list, and
+  the API never fakes a release.
 
 ## Server-sent event streams
 
@@ -89,12 +102,11 @@ Reconnect on drop; the first event after connecting carries the current state.
 | Code | Raised when |
 |---|---|
 | `401` | `X-Remote-User` missing |
-| `403` | Identity has no role, `operator` role needed, health probe from a non-loopback host, or a CSRF check failed |
+| `403` | Identity has no role, `operator` role needed, health probe from a non-loopback host, a CSRF check failed, or a release approved by its own requester |
 | `404` | Unknown hub, bank, contract or proposal (any `LookupError`) |
 | `409` | Admission or reservation refused: `detail.reason_code` holds the code (for example `R-COMMIT-LOCK-INFEASIBLE`); or a guardian veto on confirm |
 | `410` | A proposal expired |
 | `422` | Body or query failed validation, including a schema-validation failure |
-| `501` | Safe-stop release (not built) |
 | `503` | A required dependency or process is unavailable (no verdict, no stop event, not configured) |
 
 Reason codes are defined in `orchestrator/src/opengrid/core/reasons.py`; the commitment-lock ones are explained in

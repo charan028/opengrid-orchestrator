@@ -78,6 +78,42 @@
         "title": "Body_propose_safestop_og_fleet_safestop_propose_post",
         "type": "object"
       },
+      "Body_request_release_og_fleet_safestop_release_request_post": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_id": {
+            "default": "",
+            "title": "Scope Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "reason"
+        ],
+        "title": "Body_request_release_og_fleet_safestop_release_request_post",
+        "type": "object"
+      },
+      "Body_review_release_og_fleet_safestop_release_review_post": {
+        "properties": {
+          "proposal_id": {
+            "title": "Proposal Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_id"
+        ],
+        "title": "Body_review_release_og_fleet_safestop_release_review_post",
+        "type": "object"
+      },
       "CommandConfirmResult": {
         "additionalProperties": false,
         "properties": {
@@ -258,7 +294,8 @@
               "ERCOT_ENERGY",
               "ERCOT_AS",
               "DIST_DEFERRAL",
-              "PARTNER_CAPACITY"
+              "PARTNER_CAPACITY",
+              "DATA_CENTER"
             ],
             "title": "Service Type",
             "type": "string"
@@ -2027,6 +2064,52 @@
         ]
       }
     },
+    "/og/api/safestop/release/{proposal_id}/approve": {
+      "post": {
+        "description": "K8 release, step 2 of 2 (operator B, never the requester: `403`). Writes ONE `og.operator_action`\nSAFE_STOP_RELEASE (tier TIER2, confirmed, `operator_ref` = A, `approver_ref` = B) that the guardian\nverifies (allow-list, distinct operators, age, scope still engaged) and signs, and `og-safestop`\nrelays to the hubs. Then polls `og.stop_event` for the RELEASE: `200` when it lands, `202` while the\nguardian has not released (it may refuse -- e.g. an empty allow-list -- which is never faked here).",
+        "operationId": "approve_release_og_api_safestop_release__proposal_id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Proposal Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Approve Release Og Api Safestop Release  Proposal Id  Approve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Release",
+        "tags": [
+          "safestop"
+        ]
+      }
+    },
     "/og/api/safestop/{proposal_id}/confirm": {
       "post": {
         "description": "Step 2 of 2 (02b S7.1/S7.3): NOTIFYs CONFIRM, then polls `og.stop_event` for the ENGAGE row\n`og-safestop` inserts on success. No matching event within the poll window means either the\nPROPOSE already expired in `og-safestop`'s own (shorter) `confirm_window_s`, or `og-safestop`\nis not running -- reported as `503`, never assumed to have engaged.",
@@ -2073,8 +2156,8 @@
     },
     "/og/api/safestop/{scope}/{scope_id}/release": {
       "post": {
-        "description": "Single step in the API shape (02b S7.1: \"release is inherently reversible, engage is not\"), but\n`og-safestop`'s stop-only key always refuses to sign a RELEASE (K8) -- that requires the guardian's\nTier-2 (two-person) co-signed path, not yet built by any agent. Records the attempt for audit and\nreports the gap as `501`, rather than fabricating a signature or silently no-op-ing.",
-        "operationId": "release_safestop_og_api_safestop__scope___scope_id__release_post",
+        "description": "K8 release, step 1 of 2 (operator A). Nothing is written or released yet: `og-safestop`'s\nstop-only key can never sign a RELEASE; the guardian signs one only for a request approved by a\nSECOND authorised operator (`approve_release`, `opengrid.guardian.stop_release`).",
+        "operationId": "request_release_og_api_safestop__scope___scope_id__release_post",
         "parameters": [
           {
             "in": "path",
@@ -2106,13 +2189,11 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Release Safestop Og Api Safestop  Scope   Scope Id  Release Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ProposalAccepted"
                 }
               }
             },
@@ -2129,7 +2210,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Release Safestop",
+        "summary": "Request Release",
         "tags": [
           "safestop"
         ]
@@ -2211,7 +2292,7 @@
     },
     "/og/api/stream/control-room": {
       "get": {
-        "description": "Price/load ticker, fleet MW/MWh, active commitment count, net margin, invariant counters, open\nalerts (02b S7.2, S8 screen 1).",
+        "description": "Price/load ticker, fleet MW/MWh, active commitment count, net margin, invariant counters, open\nalerts (02b S7.2, S8 screen 1). The invariant counters are a measured read of `og.invariant_check`\n(`opengrid.invariants.read_summary`, populated by that package's periodic K1/K2 checks), not a\nconstant.",
         "operationId": "stream_control_room_og_api_stream_control_room_get",
         "responses": {
           "200": {
@@ -2905,6 +2986,124 @@
           }
         },
         "summary": "Propose Safestop"
+      }
+    },
+    "/og/fleet/safestop/release/request": {
+      "post": {
+        "description": "Operator A: files the release request. Nothing is released; a DIFFERENT operator must approve it.",
+        "operationId": "request_release_og_fleet_safestop_release_request_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_request_release_og_fleet_safestop_release_request_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Release"
+      }
+    },
+    "/og/fleet/safestop/release/review": {
+      "post": {
+        "description": "Operator B, step 1 of 2: an open confirm dialog for the request id; nothing is written yet.",
+        "operationId": "review_release_og_fleet_safestop_release_review_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_review_release_og_fleet_safestop_release_review_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Release"
+      }
+    },
+    "/og/fleet/safestop/release/{proposal_id}/approve": {
+      "post": {
+        "description": "Operator B, step 2 of 2: relays the approval; renders released / pending / refused -- never\nassumes the stop was released.",
+        "operationId": "approve_release_og_fleet_safestop_release__proposal_id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "title": "Proposal Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Release"
       }
     },
     "/og/fleet/safestop/{proposal_id}/confirm": {

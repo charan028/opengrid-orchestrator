@@ -295,6 +295,20 @@ Body: `scope` (string, required); `scope_id` (string | null); `reason` (string, 
 
 Responses: `202`, `422`
 
+### `POST /og/api/safestop/release/{proposal_id}/approve`
+
+Approve Release. Role: **operator**.
+
+K8 release, step 2 of 2 (operator B, never the requester: `403`). Writes ONE `og.operator_action`
+SAFE_STOP_RELEASE (tier TIER2, confirmed, `operator_ref` = A, `approver_ref` = B) that the guardian
+verifies (allow-list, distinct operators, age, scope still engaged) and signs, and `og-safestop`
+relays to the hubs. Then polls `og.stop_event` for the RELEASE: `200` when it lands, `202` while the
+guardian has not released (it may refuse -- e.g. an empty allow-list -- which is never faked here).
+
+Parameters: `proposal_id` (path, string, required)
+
+Responses: `200`, `422`
+
 ### `POST /og/api/safestop/{proposal_id}/confirm`
 
 Confirm Safestop. Role: **operator**.
@@ -310,18 +324,17 @@ Responses: `200`, `422`
 
 ### `POST /og/api/safestop/{scope}/{scope_id}/release`
 
-Release Safestop. Role: **operator**.
+Request Release. Role: **operator**.
 
-Single step in the API shape (02b S7.1: "release is inherently reversible, engage is not"), but
-`og-safestop`'s stop-only key always refuses to sign a RELEASE (K8) -- that requires the guardian's
-Tier-2 (two-person) co-signed path, not yet built by any agent. Records the attempt for audit and
-reports the gap as `501`, rather than fabricating a signature or silently no-op-ing.
+K8 release, step 1 of 2 (operator A). Nothing is written or released yet: `og-safestop`'s
+stop-only key can never sign a RELEASE; the guardian signs one only for a request approved by a
+SECOND authorised operator (`approve_release`, `opengrid.guardian.stop_release`).
 
 Parameters: `scope` (path, string, required); `scope_id` (path, string, required)
 
 Body: `reason` (string, required)
 
-Responses: `200`, `422`
+Responses: `202`, `422`
 
 ## scenario
 
@@ -350,7 +363,9 @@ Responses: `200`
 Stream Control Room. Role: **viewer**.
 
 Price/load ticker, fleet MW/MWh, active commitment count, net margin, invariant counters, open
-alerts (02b S7.2, S8 screen 1).
+alerts (02b S7.2, S8 screen 1). The invariant counters are a measured read of `og.invariant_check`
+(`opengrid.invariants.read_summary`, populated by that package's periodic K1/K2 checks), not a
+constant.
 
 Responses: `200`
 
