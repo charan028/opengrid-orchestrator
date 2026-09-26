@@ -139,17 +139,12 @@ async def _maybe_request_calibration(
     reference = CalibrationReference(
         phase_deg=0.0, freq_hz=NOMINAL_FREQ_HZ, amplitude_v=NOMINAL_VOLTAGE_V, sync_source="ntp_disciplined"
     )
-    # NOTE (reported, not silently assumed): calibration commands have no durable per-hub lease-epoch
-    # table the way `og.lease_state` gives `CommandBatch` (K6); `evaluate_and_sign_calibration` does not
-    # currently check epoch/seq at all. `epoch=1` and a timestamp-derived `seq` are placeholders that
-    # satisfy the wire schema without claiming a monotonic guarantee this sweep cannot actually make --
-    # see the build report for the guardian-side freshness gap this should eventually close.
+    # No epoch/seq here: the guardian assigns the real per-hub (epoch, seq) on `og.calibration_command`
+    # (migration 0016) when it signs; the sweep never writes a placeholder (#30).
     candidate = await service.request_calibration(
         hub_id,
         reference=reference,
         bounds=bounds,
-        epoch=1,
-        seq=int(now.timestamp()),
         now=now,
         lease_ttl_s=lease_ttl_s,
     )
