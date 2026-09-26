@@ -31,13 +31,16 @@ to a 434d230-era database and re-seeds. Three dev/-only fixes are needed for R2:
 - og-api's authz policy otherwise resolves next to `OG_CONFIG` (`dev/config/authz.toml`, which does not exist).
   A missing policy fails every viewer or operator route, so compose sets `OG_AUTHZ_POLICY` to
   `orchestrator/config/authz.toml`. Set it too when running og-api from a shell (below).
-- The regional solar feed (NP4-745-CD) is polled whatever `products` lists. The market simulator has no such
-  endpoint (404), and the product's stale `og.feed_status` row sets NO_NEW_COMMITMENTS fleet-wide, so the
-  sim-fed configs set `solar_by_region_enabled = false`. Switching it off does not clear a row already
-  written: `DELETE FROM og.feed_status WHERE source = 'ERCOT' AND product = 'np4-745-cd'`.
+- The regional solar feed (NP4-745-CD) is polled whatever `products` lists, and the market simulator has no
+  such endpoint (404), so the sim-fed configs set `solar_by_region_enabled = false`.
+  - At `6470cfa` its stale `og.feed_status` row set NO_NEW_COMMITMENTS fleet-wide.
+  - Since R2 hotfix v3 (`afb26c2`) only the price feed sets that mode, and the row leaves a permanent
+    `ALR-FEED-STALE` instead.
+  - Switching the feed off does not clear a row already written:
+    `DELETE FROM og.feed_status WHERE source = 'ERCOT' AND product = 'np4-745-cd'`.
 - Feed windows are base's (price 2,700 s, load 172,800 s). The simulator stamps prices at the 15-min interval
   start and load hourly. With R2 enforcing NO_NEW_COMMITMENTS, shorter windows would drop the stack into that
-  mode for part of every interval.
+  mode for part of every interval (for price only since R2 hotfix v3).
 
 The static checks made before any Docker run are kept at the end.
 
