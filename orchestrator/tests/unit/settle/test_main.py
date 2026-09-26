@@ -1,10 +1,13 @@
 """og-settle process loop: one `run_forever` driving several cadences (regression for the live
 2026-09-26 finding that three concurrent `run_forever` loops left SIGTERM handled by only one of them,
-so systemd SIGKILLed og-settle after 90 s on every deploy)."""
+so systemd SIGKILLed og-settle after 90 s on every deploy), with each job in its own task so a slow
+job never delays the heartbeat."""
 
 from __future__ import annotations
 
-from opengrid.settle.main import Cadence, run_due
+import asyncio
+
+from opengrid.settle.main import Cadence, JobRunner
 
 
 class _Clock:
@@ -28,7 +31,36 @@ def test_cadence_is_due_first_then_once_per_interval() -> None:
     assert not cadence.due()
 
 
-async def test_run_due_runs_only_due_jobs_and_isolates_failures() -> None:
+async def test_a_slow_job_never_delays_the_heartbeat_and_is_not_restarted_while_running() -> None:
+    """Live 2026-09-26: run sequentially, a health pass over 2,000 hubs on a slow disk held the loop and
+    og-settle's heartbeat went 52 s stale."""
+    clock = _Clock()
+    release_slow = asyncio.Event()
+    beats: list[float] = []
+    slow_starts: list[float] = []
+
+    async def heartbeat() -> None:
+        beats.append(clock.now)
+
+    async def slow() -> None:
+        slow_starts.append(clock.now)
+        await release_slow.wait()
+
+    runner = JobRunner(
+        [("heartbeat", Cadence(5.0, clock=clock), heartbeat), ("slow", Cadence(5.0, clock=clock), slow)]
+    )
+    for tick in range(3):
+        clock.now = tick * 5.0
+        await runner.run_due()
+        await asyncio.sleep(0)
+
+    assert beats == [0.0, 5.0, 10.0]
+    assert slow_starts == [0.0]  # still in flight: not started again
+    release_slow.set()
+    await runner.stop()
+
+
+async def test_a_failing_job_is_isolated() -> None:
     clock = _Clock()
     ran: list[str] = []
 
@@ -39,16 +71,12 @@ async def test_run_due_runs_only_due_jobs_and_isolates_failures() -> None:
     async def ok() -> None:
         ran.append("ok")
 
-    jobs = [
-        ("failing", Cadence(5.0, clock=clock), failing),
-        ("ok", Cadence(5.0, clock=clock), ok),
-        ("slow", Cadence(60.0, clock=clock), ok),
-    ]
+    runner = JobRunner(
+        [("failing", Cadence(5.0, clock=clock), failing), ("ok", Cadence(5.0, clock=clock), ok)]
+    )
+    await runner.run_due()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
-    await run_due(jobs)
-    assert ran == ["failing", "ok", "ok"]
-
-    clock.now = 5.0
-    ran.clear()
-    await run_due(jobs)
-    assert ran == ["failing", "ok"]  # the 60 s job is not due yet; the failure did not stop "ok"
+    assert sorted(ran) == ["failing", "ok"]
+    await runner.stop()

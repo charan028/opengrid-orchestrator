@@ -59,15 +59,36 @@ class Cadence:
         return True
 
 
-async def run_due(jobs: list[tuple[str, Cadence, Callable[[], Awaitable[object]]]]) -> None:
-    """Run every due job; one job's failure is logged and never skips the others (K7)."""
-    for name, cadence, job in jobs:
-        if not cadence.due():
-            continue
+class JobRunner:
+    """Starts each due job as its own task, so a slow job (a health pass over 2,000 hubs on a slow disk,
+    a large settlement backlog) never delays the others -- above all the heartbeat. A job is not started
+    again while its previous run is still in flight; one job's failure is logged and never affects the
+    others (K7). Only the one `run_forever` loop owns SIGTERM."""
+
+    def __init__(self, jobs: list[tuple[str, Cadence, Callable[[], Awaitable[object]]]]) -> None:
+        self._jobs = jobs
+        self._running: dict[str, asyncio.Task[None]] = {}
+
+    async def run_due(self) -> None:
+        for name, cadence, job in self._jobs:
+            task = self._running.get(name)
+            if task is not None and not task.done():
+                continue
+            if cadence.due():
+                self._running[name] = asyncio.create_task(self._run(name, job))
+
+    @staticmethod
+    async def _run(name: str, job: Callable[[], Awaitable[object]]) -> None:
         try:
             await job()
         except Exception:
             _logger.exception("og-settle job failed", extra={"job": name})
+
+    async def stop(self) -> None:
+        tasks = [t for t in self._running.values() if not t.done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _run() -> None:
@@ -99,9 +120,11 @@ async def _run() -> None:
             prune_job,
         ),
     ]
+    runner = JobRunner(jobs)
     try:
-        await run_forever(lambda: run_due(jobs), interval_s=health_interval_s, process_name=_PROCESS_NAME)
+        await run_forever(runner.run_due, interval_s=health_interval_s, process_name=_PROCESS_NAME)
     finally:
+        await runner.stop()
         await pool.close()
 
 
