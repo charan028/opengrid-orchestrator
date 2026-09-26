@@ -109,6 +109,7 @@ def _post_responses() -> dict[str, Any]:
             _load("ui19_bulk_confirm_1.json"),
             _load("ui19_bulk_confirm_2.json"),
         ],
+        "/og/api/ai/ask": _load("ai_ask.json"),
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
         "/og/api/alerts/7/ack": _load("alert_ack.json"),
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},
@@ -120,6 +121,7 @@ def _route_modules() -> list[ModuleType]:
     import opengrid.ui.api_client as api_client
     import opengrid.ui.routes.billing_audit as billing_audit
     import opengrid.ui.routes.control_room as control_room
+    import opengrid.ui.routes.copilot as copilot
     import opengrid.ui.routes.dispatch as dispatch
     import opengrid.ui.routes.fleet as fleet
     import opengrid.ui.routes.health as health
@@ -127,7 +129,18 @@ def _route_modules() -> list[ModuleType]:
     import opengrid.ui.routes.pq as pq
     import opengrid.ui.routes.profitability as profitability
 
-    return [api_client, billing_audit, control_room, dispatch, fleet, health, markets, pq, profitability]
+    return [
+        api_client,
+        billing_audit,
+        control_room,
+        copilot,
+        dispatch,
+        fleet,
+        health,
+        markets,
+        pq,
+        profitability,
+    ]
 
 
 def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:

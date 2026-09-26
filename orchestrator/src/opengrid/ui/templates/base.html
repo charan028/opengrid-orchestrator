@@ -72,6 +72,7 @@
           <svg class="og-icon" aria-hidden="true"><use href="#i-{{ 'shield' if role|default('viewer') == 'operator' else 'eye' }}"/></svg>
           Role: {{ role|default('viewer') }}
         </span>
+        {% include "_partials/copilot.html" %}
         <button type="button" class="og-theme-toggle" onclick="og.toggleTheme()" aria-label="Switch theme">
           <svg class="og-icon og-icon-sun" aria-hidden="true"><use href="#i-sun"/></svg>
           <svg class="og-icon og-icon-moon" aria-hidden="true"><use href="#i-moon"/></svg>
