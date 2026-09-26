@@ -59,3 +59,14 @@ lead-side reset command (or the Tier-2 path) is needed for back-to-back runs.
 running one (only `DELETE /api/anomalies/{id}` for already-injected anomalies). `demo-03`'s +90 s step
 still fires after its first step is cancelled. A `POST /api/scenarios/{name}/stop` that cancels the task
 and its active ids would make "Reset between runs" one call.
+
+## Confirmed on a local live stack (2026-09-25)
+
+8. **Steps 9-10 (overload alert) cannot fire yet**: SCADA readings are never persisted to `og.feed_obs`
+   (`source='scada'`) and the health evaluator is never run by `og-settle`, so `ALR-SCADA-OVERLOAD` never
+   opens even though the simulator reports 164% of rating. See `tests-e2e/chaos/NEEDS_FROM_OTHER_OWNERS.md`
+   items 5 and 8. The DIST_DEFERRAL response in the engine is independent of this and may still show.
+9. **Working live**: the price spike (step 7) lands in `og.feed_obs` at 5000 $/MWh within one feeds poll;
+   manual command propose/confirm returns a real guardian verdict; bank-scoped safe stop engages and
+   publishes the signed retained stop; the four demo scenarios are listed and runnable from the control
+   plane.

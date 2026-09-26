@@ -60,9 +60,12 @@ Scenario anomaly ids are deterministic: `<scenario>:<type>:<at_s>`, e.g.
    curl -u operator:... -X POST $OG/api/contracts -H 'Content-Type: application/json' -d '{
      "customer_id": "'$(uuidgen)'", "service_type": "ERCOT_ENERGY", "tier": "T2",
      "profile_ref": "demo", "start_at": "2026-09-26T00:00:00Z"}'
-   # one opportunity per contract, for the upcoming 15-min window
+   # one opportunity per contract. The window must start at a quarter-hour boundary at least ONE FULL
+   # GATE ahead: the gate that runs at :00/:15/:30/:45 first expires any offered window that has already
+   # started (R-EXPIRED-UNSELECTED) and only then selects. Posting at 02:58 for a 03:00 window is expired
+   # at 03:00; post for 03:30 and the 03:15 gate commits it (confirmed live).
    curl -u operator:... -X POST $OG/api/opportunities -H 'Content-Type: application/json' -d '{
-     "contract_id": "<contract_id from above>", "window_start": "<next quarter hour, ISO UTC>",
+     "contract_id": "<contract_id from above>", "window_start": "<quarter hour after next, ISO UTC>",
      "window_end": "<+30 min>", "requested_kw": 40}'
    ```
    A DIST_DEFERRAL contract must exist on bank-012 or step 10 has no PI loop to show.
