@@ -82,3 +82,19 @@ def test_status_badge_shows_the_status_when_no_label_is_given() -> None:
     assert ">GOOD<" in html and "None" not in html
     assert ">stale<" in render_status_badge("stale", label=None)
     assert ">PASS<" in render_status_badge("ok", label="PASS")
+
+
+def test_fleet_filter_inputs_are_blank_when_no_filter_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live run: the Zone/Bank inputs showed the literal text "None" (same `default` vs None trap)."""
+    import opengrid.ui.routes.fleet as fleet_route
+
+    async def fake_get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
+        return {"items": []}
+
+    monkeypatch.setattr(fleet_route, "get_json", fake_get_json)
+    app = FastAPI()
+    app.include_router(ui.build_router(), prefix="/og")
+    body = TestClient(app).get("/og/fleet").text
+    assert 'name="zone" value=""' in body and 'name="bank" value=""' in body
