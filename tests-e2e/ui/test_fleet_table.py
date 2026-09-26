@@ -26,7 +26,7 @@ def test_pages_by_cursor_and_shows_the_approximate_total(operator_page: Page) ->
     goto_ok(operator_page, f"{BASE_PATH}/fleet")
     rows = operator_page.locator("#fleet-table tbody tr.clickable-row")
     expect(rows).to_have_count(50)
-    expect(operator_page.locator("#fleet-page-info")).to_contain_text("~130 hubs")
+    expect(operator_page.locator("#fleet-page-info")).to_contain_text("~132 hubs")
     expect(operator_page.locator("#fleet-prev")).to_have_count(0)
     _shot(operator_page, "fleet_operator_1400.png")
 
@@ -68,7 +68,7 @@ def test_filters_become_chips_live_in_the_url_and_survive_refresh(operator_page:
 def test_sorting_is_a_link_in_the_url(operator_page: Page) -> None:
     goto_ok(operator_page, f"{BASE_PATH}/fleet?sort=hub&dir=desc")
     expect(operator_page.locator("#fleet-table tbody tr.clickable-row").first).to_have_attribute(
-        "data-row-id", "hub-0130"
+        "data-row-id", "trailer-mb-01"
     )
     expect(operator_page.locator('th[aria-sort="descending"]')).to_contain_text("Hub")
 
@@ -316,3 +316,43 @@ def test_viewer_reads_the_charging_schedule_but_cannot_edit(viewer_page: Page) -
     expect(viewer_page.locator("#charge-list")).to_contain_text("22:00-06:00")
     expect(viewer_page.locator("#charge-edit-form")).to_have_count(0)
     expect(viewer_page.locator("#charge-schedule button", has_text="Remove")).to_have_count(0)
+
+
+def test_asset_types_on_the_map_table_filter_and_drawer(operator_page: Page) -> None:
+    operator_page.set_viewport_size({"width": 1400, "height": 1000})
+    goto_ok(operator_page, f"{BASE_PATH}/fleet?asset_class=MOBILE&asset_class=UTILITY_SCALE")
+    rows = operator_page.locator("#fleet-table tbody tr.clickable-row")
+    expect(rows).to_have_count(2)
+    expect(operator_page.locator("#fleet-chips .fl-chip")).to_have_count(2)
+    expect(operator_page.locator("#fleet-table thead")).to_contain_text("Asset type")
+    expect(operator_page.locator('tr[data-row-id="trailer-mb-01"] .fl-asset-cell')).to_contain_text("Truck")
+    expect(operator_page.locator('tr[data-row-id="sub-LZ_AEN-00"] .fl-asset-cell')).to_contain_text(
+        "Substation BESS"
+    )
+
+    fleet_map = operator_page.locator("#fleet-map")
+    expect(fleet_map.locator(".og-asset-truck")).to_have_count(1)
+    expect(fleet_map.locator(".og-asset-sub")).to_have_count(1)
+    expect(fleet_map.locator(".og-asset-depot")).to_have_count(1)
+    legend = operator_page.locator(".og-map-legend")
+    for label in ("Home batteries", "Trucks", "Substation BESS", "Home stations"):
+        expect(legend).to_contain_text(label)
+    toggle = operator_page.get_by_label("Show Trucks (mobile storage) layer")
+    toggle.uncheck()
+    expect(fleet_map.locator(".og-asset-truck")).to_have_count(0)
+    toggle.check()
+    fleet_map.scroll_into_view_if_needed()
+    _shot(operator_page, "fleet_asset_types.png")
+
+    rows.filter(has_text="trailer-mb-01").click()
+    drawer = operator_page.locator("#hub-drawer")
+    expect(drawer.locator("#drawer-asset-type")).to_contain_text("Truck")
+    truck = drawer.locator("#drawer-truck")
+    expect(truck).to_contain_text("hs-austin-north-01 (LZ_AEN)")
+    expect(truck).to_contain_text("Away from home station")
+    expect(truck).to_contain_text("only at its home station")
+    _shot(operator_page, "fleet_drawer_truck.png")
+    operator_page.keyboard.press("Escape")
+    rows.filter(has_text="sub-LZ_AEN-00").click()
+    expect(drawer.locator("#drawer-substation")).to_contain_text("4.0 MW / 16.0 MWh")
+    expect(drawer.locator("#drawer-substation")).to_contain_text("F-AEN-7")

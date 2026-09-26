@@ -5,7 +5,32 @@
 <div class="og-panel" id="hub-drilldown">
 {% if detail %}
   {% set st = detail.status %}
+  {% set ac = detail.asset_class or 'HOME' %}
+  <p class="fl-type-badge fl-type-{{ ac|lower }}" id="drawer-asset-type"><span class="fl-asset-icon fl-asset-{{ ac|lower }}" aria-hidden="true"></span> {{ (asset_labels or {}).get(ac, ac) }}</p>
   <h2>Hub {{ detail.hub_id }}</h2>
+  {% if detail.mobile %}{% set m = detail.mobile %}
+  <section class="fl-dsec" aria-label="Truck" id="drawer-truck">
+    <h3>Truck</h3>
+    <dl class="fl-kv">
+      <div><dt>Status</dt><dd>{{ 'At home station' if m.status == 'AT_HOME_STATION' else 'Away from home station (in transit or deployed)' }}</dd></div>
+      <div><dt>Home station</dt><dd>{% if m.home_station %}{{ m.home_station.home_station_id }} ({{ m.home_station.zone }}){% else %}not assigned{% endif %}</dd></div>
+      <div><dt>Current location</dt><dd>{% if m.location.lat is not none %}{{ m.location.lat }}, {{ m.location.lon }}{% else %}not reported{% endif %}</dd></div>
+      <div><dt>Charging allowed</dt><dd title="{{ m.charging_note }}">{{ 'Yes' if m.charging_allowed else 'No' }} &middot; only at its home station (D-31)</dd></div>
+      <div><dt>Next planned return</dt><dd>{{ m.next_return or 'not scheduled (no deployment schedule yet)' }}</dd></div>
+    </dl>
+  </section>
+  {% endif %}
+  {% if detail.utility_scale %}{% set u = detail.utility_scale %}
+  <section class="fl-dsec" aria-label="Substation BESS" id="drawer-substation">
+    <h3>Substation BESS</h3>
+    <dl class="fl-kv">
+      <div><dt>Rating</dt><dd>{{ dash(u.mw) }} MW / {{ dash(u.mwh) }} MWh</dd></div>
+      <div><dt>POI (import / export)</dt><dd>{{ dash(u.poi_import_kva) }} / {{ dash(u.poi_export_kva) }} kVA</dd></div>
+      <div><dt>Feeder</dt><dd>{{ dash(u.feeder_id) }}</dd></div>
+      <div><dt>Substation</dt><dd>{{ dash(u.substation_id) }}</dd></div>
+    </dl>
+  </section>
+  {% endif %}
   <section class="fl-dsec" aria-label="Status">
     <p>
       <span class="status-badge" data-status="{{ st.health }}"><span class="status-text">{{ st.health_label }}</span></span>

@@ -293,9 +293,12 @@
     var hubs = JSON.parse(mapEl.dataset.hubs || "[]");
     var handle = og.map.create(mapEl, { center: [31.0, -99.0], zoom: 6 });
     og.map.addHubLayer(handle, hubs, { colorBy: "health" });
+    var stations = JSON.parse(mapEl.dataset.stations || "[]");
+    og.map.addDepotLayer(handle, stations, hubs);
+    og.map.addLayerToggles(handle, og.map.assetLayerItems(), "fleet-layer");
     og.map.addLegend(
       handle,
-      [{ heading: "Hub health" }].concat(og.map.hubLegendItems("health"), [
+      [{ heading: "Asset type" }].concat(og.map.assetLegendItems(), [{ heading: "Hub health" }], og.map.hubLegendItems("health"), [
         { heading: "Selection" },
         { label: "selected for a command", color: og.token("--accent") },
       ]),

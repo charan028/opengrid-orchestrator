@@ -77,7 +77,62 @@ def _with_device(hub: dict[str, Any], i: int) -> dict[str, Any]:
     return {**hub, "hardware_revision": HW_REVS[i % 2], "firmware_version": FW_VERSIONS[(i // 3) % 2]}
 
 
-HUBS = [_with_device(_hub(i), i) for i in range(1, N_HUBS + 1)]
+#: A D-31 truck away from its depot and a substation BESS (no trucks exist in the real fleet yet).
+TRUCK = {
+    "hub_id": "trailer-mb-01",
+    "bank_id": "trailer-mb-01",
+    "zone": "LZ_AEN",
+    "soc_kwh": 300.0,
+    "e_kwh": 600.0,
+    "soc_pct": 50.0,
+    "p_kw": -120.0,
+    "health": "online",
+    "health_label": "OK",
+    "activity": "delivering",
+    "rated_p_kw": 250.0,
+    "lat": 30.27,
+    "lon": -97.74,
+    "last_seen_at": "2026-09-25T11:59:55+00:00",
+    "asset_class": "MOBILE",
+    "hardware_revision": None,
+    "firmware_version": None,
+}
+SUBSTATION = {
+    "hub_id": "sub-LZ_AEN-00",
+    "bank_id": "bank-sub-aen",
+    "zone": "LZ_AEN",
+    "soc_kwh": 8000.0,
+    "e_kwh": 16000.0,
+    "soc_pct": 50.0,
+    "p_kw": 0.0,
+    "health": "online",
+    "health_label": "OK",
+    "activity": "idle",
+    "rated_p_kw": 4000.0,
+    "lat": 30.35,
+    "lon": -97.68,
+    "last_seen_at": "2026-09-25T11:59:55+00:00",
+    "asset_class": "UTILITY_SCALE",
+    "hardware_revision": None,
+    "firmware_version": None,
+}
+HOME_STATIONS = {
+    "items": [
+        {
+            "home_station_id": "hs-austin-north-01",
+            "zone": "LZ_AEN",
+            "lat": 30.401,
+            "lon": -97.719,
+            "charger_kw": 150.0,
+            "notes": "Depot",
+            "units": ["trailer-mb-01"],
+        }
+    ]
+}
+HUBS = [{**_with_device(_hub(i), i), "asset_class": "HOME"} for i in range(1, N_HUBS + 1)] + [
+    TRUCK,
+    SUBSTATION,
+]
 _SORT = {
     "hw": "hardware_revision",
     "fw": "firmware_version",
@@ -108,6 +163,7 @@ def _matching(params: Any) -> list[dict[str, Any]]:
     zones, health, acts = _multi(params, "zone"), _multi(params, "health"), _multi(params, "activity")
     bank, q = _one(params, "bank"), _one(params, "q")
     hw, fw, fw_not = _multi(params, "hw"), _multi(params, "fw"), _one(params, "fw_not")
+    classes = _multi(params, "asset_class")
     lo, hi = _one(params, "soc_min"), _one(params, "soc_max")
     out = []
     for hub in HUBS:
@@ -129,6 +185,8 @@ def _matching(params: Any) -> list[dict[str, Any]]:
             continue
         if fw_not and hub["firmware_version"] == fw_not:
             continue
+        if classes and hub["asset_class"] not in classes:
+            continue
         out.append(hub)
     return out
 
@@ -141,7 +199,10 @@ def table(params: Any) -> dict[str, Any]:
     rows = _matching(params)
     sort = _one(params, "sort") or "hub"
     key = _SORT.get(sort, "last_seen_at")
-    rows.sort(key=lambda h: (h[key], h["hub_id"]), reverse=_one(params, "dir") == "desc")
+    rows.sort(
+        key=lambda h: (h[key] is not None, h[key] if h[key] is not None else "", h["hub_id"]),
+        reverse=_one(params, "dir") == "desc",
+    )
     limit = int(_one(params, "limit") or 50)
     raw = _one(params, "cursor")
     offset = json.loads(base64.urlsafe_b64decode(raw))["o"] if raw else 0
@@ -213,8 +274,37 @@ SUMMARY = {"total": N_HUBS, "online": 65, "stale": 22, "offline": 43}
 
 def detail(hub_id: str) -> dict[str, Any]:
     hub = next(h for h in HUBS if h["hub_id"] == hub_id)
+    mobile = (
+        {
+            "home_station": HOME_STATIONS["items"][0],
+            "location": {"lat": hub["lat"], "lon": hub["lon"]},
+            "status": "AWAY",
+            "charging_allowed": False,
+            "charging_note": "D-31",
+            "next_return": None,
+        }
+        if hub["asset_class"] == "MOBILE"
+        else None
+    )
+    utility = (
+        {
+            "asset_id": hub_id,
+            "mw": 4.0,
+            "mwh": 16.0,
+            "poi_import_kva": 4000.0,
+            "poi_export_kva": 4000.0,
+            "feeder_id": "F-AEN-7",
+            "substation_id": "SUB-AEN",
+            "status": "ACTIVE",
+        }
+        if hub["asset_class"] == "UTILITY_SCALE"
+        else None
+    )
     return {
         "hub_id": hub_id,
+        "asset_class": hub["asset_class"],
+        "mobile": mobile,
+        "utility_scale": utility,
         "status": {
             "health": hub["health"],
             "health_label": hub["health_label"],
@@ -290,12 +380,13 @@ def responses() -> dict[str, Any]:
         "/og/api/fleet/release-requests": RELEASES,
         "/og/api/fleet/summary": SUMMARY,
         "/og/api/fleet/manual-targets": TARGETS,
+        "/og/api/fleet/home-stations": HOME_STATIONS,
         CHARGE_PATH: CHARGE_WINDOWS,
         f"{CHARGE_PATH}/effective": effective,
     }
     for hub in HUBS[2:3]:
         out[f"/og/api/fleet/hubs/{hub['hub_id']}"] = hub
-    for hub_id in ("hub-0001", "hub-0002", "hub-0003"):
+    for hub_id in ("hub-0001", "hub-0002", "hub-0003", "trailer-mb-01", "sub-LZ_AEN-00"):
         out[f"/og/api/fleet/hubs/{hub_id}/detail"] = detail(hub_id)
     return out
 
