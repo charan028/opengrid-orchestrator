@@ -65,6 +65,35 @@
         {% endfor %}
       </div>
     </details>
+    <details class="fl-multi" id="flt-hw">
+      <summary>HW rev{% if state.hw %} ({{ state.hw|length }}){% endif %}</summary>
+      <div class="fl-multi-list">
+        {% for v in hw_options %}
+        <label class="fl-check"><input type="checkbox" name="hw" value="{{ v }}" {{ 'checked' if v in state.hw else '' }}> {{ v }}</label>
+        {% else %}
+        <span class="og-card-meta">No hardware revisions reported yet.</span>
+        {% endfor %}
+      </div>
+    </details>
+    <details class="fl-multi" id="flt-fw">
+      <summary>FW version{% if state.fw %} ({{ state.fw|length }}){% endif %}</summary>
+      <div class="fl-multi-list">
+        {% for v in fw_options %}
+        <label class="fl-check"><input type="checkbox" name="fw" value="{{ v }}" {{ 'checked' if v in state.fw else '' }}> {{ v }}</label>
+        {% else %}
+        <span class="og-card-meta">No firmware versions reported yet.</span>
+        {% endfor %}
+      </div>
+    </details>
+    <div class="fl-field">
+      <label for="flt-fw-not">FW &ne; (out of date)</label>
+      <div class="fl-combo">
+        <input id="flt-fw-not" type="text" name="fw_not" value="{{ state.fw_not }}" autocomplete="off"
+               role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="flt-fw-not-list"
+               data-combobox="firmware" placeholder="current version">
+        <ul class="fl-listbox" id="flt-fw-not-list" role="listbox" hidden></ul>
+      </div>
+    </div>
     <div class="fl-field fl-soc">
       <span class="fl-label" id="flt-soc-label">SoC range</span>
       <div class="fl-range" role="group" aria-labelledby="flt-soc-label">
@@ -91,7 +120,7 @@
   </div>
 
   <div class="fl-table-bar">
-    <span id="fleet-page-info" role="status">{{ table_rows|length }} shown of {{ approx_text }} hubs</span>
+    <span id="fleet-page-info" role="status">{{ table_rows|length }} shown of {{ approx_text }} hubs{% if target_count %} &middot; <span class="fl-target">{{ target_count }} under an operator target</span>{% endif %}</span>
     <span class="fl-table-bar-right">
       {% if is_operator and table_rows %}
       <button type="button" class="btn btn-sm" id="fleet-select-page">Select this page</button>
@@ -133,12 +162,14 @@
           <td>{{ row.zone }}</td>
           <td class="num">{{ row.soc_pct if row.soc_pct is not none else '—' }}</td>
           <td class="num" data-col="kw">{{ row.p_kw if row.p_kw is not none else '—' }}</td>
-          <td>{{ row.activity }}</td>
+          <td>{{ row.activity }}{% if row.target %} <span class="fl-target" title="Operator target until {{ row.target.expires_at }} (by {{ row.target.proposer }})">target {{ row.target.p_kw_target }} kW</span>{% endif %}</td>
           <td><span class="status-badge" data-status="{{ row.health }}"><span class="status-text">{{ row.health_label }}</span></span></td>
           <td>{{ row.age_badge|safe }}</td>
+          <td>{{ row.hardware_revision or '—' }}</td>
+          <td>{{ row.firmware_version or '—' }}</td>
         </tr>
         {% else %}
-        <tr><td class="empty" colspan="{{ 9 if is_operator else 8 }}">No hubs match these filters. Remove a chip above or Reset to see the fleet.</td></tr>
+        <tr><td class="empty" colspan="{{ 11 if is_operator else 10 }}">No hubs match these filters. Remove a chip above or Reset to see the fleet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -173,6 +204,7 @@
 </aside>
 
 {# 4. actions #}
+{% include "_partials/fleet_charge_card.html" %}
 {% if is_operator %}
 <section class="og-panel fl-actions" aria-labelledby="actions-heading" id="fleet-actions">
   <h2 id="actions-heading">Actions</h2>
@@ -181,7 +213,7 @@
 
     <article class="fl-card" aria-labelledby="card-one">
       <h3 id="card-one">Command one hub</h3>
-      <p class="fl-instr">Pick a hub (its bank fills in) or a whole bank, set the power, give a reason.</p>
+      <p class="fl-instr">Pick a hub (its bank fills in) or a whole bank, set the power and how long it holds. The engine ramps to it at the hub's ramp limit.</p>
       <form id="manual-command-form" class="fl-form" novalidate
             hx-post="{{ base_path }}/fleet/command/propose" hx-target="#command-propose-result" hx-swap="innerHTML">
         <div class="fl-field">
@@ -206,11 +238,15 @@
           <div class="og-input-group"><input id="cmd-setpoint" type="number" step="0.1" name="p_kw_setpoint" required aria-describedby="cmd-setpoint-hint"><span class="og-input-suffix">kW</span></div>
         </div>
         <div class="fl-field">
+          <label for="cmd-duration">Expires in</label>
+          <div class="og-input-group"><input id="cmd-duration" type="number" name="duration_minutes" min="1" max="240" step="1" value="15" required><span class="og-input-suffix">min</span></div>
+        </div>
+        <div class="fl-field">
           <label for="cmd-reason">Reason</label>
           <input id="cmd-reason" type="text" name="reason" required aria-describedby="cmd-reason-hint">
         </div>
         <button class="btn btn-primary fl-submit" type="submit" data-requires="target">Propose (step 1 of 2)</button>
-        <p class="fl-hint" id="cmd-setpoint-hint">+ discharges, &minus; charges. Pick a hub to see its limit.</p>
+        <p class="fl-hint" id="cmd-setpoint-hint">Setpoint sign: + charges, &minus; discharges. Pick a hub to see its limit.</p>
         <p class="fl-hint fl-why" id="cmd-reason-hint" aria-live="polite"></p>
       </form>
       <div id="command-propose-result" role="status"></div>
@@ -226,6 +262,10 @@
         <div class="fl-field">
           <label for="bulk-setpoint">Setpoint (kW)</label>
           <div class="og-input-group"><input id="bulk-setpoint" type="number" step="0.1" name="p_kw_setpoint" required><span class="og-input-suffix">kW</span></div>
+        </div>
+        <div class="fl-field">
+          <label for="bulk-duration">Expires in</label>
+          <div class="og-input-group"><input id="bulk-duration" type="number" name="duration_minutes" min="1" max="240" step="1" value="15" required><span class="og-input-suffix">min</span></div>
         </div>
         <div class="fl-field">
           <label for="bulk-reason">Reason</label>
@@ -320,12 +360,6 @@
       </form>
       <div id="release-review-dialog"></div>
       <div id="safestop-release-result" role="status"></div>
-    </article>
-
-    <article class="fl-card fl-card-placeholder" aria-labelledby="card-charge" aria-disabled="true">
-      <h3 id="card-charge">Charging schedule</h3>
-      <p class="fl-instr">Grid-charging windows per utility (default AUSTIN_ENERGY 22:00&ndash;06:00 America/Chicago) and per-bank overrides. Solar charging is always allowed; these windows limit charging from the grid.</p>
-      <button class="btn fl-submit" type="button" disabled title="The charge-windows API is not deployed yet (R3.1)">Charging schedule &mdash; available after R3.1</button>
     </article>
 
     <article class="fl-card fl-card-placeholder" aria-labelledby="card-fw" aria-disabled="true">

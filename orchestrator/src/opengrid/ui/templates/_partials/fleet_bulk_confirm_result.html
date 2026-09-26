@@ -5,7 +5,7 @@
      result.status == "EXECUTED": per-hub guardian outcomes (outcome_counts, results[]); 200 even when
        some hubs were vetoed.
      status_code: 503 timeout, 410/404 expired or unknown; message: failure detail. #}
-<div id="bulk-confirm-result" role="{{ 'status' if (result and result.status in ('AWAITING_SECOND_CONFIRM', 'EXECUTED')) else 'alert' }}">
+<div id="bulk-confirm-result" role="{{ 'status' if (result and result.status in ('AWAITING_SECOND_CONFIRM', 'EXECUTED', 'RAMPING')) else 'alert' }}">
   {% if result and result.status == "AWAITING_SECOND_CONFIRM" %}
   <p>{% with status='caution', label='SECOND CONFIRM' %}{% include "_partials/status_badge.html" %}{% endwith %}
     First confirmation recorded ({{ result.confirmations_received|default(1) }} of {{ result.confirmations_required|default(2) }}).
@@ -14,6 +14,8 @@
           hx-post="{{ second_confirm_url }}" hx-target="#bulk-confirm-result" hx-swap="outerHTML">
     Confirm again and send to the selection
   </button>
+  {% elif result and result.status == "RAMPING" %}
+  {% include "_partials/fleet_ramp_status.html" %}
   {% elif result and result.status == "EXECUTED" %}
   {% set counts = result.outcome_counts or {} %}
   {% set passed = counts.get('PASS', 0) %}

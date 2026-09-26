@@ -1,0 +1,14 @@
+{# fleet_charge_result.html -- step 2 of a charging-schedule change. #}
+<div id="charge-confirm-result" role="{{ 'status' if result else 'alert' }}">
+  {% if result %}
+  <p>{% with status='ok', label='SAVED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ result.scope_kind }}:{{ result.scope_ref }} now {{ (result.windows or [])|join(', ') or 'inherits' }}
+    (was {{ (result.old_windows or [])|join(', ') or 'inherited' }}). Trace {{ result.trace_id|default('-') }}. Reload to see the list.</p>
+  {% elif status_code in (410, 404) %}
+  <p>{% with status='caution', label='EXPIRED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The proposal expired or is unknown -- review the change again. {{ message }}</p>
+  {% else %}
+  <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message|default('the schedule could not be saved') }}</p>
+  {% endif %}
+</div>

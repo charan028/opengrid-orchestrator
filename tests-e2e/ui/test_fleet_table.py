@@ -220,3 +220,99 @@ def test_390px_has_no_horizontal_overflow(operator_page: Page) -> None:
     )
     assert overflow <= 0, overflow
     _shot(operator_page, "fleet_390.png")
+
+
+# -- R3.1 -----------------------------------------------------------------------------------------
+
+
+def test_hw_fw_columns_filters_and_out_of_date_chip(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet?fw_not=4.3.0&hw=C1")
+    chips = operator_page.locator("#fleet-chips .fl-chip")
+    expect(chips).to_have_count(2)
+    expect(chips.filter(has_text="FW \u2260 4.3.0")).to_have_count(1)
+    header = operator_page.locator("#fleet-table thead")
+    expect(header).to_contain_text("HW rev")
+    expect(header).to_contain_text("FW version")
+    for fw in operator_page.locator("#fleet-table tbody tr td:nth-child(11)").all_inner_texts():
+        assert fw.strip() == "4.2.1"
+    for hw in operator_page.locator("#fleet-table tbody tr td:nth-child(10)").all_inner_texts():
+        assert hw.strip() == "C1"
+    operator_page.locator("#flt-fw summary").click()
+    expect(operator_page.locator('#flt-fw input[value="4.3.0"]')).to_have_count(1)
+    goto_ok(operator_page, f"{BASE_PATH}/fleet?sort=fw&dir=desc")
+    expect(operator_page.locator('th[aria-sort="descending"]')).to_contain_text("FW version")
+
+
+def test_operator_targets_are_marked_in_the_table_and_drawer(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    row = operator_page.locator('tr[data-row-id="hub-0003"]')
+    expect(row.locator(".fl-target")).to_contain_text("target 5.0 kW")
+    expect(operator_page.locator("#fleet-page-info")).to_contain_text("1 under an operator target")
+    row.click()
+    drawer = operator_page.locator("#hub-drawer")
+    expect(drawer.locator("#drawer-target")).to_contain_text("5.0 kW")
+    expect(drawer.locator("#drawer-hwfw")).to_contain_text("HW rev")
+    expect(drawer.locator("#drawer-charge-window")).to_contain_text("from BANK:bank-03")
+    expect(drawer).to_contain_text("Reported by battery")
+
+
+def test_manual_command_ramps_and_can_be_cancelled(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    form = operator_page.locator("#manual-command-form")
+    expect(form.get_by_label("Expires in", exact=True)).to_have_value("15")
+    form.get_by_label("Hub id", exact=True).fill("hub-0001")
+    form.get_by_label("Setpoint (kW)", exact=True).fill("5")
+    form.get_by_label("Reason", exact=True).fill("ramp test")
+    form.get_by_role("button", name="Propose (step 1 of 2)").click()
+    operator_page.locator("#command-propose-result .confirm-dialog").get_by_role(
+        "button", name="Send command"
+    ).click()
+    ramp = operator_page.locator("#command-confirm-result .fl-ramp")
+    expect(ramp).to_contain_text("Ramping 1 hub to")
+    expect(ramp).to_contain_text("5.0 kW")
+    expect(ramp.locator(".fl-ramp-now")).to_contain_text("Now ", timeout=8000)
+    _shot(operator_page, "fleet_ramp.png")
+    ramp.get_by_role("button", name="Cancel target").click()
+    expect(operator_page.locator("#command-confirm-result .status-text")).to_have_text("CANCELLED")
+
+
+def test_charging_schedule_lists_previews_and_saves_in_two_steps(operator_page: Page) -> None:
+    operator_page.set_viewport_size({"width": 1400, "height": 1000})
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    card = operator_page.locator("#charge-schedule")
+    expect(card).to_contain_text("Solar charging is always allowed")
+    expect(card.locator('[data-scope="FLEET:*"]')).to_contain_text("22:00-06:00")
+    expect(card.locator('[data-scope="BANK:bank-03"]')).to_contain_text("changed by alice")
+
+    card.locator("#cw-preview-hub").fill("hub-0003")
+    card.get_by_role("button", name="Preview").click()
+    expect(card.locator("#charge-effective")).to_contain_text("from BANK:bank-03")
+
+    ref = card.locator("#cw-scope-ref")
+    expect(ref).to_be_disabled()
+    card.locator("#cw-scope").select_option("BANK")
+    expect(ref).to_be_enabled()
+    ref.fill("bank-05")
+    card.locator("#cw-add").click()
+    windows = card.locator(".fl-cw-window")
+    expect(windows).to_have_count(2)
+    windows.nth(1).locator(".fl-cw-del").click()
+    windows.nth(0).locator("input").nth(0).fill("21:00")
+    windows.nth(0).locator("input").nth(1).fill("05:00")
+    submit = card.get_by_role("button", name="Review change (step 1 of 2)")
+    expect(submit).to_be_disabled()
+    card.locator("#cw-reason").fill("tariff change")
+    expect(submit).to_be_enabled()
+    submit.click()
+    dialog = card.locator("#charge-propose-result .confirm-dialog")
+    expect(dialog).to_contain_text("21:00-05:00")
+    _shot(operator_page, "fleet_charging.png")
+    dialog.get_by_role("button", name="Save schedule").click()
+    expect(card.locator("#charge-confirm-result .status-text")).to_have_text("SAVED")
+
+
+def test_viewer_reads_the_charging_schedule_but_cannot_edit(viewer_page: Page) -> None:
+    goto_ok(viewer_page, f"{BASE_PATH}/fleet")
+    expect(viewer_page.locator("#charge-list")).to_contain_text("22:00-06:00")
+    expect(viewer_page.locator("#charge-edit-form")).to_have_count(0)
+    expect(viewer_page.locator("#charge-schedule button", has_text="Remove")).to_have_count(0)

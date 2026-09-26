@@ -13,16 +13,17 @@ confirmation and renders a pass/veto/timeout/expired result fragment. The templa
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from opengrid.core.timeutil import to_utc
-from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
+from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json, put_json
 from opengrid.ui.render import render_stale_badge, render_status_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.templating import BASE_PATH, templates
@@ -41,6 +42,23 @@ _SELECTION_PATH = "/og/api/fleet/selection"
 _RELEASES_PATH = "/og/api/fleet/release-requests"
 _SUMMARY_PATH = "/og/api/fleet/summary"
 _LEGACY_HUBS_PATH = "/og/api/fleet/hubs"
+# R3.1: operator manual targets (ramped by the engine) and the grid-charging schedule (FOLLOWUPS' API)
+_TARGETS_PATH = "/og/api/fleet/manual-targets"
+_CHARGE_WINDOWS_PATH = "/og/api/fleet/charge-windows"
+DEFAULT_TARGET_MINUTES = 15
+MAX_TARGET_MINUTES = 240
+#: D-30: most specific wins, Fleet < Provider < Zone < Substation < Feeder < Bank < Hub.
+CHARGE_SCOPES: tuple[tuple[str, str], ...] = (
+    ("FLEET", "Fleet"),
+    ("PROVIDER", "Provider"),
+    ("ZONE", "Zone"),
+    ("SUBSTATION", "Substation"),
+    ("FEEDER", "Feeder"),
+    ("BANK", "Bank"),
+    ("HUB", "Hub"),
+)
+_WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+MAX_WINDOWS = 4
 PAGE_SIZES = (25, 50, 100)
 DEFAULT_PAGE_SIZE = 50
 #: "Select all N matching" cap; the API applies its own `[api].fleet_selection_max` on top.
@@ -58,9 +76,11 @@ SORT_COLUMNS: dict[str, str] = {
     "bank": "Bank",
     "zone": "Zone",
     "soc": "SoC (%)",
-    "kw": "P (kW)",
+    "kw": "P (kW, +chg/\u2212dis)",
     "health": "Health",
     "age": "Telemetry age",
+    "hw": "HW rev",
+    "fw": "FW version",
 }
 _HUB_STALE_AFTER_S = 10.0
 #: The API holds the approval open up to 10 s waiting for the guardian (api `routers.safestop`).
@@ -141,7 +161,7 @@ def bulk_risk_reasons(hubs: list[dict[str, Any]], hub_ids: list[str]) -> list[st
             for obligation in obligations:
                 label = _serving_label(obligation)
                 serving[label] = serving.get(label, 0) + 1
-        elif float(hub.get("p_kw") or hub.get("kw") or 0) > 0.1:
+        elif float(hub.get("p_kw") or hub.get("kw") or 0) < -0.1:  # +charge / -discharge
             delivering += 1
         if str(hub.get("health") or "").lower() in ("fault", "offline"):
             faulted += 1
@@ -267,6 +287,9 @@ class TableState:
     soc_min: str = ""
     soc_max: str = ""
     q: str = ""
+    hw: tuple[str, ...] = ()
+    fw: tuple[str, ...] = ()
+    fw_not: str = ""
     sort: str = "hub"
     dir: str = "asc"
     size: int = DEFAULT_PAGE_SIZE
@@ -281,6 +304,10 @@ class TableState:
         for key in ("soc_min", "soc_max", "q"):
             if getattr(self, key):
                 out.append((key, getattr(self, key)))
+        out += [("hw", v) for v in self.hw]
+        out += [("fw", v) for v in self.fw]
+        if self.fw_not:
+            out.append(("fw_not", self.fw_not))
         return out
 
     def view_params(self) -> list[tuple[str, str]]:
@@ -325,7 +352,17 @@ class TableState:
             chips.append({"label": f"SoC: {span}", "url": self.url(soc_min="", soc_max="", cursor="")})
         if self.q:
             chips.append({"label": f"Hub id: {self.q}*", "url": self.url(q="", cursor="")})
+        for v in self.hw:
+            chips.append({"label": f"HW: {v}", "url": self.url(hw=_without(self.hw, v), cursor="")})
+        for v in self.fw:
+            chips.append({"label": f"FW: {v}", "url": self.url(fw=_without(self.fw, v), cursor="")})
+        if self.fw_not:
+            chips.append({"label": f"FW \u2260 {self.fw_not}", "url": self.url(fw_not="", cursor="")})
         return chips
+
+
+def _values(raw: list[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(v.strip()[:64] for v in raw if v.strip()))
 
 
 def _without(values: tuple[str, ...], drop: str) -> tuple[str, ...]:
@@ -353,6 +390,9 @@ def table_state(request: Request) -> TableState:
         soc_min=_num_text(qp.get("soc_min")),
         soc_max=_num_text(qp.get("soc_max")),
         q=(qp.get("q") or "").strip()[:64],
+        hw=_values(qp.getlist("hw")),
+        fw=_values(qp.getlist("fw")),
+        fw_not=(qp.get("fw_not") or "").strip()[:64],
         sort=qp.get("sort", "hub") if qp.get("sort", "hub") in SORT_COLUMNS else "hub",
         dir="desc" if qp.get("dir") == "desc" else "asc",
         size=int(size) if size in {str(s) for s in PAGE_SIZES} else DEFAULT_PAGE_SIZE,
@@ -371,15 +411,30 @@ def _as_params(pairs: list[tuple[str, str]]) -> dict[str, Any]:
     return out
 
 
+_SEARCH_KINDS = ("hub", "bank", "zone", "firmware", "hardware")
+_OPTION_QUERY: dict[str, dict[str, Any]] = {
+    k: {"kind": k, "q": "", "limit": 50} for k in ("hardware", "firmware")
+}
+
+
+def _ids(body: Any) -> set[str]:
+    """The `id`s of a `GET /og/api/fleet/search` body (filter options); empty for anything else."""
+    items = body.get("items", []) if isinstance(body, dict) else []
+    return {str(i["id"]) for i in items if isinstance(i, dict) and i.get("id")}
+
+
 def _approx(n: int | None) -> str:
     if n is None:
         return "unknown number of"
     return f"~{n:,}"
 
 
-def _table_row(hub: dict[str, Any]) -> dict[str, Any]:
+def _table_row(hub: dict[str, Any], targets: dict[str, dict[str, Any]]) -> dict[str, Any]:
     last_seen_at = hub.get("last_seen_at")
     return {
+        "hardware_revision": hub.get("hardware_revision"),
+        "firmware_version": hub.get("firmware_version"),
+        "target": targets.get(str(hub.get("hub_id"))),
         "hub_id": hub.get("hub_id", "-"),
         "bank_id": hub.get("bank_id") or "-",
         "zone": hub.get("zone") or "-",
@@ -443,10 +498,15 @@ async def fleet_screen(
 
     summary = await _optional_json(_SUMMARY_PATH)
     zones_raw = await _optional_json(_SEARCH_PATH, params={"kind": "zone", "q": "", "limit": 50})
-    zone_options = sorted(
-        {str(z["id"]) for z in (zones_raw or {}).get("items", []) if isinstance(z, dict) and z.get("id")}
-        | set(state.zones)
+    zone_options = sorted(_ids(zones_raw) | set(state.zones))
+    hw_options = sorted(
+        _ids(await _optional_json(_SEARCH_PATH, params=_OPTION_QUERY["hardware"])) | set(state.hw)
     )
+    fw_options = sorted(
+        _ids(await _optional_json(_SEARCH_PATH, params=_OPTION_QUERY["firmware"])) | set(state.fw)
+    )
+    targets = await active_targets()
+    windows = await _optional_json(_CHARGE_WINDOWS_PATH)
     operator = is_operator(request)
     releases: list[dict[str, Any]] = []
     if operator:
@@ -460,7 +520,12 @@ async def fleet_screen(
             "role": role_of(request),
             "is_operator": operator,
             "state": state,
-            "table_rows": [_table_row(h) for h in hubs],
+            "table_rows": [_table_row(h, targets) for h in hubs],
+            "hw_options": hw_options,
+            "fw_options": fw_options,
+            "target_count": len(targets),
+            "charge_windows": charge_window_groups(windows),
+            "charge_scopes": CHARGE_SCOPES,
             "approx_total": page.get("approx_total"),
             "approx_text": _approx(page.get("approx_total")),
             "next_url": state.url(cursor=page["next_cursor"]) if page.get("next_cursor") else None,
@@ -491,8 +556,10 @@ async def fleet_search(
     kind: str = Query(...), q: str = Query(default=""), limit: int = Query(default=20, gt=0, le=50)
 ) -> JSONResponse:
     """Typeahead for every id field: relays `GET /og/api/fleet/search` (viewer role)."""
-    if kind not in ("hub", "bank", "zone"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="kind must be hub, bank or zone")
+    if kind not in _SEARCH_KINDS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"kind must be one of {_SEARCH_KINDS}"
+        )
     body = await _optional_json(_SEARCH_PATH, params={"kind": kind, "q": q[:64], "limit": limit})
     return JSONResponse(body if isinstance(body, dict) else {"kind": kind, "q": q, "items": []})
 
@@ -543,6 +610,10 @@ async def hub_drilldown(request: Request, hub_id: str) -> HTMLResponse:
         {
             "hub": hub,
             "detail": detail,
+            "target": (await active_targets()).get(hub_id),
+            "charge_window": await _optional_json(
+                f"{_CHARGE_WINDOWS_PATH}/effective", params={"hub_id": hub_id}
+            ),
             "activity_labels": ACTIVITY_LABELS,
             "role": role_of(request),
             "is_operator": is_operator(request),
@@ -686,6 +757,7 @@ async def propose_command(
     hub_id: str = Form(default=""),
     p_kw_setpoint: float = Form(...),
     reason: str = Form(...),
+    duration_minutes: int = Form(default=DEFAULT_TARGET_MINUTES, ge=1, le=MAX_TARGET_MINUTES),
 ) -> HTMLResponse:
     """Step 1 of 2: relays the operator's target/setpoint/reason to `POST /og/api/fleet/command` and
     renders the real proposal as an already-open confirm dialog. Guardian evaluation happens at confirm
@@ -700,6 +772,7 @@ async def propose_command(
         "hub_id": hub_id or None,
         "p_kw_setpoint": p_kw_setpoint,
         "reason": reason,
+        "duration_minutes": duration_minutes,
     }
     try:
         proposal = await post_json(_COMMAND_PROPOSE_PATH, payload, remote_user=remote_user(request))
@@ -727,6 +800,7 @@ async def propose_bulk_command(
     hub_ids: str = Form(default=""),
     p_kw_setpoint: float = Form(...),
     reason: str = Form(...),
+    duration_minutes: int = Form(default=DEFAULT_TARGET_MINUTES, ge=1, le=MAX_TARGET_MINUTES),
 ) -> HTMLResponse:
     """Step 1 of 2 for a selection (CR #19 item 2): relays the selected hubs, setpoint and reason to
     `POST /og/api/fleet/commands/bulk` and renders the real proposal as an already-open confirm dialog.
@@ -749,7 +823,12 @@ async def propose_bulk_command(
     except ApiUnavailable as exc:
         logger.info("bulk propose: hub list unavailable for the risk check (%s)", exc)
     reasons = bulk_risk_reasons(hubs, selected)
-    payload = {"hub_ids": selected, "p_kw_setpoint": p_kw_setpoint, "reason": reason}
+    payload = {
+        "hub_ids": selected,
+        "p_kw_setpoint": p_kw_setpoint,
+        "reason": reason,
+        "duration_minutes": duration_minutes,
+    }
     try:
         proposal = await post_json(_BULK_COMMAND_PATH, payload, remote_user=remote_user(request))
     except ApiUnavailable as exc:
@@ -829,4 +908,198 @@ async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
         request,
         "_partials/fleet_command_confirm_result.html",
         {"result": result, "status_code": status.HTTP_200_OK, "message": None},
+    )
+
+
+# -- R3.1: manual targets (ramped by the engine) -----------------------------------------------------
+
+
+async def active_targets() -> dict[str, dict[str, Any]]:
+    """hub_id -> the operator target currently controlling it (`GET /og/api/fleet/manual-targets`);
+    empty when the API does not serve it yet, so the table simply shows no markers."""
+    body = await _optional_json(_TARGETS_PATH)
+    items = body.get("items", []) if isinstance(body, dict) else []
+    return {str(t["hub_id"]): t for t in items if isinstance(t, dict) and t.get("hub_id")}
+
+
+@router.get("/hubs/{hub_id}/live")
+async def hub_live(hub_id: str) -> JSONResponse:
+    """The hub's current P for the ramp progress indicator (`{hub_id, p_kw, last_seen_at}`)."""
+    body = await _optional_json(f"{_LEGACY_HUBS_PATH}/{hub_id}")
+    hub = body if isinstance(body, dict) else {}
+    return JSONResponse({"hub_id": hub_id, "p_kw": hub.get("p_kw"), "last_seen_at": hub.get("last_seen_at")})
+
+
+@router.post("/manual-targets/{trace_id}/cancel", response_class=HTMLResponse)
+async def cancel_target(request: Request, trace_id: str) -> HTMLResponse:
+    """Ends an operator target early: relays `POST /og/api/fleet/manual-targets/{trace_id}/cancel`; the
+    engine hands the hubs back to normal dispatch. 404 means the target no longer controls any hub."""
+    _require_operator(request)
+    try:
+        result = await post_json(f"{_TARGETS_PATH}/{trace_id}/cancel", {}, remote_user=remote_user(request))
+    except ApiUnavailable as exc:
+        logger.warning("manual target cancel failed: %s", exc)
+        return templates.TemplateResponse(
+            request,
+            "_partials/fleet_target_cancel_result.html",
+            {"result": None, "status_code": exc.status_code, "message": str(exc)},
+        )
+    return templates.TemplateResponse(
+        request,
+        "_partials/fleet_target_cancel_result.html",
+        {"result": result, "status_code": status.HTTP_200_OK, "message": None},
+    )
+
+
+# -- R3.1: grid-charging schedule (D-30) -------------------------------------------------------------
+
+
+def charge_window_groups(body: Any) -> dict[str, Any] | None:
+    """`GET /og/api/fleet/charge-windows` grouped by scope kind in hierarchy order, or None when the API
+    is absent (the card then says it is available after R3.1)."""
+    if not isinstance(body, dict) or not isinstance(body.get("items"), list):
+        return None
+    rank = {kind: i for i, (kind, _label) in enumerate(CHARGE_SCOPES)}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in sorted(
+        (i for i in body["items"] if isinstance(i, dict)),
+        key=lambda i: (rank.get(str(i.get("scope_kind")), 99), str(i.get("scope_ref"))),
+    ):
+        groups.setdefault(str(item.get("scope_kind")), []).append(item)
+    return {"tz": body.get("tz", "America/Chicago"), "groups": groups}
+
+
+def parse_windows(starts: list[str], ends: list[str]) -> list[str]:
+    """Form rows -> the API's `"HH:MM-HH:MM"` strings. Wrapping past midnight is allowed; an empty row
+    is skipped; start == end, a malformed time or more than `MAX_WINDOWS` windows is a ValueError."""
+    windows: list[str] = []
+    for start, end in zip(starts, ends, strict=False):
+        start, end = start.strip(), end.strip()
+        if not start and not end:
+            continue
+        if not (_WINDOW_RE.match(start) and _WINDOW_RE.match(end)):
+            raise ValueError(f"times must be HH:MM (got {start or '?'} to {end or '?'})")
+        if start == end:
+            raise ValueError(f"window {start}-{end} is empty")
+        windows.append(f"{start}-{end}")
+    if len(windows) > MAX_WINDOWS:
+        raise ValueError(f"at most {MAX_WINDOWS} windows")
+    return windows
+
+
+def _charge_path(scope_kind: str, scope_ref: str) -> str:
+    kind = scope_kind.upper()
+    if kind not in dict(CHARGE_SCOPES):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"unknown scope {scope_kind!r}")
+    ref = "*" if kind == "FLEET" else scope_ref.strip()
+    if not ref:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="a scope id is required")
+    return f"{_CHARGE_WINDOWS_PATH}/{quote(kind, safe='')}/{quote(ref, safe='')}"
+
+
+def _charge_dialog(request: Request, proposal: dict[str, Any], title: str) -> HTMLResponse:
+    old = ", ".join(proposal.get("old_windows") or []) or "none (inherits)"
+    new = proposal.get("new_windows")
+    summary = proposal.get("summary") or (
+        f"{proposal.get('scope_kind')}:{proposal.get('scope_ref')}: {old} -> "
+        + (", ".join(new) if new else "override removed")
+    )
+    return templates.TemplateResponse(
+        request,
+        "_partials/confirm_dialog.html",
+        _confirm_dialog_context(
+            dialog_id=f"charge-confirm-{proposal['proposal_id']}",
+            title=title,
+            proposal={"summary": summary, "expires_in_s": proposal.get("expires_in_s")},
+            confirm_url=f"{BASE_PATH}/fleet/charge-windows/proposals/{proposal['proposal_id']}/confirm",
+            confirm_label="Save schedule",
+            variant="primary",
+            target="#charge-confirm-result",
+        ),
+    )
+
+
+@router.post("/charge-windows/propose", response_class=HTMLResponse)
+async def propose_charge_windows(request: Request) -> HTMLResponse:
+    """Step 1 of 2: `PUT /og/api/fleet/charge-windows/{kind}/{ref}` proposes the new windows; the dialog
+    shows old -> new and only its confirm button saves."""
+    _require_operator(request)
+    form = await request.form()
+    reason = str(form.get("reason") or "").strip()
+    try:
+        windows = parse_windows(
+            [str(v) for v in form.getlist("start")], [str(v) for v in form.getlist("end")]
+        )
+    except ValueError as exc:
+        return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": str(exc)})
+    if not windows or not reason:
+        message = "add at least one window" if not windows else "a reason is required"
+        return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": message})
+    path = _charge_path(str(form.get("scope_kind") or ""), str(form.get("scope_ref") or ""))
+    try:
+        proposal = await put_json(
+            path, {"windows": windows, "reason": reason}, remote_user=remote_user(request)
+        )
+    except ApiUnavailable as exc:
+        return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": str(exc)})
+    return _charge_dialog(request, proposal, "Confirm charging schedule")
+
+
+@router.post("/charge-windows/remove", response_class=HTMLResponse)
+async def propose_charge_window_removal(
+    request: Request,
+    scope_kind: str = Form(...),
+    scope_ref: str = Form(...),
+    reason: str = Form(default=""),
+) -> HTMLResponse:
+    """Step 1 of 2 for removing an override (never the Fleet default): the scope then inherits."""
+    _require_operator(request)
+    if scope_kind.upper() == "FLEET":
+        return templates.TemplateResponse(
+            request, "_partials/propose_error.html", {"message": "the Fleet default cannot be removed"}
+        )
+    if not reason.strip():
+        return templates.TemplateResponse(
+            request, "_partials/propose_error.html", {"message": "a reason is required to remove an override"}
+        )
+    try:
+        proposal = await delete_json(
+            _charge_path(scope_kind, scope_ref), remote_user=remote_user(request), payload={"reason": reason}
+        )
+    except ApiUnavailable as exc:
+        return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": str(exc)})
+    return _charge_dialog(request, proposal, "Confirm override removal")
+
+
+@router.post("/charge-windows/proposals/{proposal_id}/confirm", response_class=HTMLResponse)
+async def confirm_charge_windows(request: Request, proposal_id: str) -> HTMLResponse:
+    _require_operator(request)
+    try:
+        result = await post_json(
+            f"{_CHARGE_WINDOWS_PATH}/proposals/{proposal_id}/confirm", {}, remote_user=remote_user(request)
+        )
+    except ApiUnavailable as exc:
+        return templates.TemplateResponse(
+            request,
+            "_partials/fleet_charge_result.html",
+            {"result": None, "status_code": exc.status_code, "message": str(exc)},
+        )
+    return templates.TemplateResponse(
+        request,
+        "_partials/fleet_charge_result.html",
+        {"result": result, "status_code": status.HTTP_200_OK, "message": None},
+    )
+
+
+@router.get("/charge-windows/effective", response_class=HTMLResponse)
+async def effective_charge_windows(request: Request, hub_id: str = "", bank_id: str = "") -> HTMLResponse:
+    """Preview: the windows that apply to a hub or bank and the scope they come from."""
+    target = {"hub_id": hub_id.strip()} if hub_id.strip() else {"bank_id": bank_id.strip()}
+    body = (
+        await _optional_json(f"{_CHARGE_WINDOWS_PATH}/effective", params=target)
+        if any(target.values())
+        else None
+    )
+    return templates.TemplateResponse(
+        request, "_partials/fleet_charge_effective.html", {"effective": body, "target": target}
     )

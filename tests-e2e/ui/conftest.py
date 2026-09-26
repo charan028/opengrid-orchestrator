@@ -198,7 +198,7 @@ def _post_responses() -> dict[str, Any]:
         # the API flags the selection: the first confirm answers AWAITING_SECOND_CONFIRM, the second executes
         f"/og/api/fleet/commands/bulk/{BULK_PROPOSAL_ID}/confirm": [
             _load("ui19_bulk_confirm_1.json"),
-            _load("ui19_bulk_confirm_2.json"),
+            fleet_fixture.bulk_ramping(),  # R3.1: the executing confirm starts a ramped target
         ],
         "/og/api/ai/ask": _load("ai_ask.json"),
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
@@ -206,6 +206,7 @@ def _post_responses() -> dict[str, Any]:
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},
         "/og/api/alerts/ack-bulk": {"results": [{"alert_id": i, "status": "acked"} for i in range(1, 200)]},
         "/og/api/dispatch/as-deployments": {"deployment_id": AS_DEPLOYMENT_ID, "status": "ACTIVE"},
+        **fleet_fixture.post_responses(COMMAND_PROPOSAL_ID, BULK_PROPOSAL_ID),  # R3.1: ramped targets
     }
 
 
@@ -264,7 +265,16 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
             return body[min(served, len(body) - 1)]
         return body
 
-    async def fake_delete_json(path: str, *, remote_user: str | None = None) -> Any:
+    async def fake_put_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
+        if path.startswith(fleet_fixture.CHARGE_PATH):
+            return fleet_fixture.charge_propose(path, payload)
+        raise ApiUnavailable(f"no fixture registered for PUT {path}")
+
+    async def fake_delete_json(
+        path: str, *, remote_user: str | None = None, payload: dict[str, Any] | None = None
+    ) -> Any:
+        if path.startswith(fleet_fixture.CHARGE_PATH):
+            return fleet_fixture.charge_propose(path, None)
         if path != f"/og/api/dispatch/as-deployments/{AS_DEPLOYMENT_ID}":
             raise ApiUnavailable(f"no fixture registered for DELETE {path}")
         return {"deployment_id": AS_DEPLOYMENT_ID, "status": "STOPPED"}
@@ -274,6 +284,7 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
             ("get_json", fake_get_json),
             ("post_json", fake_post_json),
             ("delete_json", fake_delete_json),
+            ("put_json", fake_put_json),
         ):
             if hasattr(module, name):
                 monkeypatch.setattr(module, name, fake)

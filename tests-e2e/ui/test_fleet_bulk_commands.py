@@ -69,8 +69,9 @@ def test_bulk_command_needs_a_second_acknowledgement_then_passes(operator_page: 
     expect(result.locator(".status-badge .status-text")).to_have_text("SECOND CONFIRM")
     expect(result).to_contain_text("1 hub in a fault state")
     result.locator("#bulk-second-confirm").click()
-    expect(operator_page.locator("#bulk-confirm-result .status-badge .status-text")).to_have_text("PASS")
-    expect(operator_page.locator("#bulk-confirm-result")).to_contain_text("3 of 3 hubs passed the guardian")
+    expect(operator_page.locator("#bulk-confirm-result .status-badge .status-text")).to_have_text("RAMPING")
+    expect(operator_page.locator("#bulk-confirm-result")).to_contain_text("Ramping 3 hubs to")
+    expect(operator_page.locator("#bulk-confirm-result .fl-cancel-target")).to_be_visible()
 
 
 def test_viewer_gets_no_selection_or_bulk_command(viewer_page: Page) -> None:

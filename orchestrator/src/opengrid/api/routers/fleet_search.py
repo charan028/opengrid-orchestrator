@@ -61,21 +61,28 @@ HEALTH_LABELS: dict[str, str] = {
 }
 HEALTH_STATES = {label: state for state, label in HEALTH_LABELS.items()}
 ACTIVITIES = ("delivering", "serving_home", "charging", "idle")
-#: |P| at or under this is idle; above it the sign says discharging (+) or charging (-).
+#: |P| at or under this is idle. Sign convention (interfaces/mqtt/telemetry.schema.json): +charge / -discharge.
 IDLE_KW = 0.1
 _RELEASE_PROPOSAL_KIND = "safestop-release"  # api.routers.safestop's proposal kind for a release request
 
-SortKey = Literal["hub", "bank", "zone", "soc", "kw", "health", "age"]
-#: sort key -> (SQL expression, cast for the bound cursor value). NULLs are coalesced so the row-value
-#: comparison is total. "age" sorts on last_seen_at inverted, so ascending age = most recent first.
+SortKey = Literal["hub", "bank", "zone", "soc", "kw", "health", "age", "hw", "fw"]
+#: Battery-reported og.hub columns (migration 0036) read through `to_jsonb(h.*)`, so a schema without
+#: them yields NULL instead of an error (a guarded read; see the module docstring's query-plan note).
+_HW_SQL = "(to_jsonb(h.*) ->> 'hardware_revision')"
+_FW_SQL = "(to_jsonb(h.*) ->> 'firmware_version')"
+#: sort key -> (SQL expression, cast for the bound cursor value). bank_id/zone/p_kw/last_seen_at are
+#: NOT NULL (0001), so the plain columns match migration 0039's (column, hub_id) indexes; the nullable
+#: expressions are coalesced so the row-value comparison stays total. "age" sorts on last_seen_at inverted, so ascending age = most recent first.
 _SORT_SQL: dict[str, tuple[str, str]] = {
+    "hw": (f"coalesce({_HW_SQL}, '')", "text"),
+    "fw": (f"coalesce({_FW_SQL}, '')", "text"),
     "hub": ("h.hub_id", "text"),
-    "bank": ("coalesce(h.bank_id, '')", "text"),
-    "zone": ("coalesce(h.zone, '')", "text"),
+    "bank": ("h.bank_id", "text"),
+    "zone": ("h.zone", "text"),
     "soc": ("coalesce(s.soc_kwh::float8 / nullif(h.e_kwh::float8, 0), -1)", "float8"),
-    "kw": ("coalesce(s.p_kw::float8, -1e18)", "float8"),
+    "kw": ("s.p_kw", "float8"),
     "health": ("{health}", "text"),
-    "age": ("coalesce(s.last_seen_at, 'epoch'::timestamptz)", "timestamptz"),
+    "age": ("s.last_seen_at", "timestamptz"),
 }
 
 _HEALTH_SQL = (
@@ -87,9 +94,9 @@ _HEALTH_SQL = (
 )
 _LEASED = "(s.lease_expires_at IS NOT NULL AND s.lease_expires_at > now())"
 _ACTIVITY_SQL: dict[str, str] = {
-    "delivering": f"(s.p_kw > {IDLE_KW} AND {_LEASED})",
-    "serving_home": f"(s.p_kw > {IDLE_KW} AND NOT {_LEASED})",
-    "charging": f"(s.p_kw < -{IDLE_KW})",
+    "delivering": f"(s.p_kw < -{IDLE_KW} AND {_LEASED})",
+    "serving_home": f"(s.p_kw < -{IDLE_KW} AND NOT {_LEASED})",
+    "charging": f"(s.p_kw > {IDLE_KW})",
     "idle": f"(abs(coalesce(s.p_kw, 0)) <= {IDLE_KW})",
 }
 _ACTIVITY_CASE = (
@@ -101,7 +108,8 @@ _FROM = "FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id"
 _ROW_COLUMNS = (
     "h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw AS rated_p_kw, s.soc_kwh, s.p_kw,"
     " s.health AS stored_health, s.fault_code, s.last_seen_at, s.lease_epoch, s.lease_expires_at,"
-    f" s.last_command_id, {_ACTIVITY_CASE} AS activity"
+    f" s.last_command_id, {_ACTIVITY_CASE} AS activity,"
+    f" {_HW_SQL} AS hardware_revision, {_FW_SQL} AS firmware_version"
 )
 
 
@@ -116,11 +124,17 @@ class HubFilter:
     soc_min: float | None = None  # percent of rated energy
     soc_max: float | None = None
     q: str | None = None  # hub id prefix
+    hw: tuple[str, ...] = ()  # hardware revisions
+    fw: tuple[str, ...] = ()  # firmware versions
+    fw_not: str | None = None  # "FW != version": finds out-of-date hubs
 
     @property
     def empty(self) -> bool:
         return not (
-            self.zones
+            self.hw
+            or self.fw
+            or self.fw_not
+            or self.zones
             or self.bank
             or self.health
             or self.activity
@@ -179,8 +193,18 @@ def where_clause(flt: HubFilter, th: Thresholds) -> Sql:
         parts.append("s.soc_kwh::float8 * 100 <= %s * nullif(h.e_kwh::float8, 0)")
         out.params.append(flt.soc_max)
     if flt.q:
-        parts.append("h.hub_id ILIKE %s")
-        out.params.append(_like_prefix(flt.q))
+        # lower(...) LIKE 'prefix%' is an index range scan on lower(hub_id) text_pattern_ops (0039)
+        parts.append("lower(h.hub_id) LIKE %s")
+        out.params.append(_like_prefix(flt.q.lower()))
+    if flt.hw:
+        parts.append(f"{_HW_SQL} = ANY(%s)")
+        out.params.append(list(flt.hw))
+    if flt.fw:
+        parts.append(f"{_FW_SQL} = ANY(%s)")
+        out.params.append(list(flt.fw))
+    if flt.fw_not:
+        parts.append(f"{_FW_SQL} IS DISTINCT FROM %s")
+        out.params.append(flt.fw_not)
     out.text = " AND ".join(parts)
     return out
 
@@ -238,19 +262,25 @@ def estimate_query(flt: HubFilter, th: Thresholds) -> Sql:
 
 
 def search_query(kind: str, q: str, *, limit: int) -> Sql:
-    like = _like_prefix(q)
+    like = _like_prefix(q.lower())
     if kind == "hub":
         return Sql(
             "SELECT h.hub_id AS id, h.bank_id, h.zone, h.p_kw AS rated_p_kw, s.fault_code, s.last_seen_at,"
             " s.health AS stored_health FROM og.hub h LEFT JOIN og.hub_state s ON s.hub_id = h.hub_id"
-            " WHERE h.hub_id ILIKE %s ORDER BY h.hub_id LIMIT %s",
+            " WHERE lower(h.hub_id) LIKE %s ORDER BY h.hub_id LIMIT %s",
             [like, limit],
         )
     if kind == "bank":
         return Sql(
-            "SELECT b.bank_id AS id, b.zone FROM og.bank b WHERE b.bank_id ILIKE %s ORDER BY b.bank_id LIMIT %s",
+            "SELECT b.bank_id AS id, b.zone FROM og.bank b WHERE lower(b.bank_id) LIKE %s"
+            " ORDER BY b.bank_id LIMIT %s",
             [like, limit],
         )
+    if kind in ("firmware", "hardware"):
+        column = _FW_SQL if kind == "firmware" else _HW_SQL
+        where = f"{column} IS NOT NULL AND lower({column}) LIKE %s"
+        sql = f"SELECT DISTINCT {column} AS id FROM og.hub h WHERE {where} ORDER BY 1 LIMIT %s"  # noqa: S608
+        return Sql(sql, [like, limit])  # the column is one of two hard-coded fragments; values are bound
     return Sql(
         "SELECT DISTINCT b.zone AS id FROM og.bank b WHERE b.zone ILIKE %s ORDER BY b.zone LIMIT %s",
         [like, limit],
@@ -305,6 +335,9 @@ def _filter(
     soc_min: Annotated[float | None, Query(ge=0, le=100)] = None,
     soc_max: Annotated[float | None, Query(ge=0, le=100)] = None,
     q: Annotated[str | None, Query(max_length=64)] = None,
+    hw: Annotated[list[str] | None, Query()] = None,
+    fw: Annotated[list[str] | None, Query()] = None,
+    fw_not: Annotated[str | None, Query(max_length=64)] = None,
 ) -> HubFilter:
     states: list[str] = []
     for value in health or []:
@@ -325,6 +358,9 @@ def _filter(
         soc_min=soc_min,
         soc_max=soc_max,
         q=(q or "").strip() or None,
+        hw=tuple(v for v in hw or [] if v),
+        fw=tuple(v for v in fw or [] if v),
+        fw_not=(fw_not or "").strip() or None,
     )
 
 
@@ -452,7 +488,7 @@ async def search(
     store: Annotated[FleetRowsStore, Depends(_rows_store)],
     th: Annotated[Thresholds, Depends(_thresholds)],
     _identity: Annotated[Identity, Depends(require_viewer)],
-    kind: Literal["hub", "bank", "zone"],
+    kind: Literal["hub", "bank", "zone", "firmware", "hardware"],
     q: Annotated[str, Query(max_length=64)] = "",
     limit: Annotated[int, Query(gt=0, le=SEARCH_LIMIT_MAX)] = 20,
 ) -> dict[str, Any]:
@@ -547,17 +583,16 @@ TELEMETRY_KEYS = (
     "fault_code",
 )
 #: Asset columns that may not exist yet (FOLLOWUPS migration 0035); read if present.
-ASSET_KEYS = ("install_date", "last_serviced_at", "units", "feeder_id", "service_transformer_id")
-#: Battery-reported DEVICE-INFO columns (og.hub, FOLLOWUPS migration 0036; names provisional).
+ASSET_KEYS = ("installed_at", "last_serviced_at", "units", "feeder_id", "service_transformer_id")
+#: Battery-reported DEVICE-INFO columns (og.hub, FOLLOWUPS migration 0036); HW/FW first.
 DEVICE_INFO_KEYS = (
+    "hardware_revision",
+    "firmware_version",
     "serial_number",
     "manufacturer",
     "model",
-    "firmware_version",
-    "hardware_rev",
     "commissioned_at",
     "inverter_model",
-    "reserve_pct",
 )
 
 
@@ -652,7 +687,7 @@ async def hub_detail(
             "service_transformer_id": merged.get("service_transformer_id"),
         },
         "asset": {
-            "install_date": merged.get("install_date"),
+            "installed_at": merged.get("installed_at"),
             "last_serviced_at": merged.get("last_serviced_at"),
             "units": merged.get("units"),
             "rated_p_kw": _num(hub.get("p_kw")),
@@ -677,7 +712,7 @@ def _activity(p_kw: float | None, leased: bool, health: str) -> str:
         return "fault"
     if p_kw is None or abs(p_kw) <= IDLE_KW:
         return "idle"
-    if p_kw < 0:
+    if p_kw > 0:  # +charge / -discharge
         return "charging"
     return "delivering" if leased else "serving_home"
 

@@ -146,13 +146,35 @@ async def post_json(
         raise ApiUnavailable(f"POST {path} failed: {exc}") from exc
 
 
-async def delete_json(path: str, *, remote_user: str | None = None) -> Any:
-    """DELETE `path` through the same authenticated UI-to-API boundary as `post_json`."""
+async def put_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
+    """PUT `path` with a JSON `payload` through the same authenticated boundary as `post_json` (the
+    Fleet charging-schedule proposal, `PUT /og/api/fleet/charge-windows/{kind}/{ref}`)."""
+    url = f"{api_base_url()}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
+            response = await client.put(url, json=payload, headers=_identity_headers(remote_user))
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise ApiUnavailable(
+            f"PUT {path} failed: {exc}",
+            status_code=exc.response.status_code,
+            detail=_response_detail(exc.response),
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise ApiUnavailable(f"PUT {path} failed: {exc}") from exc
+
+
+async def delete_json(
+    path: str, *, remote_user: str | None = None, payload: dict[str, Any] | None = None
+) -> Any:
+    """DELETE `path` through the same authenticated UI-to-API boundary as `post_json`; `payload` is an
+    optional JSON body (e.g. the reason for removing a charging-schedule override)."""
     url = f"{api_base_url()}{path}"
     headers = _identity_headers(remote_user)
     try:
         async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
-            response = await client.delete(url, headers=headers)
+            response = await client.request("DELETE", url, headers=headers, json=payload)
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as exc:
