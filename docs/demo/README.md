@@ -89,7 +89,8 @@ the id you `DELETE` to end a moment early.
    `curl -u tester:... -X POST $SIM/api/random/pause` → `"paused": true`. Pausing does not cancel what is
    already active: list `curl -u tester:... "$SIM/api/anomalies?source=random"` and
    `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>` each one, then check `$SIM/api/anomalies` returns
-   `{"active": []}`. A restart of `og-sim-control` un-pauses random mode again; pause it after any restart.
+   `{"active": []}`. Since R2 hotfix v3 the pause is saved across a restart of `og-sim-control`; check
+   `curl -u tester:... $SIM/api/random/status` after one.
 2. **All processes up.** Open **System Health**: every process in the Processes table has a heartbeat time from
    the last few seconds (the Status column always reads `ok`, so read the time), no `ALR-PROCESS-DOWN`, no
    degraded-mode banner, and no open critical alert. One `ALR-XFMR-UNMAPPED` warning per commanded bank is
@@ -111,8 +112,8 @@ the id you `DELETE` to end a moment early.
    active ERCOT_AS awards are visible", give that contract an opportunity for the demo window as in item 3.
 5. **Three browser windows**: `og-op-a` (the one you present from), `og-op-b` (the second operator, for the
    release), and `viewer` on the Fleet screen.
-6. **The control plane.** Use the `curl` lines below. Its web page calls `/api/...` by absolute path, which the
-   server's Apache does not proxy under `/ogsim/`, so its buttons may not work there.
+6. **The control plane.** The `curl` lines below always work. Since R2 hotfix v3 its web page also works behind
+   `/ogsim/`, with Run, Stop and Stop all buttons for scenarios.
 7. **Only when feeds read the simulator: start step 18's stale price now**, at least 50 minutes before step 18
    (the `curl` is in step 18). Everything already committed keeps delivering, but nothing new is committed once
    the price is 45 minutes old, so run the demo seed (item 3) first.
@@ -258,8 +259,8 @@ skip to step 13.
   `shortfall-<obligation id>`, class `ALLOCATOR_SHORTFALL`), and its card turns amber (AT_RISK). Say (decision
   D-17): it keeps receiving the maximum feasible kW for the rest of the window, never 0, never stopped. The
   hubs themselves serve their homes on local autonomy once their lease lapses. The zone returns at 240 s; to end now,
-  `curl -u tester:... -X DELETE $SIM/api/anomalies/demo-03-zone-comms-loss:zone_mass_disconnect:90` (and
-  `...:hub_offline:0`).
+  `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/stop` (cancels its pending steps and
+  ends what it injected).
 - **Known gaps:**
   - The card moves to "Fulfilled / shortfall" with the text "Delivered short; penalty applies", although
     delivery continues.
@@ -414,10 +415,9 @@ skip to step 13.
 
 ## Reset between runs (3 minutes)
 
-1. **End anything still active:** `curl -u tester:... $SIM/api/anomalies`, then `DELETE` each id; confirm
-   `{"active": []}`. There is no "stop scenario" verb: `demo-03`'s +90 s step still fires after its first
-   step is cancelled; cancel it when it appears, or wait for
-   `GET $SIM/api/scenarios/demo-03-zone-comms-loss/status` to read `"running": false`.
+1. **End anything still active:** `curl -u tester:... -X POST $SIM/api/scenarios/stop-all` stops every scenario
+   and what it injected; `DELETE` any remaining direct injection (`curl -u tester:... $SIM/api/anomalies`, then
+   `DELETE $SIM/api/anomalies/<id>`, such as step 18's stale posting); confirm `{"active": []}`.
 2. **Let health clear:** the overload and offline-ratio alerts clear once their condition ends.
 3. **Release any stop still engaged** with two operators, as in step 20 (og-op-a requests, og-op-b approves).
 4. **End any AS deployment still active:** Dispatch, **Stop deploy**, or
