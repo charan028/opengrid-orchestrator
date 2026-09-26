@@ -49,3 +49,16 @@ correctly. The tooling asserts the *specified* behaviour (BUILD.md, 02b S6.4/S6.
 11. `[feeds.staleness] ercot_price_fresh_s = 600` means `NO_NEW_COMMITMENTS` appears 10 minutes after killing
     `og-feeds` -- outside any reasonable chaos window, so the feeds row documents it as *eventual* and does not
     assert it. If the lead wants it asserted on the server, lower the threshold for the run (architect's config).
+
+## Confirmed on a local live stack (2026-09-25, Postgres + Mosquitto + all 10 processes)
+
+8. **SCADA bank load is never persisted** (owner: engine/fleet). `ogsim.scada` publishes `APPARENT_POWER_KVA`
+   (an injected `bank_overload` on bank-003 read 123 kVA against a 75 kVA rating, plus an auto `LIMIT`
+   instruction), the engine subscribes to `<root>/scada/#`, but nothing writes `og.feed_obs` rows with
+   `source='scada'`. Both `opengrid.health.queries` (ALR-SCADA-OVERLOAD) and `opengrid.guardian.repo`
+   (bank kVA check) read exactly those rows, so the overload alert can never fire and the guardian's kVA
+   check always sees "no reading". Items 1-5 above (health evaluator never runs, heartbeat key mismatch,
+   `processes[x].status` never `down`) were also confirmed live: `GET /og/api/health` listed `og-settle`
+   and never `api`/`sim`, and `og.alert` stayed empty through the overload.
+9. **`og-engine` serves no `/metrics`** (item 6) confirmed: `tests-e2e/perf/capture.py` against the live
+   stack reports "no histogram found"; only `og-guardian:9103` answers.
