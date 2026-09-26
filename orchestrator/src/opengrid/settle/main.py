@@ -20,11 +20,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 import opengrid.contracts as contracts
 import opengrid.health as health
 from opengrid.contracts.pg_repo import PgContractsRepo
+from opengrid.health.model import AlertFinding
+from opengrid.health.queries import clear_alert, raise_alert
 from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 from opengrid.platform.heartbeat import write_heartbeat
@@ -49,9 +53,18 @@ class JobRunner:
     again while its previous run is still in flight; one job's failure is logged and never affects the
     others (K7). Only the one `run_forever` loop owns SIGTERM."""
 
-    def __init__(self, jobs: list[tuple[str, Cadence, Callable[[], Awaitable[object]]]]) -> None:
+    def __init__(
+        self,
+        jobs: list[tuple[str, Cadence, Callable[[], Awaitable[object]]]],
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._jobs = jobs
+        self._clock = clock
         self._running: dict[str, asyncio.Task[None]] = {}
+        # Progress: when each job last completed successfully (start-up counts as a success).
+        started = clock()
+        self._last_success: dict[str, float] = {name: started for name, _, _ in jobs}
 
     async def run_due(self) -> None:
         for name, cadence, job in self._jobs:
@@ -61,18 +74,74 @@ class JobRunner:
             if cadence.due():
                 self._running[name] = asyncio.create_task(self._run(name, job))
 
-    @staticmethod
-    async def _run(name: str, job: Callable[[], Awaitable[object]]) -> None:
+    def stalled(self, max_age_s: dict[str, float]) -> dict[str, float]:
+        """Jobs (among `max_age_s`'s keys) whose last successful run is older than their limit -- hung in
+        flight or failing every time -- with the seconds since that success."""
+        now = self._clock()
+        return {
+            name: now - self._last_success[name]
+            for name, limit in max_age_s.items()
+            if name in self._last_success and now - self._last_success[name] > limit
+        }
+
+    async def _run(self, name: str, job: Callable[[], Awaitable[object]]) -> None:
         try:
             await job()
         except Exception:
             _logger.exception("og-settle job failed", extra={"job": name})
+        else:
+            self._last_success[name] = self._clock()
 
     async def stop(self) -> None:
         tasks = [t for t in self._running.values() if not t.done()]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+STALL_RULE = "ALR-SETTLE-STALLED"
+_STALL_INTERVALS = 3  # a settlement job is stalled after 3 missed cadences without a successful run
+
+
+class StallWatch:
+    """Makes a stuck settlement loop visible. og-settle's heartbeat comes from its own job, and health
+    (which runs in this process) reports "settle" ok for itself, so neither shows a settle job that hangs
+    or fails on every run. On entry to a stall this logs an error and raises `ALR-SETTLE-STALLED` once;
+    on recovery it clears that alert."""
+
+    def __init__(
+        self,
+        stalled: Callable[[], dict[str, float]],
+        *,
+        raise_alert: Callable[[AlertFinding], Awaitable[int]],
+        clear_alert: Callable[[int], Awaitable[None]],
+    ) -> None:
+        self._stalled = stalled
+        self._raise = raise_alert
+        self._clear = clear_alert
+        self._open: dict[str, int | None] = {}
+
+    async def check(self) -> None:
+        stalled = self._stalled()
+        for job, age_s in stalled.items():
+            if job in self._open:
+                continue
+            _logger.error("og-settle job stalled", extra={"job": job, "since_success_s": round(age_s, 1)})
+            self._open[job] = None
+            self._open[job] = await self._raise(
+                AlertFinding(
+                    rule=STALL_RULE,
+                    severity="critical",
+                    summary=f"og-settle job '{job}' has not completed for {int(age_s)} s",
+                    condition_key=f"{STALL_RULE}:settle",
+                    detail={"process": "settle", "job": job, "since_success_s": round(age_s, 1)},
+                )
+            )
+        for job in [j for j in self._open if j not in stalled]:
+            alert_id = self._open.pop(job)
+            _logger.info("og-settle job progressing again", extra={"job": job})
+            if alert_id is not None:
+                await self._clear(alert_id)
 
 
 async def _run() -> None:
@@ -86,6 +155,7 @@ async def _run() -> None:
     health.configure(pool, cfg)
 
     health_interval_s = float(cfg.get("health.heartbeat_interval_s", _DEFAULT_HEALTH_INTERVAL_S))
+    settle_interval_s = float(cfg.get("settle.interval_s", _DEFAULT_SETTLE_INTERVAL_S))
 
     async def settle_job() -> None:
         settled_count = await run_settle_cycle()
@@ -103,7 +173,7 @@ async def _run() -> None:
     jobs: list[tuple[str, Cadence, Callable[[], Awaitable[object]]]] = [
         ("heartbeat", Cadence(health_interval_s), lambda: write_heartbeat(pool, _PROCESS_NAME)),
         ("health", Cadence(health_interval_s), health.evaluate_once),
-        ("settle", Cadence(float(cfg.get("settle.interval_s", _DEFAULT_SETTLE_INTERVAL_S))), settle_job),
+        ("settle", Cadence(settle_interval_s), settle_job),
         (
             "trace_prune",
             Cadence(float(cfg.get("settle.trace_prune_interval_s", _DEFAULT_TRACE_PRUNE_INTERVAL_S))),
@@ -111,6 +181,12 @@ async def _run() -> None:
         ),
     ]
     runner = JobRunner(jobs)
+    watch = StallWatch(
+        lambda: runner.stalled({"settle": _STALL_INTERVALS * settle_interval_s}),
+        raise_alert=lambda finding: raise_alert(pool, finding, opened_at=datetime.now(UTC)),
+        clear_alert=lambda alert_id: clear_alert(pool, alert_id),
+    )
+    jobs.append(("stall_watch", Cadence(health_interval_s), watch.check))
     try:
         await run_forever(runner.run_due, interval_s=health_interval_s, process_name=_PROCESS_NAME)
     finally:

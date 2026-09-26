@@ -39,7 +39,7 @@ from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.timeutil import floor_to_interval
-from opengrid.engine.background import BackgroundIngest
+from opengrid.engine.background import BackgroundIngest, run_periodic
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
 from opengrid.engine.gates import run_due_gates
 from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
@@ -433,6 +433,19 @@ async def _flush_pq_summaries(state: _EngineState) -> None:
         logger.exception("pq_ingest flush failed; retrying next interval")
 
 
+async def persist_fleet_state(state: Any) -> None:
+    """One fleet-persistence pass, run by `run_periodic` beside (never inside) the dispatch tick: flush
+    the twin's buffered telemetry/SCADA/acks and hub_state rows, then the buffered PQ summaries. A failed
+    fleet flush is logged and the summaries are still written (K7)."""
+    from opengrid import fleet
+
+    try:
+        await fleet.flush()
+    except Exception:
+        logger.exception("fleet flush failed; retrying next interval")
+    await _flush_pq_summaries(state)
+
+
 async def _engine_tick(state: _EngineState) -> None:
     """One driving tick of the og-engine process, run every `[allocator].cycle_interval_s` (default
     2 s). A single tick drives every cadence this process owns (allocator cycle, gate scheduling,
@@ -447,13 +460,12 @@ async def _engine_tick(state: _EngineState) -> None:
     state.cycle_seq += 1
     cycle_id = f"{int(now.timestamp())}-{state.cycle_seq}"
 
+    # Fleet persistence (telemetry COPY, hub_state upsert, SCADA/ack rows, PQ summaries) runs in its own
+    # periodic task (`persist_fleet_state`): nothing in this tick reads it back -- dispatch uses the
+    # in-memory twin and the guardian its own MQTT view -- and it was ~700 ms of the tick's p99 (A11).
     phase = state.phase_timer.phase
     with phase("heartbeat"):
         await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
-    with phase("fleet_flush"):
-        await fleet.flush(now=now)
-    with phase("pq_flush"):
-        await _flush_pq_summaries(state)
 
     with phase("gate_schedule"):
         triggers = state.gate_scheduler.due_triggers(
@@ -683,12 +695,15 @@ async def main(cfg: Config) -> None:
             ingest_task.add_done_callback(_log_ingest_exit)
             lag_probe = state.latency.lag_probe
             lag_task = asyncio.create_task(lag_probe.run()) if lag_probe is not None else raw_task
+            persist_task = asyncio.create_task(
+                run_periodic("fleet-persist", state.cycle_interval_s, lambda: persist_fleet_state(state))
+            )
             try:
                 await run_forever(
                     lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
-                for task in {ingest_task, raw_task, lag_task}:
+                for task in {ingest_task, raw_task, lag_task, persist_task}:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task

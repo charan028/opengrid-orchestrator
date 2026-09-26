@@ -19,6 +19,7 @@ from typing import Literal
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.platform import FeedStatus
+from opengrid.feeds.scheduler import EIA_FALLBACK_PRODUCT
 from opengrid.feeds.staleness import threshold_s_for_product
 from opengrid.health import queries
 from opengrid.health.metrics_scrape import (
@@ -45,6 +46,8 @@ from opengrid.health.rules import (
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
     evaluate_scada_overload_alert,
+    evaluate_sim_offline_alert,
+    is_fallback_feed_needed,
 )
 from opengrid.platform.config import Config
 from opengrid.platform.process import run_forever
@@ -54,6 +57,10 @@ logger = logging.getLogger(__name__)
 ProcessStatus = Literal["ok", "down"]
 
 _CYCLE_LATENCY_HISTORY_LEN = 150  # ~5 min at a 2 s cycle (02b S6.4 "p99 over the last 5 minutes")
+
+# `health` always runs inside `og-settle` (02b S1.2/S6.4) -- see `classify_all_processes`'s
+# `self_process` docstring for why that entry never reads its own `og.heartbeat` row to decide status.
+_SELF_PROCESS_NAME = "settle"
 
 # Module-level wiring set by `configure()` at og-settle startup (BUILD.md S4: settle calls health's
 # run()/evaluate_once() entry). Kept module-level, matching the other stub packages' no-argument
@@ -106,11 +113,35 @@ def _feed_staleness_threshold_s(feed_status: FeedStatus) -> float:
     return threshold_s_for_product(feed_status.source, feed_status.product, _staleness_cfg)
 
 
+def _feeds_needing_stale_check(feed_statuses: list[FeedStatus], *, now: datetime) -> list[FeedStatus]:
+    """Drops EIA's fallback `feed_status` row from ALR-FEED-STALE consideration while the ERCOT product
+    it backs (`EIA_FALLBACK_PRODUCT`) is itself healthy (defect fix, see `is_fallback_feed_needed`'s
+    docstring) -- an idle-and-therefore-old EIA row is then normal, not a problem. Every other feed
+    passes through unchanged."""
+    by_key = {(fs.source, fs.product): fs for fs in feed_statuses}
+    result = []
+    for feed_status in feed_statuses:
+        if feed_status.source == "EIA":
+            primary = by_key.get(("ERCOT", EIA_FALLBACK_PRODUCT))
+            primary_threshold_s = (
+                _feed_staleness_threshold_s(primary)
+                if primary is not None
+                else _thresholds.heartbeat_down_after_s
+            )
+            if not is_fallback_feed_needed(primary, now=now, primary_threshold_s=primary_threshold_s):
+                continue
+        result.append(feed_status)
+    return result
+
+
 async def evaluate_heartbeats() -> dict[str, ProcessStatus]:
-    """Read all 7 processes' `og.heartbeat` rows; a process is "down" after
-    `health.heartbeat_miss_threshold` missed intervals (02b S6.4)."""
+    """Read every monitored `opengrid` process's `og.heartbeat` row (`ALL_PROCESSES`); a process is
+    "down" after `health.heartbeat_miss_threshold` missed intervals (02b S6.4). `settle` (this evaluator's
+    own host process) is always "ok" -- see `classify_all_processes`'s `self_process` docstring."""
     heartbeats = await queries.fetch_heartbeats(_require_pool())
-    processes = classify_all_processes(heartbeats, now=_now(), thresholds=_thresholds)
+    processes = classify_all_processes(
+        heartbeats, now=_now(), thresholds=_thresholds, self_process=_SELF_PROCESS_NAME
+    )
     return {p.process: p.status for p in processes}
 
 
@@ -194,7 +225,9 @@ async def evaluate_alerts() -> None:
     now = _now()
 
     heartbeats = await queries.fetch_heartbeats(pool)
-    processes = classify_all_processes(heartbeats, now=now, thresholds=_thresholds)
+    processes = classify_all_processes(
+        heartbeats, now=now, thresholds=_thresholds, self_process=_SELF_PROCESS_NAME
+    )
 
     hub_rows = await queries.fetch_hub_states(pool)
     classified_hubs = [
@@ -208,13 +241,15 @@ async def evaluate_alerts() -> None:
     guardian_timeout_rate = await _fetch_guardian_timeout_rate()
     reserve_breach_count = await _fetch_reserve_breach_count()
     bank_loads = await queries.fetch_bank_loads(pool)
+    latest_fleet_seen_at = await queries.fetch_latest_hub_seen_at(pool)
+    latest_scada_seen_at = await queries.fetch_latest_scada_obs_at(pool)
 
     findings = []
     for bank_id, kva_rating, load_kva in bank_loads:
         finding = evaluate_scada_overload_alert(bank_id, load_kva, kva_rating, thresholds=_thresholds)
         if finding:
             findings.append(finding)
-    for feed_status in feed_statuses:
+    for feed_status in _feeds_needing_stale_check(feed_statuses, now=now):
         finding = evaluate_feed_alert(
             feed_status,
             now=now,
@@ -242,6 +277,11 @@ async def evaluate_alerts() -> None:
     reserve_finding = evaluate_reserve_breach_alert(reserve_breach_count)
     if reserve_finding:
         findings.append(reserve_finding)
+    sim_offline_finding = evaluate_sim_offline_alert(
+        latest_fleet_seen_at, latest_scada_seen_at, now=now, thresholds=_thresholds
+    )
+    if sim_offline_finding:
+        findings.append(sim_offline_finding)
 
     open_alerts = await queries.fetch_open_alerts(pool)
     open_by_key = {queries.condition_key_for(a): a for a in open_alerts}
@@ -267,7 +307,9 @@ async def evaluate_once() -> HealthSnapshot:
     await evaluate_alerts()
 
     heartbeats = await queries.fetch_heartbeats(pool)
-    processes = classify_all_processes(heartbeats, now=now, thresholds=_thresholds)
+    processes = classify_all_processes(
+        heartbeats, now=now, thresholds=_thresholds, self_process=_SELF_PROCESS_NAME
+    )
 
     hub_rows = await queries.fetch_hub_states(pool)
     classified_hubs = [
@@ -282,7 +324,7 @@ async def evaluate_once() -> HealthSnapshot:
             fs, now=now, thresholds=_thresholds, staleness_threshold_s=_feed_staleness_threshold_s(fs)
         )
         is not None
-        for fs in feed_statuses
+        for fs in _feeds_needing_stale_check(feed_statuses, now=now)
     )
     cycle_latency = await _fetch_cycle_latency(now)
     degraded_modes = derive_degraded_modes(feed_stale=any_feed_stale, process_health=processes)

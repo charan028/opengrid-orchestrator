@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -58,3 +59,22 @@ class BackgroundIngest:
     async def drain(self) -> None:
         """Wait until everything submitted so far has been handled (tests, orderly shutdown)."""
         await self._queue.join()
+
+
+async def run_periodic(
+    name: str,
+    interval_s: float,
+    job: Callable[[], Awaitable[object]],
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+) -> None:
+    """Run `job` every `interval_s` as its own task (never inside the 2 s dispatch tick) until cancelled.
+    A failed run is logged and the next run still happens (K7)."""
+    while True:
+        started = clock()
+        try:
+            await job()
+        except Exception:
+            logger.exception("periodic job failed", extra={"job": name})
+        await sleep(max(0.0, interval_s - (clock() - started)))

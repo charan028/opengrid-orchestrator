@@ -39,6 +39,9 @@ SELECT b.bank_id, b.kva_rating,
 FROM og.bank b
 """
 
+_FETCH_LATEST_HUB_SEEN_AT_SQL = "SELECT MAX(last_seen_at) FROM og.hub_state"
+_FETCH_LATEST_SCADA_OBS_AT_SQL = "SELECT MAX(ts) FROM og.feed_obs WHERE source = 'scada'"
+
 _FETCH_OPEN_ALERTS_SQL = """
 SELECT id, rule, severity, summary, detail, opened_at, cleared_at, acked_by
 FROM og.alert WHERE cleared_at IS NULL
@@ -128,6 +131,27 @@ async def fetch_bank_loads(pool: AsyncConnectionPool) -> list[tuple[str, float, 
         await cur.execute(_FETCH_BANK_LOADS_SQL)
         rows = await cur.fetchall()
     return [(r[0], float(r[1]), float(r[2]) if r[2] is not None else None) for r in rows]
+
+
+async def fetch_latest_hub_seen_at(pool: AsyncConnectionPool) -> datetime | None:
+    """Freshest `og.hub_state.last_seen_at` across every hub -- `ogsim.fleet`'s own MQTT-driven write,
+    used as one of `ALR-SIM-OFFLINE`'s two liveness signals for the integration simulators (which write
+    no `og.heartbeat` row, see `opengrid.health.model.ALL_PROCESSES`'s docstring). `None` if there are no
+    hubs at all (a cold start, not evidence of an offline sim)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_FETCH_LATEST_HUB_SEEN_AT_SQL)
+        row = await cur.fetchone()
+    return row[0] if row is not None else None
+
+
+async def fetch_latest_scada_obs_at(pool: AsyncConnectionPool) -> datetime | None:
+    """Freshest SCADA reading timestamp across every bank -- `ogsim.scada`'s own MQTT-driven write, the
+    other of `ALR-SIM-OFFLINE`'s two liveness signals. `None` if no SCADA reading has ever arrived (a cold
+    start, not evidence of an offline sim)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_FETCH_LATEST_SCADA_OBS_AT_SQL)
+        row = await cur.fetchone()
+    return row[0] if row is not None else None
 
 
 async def fetch_open_alerts(pool: AsyncConnectionPool) -> list[Alert]:

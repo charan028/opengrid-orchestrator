@@ -81,3 +81,74 @@ async def test_a_failing_job_is_isolated() -> None:
 
     assert sorted(ran) == ["failing", "ok"]
     await runner.stop()
+
+
+async def test_a_job_that_stops_progressing_is_reported_stalled() -> None:
+    """Health now runs inside og-settle and reports "settle" ok for itself, so a hung or always-failing
+    settlement job would be invisible through the heartbeat; the runner tracks each job's last success."""
+    clock = _Clock()
+    hang = asyncio.Event()
+
+    async def settle() -> None:
+        if clock.now > 0:
+            await hang.wait()  # second run never finishes
+
+    runner = JobRunner([("settle", Cadence(60.0, clock=clock), settle)], clock=clock)
+    await runner.run_due()
+    await asyncio.sleep(0)
+    assert runner.stalled({"settle": 180.0}) == {}
+
+    clock.now = 60.0
+    await runner.run_due()
+    await asyncio.sleep(0)
+    clock.now = 170.0
+    assert runner.stalled({"settle": 180.0}) == {}
+    clock.now = 200.0
+    assert runner.stalled({"settle": 180.0}) == {"settle": 200.0}
+    hang.set()
+    await runner.stop()
+
+
+async def test_an_always_failing_job_is_reported_stalled() -> None:
+    clock = _Clock()
+
+    async def failing() -> None:
+        raise RuntimeError("settle backend down")
+
+    runner = JobRunner([("settle", Cadence(60.0, clock=clock), failing)], clock=clock)
+    for t in (0.0, 60.0, 120.0, 180.0, 240.0):
+        clock.now = t
+        await runner.run_due()
+        await asyncio.sleep(0)
+    assert runner.stalled({"settle": 180.0}) == {"settle": 240.0}
+    await runner.stop()
+
+
+async def test_stall_watch_raises_once_per_episode_and_clears_on_recovery() -> None:
+    from opengrid.settle.main import StallWatch
+
+    stalled: dict[str, float] = {"settle": 200.0}
+    raised: list[tuple[str, dict]] = []
+    cleared: list[int] = []
+
+    async def _raise(finding) -> int:
+        raised.append((finding.rule, finding.detail))
+        return 41
+
+    async def _clear(alert_id: int) -> None:
+        cleared.append(alert_id)
+
+    watch = StallWatch(lambda: dict(stalled), raise_alert=_raise, clear_alert=_clear)
+    await watch.check()
+    await watch.check()  # same episode: not raised again
+    assert raised == [
+        ("ALR-SETTLE-STALLED", {"process": "settle", "job": "settle", "since_success_s": 200.0})
+    ]
+
+    stalled.clear()
+    await watch.check()
+    assert cleared == [41]
+
+    stalled["settle"] = 300.0
+    await watch.check()  # a new episode raises again
+    assert len(raised) == 2
