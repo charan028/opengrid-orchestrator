@@ -1,5 +1,5 @@
 """The shared alerts component in the browser (owner UX review, R3): grouping, paging, filters, bulk
-selection and the one-confirm acknowledgement, plus the posture strip, on both screens."""
+selection and the one-confirm acknowledgement on both screens, and the posture's link from the bell."""
 
 from __future__ import annotations
 
@@ -54,13 +54,15 @@ def test_bulk_select_and_one_confirm_ack(operator_page: Page) -> None:
     expect(operator_page.locator("#control-room-ack-result")).to_contain_text("acknowledged")
 
 
-def test_posture_strip_links_to_the_filtered_alerts(operator_page: Page) -> None:
+def test_posture_is_in_the_bell_and_links_to_the_filtered_alerts(operator_page: Page) -> None:
     goto_ok(operator_page, f"{BASE_PATH}/")
-    strip = operator_page.locator("#control-room-posture-strip")
-    expect(strip).to_contain_text("3 scopes conservative (bank-003, bank-007, bank-012)")
-    expect(strip).to_contain_text("clears automatically after 3 clean cycles")
-    strip.get_by_role("link").click()
-    expect(operator_page.locator("#control-room-alert-rule")).to_have_value("ALR-SCOPE-CONSERVATIVE")
+    expect(operator_page.locator("#control-room-posture-strip")).to_have_count(0)  # no longer above the map
+    operator_page.locator("#og-notify-bell").click()
+    item = operator_page.locator("#og-notify-safety .og-notify-item").first
+    expect(item).to_contain_text("3 scopes held conservative")
+    expect(item).to_contain_text("clears automatically after 3 clean cycles")
+    item.get_by_role("link").click()
+    expect(operator_page.locator("#health-alert-rule")).to_have_value("ALR-SCOPE-CONSERVATIVE")
 
 
 def test_viewer_sees_no_selection(viewer_page: Page) -> None:

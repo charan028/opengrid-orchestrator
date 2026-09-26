@@ -1,6 +1,7 @@
 """The shared alerts component's routes (Control room and System Health). Owner: ui.
 
 - `GET /og/alerts/panel`: the panel fragment for a filter/page (HTMX swaps it in place).
+- `GET /og/alerts/notifications`: the header bell's popover (every page) plus the one critical line.
 - `POST /og/alerts/ack-bulk/propose`: step 1 -- a confirm dialog naming how many alerts will be acked.
 - `POST /og/alerts/ack-bulk/confirm?ids=`: step 2 (also each row's own Ack) -- relays to
   `POST /og/api/alerts/ack-bulk {alert_ids}`; until that endpoint exists (404/405), acknowledges one by
@@ -16,7 +17,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from opengrid.ui.alerts import POSTURE_PATH, alerts_panel, parse_ids, posture_strip
+from opengrid.ui.alerts import POSTURE_PATH, alerts_panel, notification_centre, parse_ids, posture_strip
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.role import is_operator, remote_user
 from opengrid.ui.routes.fleet import _confirm_dialog_context
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/alerts")
 
 ACK_BULK_PATH = "/og/api/alerts/ack-bulk"
-_PANELS = ("control-room", "health")
+_PANELS = ("control-room", "health", "notify")  # "notify": the header bell's popover
 
 
 def panel_context(
@@ -81,6 +82,36 @@ async def panel(
         request,
         "_partials/alerts_panel.html",
         panel_context(request, alerts, panel_id=panel_id, params=params),
+    )
+
+
+@router.get("/notifications", response_class=HTMLResponse)
+async def notifications(request: Request) -> HTMLResponse:
+    """The header bell + popover (every page) and, out of band, the single critical status line."""
+    from opengrid.ui.routes.health import DEGRADED_MODE_LABELS, degraded_modes_of, guardian_attention
+
+    health: dict[str, Any] = {}
+    unavailable: str | None = None
+    try:
+        raw = await get_json("/og/api/health")
+        health = raw if isinstance(raw, dict) else {}
+    except ApiUnavailable as exc:
+        logger.warning("notifications: /og/api/health unavailable: %s", exc)
+        unavailable = str(exc)
+    alerts = [a for a in (health.get("alerts") or []) if isinstance(a, dict)]
+    posture = (await posture_context())["posture"]
+    centre = notification_centre(
+        guardian_items=guardian_attention(alerts),
+        degraded_modes=degraded_modes_of(health),
+        mode_labels=DEGRADED_MODE_LABELS,
+        posture=posture,
+        alerts=alerts,
+        base_path=BASE_PATH,
+    )
+    return templates.TemplateResponse(
+        request,
+        "_partials/notification_centre.html",
+        {"nc": centre, "is_operator": is_operator(request), "unavailable": unavailable},
     )
 
 

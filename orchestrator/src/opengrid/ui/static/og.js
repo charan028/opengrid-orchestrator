@@ -181,19 +181,72 @@
   };
 
   /**
-   * Degraded-mode banner (Health, Control room) from a stream frame's `degraded_modes`. The labels come from
-   * the server (`opengrid.ui.routes.health.DEGRADED_MODE_LABELS`, the element's data-labels); an unknown
-   * mode shows its code. A frame without the field leaves the banner as it is.
+   * Notification centre (owner UX review R3.1). Degraded modes, guardian escalations and alerts live behind
+   * the header bell (#og-notify, GET /og/alerts/notifications). A stream frame whose `degraded_modes`
+   * differ from the last one asks the bell to refresh; a frame without the field changes nothing.
    */
-  og.renderDegradedBanner = function renderDegradedBanner(el, modes) {
-    if (!el || !Array.isArray(modes)) {
+  var lastDegradedKey = null;
+  og.noteDegradedModes = function noteDegradedModes(modes) {
+    if (!Array.isArray(modes)) {
+      return false;
+    }
+    var key = modes.slice().sort().join("|");
+    if (key === lastDegradedKey) {
+      return false;
+    }
+    var first = lastDegradedKey === null;
+    lastDegradedKey = key;
+    if (!first && window.htmx) {
+      window.htmx.trigger(document.body, "og-alerts-changed");
+    }
+    return !first;
+  };
+
+  /** True while the notification popover is open (its 30 s refresh waits until it is closed). */
+  og.notifyOpen = function notifyOpen() {
+    var panel = document.getElementById("og-notify-panel");
+    try {
+      return !!(panel && panel.matches(":popover-open"));
+    } catch (e) {
+      return false;
+    }
+  };
+
+  /** Copy the staged critical line into the aria-live strip, only when its text changed (no re-announce). */
+  og.syncCriticalStrip = function syncCriticalStrip() {
+    var next = document.getElementById("og-critical-next");
+    var strip = document.getElementById("og-critical-strip");
+    if (!next || !strip) {
       return;
     }
-    var labels = JSON.parse(el.dataset.labels || "{}");
-    var text = modes.map(function (m) { return labels[m] || m; }).join(" + ");
-    el.hidden = !text;
-    el.textContent = text ? "Degraded mode: " + text : "";
+    var html = next.innerHTML.trim();
+    var text = next.content ? next.content.textContent.replace(/\s+/g, " ").trim() : "";
+    if (strip.dataset.text === text) {
+      return;
+    }
+    strip.dataset.text = text;
+    strip.innerHTML = html;
+    strip.hidden = !html;
   };
+
+  // Keep the popover open across a refresh it triggered itself (an Ack inside it), and sync the strip.
+  var notifyWasOpen = false;
+  document.addEventListener("htmx:beforeSwap", function (evt) {
+    if (evt.detail && evt.detail.target && evt.detail.target.id === "og-notify") {
+      notifyWasOpen = og.notifyOpen();
+    }
+  });
+  document.addEventListener("htmx:afterSwap", function (evt) {
+    if (!evt.detail || !evt.detail.target || evt.detail.target.id !== "og-notify") {
+      return;
+    }
+    og.syncCriticalStrip();
+    var panel = document.getElementById("og-notify-panel");
+    if (notifyWasOpen && panel && panel.showPopover) {
+      panel.showPopover();
+    }
+    notifyWasOpen = false;
+  });
 
   /** True when the viewer asked the OS for reduced motion. */
   og.reducedMotion = function reducedMotion() {
