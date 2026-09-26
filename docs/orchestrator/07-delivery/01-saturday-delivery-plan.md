@@ -30,6 +30,18 @@ and the local clients in `src/opengrid/`.
   clients where they fit the `feeds` interface (e.g., the ERCOT auth/report call pattern), reviewed as new code. The
   fleet/grid simulator in this plan is the spec's **test harness** (`agent-sim`/`grid-sim`, spec §12.3). It stands in
   for real hubs and SCADA until hardware exists, and is not a concept simulator.
+- **(D-16, 2026-09-26) The base server is the permanent host.** `192.168.5.35`/`basepower` is not a temporary demo
+  box for this delivery; no decommission or migration off it is planned. See `02b-mvp-s-spec-platform.md` §9.1.
+- **(D-20, 2026-09-26) Two markets, in build.** Base sells into one **regulated** market (a vertically integrated
+  utility as the customer, premium capacity, territory-bound energy) and one **free** market (ERCOT), priced as
+  $/kW-in vs $/kW-out rather than by hardware cost. Full model:
+  `docs/orchestrator/07-delivery/08-market-model-two-markets.md`. **In build, not live**:
+  `orchestrator/config/tdsp_tariffs.toml:81-83` (`[zone_territory]`) already marks `LZ_AEN`/`LZ_CPS` (Austin
+  Energy / CPS Energy) `REGULATED` with `delivery_charge = "NONE"`, and `integration-sims/config/fleet.yaml:47-55`
+  already defines their `zone_blocks` (10 banks each) — but every block ships `enabled: false`, so the seeded
+  fleet today is still the original 2,000 hubs / 40 banks / ERCOT-only. Turning a block on also needs
+  `orchestrator/config/orchestrator.toml`'s `[fleet].zones` and `[forecast]`'s series lists extended to match
+  (`orchestrator.toml:76-80` comment).
 
 ## 0b. Requirement changes (2026-09-25, evening)
 
@@ -53,6 +65,16 @@ Apache/TLS at `https://base.tocy-net.net/og/`. A simulated fleet of **2,000 hubs
 live ERCOT/EIA/NWS data. The system dispatches **five services** using an **LP selector with commitment lock** and a
 **2-second real-time allocator**. Every command is signed by an independent **guardian**. Delivery is measured, billed
 and traced in a hash chain, and shown in **7 UI screens**.
+
+**Build reality (main @ 434d230, updated 2026-09-26): 10 systemd units on native systemd, not 7 under Docker
+Compose.** §0a below already recommended native systemd over Compose, and that is what was actually deployed
+(`deploy/RUNBOOK.md`); this paragraph's "one container image"/"Docker Compose" framing above was never built and
+is superseded. The unit count grew from 7 to **10** because `og-sim` was split into two codebases that share no
+code (`orchestrator` = package `opengrid`; `integration-sims` = package `ogsim`, `BUILD.md` §1), and `ogsim` runs
+as **four** separate units instead of one: 6 orchestrator units (`og-feeds`, `og-engine`, `og-guardian`,
+`og-safestop`, `og-settle`, `og-api`, grouped by `opengrid.target`) + 4 sim units (`og-sim-market`, `og-sim-fleet`,
+`og-sim-scada`, `og-sim-control`, grouped by `ogsim.target`) — unit files under `deploy/systemd/`;
+`deploy/RUNBOOK.md`: "Status (2026-09-26): all ten units are enabled and running from `/opt/opengrid/current`".
 
 Documents come first. A compact spec pack (the addendum, stories and test cases) is frozen by Friday 15:00, before
 coding starts. Everything else in the full spec is labelled `MVP-J`/`R2` and is not built by Saturday.
@@ -83,6 +105,20 @@ coding starts. Everything else in the full spec is labelled `MVP-J`/`R2` and is 
 **Not built by Saturday** (stays in the spec as `MVP-J`/`R2`): real DNP3/ICCP/2030.5 protocols, real ERCOT
 market submission, the AI agent, `PIPELINE_AC`/`MOBILE_*`/`PJM_CAPACITY`/`LARGE_LOAD`, Keycloak/OPA,
 Kubernetes/multi-node HA, and forecasting beyond simple quantile persistence.
+
+**Status against the code on `main` (434d230), audited 2026-09-26** — built / built dark / in build / not built,
+each with evidence:
+
+| Item | Status | Evidence |
+|---|---|---|
+| Real DNP3/ICCP/2030.5 protocols | **Not built** | No match for `DNP3`/`ICCP`/`2030.5` anywhere under `orchestrator/src`, `integration-sims/src`, or `deploy/` |
+| Real ERCOT market submission | **Not built** | `feeds` only issues `GET`s against the 5 read-only products (02b §2.2); no bid/offer submission code path exists in `orchestrator/src/opengrid/feeds/` or `integration-sims/src/ogsim/market/` |
+| The AI agent | **Not built** | No `ai_agent`/"AI agent" code anywhere under `orchestrator/src` or `integration-sims/src` |
+| `PIPELINE_AC` | **In build** (this list's original "not built" assumption is superseded for this one item) | Admitted today as a `variant` of an existing service type, gated by `[contracts.activation].data_center` (default `false`): `orchestrator/src/opengrid/contracts/admission.py:59-63,169-183` (`_ACTIVATION_GATED_VARIANTS`, `R-ADMIT-REJECT`). Real settlement and PQ logic already exist behind the same gate: `orchestrator/src/opengrid/settle/performance.py:44-51`, `orchestrator/src/opengrid/guardian/pq_checks.py:108`, `orchestrator/src/opengrid/assets/repo.py:567`. It still has no `og.contract.service_type` of its own (`admission.py:59`) |
+| `MOBILE_*` / `PJM_CAPACITY` / `LARGE_LOAD` | **Not built** | No match anywhere under `orchestrator/src` or `integration-sims/src` |
+| Keycloak/OPA | **Not built** (a different mechanism was built instead) | No match under `orchestrator/src`, `integration-sims/src`, or `deploy/`; auth is Apache Basic Auth plus a shared-secret proxy header instead (D-12) — `orchestrator/src/opengrid/api/auth.py` (02b §7) |
+| Kubernetes/multi-node HA | **Not built** | No match for `Kubernetes`/`k3s`/`kubectl` under `orchestrator/`, `integration-sims/`, or `deploy/`; single-host native systemd only (10 units, above) |
+| Forecasting beyond simple quantile persistence | **Not built** (only the in-scope method exists) | `orchestrator/src/opengrid/forecast/quantiles.py` + `service.py` implement quantile persistence only (`compute_slot_quantiles`); no other forecasting method is present in the module |
 
 ## 2. Architecture
 
