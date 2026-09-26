@@ -1,88 +1,79 @@
-# DEMO: things the walkthrough needs from paths DEMO does not own
+# DEMO: what the walkthrough needs from paths DEMO does not own
 
-Found while writing `docs/demo/README.md` and the `demo-*.yaml` scenarios (branch `wp/fancyviper007-lane`).
-Each item names the owner from `BUILD.md` §4 and the demo step that depends on it.
+Kept next to `docs/demo/README.md` (DEMO-2, release R2). Each item names the owner lane the lead routed it to
+and the demo step that depends on it. Status re-checked against R2 (`main` `6470cfa`); items resolved in R2 or
+earlier are listed at the end for the record. Items 12-16 concern the simulators and were not re-checked at R2.
 
-## 1. `integration-sims/tests/test_scenarios.py` hard-codes the scenario count (owner: market)
+## Open
 
-`test_all_six_shipped_scenarios_load_without_error` asserts `len(scenarios) == 6`. Adding any file to
-`integration-sims/scenarios/` (WORKBOARD's DEMO path is exactly `integration-sims/scenarios/demo-*.yaml`)
-fails it: with the four demo files, `pytest tests -q` reports `1 failed, 261 passed, 1 skipped`
-(`assert 10 == 6`). Every demo file loads through `load_scenario` without error (checked with the same
-function `app.py` uses). Please change the assertion to `>= 6`, or count only non-`demo-*` files.
+1. **"Run chain verify" reports FAIL from an unfiltered page** (owner: MERGE, UI; step 24).
+   - R2 fixed the identity: the button forwards it now.
+   - But the button posts `?class=&from=&to=` (`ui/templates/billing_audit.html:116`), and the route relays the
+     empty strings. `TraceVerifyRequest`'s datetime fields refuse `""` with a 422, which the page renders as FAIL.
+   - The step sets From/To first or uses `curl`.
+2. **The AS Deploy form still offers "all held AS awards" and 1-240 min** (owner: UI; step 10). og-api now
+   refuses both (R2), with a raw 422 or 409 on the page. The lead reports the option removed on `integ/ui-ai`
+   (`e64e818`) for R3. og-api also accepts a second deployment of an award that is already deployed (routed to
+   FOLLOWUPS).
+3. **Restoring the full commitment after a best-effort shortfall** (owner: DISPATCH, found by Q4; step 14).
+   The root cause is in the code: og-engine passes the latest stored utility (L2) instruction to the allocator
+   without checking `expires_at` (`orchestrator/src/opengrid/engine/gateways.py:518-527`). A lifted BLOCK or
+   LIMIT therefore keeps the bank cut, and the delivery stays at the best-effort remainder
+   (`tests-e2e/functional` Q4 strict xfail).
+4. **The "Commitment-lock events (K13)" table is never populated** (owner: engine/ledger; steps 6, 8, 14). No
+   code writes commitment rows with a lock reason or a `supersedes`; the demo points at the trace instead.
+5. **"SCADA silent" is never raised** (owner: health, ES07-S05; step 18). `health/__init__.py:364` never passes
+   the SCADA-silent input. (Feed stale, `NO_NEW_COMMITMENTS`, is enforced since R2.)
+6. **Market anomalies need `og-feeds` on the simulator** (owner: lead; steps 7-8, 18).
+   - The server polls live ERCOT/EIA/NWS, so `/ogsim/` market anomalies do not reach it until `[feeds.*]` points
+     at `ogsim.market`.
+   - Since R2 the server's price freshness window is 2,700 s, longer than the `feed_outage_and_stale` scenario.
+     Step 18 therefore runs on the dev stack (600 s) unless the lead shortens the window for the run.
+7. **"LP value added (latest selector gate)" is never available** (owner: MERGE, API; step 21).
+   `orchestrator/src/opengrid/api/routers/lp_value.py` exists but og-api does not mount it
+   (`api/app.py:130-171`).
+8. **`bank_overload` on the dev stack** (owner: sims, found by Q2; step 11).
+   - The dev-stack test for it is still a strict xfail at R2
+     (`tests-e2e/functional/safety/test_ts06_guardian_and_safe_stop.py:290-301`), so `ALR-SCADA-OVERLOAD` may not
+     show there. One live run will tell.
+   - After 3 overloaded readings the SCADA simulator also issues a LIMIT at 90% of the rating with no expiry
+     (`integration-sims/src/ogsim/scada/instructions.py:36-47`). og-engine keeps applying it (item 3), so the
+     demo bank stays capped at 540 kW.
+9. **One permanent `ALR-XFMR-UNMAPPED` warning per bank** (owner: data/guardian; "Before you start" item 2). No
+   hub has a service-transformer mapping yet (`og.hub.transformer_id`, migration 0029), and the alert never
+   clears by itself.
+10. **The Hubs table shows at most 200 hubs** (owner: UI; step 3). The map draws every hub since R2.
+11. **The System Health processes and feeds tables, the Control-room banner and "Guardian escalations" reflect
+    page load** (owner: UI; steps 2, 16, 18).
+12. **`tampered_unsigned_command` has no observable effect** (owner: sims; the forged-command moment is out of
+    the script). Its self-test is never invoked on anomaly start, and no rejected ack reaches the orchestrator.
+13. **Legacy scenario files use ids the simulator does not know** (owner: sims; not used by the script).
+    `bank_overload_and_utility_limit`, `compound_stress` and `tampered_command` target `BANK_07`, `BANK_12`,
+    `HUB_0501` and `HUB_0142`; the simulator's ids are `bank-NNN`/`hub-NNNNN`. A fix is on `wp/scenario-target-ids`.
+14. **Random mode resumes after a control-plane restart** (owner: sims; "Before you start" item 1). Pause is held
+    in memory only.
+15. **The control plane's web page calls `/api/...` by absolute path** (owner: sims; "Before you start" item 6).
+    Behind Apache's `/ogsim/` the buttons probably fail; the script uses `curl`.
+16. **No "stop scenario" verb** (owner: market). `POST /api/scenarios/{name}/run` has no matching stop, and
+    pending steps still fire after their first anomaly is cancelled.
 
-## 2. `tampered_unsigned_command` has no observable effect yet (owner: sims; README step 13)
+## Resolved (R2 and earlier)
 
-`ogsim.fleet.runtime.FleetRuntime.self_test_tampered_unsigned_command` builds the forged batch and proves
-`BAD_SIGNATURE`, but nothing calls it: `AnomalyEngine._apply` in `fleet/anomalies.py` deliberately skips the
-type ("applied by the runtime's ack path"), and `__main__.py` never invokes the self-test on anomaly start.
-So injecting `demo-04-tampered-command` currently only registers an active anomaly. The README's Expect
-column describes the intended behaviour (log line `fleet self-test: forged command correctly rejected
-(BAD_SIGNATURE)` and a rejected ack on `og/v1/ack/hub-00142`). Needed: on `ActiveAnomalyStarted` for this
-type, run the self-test for the target hub's bank and publish the rejected ack (`build_ack` already reports
-`reject_reason`). Fallback for the presenter until then: the hub's power/last command id on the Fleet
-drill-down do not change, and the invariant tiles stay 0.
-
-## 3. Rejected acks are not surfaced in the orchestrator (owner: engine + ui-a; README step 13)
-
-`opengrid.core.models.mqtt` knows `reject_reason: BAD_SIGNATURE | STALE_EPOCH | STALE_SEQ | EXPIRED`, but no
-engine code consumes `ack/*` for display, and no UI widget or alert shows a rejected command. For the demo a
-"Rejected commands" counter or row on the Fleet drill-down (or an `ALR-COMMAND-REJECTED` alert) would make
-step 13 visible on screen instead of in `journalctl -u og-sim-fleet`.
-
-## 4. Per-hub substitution rows cannot be written (owner: allocator/engine + architect; README step 11)
-
-`EngineLedgerGateway.record_substitution` (`engine/gateways.py`) raises because `og.grant` has no
-`reason_code` column, so `R-SUBSTITUTION` never reaches the Dispatch "Real-time grants & substitutions" table.
-The demo shows substitution indirectly (the obligation's granted kW on bank-001 stays constant while
-`hub-00001` is offline and the other 49 hubs' power rises on the Fleet screen). A `reason_code` column on
-`og.grant` plus the gateway write would let the table show the swap explicitly.
-
-## 5. The demo needs three committed customers on `bank-012` (owner: lead, L1 intake / D0 dev stack)
-
-Steps 5-8 and 10 assume at least three customers with contracts (one of them `DIST_DEFERRAL`) and
-opportunities selected and COMMITTED on `bank-012` for the demo window. `POST /og/api/contracts` and
-`POST /og/api/opportunities` exist and the README shows the `curl`, but there is no seed script; the presenter
-depends on the lead's L1 intake or a `dev/` seed to have them in place. A `tools/`/`dev/` seed for "3 demo
-customers on bank-012" would remove the manual step. Also `profile_ref` has no documented accepted values;
-the README uses `"demo"`.
-
-## 6. Safe stop cannot be released (owner: safestop/guardian; README steps 15-16 and reset)
-
-`POST /og/api/safestop/{scope}/{scope_id}/release` returns `501` by design (no Tier-2 co-signed path). Each
-demo run therefore consumes one bank (`bank-022`) until the lead clears the stop on the server. A documented
-lead-side reset command (or the Tier-2 path) is needed for back-to-back runs.
-
-## 7. No "stop scenario" verb on the control plane (owner: market)
-
-`POST /api/scenarios/{name}/run` starts a scenario; there is no endpoint to cancel the pending steps of a
-running one (only `DELETE /api/anomalies/{id}` for already-injected anomalies). `demo-03`'s +90 s step
-still fires after its first step is cancelled. A `POST /api/scenarios/{name}/stop` that cancels the task
-and its active ids would make "Reset between runs" one call.
-
-## Confirmed on a local live stack (2026-09-25)
-
-8. **Steps 9-10 (overload alert) cannot fire yet**: SCADA readings are never persisted to `og.feed_obs`
-   (`source='scada'`) and the health evaluator is never run by `og-settle`, so `ALR-SCADA-OVERLOAD` never
-   opens even though the simulator reports 164% of rating. See `tests-e2e/chaos/NEEDS_FROM_OTHER_OWNERS.md`
-   items 5 and 8. The DIST_DEFERRAL response in the engine is independent of this and may still show.
-9. **Working live**: the price spike (step 7) lands in `og.feed_obs` at 5000 $/MWh within one feeds poll;
-   manual command propose/confirm returns a real guardian verdict; bank-scoped safe stop engages and
-   publishes the signed retained stop; the four demo scenarios are listed and runnable from the control
-   plane.
-
-## Root causes found live (2026-09-26 03:20Z) for the two blockers every demo step 5-8 depends on
-
-10. **Every automatic batch is VETOED on G-14 `TRACE_PREIMAGE_MISSING`** (owner: engine). `og.command_batch`
-    had 3,424 of 3,425 rows with `trace_pre_image_id IS NULL`; the only `RT_ALLOCATION` trace row came
-    from the API's manual-command path. `opengrid.guardian.repo` documents that the engine must write the
-    K10 pre-image (`decision_type='RT_ALLOCATION'`, payload with `command_batch_id`) before invoking the
-    guardian; `opengrid.engine`/`opengrid.allocator` never call the trace store for a batch. This, not
-    stale telemetry, is why the server showed 160/160 VETOED (qa/merge-notes.md section 13): locally all
-    200 hubs were fresh and the veto rate was still 100%.
-11. **The selector never commits because every opportunity has `value_per_mwh = NULL`** (owner: api/
-    contracts). `POST /og/api/opportunities` calls `admit()` with no value; the intake path that derives
-    it from feeds/forecast is not used by the API, and `selector.gate.load_candidates` turns NULL into
-    `0.0`, so the LP finds nothing worth selecting (plans are OPTIMAL with objective ~330 from other terms,
-    zero reservations). Also observed: the ADMISSION gate re-runs for the same three contracts every 2 s
-    because nothing ever marks an OFFERED opportunity as attached to a plan.
+- **R2:**
+  - **A guardian veto shows VETOED** with its rule ids (was: FAILED with "409 Conflict").
+  - **A slow release shows PENDING**, not FAILED (the screen waits 15 s).
+  - **Export CSV** always sends plain dates.
+  - **The safe-stop dialog counts down from 30 s**, og-safestop's window.
+  - **The AS panel shows the product** (`ECRS · 1 h hold`).
+  - **og-api deploys one award, capped by its product** (the form still offers more; item 2).
+  - **The simulator's stop ramp completes** in about 4 s.
+  - **Feed stale is enforced**: og-engine skips intake and the selector commits nothing new.
+  - **The power-quality, $/kW, bid-funnel, fleet-map and bulk-command APIs are in the release.**
+- **The demo's committed customers:** `dev/scripts/seed_demo_customers.py` (dev-stack PR #35) commits the three
+  seeded demo contracts through admission and the selector, idempotently, and names the demo bank the steps
+  use.
+- **Safe-stop release:** the two-person release is built (og-op-a requests, og-op-b approves, self-approval
+  refused); steps 19-20.
+- **Every automatic batch vetoed on G-14** and **opportunities without a value:** the functional suite commits,
+  delivers and signs on the dev stack (21 of 22 functional tests pass).
+- **The scenario-count assertion:** `integration-sims/tests` loads every scenario file.

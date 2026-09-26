@@ -1,310 +1,426 @@
-# OpenGrid Orchestrator: 21-step sign-off demo
+# OpenGrid Orchestrator: sign-off demo (DEMO-2, release R2)
 
-A presenter runs this start to finish in about 10 minutes against the dev stack or the server. Every
-injected moment is a scenario file in `integration-sims/scenarios/demo-*.yaml`, so the run is repeatable.
-The operator guide (`docs/operator/README.md`) explains each screen in depth; this document only says what
-to do, where to look, and what must happen.
+A presenter runs this start to finish in about 15 minutes against the server or the local dev stack. Every
+injected moment is a scenario or anomaly on the simulator control plane (`/ogsim/`), so the run is repeatable.
+The operator guide (`docs/operator/README.md`) explains each screen and action in depth; this document only
+says what to do, where to look, and what must happen.
+
+What changed since DEMO-1 (R1.6):
+- the two-person safe-stop release is built (steps 19-20);
+- ERCOT AS awards are held, and deployed by an operator (steps 9-10);
+- the guardian escalates on repeated vetoes (steps 15-16);
+- a stale feed stops new commitments and shows a banner (step 18);
+- a lost delivery continues on best effort (step 14);
+- prices are per load zone (step 2).
+
+The Health screen is now called **System Health**.
+
+## Step markers
+
+| Marker | Meaning |
+|---|---|
+| **[ogsim]** | Needs an injection on the simulator control plane (`$SIM`, account `tester`) |
+| **[feeds→sim]** | Works only while `og-feeds` reads `ogsim.market` instead of the live ERCOT/EIA/NWS APIs (see "Market moments") |
+| **[root]** | Needs a root shell on the server (the lead) |
+| **[JUDGES]** | Part of the 3-minute version for judges: steps 9-10, 19-20 and 24 (plus 7-8 when feeds read the sim) |
+| **Known gap** | The release under test does not yet do this; the step says what to show instead |
+
+## Market moments: live feeds or the simulator
+
+The server's `og-feeds` polls the live ERCOT, EIA and NWS APIs (`orchestrator/config/orchestrator.toml`
+`[feeds.*] base_url`). A market anomaly injected on `/ogsim/` (price spike, AS price jump, HTTP 5xx, stale
+posting) changes only `ogsim.market`, so it reaches the orchestrator only when `og-feeds` is pointed at the
+simulator, as `dev/config/dev.toml` does. That switch is configuration plus `systemctl restart og-feeds`
+(`deploy/README.md`, "Switching live APIs vs. the market simulator"), and on the server it is the lead's call.
+
+- **Feeds live (the server as deployed):** skip steps 7-8 and 18; every other step works on live market data.
+- **Feeds on the simulator (the dev stack, or the server after the switch):** run everything.
 
 ## Real / simulated / derived / live
 
 | Data | Kind | Where it comes from |
 |---|---|---|
-| ERCOT prices, load, wind, solar, ancillary-service prices; EIA; NWS weather | **Real, live** | Public APIs, polled by `og-feeds`. The Markets freshness table labels each feed `live` or `simulated` |
-| Hub telemetry (2,000 hubs), SCADA bank load (40 banks), utility instructions | **Simulated** | `ogsim.fleet`, `ogsim.scada`, autonomous, over MQTT |
-| Anomalies: price spike, bank overload, comms loss, forged command | **Simulated, injected on demand** | `ogsim.control` (this demo's `demo-*.yaml` scenarios) |
-| Forecasts (P10/P50/P90), selector plans, commitments, grants, guardian verdicts, alerts, P&L, invoice lines, trace chain | **Derived** | Computed by the orchestrator from the rows above. Nothing on any screen is LLM-generated |
+| ERCOT prices per load zone, load, wind, solar, AS prices; EIA; NWS | **Real, live** on the server; **simulated** when feeds read `ogsim.market` | `og-feeds`. The Markets freshness table labels each feed `LIVE`, `SIM` or `HIST` |
+| Hub telemetry, SCADA bank load, utility instructions | **Simulated** | `ogsim.fleet`, `ogsim.scada`, autonomous, over MQTT |
+| Anomalies: overload, comms loss, energy drain, feed outage | **Simulated, injected on demand** | `ogsim.control` (`integration-sims/scenarios/*.yaml`) |
+| Forecasts, selector plans, commitments, grants, guardian verdicts, escalations, alerts, P&L, invoice lines, trace chain | **Derived** | Computed by the orchestrator. Nothing on any screen is LLM-generated |
 
-## URLs, accounts, ids used below
+## URLs, accounts, ids
 
 | Thing | Server | Local dev stack |
 |---|---|---|
-| Orchestrator UI | `https://base.tocy-net.net/og/` | `http://127.0.0.1:8080/og/` |
-| Orchestrator API | `https://base.tocy-net.net/og/api/...` | `http://127.0.0.1:8080/og/api/...` |
-| Sim control plane (UI + API) | `https://base.tocy-net.net/ogsim/` | `http://127.0.0.1:8091/` |
+| Orchestrator UI | `https://base.tocy-net.net/og/` | `http://127.0.0.1:8088/og/` through `dev/scripts/dev_proxy.py` (og-api refuses a browser on :8080) |
+| Orchestrator API (`$OG`) | `https://base.tocy-net.net/og/api` | `http://127.0.0.1:8088/og/api` (same proxy) |
+| Simulator control plane (`$SIM`) | `https://base.tocy-net.net/ogsim` | `http://127.0.0.1:8091` |
 
-- UI/API accounts: **operator** (can act) and **viewer** (read only; every write button is hidden). Control
-  plane account: **tester**. Passwords are in the lead's credentials file, never in this repo. In the `curl`
-  lines below `$OG` is the orchestrator base, `$SIM` the control-plane base, and `-u operator:...` stands for
-  the operator credentials (behind Apache). On the local stack there is no Apache, so send the identity header
-  instead: `-H 'X-Remote-User: operator'`.
-- Fleet ids: hubs `hub-00000`..`hub-01999`, banks `bank-000`..`bank-039`, zones `LZ_NORTH`, `LZ_SOUTH`,
-  `LZ_HOUSTON`, `LZ_WEST`. Hub `i` sits on bank `i mod 40` in zone `i mod 4` (0 NORTH, 1 SOUTH, 2 HOUSTON,
-  3 WEST). So LZ_SOUTH is exactly banks `bank-001, -005, ..., -037` (500 hubs).
-- Targets this demo uses, so you know where to look:
+- **Accounts** (passwords are in the lead's credentials file, never in this repo):
+  - `og-op-a` and `og-op-b`: named operators. Only these two can complete a safe-stop release: the guardian
+    signs a release only for two different accounts on `[guardian] stop_release_authorised_operators`.
+  - `operator`: the shared operator account. It can do everything except complete a release (its approval
+    stays PENDING, refused as `OPERATOR_NOT_AUTHORISED`).
+  - `viewer`: read only; every write panel is hidden.
+  - `tester`: the `/ogsim/` control plane.
+- In the `curl` lines, `-u og-op-a:...` stands for that account's credentials behind Apache. On the local
+  stack, drop `-u` and go through the dev proxy with `-H 'X-Remote-User: og-op-a'`.
+- **Fleet ids (server):** hubs `hub-00000`..`hub-01999`, banks `bank-000`..`bank-039`, zones `LZ_NORTH`,
+  `LZ_SOUTH`, `LZ_HOUSTON`, `LZ_WEST`. Hub `i` sits on bank `i mod 40` in zone `i mod 4` (0 NORTH, 1 SOUTH,
+  2 HOUSTON, 3 WEST). So LZ_SOUTH is banks `bank-001, -005, ..., -037` (500 hubs).
+- **Dev stack:** 200 hubs, 8 banks (`bank-000`..`bank-007`); pick targets from those.
 
-| Moment | Scenario | Target | Screen to watch |
+| Moment | How | Target | Screen to watch |
 |---|---|---|---|
-| Price spike during delivery | `demo-01-price-spike-lock` | `np6-905-cd` (wholesale), `np4-188-cd` RRS | Dispatch, Control room, Profitability |
-| SCADA overload | `demo-02-bank-overload` | `bank-012` (LZ_NORTH, 600 kVA) | Health, Dispatch |
-| Comms loss | `demo-03-zone-comms-loss` | `hub-00001` then zone `LZ_SOUTH` | Fleet, Health |
-| Forged command | `demo-04-tampered-command` | `hub-00142` (bank-022, LZ_HOUSTON) | Fleet drill-down, Control room |
-| Scoped safe stop | operator action, no scenario | `bank-022` | Fleet |
+| Zone prices | live data | all load zones | Markets, Control room ticker |
+| Price spike during delivery | [ogsim] [feeds→sim] `demo-01-price-spike-lock` | `np6-905-cd`, RRS | Dispatch, Control room, Profitability |
+| AS award held, then deployed | operator action | the seeded ECRS award (contract `...0d03`) | Dispatch |
+| SCADA overload | [ogsim] `bank_overload` on the demo bank | `$BANK` | System Health, Dispatch |
+| Comms loss, best effort | [ogsim] `demo-03-zone-comms-loss` | `hub-00001`, then zone `LZ_SOUTH` | Fleet, System Health, Dispatch |
+| Guardian escalation (K7) | operator API burst | `$HUB`, a hub on the demo bank | Control room, System Health, Fleet |
+| Degraded mode | [ogsim] [feeds→sim] `feed_outage_and_stale` | `np6-905-cd` | System Health, Control room |
+| Scoped safe stop and release | operator actions, two operators | `bank-022` | Fleet |
+| Energy runs low | [ogsim] `reserve_floor_pressure` on the demo bank's zone | `$ZONE` | Dispatch, System Health |
 
-Scenario anomaly ids are deterministic: `<scenario>:<type>:<at_s>`, e.g.
-`demo-02-bank-overload:bank_overload:0`. That is the id you `DELETE` to end a moment early.
+Scenario anomaly ids are `<scenario>:<type>:<at_s>`, e.g. `demo-02-bank-overload:bank_overload:0`; that is
+the id you `DELETE` to end a moment early.
 
-## Before you start (5 minutes, not part of the 10)
+## Before you start (5 minutes, not part of the 15)
 
-1. **Pause random anomalies** so nothing fires mid-demo:
-   `curl -u tester:... -X POST $SIM/api/random/pause` → JSON with `"paused": true`. Confirm nothing is active:
-   `curl -u tester:... $SIM/api/anomalies` → `{"active": []}`. Cancel any leftover with
-   `curl -X DELETE $SIM/api/anomalies/<id>`.
-2. **All seven processes ok.** Open `/og/health`. The Processes table shows `feeds, engine, guardian, safestop,
-   sim, settle, api` all `ok`, no degraded banner, and the Alerts table has no open critical alert.
-3. **Several customers committed.** The Dispatch header must already read at least `3 customers`, with cards
-   in COMMITTED or DELIVERING on `bank-012` for the current window (services ERCOT_ENERGY, DIST_DEFERRAL and
-   one more). If not, the operator creates them (contracts first, then opportunities; the selector commits at
-   the next gate):
+1. **Pause random anomalies.** They start unpaused, and each random arrival targets the whole fleet (all hubs,
+   all banks or all products):
+   `curl -u tester:... -X POST $SIM/api/random/pause` → `"paused": true`. Pausing does not cancel what is
+   already active: list `curl -u tester:... "$SIM/api/anomalies?source=random"` and
+   `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>` each one, then check `$SIM/api/anomalies` returns
+   `{"active": []}`. A restart of `og-sim-control` un-pauses random mode again; pause it after any restart.
+2. **All processes up.** Open **System Health**: every process in the Processes table has a heartbeat time from
+   the last few seconds (the Status column always reads `ok`, so read the time), no `ALR-PROCESS-DOWN`, no
+   degraded-mode banner, and no open critical alert. One `ALR-XFMR-UNMAPPED` warning per commanded bank is
+   expected in this release (no hub has a service-transformer mapping yet).
+3. **Customers committed: run the demo seed.** `python dev/scripts/seed_demo_customers.py` offers the three
+   seeded demo contracts (ERCOT_ENERGY, DIST_DEFERRAL, PARTNER_CAPACITY) for a one-hour window starting at the
+   quarter hour after next, through the real admission path, and waits until the selector has committed them.
+   It is idempotent: re-running it leaves live obligations alone. On the server it is run by the release manager
+   with the lead's OK [root]. The selector decides which banks carry each customer, so the seed ends with a line
+   like `demo bank: bank-015 (zone LZ_WEST; carries ERCOT_ENERGY, DIST_DEFERRAL, PARTNER_CAPACITY); a hub on it:
+   hub-00015`. Set the three names this run uses:
    ```bash
-   # one contract per customer (repeat with a new customer_id and service_type)
-   curl -u operator:... -X POST $OG/api/contracts -H 'Content-Type: application/json' -d '{
-     "customer_id": "'$(uuidgen)'", "service_type": "ERCOT_ENERGY", "tier": "T2",
-     "profile_ref": "demo", "start_at": "2026-09-26T00:00:00Z"}'
-   # one opportunity per contract. The window must start at a quarter-hour boundary at least ONE FULL
-   # GATE ahead: the gate that runs at :00/:15/:30/:45 first expires any offered window that has already
-   # started (R-EXPIRED-UNSELECTED) and only then selects. Posting at 02:58 for a 03:00 window is expired
-   # at 03:00; post for 03:30 and the 03:15 gate commits it (confirmed live).
-   curl -u operator:... -X POST $OG/api/opportunities -H 'Content-Type: application/json' -d '{
-     "contract_id": "<contract_id from above>", "window_start": "<quarter hour after next, ISO UTC>",
-     "window_end": "<+30 min>", "requested_kw": 40}'
+   BANK=bank-015; ZONE=LZ_WEST; HUB=hub-00015     # from the seed's "demo bank" line
    ```
-   A DIST_DEFERRAL contract must exist on bank-012 or step 10 has no PI loop to show.
-4. **Two browser windows**: one logged in as **operator** (the one you present from), one as **viewer** on the
-   Fleet screen, to show in step 3 that the viewer has no Propose buttons.
-5. Open the control-plane UI (`$SIM/`) in a third tab: its Scenarios panel lists the four `demo-*` scenarios
-   with a **Run** button each; the Active anomalies panel has a **Cancel** button per id. Use it or the
-   `curl` lines, whichever you prefer to show.
+   The steps below use `$BANK`, `$ZONE` and `$HUB`; the Dispatch pipeline must read at least `3 customers` with
+   cards in COMMITTED (then DELIVERING) for the window.
+4. **The AS award.** Dispatch → "AS awards & deployment" lists the seeded ERCOT_AS award (contract
+   `00000000-0000-7000-8000-000000000d03`, ECRS since migration `0022`) in state `held`. If the table reads "No
+   active ERCOT_AS awards are visible", give that contract an opportunity for the demo window as in item 3.
+5. **Three browser windows**: `og-op-a` (the one you present from), `og-op-b` (the second operator, for the
+   release), and `viewer` on the Fleet screen.
+6. **The control plane.** Use the `curl` lines below. Its web page calls `/api/...` by absolute path, which the
+   server's Apache does not proxy under `/ogsim/`, so its buttons may not work there.
 
-## The 21 steps
+## The steps
 
-Timing is the budget per step; the total is about 10 minutes. Steps marked **[JUDGES]** are the 2-minute
-short version for hackathon judges: steps 7-8, 13 and 20 (run the price spike, show the lock holding and the
-forgone upside; run the forged command and show it rejected; run chain verify).
+Timing is the budget per step; the total is about 15 minutes.
 
-### Topic 1: live feeds
+### Topic 1: live markets, per load zone
 
 **Step 1: The control room is live** (30 s)
-- **Action:** Open `/og/` as operator.
-- **Show:** Header badge; the Market ticker panel; the seven KPI tiles.
-- **Expect:** Header badge reads `live` (not `reconnecting`). Every tile shows an age badge under 10 s. The three
-  invariant tiles **Reserve breaches**, **kWh sold twice**, **Commitment switches** all read `0` with a green
-  badge. Market ticker shows a moving ERCOT price line.
+- **Action:** Open `/og/` as og-op-a.
+- **Show:** Header badge; the one-line fleet story; "Promises kept"; the KPI tiles; the Grid map.
+- **Expect:** Header badge `live`. The story line reads "N of M hubs online · n obligations promised to b
+  buyers ... **0 promises broken today**". The three "Promises kept" tiles, **Reserve breaches**, **kWh sold
+  twice**, **Commitment switches**, all read `0` in green. Fleet power, Active commitments and Today's net
+  margin have values (Fleet energy reads `--`).
+- **Known gaps:** **Commitment switches** is not measured yet (always 0), and the other two tiles are running
+  totals since the checks started, not today's. The tiles' age badges turn "stale" about 10 s after load even
+  though four of them keep updating live; reload to reset them.
 
-**Step 2: Real feeds, labelled as such** (30 s)
+**Step 2: Prices per load zone** (45 s)
 - **Action:** Open `/og/markets`.
-- **Show:** The "Freshness & source status" table, then the "Forecast band (P10 / P50 / P90)" chart.
-- **Expect:** Rows for the ERCOT products (`np6-905-cd` price, `np4-188-cd` AS, load, wind, solar), EIA and
-  NWS, each with mode `live`, age under its window, `0` consecutive failures and breaker `closed`. Header badge
-  says `poll: 30s`. The forecast band is drawn ahead of now; the P50 line lies between P10 and P90.
+- **Show:** "Wholesale price ($/MWh)" (one line per load zone), then "Freshness & source status", then
+  "Forecast band (P10 / P50 / P90)".
+- **Expect:** One price line per ERCOT load zone; each bank is dispatched and settled at its own zone's price,
+  never at a hub price (decision D-10). Freshness rows for `np6-905-cd` (price), `np6-345-cd` (load),
+  `np4-732-cd` (wind), `np4-737-cd` (solar), `np4-745-cd` (solar by region, new in R2), `np4-188-cd` (AS), EIA
+  and NWS, each `LIVE` (or `SIM` when feeds read the simulator), failures `0`, breaker `closed`. The forecast
+  band is drawn ahead of now for `LZ_NORTH`. The "Bid funnel" is derived from the pipeline, so it shows the
+  demo offers.
 
 ### Topic 2: the fleet
 
-**Step 3: 2,000 hubs, 40 banks, 4 zones** (30 s)
-- **Action:** Open `/og/fleet`. Set the filter to zone `LZ_NORTH`, bank `bank-012`
-  (`/og/fleet?zone=LZ_NORTH&bank=bank-012`). Glance at the viewer window on the same screen.
-- **Show:** The Hubs table and its filters; the "Scoped safe stop" and "Manual command" panels.
-- **Expect:** Unfiltered, the table paginates 2,000 rows, all `online`. Filtered, exactly 50 hubs
-  (`hub-00012, hub-00052, ..., hub-01972`) all `online`, telemetry age under 4 s, SoC around the reserve line
-  and power non-zero on hubs that are delivering. The operator window shows both **Propose** buttons; the viewer
-  window shows neither.
+**Step 3: One fleet, many homes** (30 s)
+- **Action:** Open `/og/fleet`. Filter zone `$ZONE`, bank `$BANK`. Glance at the viewer window.
+- **Show:** The Fleet map and the Hubs table; the operator panels.
+- **Expect:** Filtered, exactly 50 hubs (`$HUB` and every 40th hub id after it), `online`, age a few seconds.
+  og-op-a sees "Scoped safe stop", "Release a safe stop (two operators)", "Manual command" and "Command the
+  selection"; the viewer sees none of them. Unfiltered, the Hubs table shows the first 200 hubs only (a known
+  cap of this release; the map draws every hub), so filter by zone or bank.
 
 **Step 4: One hub up close** (30 s)
-- **Action:** Click the `hub-00012` row (or press Enter on it): `/og/fleet/hubs/hub-00012`.
-- **Show:** The drill-down: lease epoch, lease expiry, last command id, telemetry sparkline.
-- **Expect:** Lease expiry is in the future and renews (30 s TTL); last command id changes every 2 s cycle;
-  the sparkline moves. Say once: a hub only executes a command signed by the guardian's key for the current
-  lease epoch, which step 13 will prove.
+- **Action:** Click the `$HUB` row (or Enter on it).
+- **Show:** "Hub detail": lease epoch, lease expires, last command.
+- **Expect:** Lease expiry in the future and renewing (30 s TTL); the last command id changes as the engine
+  commands it. Say once: a hub only executes a command signed by the guardian's key for its current lease
+  epoch.
 
 ### Topic 3: several customers committed at once
 
-**Step 5: Several customers in the pipeline** (30 s)
+**Step 5: The pipeline** (30 s)
 - **Action:** Open `/og/dispatch`.
-- **Show:** "Opportunity pipeline (N customers, M obligations)" board.
-- **Expect:** Header shows `3 customers` or more. Cards in **COMMITTED** and **DELIVERING** with different
-  service types (ERCOT_ENERGY, DIST_DEFERRAL, ...), tier and committed kW. No card has an amber at-risk
-  border. The "Latest selector plan" panel shows mode `lp` (not `rule`), a gate time, and solver status
-  optimal.
+- **Show:** "Opportunity pipeline (N customers, M open ...)".
+- **Expect:** `3 customers` or more; cards in **Committed** and **Delivering** with different services, tier and
+  kW, each reading "Locked: this promise is kept even if a better price appears (K13)". No card has an amber
+  at-risk border. "Latest selector plan" shows "LP optimizer" and an optimal solver status.
 
-**Step 6: One bank, several committed bands** (30 s)
-- **Action:** Pick `bank-012` in the ledger timeline selector.
-- **Show:** "Ledger timeline: bank bank-012" stacked chart; "Commitment-lock events (K13)" table.
-- **Expect:** One coloured band per committed obligation stacked to the bank's capacity, free headroom on top.
-  The lock-events table is empty (`No lock events`) or contains only rows older than this run. Say: new
-  opportunities may only take the headroom band.
+**Step 6: The ledger, fleet first** (30 s)
+- **Action:** In the header, Ledger `Fleet` → View; then `Feeder segment (bank)` `$BANK` → View.
+- **Show:** "Ledger timeline" (stacked committed capacity per obligation, dashed uncommitted capacity on top).
+- **Expect:** One band per committed obligation, headroom above. Say: a new opportunity may only take the
+  headroom.
 
-### Topic 4: a price spike during delivery, the lock holds
+### Topic 4: a price spike during delivery, the lock holds [feeds→sim]
 
-**Step 7 [JUDGES]: Inject a $5,000/MWh spike** (30 s)
+**Step 7 [JUDGES]: Inject a $5,000/MWh spike** [ogsim] (30 s)
 - **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-01-price-spike-lock/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
-  (or press **Run** next to `demo-01-price-spike-lock` in the control-plane UI).
-- **Show:** Control room Market ticker, then Markets.
-- **Expect:** Response `{"ok": true, "scenario": "demo-01-price-spike-lock", "steps": 2}`. Within 30 s (next
-  feed poll) the ticker's price line jumps to `5000` on `np6-905-cd`; Markets shows the RRS AS price at `800`.
-  `$SIM/api/anomalies` lists `demo-01-price-spike-lock:price_spike:0` and `...:as_price_jump:0` as active.
+- **Show:** Control room "Market ticker", then Markets.
+- **Expect:** `{"ok": true, "scenario": "demo-01-price-spike-lock", "steps": 2}`. Within one feeds poll every
+  load-zone price line jumps to `5000` (the simulator spikes the product, all zones at once) and RRS to `800`.
 
 **Step 8 [JUDGES]: The committed customers keep their capacity** (45 s)
-- **Action:** Back to `/og/dispatch`, ledger on `bank-012`; then `/og/` tiles; then `/og/profitability`.
-- **Show:** The COMMITTED/DELIVERING cards and their committed kW; the "Commitment-lock events (K13)" table;
-  the **Commitment switches** tile; the **Forgone upside (lock)** tile.
-- **Expect:** Every committed card keeps the same kW; **no new row** appears in Commitment-lock events (the only
-  reasons that may ever appear there are `R-COMMIT-LOCK-OVERRIDE-L0/L1/L2` and `R-COMMIT-LOCK-INFEASIBLE`,
-  none of which is a price). **Commitment switches** stays `0` green. Within one profitability refresh
-  (30 s) **Forgone upside (lock)** turns non-zero with a caution badge: the money the fleet chose not to
-  chase. Any new opportunity created now (repeat the step 3 `curl` in "Before you start") lands as OFFERED
-  and, if selected, takes only headroom.
+- **Action:** `/og/dispatch` (`$BANK` ledger), then `/og/`, then `/og/profitability`.
+- **Show:** The Committed/Delivering cards; the **Forgone upside (lock)** tile on Profitability.
+- **Expect:** Every committed card keeps its kW and its "Locked ... (K13)" sentence; only L0/L1/L2 overrides
+  and infeasibility may ever reduce a commitment, never a price, and the guardian re-checks any such claim
+  (G-19). Within a Profitability refresh (30 s) **Forgone upside (lock)** turns non-zero with a caution badge:
+  the money the fleet chose not to chase.
 
-### Topic 5: a SCADA overload, DIST_DEFERRAL responds, an alert fires
+### Topic 5: an ERCOT AS award, held then deployed
 
-**Step 9: Overload bank-012** (30 s)
-- **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-02-bank-overload/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
-- **Show:** `/og/health`, Alerts table.
-- **Expect:** Within two SCADA cycles a new alert row: rule `ALR-SCADA-OVERLOAD`, severity **critical**
-  (25% over the 600 kVA feeder-segment rating is above the 120% critical line), summary
-  `Bank bank-012 SCADA load 750.0 kVA over rating 600.0 kVA (125%)`. The same row appears in the Control room
-  "Open alerts".
+**Step 9 [JUDGES]: The award is held, not sold** (45 s)
+- **Action:** `/og/dispatch`, panel "AS awards & deployment".
+- **Show:** The award row: Product, Committed, Energy held, State, Risk.
+- **Expect:** State `held`, Risk `OK`. Say: an AS award sits at **0 kW** until ERCOT (here, an operator) deploys
+  it; the allocator grants it 0 kW with reason `R-GRANT-AS-HOLD`, keeps its capacity out of the headroom it
+  sells, and keeps enough energy above the homes' reserve to run the whole product (ECRS 1 h, Non-Spin 4 h).
+  The guardian independently signs a below-commitment hold only when its own reads show an ERCOT_AS award with
+  no active deployment and an unused reservation (G-19).
+- The Product column reads `ECRS · 1 h hold`; "Energy held" shows only the requirement (`-- / N kWh`).
 
-**Step 10: The DIST_DEFERRAL loop pulls the bank back** (45 s)
-- **Action:** `/og/dispatch`, "Real-time grants & substitutions" table and the bank-012 ledger.
-- **Show:** Grant rows for `bank-012`; the DIST_DEFERRAL card's committed kW; the Health alert.
-- **Expect:** Over the next 2 s cycles the DIST_DEFERRAL grant on bank-012 rises (more discharge to relieve the
-  substation) with kind/reason `R-GRANT-DIST-DEFERRAL-PI`, while every committed kW on the cards is unchanged
-  and no Commitment-lock event is written. If you also want to show the utility path, inject
-  `utility_instruction` `{mode: limit, limit_kw: 50}` on bank-012 by hand: the lock-events table then gets a
-  row with `R-COMMIT-LOCK-OVERRIDE-L2`, the only legitimate way a price-independent instruction reduces a
-  commitment. The alert clears on its own when the anomaly ends (300 s), or now via
-  `curl -X DELETE $SIM/api/anomalies/demo-02-bank-overload:bank_overload:0`.
+**Step 10 [JUDGES]: Deploy it** (60 s)
+- **Action:** Press **Deploy** on the award row (15 minutes). Read the summary in "Confirm ERCOT AS
+  deployment", then **Confirm deployment**.
+- **Show:** The result line; the award's State; "Real-time grants & substitutions"; the bank ledger.
+- **Expect:** "Deployment `<id>` is active."; State `deployed`. From the next 2 s cycle the award is dispatched
+  up to its committed kW like any committed delivery; when the deployment ends, or on **Stop deploy** →
+  **Stop deployment**, it returns to a 0 kW hold on the next cycle. Every step is in the trace
+  (`AS_DEPLOYMENT`, `AS_DEPLOYMENT_END`), step 23.
+- **Known gap:** the form's "Deploy" selector still offers "all held AS awards" and 1-240 min, and og-api
+  refuses both a deployment without an award and one longer than the product (ECRS: 60 min), with a raw error.
+  Use the row's **Deploy** button.
 
-### Topic 6: zone comms loss, substitution
+### Topic 6: a SCADA overload, DIST_DEFERRAL responds, an alert fires
 
-**Step 11: One hub goes quiet, the bank covers for it** (45 s)
-- **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
-  then open `/og/fleet?bank=bank-001`.
-- **Show:** The 50 hubs of `bank-001`; `hub-00001`'s row; the bank-001 grant in Dispatch.
-- **Expect:** `hub-00001` age climbs; after 6 s its badge reads `stale`, after 30 s `offline`. Its power drops to
-  `--` while the remaining 49 hubs' power rises so the obligation on bank-001 keeps its granted kW
-  (substitution, reason `R-SUBSTITUTION`, a grant change and never a commitment write). No lock event, no
-  alert yet (1 of 500 LZ_SOUTH hubs is 0.2%, under the 5% warning line).
+**Step 11: Overload the demo bank** [ogsim] (30 s). **Known gap:** on the dev stack this injection does not
+change the SCADA readings yet (tests-e2e finding), so no alert fires there; if none appears on the server,
+skip to step 13.
+- **Action:** the same anomaly as scenario `demo-02-bank-overload` (which targets `bank-012`), on `$BANK`:
+  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "bank_overload", "target": "'$BANK'", "params": {"kva_over_rating_pct": 25}, "duration": 300}'`
+  (the response carries the anomaly's `id`).
+- **Show:** System Health, "Alerts".
+- **Expect:** Within a few SCADA cycles an `ALR-SCADA-OVERLOAD` row for `$BANK`: warning above 100% of the
+  600 kVA rating, critical above 120%. The simulator reports the bank's actual load × 1.25, so the percentage
+  depends on the load at that moment. The same alert appears in the Control room "Open alerts" (reload).
 
-**Step 12: The whole zone goes quiet** (45 s)
-- **Action:** At +90 s the scenario disconnects all of `LZ_SOUTH`. Open `/og/health`, then `/og/`.
-- **Show:** "Hub health by zone" chart; Alerts table; Control room fleet map; Dispatch pipeline.
-- **Expect:** LZ_SOUTH's bar turns to 500 `offline` while the other three zones stay `online`. Alert
-  `ALR-HUB-OFFLINE-RATIO` for `LZ_SOUTH`, severity **critical** (`ratio 100.0%`, over the 20% line). The
-  fleet map shows the LZ_SOUTH hubs amber. Any obligation on an LZ_SOUTH bank with no substitute left moves to
-  SHORTFALL with `R-COMMIT-LOCK-INFEASIBLE` in the lock-events table: the one honest reason a commitment
-  cannot be met. Everything on LZ_NORTH/HOUSTON/WEST is untouched. Say: the hubs themselves keep serving their
-  homes on local autonomy once their lease expires (30 s). Clears itself at 240 s; to end now,
-  `curl -X DELETE $SIM/api/anomalies/demo-03-zone-comms-loss:zone_mass_disconnect:90` (and `...:hub_offline:0`).
+**Step 12: The DIST_DEFERRAL loop responds** (45 s)
+- **Action:** `/og/dispatch`, ledger `$BANK`: "Real-time grants & substitutions" and the ledger.
+- **Show:** The DIST_DEFERRAL grant on `$BANK`; the committed kW on the cards.
+- **Expect:** The DIST_DEFERRAL grant on `$BANK` rises (more discharge to relieve the feeder segment) while
+  every committed kW is unchanged. The alert clears when the anomaly ends (300 s), or now:
+  `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`.
+- **Note:** after 3 overloaded readings the SCADA simulator also issues a LIMIT at 90% of the rating (540 kW) on
+  `$BANK` with no expiry, and in this release og-engine keeps applying it. `$BANK` stays capped at 540 kW for the
+  rest of the run, which does not affect the demo's 40-60 kW obligations.
 
-### Topic 7: a forged command is rejected
+### Topic 7: comms loss, substitution, then best effort
 
-**Step 13 [JUDGES]: Forge a command to hub-00142** (30 s)
-- **Action:** Open `/og/fleet/hubs/hub-00142` first, then
-  `curl -u tester:... -X POST $SIM/api/scenarios/demo-04-tampered-command/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
-- **Show:** The hub-00142 drill-down (power, last command id), then the three invariant tiles on `/og/`.
-- **Expect:** The forged batch asks hub-00142 for -5 kW with `key_id: forged-key` and an empty signature. The hub
-  refuses it with reject reason `BAD_SIGNATURE` (signature is checked before freshness, so a forged key never
-  gets as far as the epoch/seq check): its power and last command id do not change, no ack is applied, and
-  **Reserve breaches / kWh sold twice / Commitment switches** stay `0`. The fleet simulator logs
-  `fleet self-test: forged command correctly rejected (BAD_SIGNATURE)` (`journalctl -u og-sim-fleet`) and
-  publishes the rejected ack on `og/v1/ack/hub-00142` with `"accepted": false, "reject_reason": "BAD_SIGNATURE"`.
+**Step 13: One hub goes quiet, the bank covers for it** [ogsim] (45 s)
+- **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/run -H 'Content-Type: application/json' -d '{"speed": 1}'`,
+  then `/og/fleet?bank=bank-001`.
+- **Show:** bank-001's 50 hubs; `hub-00001`.
+- **Expect:** `hub-00001` goes `stale` after 6 s and `offline` after 30 s; the other 49 hubs pick up its share, so
+  the obligation on bank-001 keeps its granted kW (substitution: a grant change, never a commitment write).
 
-**Step 14: The legitimate path, for contrast** (45 s)
-- **Action:** On `/og/fleet`, Manual command panel: hub `hub-00142`, setpoint `2`, reason `demo signed path`,
-  **Propose (step 1 of 2)**; read the summary; **Confirm** before the 60 s countdown ends.
-- **Show:** The confirm dialog (focus starts on Cancel, Tab to Confirm, Escape closes); the result badge.
-- **Expect:** Badge `PASS` (guardian signed it; the drill-down's last command id changes and power moves toward
-  2 kW), or `VETOED` with the guardian rule ids listed (for example `G-02` hub power bound or `G-19` commitment
-  lock if 2 kW would take capacity from a committed band). Either way the setpoint reached the hub only via
-  a guardian-signed batch. If you confirm after 60 s: `EXPIRED`, propose again.
+**Step 14: The whole zone goes quiet; best effort** (60 s)
+- **Action:** At +90 s the scenario disconnects all of `LZ_SOUTH`. Open System Health, then `/og/dispatch`.
+- **Show:** "Hub health"; "Alerts"; the pipeline cards.
+- **Expect:** 500 LZ_SOUTH hubs `offline`; `ALR-HUB-OFFLINE-RATIO` for LZ_SOUTH, critical (over 20%). A
+  delivering obligation on an LZ_SOUTH bank with no substitute left moves to **SHORTFALL** after 60 s
+  sustained, with reason `R-COMMIT-LOCK-INFEASIBLE` (on the card at load, and in the trace: stream
+  `shortfall-<obligation id>`, class `ALLOCATOR_SHORTFALL`), and its card turns amber (AT_RISK). Say (decision
+  D-17): it keeps receiving the maximum feasible kW for the rest of the window, never 0, never stopped. The
+  hubs themselves serve their homes on local autonomy once their lease lapses. The zone returns at 240 s; to end now,
+  `curl -u tester:... -X DELETE $SIM/api/anomalies/demo-03-zone-comms-loss:zone_mass_disconnect:90` (and
+  `...:hub_offline:0`).
+- **Known gaps:**
+  - The card moves to "Fulfilled / shortfall" with the text "Delivered short; penalty applies", although
+    delivery continues.
+  - The "Commitment-lock events (K13)" table is not populated yet; use the trace.
+  - A delivery cut by a utility (L2) instruction does not return to the full commitment when the instruction is
+    lifted, because og-engine keeps applying the expired instruction (a defect routed for fixing).
 
-### Topic 8: a scoped safe stop
+  The state itself stays SHORTFALL until the window closes.
 
-**Step 15: Propose a bank-scoped stop** (30 s)
-- **Action:** `/og/fleet`, "Scoped safe stop" panel: scope `Bank`, scope id `bank-022`, reason
-  `forged command seen on bank-022`, **Propose safe stop (step 1 of 2)**.
-- **Show:** The proposal summary and the 30 s countdown.
-- **Expect:** Summary reads `Engage safe stop on bank/bank-022 (forged command seen on bank-022)`; nothing has
-  stopped yet (Fleet power tile unchanged). Say: a single message can never stop anything, and og-safestop is
-  its own process with its own key, so this works even with engine and guardian down.
+### Topic 8: the guardian gets cautious (K7)
 
-**Step 16: Confirm and watch the ramp** (45 s)
-- **Action:** Press **Confirm** inside the 30 s window. Then filter `/og/fleet?bank=bank-022`.
-- **Show:** The result line; bank-022's 50 hubs; the Fleet power tile.
-- **Expect:** `Safe stop engaged for bank/bank-022.` Bank-022's hubs ramp to 0 kW over 30 s (bank ramp window);
-  the other 39 banks keep delivering; Fleet power drops by bank-022's share only. No hub goes below its home
-  reserve (Reserve breaches still `0`). If you confirm late: `proposal expired, propose again`. Note out loud:
-  release is not built (the stop-only key cannot sign a release), so the lead lifts this stop afterwards; that
-  is why it is near the end of the run.
+**Step 15: A burst of vetoed commands** (45 s)
+- **Action:** From a shell, send over-limit commands to one hub (60 kW is above every hub's 11 or 20 kW
+  inverter), about one per second for 30 s:
+  ```bash
+  for i in $(seq 1 30); do
+    id=$(curl -s -u og-op-a:... -X POST "$OG/fleet/command" -H 'Content-Type: application/json' \
+         -d '{"hub_id": "'$HUB'", "p_kw_setpoint": 60, "reason": "K7 demo: over the hub limit"}' | jq -r .proposal_id)
+    curl -s -o /dev/null -w '%{http_code} ' -u og-op-a:... -X POST "$OG/fleet/command/$id/confirm"
+  done; echo
+  ```
+- **Show:** The printed status codes; then System Health (reload).
+- **Expect:** A row of `409`: the guardian vetoes every one (G-02 hub power; since R2 the flow checks, e.g. G-31,
+  may be listed too). More than 5% of a tick's commands vetoed puts `$BANK` (and its zone, if the zone crosses
+  5% too) **CONSERVATIVE**: "Guardian escalations" shows "Scope held conservative" (`ALR-SCOPE-CONSERVATIVE`),
+  and the engine stops selling spot headroom there. After three bad ticks it shows "Guardian requests a safe
+  stop" (`ALR-SAFE-STOP-REQUESTED`) with **Review safe stop (two-step)**.
 
-### Topic 9: profitability and billing
+**Step 16: A person decides** (30 s)
+- **Action:** Click **Review safe stop (two-step)**.
+- **Show:** The Fleet screen's "Scoped safe stop" panel, prefilled.
+- **Expect:** Scope and scope id filled from the guardian's request, reason "Guardian escalation: safe stop
+  requested", and the note "Prefilled from the guardian's safe-stop request ... nothing is engaged until you
+  confirm". Nothing has stopped: the guardian never engages a stop by itself (K8). Do not propose it; stop
+  here. With no more vetoes the escalation clears on its own, after 3 consecutive good ticks (at most 2.5%
+  vetoed), or after 30 ticks with no commands (about 60 s).
+- **Known gap:** "Guardian escalations" is drawn at page load; reload to see it change.
 
-**Step 17: Where the money went** (45 s)
-- **Action:** Open `/og/profitability`, service filter `All`, today.
-- **Show:** **Net margin** and **Forgone upside (lock)** tiles; the "Per obligation / day" table; the
-  "LP vs rule baseline" panel.
-- **Expect:** Net margin positive. Forgone upside (lock) non-zero from step 8, with the obligations count that
-  carried it. The table has one row per obligation per day (revenue, energy cost, degradation cost, penalty,
-  net); the DIST_DEFERRAL row from step 10 shows revenue, any LZ_SOUTH shortfall from step 12 shows a penalty.
-  LP vs rule baseline shows the optimiser ahead of (or equal to) the rule selector. Header badge `poll: 30s`.
+### Topic 9: a forged command, and the legitimate path
 
-**Step 18: Invoice lines and M&V** (30 s)
-- **Action:** Open `/og/billing`. Press **Export CSV**.
-- **Show:** Invoice lines table (Line, Contract, Obligation, Period, ...); "M&V performance" panel.
-- **Expect:** One line per settled obligation-interval per contract, matching the Profitability rows for the
-  same day; a CSV downloads with the same lines. M&V shows delivered vs committed per obligation; the
-  step-12 shortfall, if any, shows under-delivery against its committed kW.
+**Step 17: The signed path, for contrast** (45 s)
+- **Action:** `/og/fleet`, "Manual command": hub `hub-00142`, setpoint `2`, reason `demo signed path`,
+  **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown.
+- **Show:** The confirm dialog (focus starts on Cancel, Tab to the confirm button, Escape closes); the result.
+- **Expect:** `PASS` "Command accepted. Trace ..." (the drill-down's last command id changes), or `VETOED` "Vetoed
+  by guardian: <rule ids>. Trace ..."; the 409 in step 15 is the same veto seen from the API. Either way the
+  setpoint reached the hub only in a guardian-signed batch.
+- **Forged command:** `demo-04-tampered-command` still only registers an active anomaly (the simulator's
+  self-test is not invoked), so there is nothing to show on screen; leave it out.
 
-### Topic 10: the audit chain
+### Topic 10: degraded mode [feeds→sim]
 
-**Step 19: Every decision in the trace** (45 s)
-- **Action:** On `/og/billing`, Trace explorer: leave filters blank, or filter class `SAFE_STOP_ENGAGE`.
-- **Show:** The trace rows (Trace, Decision, Class, Stream, ...).
-- **Expect:** Rows for this run in order: `OPERATOR_ACTION`/`SAFE_STOP_ENGAGE` for bank-022 carrying the
-  operator's identity and the exact reason text from step 15; `OPERATOR_ACTION` for the manual command of
-  step 14; `RT_ALLOCATION` records every 2 s; the shortfall/lock transitions from step 12 with their
-  `R-COMMIT-LOCK-INFEASIBLE` reason; and the alerts from steps 9 and 12. Nothing from steps 7-8 reduced a
-  commitment: there is no lock-override record for the spike.
+**Step 18: A feed goes down** [ogsim] (30 s, started about 10 minutes earlier)
+- **Where:** the dev stack, whose price freshness window is 600 s. On the server the window is 2,700 s since R2.
+  That is longer than this scenario's 17 minutes without new data, so there the banner appears only if the
+  breaker opens. Skip the step on the server unless the lead shortens the window for the run [root].
+- **Action:** Start it during step 3:
+  `curl -u tester:... -X POST $SIM/api/scenarios/feed_outage_and_stale/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
+  (np6-905-cd returns 503 for 120 s, then stops posting new data for 900 s). Now open System Health.
+- **Show:** The banner at the top; "Feed freshness"; "Alerts"; then Dispatch.
+- **Expect:** "Degraded mode: **Feed stale**" once the price feed is older than its window (`ALR-FEED-STALE`,
+  warning), or at once if its breaker opened (`ALR-FEED-LGV-EXHAUSTED`, critical). Markets shows the row's
+  failures and breaker. The banner is live on System Health; the Control room shows it on reload.
+- **Say:** Feed stale is enforced. While it lasts, og-engine skips intake and every selector gate commits
+  nothing new; the committed deliveries continue. The other modes (Engine down, Guardian down, SCADA silent)
+  are shown and recorded only. "Engine down" and "Guardian down" need `systemctl stop` [root] and interrupt
+  delivery, so they are not part of this run.
 
-**Step 20 [JUDGES]: Verify the chain** (30 s)
-- **Action:** Press **Run chain verify** (or `curl -u viewer:... -X POST $OG/api/trace/verify -H 'Content-Type: application/json' -d '{}'`).
-- **Show:** The verify result line.
-- **Expect:** `passed: true`, `checked: <number of streams>`, `first_broken: null`. Say: records are
-  hash-chained per stream, so nothing above could have been edited or removed without this turning to
-  `passed: false` with the first broken `stream_id`/`seq`. That closes the run.
+### Topic 11: a scoped safe stop, released by two operators
 
-**Step 21: Energy runs low on a committed delivery** (60 s)
-- **Action:** Run scenario `demo-05-energy-runs-low` (`curl -u tester:... -X POST $SIM/api/scenarios/demo-05-energy-runs-low/run`).
-  It raises simulated home load on every hub in `LZ_NORTH` to 10 kW for 5 minutes, so the homes behind
-  bank-012's committed deliveries drain toward their 20% reserve (7.84 kWh per unit) while still committed.
-- **Show:** Dispatch board, the bank-012 cards; then Health, Alerts; then the Control room invariant tiles.
-- **Expect:** The affected obligation cards turn amber (**AT_RISK**) and show a falling energy margin and a
-  time-to-depletion; `ALR-ENERGY-SHORTFALL-RISK` opens on Health (requirement change 2026-09-25, `docs/team/NOTICES.md`;
-  until that alert rule lands, the AT_RISK card and substitution grants to other hubs are the evidence).
-  Substitution moves the delivery to hubs with energy left rather than over-drawing; **Reserve breaches stays 0**
-  throughout (K1 on energy, not just power). Say: a home can have 11 kW of headroom and still be out of charge;
-  the system checks energy every cycle and never plans a discharge below reserve. End early with
-  `DELETE $SIM/api/anomalies/demo-05-energy-runs-low:reserve_floor_pressure:0`.
+**Step 19 [JUDGES]: Stop bank-022** (45 s)
+- **Action:** As og-op-a, `/og/fleet`, "Scoped safe stop": scope `Bank`, scope id `bank-022`, reason
+  `demo: stop bank-022`, **Propose safe stop (step 1 of 2)**; read the summary; **Engage safe stop within 30 s**.
+- **Show:** The dialog, then the result; `/og/fleet?bank=bank-022`; Fleet power.
+- **Expect:** Summary `Engage safe stop on bank/bank-022 (demo: stop bank-022)`, then `ENGAGED` "Safe stop
+  engaged for bank/bank-022." bank-022's hubs drop toward 0 kW and get no new signed command (the guardian
+  vetoes batches for a stopped bank); the other banks keep delivering; Reserve breaches stays `0`. Say:
+  og-safestop is its own process with its own stop-only key, so this works with engine and guardian down; a
+  single message can never stop anything.
+- Confirm within **30 s**: the dialog counts down from 30 s and disables **Engage safe stop** at 0 (propose
+  again). In the simulator the stopped hubs reach 0 kW over the 4 s stop ramp.
+
+**Step 20 [JUDGES]: Release it, two people** (60 s)
+- **Action:** As og-op-a, "Release a safe stop (two operators)": scope `Bank`, scope id `bank-022`, reason
+  `demo: release`, **Request release (operator 1)**. Copy the request id. Then, still as og-op-a, paste it into
+  "Release request id" → **Review and approve (operator 2)** → **Approve release**. Then do the same as og-op-b.
+- **Show:** The three results.
+- **Expect:** `REQUESTED` "... Request id `<id>` -- a second operator approves it below within 60 s." Then, for
+  og-op-a approving its own request, `REFUSED` "The requesting operator cannot approve their own release." (the
+  API answers 403 and the request stays valid). For og-op-b, `RELEASED` "Safe stop released for BANK:bank-022"
+  once the guardian has signed the release and og-safestop relayed it; bank-022's hubs resume.
+- If the guardian has not signed within og-api's 10 s wait, og-op-b sees `PENDING`; the release usually lands a
+  moment later (check bank-022 on Fleet). The same approvals from a shell, with the request id:
+  ```bash
+  curl -s -u og-op-a:... -X POST "$OG/safestop/release/<id>/approve" -w ' %{http_code}\n'   # 403
+  curl -s -u og-op-b:... -X POST "$OG/safestop/release/<id>/approve" -w ' %{http_code}\n'   # 200 released (202 = pending)
+  ```
+
+### Topic 12: profitability and billing
+
+**Step 21: Where the money went** (45 s)
+- **Action:** `/og/profitability`, Service `All`, today.
+- **Show:** The totals tiles (Revenue, Energy cost, Degradation, Penalty, Net margin, Forgone upside (lock));
+  "Economics per kW (annualised)"; "Per settled interval"; "LP vs rule baseline".
+- **Expect:** Net margin positive; Forgone upside (lock) non-zero if step 8 ran. One row per settled
+  obligation-interval; a shortfall from step 14 shows a penalty. "Economics per kW" shows $/kW-in, $/kW-out and
+  payback per scope (operators only).
+- **Known gap:** "LP value added (latest selector gate)" reads "The LP value-added view is not available on this
+  deployment yet." in R2; show "LP vs rule baseline" instead.
+
+**Step 22: Invoice lines and M&V** (30 s)
+- **Action:** `/og/billing`; set From to today and To to tomorrow, then **Export CSV** (or
+  `curl -s -u viewer:... "$OG/billing/invoice-lines?from=<today>&to=<tomorrow>&format=csv"`, dates as `YYYY-MM-DD`).
+- **Show:** "Invoice lines"; "M&V performance".
+- **Expect:** One line per settled obligation-interval per contract, matching Profitability; the CSV downloads
+  with the same lines (To is exclusive of that day, hence tomorrow). M&V shows average compliance and pass
+  rate.
+
+### Topic 13: the audit chain
+
+**Step 23: Every decision in the trace** (45 s)
+- **Action:** `/og/billing`, "Trace explorer", filters blank (or class `SAFE_STOP_RELEASE`).
+- **Show:** Trace rows.
+- **Expect:** This run's operator actions: `SAFE_STOP_ENGAGE` on stream `operator_action:og-op-a` (step
+  19); `SAFE_STOP_RELEASE` on stream `operator_action:og-op-b`, the approver (its payload records og-op-a as
+  requester); the guardian's signed release (`GUARDIAN_VERDICT`); `AS_DEPLOYMENT` from step 10; the manual
+  command from step 17. Nothing from steps 7-8 reduced a commitment.
+
+**Step 24 [JUDGES]: Verify the chain** (30 s)
+- **Action:** `curl -s -u viewer:... -X POST $OG/trace/verify -H 'Content-Type: application/json' -d '{}'`
+- **Expect:** `"passed": true`, `"first_broken": null`, and `checked` = the number of streams verified. Say:
+  records are hash-chained per stream, so nothing above could have been edited or removed without this turning
+  to `passed: false` with the first broken `stream_id`/`seq`.
+- **Known gap:** the "Run chain verify" button on Billing & audit reports FAIL from an unfiltered page (its empty
+  From/To are refused); set From and To in the header filter first, or use the `curl`.
+
+### Topic 14: energy runs low
+
+**Step 25: Homes draining toward their reserve** [ogsim] (60 s)
+- **Action:** the anomaly of scenario `demo-05-energy-runs-low` (which targets `LZ_NORTH`), on `$ZONE`:
+  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "reserve_floor_pressure", "target": "'$ZONE'", "params": {"home_load_kw": 10}, "duration": 300}'`
+  (home load 10 kW on every hub in the zone for 5 minutes).
+- **Show:** Dispatch, the `$BANK` cards; System Health, "Alerts"; the Control room "Promises kept".
+- **Expect:** The affected cards turn amber (AT_RISK) with a falling "energy margin" and "depletes in";
+  `ALR-ENERGY-SHORTFALL-RISK` opens; substitution moves delivery to hubs with energy left; **Reserve breaches
+  stays 0** throughout (K1 on energy, not only power). A negative margin held 60 s on a delivering obligation
+  escalates it to SHORTFALL, as in step 14. End early with `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`.
 
 ## Reset between runs (3 minutes)
 
-1. **End anything still active**: `curl -u tester:... $SIM/api/anomalies`, then
-   `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>` for each id (the four scenarios expire on their own at
-   300 s, 300 s, 300 s and 60 s). Confirm `{"active": []}`. The scenario runner has no stop verb: a scenario
-   whose later steps have not fired yet (`demo-03` before +90 s) still fires them; cancel those ids when they
-   appear, or wait for `GET $SIM/api/scenarios/demo-03-zone-comms-loss/status` to read `"running": false`.
-2. **Wait for health to clear**: `ALR-SCADA-OVERLOAD` and `ALR-HUB-OFFLINE-RATIO` clear themselves once the
-   condition ends; LZ_SOUTH hubs return to `online` within one telemetry interval of the cancel.
-3. **Lift the safe stop on bank-022**: not possible from the UI or API in this release (the release endpoint
-   answers `501` and records the attempt). The lead clears the stop on the server (`og-safestop` owner). If the
-   next run is soon, skip steps 15-16, or stop a different bank that carries no committed obligation.
-4. **Resume random anomalies** if the system is going back to normal operation:
-   `curl -u tester:... -X POST $SIM/api/random/resume`. Leave it paused if another run follows.
-5. **Fresh commitments**: the customers from "Before you start" stay; create new opportunities for the next
-   window so steps 5-8 have COMMITTED cards again.
+1. **End anything still active:** `curl -u tester:... $SIM/api/anomalies`, then `DELETE` each id; confirm
+   `{"active": []}`. There is no "stop scenario" verb: `demo-03`'s +90 s step still fires after its first
+   step is cancelled; cancel it when it appears, or wait for
+   `GET $SIM/api/scenarios/demo-03-zone-comms-loss/status` to read `"running": false`.
+2. **Let health clear:** the overload and offline-ratio alerts clear once their condition ends.
+3. **Release any stop still engaged** with two operators, as in step 20 (og-op-a requests, og-op-b approves).
+4. **End any AS deployment still active:** Dispatch, **Stop deploy**, or
+   `curl -u og-op-a:... -X DELETE $OG/dispatch/as-deployments/<deployment_id>`.
+5. **Random mode:** leave it paused for another run; `curl -u tester:... -X POST $SIM/api/random/resume` to
+   return to normal operation.
+6. **Fresh commitments:** run the demo seed again (item 3 of "Before you start") for the next window.
 
 ## Known gaps
 
-What this script relies on that is not yet in the code is listed, with owner, in `NEEDS_FROM_OTHER_OWNERS.md`
-next to this file. Read it before presenting to judges: the two places that need a fallback are the
-forged-command visibility (step 13) and the per-hub substitution rows (step 11).
+The Known gap lines above are tracked for fixing; the ones that need another owner are listed, with owner, in
+`NEEDS_FROM_OTHER_OWNERS.md` next to this file. Re-check them after each release: when a fix lands, the step's
+fallback comes out.
