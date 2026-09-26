@@ -23,3 +23,12 @@
    `opengrid.health.rules.evaluate_feed_alert` compares that same field to the staleness window, so
    `ALR-FEED-STALE` can never fire for a forecast product even if it stops arriving. Store the receive
    time (`recorded_at`) as the freshness field, and expose the coverage horizon separately if wanted.
+7. **Energy columns on the Dispatch board** (owner: api, per `docs/team/NOTICES.md` 2026-09-25 item 1). The
+   UI renders two fields per obligation card and shows `-` until they exist in
+   `GET /og/api/dispatch/opportunities` rows and the `/og/api/stream/dispatch` payload:
+   `energy_margin_kwh` (energy above reserve on the obligation's eligible hubs minus its remaining delivery,
+   kWh, may be negative) and `time_to_depletion_min` (minutes until that margin reaches zero at the
+   current grant, null when not discharging). Rename here and in `opengrid.ui.routes.dispatch.pipeline_view`
+   together if the api picks other names.
+8. Status after main @ c5eda88: item 4 (`feeds/secrets.py` gitignored) is still open; the new `.gitignore`
+   lines cover only `dev/` secrets.

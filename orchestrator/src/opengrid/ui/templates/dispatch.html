@@ -34,6 +34,7 @@
         <div>{{ item.obligation_id }}</div>
         <div class="og-card-meta">{{ item.service_type }} &middot; {{ item.tier }} &middot; {{ item.committed_qty_kw }} kW</div>
         <div class="og-card-meta">customer {{ item.customer_id }}</div>
+        <div class="og-card-meta">energy margin {{ item.energy_margin_kwh if item.energy_margin_kwh is not none else '-' }} kWh &middot; depletion in {{ item.time_to_depletion_min if item.time_to_depletion_min is not none else '-' }} min</div>
         {% if item.reason_code %}<div class="og-card-meta">{{ item.reason_code }}</div>{% endif %}
       </div>
       {% else %}
@@ -145,6 +146,11 @@
             (item.committed_qty_kw != null ? item.committed_qty_kw : item.requested_kw) + " kW",
           ].filter(Boolean).join(" · ");
           card.appendChild(metaLine);
+          var energyLine = document.createElement("div");
+          energyLine.className = "og-card-meta";
+          energyLine.textContent = "energy margin " + (item.energy_margin_kwh != null ? item.energy_margin_kwh : "-")
+            + " kWh · depletion in " + (item.time_to_depletion_min != null ? item.time_to_depletion_min : "-") + " min";
+          card.appendChild(energyLine);
           column.appendChild(card);
         });
       });
