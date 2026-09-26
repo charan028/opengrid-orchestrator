@@ -192,7 +192,7 @@
           <td class="mig">0030 (NEW)</td>
           <td class="pk"><code>plan_id → plan</code></td>
           <td class="fk">plan_id → plan</td>
-          <td class="purpose">ES05-S07 / KPI-22: the LP plan&#x27;s and the rule baseline&#x27;s (F2 shadow run) expected net value on the same gate inputs, value_added, forgone_upside of the commitment lock, breakdown (jsonb). Read by GET /og/api/profitability/lp-value (api/routers/lp_value.py:91).</td>
+          <td class="purpose">ES05-S07 / KPI-22: the LP plan&#x27;s and the rule baseline&#x27;s (F2 shadow run) expected net value on the same gate inputs, value_added, forgone_upside of the commitment lock, breakdown (jsonb). Meant for GET /og/api/profitability/lp-value (api/routers/lp_value.py:91), but og-api does not mount that router at R2 (api/app.py:130-171), so nothing reads this table yet.</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.plan_shadow_obligation</code></td>
