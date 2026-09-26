@@ -409,11 +409,14 @@ def nws_forecast_to_feed_obs(payload: dict[str, object], *, recorded_at: datetim
         ts = _parse_utc(str(period["startTime"]))
         temp_f = float(period["temperature"])
         dewpoint_c = float(period["dewpoint"]["value"])
-        sky_cover_pct = float(period["skyCover"])
+        # The live hourly forecast carries no `skyCover` (it is a raw-gridpoint field); requiring it
+        # rejected every real period as malformed. Sky cover is emitted only when present.
+        sky_cover_raw = period.get("skyCover")
+        sky_cover_pct = float(sky_cover_raw) if sky_cover_raw is not None else None
     except (KeyError, TypeError, ValueError) as exc:
         raise FeedDataError(f"NWS period malformed: {period!r}") from exc
 
-    return [
+    obs = [
         FeedObs(
             source=SOURCE_NWS,
             product=NWS_PRODUCT,
@@ -434,14 +437,18 @@ def nws_forecast_to_feed_obs(payload: dict[str, object], *, recorded_at: datetim
             quality="GOOD",
             recorded_at=recorded_at,
         ),
-        FeedObs(
-            source=SOURCE_NWS,
-            product=NWS_PRODUCT,
-            series="sky_cover",
-            ts=ts,
-            value=sky_cover_pct,
-            unit="pct",
-            quality="GOOD",
-            recorded_at=recorded_at,
-        ),
     ]
+    if sky_cover_pct is not None:
+        obs.append(
+            FeedObs(
+                source=SOURCE_NWS,
+                product=NWS_PRODUCT,
+                series="sky_cover",
+                ts=ts,
+                value=sky_cover_pct,
+                unit="pct",
+                quality="GOOD",
+                recorded_at=recorded_at,
+            )
+        )
+    return obs
