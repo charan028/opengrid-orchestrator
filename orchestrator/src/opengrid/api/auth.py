@@ -1,16 +1,28 @@
 """Auth: `X-Remote-User` identity, config-mapped roles (02b S7, BUILD.md api row).
 
 Apache (`deploy/README.md`) terminates HTTP Basic Auth and forwards the authenticated identity in
-`X-Remote-User` after stripping any client-supplied value; `api` trusts that header because
-`[api].bind_host` is loopback-only and nothing but Apache can reach it (02b Open point 7). Every
-endpoint except `/og/api/health` requires the header. `/og/api/health` is the deploy-time liveness
-probe (`deploy/scripts/deploy.sh` polls it directly on loopback with no Apache in front, so it never
-carries the header) -- it is gated on the *connection* being loopback instead, and never trusts the
-header if the connection somehow was not (defence in depth beyond `bind_host`).
+`X-Remote-User` after stripping any client-supplied value. `[api].bind_host` is loopback-only, but
+loopback is not a trust boundary on the base server: the simulators, workspace test runs and any other
+local process can reach the port and set `X-Remote-User` themselves. So the identity header is only
+believed when the request also carries `X-OG-Proxy-Auth` equal to the shared secret
+`OG_API_PROXY_SECRET`, which Apache sets (after unsetting any client value) and nothing else on the host
+is given. No secret configured, no proxy header, or a wrong one: 401, fail closed.
+
+`/og/api/health` is the deploy-time liveness probe (`deploy/scripts/deploy.sh` polls it directly on
+loopback with no Apache in front, so it never carries either header) -- it is gated on the *connection*
+being loopback instead, and never trusts the header if the connection somehow was not (defence in depth
+beyond `bind_host`).
+
+Roles: `operator`, `viewer` and `customer`. A customer identity (`[api.roles.customer]`, a table of
+`user = "<customer_id>"`) may only use the customer API (`opengrid.customer_api`); `require_viewer` and
+`require_operator` refuse it, so a customer can never read the operator console's fleet-wide data.
 """
 
 from __future__ import annotations
 
+import logging
+import os
+import secrets
 from enum import StrEnum
 from typing import Annotated
 
@@ -19,15 +31,20 @@ from fastapi import Depends, HTTPException, Request, status
 from opengrid.api.deps import get_config
 from opengrid.platform.config import Config
 
+logger = logging.getLogger(__name__)
+
 _REMOTE_USER_HEADER = "x-remote-user"
+PROXY_AUTH_HEADER = "x-og-proxy-auth"
+PROXY_SECRET_ENV = "OG_API_PROXY_SECRET"  # noqa: S105 -- an env-var name, not a secret
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 class Role(StrEnum):
-    """The two roles carried by Apache's `AuthUserFile` groups (deploy/README.md)."""
+    """Operator/viewer (Apache's `AuthUserFile` accounts, deploy/README.md) and customer."""
 
     OPERATOR = "operator"
     VIEWER = "viewer"
+    CUSTOMER = "customer"
 
 
 class Identity:
@@ -46,25 +63,53 @@ def _configured_members(cfg: Config, role: Role) -> set[str]:
 
 def role_for_identity(user: str, cfg: Config) -> Role | None:
     """Map an `X-Remote-User` value to a role via `[api.roles]` config, falling back to the identity
-    matching the role name itself -- Apache's own accounts are literally named `operator`/`viewer`
-    (deploy/README.md "UI credentials"), so that fallback works with zero extra configuration, while
-    `[api.roles.operator]`/`[api.roles.viewer]` let an operator map additional named accounts.
+    matching the role name itself for operator/viewer -- Apache's own accounts are literally named
+    `operator`/`viewer` (deploy/README.md "UI credentials"), so that fallback works with zero extra
+    configuration, while `[api.roles.operator]`/`[api.roles.viewer]` let an operator map additional
+    named accounts. A customer is only ever an explicitly configured `[api.roles.customer]` key (it
+    also needs its customer_id there), never a name fallback.
     """
     if user in _configured_members(cfg, Role.OPERATOR) or user == Role.OPERATOR.value:
         return Role.OPERATOR
     if user in _configured_members(cfg, Role.VIEWER) or user == Role.VIEWER.value:
         return Role.VIEWER
+    if user in _configured_members(cfg, Role.CUSTOMER):
+        return Role.CUSTOMER
     return None
 
 
-async def current_identity(request: Request, cfg: Annotated[Config, Depends(get_config)]) -> Identity:
-    """Every non-health endpoint depends on this: 401 if the header is missing, 403 if the identity
-    does not map to a known role. Takes `cfg` through `opengrid.api.deps.get_config` (not
-    `request.app.state.config` directly) so tests can override it the same way as every other
-    dependency."""
+def proxy_authenticated(request: Request) -> bool:
+    """True only when the request carries `X-OG-Proxy-Auth` equal to `OG_API_PROXY_SECRET` (constant-
+    time compare). An unset or empty secret authenticates nothing (fail closed) and is logged."""
+    expected = os.environ.get(PROXY_SECRET_ENV, "")
+    if not expected:
+        logger.error(
+            "proxy secret env var is not set; refusing every identity header", extra={"env": PROXY_SECRET_ENV}
+        )
+        return False
+    presented = request.headers.get(PROXY_AUTH_HEADER)
+    return presented is not None and secrets.compare_digest(presented.encode(), expected.encode())
+
+
+def verified_remote_user(request: Request) -> str | None:
+    """The `X-Remote-User` identity, only if the request came through Apache (`proxy_authenticated`);
+    otherwise `None`. The single place any module (API or UI) reads the identity header."""
     user = request.headers.get(_REMOTE_USER_HEADER)
-    if not user:
+    if not user or not proxy_authenticated(request):
+        return None
+    return user
+
+
+async def current_identity(request: Request, cfg: Annotated[Config, Depends(get_config)]) -> Identity:
+    """Every non-health endpoint depends on this: 401 if the header is missing or did not come through
+    Apache (no or wrong proxy secret), 403 if the identity does not map to a known role. Takes `cfg`
+    through `opengrid.api.deps.get_config` (not `request.app.state.config` directly) so tests can
+    override it the same way as every other dependency."""
+    if not request.headers.get(_REMOTE_USER_HEADER):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Missing X-Remote-User")
+    user = verified_remote_user(request)
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Identity not asserted by the proxy")
     role = role_for_identity(user, cfg)
     if role is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=f"No role mapped for identity {user!r}")
@@ -72,7 +117,10 @@ async def current_identity(request: Request, cfg: Annotated[Config, Depends(get_
 
 
 async def require_viewer(identity: Annotated[Identity, Depends(current_identity)]) -> Identity:
-    """`viewer` can read every GET/SSE endpoint (02b S7); `operator` implies `viewer` access too."""
+    """`viewer` can read every GET/SSE endpoint (02b S7); `operator` implies `viewer` access too. A
+    `customer` is refused: fleet-wide reads would expose other customers' data."""
+    if identity.role is Role.CUSTOMER:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="operator or viewer role required")
     return identity
 
 

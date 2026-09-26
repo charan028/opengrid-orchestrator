@@ -93,6 +93,12 @@ trace_verify_failures_total = Counter(
     "og_trace_verify_failures_total",
     "Scheduled trace-chain verification failures found by opengrid.invariants (K11).",
 )
+k13_outage_gap_total = Counter(
+    "og_k13_outage_gap_total",
+    "K13 dips explained by a total grant-activity outage (engine restart, comms silence), classified "
+    "separately from og_lock_violations_total -- still flagged (the chaos harness needs to see it), but "
+    "not an unexplained realized-below-committed delivery. See opengrid.invariants.checks.classify_dip.",
+)
 invariant_check_last_run_timestamp_seconds = Gauge(
     "og_invariant_check_last_run_timestamp_seconds",
     "Unix time of the last completed run of each opengrid.invariants check.",
@@ -101,6 +107,12 @@ invariant_check_last_run_timestamp_seconds = Gauge(
 invariant_check_duration_seconds = Histogram(
     "og_invariant_check_duration_seconds",
     "Wall time of one opengrid.invariants check run, per check.",
+    labelnames=("check",),
+)
+invariant_check_lag_seconds = Gauge(
+    "og_invariant_check_lag_seconds",
+    "How far behind its own upper scan bound an incremental opengrid.invariants check's watermark "
+    "currently sits. A growing value means the check is falling behind its backlog.",
     labelnames=("check",),
 )
 

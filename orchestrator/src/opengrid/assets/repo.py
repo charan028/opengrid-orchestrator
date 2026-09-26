@@ -14,6 +14,7 @@ from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid import pq_ingest
+from opengrid.assets.calibration_ack import IssuedCalibration
 from opengrid.assets.ports import DriftObservationWindow, HubAssetRecord, PendingCalibrationAttempt
 from opengrid.core.models.pq import MaintenanceWorkOrder
 from opengrid.core.pq import CalibrationOutcome, OffsetVector, exceeds_watch_threshold
@@ -139,8 +140,76 @@ WHERE calibration_id = %(calibration_id)s
 
 _GET_PENDING_SQL = """
 SELECT hub_id, measured_offset_freq_hz, measured_offset_voltage_pct, measured_offset_phase_deg
-FROM og.calibration_attempt WHERE calibration_id = %(calibration_id)s
+FROM og.calibration_attempt WHERE calibration_id = %(calibration_id)s AND outcome = 'PENDING'
 """
+
+# `og.calibration_command` (migration 0016, written by og-guardian): the command actually issued for an
+# attempt, and its single-use ack marker.
+_ISSUED_COMMAND_SQL = """
+SELECT hub_id, epoch, seq, ack_consumed_at IS NOT NULL
+FROM og.calibration_command WHERE calibration_id = %(calibration_id)s AND status = 'SIGNED'
+"""
+
+_CONSUME_ACK_SQL = """
+UPDATE og.calibration_command SET ack_consumed_at = now()
+WHERE calibration_id = %(calibration_id)s AND status = 'SIGNED' AND ack_consumed_at IS NULL
+RETURNING calibration_id
+"""
+
+_CLOSE_PROTOCOL_ERROR_SQL = """
+UPDATE og.calibration_attempt SET outcome = 'FAILED_NO_ACK', verified_at = %(at)s
+WHERE calibration_id = %(calibration_id)s AND outcome = 'PENDING'
+"""
+
+_OPEN_ALERT_SQL = "SELECT 1 FROM og.alert WHERE rule = %(rule)s AND cleared_at IS NULL LIMIT 1"
+
+
+class PgCalibrationAckGuard:
+    """`opengrid.assets.calibration_ack.CalibrationAckGuard` over `og.calibration_command`. `hub_public_keys`
+    (hub_id -> 32-byte Ed25519 key) verifies hub-signed acks; with no key for a hub, a SIGNED ack from it
+    is refused (unsigned acks are still accepted, bound by hub, id and (epoch, seq))."""
+
+    def __init__(self, pool: AsyncConnectionPool, *, hub_public_keys: dict[str, bytes] | None = None) -> None:
+        self._pool = pool
+        self._hub_keys = dict(hub_public_keys or {})
+
+    async def issued(self, calibration_id: UUID) -> IssuedCalibration | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ISSUED_COMMAND_SQL, {"calibration_id": calibration_id})
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return IssuedCalibration(
+            hub_id=str(row[0]), epoch=int(row[1]), seq=int(row[2]), ack_consumed=bool(row[3])
+        )
+
+    async def consume(self, calibration_id: UUID) -> bool:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_CONSUME_ACK_SQL, {"calibration_id": calibration_id})
+            row = await cur.fetchone()
+            await conn.commit()
+        return row is not None
+
+    async def close_protocol_error(self, calibration_id: UUID, *, at: datetime) -> None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_CLOSE_PROTOCOL_ERROR_SQL, {"calibration_id": calibration_id, "at": at})
+            await conn.commit()
+
+    async def raise_alert(self, rule: str, summary: str, detail: dict[str, object]) -> None:
+        from opengrid.health.model import AlertFinding
+        from opengrid.health.queries import raise_alert
+
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_OPEN_ALERT_SQL, {"rule": rule})
+            if await cur.fetchone() is not None:
+                return
+        finding = AlertFinding(
+            rule=rule, severity="warning", summary=summary, condition_key=rule, detail=dict(detail)
+        )
+        await raise_alert(self._pool, finding, opened_at=datetime.now(UTC))
+
+    def hub_public_key(self, hub_id: str) -> bytes | None:
+        return self._hub_keys.get(hub_id)
 
 
 class PgCalibrationAttemptRepo:

@@ -11,7 +11,9 @@ SUSTAINED exception into the lifecycle edge with the matching K13 reason code:
 
 A signal must persist for `sustain_cycles` consecutive cycles (default 30 = 60 s at 2 s) so a transient
 dip never ends a delivery; one clean cycle resets the count. The obligation keeps its commitment row
-(K13); settle bills the shortfall. Pure logic here; the engine applies the transition.
+(K13); settle bills the shortfall. Owner decision 2026-09-26 (00-invariants.md): SHORTFALL never stops
+dispatch -- the obligation keeps receiving the maximum feasible kW (substitution first) and its full
+commitment as soon as the constraint clears, flagged AT_RISK while short. Pure logic here; the engine applies the transition.
 """
 
 from __future__ import annotations
@@ -20,23 +22,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from opengrid.core.reasons import (
+    LOCK_REASON_BY_SHORTFALL,
     R_COMMIT_LOCK_INFEASIBLE,
     R_COMMIT_LOCK_OVERRIDE_L0,
     R_COMMIT_LOCK_OVERRIDE_L1,
     R_COMMIT_LOCK_OVERRIDE_L2,
-    R_SHORTFALL_BANK_CAPACITY,
-    R_SHORTFALL_L2_INSTRUCTION,
-    R_SHORTFALL_NO_SUBSTITUTE,
 )
 
 DEFAULT_SUSTAIN_CYCLES = 30
 
-#: Allocator shortfall reason -> the K13 reason the `DELIVERING -> SHORTFALL` edge requires.
-_LOCK_REASON_BY_SHORTFALL: dict[str, str] = {
-    R_SHORTFALL_L2_INSTRUCTION: R_COMMIT_LOCK_OVERRIDE_L2,
-    R_SHORTFALL_NO_SUBSTITUTE: R_COMMIT_LOCK_INFEASIBLE,
-    R_SHORTFALL_BANK_CAPACITY: R_COMMIT_LOCK_INFEASIBLE,
-}
 
 #: When several apply in one cycle, the higher tier wins: L0 safety > L1 reserve > L2 authority > infeasible.
 _PRECEDENCE = (
@@ -53,7 +47,7 @@ def lock_reason_for_shortfall(shortfall_reason: str) -> str | None:
     `realize_obligation`); the `R-SHORTFALL-*` detail codes map onto them."""
     if shortfall_reason in _PRECEDENCE:
         return shortfall_reason
-    return _LOCK_REASON_BY_SHORTFALL.get(shortfall_reason)
+    return LOCK_REASON_BY_SHORTFALL.get(shortfall_reason)
 
 
 @dataclass

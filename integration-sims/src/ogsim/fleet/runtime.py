@@ -21,7 +21,12 @@ from ogsim.common.mqtt_client import SimMqttClient
 from ogsim.common.scenario import ScenarioCommand, parse_scenario_cmd, utc_timestamp
 from ogsim.fleet import household, physics
 from ogsim.fleet.anomalies import FLEET_ANOMALY_TYPES, FleetAnomalyManager
-from ogsim.fleet.calibration import CalibrationOutcome, apply_calibration, build_calibration_ack
+from ogsim.fleet.calibration import (
+    CalibrationOutcome,
+    apply_calibration,
+    build_calibration_ack,
+    current_offsets,
+)
 from ogsim.fleet.commands import CommandVerdict, build_ack, evaluate_batch, utc_now_from_epoch
 from ogsim.fleet.lease import HoldTracker, lease_expiry_from_message
 from ogsim.fleet.pq import (
@@ -125,7 +130,12 @@ class FleetEngine:
         outcome: CalibrationOutcome = apply_calibration(
             self.pq, self.pq_anomalies, command, public_key, now, self.config.pq_calibration_rate_limit_s
         )
-        return build_calibration_ack(outcome, utc_timestamp(now))
+        return build_calibration_ack(
+            outcome,
+            utc_timestamp(now),
+            command=command,
+            fallback_offsets=current_offsets(self.pq, str(command.get("hub_id", ""))),
+        )
 
     def inverter_state(self, hub_id: str) -> list[InverterSnapshot]:
         """Clean, WP-H-facing accessor (§7.4): the per-unit parameters needed
@@ -231,10 +241,9 @@ class FleetEngine:
                 event.get("key_id"),
             )
             return False
-        self.stops.apply_stop_event(
-            str(event.get("action", "")), str(event.get("scope", "")), event.get("scope_id")
-        )
-        return True
+        # Per-stop state (K8): a RELEASE lifts only its own stop_id; a replayed or out-of-order event
+        # that changes nothing returns False.
+        return self.stops.apply_verified_event(event)
 
     def handle_lease_message(self, hub_id: str, expires_at: str) -> None:
         idx = self.state.hub_index.get(hub_id)

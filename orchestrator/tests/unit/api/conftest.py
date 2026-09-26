@@ -22,6 +22,17 @@ from .fakes import SAMPLE_CONTRACT_ID, SAMPLE_CUSTOMER_ID, FakeStore, FakeTraceB
 
 OPERATOR_HEADERS = {"X-Remote-User": "operator"}
 VIEWER_HEADERS = {"X-Remote-User": "viewer"}
+#: What Apache sets on every proxied request (`opengrid.api.auth.proxy_authenticated`); the `client`
+#: fixtures send it by default, as every real request through Apache does.
+PROXY_SECRET = "test-proxy-secret"  # noqa: S105 -- a test value, not a secret
+PROXY_HEADERS = {"X-OG-Proxy-Auth": PROXY_SECRET}
+
+
+@pytest.fixture(autouse=True)
+def _proxy_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    from opengrid.api.auth import PROXY_SECRET_ENV
+
+    monkeypatch.setenv(PROXY_SECRET_ENV, PROXY_SECRET)
 
 
 def _echo_csrf_cookie_as_header(request: object) -> None:
@@ -92,7 +103,7 @@ def client(fake_store, fake_trace_store, fake_proposals, fake_config) -> TestCli
     app.dependency_overrides[get_trace_store] = lambda: fake_trace_store
     app.dependency_overrides[get_proposals] = lambda: fake_proposals
     app.dependency_overrides[get_config] = lambda: fake_config
-    test_client = TestClient(app, client=("127.0.0.1", 51234))
+    test_client = TestClient(app, client=("127.0.0.1", 51234), headers=PROXY_HEADERS)
     test_client.event_hooks = {"request": [_echo_csrf_cookie_as_header], "response": []}
     return test_client
 
@@ -106,4 +117,4 @@ def non_loopback_client(fake_store, fake_trace_store, fake_proposals, fake_confi
     app.dependency_overrides[get_trace_store] = lambda: fake_trace_store
     app.dependency_overrides[get_proposals] = lambda: fake_proposals
     app.dependency_overrides[get_config] = lambda: fake_config
-    return TestClient(app)
+    return TestClient(app, headers=PROXY_HEADERS)

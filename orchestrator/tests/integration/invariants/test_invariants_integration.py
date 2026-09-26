@@ -34,6 +34,7 @@ from opengrid.invariants.models import (
     CHECK_K1_RESERVE_BREACH,
     CHECK_K2_DOUBLE_SOLD,
     CHECK_K13_LOCK_VIOLATION,
+    CHECK_K13_OUTAGE_GAP,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_ORPHAN_RESERVATION,
 )
@@ -77,6 +78,24 @@ requires_db = pytest.mark.skipif(
     _DSN is None or not _db_reachable(_DSN),
     reason="Postgres not reachable locally; run via tools/remote.ps1 -Ws inv (BUILD.md S5)",
 )
+
+
+def _seed_hub_state(dsn: str, hubs) -> None:
+    """Real `og.hub_state` rows for the seeded topology (`opengrid.fleet.seed` only writes `og.hub`/
+    `og.bank`) -- K2's fixed logic needs these to compute each bank's TRUE capability
+    (`checks.compute_bank_capabilities_kw`); without them every hub is excluded (no `hub_state` row to
+    join) and every bank's true capability degrades to 0 kW, which would still "detect" an oversale but
+    not for the reason this test is proving. Every hub is online at full SoC, matching a healthy fleet."""
+    now = datetime.now(UTC)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        for hub in hubs:
+            cur.execute(
+                "INSERT INTO og.hub_state (hub_id, soc_kwh, p_kw, health, last_seen_at) "
+                "VALUES (%s, %s, 0, 'online', %s) "
+                "ON CONFLICT (hub_id) DO UPDATE SET soc_kwh = EXCLUDED.soc_kwh, health = EXCLUDED.health, "
+                "last_seen_at = EXCLUDED.last_seen_at",
+                (hub.hub_id, hub.e_kwh, now),
+            )
 
 
 def _seed_scenario_rows(dsn: str, *, bank_id: str, hub_id: str) -> dict[str, str]:
@@ -134,8 +153,9 @@ def _seed_scenario_rows(dsn: str, *, bank_id: str, hub_id: str) -> dict[str, str
                 (uuid4(), ob_id, bank_id, now, now + timedelta(minutes=15)),
             )
 
-        # --- K13: a committed obligation whose interval has elapsed with a grant well below its
-        # committed floor, and NO trace row carrying an allowed override/substitution reason ---------
+        # --- K13_LOCK_VIOLATION: a committed obligation whose interval has elapsed with grants
+        # continuously flowing (no activity gap) but persistently below its committed floor, and NO
+        # trace row carrying an allowed override/substitution reason -----------------------------------
         _insert_obligation_chain(
             cur,
             contract_id=contract_id,
@@ -147,10 +167,38 @@ def _seed_scenario_rows(dsn: str, *, bank_id: str, hub_id: str) -> dict[str, str
             state="DELIVERING",
             plan_id=plan_id,
         )
-        cur.execute(
-            "INSERT INTO og.grant (grant_id, cycle_id, obligation_id, bank_id, granted_kw, ledger_version, "
-            "created_at) VALUES (%s, %s, %s, %s, 20.0, 1, %s)",
-            (uuid4(), _CYCLE_ID, obligation_k13, bank_id, interval_start + timedelta(minutes=1)),
+        # One grant every 2 minutes across the 15-minute window (well under k13_max_grant_gap_s's
+        # default 30s... no: comfortably under find_dip's gap threshold when measured against the whole
+        # window is not the point here -- these rows just need to avoid a >30s silent stretch, so every
+        # 2 minutes would NOT do that. Use a tight cadence instead, matching the allocator's real ~2s
+        # cycle, so the dip is unambiguously a LOW-VALUE delivery, not an activity gap.
+        for offset_s in range(0, int((interval_end - interval_start).total_seconds()), 10):
+            cur.execute(
+                "INSERT INTO og.grant (grant_id, cycle_id, obligation_id, bank_id, granted_kw, "
+                "ledger_version, created_at) VALUES (%s, %s, %s, %s, 20.0, 1, %s)",
+                (
+                    uuid4(),
+                    f"{_CYCLE_ID}-{offset_s}",
+                    obligation_k13,
+                    bank_id,
+                    interval_start + timedelta(seconds=offset_s),
+                ),
+            )
+
+        # --- K13_OUTAGE_GAP: a separate committed obligation whose interval has elapsed with NO grant
+        # activity at all -- a total silence, classified distinctly from the low-but-flowing case above
+        opportunity_outage = uuid4()
+        obligation_outage = uuid4()
+        _insert_obligation_chain(
+            cur,
+            contract_id=contract_id,
+            opportunity_id=opportunity_outage,
+            obligation_id=obligation_outage,
+            interval_start=interval_start,
+            interval_end=interval_end,
+            committed_kw=50.0,
+            state="DELIVERING",
+            plan_id=plan_id,
         )
 
         # --- orphan reservation: active, no matching active commitment ------------------------------
@@ -186,6 +234,7 @@ def _seed_scenario_rows(dsn: str, *, bank_id: str, hub_id: str) -> dict[str, str
     return {
         "contract_id": str(contract_id),
         "obligation_k13": str(obligation_k13),
+        "obligation_outage": str(obligation_outage),
         "obligation_orphan_res": str(obligation_orphan_res),
         "obligation_orphan_com": str(obligation_orphan_com),
     }
@@ -245,7 +294,7 @@ def _cleanup(dsn: str) -> None:
             "WHERE c.profile_ref = %s)",
             (_PROFILE_REF,),
         )
-        cur.execute("DELETE FROM og.grant WHERE cycle_id = %s", (_CYCLE_ID,))
+        cur.execute("DELETE FROM og.grant WHERE cycle_id LIKE %s", (f"{_CYCLE_ID}%",))
         cur.execute(
             "DELETE FROM og.commitment WHERE obligation_id IN "
             "(SELECT obligation_id FROM og.obligation o JOIN og.contract c ON c.contract_id = o.contract_id "
@@ -281,6 +330,7 @@ async def test_invariants_detect_seeded_violations_at_live_scale() -> None:
     try:
         t_seed0 = time.perf_counter()
         await seed_topology(pool, topology)
+        _seed_hub_state(_DSN, topology.hubs)
         t_seed1 = time.perf_counter()
         logger.info(
             "seeded %d hubs / %d banks in %.3fs", len(topology.hubs), len(topology.banks), t_seed1 - t_seed0
@@ -309,6 +359,17 @@ async def test_invariants_detect_seeded_violations_at_live_scale() -> None:
         assert outcomes[CHECK_K13_LOCK_VIOLATION].count >= 1
         assert any(
             v.scope.get("obligation_id") == ids["obligation_k13"]
+            for v in outcomes[CHECK_K13_LOCK_VIOLATION].violations
+        )
+        # A different obligation, committed but with NO grant activity at all, is classified separately.
+        assert outcomes[CHECK_K13_OUTAGE_GAP].count >= 1
+        assert any(
+            v.scope.get("obligation_id") == ids["obligation_outage"]
+            for v in outcomes[CHECK_K13_OUTAGE_GAP].violations
+        )
+        # ...and the outage is not ALSO double-counted as a lock violation.
+        assert not any(
+            v.scope.get("obligation_id") == ids["obligation_outage"]
             for v in outcomes[CHECK_K13_LOCK_VIOLATION].violations
         )
 
@@ -341,6 +402,11 @@ async def test_invariants_detect_seeded_violations_at_live_scale() -> None:
         logger.info("second (steady-state) invariants.run_once() took %.1f ms", (t3 - t2) * 1000)
         assert second_outcomes[CHECK_K1_RESERVE_BREACH].count == 0  # already past the watermark
         assert second_outcomes[CHECK_K13_LOCK_VIOLATION].count == 0
+        # K2's oversold reservation is still active, so it's still DETECTED every run (count == 1)...
+        assert second_outcomes[CHECK_K2_DOUBLE_SOLD].count == 1
+        # ...but the idempotent upsert must not have recounted it into the running total a second time.
+        summary_after_second_run = await inv_queries.read_summary(pool)
+        assert summary_after_second_run.double_sold_kwh == summary.double_sold_kwh
 
         # K11: trace verification runs clean on an empty/consistent trace table at this scale.
         t4 = time.perf_counter()

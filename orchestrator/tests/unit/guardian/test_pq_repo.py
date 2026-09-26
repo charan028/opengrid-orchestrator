@@ -5,6 +5,7 @@ mirrors `tests/unit/guardian/test_repo.py`'s own fake (no real database, BUILD.m
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 import pytest
 
@@ -222,14 +223,61 @@ async def test_calibration_history_reads_the_guardians_own_signed_record_not_the
     """Regression: the rate limit read `og.calibration_attempt`, whose newest row is always the PENDING
     candidate under evaluation (the ladder records it first), so G-25 refused every calibration."""
     cursor = FakeCursor(responses=[(None,)])
-    port = pq_repo.PgCalibrationHistoryPort(FakePool(cursor), lookback_s=3600.0)  # type: ignore[arg-type]
+    port = pq_repo.PgCalibrationHistoryPort(FakePool(cursor))  # type: ignore[arg-type]
 
     assert await port.last_attempt_epoch_s("hub-00007") is None
 
     sql, params = cursor.executed[0]
     assert "og.calibration_attempt" not in sql
-    assert "GUARDIAN_VERDICT" in sql and "'SIGNED'" in sql and "'CALIBRATION'" in sql
-    assert params == {"hub_id": "hub-00007", "lookback_s": 3600.0}
+    assert "og.calibration_command" in sql and "'SIGNED'" in sql
+    assert params == {"hub_id": "hub-00007"}
+
+
+# ---------------------------------------------------------------------------
+# PgCalibrationLedgerPort (#15 durable per-hub sequence, #20 atomic claim, #10 fleet usage)
+# ---------------------------------------------------------------------------
+
+
+async def test_ledger_reserve_locks_the_hub_and_claims_atomically():
+    cursor = FakeCursor(responses=[None, (1, 7)])
+    pool = FakePool(cursor)
+    ledger = pq_repo.PgCalibrationLedgerPort(pool)  # type: ignore[arg-type]
+    cid = UUID("00000000-0000-4000-8000-0000000000c1")
+
+    assert await ledger.reserve(cid, "hub-1") == (1, 7)
+    lock_sql, _ = cursor.executed[0]
+    reserve_sql, params = cursor.executed[1]
+    assert "pg_advisory_xact_lock" in lock_sql
+    assert "ON CONFLICT (calibration_id) DO NOTHING" in reserve_sql and "MAX(seq)" in reserve_sql
+    assert params == {"calibration_id": cid, "hub_id": "hub-1", "epoch": 1}
+
+
+async def test_ledger_reserve_of_an_already_claimed_attempt_returns_none():
+    ledger = pq_repo.PgCalibrationLedgerPort(FakePool(FakeCursor(responses=[None, None])))  # type: ignore[arg-type]
+    assert await ledger.reserve(UUID(int=1), "hub-1") is None
+
+
+async def test_ledger_fleet_usage_maps_the_counts():
+    ledger = pq_repo.PgCalibrationLedgerPort(FakePool(FakeCursor(responses=[(2000, 12, 3, 9)])))  # type: ignore[arg-type]
+    usage = await ledger.fleet_usage(window_s=3600.0)
+    assert (usage.fleet_hubs, usage.signed_in_window, usage.in_flight, usage.flagged_hubs) == (2000, 12, 3, 9)
+
+
+async def test_ledger_alert_is_raised_once_while_open(monkeypatch):
+    raised: list = []
+
+    async def fake_raise(pool, finding, *, opened_at):
+        raised.append(finding.rule)
+        return 1
+
+    import opengrid.health.queries as health_queries
+
+    monkeypatch.setattr(health_queries, "raise_alert", fake_raise)
+    open_already = pq_repo.PgCalibrationLedgerPort(FakePool(FakeCursor(responses=[(1,)])))  # type: ignore[arg-type]
+    await open_already.raise_alert("ALR-CALIBRATION-BUDGET", "s", {"reason": "x"})
+    fresh = pq_repo.PgCalibrationLedgerPort(FakePool(FakeCursor(responses=[None])))  # type: ignore[arg-type]
+    await fresh.raise_alert("ALR-CALIBRATION-BUDGET", "s", {"reason": "x"})
+    assert raised == ["ALR-CALIBRATION-BUDGET"]
 
 
 # ---------------------------------------------------------------------------

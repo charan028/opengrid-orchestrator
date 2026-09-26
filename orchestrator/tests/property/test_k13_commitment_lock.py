@@ -126,3 +126,17 @@ def test_k13_stale_telemetry_never_corroborates_a_shortfall(frozen, reason, frac
     verdict = evaluate(world, SIGNER)
 
     assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids
+
+
+@given(_frozen_kw, st.decimals(min_value="0", max_value="0.9", places=1))
+def test_k13_a_closed_loop_reduction_is_never_signed_without_the_guardians_own_profile_read(frozen, fraction):
+    """Need basis (owner decision 2026-09-26): `R-GRANT-CLOSED-LOOP` below the reserved maximum is a claim;
+    with no profile read by the guardian it is never signed."""
+    oid = uuid4()
+    world = passing_world([ProposedItem(HUB_ID, 1.0, reasons.R_GRANT_CLOSED_LOOP, oid, frozen * fraction)])
+    world.hub = make_hub(prev_p_kw=1.0)
+    world.active = [ActiveObligation(oid, frozen)]
+
+    verdict = evaluate(world, SIGNER)
+
+    assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids

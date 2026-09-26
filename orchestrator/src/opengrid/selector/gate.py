@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from opengrid import forecast
+from opengrid import forecast, ledger
 from opengrid.core.models.engine import Plan
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.timeutil import floor_to_interval
@@ -90,6 +90,31 @@ def shutdown_solver_process() -> None:
     if _solver_pool is not None:
         _solver_pool.shutdown(wait=True, cancel_futures=True)
         _solver_pool = None
+
+
+R_PQ_ELIGIBLE_CAPACITY = "R-PQ-ELIGIBLE-CAPACITY"
+
+#: `(service_type, bank_id) -> eligible kW` for PQ-sensitive profiles (`None` for other services); wired by
+#: og-engine to `opengrid.engine.pq_eligibility.eligible_kw`. Unset: no PQ cap (tests, tools).
+_pq_capacity: Callable[[str, str], float | None] | None = None
+
+
+def configure_pq_capacity(provider: Callable[[str, str], float | None] | None) -> None:
+    global _pq_capacity
+    _pq_capacity = provider
+
+
+def exceeds_pq_eligible_capacity(candidate: CandidateOpportunity, selected_kw: dict[str, Decimal]) -> bool:
+    """True if any (bank, interval) of the selection asks more than the bank's PQ-eligible kW for the
+    candidate's (PQ-sensitive) service type."""
+    if _pq_capacity is None or not candidate.service_type:
+        return False
+    for key, kw in selected_kw.items():
+        bank_id, _start, _end = ledger.decode_interval_key(key)
+        cap = _pq_capacity(candidate.service_type, bank_id)
+        if cap is not None and float(kw) > cap + 1e-9:
+            return True
+    return False
 
 
 #: Wall-clock allowance on top of HiGHS's own time limits: model build, validation and IPC.
@@ -319,6 +344,7 @@ async def load_candidates(
                 degradation_cost_per_kwh=float(row["degradation_cost"] or 0.03),
                 tier=row["tier"] or "T4",
                 category=_CATEGORY_BY_SERVICE_TYPE.get(row["service_type"], "MARKET"),
+                service_type=str(row["service_type"] or ""),
             )
         )
     return tuple(candidates)
@@ -449,6 +475,15 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         # Keys are `encode_interval_key(bank, start, end)` per bank (a bare interval index collided
         # across banks), and the obligation -- not the opportunity -- owns the reservation (FK).
         selected_kw = selected_kw_by_interval_key(c, result, horizon_start, INTERVAL_MINUTES)
+        if selected_kw and exceeds_pq_eligible_capacity(c, selected_kw):
+            # WP-D (owner decision): a PQ-sensitive obligation is never committed beyond the capacity of
+            # its PQ-eligible hubs -- not selected, rather than silently over-committed.
+            logger.warning(
+                "selection exceeds PQ-eligible capacity; not committed",
+                extra={"obligation_id": c.obligation_id, "reason_code": R_PQ_ELIGIBLE_CAPACITY},
+            )
+            unselected.append(c)
+            continue
         if selected_kw:
             try:
                 await commit_candidate(c, selected_kw, plan_id)

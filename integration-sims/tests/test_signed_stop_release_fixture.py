@@ -37,7 +37,7 @@ def test_hub_lifts_the_stop_with_it_and_rejects_any_alteration() -> None:
     safestop_key = Ed25519PrivateKey.generate().public_key()
     config = dc_replace(load_fleet_config(), mqtt=MQTT, hub_count=4, bank_count=1, zones=("LZ_NORTH",))
     engine = FleetEngine(config, seed=1)
-    engine.stops.engage("bank", "bank-000")
+    engine.stops.engage("bank", "bank-000", stop_id=release["stop_id"], issued_at=0.0)
 
     tampered = copy.deepcopy(release)
     tampered["approver_ref"] = "operator:mallory"

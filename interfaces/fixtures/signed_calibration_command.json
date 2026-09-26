@@ -4,7 +4,7 @@
   "command": {
     "calibration_id": "00000000-0000-4000-8000-0000000000c1",
     "hub_id": "hub-00001",
-    "epoch": 1790445602,
+    "epoch": 1,
     "seq": 1,
     "issued_at": "2026-09-26T18:00:02.104000Z",
     "expires_at": "2026-09-26T18:01:02.104000Z",
@@ -25,6 +25,6 @@
       "max_phase_deg": 5.0
     },
     "key_id": "guardian-test",
-    "signature": "HNGncWpmWD7faCvMRfZkza53fSEzKXljbz7V86sI25wYh5Ah-_3QkSXniaU7ddc_ZutL61tK0QjgllMUzPawCg"
+    "signature": "XO4Az0uymFfpJaAE55wN96Uc3R2oDDCGu31Z1lO49FZ4QjTQaTgcmSN_5cfzn9vYRJvNrJNzoZKKPrcSb5t2Cw"
   }
 }

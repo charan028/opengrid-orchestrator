@@ -11,6 +11,7 @@ import contextlib
 import json
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ogsim.common.clock import FakeClock
 from ogsim.common.config import MqttSettings, load_fleet_config
+from ogsim.common.crypto import sign
 from ogsim.fleet.__main__ import _dispatch_message
 from ogsim.fleet.runtime import FleetEngine, run_fleet
 
@@ -115,6 +117,7 @@ async def test_dispatch_routes_calibration_command_and_publishes_wire_shaped_ack
         "applied_at",
         "resulting_offsets",
         "status",
+        "reject_reason",  # additive wire field (the internal `outcome` stays stripped)
     }
     assert published["hub_id"] == hub_id
     assert published["status"] == "APPLIED"
@@ -141,3 +144,46 @@ async def test_dispatch_drops_ack_that_fails_schema_validation(
         object(),
     )
     assert client._transport.published == []
+
+
+async def test_a_stale_command_is_acked_as_a_rejection_with_its_reason_and_sequence(
+    engine: FleetEngine,
+) -> None:
+    """#11/#15: a REJECTED ack used to carry `resulting_offsets: null`, failed the wire schema and was never
+    published, and its reason was stripped. It is now published with the command's (epoch, seq) and the
+    hub's reject_reason, so the orchestrator can bind it and tell a protocol error from inverter drift."""
+    guardian_key = Ed25519PrivateKey.generate()
+    hub_id = engine.state.hub_ids[0]
+    engine.pq.last_calibration_epoch[engine.pq.indices_for_hub(hub_id)] = 1
+    engine.pq.last_calibration_seq[engine.pq.indices_for_hub(hub_id)] = 9
+    now = datetime.now(UTC)
+    command: dict[str, Any] = {
+        "calibration_id": "00000000-0000-4000-8000-0000000000c9",
+        "hub_id": hub_id,
+        "epoch": 1,
+        "seq": 3,
+        "issued_at": (now - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "expires_at": (now + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "reference": {"phase_deg": 0.0, "freq_hz": 60.0, "amplitude_v": 240.0, "sync_source": "ptp"},
+        "correction": {"freq_hz": 0.01},
+        "bounds": {"max_freq_hz": 0.1, "max_voltage_pct": 2.0, "max_phase_deg": 5.0},
+    }
+    signed_fields = {k: v for k, v in command.items()}
+    command["key_id"] = "guardian-test"
+    command["signature"] = sign(guardian_key, signed_fields)
+    client = _FakeClient()
+
+    await _dispatch_message(
+        engine,
+        client,
+        f"og/v1/cmd/cal/{hub_id}",
+        json.dumps(command).encode(),
+        guardian_key.public_key(),
+        None,
+    )
+
+    (topic, payload, qos, _retain) = client._transport.published[0]
+    ack = json.loads(payload)
+    assert topic == f"og/v1/ack/cal/{hub_id}" and qos == 1
+    assert (ack["status"], ack["reject_reason"], ack["epoch"], ack["seq"]) == ("REJECTED", "STALE_SEQ", 1, 3)
+    assert set(ack["resulting_offsets"]) == {"freq_hz", "voltage_pct", "phase_deg"}

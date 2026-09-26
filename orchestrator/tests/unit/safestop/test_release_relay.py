@@ -45,9 +45,13 @@ class _Backend:
 @dataclass
 class _Publisher:
     published: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    cleared: list[str] = field(default_factory=list)
 
     async def publish_retained(self, topic_suffix: str, payload: dict[str, Any]) -> None:
         self.published.append((topic_suffix, payload))
+
+    async def clear_retained(self, topic_suffix: str) -> None:
+        self.cleared.append(topic_suffix)
 
 
 @dataclass
@@ -241,3 +245,57 @@ def test_k8_property_no_altered_or_foreign_release_is_ever_relayed(field_name, v
         return
     assert asyncio.run(service.relay_guardian_release(candidate)) is False
     assert publisher.published == [] and backend.rows == []
+
+
+# --- K8 housekeeping: clear a released stop's retained topic after the retention window -------------------
+
+
+@dataclass
+class _Housekeeping:
+    due: list[dict[str, Any]]
+    retain_s: float | None = None
+
+    async def releases_due_for_clearing(self, *, retain_s: float, limit: int) -> list[dict[str, Any]]:
+        self.retain_s = retain_s
+        return list(self.due)
+
+
+async def test_released_stop_topics_are_cleared_after_the_retention_window(keys):
+    service, _backend, publisher, trace = _service(keys)
+    event = _guardian_release(keys)
+    housekeeping = _Housekeeping([event, {"not": "an event"}])
+
+    cleared = await service.clear_released_retained(housekeeping, retain_s=86_400.0)
+
+    assert cleared == 1 and housekeeping.retain_s == 86_400.0
+    assert publisher.cleared == [stop_topic_suffix("BANK", "bank-001", ENGAGE_ID)]
+    assert publisher.published == []  # housekeeping never publishes a stop event
+    (args, _kwargs) = trace.rows[-1]
+    assert args[3]["housekeeping"] == "RETAINED_CLEARED" and args[3]["stop_id"] == str(ENGAGE_ID)
+
+
+async def test_aiomqtt_publisher_clears_with_a_zero_length_retained_payload():
+    from opengrid.safestop.mqtt_publish import AiomqttStopPublisher
+
+    sent: list[dict[str, Any]] = []
+
+    class _Client:
+        async def publish(self, topic: str, payload: bytes, qos: int, retain: bool) -> None:
+            sent.append({"topic": topic, "payload": payload, "qos": qos, "retain": retain})
+
+    publisher = AiomqttStopPublisher(client=_Client(), config=Config({"mqtt": {"topic_root": "ogtest/x"}}))  # type: ignore[arg-type]
+    await publisher.clear_retained("stop/bank/bank-001/abc")
+    assert sent == [{"topic": "ogtest/x/stop/bank/bank-001/abc", "payload": b"", "qos": 1, "retain": True}]
+
+
+async def test_due_releases_query_reads_only_uncleared_safestop_release_rows():
+    from opengrid.safestop.pg_backend import PgStopEventBackend
+
+    from ._fake_pool import FakePool
+
+    pool = FakePool()
+    pool.fetchall_result = [({"action": "RELEASE", "stop_id": "s"},)]
+    backend = PgStopEventBackend(pool)  # type: ignore[arg-type]
+    assert await backend.releases_due_for_clearing(retain_s=60.0, limit=5) == [
+        {"action": "RELEASE", "stop_id": "s"}
+    ]

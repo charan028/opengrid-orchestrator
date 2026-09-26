@@ -494,7 +494,7 @@ async def test_calibration_queue_maps_rows_and_excludes_already_evaluated_attemp
         )
     ]
     sql, params = cursor.executed[0]
-    assert "outcome = 'PENDING'" in sql and "NOT EXISTS" in sql and "'CALIBRATION'" in sql
+    assert "outcome = 'PENDING'" in sql and "NOT EXISTS" in sql and "og.calibration_command c" in sql
     assert params == {"max_age_s": 600.0, "limit": 20}
 
 

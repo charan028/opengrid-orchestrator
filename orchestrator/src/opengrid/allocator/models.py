@@ -82,6 +82,9 @@ class ObligationCall:
     eligible_hub_ids: tuple[str, ...]
     prior_granted_kw: float | None = None
     value_per_mwh: float = 0.0
+    #: Already escalated to SHORTFALL mid-window: still dispatched best-effort (owner decision 2026-09-26),
+    #: its partial grants carry the shortfall code G-19 corroborates.
+    in_shortfall: bool = False
 
 
 @dataclass(frozen=True, slots=True)

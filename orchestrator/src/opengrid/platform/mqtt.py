@@ -123,6 +123,35 @@ def compose_client_id(cfg: Config, process: str) -> str:
     return "-".join(part for part in (prefix, workspace, process) if part)
 
 
+#: Per-workspace broker credentials (deploy/mosquitto/provision_ws_users.py writes them to
+#: /opt/opengrid/work/<ws>/.mqtt.env; tools/remote.ps1 exports them). User `ogw_<ws>` may reach only
+#: `ogtest/<ws>/#`.
+ENV_WS_USER = "OG_MQTT_WS_USER"
+ENV_WS_PASSWORD = "OG_MQTT_WS_PASSWORD"  # noqa: S105 -- an env-var name, not a secret
+
+
+def resolve_mqtt_credentials(username: str, password: str) -> tuple[str, str]:
+    """Which broker credentials this process uses. Precedence:
+
+    1. `OG_MQTT_WS_USER`/`OG_MQTT_WS_PASSWORD` (a workspace run) always win over the caller's role user;
+    2. otherwise the caller's production role user (`og_guardian`, ...) and its password.
+
+    A workspace (`OG_WS` set) without workspace credentials is refused -- it must never fall back to a
+    production role user -- and a workspace user without a password is refused too."""
+    ws_user = os.environ.get(ENV_WS_USER, "").strip()
+    ws_password = os.environ.get(ENV_WS_PASSWORD, "")
+    if ws_user:
+        if not ws_password:
+            raise MqttIdentityError(f"{ENV_WS_USER} is set but {ENV_WS_PASSWORD} is empty")
+        return ws_user, ws_password
+    if os.environ.get(_ENV_WORKSPACE, "").strip():
+        raise MqttIdentityError(
+            f"OG_WS is set but {ENV_WS_USER} is not: a workspace never uses production MQTT users "
+            "(provision it with deploy/mosquitto/provision_ws_users.py; tools/remote.ps1 loads .mqtt.env)"
+        )
+    return username, password
+
+
 def build_client(
     cfg: Config,
     *,
@@ -144,11 +173,12 @@ def build_client(
     host = cfg.get("mqtt.host", "127.0.0.1")
     port = cfg.get("mqtt.port", 1883)
     keepalive_s = cfg.get("mqtt.keepalive_s", 20)
+    broker_user, broker_password = resolve_mqtt_credentials(username, password)
     return aiomqtt.Client(
         hostname=host,
         port=port,
-        username=username,
-        password=password,
+        username=broker_user,
+        password=broker_password,
         identifier=compose_client_id(cfg, process),
         keepalive=keepalive_s,
     )

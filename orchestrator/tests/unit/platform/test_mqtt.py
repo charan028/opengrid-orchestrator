@@ -141,6 +141,8 @@ def test_missing_prefix_defaults_to_production_and_is_refused_in_a_workspace(mon
 
 def test_build_client_composes_the_identifier(monkeypatch):
     monkeypatch.setenv("OG_WS", "guardsafe")
+    monkeypatch.setenv("OG_MQTT_WS_USER", "ogw_guardsafe")
+    monkeypatch.setenv("OG_MQTT_WS_PASSWORD", "ws-test-password")
     captured: dict = {}
 
     def fake_client(**kwargs):
@@ -168,3 +170,56 @@ def test_build_client_refuses_a_workspace_with_the_production_prefix(monkeypatch
 
 def test_calibration_schemas_are_registered():
     assert "calibration_command" in mqtt._SCHEMA_BY_KIND and "calibration_ack" in mqtt._SCHEMA_BY_KIND
+
+
+# --- MQTT credentials: workspace env wins; a workspace never falls back to production users ------------------
+
+
+def _no_ws_creds(monkeypatch):
+    for name in ("OG_WS", "OG_MQTT_WS_USER", "OG_MQTT_WS_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_production_uses_the_callers_role_credentials(monkeypatch):
+    _no_ws_creds(monkeypatch)
+    assert mqtt.resolve_mqtt_credentials("og_guardian", "role-pw") == ("og_guardian", "role-pw")
+
+
+def test_workspace_credentials_win_over_the_role_user(monkeypatch):
+    _no_ws_creds(monkeypatch)
+    monkeypatch.setenv("OG_WS", "guard")
+    monkeypatch.setenv("OG_MQTT_WS_USER", "ogw_guard")
+    monkeypatch.setenv("OG_MQTT_WS_PASSWORD", "ws-pw")
+    assert mqtt.resolve_mqtt_credentials("og_guardian", "placeholder") == ("ogw_guard", "ws-pw")
+
+
+def test_a_workspace_without_its_own_user_is_refused(monkeypatch):
+    _no_ws_creds(monkeypatch)
+    monkeypatch.setenv("OG_WS", "guard")
+    with pytest.raises(mqtt.MqttIdentityError, match="OG_MQTT_WS_USER"):
+        mqtt.resolve_mqtt_credentials("og_guardian", "real-production-password")
+
+
+def test_a_workspace_user_without_a_password_is_refused(monkeypatch):
+    _no_ws_creds(monkeypatch)
+    monkeypatch.setenv("OG_MQTT_WS_USER", "ogw_guard")
+    with pytest.raises(mqtt.MqttIdentityError, match="OG_MQTT_WS_PASSWORD"):
+        mqtt.resolve_mqtt_credentials("og_guardian", "x")
+
+
+def test_build_client_connects_as_the_workspace_user(monkeypatch):
+    _no_ws_creds(monkeypatch)
+    monkeypatch.setenv("OG_WS", "guard")
+    monkeypatch.setenv("OG_MQTT_WS_USER", "ogw_guard")
+    monkeypatch.setenv("OG_MQTT_WS_PASSWORD", "ws-pw")
+    captured: dict = {}
+    monkeypatch.setattr(mqtt.aiomqtt, "Client", lambda **kwargs: captured.update(kwargs))
+
+    mqtt.build_client(
+        _identity_cfg(prefix="og-test", env="dev"),
+        username="og_engine",
+        password="placeholder",
+        process="engine",
+    )
+
+    assert (captured["username"], captured["password"]) == ("ogw_guard", "ws-pw")

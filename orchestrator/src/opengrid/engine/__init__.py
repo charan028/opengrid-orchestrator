@@ -41,6 +41,7 @@ from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine import metrics as engine_metrics
+from opengrid.engine import pq_eligibility
 from opengrid.engine.alerts import clear_open_alerts, open_alert_details
 from opengrid.engine.background import BackgroundIngest, run_periodic
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
@@ -336,6 +337,7 @@ class _EngineState:
     flush_lag: engine_metrics.FlushLag | None = None  # og_engine_fleet_flush_lag_seconds
     stuck_sweep: Cadence = field(default_factory=lambda: Cadence(STUCK_SWEEP_INTERVAL_S))
     escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
+    short_flagged: set[str] = field(default_factory=set)  # obligations flagged AT_RISK for a shortfall
     pq_flush: Cadence | None = None
     gate_task: asyncio.Task[int] | None = None
     gate_backlog: list[GateTrigger] = field(
@@ -370,6 +372,44 @@ async def timed_tick(state: _EngineState) -> None:
                 logger.exception("failed to trace engine cycle latency")
 
 
+async def flag_short_obligations(state: Any, signals: dict[str, set[str]]) -> None:
+    """Owner decision 2026-09-26: while an obligation is short of its commitment (any K13 shortfall
+    signal this cycle) it is flagged AT_RISK; the flag clears as soon as it is served in full again,
+    unless the energy check still holds it at risk. Dispatch never stops for it (SHORTFALL included)."""
+    from opengrid import contracts
+
+    short_now = set(signals)
+    flagged: set[str] = state.short_flagged
+    energy_gw = state.energy_sufficiency_gateway
+    energy_at_risk: set[str] = getattr(energy_gw, "_at_risk", set()) if energy_gw is not None else set()
+    for obligation_id in sorted(short_now - flagged):
+        reason = sorted(signals[obligation_id])[0]
+        try:
+            await contracts.set_obligation_at_risk(
+                UUID(obligation_id), True, reason_code=reason, payload={"cause": "allocator_shortfall"}
+            )
+            flagged.add(obligation_id)
+        except Exception:
+            logger.exception(
+                "could not flag a short obligation at risk", extra={"obligation_id": obligation_id}
+            )
+    for obligation_id in sorted(flagged - short_now):
+        flagged.discard(obligation_id)
+        if obligation_id in energy_at_risk:
+            continue
+        try:
+            await contracts.set_obligation_at_risk(
+                UUID(obligation_id),
+                False,
+                reason_code="R-SHORTFALL-RECOVERED",
+                payload={"cause": "recovered"},
+            )
+        except Exception:
+            logger.exception(
+                "could not clear a recovered obligation's at_risk", extra={"obligation_id": obligation_id}
+            )
+
+
 async def escalate_sustained_shortfalls(
     state: _EngineState, energy_results: list[EnergySufficiencyResult], transition: Any
 ) -> list[tuple[str, str]]:
@@ -378,8 +418,10 @@ async def escalate_sustained_shortfalls(
     obligation not yet delivering is skipped (the state machine refuses the edge). Returns what escalated."""
     allocator_shortfalls = getattr(state.ledger_gateway, "last_shortfalls", [])
     infeasible = [r.obligation_id for r in energy_results if r.at_risk and r.margin_kwh < 0]
+    signals = merge_signals(allocator_shortfalls, infeasible)
+    await flag_short_obligations(state, signals)
     escalated: list[tuple[str, str]] = []
-    for obligation_id, reason in state.escalator.observe(merge_signals(allocator_shortfalls, infeasible)):
+    for obligation_id, reason in state.escalator.observe(signals):
         try:
             await transition(
                 UUID(obligation_id),
@@ -482,6 +524,8 @@ async def sweep_stuck_selected(state: Any, transition: Any, now: datetime) -> li
         )
     return unresolved
 
+
+PQ_ELIGIBILITY_REFRESH_S = 60.0
 
 #: Heavy background work (PQ characterization) waits this long after start-up so dispatch resumes first.
 STARTUP_QUIET_S = 120.0
@@ -783,9 +827,15 @@ async def main(cfg: Config) -> None:
         backend = PgEngineBackend(pool)
         fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool, trace_store)
         allocator_mod.configure(ledger_gateway)
+        from opengrid.assets.repo import PgCalibrationAckGuard
         from opengrid.assets.wiring import build_asset_health_service
+        from opengrid.selector import gate as selector_gate
 
         asset_service = build_asset_health_service(pool, trace_store)
+        # WP-D: PQ-sensitive profiles (DATA_CENTER) draw only on PQ-eligible hubs, and the selector never
+        # commits one beyond that capacity (fail closed until the first refresh).
+        pq_eligibility.configure(pq_eligibility.load_profile_configs())
+        selector_gate.configure_pq_capacity(pq_eligibility.eligible_kw)
         flush_lag = engine_metrics.FlushLag()
         flush_lag.bind()
         state = _EngineState(
@@ -824,7 +874,9 @@ async def main(cfg: Config) -> None:
         ) as client:
             raw_worker = BackgroundIngest("pq-raw", ingest_raw_capture_off_loop)
             raw_task = asyncio.create_task(raw_worker.run())
-            cal_worker = BackgroundIngest("calibration-ack", make_calibration_ack_handler(asset_service))
+            cal_worker = BackgroundIngest(
+                "calibration-ack", make_calibration_ack_handler(asset_service, PgCalibrationAckGuard(pool))
+            )
             cal_task = asyncio.create_task(cal_worker.run())
             summary_worker = BackgroundIngest(
                 "pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX
@@ -852,6 +904,9 @@ async def main(cfg: Config) -> None:
                     initial_delay_s=STARTUP_QUIET_S,
                 )
             )
+            pq_elig_task = asyncio.create_task(
+                run_periodic("pq-eligibility", PQ_ELIGIBILITY_REFRESH_S, lambda: pq_eligibility.refresh(pool))
+            )
             heartbeat_task = asyncio.create_task(
                 run_periodic("heartbeat", state.cycle_interval_s, lambda: beat_if_ticking(state))
             )
@@ -868,6 +923,7 @@ async def main(cfg: Config) -> None:
                     persist_task,
                     heartbeat_task,
                     characterize_task,
+                    pq_elig_task,
                 )
                 for task in {ingest_task, *background}:
                     task.cancel()
@@ -898,21 +954,26 @@ async def ingest_summary_off_loop(payload: dict[str, Any]) -> None:
     await pq_ingest.ingest_summary(payload)
 
 
-def make_calibration_ack_handler(service: Any) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
-    """Background handler for `ack/cal/<hub_id>` (S6.7 calibration loop): validate against
-    calibration_ack.schema.json, then `opengrid.assets.calibration_ack.handle_calibration_ack` classifies
-    the outcome and advances the hub's asset state. An invalid ack is logged and dropped."""
+def make_calibration_ack_handler(
+    service: Any, guard: Any = None
+) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+    """Background handler for `ack/cal/<hub_id>` (S6.7 calibration loop). Each queued item is
+    `{"topic_hub_id": <hub from the topic>, "payload": <ack>}`: validate against calibration_ack.schema.json,
+    then `opengrid.assets.calibration_ack.handle_calibration_ack` binds the ack to the topic's hub and the
+    guardian-issued command (`guard`, the durable calibration ledger: consumed once), classifies the outcome
+    and advances the hub's asset state. An invalid or unbound ack is logged and dropped (fail closed)."""
 
-    async def _handle(payload: dict[str, Any]) -> None:
+    async def _handle(item: dict[str, Any]) -> None:
         from opengrid.assets.calibration_ack import handle_calibration_ack
         from opengrid.platform.mqtt import SchemaValidationError, validate_payload
 
+        payload = item["payload"]
         try:
             validate_payload("calibration_ack", payload)
         except SchemaValidationError:
             logger.warning("dropped invalid calibration ack", extra={"hub_id": payload.get("hub_id")})
             return
-        await handle_calibration_ack(service, payload)
+        await handle_calibration_ack(service, payload, topic_hub_id=item.get("topic_hub_id"), guard=guard)
 
     return _handle
 
@@ -984,7 +1045,8 @@ async def _mqtt_ingest_loop(
             elif message.topic.matches(wave_raw_topic):
                 raw_worker.submit(payload)  # validation, blob write and index insert off the ingest path
             elif cal_worker is not None and message.topic.matches(cal_ack_topic):
-                cal_worker.submit(payload)  # validation and the asset-state write off the ingest path
+                # validation and the asset-state write off the ingest path; the hub is bound from the topic
+                cal_worker.submit({"topic_hub_id": msg_topic.rsplit("/", 1)[-1], "payload": payload})
             elif message.topic.matches(ack_topic):
                 validate_payload("ack", payload)
                 await fleet.ingest_ack(payload)

@@ -21,6 +21,11 @@ def _never_production_mqtt(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OGSIM_ENV", raising=False)
     if not os.environ.get("OG_MQTT_ROOT"):
         monkeypatch.setenv("OG_MQTT_ROOT", "ogtest/unit")
+    if os.environ.get("OG_WS") and not os.environ.get("OG_MQTT_WS_USER"):
+        # An unprovisioned server workspace: unit tests never connect, but config loading requires a
+        # workspace user (never the production ones).
+        monkeypatch.setenv("OG_MQTT_WS_USER", "ogw_unit")
+        monkeypatch.setenv("OG_MQTT_WS_PASSWORD", "unit-test-not-a-credential")
 
 
 @pytest.fixture(autouse=True)

@@ -25,6 +25,8 @@ from ogsim.common.config import (
 @pytest.fixture
 def workspace(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.setenv("OG_WS", "guardsafe")
+    monkeypatch.setenv("OG_MQTT_WS_USER", "ogw_guardsafe")
+    monkeypatch.setenv("OG_MQTT_WS_PASSWORD", "ws-test-password")
     for name in (
         "OG_MQTT_ROOT",
         "OGSIM_ENV",
@@ -38,14 +40,21 @@ def workspace(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 @pytest.fixture
 def dev(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Neither a workspace nor marked production (e.g. a developer shell)."""
-    for name in ("OG_WS", "OG_MQTT_ROOT", "OGSIM_ENV", "OGSIM_GUARDIAN_PUBLIC_KEY_PATH"):
+    for name in ("OG_WS", "OG_MQTT_ROOT", "OGSIM_ENV", "OGSIM_GUARDIAN_PUBLIC_KEY_PATH", "OG_MQTT_WS_USER"):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
 
 
 @pytest.fixture
 def production(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    for name in ("OG_WS", "OG_MQTT_ROOT", "OGSIM_GUARDIAN_PUBLIC_KEY_PATH", "OGSIM_SAFESTOP_PUBLIC_KEY_PATH"):
+    for name in (
+        "OG_WS",
+        "OG_MQTT_ROOT",
+        "OGSIM_GUARDIAN_PUBLIC_KEY_PATH",
+        "OGSIM_SAFESTOP_PUBLIC_KEY_PATH",
+        "OG_MQTT_WS_USER",
+        "OG_MQTT_WS_PASSWORD",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OGSIM_ENV", "prod")
     return monkeypatch
@@ -167,3 +176,49 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     assert (fleet.e_kwh_default, fleet.p_kw_default, fleet.dual_unit_share) == (39.2, 11.0, 0.2)
     assert (fleet.e_kwh_dual_unit, fleet.p_kw_dual_unit, fleet.bank_kva_rating_default) == (78.4, 20.0, 600.0)
     assert (fleet.hub_count, fleet.bank_count) == (2000, 40)
+
+
+# --- broker credentials ----------------------------------------------------------------------
+
+
+def test_workspace_credentials_win_for_the_fleet_sims(workspace: pytest.MonkeyPatch) -> None:
+    workspace.setenv("OG_MQTT_ROOT", "ogtest/guardsafe")
+    workspace.setenv("OG_MQTT_SIM_PASSWORD", "placeholder")
+    settings = sim_config.mqtt_settings_from_env({})
+    assert (settings.username, settings.password) == ("ogw_guardsafe", "ws-test-password")
+
+
+def test_workspace_credentials_win_for_the_control_publisher(workspace: pytest.MonkeyPatch) -> None:
+    from ogsim.control import mqtt_pub
+
+    kwargs = mqtt_pub.mqtt_settings()
+    assert (kwargs["username"], kwargs["password"]) == ("ogw_guardsafe", "ws-test-password")
+
+
+def test_a_workspace_without_its_own_mqtt_user_is_refused(workspace: pytest.MonkeyPatch) -> None:
+    workspace.delenv("OG_MQTT_WS_USER")
+    workspace.setenv("OG_MQTT_ROOT", "ogtest/guardsafe")
+    with pytest.raises(WorkspaceConfigError, match="OG_MQTT_WS_USER"):
+        sim_config.mqtt_settings_from_env({})
+
+
+def test_a_workspace_user_without_a_password_is_refused(workspace: pytest.MonkeyPatch) -> None:
+    workspace.setenv("OG_MQTT_WS_PASSWORD", "")
+    with pytest.raises(WorkspaceConfigError, match="OG_MQTT_WS_PASSWORD"):
+        sim_config.resolve_mqtt_credentials("og_sim", "OG_MQTT_SIM_PASSWORD")
+
+
+def test_production_uses_the_role_users(production: pytest.MonkeyPatch) -> None:
+    production.setenv("OG_MQTT_SIM_PASSWORD", "prod-sim")
+    production.setenv("OG_MQTT_SIMCTL_PASSWORD", "prod-simctl")
+    from ogsim.control import mqtt_pub
+
+    assert sim_config.resolve_mqtt_credentials("og_sim", "OG_MQTT_SIM_PASSWORD") == ("og_sim", "prod-sim")
+    assert mqtt_pub.mqtt_settings()["username"] == "og_simctl"
+
+
+def test_the_client_kwargs_carry_the_resolved_user() -> None:
+    from ogsim.common.mqtt_client import mqtt_settings
+
+    assert mqtt_settings("h", 1, "pw", "ogw_x")["username"] == "ogw_x"
+    assert mqtt_settings("h", 1, "pw")["username"] == "og_sim"

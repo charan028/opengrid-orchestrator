@@ -18,6 +18,8 @@ from typing import Any
 
 import httpx
 
+from opengrid.api.auth import PROXY_SECRET_ENV
+
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _TIMEOUT_S = 3.0
 _POST_TIMEOUT_S = 5.0
@@ -76,6 +78,15 @@ async def get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
         raise ApiUnavailable(f"GET {path} failed: {exc}") from exc
 
 
+def _identity_headers(remote_user: str | None) -> dict[str, str] | None:
+    """The forwarded identity plus the proxy secret the API requires before it believes it
+    (`opengrid.api.auth.proxy_authenticated`). `remote_user` must already be the proxy-verified identity
+    (`opengrid.ui.role.remote_user`), so the UI never vouches for an identity Apache did not assert."""
+    if not remote_user:
+        return None
+    return {"X-Remote-User": remote_user, "X-OG-Proxy-Auth": os.environ.get(PROXY_SECRET_ENV, "")}
+
+
 async def post_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
     """POST `path` (e.g. `/og/api/safestop`) with a JSON `payload` and return the parsed JSON body.
     `remote_user` forwards the Apache-authenticated identity (`X-Remote-User`) to the API, which needs it
@@ -85,7 +96,7 @@ async def post_json(path: str, payload: dict[str, Any], *, remote_user: str | No
     `_post_json` copy in `opengrid.ui.routes.billing_audit`, plus a second bare `httpx.AsyncClient` for
     the CSV relay in the same module -- both now go through this one shared client)."""
     url = f"{api_base_url()}{path}"
-    headers = {"X-Remote-User": remote_user} if remote_user else None
+    headers = _identity_headers(remote_user)
     try:
         async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
             response = await client.post(url, json=payload, headers=headers)

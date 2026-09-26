@@ -22,7 +22,7 @@ from opengrid.core.models.pq import CalibrationReference
 from opengrid.core.pq import DEFAULT_FIRMWARE_CALIBRATION_BOUNDS, CalibrationBounds, OffsetVector
 from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import GuardianPorts, PqPorts
-from opengrid.guardian.pq_ports import ProposedCalibrationCommand
+from opengrid.guardian.pq_ports import CalibrationFleetUsage, ProposedCalibrationCommand
 from opengrid.guardian.service import GuardianService
 
 FIXTURE = Path(__file__).resolve().parents[4] / "interfaces" / "fixtures" / "signed_calibration_command.json"
@@ -53,10 +53,26 @@ class _FixtureWorld:
     async def has_active_non_default_envelope_grant(self, hub_id: str) -> bool:
         return False
 
+    # CalibrationLedgerPort: the first command this hub ever received.
+    async def reserve(self, calibration_id: UUID, hub_id: str) -> tuple[int, int] | None:
+        return (1, 1)
+
+    async def mark_signed(self, calibration_id: UUID) -> None:
+        return None
+
+    async def refuse(self, calibration_id: UUID, hub_id: str, reason: str) -> None:
+        return None
+
+    async def fleet_usage(self, *, window_s: float) -> CalibrationFleetUsage:
+        return CalibrationFleetUsage(fleet_hubs=2000, signed_in_window=0, in_flight=0, flagged_hubs=1)
+
+    async def raise_alert(self, rule: str, summary: str, detail: dict[str, object]) -> None:
+        return None
+
 
 def _signed_command() -> dict[str, Any]:
     world = _FixtureWorld()
-    pq = PqPorts(world, world, world, world, world, world)  # type: ignore[arg-type]
+    pq = PqPorts(world, world, world, world, world, world, calibration_ledger=world)  # type: ignore[arg-type]
     ports = GuardianPorts(world, None, world, None, None, None, None, None, None, None, None, pq=pq)  # type: ignore[arg-type]
     service = GuardianService(
         ports=ports,

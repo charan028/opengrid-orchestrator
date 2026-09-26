@@ -123,6 +123,8 @@ async def test_engine_applies_the_edge_and_skips_an_obligation_not_yet_deliverin
     state = types.SimpleNamespace(
         ledger_gateway=types.SimpleNamespace(last_shortfalls=[]),
         escalator=ShortfallEscalator(sustain_cycles=1),
+        short_flagged=set(),
+        energy_sufficiency_gateway=None,
     )
     escalated = await escalate_sustained_shortfalls(
         state, [_energy(OBL, -5.0), _energy(OTHER, -1.0)], _transition
@@ -130,3 +132,120 @@ async def test_engine_applies_the_edge_and_skips_an_obligation_not_yet_deliverin
 
     assert calls == [(OBL, "SHORTFALL", "R-COMMIT-LOCK-INFEASIBLE")]
     assert escalated == [(OBL, "R-COMMIT-LOCK-INFEASIBLE")]
+
+
+def test_a_shortfall_obligation_keeps_its_feasible_remainder_and_recovers_in_one_cycle() -> None:
+    """Owner decision 2026-09-26: a mid-window SHORTFALL never stops dispatch. While an L2 LIMIT caps the
+    bank the obligation gets the feasible remainder (not 0); once the constraint lifts, the next cycle
+    grants the full commitment again. SHORTFALL obligations stay in the allocator's active calls."""
+    from datetime import UTC, datetime
+
+    from opengrid.allocator.cycle import cycle
+    from opengrid.allocator.models import (
+        BankSnapshot,
+        FleetState,
+        HubSnapshot,
+        Instruction,
+        LedgerView,
+        ObligationCall,
+        Schedule,
+    )
+    from opengrid.engine import gateways
+
+    hub = HubSnapshot(
+        hub_id="h1",
+        bank_id="b1",
+        free_discharge_kw=60.0,
+        health="OK",
+        soc_kwh=1e6,
+        reserve_kwh=0.0,
+        e_kwh=1e6,
+    )
+    bank = BankSnapshot(bank_id="b1", capability_kw=100.0, kva_rating=100.0)
+    fleet = FleetState(hubs=(hub,), banks=(bank,))
+    call = ObligationCall(
+        obligation_id=OBL,
+        bank_id="b1",
+        service_type="PARTNER_CAPACITY",
+        tier="T3",
+        committed_kw=50.0,
+        eligible_hub_ids=("h1",),
+    )
+    t = datetime(2026, 9, 26, 10, 0, tzinfo=UTC)
+    limit = (Instruction(scope="BANK", scope_ref="b1", kind="LIMIT", limit_kw=20.0),)
+    limited = cycle(t, fleet, LedgerView(calls=(call,)), Schedule(), {}, limit)
+    lifted = cycle(t, fleet, LedgerView(calls=(call,)), Schedule(), {}, ())
+
+    assert sum(g.granted_kw for g in limited.grants if g.obligation_id == OBL) == 20.0
+    assert sum(g.granted_kw for g in lifted.grants if g.obligation_id == OBL) == 50.0
+    assert "'SHORTFALL'" in gateways._ACTIVE_CALLS_SQL
+
+
+async def test_a_short_obligation_is_flagged_at_risk_and_cleared_on_recovery(monkeypatch) -> None:
+    from opengrid import contracts
+    from opengrid.engine import flag_short_obligations
+
+    calls: list[tuple[str, bool]] = []
+
+    async def _set(obligation_id, at_risk, *, reason_code, payload=None):
+        calls.append((str(obligation_id), at_risk))
+
+    monkeypatch.setattr(contracts, "set_obligation_at_risk", _set)
+    state = types.SimpleNamespace(short_flagged=set(), energy_sufficiency_gateway=None)
+
+    await flag_short_obligations(state, {OBL: {"R-COMMIT-LOCK-OVERRIDE-L2"}})
+    await flag_short_obligations(state, {OBL: {"R-COMMIT-LOCK-OVERRIDE-L2"}})  # no repeat
+    await flag_short_obligations(state, {})  # served in full again
+
+    assert calls == [(OBL, True), (OBL, False)]
+
+
+def test_a_shortfall_obligations_partial_grant_carries_the_code_g19_corroborates() -> None:
+    """Safety agent's G-19 (2026-09-26): a SHORTFALL obligation's partial grant is accepted only with a
+    `core.reasons.LOCK_REASON_BY_SHORTFALL` code -- L2 instruction, bank capacity, or no substitute."""
+    from datetime import UTC, datetime
+
+    from opengrid.allocator.cycle import cycle
+    from opengrid.allocator.models import (
+        BankSnapshot,
+        FleetState,
+        HubSnapshot,
+        Instruction,
+        LedgerView,
+        ObligationCall,
+        Schedule,
+    )
+    from opengrid.core.reasons import LOCK_REASON_BY_SHORTFALL
+
+    hub = HubSnapshot(
+        hub_id="h1",
+        bank_id="b1",
+        free_discharge_kw=60.0,
+        health="OK",
+        soc_kwh=1e6,
+        reserve_kwh=0.0,
+        e_kwh=1e6,
+    )
+    bank = BankSnapshot(bank_id="b1", capability_kw=100.0, kva_rating=100.0)
+    t = datetime(2026, 9, 26, 10, 0, tzinfo=UTC)
+
+    def _reason(in_shortfall: bool, instructions: tuple, committed_kw: float = 50.0) -> str:
+        call = ObligationCall(
+            obligation_id=OBL,
+            bank_id="b1",
+            service_type="PARTNER_CAPACITY",
+            tier="T3",
+            committed_kw=committed_kw,
+            eligible_hub_ids=("h1",),
+            in_shortfall=in_shortfall,
+        )
+        fleet = FleetState(hubs=(hub,), banks=(bank,))
+        result = cycle(t, fleet, LedgerView(calls=(call,)), Schedule(), {}, instructions)
+        return next(g.reason_code for g in result.grants if g.obligation_id == OBL)
+
+    limit = (Instruction(scope="BANK", scope_ref="b1", kind="LIMIT", limit_kw=20.0),)
+    assert _reason(True, limit) == "R-SHORTFALL-L2-INSTRUCTION"
+    assert _reason(False, limit) == "R-COMMIT-LOCK-OVERRIDE-L2"  # not yet SHORTFALL: the K13 code
+    assert _reason(True, (), committed_kw=80.0) == "R-SHORTFALL-NO-SUBSTITUTE"  # 60 kW hub, no substitute
+    assert "R-SHORTFALL-L2-INSTRUCTION" in LOCK_REASON_BY_SHORTFALL
+    assert "R-SHORTFALL-NO-SUBSTITUTE" in LOCK_REASON_BY_SHORTFALL

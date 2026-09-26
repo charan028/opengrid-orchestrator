@@ -49,6 +49,10 @@ DEFAULT_KEY_ID = "safestop-2026a"
 DEFAULT_HEARTBEAT_INTERVAL_S = 5.0
 DEFAULT_GUARDIAN_PUBLIC_KEY_PATH = "/etc/opengrid/guardian_ed25519.pub"
 GUARDIAN_PUBLIC_KEY_LENGTH = 32
+#: K8: how long a relayed RELEASE stays retained before its topic is cleared. Must exceed the longest a
+#: hub may be offline and still hold its in-memory stop set; after that a reconnecting hub that lost its
+#: memory starts unstopped anyway, which is correct once the stop is released.
+DEFAULT_RELEASE_RETAIN_S = 86_400.0
 
 
 async def _handle_request(payload: dict[str, Any], broker: ConfirmationBroker) -> None:
@@ -137,11 +141,11 @@ async def main(cfg: Config | None = None) -> None:
         cfg, username=mqtt_username, password=mqtt_password, process="safestop"
     ) as client:
         publisher = AiomqttStopPublisher(client=client, config=cfg)
-        safestop.configure_service(
-            SafestopService(
-                stop_key, backend, publisher, trace, guardian_public_key=load_guardian_public_key(cfg)
-            )
+        service = SafestopService(
+            stop_key, backend, publisher, trace, guardian_public_key=load_guardian_public_key(cfg)
         )
+        safestop.configure_service(service)
+        release_retain_s = float(cfg.get("safestop.release_retain_s", DEFAULT_RELEASE_RETAIN_S))
 
         intake_task = asyncio.create_task(_request_intake_loop(pool, broker))
         try:
@@ -149,6 +153,10 @@ async def main(cfg: Config | None = None) -> None:
             async def _tick() -> None:
                 broker.discard_expired()
                 await write_heartbeat(pool, PROCESS_NAME)
+                try:
+                    await service.clear_released_retained(backend, retain_s=release_retain_s)
+                except Exception:
+                    logger.exception("retained stop-topic housekeeping failed; retried next tick")
 
             await run_forever(_tick, interval_s=heartbeat_interval_s, process_name=PROCESS_NAME)
         finally:

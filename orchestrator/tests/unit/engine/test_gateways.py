@@ -215,7 +215,7 @@ async def test_schedule_gateway_defaults_to_zero_price_when_no_data():
 async def test_ledger_gateway_ledger_view_builds_obligation_calls():
     await _seed_fleet()
     obligation_id = uuid4()
-    call_row = (obligation_id, "bank-000", Decimal("3.5"), "HOME", "L1", None)
+    call_row = (obligation_id, "bank-000", Decimal("3.5"), "HOME", "L1", None, "SHORTFALL")
     prior_rows: list = []
     cursor = FakeCursor([[call_row], prior_rows])
     gw = EngineLedgerGateway(pool=FakePool(cursor))
@@ -230,6 +230,7 @@ async def test_ledger_gateway_ledger_view_builds_obligation_calls():
     assert call.eligible_hub_ids == ("hub-00000",)  # only the online hub
     assert call.prior_granted_kw is None
     assert call.value_per_mwh == 0.0
+    assert call.in_shortfall  # still dispatched best-effort (owner decision 2026-09-26)
 
 
 async def test_ledger_gateway_persist_grants_and_version(monkeypatch: pytest.MonkeyPatch):

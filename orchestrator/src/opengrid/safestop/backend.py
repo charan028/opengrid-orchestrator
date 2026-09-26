@@ -44,3 +44,15 @@ class StopPublisher(Protocol):
     """Publishes the retained `<root>/stop/<scope>/<id>` MQTT message (topics.md)."""
 
     async def publish_retained(self, topic_suffix: str, payload: dict[str, Any]) -> None: ...
+
+    async def clear_retained(self, topic_suffix: str) -> None:
+        """Publish an empty retained payload: broker housekeeping that deletes the retained message on
+        the topic. Hubs ignore it (it never changes stop state, K8)."""
+        ...
+
+
+class ReleaseHousekeepingBackend(Protocol):
+    async def releases_due_for_clearing(self, *, retain_s: float, limit: int) -> list[dict[str, Any]]:
+        """Relayed guardian RELEASE events older than `retain_s` whose retained topic has not yet been
+        cleared (from og-safestop's own trace stream)."""
+        ...

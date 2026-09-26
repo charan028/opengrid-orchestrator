@@ -77,9 +77,10 @@ class SimMqttClient:
             yield msg
 
 
-def mqtt_settings(host: str, port: int, password: str) -> dict[str, Any]:
-    """Builds the `aiomqtt.Client` kwargs for the `og_sim` user."""
-    return {"hostname": host, "port": port, "username": "og_sim", "password": password}
+def mqtt_settings(host: str, port: int, password: str, username: str = "og_sim") -> dict[str, Any]:
+    """Builds the `aiomqtt.Client` kwargs. Callers pass `MqttSettings.username`, which is the workspace
+    user (`ogw_<ws>`) in a workspace run and `og_sim` in production (`config.resolve_mqtt_credentials`)."""
+    return {"hostname": host, "port": port, "username": username, "password": password}
 
 
 class AiomqttTransportAdapter:

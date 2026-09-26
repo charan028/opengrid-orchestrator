@@ -749,3 +749,134 @@ async def test_g19_shortfall_that_holds_even_with_unseen_hubs_at_full_rating_is_
         make_batch_row(proposal)
     )
     assert verdict.outcome == "PASS"
+
+
+# --- K13 need basis (owner decision 2026-09-26) and best-effort SHORTFALL ----------------------------------
+
+
+class _Profiles:
+    def __init__(self, sources: dict) -> None:
+        self.sources = sources
+
+    async def setpoint_source(self, obligation_id):
+        return self.sources.get(obligation_id)
+
+
+def _need_basis_service(fakes, config, seed, sources: dict | None):
+    service = service_with(fakes, config, seed)
+    profiles = _Profiles(sources) if sources is not None else None
+    service.ports = replace(fakes.as_ports(), service_profiles=profiles)
+    return service
+
+
+def _closed_loop_batch(fakes, *, extra: tuple | None = None):
+    """Need-basis obligation A: 5 kW reserved maximum, 2 kW granted (measured need). `extra` adds another
+    obligation B as (obligation_id, committed_kw, granted_kw) on the same bank and cycle."""
+    need_id = uuid4()
+    items = [ProposedItem("hub-0001", 3.0, "R-GRANT-CLOSED-LOOP", need_id, Decimal("2.0"))]
+    if extra is not None:
+        other_id, _committed, granted = extra
+        items.append(ProposedItem("hub-0002", 3.0, "R-GRANT-COMMITTED", other_id, granted))
+    proposal = replace(make_proposal(), items=items)
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.commitments.frozen[need_id] = Decimal("5.0")
+    fakes.prior_grants.prior[need_id] = Decimal("5.0")
+    if extra is not None:
+        fakes.commitments.frozen[extra[0]] = extra[1]
+        if extra[1] > 0:
+            fakes.commitments.active_by_bank[BANK_ID].add(extra[0])
+    return proposal, need_id
+
+
+async def test_need_basis_grant_below_the_reserved_maximum_is_signed(fakes, guardian_config, signing_seed):
+    proposal, need_id = _closed_loop_batch(fakes)
+    service = _need_basis_service(fakes, guardian_config, signing_seed, {need_id: "MEASURED_FEEDBACK"})
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+    assert verdict.outcome == "PASS"
+
+
+@pytest.mark.parametrize("source", ["PLAN", None])
+async def test_the_same_grant_on_a_fixed_profile_is_vetoed(fakes, guardian_config, signing_seed, source):
+    proposal, need_id = _closed_loop_batch(fakes)
+    service = _need_basis_service(fakes, guardian_config, signing_seed, {need_id: source} if source else {})
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids
+    reasons = {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]}
+    assert "NEED_BASIS_PROFILE_NOT_MEASURED_FEEDBACK" in reasons
+
+
+async def test_need_basis_without_a_profile_read_is_vetoed(fakes, guardian_config, signing_seed):
+    proposal, _need_id = _closed_loop_batch(fakes)
+    service = _need_basis_service(fakes, guardian_config, signing_seed, None)
+    assert "G-19" in (await service.evaluate_and_sign(make_batch_row(proposal))).vetoed_rule_ids
+
+
+@pytest.mark.parametrize(
+    ("committed", "granted"),
+    [(Decimal("1.0"), Decimal("4.0")), (Decimal("0"), Decimal("3.0"))],  # over its own commitment / none here
+)
+async def test_need_basis_reservation_used_by_another_obligation_is_vetoed(
+    fakes, guardian_config, signing_seed, committed, granted
+):
+    other_id = uuid4()
+    proposal, need_id = _closed_loop_batch(fakes, extra=(other_id, committed, granted))
+    service = _need_basis_service(fakes, guardian_config, signing_seed, {need_id: "MEASURED_FEEDBACK"})
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids
+    reasons = {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]}
+    assert "NEED_BASIS_RESERVATION_REASSIGNED" in reasons
+
+
+async def test_another_obligation_within_its_own_commitment_does_not_block_need_basis(
+    fakes, guardian_config, signing_seed
+):
+    other_id = uuid4()
+    proposal, need_id = _closed_loop_batch(fakes, extra=(other_id, Decimal("3.0"), Decimal("3.0")))
+    service = _need_basis_service(fakes, guardian_config, signing_seed, {need_id: "MEASURED_FEEDBACK"})
+    assert (await service.evaluate_and_sign(make_batch_row(proposal))).outcome == "PASS"
+
+
+async def test_best_effort_shortfall_grant_is_signed_when_the_guardian_confirms_the_shortfall(
+    fakes, guardian_config, signing_seed
+):
+    """Owner decision: a mid-window SHORTFALL is best effort; the partial grant carries the shortfall reason
+    and is corroborated like the override it maps to (bank capability short here)."""
+    proposal = _reduced_commitment(fakes, "R-SHORTFALL-BANK-CAPACITY")
+    _bank_members(fakes, 7.84, 7.84)
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert verdict.outcome == "PASS"
+
+
+@pytest.mark.parametrize("reason_code", ["R-SHORTFALL-BANK-CAPACITY", "R-SHORTFALL-NO-SUBSTITUTE"])
+async def test_best_effort_shortfall_claim_is_vetoed_when_the_bank_could_deliver(
+    fakes, guardian_config, signing_seed, reason_code
+):
+    proposal = _reduced_commitment(fakes, reason_code)
+    _bank_members(fakes, 20.0, 20.0)
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids
+
+
+async def test_best_effort_l2_shortfall_needs_an_active_instruction(fakes, guardian_config, signing_seed):
+    proposal = _reduced_commitment(fakes, "R-SHORTFALL-L2-INSTRUCTION")
+    assert (
+        "G-19"
+        in (
+            await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+                make_batch_row(proposal)
+            )
+        ).vetoed_rule_ids
+    )
+    fakes.l2_instructions.active[BANK_ID] = L2Instruction(kind="LIMIT", limit_kw=10.0)
+    assert (
+        await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(make_batch_row(proposal))
+    ).outcome == "PASS"

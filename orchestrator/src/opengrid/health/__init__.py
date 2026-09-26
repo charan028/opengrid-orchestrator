@@ -213,15 +213,22 @@ async def _fetch_guardian_timeout_rate() -> float | None:
 
 
 async def _fetch_reserve_breach_count() -> float:
-    if _engine_metrics_url is None:
-        return 0.0
-    try:
-        text = await scrape_metrics_text(_engine_metrics_url, timeout_s=_scrape_timeout_s)
-    except Exception:
-        return 0.0
+    """K1 (00-invariants.md, A10 "reserve breaches = 0"): reads `opengrid.invariants.read_summary()`
+    directly rather than scraping a `/metrics` endpoint (adversarial-review fix #7:
+    `og_reserve_breaches_total` is incremented in `og-settle`'s OWN process registry by
+    `opengrid.invariants` -- this evaluator already runs inside `og-settle` (02b S1.2), so scraping
+    `og-engine`'s `/metrics` could never see it; `ALR-RESERVE-BREACH` never fired for that reason.
+    `invariants.read_summary` is a plain Postgres read (`og.invariant_check`), not a cross-process HTTP
+    call, so it needs no separate timeout/failure handling beyond its own -- a DB hiccup there already
+    degrades to `InvariantsSummary.unavailable()` (all-zero) rather than raising."""
+    from opengrid import invariants  # local import: breaks the import cycle, see configure()'s own note
 
-    samples = parse_prometheus_text(text)
-    return sum_metric(samples, "og_reserve_breaches_total")
+    try:
+        summary = await invariants.read_summary(_require_pool())
+    except Exception:
+        logger.warning("opengrid.invariants.read_summary failed", exc_info=True)
+        return 0.0
+    return float(summary.reserve_breaches)
 
 
 async def evaluate_alerts() -> None:

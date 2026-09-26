@@ -128,8 +128,12 @@ Process entry points (fixed): `python -m opengrid.feeds`, `opengrid.engine`, `op
 - **Server (integration, DB, MQTT, live APIs):**
   `powershell -File tools\remote.ps1 -Ws <your-ws> -Cmd "<bash command>"`. The script:
   - syncs the whole repo to `/opt/opengrid/work/<ws>` and runs the command as user `opengrid`;
-  - sets `OG_DB=og_t_<ws>` (your own Postgres database), `OG_MQTT_ROOT=ogtest/<ws>` (your own topic root; the
-    ACL allows it for all og users) and the env files (`secrets.env`, `api_keys.env`).
+  - sets `OG_DB=og_t_<ws>` (your own Postgres database) and `OG_MQTT_ROOT=ogtest/<ws>` (your own topic root);
+  - loads `secrets.env` and `api_keys.env` with every `OG_MQTT_*` line removed. MQTT credentials come only from the
+    workspace's own `/opt/opengrid/work/<ws>/.mqtt.env`: user `ogw_<ws>`, whose ACL allows `ogtest/<ws>/#` only. It
+    is created by `deploy/mosquitto/provision_ws_users.sh`. A workspace can never authenticate as a production
+    MQTT user, and its MQTT clients refuse to start if `.mqtt.env` is missing;
+  - never start orchestrator processes or simulators from a workspace against the shared broker (§6).
 
   Workspaces: arch, feeds, fcst, ctr, sel, ledg, alloc, eng, guard, stop, settle, hlth, api, uia, uib, sims, mkt,
   merge, qa, ui, sec, rev1, rev2, prop. Use only yours.

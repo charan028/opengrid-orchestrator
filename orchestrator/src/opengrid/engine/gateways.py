@@ -48,6 +48,7 @@ from opengrid.allocator.models import (
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
 from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, COMMIT_LOCK_OVERRIDE_REASONS, R_SUBSTITUTION
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine import pq_eligibility
 from opengrid.engine.alerts import clear_open_alerts, open_alert_details
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
@@ -97,7 +98,8 @@ JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.contract c ON c.contract_id = o.contract_id
 WHERE r.released_at IS NULL
   AND r.kind = 'POWER_KW'
-  AND o.state IN ('COMMITTED', 'DELIVERING')
+  -- SHORTFALL keeps delivering best-effort until its window ends (owner decision 2026-09-26)
+  AND o.state IN ('COMMITTED', 'DELIVERING', 'SHORTFALL')
   AND o.window_start <= %(lookahead_end)s
   AND r.interval_end > %(now)s
 GROUP BY r.obligation_id, r.bank_id, c.customer_id
@@ -120,14 +122,16 @@ ORDER BY ts DESC LIMIT 1
 # Active (COMMITTED/DELIVERING) obligations' calls on the given banks for "now" (02a S1's active_calls):
 # the reservation is the K13 frozen floor; obligation/opportunity give service_type/tier/value.
 _ACTIVE_CALLS_SQL = """
-SELECT r.obligation_id, r.bank_id, r.amount, o.service_type, o.tier, op.value_per_mwh
+SELECT r.obligation_id, r.bank_id, r.amount, o.service_type, o.tier, op.value_per_mwh, o.state
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
 WHERE r.bank_id = ANY(%(bank_ids)s)
   AND r.released_at IS NULL
   AND r.interval_start <= %(now)s AND r.interval_end > %(now)s
-  AND o.state IN ('COMMITTED', 'DELIVERING')
+  -- Owner decision 2026-09-26: a mid-window SHORTFALL never stops dispatch; it keeps receiving the
+  -- maximum feasible kW of its unchanged commitment until its window ends (K13: nothing reallocated).
+  AND o.state IN ('COMMITTED', 'DELIVERING', 'SHORTFALL')
 """
 
 # Latest grant per obligation on these banks -- `prior_granted_kw` (02a S5.1's K13 "never below
@@ -279,13 +283,15 @@ class EngineLedgerGateway:
         prior_by_obligation = {str(obligation_id): float(kw) for obligation_id, kw in prior_rows}
 
         calls: list[ObligationCall] = []
-        for obligation_id, bank_id, amount, service_type, tier, value_per_mwh in call_rows:
+        for obligation_id, bank_id, amount, service_type, tier, value_per_mwh, state in call_rows:
             try:
                 eligible_hub_ids = tuple(
                     s.hub_id for s in fleet.hub_capabilities(bank_id) if s.health == "online"
                 )
             except LookupError:
                 eligible_hub_ids = ()
+            # WP-D: a PQ-sensitive profile (DATA_CENTER) draws only on its PQ-eligible hubs.
+            eligible_hub_ids = pq_eligibility.filter_hub_ids(str(service_type), bank_id, eligible_hub_ids)
             calls.append(
                 ObligationCall(
                     obligation_id=str(obligation_id),
@@ -296,6 +302,7 @@ class EngineLedgerGateway:
                     eligible_hub_ids=eligible_hub_ids,
                     prior_granted_kw=prior_by_obligation.get(str(obligation_id)),
                     value_per_mwh=float(value_per_mwh) if value_per_mwh is not None else 0.0,
+                    in_shortfall=state == "SHORTFALL",
                 )
             )
         return LedgerView(calls=tuple(calls))

@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+from opengrid.core import reasons
 from opengrid.core.crypto import sha256_hex_of_json, sign_payload
 from opengrid.core.models.engine import CommandBatchRow, Verdict, VerdictOutcome
 from opengrid.core.models.mqtt import CommandBatch, StopEvent
@@ -32,7 +33,11 @@ from opengrid.guardian import checks, pq_checks, stop_release
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import BankSnapshot, GuardianPorts, ProposedBatch, ReleaseRequest
-from opengrid.guardian.pq_ports import ProposedCalibrationCommand
+from opengrid.guardian.pq_ports import (
+    CalibrationFleetUsage,
+    CalibrationLedgerPort,
+    ProposedCalibrationCommand,
+)
 from opengrid.platform.metrics import guardian_clock_offset_ms, guardian_verdicts_total
 
 logger = logging.getLogger(__name__)
@@ -95,8 +100,6 @@ class GuardianService:
     )
 
     _evaluated: OrderedDict[UUID, ProposedBatch] = field(default_factory=OrderedDict, init=False)
-    _calibration_epoch: int | None = field(default=None, init=False)
-    _calibration_seq_by_hub: dict[str, int] = field(default_factory=dict, init=False)
 
     async def evaluate_and_sign(self, batch: CommandBatchRow) -> Verdict:
         """Run every applicable G-check against independently-read state; PASS signs, any veto returns
@@ -354,30 +357,31 @@ class GuardianService:
         """S6.7/K14: the sole signing path for a remote-recalibration command. Runs G-20 (clock quality)
         first, then G-25 (lease sanity; bounds within the firmware family's maximum and the correction
         within bounds; per-hub rate limit on the guardian's own signed record; no active PQ-sensitive
-        grant on the hub). On PASS it assigns the command's `(epoch, seq)` itself -- strictly increasing
-        per hub across restarts (`_next_calibration_sequence`) -- signs the full wire envelope
-        (`CalibrationCommand.signing_payload()`, the same fields the hub verifies) and returns it once the
-        signed verdict is durably traced (K10). On any refusal it returns `None` (a hold: the ladder
-        step is skipped, never forced through) and traces the refusal best-effort."""
+        grant on the hub; the fleet-wide budget, concurrency and systemic-drift caps, which also raise
+        ALR-CALIBRATION-BUDGET). On PASS it atomically claims the attempt in the durable command ledger,
+        which assigns the hub's next `(epoch, seq)` (strictly increasing per hub, persisted in
+        `og.calibration_command`), signs the full wire envelope (`CalibrationCommand.signing_payload()`,
+        the same fields the hub verifies; crypto.md S2.5) and returns it once the signed verdict and the
+        ledger row are durable (K10). An attempt already claimed is never signed again. On any refusal it
+        returns `None` (a hold: the ladder step is skipped, never forced through), claims the attempt as
+        refused and traces the refusal best-effort."""
         pq = self.ports.pq
-        if pq is None:
-            await self._trace_calibration_refusal(proposed, CheckOutcome("G-25", False, "PQ_PORTS_NOT_WIRED"))
+        ledger = pq.calibration_ledger if pq is not None else None
+        if pq is None or ledger is None:
+            await self._refuse_calibration(proposed, CheckOutcome("G-25", False, "PQ_CALIBRATION_NOT_WIRED"))
             return None
         if not await self._clock_ok():
-            await self._trace_calibration_refusal(
-                proposed, CheckOutcome("G-20", False, "CLOCK_OFFSET_EXCEEDED")
-            )
+            await self._refuse_calibration(proposed, CheckOutcome("G-20", False, "CLOCK_OFFSET_EXCEEDED"))
             return None
 
         now = self.now_fn()
-        lease = pq_checks.check_g25_calibration_lease(
+        g25 = pq_checks.check_g25_calibration_lease(
             proposed,
             now=now,
             max_lease_s=self.config.calibration_max_lease_s,
             max_issue_skew_s=self.config.calibration_max_issue_skew_s,
         )
-        g25 = lease
-        if lease.ok:
+        if g25.ok:
             g25 = pq_checks.check_g25_calibration_safety(
                 proposed,
                 firmware_max_bounds=await pq.firmware_bounds.max_bounds_for_hub(proposed.hub_id),
@@ -388,11 +392,31 @@ class GuardianService:
                     proposed.hub_id
                 ),
             )
+        if g25.ok:
+            usage = await ledger.fleet_usage(window_s=self.config.calibration_budget_window_s)
+            g25 = pq_checks.check_g25_fleet_budget(
+                fleet_hubs=usage.fleet_hubs,
+                signed_in_window=usage.signed_in_window,
+                in_flight=usage.in_flight,
+                flagged_hubs=usage.flagged_hubs,
+                budget_pct_per_window=self.config.calibration_budget_pct,
+                max_concurrent=self.config.calibration_max_concurrent,
+                systemic_drift_pct=self.config.calibration_systemic_drift_pct,
+            )
+            if not g25.ok:
+                await self._alert_calibration_budget(ledger, g25, usage)
         if not g25.ok:
-            await self._trace_calibration_refusal(proposed, g25)
+            await self._refuse_calibration(proposed, g25)
             return None
 
-        epoch, seq = self._next_calibration_sequence(proposed.hub_id)
+        sequence = await ledger.reserve(proposed.calibration_id, proposed.hub_id)
+        if sequence is None:
+            logger.info(
+                "calibration attempt already claimed; not signing it again",
+                extra={"calibration_id": str(proposed.calibration_id)},
+            )
+            return None
+        epoch, seq = sequence
         command = self.sign_calibration_command(
             CalibrationCommand(
                 calibration_id=proposed.calibration_id,
@@ -430,11 +454,13 @@ class GuardianService:
                     "signature": command.signature,
                 },
             )
+            await ledger.mark_signed(proposed.calibration_id)
         except Exception:
-            # K10: a signed command is released only once its verdict is durable. Holding here is safe:
-            # the ladder's attempt stays PENDING and ages out, and the drift escalates on its own.
+            # K10: a signed command is released only once its verdict and its ledger row are durable.
+            # Holding is safe: the reserved (epoch, seq) is simply never used, the attempt stays claimed,
+            # and the drift escalates on its own timeline.
             logger.exception(
-                "failed to trace signed calibration verdict; withholding the command",
+                "failed to record signed calibration command; withholding it",
                 extra={"calibration_id": str(proposed.calibration_id), "hub_id": proposed.hub_id},
             )
             return None
@@ -545,23 +571,44 @@ class GuardianService:
             update={"signature": sign_payload(self.signing_seed, command.signing_payload())}
         )
 
-    def _next_calibration_sequence(self, hub_id: str) -> tuple[int, int]:
-        """Per-hub strictly increasing `(epoch, seq)` for calibration commands (K6 pattern). The epoch is
-        this process's first-signing wall-clock second (G-20 has just vouched for that clock), so a
-        restarted guardian always starts above every pair the previous process issued; `seq` counts up
-        per hub within the epoch. No durable table is needed and nothing is taken from the proposer."""
-        if self._calibration_epoch is None:
-            self._calibration_epoch = int(self.now_fn().timestamp())
-        seq = self._calibration_seq_by_hub.get(hub_id, 0) + 1
-        self._calibration_seq_by_hub[hub_id] = seq
-        return self._calibration_epoch, seq
+    async def _alert_calibration_budget(
+        self, ledger: CalibrationLedgerPort, outcome: CheckOutcome, usage: CalibrationFleetUsage
+    ) -> None:
+        """ALR-CALIBRATION-BUDGET (raised once while open): the fleet-wide calibration cap or the
+        systemic-drift hold refused a command. Best-effort -- the refusal stands either way."""
+        try:
+            await ledger.raise_alert(
+                "ALR-CALIBRATION-BUDGET",
+                f"remote calibration held: {outcome.reason}",
+                {
+                    "reason": outcome.reason,
+                    "fleet_hubs": usage.fleet_hubs,
+                    "signed_in_window": usage.signed_in_window,
+                    "in_flight": usage.in_flight,
+                    "flagged_hubs": usage.flagged_hubs,
+                },
+            )
+        except Exception:
+            logger.exception("failed to raise ALR-CALIBRATION-BUDGET")
+
+    async def _refuse_calibration(self, proposed: ProposedCalibrationCommand, outcome: CheckOutcome) -> None:
+        """Claim the attempt as refused in the ledger (so it is never re-evaluated or signed later) and
+        trace the refusal. Both best-effort: a refusal signs nothing either way (S6.7: the ladder step is
+        skipped and the drift escalates on its own timeline)."""
+        ledger = self.ports.pq.calibration_ledger if self.ports.pq is not None else None
+        if ledger is not None:
+            try:
+                await ledger.refuse(
+                    proposed.calibration_id, proposed.hub_id, outcome.reason or outcome.rule_id
+                )
+            except Exception:
+                logger.exception("failed to record refused calibration attempt")
+        await self._trace_calibration_refusal(proposed, outcome)
 
     async def _trace_calibration_refusal(
         self, proposed: ProposedCalibrationCommand, outcome: CheckOutcome
     ) -> None:
-        """Best-effort trace of a refused calibration command. The trace row is also what marks the
-        ladder's PENDING attempt as evaluated, so it is not re-evaluated every cycle (S6.7: a refusal
-        skips the ladder step; the drift escalates on its own timeline)."""
+        """Best-effort trace of a refused calibration command."""
         guardian_verdicts_total.labels(outcome="vetoed").inc()
         logger.warning(
             "calibration command refused",
@@ -617,6 +664,27 @@ class GuardianService:
             prior = await self.ports.prior_grants.prior_granted_kw(obligation.obligation_id)
             prior_kw = float(prior) if prior is not None else frozen_kw
             reason_code = reason_by_obligation.get(obligation_key)
+            if reason_code == reasons.R_GRANT_CLOSED_LOOP and checks.g19_reduction_below_floor(
+                new_kw, frozen_kw, prior_kw
+            ):
+                # Need basis (owner decision 2026-09-26): below the reserved maximum is signed only on the
+                # guardian's own reads -- the profile is measured closed-loop, and nothing on this bank is
+                # using the unused reservation.
+                need = checks.check_g19_need_basis(
+                    obligation_key,
+                    setpoint_source=await self._setpoint_source(obligation.obligation_id),
+                    borrowed_by=checks.g19_obligations_over_commitment(
+                        totals,
+                        {str(o.obligation_id): o.frozen_kw for o in active_obligations},
+                        exclude=obligation_key,
+                    ),
+                )
+                if not need.ok:
+                    violations.append(need)
+                continue
+            # A best-effort partial grant after a mid-window SHORTFALL carries the shortfall reason; it is
+            # the override it maps to, and is corroborated below exactly like one.
+            reason_code = checks.g19_lock_reason(reason_code)
             g19 = checks.check_g19_commitment_lock(
                 obligation_key,
                 new_kw,
@@ -643,6 +711,10 @@ class GuardianService:
             if not corroborated.ok:
                 violations.append(corroborated)
         return violations
+
+    async def _setpoint_source(self, obligation_id: UUID) -> str | None:
+        port = self.ports.service_profiles
+        return await port.setpoint_source(obligation_id) if port is not None else None
 
     async def _override_evidence(self, proposal: ProposedBatch) -> _OverrideEvidence:
         """The guardian's own reads a K13 override must agree with: an active L2 instruction on the bank,
@@ -735,6 +807,11 @@ class GuardianService:
         guardian_verdicts_total.labels(
             outcome={"PASS": "signed", "TIMEOUT": "timeout"}.get(outcome, "vetoed")
         ).inc()
+        # Deliberately NOT withheld on a failed verdict trace (unlike the calibration and stop-release
+        # paths, where the trace row IS the durable record): here K10's pre-image is already proven by
+        # G-14 before signing, and `main.py` durably inserts this verdict (with its signature) into
+        # og.verdict before anything is published -- a failed insert publishes nothing. The GUARDIAN_VERDICT
+        # trace is K11 audit on top; losing it must not change the decision (K7, TS property K07).
         await self._trace_verdict(verdict, violations or [])
         return verdict
 
@@ -757,10 +834,10 @@ class GuardianService:
             }
         )
 
-    async def _trace_verdict(self, verdict: Verdict, violations: list[CheckOutcome]) -> None:
-        """Best-effort audit trace of the verdict itself (GUARDIAN_VERDICT, 02a S8.1), including each
-        distinct violation (rule, reason, hub/obligation) so a veto is explainable from the trace alone.
-        Never raises -- the signing decision is already final; a tracing hiccup must not undo it (K7)."""
+    async def _trace_verdict(self, verdict: Verdict, violations: list[CheckOutcome]) -> bool:
+        """Audit trace of the verdict itself (GUARDIAN_VERDICT, 02a S8.1), including each distinct
+        violation (rule, reason, hub/obligation) so a veto is explainable from the trace alone. Never
+        raises; returns False on failure (see `_finalize` for why a PASS still stands)."""
         payload = verdict.model_dump(mode="json")
         payload["violations"] = _violation_summary(violations)
         try:
@@ -769,3 +846,5 @@ class GuardianService:
             logger.exception(
                 "failed to trace guardian verdict", extra={"command_batch_id": str(verdict.command_batch_id)}
             )
+            return False
+        return True

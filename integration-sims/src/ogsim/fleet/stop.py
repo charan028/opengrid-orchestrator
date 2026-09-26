@@ -22,7 +22,7 @@ by the guardian key (Tier-2 approved) and name a second approver distinct
 from the requester (`approver_ref` != `issued_by`). A StopEvent that fails
 this -- wrong key for the action, a bad/missing signature, an unknown action,
 or a RELEASE without two people on it -- is rejected and must never reach
-`StopRegistry.apply_stop_event`.
+`StopRegistry.apply_verified_event`.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ogsim.common.crypto import verify_signature
+from ogsim.fleet.commands import parse_rfc3339
 
 #: "BAD_SIGNATURE" | "UNKNOWN_ACTION" | "NOT_TIER2_APPROVED"; callers log rejects themselves.
 StopRejectReason = str
@@ -82,36 +83,91 @@ def verify_stop_event(
     return None
 
 
+ScopeKey = tuple[str, str | None]
+_MANUAL_STOP_ID = "manual"
+
+
+def _scope_key(scope: str, scope_id: str | None) -> ScopeKey | None:
+    if scope == "fleet":
+        return ("fleet", None)
+    if scope in ("zone", "bank") and scope_id:
+        return (scope, scope_id)
+    return None
+
+
 @dataclass
 class StopRegistry:
-    fleet_stopped: bool = False
-    zones_stopped: set[str] = field(default_factory=set)
-    banks_stopped: set[str] = field(default_factory=set)
+    """K8 stop state, tracked PER STOP, not per scope. A scope is stopped while ANY of its ENGAGE
+    `stop_id`s is outstanding. A verified RELEASE removes only its own `stop_id`; an unknown or
+    already-released id changes nothing. So a replayed old RELEASE can never lift a newer stop, and the
+    retained ENGAGE/RELEASE messages a reconnecting hub receives may arrive in any order:
 
-    def engage(self, scope: str, scope_id: str | None) -> None:
-        if scope == "fleet":
-            self.fleet_stopped = True
-        elif scope == "zone" and scope_id:
-            self.zones_stopped.add(scope_id)
-        elif scope == "bank" and scope_id:
-            self.banks_stopped.add(scope_id)
+    - RELEASE before its ENGAGE: the id is remembered as released, and the late ENGAGE is ignored;
+    - `issued_at` backstop: a RELEASE issued before the newest ENGAGE seen for its scope is ignored.
+    """
 
-    def release(self, scope: str, scope_id: str | None) -> None:
-        if scope == "fleet":
-            self.fleet_stopped = False
-        elif scope == "zone" and scope_id:
-            self.zones_stopped.discard(scope_id)
-        elif scope == "bank" and scope_id:
-            self.banks_stopped.discard(scope_id)
+    #: scope -> {stop_id: ENGAGE issued_at (epoch seconds)}
+    outstanding: dict[ScopeKey, dict[str, float]] = field(default_factory=dict)
+    #: stop_ids already released: a later (replayed or reordered) ENGAGE with one of them is ignored.
+    released: set[str] = field(default_factory=set)
+    #: newest ENGAGE issued_at seen per scope (the RELEASE backstop).
+    newest_engage_at: dict[ScopeKey, float] = field(default_factory=dict)
 
-    def apply_stop_event(self, action: str, scope: str, scope_id: str | None) -> None:
-        if action == "ENGAGE":
-            self.engage(scope, scope_id)
-        elif action == "RELEASE":
-            self.release(scope, scope_id)
+    def engage(
+        self, scope: str, scope_id: str | None, stop_id: str = _MANUAL_STOP_ID, issued_at: float = 0.0
+    ) -> bool:
+        key = _scope_key(scope, scope_id)
+        if key is None or stop_id in self.released:
+            return False
+        self.outstanding.setdefault(key, {})[stop_id] = issued_at
+        self.newest_engage_at[key] = max(self.newest_engage_at.get(key, issued_at), issued_at)
+        return True
+
+    def release_stop(self, scope: str, scope_id: str | None, stop_id: str, issued_at: float) -> bool:
+        """Release exactly `stop_id`. Returns True only if it was outstanding and is now removed."""
+        key = _scope_key(scope, scope_id)
+        if key is None or issued_at < self.newest_engage_at.get(key, float("-inf")):
+            return False
+        self.released.add(stop_id)
+        ids = self.outstanding.get(key, {})
+        if stop_id not in ids:
+            return False
+        del ids[stop_id]
+        return True
+
+    def apply_verified_event(self, event: dict[str, Any]) -> bool:
+        """Apply a StopEvent that `verify_stop_event` has already accepted. Returns True if state changed."""
+        scope, scope_id = str(event.get("scope", "")), event.get("scope_id")
+        stop_id = str(event.get("stop_id", ""))
+        if not stop_id:
+            return False
+        try:
+            issued_at = parse_rfc3339(str(event["issued_at"])).timestamp()
+        except (KeyError, ValueError):
+            return False
+        if event.get("action") == "ENGAGE":
+            return self.engage(scope, scope_id, stop_id, issued_at)
+        if event.get("action") == "RELEASE":
+            return self.release_stop(scope, scope_id, stop_id, issued_at)
+        return False
+
+    def _stopped(self, key: ScopeKey) -> bool:
+        return bool(self.outstanding.get(key))
+
+    @property
+    def fleet_stopped(self) -> bool:
+        return self._stopped(("fleet", None))
+
+    @property
+    def zones_stopped(self) -> set[str]:
+        return {ref for (scope, ref), ids in self.outstanding.items() if scope == "zone" and ids and ref}
+
+    @property
+    def banks_stopped(self) -> set[str]:
+        return {ref for (scope, ref), ids in self.outstanding.items() if scope == "bank" and ids and ref}
 
     def is_stopped(self, zone: str, bank_id: str) -> bool:
-        return self.fleet_stopped or zone in self.zones_stopped or bank_id in self.banks_stopped
+        return self.fleet_stopped or self._stopped(("zone", zone)) or self._stopped(("bank", bank_id))
 
 
 def ramp_toward_zero(current_p_kw: float, dt_s: float, ramp_time_s: float, p_kw_limit: float) -> float:

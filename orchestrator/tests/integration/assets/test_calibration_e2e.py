@@ -67,6 +67,7 @@ def _seed_hub(dsn: str, hub_id: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM og.asset_event WHERE hub_id = %s", (hub_id,))
         cur.execute("DELETE FROM og.maintenance_work_order WHERE hub_id = %s", (hub_id,))
+        cur.execute("DELETE FROM og.calibration_command WHERE hub_id = %s", (hub_id,))
         cur.execute("DELETE FROM og.calibration_attempt WHERE hub_id = %s", (hub_id,))
         cur.execute("DELETE FROM og.pq_waveform_summary WHERE hub_id = %s", (hub_id,))
         cur.execute("DELETE FROM og.hub_inverter_pq WHERE hub_id = %s", (hub_id,))
@@ -142,6 +143,20 @@ async def _configure_pq_ingest(pool, tmp_path) -> None:
     pq_ingest.configure(PgPqIngestBackend(pool), FileBlobStore(str(tmp_path)))
 
 
+async def _issue_like_the_guardian(pool, calibration_id, hub_id: str, ack: dict) -> tuple[dict, object]:
+    """What og-guardian does on signing (its real ledger adapter): claim the attempt with the hub's next
+    (epoch, seq) in og.calibration_command and mark it SIGNED. The hub echoes (epoch, seq) in its ack."""
+    from opengrid.assets.repo import PgCalibrationAckGuard
+    from opengrid.guardian.pq_repo import PgCalibrationLedgerPort
+
+    ledger = PgCalibrationLedgerPort(pool)
+    sequence = await ledger.reserve(calibration_id, hub_id)
+    assert sequence is not None
+    await ledger.mark_signed(calibration_id)
+    epoch, seq = sequence
+    return {**ack, "epoch": epoch, "seq": seq}, PgCalibrationAckGuard(pool)
+
+
 @requires_server
 async def test_calibration_drift_correctable_detect_calibrate_verify_readmit(tmp_path) -> None:
     """ES16/TS-16a: a persistent frequency drift is detected (`run_once` -> WATCH, a `PENDING`
@@ -188,7 +203,9 @@ async def test_calibration_drift_correctable_detect_calibrate_verify_readmit(tmp
             "resulting_offsets": {"freq_hz": 0.0, "voltage_pct": 0.0, "phase_deg": 0.0},
             "status": "APPLIED",
         }
-        outcome = await handle_calibration_ack(service, ack, now=now)
+        ack, guard = await _issue_like_the_guardian(pool, calibration_id, hub_id, ack)
+        outcome = await handle_calibration_ack(service, ack, now=now, topic_hub_id=hub_id, guard=guard)
+        assert await handle_calibration_ack(service, ack, now=now, topic_hub_id=hub_id, guard=guard) is None
         assert outcome is not None and outcome.value == "CORRECTED"
 
         record = await service.ports.asset_health.get(hub_id)
@@ -244,7 +261,8 @@ async def test_calibration_drift_hardware_escalates_to_work_order(tmp_path) -> N
             "resulting_offsets": {"freq_hz": 0.2, "voltage_pct": 0.0, "phase_deg": 0.0},
             "status": "APPLIED",
         }
-        outcome = await handle_calibration_ack(service, ack, now=now)
+        ack, guard = await _issue_like_the_guardian(pool, calibration_id, hub_id, ack)
+        outcome = await handle_calibration_ack(service, ack, now=now, topic_hub_id=hub_id, guard=guard)
         assert outcome is not None and outcome.value == "NO_CHANGE"
 
         record = await service.ports.asset_health.get(hub_id)

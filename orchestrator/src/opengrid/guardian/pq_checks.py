@@ -174,6 +174,38 @@ def check_g25_calibration_safety(
     return CheckOutcome.passed("G-25", hub_id=command.hub_id)
 
 
+def check_g25_fleet_budget(
+    *,
+    fleet_hubs: int,
+    signed_in_window: int,
+    in_flight: int,
+    flagged_hubs: int,
+    budget_pct_per_window: float,
+    max_concurrent: int,
+    systemic_drift_pct: float,
+) -> CheckOutcome:
+    """G-25 fleet-wide caps on AUTONOMOUS recalibration (a per-hub rate limit alone lets the ladder touch
+    the whole fleet in an hour). Refuse when:
+
+    - more than `systemic_drift_pct` of the fleet was flagged for calibration in the window: that many
+      inverters drifting at once is a fleet/grid event (reference, firmware, sensing), not per-inverter
+      drift -- hold every calibration and alert, never "correct" the fleet into it;
+    - `budget_pct_per_window` of the fleet (at least one hub) has already been signed in the window;
+    - `max_concurrent` signed commands are still awaiting their ack.
+
+    An unknown fleet size refuses too (fail closed)."""
+    if fleet_hubs <= 0:
+        return CheckOutcome("G-25", False, "PQ_CALIBRATION_BUDGET_UNKNOWN")
+    if flagged_hubs * 100.0 > systemic_drift_pct * fleet_hubs:
+        return CheckOutcome("G-25", False, "PQ_CALIBRATION_SYSTEMIC_DRIFT_SUSPECTED")
+    budget = max(1, int(fleet_hubs * budget_pct_per_window / 100.0))
+    if signed_in_window >= budget:
+        return CheckOutcome("G-25", False, "PQ_CALIBRATION_FLEET_BUDGET_EXCEEDED")
+    if in_flight >= max_concurrent:
+        return CheckOutcome("G-25", False, "PQ_CALIBRATION_CONCURRENCY_EXCEEDED")
+    return CheckOutcome.passed("G-25")
+
+
 def check_g25_calibration_lease(
     command: ProposedCalibrationCommand, *, now: datetime, max_lease_s: float, max_issue_skew_s: float
 ) -> CheckOutcome:

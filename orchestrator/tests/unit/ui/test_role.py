@@ -16,14 +16,19 @@ from starlette.requests import Request
 from opengrid.platform.config import Config
 from opengrid.ui.role import is_operator, remote_user, role_of
 
+from .conftest import PROXY_HEADERS
+
 _ROLES_CFG = Config({"api": {"roles": {"operator": ["alice"], "viewer": ["carol"]}}})
 
 
-def _request(headers: dict[str, str] | None = None, *, config: Config | None = _ROLES_CFG) -> Request:
+def _request(
+    headers: dict[str, str] | None = None, *, config: Config | None = _ROLES_CFG, proxied: bool = True
+) -> Request:
+    """`proxied=True` adds the proxy secret Apache sets on every real request (conftest.PROXY_HEADERS)."""
     app = FastAPI()
     if config is not None:
         app.state.config = config
-    headers_obj = Headers(headers or {})
+    headers_obj = Headers({**(PROXY_HEADERS if proxied else {}), **(headers or {})})
     scope = {"type": "http", "headers": headers_obj.raw, "method": "GET", "path": "/", "app": app}
     return Request(scope)
 
@@ -84,3 +89,17 @@ def test_remote_user_reads_only_the_trusted_header() -> None:
     assert remote_user(_request({"X-Remote-User": "alice"})) == "alice"
     assert remote_user(_request({"X-OG-Role": "operator"})) is None
     assert remote_user(_request()) is None
+
+
+def test_remote_user_is_none_without_the_proxy_secret() -> None:
+    """Any local process can reach og-api's loopback port and set `X-Remote-User`; without Apache's
+    proxy secret the identity is not believed, so no operator control unlocks."""
+    request = _request({"X-Remote-User": "alice"}, proxied=False)
+    assert remote_user(request) is None
+    assert is_operator(request) is False
+
+
+def test_remote_user_is_none_with_a_wrong_proxy_secret() -> None:
+    request = _request({"X-Remote-User": "alice", "X-OG-Proxy-Auth": "guess"}, proxied=False)
+    assert remote_user(request) is None
+    assert role_of(request) == "viewer"

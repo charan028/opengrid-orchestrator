@@ -421,3 +421,13 @@ class CalibrationAck(_Wire):
     applied_at: datetime
     resulting_offsets: CalibrationOffsets
     status: Literal["APPLIED", "REJECTED", "EXPIRED"]
+    # Additive (crypto.md S2.5): the command's echoed (epoch, seq), the hub's rejection reason, and an
+    # optional hub signature over every other field (enforced when present).
+    epoch: int | None = None
+    seq: int | None = None
+    reject_reason: (
+        Literal["UNKNOWN_HUB", "BAD_SIGNATURE", "EXPIRED", "STALE_SEQ", "RATE_LIMITED", "BOUNDS_EXCEEDED"]
+        | None
+    ) = None
+    key_id: str | None = None
+    signature: str | None = None

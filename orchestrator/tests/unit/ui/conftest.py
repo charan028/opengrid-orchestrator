@@ -29,6 +29,19 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 TEST_ROLES_CONFIG = Config({"api": {"roles": {"operator": ["alice", "bob"], "viewer": ["carol"]}}})
 
 
+#: What Apache sets on every proxied request; `opengrid.ui.role.remote_user` believes `X-Remote-User`
+#: only alongside it (`opengrid.api.auth.verified_remote_user`).
+PROXY_SECRET = "test-proxy-secret"  # noqa: S105 -- a test value, not a secret
+PROXY_HEADERS = {"X-OG-Proxy-Auth": PROXY_SECRET}
+
+
+@pytest.fixture(autouse=True)
+def _proxy_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    from opengrid.api.auth import PROXY_SECRET_ENV
+
+    monkeypatch.setenv(PROXY_SECRET_ENV, PROXY_SECRET)
+
+
 def load_fixture(name: str) -> Any:
     with (FIXTURES_DIR / name).open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -44,7 +57,7 @@ def app() -> FastAPI:
 
 @pytest.fixture
 def client(app: FastAPI) -> TestClient:
-    return TestClient(app)
+    return TestClient(app, headers=PROXY_HEADERS)
 
 
 @pytest.fixture

@@ -37,6 +37,13 @@ DEFAULT_CALIBRATION_MAX_LEASE_S = 300.0
 DEFAULT_CALIBRATION_MAX_ISSUE_SKEW_S = 5.0
 DEFAULT_CALIBRATION_MAX_REQUEST_AGE_S = 600.0
 DEFAULT_CALIBRATION_SYNC_SOURCE: CalibrationSyncSource = "ntp_disciplined"
+#: G-25 fleet caps on autonomous recalibration: at most this % of the fleet signed per window, at most
+#: this many awaiting their ack, and a hold (plus ALR-CALIBRATION-BUDGET) when more than this % of the fleet
+#: is flagged for calibration in the window (a fleet event, not per-inverter drift).
+DEFAULT_CALIBRATION_BUDGET_PCT = 2.0
+DEFAULT_CALIBRATION_BUDGET_WINDOW_S = 3600.0
+DEFAULT_CALIBRATION_MAX_CONCURRENT = 10
+DEFAULT_CALIBRATION_SYSTEMIC_DRIFT_PCT = 5.0
 #: K8: a Tier-2 release approval older than this is never acted on; a signed RELEASE not yet published
 #: by og-safestop is re-handed to it for the same window.
 DEFAULT_STOP_RELEASE_MAX_AGE_S = 300.0
@@ -69,6 +76,10 @@ class GuardianConfig:
     calibration_max_issue_skew_s: float = DEFAULT_CALIBRATION_MAX_ISSUE_SKEW_S
     calibration_max_request_age_s: float = DEFAULT_CALIBRATION_MAX_REQUEST_AGE_S
     calibration_sync_source: CalibrationSyncSource = DEFAULT_CALIBRATION_SYNC_SOURCE
+    calibration_budget_pct: float = DEFAULT_CALIBRATION_BUDGET_PCT
+    calibration_budget_window_s: float = DEFAULT_CALIBRATION_BUDGET_WINDOW_S
+    calibration_max_concurrent: int = DEFAULT_CALIBRATION_MAX_CONCURRENT
+    calibration_systemic_drift_pct: float = DEFAULT_CALIBRATION_SYSTEMIC_DRIFT_PCT
     #: K8: operators allowed to request/approve a stop RELEASE. Empty = no release is ever signed.
     stop_release_authorised_operators: frozenset[str] = frozenset()
     stop_release_max_age_s: float = DEFAULT_STOP_RELEASE_MAX_AGE_S
@@ -128,6 +139,18 @@ def load_guardian_config(cfg: Config) -> GuardianConfig:
         ),
         calibration_sync_source=_sync_source(
             cfg.get("guardian.calibration_sync_source", DEFAULT_CALIBRATION_SYNC_SOURCE)
+        ),
+        calibration_budget_pct=float(
+            cfg.get("guardian.calibration_budget_pct", DEFAULT_CALIBRATION_BUDGET_PCT)
+        ),
+        calibration_budget_window_s=float(
+            cfg.get("guardian.calibration_budget_window_s", DEFAULT_CALIBRATION_BUDGET_WINDOW_S)
+        ),
+        calibration_max_concurrent=int(
+            cfg.get("guardian.calibration_max_concurrent", DEFAULT_CALIBRATION_MAX_CONCURRENT)
+        ),
+        calibration_systemic_drift_pct=float(
+            cfg.get("guardian.calibration_systemic_drift_pct", DEFAULT_CALIBRATION_SYSTEMIC_DRIFT_PCT)
         ),
         stop_release_authorised_operators=frozenset(
             str(op) for op in cfg.get("guardian.stop_release_authorised_operators", []) or []

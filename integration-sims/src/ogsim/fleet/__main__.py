@@ -85,7 +85,7 @@ async def _run_forever() -> None:
     clock = RealClock()
 
     async with aiomqtt.Client(
-        **mqtt_settings(config.mqtt.host, config.mqtt.port, config.mqtt.password)
+        **mqtt_settings(config.mqtt.host, config.mqtt.port, config.mqtt.password, config.mqtt.username)
     ) as raw:
         client = SimMqttClient(AiomqttTransportAdapter(raw), config.mqtt.topic_root)
 
@@ -177,7 +177,17 @@ async def _handle_command_batch(
 #: sim's own scenario assertions use -- narrowed here to the wire schema before publish, never a change
 #: to `calibration.py`'s own outcome-computation logic.
 _CALIBRATION_ACK_WIRE_FIELDS = frozenset(
-    {"calibration_id", "hub_id", "applied", "applied_at", "resulting_offsets", "status"}
+    {
+        "calibration_id",
+        "hub_id",
+        "applied",
+        "applied_at",
+        "resulting_offsets",
+        "status",
+        "epoch",
+        "seq",
+        "reject_reason",
+    }
 )
 
 

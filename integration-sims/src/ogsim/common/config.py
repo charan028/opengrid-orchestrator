@@ -102,12 +102,32 @@ class MqttSettings:
     topic_root: str
 
 
+def resolve_mqtt_credentials(role_user: str, role_password_env: str) -> tuple[str, str]:
+    """Broker credentials, mirroring the orchestrator's `platform.mqtt.resolve_mqtt_credentials`:
+    `OG_MQTT_WS_USER`/`OG_MQTT_WS_PASSWORD` (a workspace, `ogw_<ws>`, reaching only `ogtest/<ws>/#`)
+    always win; otherwise the production role user with its password env var. A workspace (`OG_WS`)
+    without workspace credentials, or a workspace user without a password, is refused."""
+    ws_user = os.environ.get("OG_MQTT_WS_USER", "").strip()
+    if ws_user:
+        ws_password = os.environ.get("OG_MQTT_WS_PASSWORD", "")
+        if not ws_password:
+            raise WorkspaceConfigError("OG_MQTT_WS_USER is set but OG_MQTT_WS_PASSWORD is empty")
+        return ws_user, ws_password
+    if workspace_name():
+        raise WorkspaceConfigError(
+            f"OG_WS={workspace_name()!r} is set but OG_MQTT_WS_USER is not: a workspace never uses the "
+            "production MQTT users"
+        )
+    return role_user, os.environ.get(role_password_env, "")
+
+
 def mqtt_settings_from_env(raw: dict[str, Any]) -> MqttSettings:
+    username, password = resolve_mqtt_credentials("og_sim", "OG_MQTT_SIM_PASSWORD")
     return MqttSettings(
         host=str(os.environ.get("OG_MQTT_HOST") or raw.get("host", "127.0.0.1")),
         port=int(os.environ.get("OG_MQTT_PORT") or raw.get("port", 1883)),
-        username="og_sim",
-        password=os.environ.get("OG_MQTT_SIM_PASSWORD", ""),
+        username=username,
+        password=password,
         topic_root=resolve_topic_root(raw),
     )
 

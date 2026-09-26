@@ -12,6 +12,12 @@ from typing import Any
 CHECK_K1_RESERVE_BREACH = "K1_RESERVE_BREACH"
 CHECK_K2_DOUBLE_SOLD = "K2_DOUBLE_SOLD"
 CHECK_K13_LOCK_VIOLATION = "K13_LOCK_VIOLATION"
+#: A K13 dip explained by a total grant-activity outage (an engine restart, a genuine SCADA/comms
+#: silence) is still flagged -- the chaos harness needs to see it -- but classified separately from a
+#: `K13_LOCK_VIOLATION` (an unexplained realized-below-committed dip while grants WERE flowing). Kept
+#: distinct per the owner's policy call; the classification itself lives in one place
+#: (`checks.classify_dip`).
+CHECK_K13_OUTAGE_GAP = "K13_OUTAGE_GAP"
 CHECK_ORPHAN_RESERVATION = "ORPHAN_RESERVATION"
 CHECK_ORPHAN_COMMITMENT = "ORPHAN_COMMITMENT"
 CHECK_TRACE_VERIFY = "TRACE_VERIFY"
@@ -20,6 +26,7 @@ ALL_CHECKS: tuple[str, ...] = (
     CHECK_K1_RESERVE_BREACH,
     CHECK_K2_DOUBLE_SOLD,
     CHECK_K13_LOCK_VIOLATION,
+    CHECK_K13_OUTAGE_GAP,
     CHECK_ORPHAN_RESERVATION,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_TRACE_VERIFY,
@@ -29,14 +36,19 @@ ALL_CHECKS: tuple[str, ...] = (
 @dataclass(frozen=True, slots=True)
 class Violation:
     """One instance of a check's condition found true. `scope` identifies what was affected (hub_id,
-    bank_id, obligation_id, ...) and is what `condition_key`-style de-duplication in a caller would key
-    on; `detail` carries the numbers a human or the audit trail needs (measured value, threshold,
-    reason codes seen). `magnitude` is the check's own natural unit for its Prometheus counter (kWh for
-    K2's "kWh sold twice", a bare count of 1 for every other check) -- see each `checks.py` function's
+    bank_id, obligation_id, ...); `dedupe_key` is the check's own STABLE natural key for that same
+    condition (e.g. `f"{bank_id}|{interval_start}"`, `f"{hub_id}|{ts}"`) -- `invariants.queries.
+    insert_violations` upserts on `(check_name, dedupe_key)` so a condition that is still true on the
+    next run is recognized as the SAME violation, not counted and stored again (verified live: K2's old
+    unkeyed insert re-counted one over-sale roughly 120x across an hour's worth of 60s re-scans).
+    `detail` carries the numbers a human or the audit trail needs (measured value, threshold, reason
+    codes seen). `magnitude` is the check's own natural unit for its Prometheus counter (kWh for K2's
+    "kWh sold twice", a bare count of 1 for every other check) -- see each `checks.py` function's
     docstring for what it means there.
     """
 
     scope: dict[str, Any]
+    dedupe_key: str
     detail: dict[str, Any] = field(default_factory=dict)
     magnitude: float = 1.0
 
@@ -97,6 +109,7 @@ class InvariantsSummary:
     reserve_breaches: int
     double_sold_kwh: float
     lock_violations: int
+    outage_gaps: int
     orphan_reservations: int
     orphan_commitments: int
     as_of: datetime | None
@@ -110,6 +123,7 @@ class InvariantsSummary:
             reserve_breaches=0,
             double_sold_kwh=0.0,
             lock_violations=0,
+            outage_gaps=0,
             orphan_reservations=0,
             orphan_commitments=0,
             as_of=None,

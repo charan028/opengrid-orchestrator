@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://opengrid.example/interfaces/mqtt/calibration_ack.schema.json",
   "title": "CalibrationAck",
-  "description": "Hub -> orchestrator, published on <root>/ack/cal/<hub_id>, QoS 1 (06-service-profiles-and-power-quality.md S6.7).",
+  "description": "Hub -> orchestrator, published on <root>/ack/cal/<hub_id>, QoS 1 (06-service-profiles-and-power-quality.md S6.7). epoch/seq echo the command's; the orchestrator acts on an ack only if it matches the command the guardian issued, and only once (interfaces/crypto.md S2.5). key_id/signature are an optional hub signature over every other field (JCS), enforced when present.",
   "type": "object",
   "additionalProperties": false,
   "required": ["calibration_id", "hub_id", "applied", "applied_at", "resulting_offsets", "status"],
@@ -21,6 +21,15 @@
         "phase_deg": { "type": "number" }
       }
     },
-    "status": { "type": "string", "enum": ["APPLIED", "REJECTED", "EXPIRED"] }
+    "status": { "type": "string", "enum": ["APPLIED", "REJECTED", "EXPIRED"] },
+    "epoch": { "type": ["integer", "null"], "minimum": 0, "description": "echo of the command's epoch" },
+    "seq": { "type": ["integer", "null"], "minimum": 0, "description": "echo of the command's seq" },
+    "reject_reason": {
+      "type": ["string", "null"],
+      "enum": ["UNKNOWN_HUB", "BAD_SIGNATURE", "EXPIRED", "STALE_SEQ", "RATE_LIMITED", "BOUNDS_EXCEEDED", null],
+      "description": "why a REJECTED/EXPIRED command was not applied; STALE_SEQ/BAD_SIGNATURE/UNKNOWN_HUB are protocol errors, not inverter evidence"
+    },
+    "key_id": { "type": ["string", "null"], "minLength": 1 },
+    "signature": { "type": ["string", "null"], "minLength": 1 }
   }
 }

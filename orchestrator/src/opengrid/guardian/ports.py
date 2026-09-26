@@ -19,6 +19,7 @@ from uuid import UUID
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.guardian.pq_ports import (
     CalibrationHistoryPort,
+    CalibrationLedgerPort,
     FirmwareCalibrationBoundsPort,
     HubAssetStatePort,
     PqEnvelopeStatePort,
@@ -186,6 +187,13 @@ class LeaseStatePort(Protocol):
         ...
 
 
+class ServiceProfilePort(Protocol):
+    async def setpoint_source(self, obligation_id: UUID) -> str | None:
+        """The obligation's current service profile `setpoint_source` (e.g. MEASURED_FEEDBACK for a
+        need-basis closed-loop profile), read by the guardian from the DB; None if it has none."""
+        ...
+
+
 class L2InstructionPort(Protocol):
     async def active_instruction(self, bank_id: str) -> L2Instruction | None: ...
 
@@ -251,6 +259,8 @@ class PqPorts:
     calibration_history: CalibrationHistoryPort
     firmware_bounds: FirmwareCalibrationBoundsPort
     sensitive_grants: SensitiveGrantPort
+    # None: no durable command ledger, so no calibration command is ever signed (fail closed).
+    calibration_ledger: CalibrationLedgerPort | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,3 +284,5 @@ class GuardianPorts:
     bank_members: BankMembersPort | None = None
     # None: the K8 stop-release path is not wired, so every release request is refused.
     stop_release: StopReleasePort | None = None
+    # None: no profile read, so no need-basis (R-GRANT-CLOSED-LOOP) reduction is ever corroborated (VETO).
+    service_profiles: ServiceProfilePort | None = None

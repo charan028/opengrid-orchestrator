@@ -35,7 +35,7 @@ import logging
 
 from fastapi import Request
 
-from opengrid.api.auth import Role, role_for_identity
+from opengrid.api.auth import Role, role_for_identity, verified_remote_user
 from opengrid.api.deps import get_config
 
 logger = logging.getLogger(__name__)
@@ -43,15 +43,15 @@ logger = logging.getLogger(__name__)
 VIEWER = Role.VIEWER.value
 OPERATOR = Role.OPERATOR.value
 
-_REMOTE_USER_HEADER = "x-remote-user"
-
 
 def remote_user(request: Request) -> str | None:
-    """The Apache-authenticated identity for this request (`X-Remote-User`), or `None` if absent.
-    Shared by every UI route so `opengrid.ui.api_client.post_json`'s `remote_user=` always forwards
-    the same value `role_of`/`is_operator` used to decide access here -- never a second, independent
-    read of the header."""
-    return request.headers.get(_REMOTE_USER_HEADER) or None
+    """The Apache-authenticated identity for this request (`X-Remote-User`), or `None` if absent or not
+    asserted by Apache (`opengrid.api.auth.verified_remote_user`: the proxy secret must match, since any
+    local process can reach the loopback port). Shared by every UI route so
+    `opengrid.ui.api_client.post_json`'s `remote_user=` always forwards the same value
+    `role_of`/`is_operator` used to decide access here -- never a second, independent read of the
+    header."""
+    return verified_remote_user(request)
 
 
 def role_of(request: Request) -> str:

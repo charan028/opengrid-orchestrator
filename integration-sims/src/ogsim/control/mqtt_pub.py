@@ -20,18 +20,21 @@ from typing import Any
 
 import aiomqtt
 
-from ogsim.common.config import resolve_topic_root
+from ogsim.common.config import resolve_mqtt_credentials, resolve_topic_root
 from ogsim.control.schema_validation import validate_scenario_cmd
 
 DEFAULT_MQTT_PORT = 1883
 
 
 def mqtt_settings() -> dict[str, Any]:
+    """Workspace credentials (`OG_MQTT_WS_USER`/`OG_MQTT_WS_PASSWORD`) win; otherwise `og_simctl`
+    (`ogsim.common.config.resolve_mqtt_credentials`, which refuses a workspace without its own user)."""
+    username, password = resolve_mqtt_credentials("og_simctl", "OG_MQTT_SIMCTL_PASSWORD")
     return {
         "hostname": os.environ.get("OG_MQTT_HOST", "127.0.0.1"),
         "port": int(os.environ.get("OG_MQTT_PORT", str(DEFAULT_MQTT_PORT))),
-        "username": "og_simctl",
-        "password": os.environ.get("OG_MQTT_SIMCTL_PASSWORD", ""),
+        "username": username,
+        "password": password,
     }
 
 

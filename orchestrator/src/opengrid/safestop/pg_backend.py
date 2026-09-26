@@ -26,6 +26,23 @@ VALUES (%(stop_event_id)s, %(scope_kind)s, %(scope_ref)s, %(action)s, %(initiato
         %(initiator_ref)s, %(reason)s, %(approver_ref)s, %(signature)s)
 """
 
+# Relayed guardian RELEASEs (og-safestop's own "safestop" trace stream) older than the retention window
+# whose retained topic has not been cleared yet (no RETAINED_CLEARED housekeeping row for that stop_id).
+_RELEASES_DUE_FOR_CLEARING_SQL = """
+SELECT t.payload
+FROM og.trace t
+WHERE t.stream_id = 'safestop' AND t.decision_type = 'SAFE_STOP'
+  AND t.payload ->> 'action' = 'RELEASE'
+  AND t.created_at < now() - make_interval(secs => %(retain_s)s)
+  AND NOT EXISTS (
+      SELECT 1 FROM og.trace c
+      WHERE c.stream_id = 'safestop' AND c.payload ->> 'housekeeping' = 'RETAINED_CLEARED'
+        AND c.payload ->> 'stop_id' = t.payload ->> 'stop_id'
+  )
+ORDER BY t.seq
+LIMIT %(limit)s
+"""
+
 _HAS_SIGNATURE_SQL = "SELECT 1 FROM og.stop_event WHERE signature = %(signature)s LIMIT 1"
 
 _LATEST_ACTION_SQL = """
@@ -70,6 +87,12 @@ class PgStopEventBackend:
                     "signature": signature,
                 },
             )
+
+    async def releases_due_for_clearing(self, *, retain_s: float, limit: int) -> list[dict[str, Any]]:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_RELEASES_DUE_FOR_CLEARING_SQL, {"retain_s": retain_s, "limit": limit})
+            rows = await cur.fetchall()
+        return [dict(row[0]) for row in rows]
 
     async def has_signature(self, signature: str) -> bool:
         async with self.pool.connection() as conn, conn.cursor() as cur:

@@ -56,6 +56,7 @@ from opengrid.guardian.ports import (
 )
 from opengrid.guardian.pq_repo import (
     PgCalibrationHistoryPort,
+    PgCalibrationLedgerPort,
     PgHubAssetStatePort,
     PgPqEnvelopeStatePort,
     PgPqMeasurementPort,
@@ -250,6 +251,31 @@ class PgLeaseStatePort:
                 "failed to persist lease_state; next restart may re-permit this (epoch, seq)",
                 extra={"bank_id": bank_id, "epoch": epoch, "seq": seq},
             )
+
+
+# The obligation's latest service profile (og.service_profile, highest version for its contract).
+_SETPOINT_SOURCE_SQL = """
+SELECT sp.setpoint_source
+FROM og.obligation ob
+JOIN LATERAL (
+    SELECT setpoint_source FROM og.service_profile
+    WHERE contract_id = ob.contract_id ORDER BY version DESC LIMIT 1
+) sp ON true
+WHERE ob.obligation_id = %(obligation_id)s
+"""
+
+
+class PgServiceProfilePort:
+    """G-19 need basis: the guardian's own read of an obligation's service-profile setpoint source."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def setpoint_source(self, obligation_id: UUID) -> str | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_SETPOINT_SOURCE_SQL, {"obligation_id": obligation_id})
+            row = await cur.fetchone()
+        return str(row[0]) if row and row[0] is not None else None
 
 
 class PgSafeStopPort:
@@ -577,8 +603,9 @@ def build_clock_port(source: ClockSource, *, cache_s: float = DEFAULT_CLOCK_CACH
 
 # =====================================================================================================
 # S6.7 calibration hand-off: the ladder (`opengrid.assets`) records a PENDING og.calibration_attempt row;
-# the guardian polls it, evaluates G-20/G-25 and signs. The guardian's own verdict trace row (signed or
-# refused) is the claim marker, so each attempt is evaluated at most once and never re-signed.
+# the guardian polls it, evaluates G-20/G-25 and signs. Its og.calibration_command row (the atomic claim,
+# signed or refused; pq_repo.PgCalibrationLedgerPort) excludes the attempt from this queue, so each attempt is
+# decided at most once and never re-signed, even by a concurrent evaluator.
 # =====================================================================================================
 
 _PENDING_CALIBRATIONS_SQL = """
@@ -587,13 +614,7 @@ SELECT ca.calibration_id, ca.hub_id, ca.reference_phase_deg, ca.reference_freq_h
 FROM og.calibration_attempt ca
 WHERE ca.outcome = 'PENDING' AND ca.command_batch_id IS NULL
   AND ca.requested_at > now() - make_interval(secs => %(max_age_s)s)
-  AND NOT EXISTS (
-      SELECT 1 FROM og.trace t
-      WHERE t.event_class = 'GUARDIAN_VERDICT'
-        AND t.created_at > now() - make_interval(secs => %(max_age_s)s) - interval '1 minute'
-        AND t.payload ->> 'kind' = 'CALIBRATION'
-        AND t.payload ->> 'calibration_id' = ca.calibration_id::text
-  )
+  AND NOT EXISTS (SELECT 1 FROM og.calibration_command c WHERE c.calibration_id = ca.calibration_id)
 ORDER BY ca.requested_at
 LIMIT %(limit)s
 """
@@ -827,6 +848,7 @@ def build_pg_ports(
         zones_by_bank=dict(zones_by_bank or {}),
         bank_members=bank_members,
         stop_release=stop_release,
+        service_profiles=PgServiceProfilePort(pool),
         pq=PqPorts(
             envelopes=PgPqEnvelopeStatePort(pool),
             measurements=PgPqMeasurementPort(pool),
@@ -834,6 +856,7 @@ def build_pg_ports(
             calibration_history=PgCalibrationHistoryPort(pool),
             firmware_bounds=StaticFirmwareCalibrationBoundsPort(),
             sensitive_grants=PgSensitiveGrantPort(pool),
+            calibration_ledger=PgCalibrationLedgerPort(pool),
         ),
     )
     return ports, leases

@@ -90,6 +90,38 @@ class FirmwareCalibrationBoundsPort(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class CalibrationFleetUsage:
+    """G-25 fleet-cap inputs over one budget window, all from the guardian's own records."""
+
+    fleet_hubs: int
+    signed_in_window: int  # commands the guardian signed in the window
+    in_flight: int  # signed commands in the window whose ack has not been consumed
+    flagged_hubs: int  # distinct hubs the ladder asked to calibrate in the window
+
+
+class CalibrationLedgerPort(Protocol):
+    """The durable record of guardian-issued calibration commands (`og.calibration_command`): the atomic
+    claim of an attempt, the per-hub strictly increasing (epoch, seq), and the fleet usage G-25 caps."""
+
+    async def reserve(self, calibration_id: UUID, hub_id: str) -> tuple[int, int] | None:
+        """Atomically claim the attempt and assign the hub's next (epoch, seq). `None` if the attempt was
+        already claimed (by an earlier or concurrent evaluation): the caller must not sign it."""
+        ...
+
+    async def mark_signed(self, calibration_id: UUID) -> None: ...
+
+    async def refuse(self, calibration_id: UUID, hub_id: str, reason: str) -> None:
+        """Claim the attempt as refused (idempotent; a no-op if already claimed)."""
+        ...
+
+    async def fleet_usage(self, *, window_s: float) -> CalibrationFleetUsage: ...
+
+    async def raise_alert(self, rule: str, summary: str, detail: dict[str, object]) -> None:
+        """Raise an operator alert once while it stays open (never an alert storm)."""
+        ...
+
+
 class SensitiveGrantPort(Protocol):
     async def has_active_non_default_envelope_grant(self, hub_id: str) -> bool:
         """G-25(iii)/S5.5.4: does `hub_id` currently carry an active committed grant for a non-default-

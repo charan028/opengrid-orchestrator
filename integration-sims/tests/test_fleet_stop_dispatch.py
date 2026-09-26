@@ -40,10 +40,15 @@ def guardian_key() -> Ed25519PrivateKey:
 
 
 def _event(
-    key: Ed25519PrivateKey | None, *, action: str, scope: str = "fleet", scope_id: str | None = None
+    key: Ed25519PrivateKey | None,
+    *,
+    action: str,
+    scope: str = "fleet",
+    scope_id: str | None = None,
+    stop_id: str | None = None,
 ) -> dict:
     event: dict[str, Any] = {
-        "stop_id": str(uuid.uuid4()),
+        "stop_id": stop_id or str(uuid.uuid4()),
         "scope": scope,
         "scope_id": scope_id,
         "action": action,
@@ -62,12 +67,13 @@ async def _dispatch(engine: FleetEngine, topic: str, payload: bytes, safestop, g
     await _dispatch_message(engine, None, topic, payload, guardian.public_key(), safestop.public_key())  # type: ignore[arg-type]
 
 
-async def _engaged_fleet(engine: FleetEngine, safestop, guardian) -> None:
+async def _engaged_fleet(engine: FleetEngine, safestop, guardian) -> str:
     engage = _event(safestop, action="ENGAGE")
     await _dispatch(
         engine, f"ogtest/unit/stop/fleet/{engage['stop_id']}", json.dumps(engage).encode(), safestop, guardian
     )
     assert engine.stops.fleet_stopped
+    return str(engage["stop_id"])
 
 
 @pytest.mark.parametrize("payload", [b"{}", b"null", b"[]", b"0", b"false", b"", b'""'])
@@ -93,8 +99,8 @@ async def test_non_object_payloads_are_ignored_without_crashing_the_consumer(
 async def test_unsigned_release_is_rejected(
     engine: FleetEngine, safestop_key: Ed25519PrivateKey, guardian_key: Ed25519PrivateKey
 ) -> None:
-    await _engaged_fleet(engine, safestop_key, guardian_key)
-    release = _event(None, action="RELEASE")
+    stop_id = await _engaged_fleet(engine, safestop_key, guardian_key)
+    release = _event(None, action="RELEASE", stop_id=stop_id)
     await _dispatch(
         engine, "ogtest/unit/stop/fleet/x", json.dumps(release).encode(), safestop_key, guardian_key
     )
@@ -105,9 +111,9 @@ async def test_unsigned_release_is_rejected(
 async def test_forged_release_is_rejected(
     engine: FleetEngine, safestop_key: Ed25519PrivateKey, guardian_key: Ed25519PrivateKey, forger: str
 ) -> None:
-    await _engaged_fleet(engine, safestop_key, guardian_key)
+    stop_id = await _engaged_fleet(engine, safestop_key, guardian_key)
     key = safestop_key if forger == "safestop" else Ed25519PrivateKey.generate()
-    release = _event(key, action="RELEASE")
+    release = _event(key, action="RELEASE", stop_id=stop_id)
     await _dispatch(
         engine, "ogtest/unit/stop/fleet/x", json.dumps(release).encode(), safestop_key, guardian_key
     )
@@ -117,8 +123,8 @@ async def test_forged_release_is_rejected(
 async def test_guardian_signed_release_lifts_the_stop(
     engine: FleetEngine, safestop_key: Ed25519PrivateKey, guardian_key: Ed25519PrivateKey
 ) -> None:
-    await _engaged_fleet(engine, safestop_key, guardian_key)
-    release = _event(guardian_key, action="RELEASE")
+    stop_id = await _engaged_fleet(engine, safestop_key, guardian_key)
+    release = _event(guardian_key, action="RELEASE", stop_id=stop_id)
     await _dispatch(
         engine, "ogtest/unit/stop/fleet/x", json.dumps(release).encode(), safestop_key, guardian_key
     )
@@ -130,8 +136,8 @@ async def test_the_signed_scope_governs_not_the_topic(
 ) -> None:
     """A guardian-signed release of bank-000 published on the fleet topic releases only bank-000."""
     await _engaged_fleet(engine, safestop_key, guardian_key)
-    engine.stops.engage("bank", "bank-000")
-    release = _event(guardian_key, action="RELEASE", scope="bank", scope_id="bank-000")
+    engine.stops.engage("bank", "bank-000", stop_id="bank-stop-1")
+    release = _event(guardian_key, action="RELEASE", scope="bank", scope_id="bank-000", stop_id="bank-stop-1")
     await _dispatch(
         engine, "ogtest/unit/stop/fleet/x", json.dumps(release).encode(), safestop_key, guardian_key
     )

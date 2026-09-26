@@ -153,22 +153,23 @@ async def test_calibration_ack_handler_validates_then_hands_off_to_assets(monkey
     import opengrid.platform.mqtt as mqtt
     from opengrid.engine import make_calibration_ack_handler
 
-    handled: list[tuple[object, dict]] = []
+    handled: list[tuple[object, dict, object, object]] = []
 
-    async def _handle(service, payload):
-        handled.append((service, payload))
+    async def _handle(service, payload, *, topic_hub_id=None, guard=None):
+        handled.append((service, payload, topic_hub_id, guard))
 
     monkeypatch.setattr(calibration_ack, "handle_calibration_ack", _handle)
-    service = object()
-    handler = make_calibration_ack_handler(service)
+    service, guard = object(), object()
+    handler = make_calibration_ack_handler(service, guard)
 
-    await handler({"hub_id": "hub-1"})  # missing required fields -> dropped
+    await handler({"topic_hub_id": "hub-1", "payload": {"hub_id": "hub-1"}})  # invalid -> dropped
     assert handled == []
 
     monkeypatch.setattr(mqtt, "validate_payload", lambda kind, payload: None)
     good = {"hub_id": "hub-1", "calibration_id": "c1"}
-    await handler(good)
-    assert handled == [(service, good)]
+    await handler({"topic_hub_id": "hub-1", "payload": good})
+    # K8 safety fix: the ack is bound to the hub in its topic and to the durable calibration ledger (guard).
+    assert handled == [(service, good, "hub-1", guard)]
 
 
 async def test_periodic_job_repeats_on_its_interval_and_survives_a_failure() -> None:

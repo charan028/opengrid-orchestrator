@@ -5,9 +5,14 @@ the billing/audit screen, `api/routers/billing.py`).
 
 Reuses `opengrid.trace.store.TraceStore.verify` (built on `opengrid.core.tracehash`) exactly as the
 on-demand endpoint does -- this module never re-implements hashing or chain-walking, only decides WHEN
-to check, WHICH streams exist (`invariants.queries.fetch_trace_stream_ids`, a plain read of `og.trace`
-rather than reaching into `TraceStore`'s own private backend, which belongs to a different owner -- see
-`fetch_trace_stream_ids`'s docstring), and WHAT to do with a failure.
+to check, WHICH streams exist, and WHAT to do with a failure.
+
+Stream discovery and each stream's resume point are both incremental (adversarial-review fix): discovery
+reads `og.trace` only for rows written since the last discovery cursor (`invariants.queries.
+fetch_new_trace_stream_ids`), not a `SELECT DISTINCT stream_id` over the whole table every run; each
+stream's own verify position lives in its own row (`og.invariant_trace_watermark`, `invariants.queries.
+get_trace_watermark`/`upsert_trace_watermark`) rather than one shared jsonb blob rewritten whole on every
+run regardless of how many streams actually advanced.
 """
 
 from __future__ import annotations
@@ -15,7 +20,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -34,41 +38,45 @@ ALR_TRACE_VERIFY_FAILED = "ALR-TRACE-VERIFY-FAILED"
 class TraceVerifyOutcome:
     checked_streams: int
     failed_streams: tuple[str, ...]
-    new_watermark: dict[str, int]  # stream_id -> next from_seq to resume from (last verified seq + 1)
 
 
 async def verify_new_segments(
-    pool: AsyncConnectionPool, trace_store: TraceStore, *, watermark: dict[str, Any]
+    pool: AsyncConnectionPool, trace_store: TraceStore, *, discovery_since: datetime
 ) -> TraceVerifyOutcome:
-    """Verify, for every known stream, the segment from this check's last-verified `seq` onward
-    (`watermark[stream_id]`, or from the start for a stream never checked before). Bounded per run: only
-    the NEW rows since the last check are re-hashed, not the whole chain every time -- the same
-    checkpoint-relative resume `TraceStore.verify`'s `from_seq` already supports for pruned chains (02a
-    S8.3) doubles as this check's own incremental scan.
+    """Discover any stream first written after `discovery_since` that isn't already known
+    (`fetch_new_trace_stream_ids`), register it (`upsert_trace_watermark(..., next_from_seq=0)`), then
+    verify EVERY known stream's segment from its own row's resume point onward. Bounded per run: only
+    the NEW rows since each stream's own last check are re-hashed, not the whole chain every time -- the
+    same checkpoint-relative resume `TraceStore.verify`'s `from_seq` already supports for pruned chains
+    (02a S8.3) doubles as this check's own incremental scan.
 
-    A stream that fails verification keeps its watermark at the last point it verified as broken (not
-    advanced past the break), so the next run finds the same break again until it is fixed -- a
-    verification failure must never be silently skipped past.
+    A stream that fails verification keeps its watermark row at the last point it verified as broken
+    (never advanced past the break), so the next run finds the same break again until it is fixed -- a
+    verification failure must never be silently skipped past. `discovery_since` is the caller's own
+    cursor to advance for the NEXT run (this function does not persist it -- that scalar lives in
+    `TRACE_VERIFY`'s own `og.invariant_check` row, not per-stream).
     """
-    stream_ids = await invariants_queries.fetch_trace_stream_ids(pool)
+    new_stream_ids = await invariants_queries.fetch_new_trace_stream_ids(pool, since=discovery_since)
+    for stream_id in new_stream_ids:
+        await invariants_queries.upsert_trace_watermark(pool, stream_id, next_from_seq=0)
+
+    known_stream_ids = await invariants_queries.fetch_known_trace_stream_ids(pool)
+
     failed: list[str] = []
-    new_watermark: dict[str, int] = dict(watermark)
-    for stream_id in stream_ids:
-        from_seq = int(watermark.get(stream_id, 0))
+    for stream_id in known_stream_ids:
+        from_seq = await invariants_queries.get_trace_watermark(pool, stream_id)
         result = await trace_store.verify(stream_id, from_seq=from_seq)
         if result.ok:
             max_seq = await invariants_queries.fetch_trace_max_seq(pool, stream_id)
             if max_seq is not None:
-                new_watermark[stream_id] = max_seq + 1
+                await invariants_queries.upsert_trace_watermark(pool, stream_id, next_from_seq=max_seq + 1)
         else:
             failed.append(stream_id)
             logger.error(
                 "trace chain verification failed",
                 extra={"stream_id": stream_id, "seq": result.broken_at_seq, "reason": result.reason},
             )
-    return TraceVerifyOutcome(
-        checked_streams=len(stream_ids), failed_streams=tuple(failed), new_watermark=new_watermark
-    )
+    return TraceVerifyOutcome(checked_streams=len(known_stream_ids), failed_streams=tuple(failed))
 
 
 async def raise_or_clear_alert(

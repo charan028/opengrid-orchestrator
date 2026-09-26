@@ -38,8 +38,8 @@ def test_bank_scope_stops_only_that_bank() -> None:
 
 def test_release_clears_the_stop() -> None:
     registry = StopRegistry()
-    registry.engage("zone", "LZ_NORTH")
-    registry.release("zone", "LZ_NORTH")
+    registry.engage("zone", "LZ_NORTH", stop_id="s1", issued_at=100.0)
+    assert registry.release_stop("zone", "LZ_NORTH", "s1", issued_at=200.0)
     assert registry.is_stopped("LZ_NORTH", "bank-000") is False
 
 

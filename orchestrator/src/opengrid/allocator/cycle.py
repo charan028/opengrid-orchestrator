@@ -105,6 +105,7 @@ def cycle(
         tier_result = allocate_tiers(bank_id, calls, cap, shortfall_reason=shortfall_reason)
         shortfalls.extend(tier_result.shortfalls)
         short_obligations = {s.obligation_id: s.reason_code for s in tier_result.shortfalls}
+        tier_short = set(short_obligations)  # short at the bank-capability step (vs. no hub substitute)
 
         remaining_headroom = tier_result.remaining_capability_kw
 
@@ -157,8 +158,13 @@ def cycle(
                 shortfalls.append(realized_short)
                 short_obligations.setdefault(call.obligation_id, realized_short.reason_code)
             if call.obligation_id in short_obligations:
-                # A grant below the committed kW carries its K13 exception (G-19 accepts only these).
+                # A grant below the committed kW carries its K13 exception (G-19 accepts only these); an
+                # obligation already in SHORTFALL carries the best-effort shortfall code G-19 corroborates.
                 reason_code = short_obligations[call.obligation_id]
+                if call.in_shortfall:
+                    reason_code = best_effort_reason(
+                        reason_code, at_bank_capacity=call.obligation_id in tier_short
+                    )
             if result.event is not None:
                 substitutions.append(result.event)
 
@@ -206,6 +212,18 @@ def cycle(
         shortfalls=tuple(shortfalls),
         substitutions=tuple(substitutions),
     )
+
+
+def best_effort_reason(lock_reason: str, *, at_bank_capacity: bool) -> str:
+    """Owner decision 2026-09-26: a SHORTFALL obligation keeps receiving its maximum feasible kW; that
+    partial grant carries the shortfall code (`core.reasons.LOCK_REASON_BY_SHORTFALL`'s keys) that the
+    guardian's G-19 corroborates: an L2 instruction, the bank's capability, or no substitute hub. L0/L1
+    keep their own K13 code (corroborated from the guardian's capability read)."""
+    if lock_reason == reasons.R_COMMIT_LOCK_OVERRIDE_L2:
+        return reasons.R_SHORTFALL_L2_INSTRUCTION
+    if lock_reason == reasons.R_COMMIT_LOCK_INFEASIBLE:
+        return reasons.R_SHORTFALL_BANK_CAPACITY if at_bank_capacity else reasons.R_SHORTFALL_NO_SUBSTITUTE
+    return lock_reason
 
 
 def classify_hub_loss(hubs: Sequence[HubSnapshot]) -> str:

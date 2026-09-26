@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from opengrid.core.crypto import verify_payload
 from opengrid.core.models.mqtt import StopEvent
-from opengrid.safestop.backend import StopEventBackend, StopPublisher
+from opengrid.safestop.backend import ReleaseHousekeepingBackend, StopEventBackend, StopPublisher
 from opengrid.safestop.events import Scope, build_engage_event, stop_topic_suffix, wire_stop_topic_suffix
 from opengrid.safestop.keys import StopSigningKey
 
@@ -150,6 +150,39 @@ class SafestopService:
             extra={"scope": scope_kind, "scope_ref": parsed.scope_id, "stop_id": str(parsed.stop_id)},
         )
         return True
+
+    async def clear_released_retained(
+        self, housekeeping: ReleaseHousekeepingBackend, *, retain_s: float
+    ) -> int:
+        """K8 housekeeping: once a relayed RELEASE has stayed retained for `retain_s` (long enough for any
+        hub that was offline to reconnect and receive it), delete the retained message on that stop's
+        topic with an empty retained publish, and trace it. The topic then holds nothing -- neither the
+        superseded ENGAGE (already replaced by the RELEASE) nor a RELEASE an attacker could replay from
+        the broker. Hubs ignore the empty payload. Returns the number of topics cleared."""
+        cleared = 0
+        for event in await housekeeping.releases_due_for_clearing(retain_s=retain_s, limit=50):
+            try:
+                parsed = StopEvent.model_validate(event)
+            except ValidationError:
+                continue
+            await self.publisher.clear_retained(
+                wire_stop_topic_suffix(parsed.scope, parsed.scope_id, parsed.stop_id)
+            )
+            if self.trace is not None:
+                await self.trace.append(
+                    "safestop",
+                    "SAFE_STOP",
+                    "SAFE_STOP",
+                    {
+                        "housekeeping": "RETAINED_CLEARED",
+                        "stop_id": str(parsed.stop_id),
+                        "scope": parsed.scope,
+                        "scope_id": parsed.scope_id,
+                    },
+                    reason_codes=["SAFE_STOP_HOUSEKEEPING"],
+                )
+            cleared += 1
+        return cleared
 
     def _release_refusal(self, event: Any) -> str | None:
         if self.guardian_public_key is None:

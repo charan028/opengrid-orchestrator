@@ -262,6 +262,48 @@ def check_g19_override_evidence(
     return CheckOutcome.passed("G-19")
 
 
+def g19_lock_reason(reason_code: str | None) -> str | None:
+    """The K13 lock exception a batch reason stands for. A best-effort partial grant after a mid-window
+    SHORTFALL carries the shortfall reason (`core.reasons.LOCK_REASON_BY_SHORTFALL`); it is judged, and
+    corroborated, exactly as the override it maps to. Every other reason is itself."""
+    if reason_code is None:
+        return None
+    return reasons.LOCK_REASON_BY_SHORTFALL.get(reason_code, reason_code)
+
+
+#: `og.service_profile.setpoint_source` of a measured closed-loop (need-basis) profile.
+NEED_BASIS_SETPOINT_SOURCE = "MEASURED_FEEDBACK"
+
+
+def g19_obligations_over_commitment(
+    granted_kw: dict[str, Decimal], committed_kw: dict[str, Decimal], *, exclude: str
+) -> list[str]:
+    """Obligations (other than `exclude`) granted more on this bank this cycle than their own commitment
+    here (0 kW for one with no commitment on the bank). Any such grant could only be using capacity
+    reserved for another obligation, e.g. a need-basis obligation's unused reservation."""
+    return sorted(
+        key
+        for key, kw in granted_kw.items()
+        if key != exclude and kw > committed_kw.get(key, Decimal(0)) + Decimal("1e-9")
+    )
+
+
+def check_g19_need_basis(
+    obligation_id: str, *, setpoint_source: str | None, borrowed_by: list[str]
+) -> CheckOutcome:
+    """K13 need basis (owner decision 2026-09-26): an `R-GRANT-CLOSED-LOOP` grant below the reserved
+    maximum is signed only if (a) the guardian's own read of the obligation's service profile is
+    `MEASURED_FEEDBACK` and (b) no other obligation on the bank is granted beyond its own commitment this
+    cycle (the unused reservation stays locked, never reassigned). Otherwise VETO, as for any reduction."""
+    if setpoint_source != NEED_BASIS_SETPOINT_SOURCE:
+        return CheckOutcome(
+            "G-19", False, "NEED_BASIS_PROFILE_NOT_MEASURED_FEEDBACK", obligation_id=obligation_id
+        )
+    if borrowed_by:
+        return CheckOutcome("G-19", False, "NEED_BASIS_RESERVATION_REASSIGNED", obligation_id=obligation_id)
+    return CheckOutcome.passed("G-19")
+
+
 def check_g20_clock_quality(offset_ms: float, max_offset_ms: float) -> CheckOutcome:
     """K12: refuse to sign when the guardian's own clock offset from NTP exceeds its limit. Runs first,
     before every other check (02a S6.2a) -- every freshness/lease check downstream depends on this

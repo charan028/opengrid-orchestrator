@@ -21,6 +21,7 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -33,8 +34,7 @@ from opengrid.core.pq import (
     PqMeasurement,
     bank_thd_current_pct,
 )
-from opengrid.core.pq.constants import CALIBRATION_MIN_INTERVAL_S_DEFAULT
-from opengrid.guardian.pq_ports import HubAssetSnapshot
+from opengrid.guardian.pq_ports import CalibrationFleetUsage, HubAssetSnapshot
 from opengrid.pq_ingest.aggregation import bank_measurement
 
 logger = logging.getLogger(__name__)
@@ -276,16 +276,11 @@ class PgHubAssetStatePort:
         return HubAssetSnapshot(asset_state=asset_state, ride_through_class=ride_through_class)
 
 
-# The guardian's OWN record of calibration commands it signed (`TraceStorePort.append_calibration_verdict`,
-# event_class GUARDIAN_VERDICT, payload kind CALIBRATION). Bounded to the rate-limit window so the scan
-# stays on `ix_trace_class_time`'s (event_class, created_at) range.
+# The guardian's OWN record of calibration commands it signed: `og.calibration_command` (migration 0016),
+# written only by og-guardian (`PgCalibrationLedgerPort`).
 _LAST_SIGNED_CALIBRATION_SQL = """
-SELECT extract(epoch FROM max(created_at)) FROM og.trace
-WHERE event_class = 'GUARDIAN_VERDICT'
-  AND created_at > now() - make_interval(secs => %(lookback_s)s)
-  AND payload ->> 'kind' = 'CALIBRATION'
-  AND payload ->> 'outcome' = 'SIGNED'
-  AND payload ->> 'hub_id' = %(hub_id)s
+SELECT extract(epoch FROM max(signed_at)) FROM og.calibration_command
+WHERE hub_id = %(hub_id)s AND status = 'SIGNED'
 """
 
 
@@ -295,19 +290,106 @@ class PgCalibrationHistoryPort:
     `pq_ports.CalibrationHistoryPort`): what the rate limit protects is the inverter, and only a
     guardian-signed command ever reaches it."""
 
-    def __init__(
-        self, pool: AsyncConnectionPool, *, lookback_s: float = CALIBRATION_MIN_INTERVAL_S_DEFAULT
-    ) -> None:
+    def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
-        self._lookback_s = lookback_s
 
     async def last_attempt_epoch_s(self, hub_id: str) -> float | None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                _LAST_SIGNED_CALIBRATION_SQL, {"hub_id": hub_id, "lookback_s": self._lookback_s}
-            )
+            await cur.execute(_LAST_SIGNED_CALIBRATION_SQL, {"hub_id": hub_id})
             row = await cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
+
+
+#: Calibration commands use one sequence generation per hub; `seq` is the durable per-hub counter.
+CALIBRATION_EPOCH = 1
+
+_HUB_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('og.calibration_command:' || %(hub_id)s))"
+
+# The INSERT is the atomic claim of the attempt (primary key): ON CONFLICT DO NOTHING returns no row when
+# it was already claimed. The per-hub advisory lock serialises seq assignment; UNIQUE(hub_id, epoch, seq)
+# is the backstop.
+_RESERVE_SQL = """
+INSERT INTO og.calibration_command (calibration_id, hub_id, status, epoch, seq)
+SELECT %(calibration_id)s, %(hub_id)s, 'RESERVED', %(epoch)s, COALESCE(MAX(seq), 0) + 1
+FROM og.calibration_command WHERE hub_id = %(hub_id)s AND epoch = %(epoch)s
+ON CONFLICT (calibration_id) DO NOTHING
+RETURNING epoch, seq
+"""
+
+_MARK_SIGNED_SQL = """
+UPDATE og.calibration_command SET status = 'SIGNED', signed_at = now()
+WHERE calibration_id = %(calibration_id)s AND status = 'RESERVED'
+"""
+
+_REFUSE_SQL = """
+INSERT INTO og.calibration_command (calibration_id, hub_id, status, reason)
+VALUES (%(calibration_id)s, %(hub_id)s, 'REFUSED', %(reason)s)
+ON CONFLICT (calibration_id) DO NOTHING
+"""
+
+_FLEET_USAGE_SQL = """
+SELECT
+  (SELECT count(*) FROM og.hub),
+  (SELECT count(*) FROM og.calibration_command
+    WHERE status = 'SIGNED' AND signed_at > now() - make_interval(secs => %(window_s)s)),
+  (SELECT count(*) FROM og.calibration_command
+    WHERE status = 'SIGNED' AND ack_consumed_at IS NULL AND signed_at > now() - make_interval(secs => %(window_s)s)),
+  (SELECT count(DISTINCT hub_id) FROM og.calibration_attempt
+    WHERE requested_at > now() - make_interval(secs => %(window_s)s))
+"""
+
+_OPEN_ALERT_SQL = "SELECT 1 FROM og.alert WHERE rule = %(rule)s AND cleared_at IS NULL LIMIT 1"
+
+
+class PgCalibrationLedgerPort:
+    """`og.calibration_command`: the atomic claim of an attempt, the durable per-hub (epoch, seq), and the
+    G-25 fleet usage. Alerts go through `opengrid.health.queries.raise_alert` (the single `og.alert`
+    writer), at most once while an alert with the same rule is open."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def reserve(self, calibration_id: UUID, hub_id: str) -> tuple[int, int] | None:
+        params = {"calibration_id": calibration_id, "hub_id": hub_id, "epoch": CALIBRATION_EPOCH}
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_HUB_LOCK_SQL, {"hub_id": hub_id})
+            await cur.execute(_RESERVE_SQL, params)
+            row = await cur.fetchone()
+            await conn.commit()
+        return (int(row[0]), int(row[1])) if row else None
+
+    async def mark_signed(self, calibration_id: UUID) -> None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_MARK_SIGNED_SQL, {"calibration_id": calibration_id})
+            await conn.commit()
+
+    async def refuse(self, calibration_id: UUID, hub_id: str, reason: str) -> None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _REFUSE_SQL, {"calibration_id": calibration_id, "hub_id": hub_id, "reason": reason}
+            )
+            await conn.commit()
+
+    async def fleet_usage(self, *, window_s: float) -> CalibrationFleetUsage:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_FLEET_USAGE_SQL, {"window_s": window_s})
+            row = await cur.fetchone()
+        if row is None:
+            return CalibrationFleetUsage(0, 0, 0, 0)
+        return CalibrationFleetUsage(int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+
+    async def raise_alert(self, rule: str, summary: str, detail: dict[str, object]) -> None:
+        from opengrid.health.model import AlertFinding
+        from opengrid.health.queries import raise_alert
+
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_OPEN_ALERT_SQL, {"rule": rule})
+            if await cur.fetchone() is not None:
+                return
+        finding = AlertFinding(
+            rule=rule, severity="warning", summary=summary, condition_key=rule, detail=dict(detail)
+        )
+        await raise_alert(self._pool, finding, opened_at=datetime.now(UTC))
 
 
 class StaticFirmwareCalibrationBoundsPort:

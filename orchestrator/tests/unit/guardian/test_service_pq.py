@@ -11,11 +11,13 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from uuid import UUID, uuid4
 
+import pytest
+
 from opengrid.core.crypto import private_key_from_seed, verify_payload
 from opengrid.core.models.pq import CalibrationCommand, CalibrationReference
 from opengrid.core.pq import CalibrationBounds, OffsetVector, PqEnvelopeLimits, PqMeasurement
 from opengrid.guardian.ports import PqPorts
-from opengrid.guardian.pq_ports import HubAssetSnapshot, ProposedCalibrationCommand
+from opengrid.guardian.pq_ports import CalibrationFleetUsage, HubAssetSnapshot, ProposedCalibrationCommand
 
 from .conftest import NOW, make_batch_row, make_proposal, service_with, wire_default_passing_scenario
 
@@ -44,6 +46,32 @@ class _Pq:
     asset: HubAssetSnapshot | None = field(default_factory=lambda: HubAssetSnapshot("OK", "CATEGORY_III"))
     last_attempt: float | None = None
     sensitive_grant: bool = False
+    # CalibrationLedgerPort fake: a durable per-hub counter and the claims, shared across "restarts".
+    usage: CalibrationFleetUsage = field(default_factory=lambda: CalibrationFleetUsage(2000, 0, 0, 1))
+    claims: dict = field(default_factory=dict)
+    seq_by_hub: dict = field(default_factory=dict)
+    signed: list = field(default_factory=list)
+    alerts: list = field(default_factory=list)
+
+    async def reserve(self, calibration_id, hub_id):
+        if calibration_id in self.claims:
+            return None
+        self.seq_by_hub[hub_id] = self.seq_by_hub.get(hub_id, 0) + 1
+        self.claims[calibration_id] = ("RESERVED", hub_id)
+        return (1, self.seq_by_hub[hub_id])
+
+    async def mark_signed(self, calibration_id):
+        self.signed.append(calibration_id)
+        self.claims[calibration_id] = ("SIGNED", self.claims[calibration_id][1])
+
+    async def refuse(self, calibration_id, hub_id, reason):
+        self.claims.setdefault(calibration_id, ("REFUSED", hub_id, reason))
+
+    async def fleet_usage(self, *, window_s):
+        return self.usage
+
+    async def raise_alert(self, rule, summary, detail):
+        self.alerts.append((rule, detail["reason"]))
 
     async def tightest_active_limits(self, bank_id):
         return self.limits
@@ -64,7 +92,7 @@ class _Pq:
         return self.sensitive_grant
 
     def ports(self) -> PqPorts:
-        return PqPorts(self, self, self, self, self, self)  # type: ignore[arg-type]
+        return PqPorts(self, self, self, self, self, self, calibration_ledger=self)  # type: ignore[arg-type]
 
 
 def _with_pq(fakes, pq: _Pq):
@@ -172,7 +200,8 @@ async def test_calibration_signature_covers_the_full_wire_envelope_the_hub_verif
 async def test_calibration_epoch_and_seq_are_assigned_by_the_guardian_and_strictly_increase(
     fakes, guardian_config, signing_seed
 ):
-    service = _calibration_service(fakes, guardian_config, signing_seed, _Pq())
+    pq = _Pq()
+    service = _calibration_service(fakes, guardian_config, signing_seed, pq)
     first = await service.evaluate_and_sign_calibration(_calibration(hub_id="hub-1"))
     second = await service.evaluate_and_sign_calibration(_calibration(hub_id="hub-1"))
     other = await service.evaluate_and_sign_calibration(_calibration(hub_id="hub-2"))
@@ -180,9 +209,7 @@ async def test_calibration_epoch_and_seq_are_assigned_by_the_guardian_and_strict
     assert (first.epoch, first.seq) < (second.epoch, second.seq)
     assert other.seq == 1
 
-    restarted = _calibration_service(
-        fakes, guardian_config, signing_seed, _Pq(), now=NOW + timedelta(seconds=5)
-    )
+    restarted = _calibration_service(fakes, guardian_config, signing_seed, pq, now=NOW + timedelta(seconds=5))
     after_restart = await restarted.evaluate_and_sign_calibration(_calibration(hub_id="hub-1"))
     assert after_restart is not None
     assert (after_restart.epoch, after_restart.seq) > (second.epoch, second.seq)
@@ -228,4 +255,79 @@ async def test_a_signed_calibration_is_withheld_when_its_verdict_cannot_be_trace
 async def test_calibration_without_pq_ports_is_refused(fakes, guardian_config, signing_seed):
     service = service_with(fakes, guardian_config, signing_seed)
     assert await service.evaluate_and_sign_calibration(_calibration()) is None
-    assert fakes.trace.calibration_verdicts[-1][1]["reason"] == "PQ_PORTS_NOT_WIRED"
+    assert fakes.trace.calibration_verdicts[-1][1]["reason"] == "PQ_CALIBRATION_NOT_WIRED"
+
+
+# --- durable ledger claim, fleet budget (#10), systemic-drift hold ------------------------------------------
+
+
+async def test_the_sequence_comes_from_the_durable_ledger_not_the_process_or_the_wall_clock(
+    fakes, guardian_config, signing_seed
+):
+    """Regression (#15): (epoch, seq) lived only in memory with a wall-clock epoch. It now comes from
+    the ledger, so a restarted guardian continues the same per-hub counter."""
+    pq = _Pq(seq_by_hub={"hub-1": 41})
+    command = await _calibration_service(
+        fakes, guardian_config, signing_seed, pq
+    ).evaluate_and_sign_calibration(_calibration(hub_id="hub-1"))
+    assert command is not None and (command.epoch, command.seq) == (1, 42)
+    assert pq.signed == [command.calibration_id]
+
+
+async def test_an_attempt_already_claimed_is_never_signed_again(fakes, guardian_config, signing_seed):
+    """#20: the ledger INSERT is the atomic claim; a second evaluation of the same attempt signs nothing."""
+    pq = _Pq()
+    proposed = _calibration()
+    service = _calibration_service(fakes, guardian_config, signing_seed, pq)
+    assert await service.evaluate_and_sign_calibration(proposed) is not None
+    assert await service.evaluate_and_sign_calibration(proposed) is None
+    assert pq.signed == [proposed.calibration_id]
+
+
+@pytest.mark.parametrize(
+    ("usage", "reason"),
+    [
+        (
+            CalibrationFleetUsage(2000, 40, 0, 1),
+            "PQ_CALIBRATION_FLEET_BUDGET_EXCEEDED",
+        ),  # 2% of 2,000 per hour
+        (CalibrationFleetUsage(2000, 3, 10, 1), "PQ_CALIBRATION_CONCURRENCY_EXCEEDED"),
+        (CalibrationFleetUsage(2000, 0, 0, 101), "PQ_CALIBRATION_SYSTEMIC_DRIFT_SUSPECTED"),  # > 5% flagged
+        (CalibrationFleetUsage(0, 0, 0, 0), "PQ_CALIBRATION_BUDGET_UNKNOWN"),
+    ],
+)
+async def test_fleet_caps_hold_calibration_and_alert(fakes, guardian_config, signing_seed, usage, reason):
+    """#10: autonomous calibration had no fleet-wide cap (the sweep covers every hub each minute). The
+    guardian now enforces a budget per window, a concurrency cap and a systemic-drift hold, and alerts."""
+    pq = _Pq(usage=usage)
+    proposed = _calibration()
+    assert (
+        await _calibration_service(fakes, guardian_config, signing_seed, pq).evaluate_and_sign_calibration(
+            proposed
+        )
+        is None
+    )
+    assert pq.alerts == [("ALR-CALIBRATION-BUDGET", reason)]
+    assert pq.claims[proposed.calibration_id][0] == "REFUSED" and pq.signed == []
+    assert fakes.trace.calibration_verdicts[-1][1]["reason"] == reason
+
+
+async def test_within_the_fleet_budget_a_calibration_is_signed(fakes, guardian_config, signing_seed):
+    pq = _Pq(usage=CalibrationFleetUsage(2000, 39, 9, 100))
+    assert (
+        await _calibration_service(fakes, guardian_config, signing_seed, pq).evaluate_and_sign_calibration(
+            _calibration()
+        )
+        is not None
+    )
+    assert pq.alerts == []
+
+
+async def test_calibration_without_a_ledger_is_refused(fakes, guardian_config, signing_seed):
+    pq = _Pq()
+    service = service_with(fakes, guardian_config, signing_seed)
+    service.ports = dataclasses.replace(
+        fakes.as_ports(), pq=dataclasses.replace(pq.ports(), calibration_ledger=None)
+    )
+    assert await service.evaluate_and_sign_calibration(_calibration()) is None
+    assert fakes.trace.calibration_verdicts[-1][1]["reason"] == "PQ_CALIBRATION_NOT_WIRED"

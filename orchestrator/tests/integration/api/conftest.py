@@ -24,6 +24,15 @@ from opengrid.trace.store import TraceStore
 
 OPERATOR_HEADERS = {"X-Remote-User": "operator"}
 VIEWER_HEADERS = {"X-Remote-User": "viewer"}
+# Apache's proxy secret (`opengrid.api.auth.proxy_authenticated`); the client sends it by default.
+PROXY_SECRET = "integration-proxy-secret"  # noqa: S105 -- a test value, not a secret
+
+
+@pytest.fixture(autouse=True)
+def _proxy_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    from opengrid.api.auth import PROXY_SECRET_ENV
+
+    monkeypatch.setenv(PROXY_SECRET_ENV, PROXY_SECRET)
 
 
 def _integration_config() -> Config:
@@ -77,7 +86,7 @@ async def client(pg_dsn: str) -> Iterator[TestClient]:
     # Not entered as a context manager: `create_app()`'s lifespan calls `load_config()`/`make_pool()`
     # unconditionally, which needs `OG_CONFIG` set. Every dependency it would populate is already
     # overridden above, so lifespan startup/shutdown is not needed for these tests.
-    test_client = TestClient(app, client=("127.0.0.1", 51234))
+    test_client = TestClient(app, client=("127.0.0.1", 51234), headers={"X-OG-Proxy-Auth": PROXY_SECRET})
     yield test_client
 
     contracts_module.reset_for_testing()
