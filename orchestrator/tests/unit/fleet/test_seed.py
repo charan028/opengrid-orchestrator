@@ -4,15 +4,18 @@ exercised against a minimal fake pool/cursor, matching `tests/unit/guardian/test
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
 
 from opengrid.fleet.seed import (
+    _ZONE_CENTROIDS,
     BANKS_PER_FEEDER_DEFAULT,
     SimFleetTopologyConfig,
     build_topology,
     feeder_id_for,
+    hub_coordinates,
     load_sim_fleet_topology_config,
     resolve_sim_fleet_config_path,
     seed_topology,
@@ -656,3 +659,46 @@ async def test_seed_writes_the_feeder_id():
 
     bank_params = [params for sql, params in cursor.executed if sql.strip().startswith("INSERT INTO og.bank")]
     assert [p["feeder_id"] for p in bank_params] == ["feeder-LZ_NORTH-00", "feeder-LZ_NORTH-00"]
+
+
+def _km_between(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Great-circle distance in km, enough for an "is it inside the zone" assertion."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    inner = (
+        math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    )
+    return 2 * 6371 * math.asin(math.sqrt(inner))
+
+
+def test_hub_coordinates_are_deterministic() -> None:
+    assert hub_coordinates("hub-00042", "LZ_NORTH") == hub_coordinates("hub-00042", "LZ_NORTH")
+
+
+def test_hub_coordinates_sit_inside_their_load_zone() -> None:
+    """The zone is real; the point inside it is a stable placement. It must never wander out of the
+    zone it claims to be in, or the map would put a North hub in the Gulf."""
+    for zone, centre in _ZONE_CENTROIDS.items():
+        lat, lon = hub_coordinates("hub-00007", zone)
+        assert lat is not None and lon is not None
+        assert _km_between((lat, lon), centre) <= 45.0
+
+
+def test_hub_coordinates_scatter_rather_than_collapse() -> None:
+    """Sequential hub ids must not land on a line: without an avalanche step in the hash, neighbouring
+    ids produce neighbouring angles and the whole fleet draws as a bowtie (seen live on the map)."""
+    points = [hub_coordinates(f"hub-{i:05d}", "LZ_SOUTH") for i in range(200)]
+    lats = sorted(p[0] for p in points)
+    lons = sorted(p[1] for p in points)
+    assert len({round(p[0], 3) for p in points}) > 150  # distinct, not stacked
+    assert lats[-1] - lats[0] > 0.5  # spread across the zone, not a thin band
+    assert lons[-1] - lons[0] > 0.5
+
+
+def test_hub_coordinates_refuse_to_guess_an_unknown_zone() -> None:
+    assert hub_coordinates("hub-00001", "LZ_ATLANTIS") == (None, None)
+
+
+def test_build_topology_gives_every_hub_coordinates() -> None:
+    topology = build_topology(SimFleetTopologyConfig(hub_count=50, bank_count=4))
+    assert all(h.lat is not None and h.lon is not None for h in topology.hubs)
+    assert len({(h.lat, h.lon) for h in topology.hubs}) == 50
