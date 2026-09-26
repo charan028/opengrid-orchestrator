@@ -12,12 +12,12 @@ steps:
     duration: 300
   - at_s: 15
     type: bank_overload
-    target: BANK_12
+    target: bank-012
     params: {kva_over_rating_pct: 30}
     duration: 240
   - at_s: 30
     type: hub_offline
-    target: HUB_0501
+    target: hub-00501
     params: {}
     duration: 180
   - at_s: 45
