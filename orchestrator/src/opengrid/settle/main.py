@@ -26,6 +26,9 @@ from datetime import UTC, datetime
 
 import opengrid.contracts as contracts
 import opengrid.health as health
+from opengrid.assets.runner import run_once as run_asset_drift_sweep
+from opengrid.assets.service import AssetHealthService
+from opengrid.assets.wiring import build_asset_health_service
 from opengrid.contracts.pg_repo import PgContractsRepo
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import clear_alert, raise_alert
@@ -97,6 +100,29 @@ class JobRunner:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+_DEFAULT_ASSET_DRIFT_INTERVAL_S = 60.0
+
+
+def make_asset_drift_job(service: AssetHealthService) -> Callable[[], Awaitable[None]]:
+    """The asset-health drift sweep (`opengrid.assets.runner.run_once`) as an og-settle job: WATCH hubs
+    get a PENDING calibration attempt for the guardian to sign (G-25), DEGRADED hubs a work order."""
+
+    async def asset_drift_job() -> None:
+        result = await run_asset_drift_sweep(service, now=datetime.now(UTC))
+        if result.calibrations_requested or result.work_orders_opened or result.errors:
+            _logger.info(
+                "asset drift sweep",
+                extra={
+                    "evaluated": result.evaluated,
+                    "calibrations_requested": result.calibrations_requested,
+                    "work_orders_opened": result.work_orders_opened,
+                    "errors": result.errors,
+                },
+            )
+
+    return asset_drift_job
 
 
 STALL_RULE = "ALR-SETTLE-STALLED"
@@ -180,6 +206,14 @@ async def _run() -> None:
             prune_job,
         ),
     ]
+    if bool(cfg.get("assets.drift_enabled", False)):
+        jobs.append(
+            (
+                "asset_drift",
+                Cadence(float(cfg.get("assets.drift_interval_s", _DEFAULT_ASSET_DRIFT_INTERVAL_S))),
+                make_asset_drift_job(build_asset_health_service(pool, trace_store)),
+            )
+        )
     runner = JobRunner(jobs)
     watch = StallWatch(
         lambda: runner.stalled({"settle": _STALL_INTERVALS * settle_interval_s}),

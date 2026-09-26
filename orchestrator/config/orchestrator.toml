@@ -114,6 +114,11 @@ bind_host = "127.0.0.1"
 # og-engine /metrics (loopback only): cycle latency, gate duration, flush lag, MQTT ingest lag.
 engine_port = 9101
 
+[assets]
+# Asset-health drift sweep in og-settle (WATCH -> guardian-signed calibration, DEGRADED -> work order).
+drift_enabled = false
+drift_interval_s = 60.0
+
 [pq_ingest]
 # Waveform ingest (06-service-profiles-and-power-quality.md S6.4-6.5): summaries are buffered in og-engine
 # and written in one batch every flush_interval_s; raw captures go to blob_store_dir.

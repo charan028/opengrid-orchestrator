@@ -718,6 +718,9 @@ async def main(cfg: Config) -> None:
         backend = PgEngineBackend(pool)
         fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool, trace_store)
         allocator_mod.configure(ledger_gateway)
+        from opengrid.assets.wiring import build_asset_health_service
+
+        asset_service = build_asset_health_service(pool, trace_store)
         flush_lag = engine_metrics.FlushLag()
         flush_lag.bind()
         state = _EngineState(
@@ -756,7 +759,15 @@ async def main(cfg: Config) -> None:
         ) as client:
             raw_worker = BackgroundIngest("pq-raw", ingest_raw_capture_off_loop)
             raw_task = asyncio.create_task(raw_worker.run())
-            ingest_task = asyncio.create_task(_mqtt_ingest_loop(client, cfg, raw_worker))
+            cal_worker = BackgroundIngest("calibration-ack", make_calibration_ack_handler(asset_service))
+            cal_task = asyncio.create_task(cal_worker.run())
+            summary_worker = BackgroundIngest(
+                "pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX
+            )
+            summary_task = asyncio.create_task(summary_worker.run())
+            ingest_task = asyncio.create_task(
+                _mqtt_ingest_loop(client, cfg, raw_worker, cal_worker, summary_worker)
+            )
             ingest_task.add_done_callback(_log_ingest_exit)
             lag_probe = state.latency.lag_probe
             lag_task = asyncio.create_task(lag_probe.run()) if lag_probe is not None else raw_task
@@ -771,12 +782,53 @@ async def main(cfg: Config) -> None:
                     lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
-                for task in {ingest_task, raw_task, lag_task, persist_task, heartbeat_task}:
+                background = (raw_task, cal_task, summary_task, lag_task, persist_task, heartbeat_task)
+                for task in {ingest_task, *background}:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
     finally:
         await pool.close()
+
+
+#: ~100 s of waveform summaries at 2,000 hubs; beyond that the newest are dropped (counted) rather than
+#: letting a slow database back up into telemetry ingest.
+SUMMARY_QUEUE_MAX = 20_000
+
+
+async def ingest_summary_off_loop(payload: dict[str, Any]) -> None:
+    """Background handler for a waveform summary. `pq_ingest.ingest_summary` flushes inline whenever its
+    buffer reaches a batch -- a database write that, on the MQTT ingest loop, held every hub's telemetry
+    during a host disk stall (live 2026-09-26 06:04-06:09: hubs aged, a delivering obligation flapped
+    AT_RISK). Validation and that flush now run here, off the ingest path."""
+    from opengrid import pq_ingest
+    from opengrid.platform.mqtt import SchemaValidationError, validate_payload
+
+    try:
+        validate_payload("pq_waveform_summary", payload)
+    except SchemaValidationError:
+        logger.warning("dropped invalid waveform summary", extra={"hub_id": payload.get("hub_id")})
+        return
+    await pq_ingest.ingest_summary(payload)
+
+
+def make_calibration_ack_handler(service: Any) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+    """Background handler for `ack/cal/<hub_id>` (S6.7 calibration loop): validate against
+    calibration_ack.schema.json, then `opengrid.assets.calibration_ack.handle_calibration_ack` classifies
+    the outcome and advances the hub's asset state. An invalid ack is logged and dropped."""
+
+    async def _handle(payload: dict[str, Any]) -> None:
+        from opengrid.assets.calibration_ack import handle_calibration_ack
+        from opengrid.platform.mqtt import SchemaValidationError, validate_payload
+
+        try:
+            validate_payload("calibration_ack", payload)
+        except SchemaValidationError:
+            logger.warning("dropped invalid calibration ack", extra={"hub_id": payload.get("hub_id")})
+            return
+        await handle_calibration_ack(service, payload)
+
+    return _handle
 
 
 async def ingest_raw_capture_off_loop(payload: dict[str, Any]) -> None:
@@ -803,7 +855,13 @@ def _log_ingest_exit(task: asyncio.Task[None]) -> None:
     logger.error("mqtt ingest loop exited", exc_info=exc)
 
 
-async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config, raw_worker: BackgroundIngest) -> None:
+async def _mqtt_ingest_loop(
+    client: aiomqtt.Client,
+    cfg: Config,
+    raw_worker: BackgroundIngest,
+    cal_worker: BackgroundIngest | None = None,
+    summary_worker: BackgroundIngest | None = None,
+) -> None:
     """Subscribe to `<root>/tel/#`, `<root>/scada/#`, `<root>/scada/instruction/#` (topics.md) and route
     validated payloads into the fleet twin. Split out of `main` so it runs concurrently with the 2 s
     driving tick as one cancellable task (graceful shutdown, 02b S1.1-S1.3). `client` is already entered
@@ -820,8 +878,11 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config, raw_worker: Bac
     wave_summary_topic = topic(cfg, "scada/wave/+/+/+/summary")
     wave_raw_topic = topic(cfg, "scada/wave/+/+/+/raw")
     ack_topic = topic(cfg, "ack/+")  # hub acks; ack/cal/<hub> (calibration) is a different schema
+    cal_ack_topic = topic(cfg, "ack/cal/+")
     await client.subscribe(tel_topic)
     await client.subscribe(ack_topic)
+    if cal_worker is not None:
+        await client.subscribe(cal_ack_topic)
     await client.subscribe(scada_topic)  # also matches scada/instruction/#, disambiguated below
 
     async for message in client.messages:
@@ -829,10 +890,15 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config, raw_worker: Bac
         try:
             payload = json.loads(message.payload)
             if message.topic.matches(wave_summary_topic):
-                validate_payload("pq_waveform_summary", payload)
-                await pq_ingest.ingest_summary(payload)
+                if summary_worker is not None:
+                    summary_worker.submit(payload)  # validation and any size-triggered flush off the loop
+                else:
+                    validate_payload("pq_waveform_summary", payload)
+                    await pq_ingest.ingest_summary(payload)
             elif message.topic.matches(wave_raw_topic):
                 raw_worker.submit(payload)  # validation, blob write and index insert off the ingest path
+            elif cal_worker is not None and message.topic.matches(cal_ack_topic):
+                cal_worker.submit(payload)  # validation and the asset-state write off the ingest path
             elif message.topic.matches(ack_topic):
                 validate_payload("ack", payload)
                 await fleet.ingest_ack(payload)

@@ -63,6 +63,57 @@ async def test_raw_capture_handler_validates_off_loop_and_drops_invalid(monkeypa
     assert ingested == []
 
 
+async def test_waveform_summaries_are_ingested_off_the_mqtt_loop(monkeypatch) -> None:
+    """Live 2026-09-26 06:04-06:09: pq_ingest.ingest_summary's size-triggered flush ran on the MQTT ingest
+    loop and, during a host disk stall, held telemetry until hubs aged. The summary path is now a
+    background worker; an invalid summary is dropped there."""
+    import opengrid.platform.mqtt as mqtt
+    import opengrid.pq_ingest as pq_ingest
+    from opengrid.engine import SUMMARY_QUEUE_MAX, ingest_summary_off_loop
+
+    ingested: list[dict] = []
+
+    async def _ingest(payload):
+        ingested.append(payload)
+
+    monkeypatch.setattr(pq_ingest, "ingest_summary", _ingest)
+    await ingest_summary_off_loop({"hub_id": "hub-1"})  # invalid -> dropped
+    assert ingested == []
+
+    monkeypatch.setattr(mqtt, "validate_payload", lambda kind, payload: None)
+    worker = BackgroundIngest("pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX)
+    task = asyncio.create_task(worker.run())
+    assert worker.submit({"hub_id": "hub-1", "ok": True})
+    await worker.drain()
+    task.cancel()
+    assert ingested == [{"hub_id": "hub-1", "ok": True}]
+
+
+async def test_calibration_ack_handler_validates_then_hands_off_to_assets(monkeypatch) -> None:
+    """S6.7 calibration loop, engine side: ack/cal/<hub> is validated against calibration_ack.schema.json
+    and handed to opengrid.assets.calibration_ack; an invalid ack never reaches the asset state."""
+    import opengrid.assets.calibration_ack as calibration_ack
+    import opengrid.platform.mqtt as mqtt
+    from opengrid.engine import make_calibration_ack_handler
+
+    handled: list[tuple[object, dict]] = []
+
+    async def _handle(service, payload):
+        handled.append((service, payload))
+
+    monkeypatch.setattr(calibration_ack, "handle_calibration_ack", _handle)
+    service = object()
+    handler = make_calibration_ack_handler(service)
+
+    await handler({"hub_id": "hub-1"})  # missing required fields -> dropped
+    assert handled == []
+
+    monkeypatch.setattr(mqtt, "validate_payload", lambda kind, payload: None)
+    good = {"hub_id": "hub-1", "calibration_id": "c1"}
+    await handler(good)
+    assert handled == [(service, good)]
+
+
 async def test_periodic_job_repeats_on_its_interval_and_survives_a_failure() -> None:
     """A11 regression (live 2026-09-26): fleet persistence (telemetry COPY + 2,000-row hub_state upsert)
     ran inside the 2 s dispatch tick and was its p99 (~700 ms of ~1.1 s). It now runs as its own periodic

@@ -124,6 +124,22 @@ async def test_an_always_failing_job_is_reported_stalled() -> None:
     await runner.stop()
 
 
+async def test_asset_drift_job_runs_the_assets_sweep(monkeypatch) -> None:
+    import opengrid.settle.main as settle_main
+    from opengrid.assets.runner import RunOnceResult
+
+    calls: list[object] = []
+
+    async def _sweep(service, *, now):
+        calls.append(service)
+        return RunOnceResult(evaluated=3, calibrations_requested=1, work_orders_opened=0, errors=0)
+
+    monkeypatch.setattr(settle_main, "run_asset_drift_sweep", _sweep)
+    service = object()
+    await settle_main.make_asset_drift_job(service)()  # type: ignore[arg-type]
+    assert calls == [service]
+
+
 async def test_stall_watch_raises_once_per_episode_and_clears_on_recovery() -> None:
     from opengrid.settle.main import StallWatch
 
