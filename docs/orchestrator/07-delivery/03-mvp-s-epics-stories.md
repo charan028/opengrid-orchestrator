@@ -838,6 +838,8 @@ enforced:
   (`orchestrator/src/opengrid/selector/gate.py:532-602`).
 
 Contract admission and customer-API submission are not gated, and tracing of the transition was not verified.
+Since R2 hotfix v3 (`afb26c2`) only feeds in `[health] firm_blocking_feeds` (default the ERCOT price series
+`np6-905-cd`) set the mode; the load, NWS and EIA feeds alert only.
 Test: `orchestrator/tests/unit/health/test_rules.py:186` (`test_feed_stale_yields_no_new_commitments`).
 
 **ES07-S03 — Hub health: online / stale / fault classification.**
@@ -883,10 +885,14 @@ Priority: Must · FR/story links: none existing (fills a gap: `02b` §6.5 define
 ES07 only told the story of 2 of them) · Invariants: K7 (degrade, don't trip), K9 (one loop per quantity — the
 PI's open-loop fallback is the "outer loop becomes feed-forward only" case) · Dependencies: ES06-S01, ES07-S01,
 ES05-S06 · Estimate: 2 h
-Status: **built** · Code: `orchestrator/src/opengrid/health/model.py:22-27` (all four `DegradedMode` values) ·
-Test: `orchestrator/tests/unit/health/test_rules.py:198` (`test_guardian_down_yields_hold`), `:204`
-(`test_degraded_modes_can_combine`); no test name matched `DIST_DEFERRAL_OPEN_LOOP` specifically by grep, so its
-direct coverage could not be fully verified — see "could not verify" in the final report
+Status: **partly built**. `HOLD` is live. `DIST_DEFERRAL_OPEN_LOOP` could never be produced at `434d230` and
+`6470cfa`. R2 hotfix v3 (`afb26c2`) raises it with `ALR-SCADA-SILENT` after 60 s without any SCADA reading
+(`orchestrator/src/opengrid/health/rules.py:204-240` there). It is fleet-wide rather than per bank as the second
+criterion asks, and the PI loop does not fall back to open loop: only the UI reads the mode · Code:
+`orchestrator/src/opengrid/health/model.py:22-27` (all four `DegradedMode` values) · Test:
+`orchestrator/tests/unit/health/test_rules.py:198` (`test_guardian_down_yields_hold`), `:204`
+(`test_degraded_modes_can_combine`); at `afb26c2` also `test_rules.py:218` (SCADA silent) and
+`orchestrator/tests/unit/health/test_init.py:389-431`
 
 **ES07 subtotal: 5 stories, 12 h.**
 
