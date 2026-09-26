@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
 from fastapi.staticfiles import StaticFiles
 
+from opengrid.ui.api_client import bind_remote_user
 from opengrid.ui.routes import control_room, fleet, health
 from opengrid.ui.templating import TEMPLATES_DIR
 
@@ -22,7 +23,15 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = TEMPLATES_DIR.parent / "static"
 
-router = APIRouter()
+
+async def _forward_remote_user(request: Request) -> None:
+    """Bind the browser request's `X-Remote-User` (set by Apache) so `opengrid.ui.api_client` forwards
+    it to `opengrid.api`. Async on purpose: a sync dependency runs in a worker thread and its
+    `ContextVar.set` would not reach the endpoint."""
+    bind_remote_user(request.headers.get("x-remote-user"))
+
+
+router = APIRouter(dependencies=[Depends(_forward_remote_user)])
 router.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 router.include_router(control_room.router)
 router.include_router(fleet.router)

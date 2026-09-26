@@ -179,7 +179,9 @@ def ui_base_url() -> Iterator[str]:
 
 
 def _role_page(browser: Browser, base_url: str, role: str) -> Iterator[Page]:
-    context = browser.new_context(base_url=base_url, extra_http_headers={ROLE_HEADER: role})
+    context = browser.new_context(
+        base_url=base_url, extra_http_headers={ROLE_HEADER: role, "X-Remote-User": role}
+    )
     page = context.new_page()
     page.route(_MAP_TILE_URL_GLOB, lambda route: route.abort())  # map tiles add nothing to the assertions
     try:

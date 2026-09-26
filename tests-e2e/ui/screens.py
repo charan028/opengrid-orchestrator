@@ -22,7 +22,7 @@ SCREENS: tuple[tuple[str, str], ...] = (
 # (path, SSE stream name) -- screens that subscribe to `/og/api/stream/<name>` via `og.sse` (02b S7.2).
 LIVE_SCREENS: tuple[tuple[str, str], ...] = (
     (f"{BASE_PATH}/", "control-room"),
-    (f"{BASE_PATH}/fleet", "fleet"),
+    (f"{BASE_PATH}/fleet", "health"),  # api serves no fleet stream (NEEDS_FROM_OTHER_OWNERS.md)
     (f"{BASE_PATH}/dispatch", "dispatch"),
     (f"{BASE_PATH}/health", "health"),
 )
