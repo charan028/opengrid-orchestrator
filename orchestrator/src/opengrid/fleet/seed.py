@@ -281,6 +281,7 @@ def build_topology(
                 e_kwh=e_kwh,
                 r_kwh=r_kwh,
                 p_kw=p_kw,
+                units=2 if dual_unit else 1,
                 eta_c=config.eta_c,
                 eta_d=config.eta_d,
                 lat=lat,
@@ -356,6 +357,7 @@ def _build_zone_block(
                 e_kwh=e_kwh,
                 r_kwh=e_kwh * config.reserve_frac_default,
                 p_kw=p_kw,
+                units=2 if dual_unit else 1,
                 eta_c=config.eta_c,
                 eta_d=config.eta_d,
                 lat=lat,
@@ -385,13 +387,13 @@ ON CONFLICT (bank_id) DO UPDATE SET
 """
 
 _UPSERT_HUB_SQL = """
-INSERT INTO og.hub (hub_id, bank_id, zone, e_kwh, r_kwh, p_kw, eta_c, eta_d, lat, lon)
+INSERT INTO og.hub (hub_id, bank_id, zone, e_kwh, r_kwh, p_kw, eta_c, eta_d, lat, lon, units)
 VALUES (%(hub_id)s, %(bank_id)s, %(zone)s, %(e_kwh)s, %(r_kwh)s, %(p_kw)s, %(eta_c)s, %(eta_d)s,
-        %(lat)s, %(lon)s)
+        %(lat)s, %(lon)s, %(units)s)
 ON CONFLICT (hub_id) DO UPDATE SET
     bank_id = EXCLUDED.bank_id, zone = EXCLUDED.zone, e_kwh = EXCLUDED.e_kwh, r_kwh = EXCLUDED.r_kwh,
     p_kw = EXCLUDED.p_kw, eta_c = EXCLUDED.eta_c, eta_d = EXCLUDED.eta_d, lat = EXCLUDED.lat,
-    lon = EXCLUDED.lon
+    lon = EXCLUDED.lon, units = EXCLUDED.units
 """
 
 
@@ -431,6 +433,8 @@ async def seed_topology(pool: AsyncConnectionPool, topology: Topology) -> SeedRe
                     "eta_d": hub.eta_d,
                     "lat": hub.lat,
                     "lon": hub.lon,
+                    # Explicit, never left to 0032's e_kwh-derived insert trigger: G-02 caps 11 kW per unit.
+                    "units": hub.units,
                 },
             )
         await conn.commit()

@@ -36,8 +36,10 @@ class CalibrationCandidate:
 
     calibration_id: UUID
     hub_id: str
-    epoch: int
-    seq: int
+    epoch: int | None
+    """`None` until the guardian assigns the real per-hub (epoch, seq) on `og.calibration_command`
+    (migration 0016) when it signs; the ladder never invents one (#30)."""
+    seq: int | None
     issued_at: datetime
     expires_at: datetime
     reference: CalibrationReference
@@ -51,11 +53,11 @@ def build_calibration_candidate(
     measured_offset: OffsetVector,
     bounds: CalibrationBounds,
     reference: CalibrationReference,
-    epoch: int,
-    seq: int,
     issued_at: datetime,
     lease_ttl_s: float,
     calibration_id: UUID | None = None,
+    epoch: int | None = None,
+    seq: int | None = None,
 ) -> CalibrationCandidate:
     """S5.5.4: the correction is the negative of the measured offset, clipped to `bounds` (`opengrid.
     core.pq.compute_correction` -- the SAME clipping G-25 re-checks defense-in-depth). `lease_ttl_s`

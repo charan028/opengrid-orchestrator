@@ -99,7 +99,7 @@ async def test_request_calibration_refused_while_sensitive_grant_active_es18(ser
         latest_measured_offset=ZERO_OFFSET,
     )
     candidate = await service.request_calibration(
-        HUB_ID, reference=REFERENCE, bounds=BOUNDS, epoch=1, seq=1, now=NOW, lease_ttl_s=30.0
+        HUB_ID, reference=REFERENCE, bounds=BOUNDS, now=NOW, lease_ttl_s=30.0
     )
     assert candidate is None
 
@@ -112,7 +112,7 @@ async def test_request_calibration_refused_within_rate_limit(service, fakes):
         latest_measured_offset=ZERO_OFFSET,
     )
     candidate = await service.request_calibration(
-        HUB_ID, reference=REFERENCE, bounds=BOUNDS, epoch=1, seq=1, now=NOW, lease_ttl_s=30.0
+        HUB_ID, reference=REFERENCE, bounds=BOUNDS, now=NOW, lease_ttl_s=30.0
     )
     assert candidate is None
 
@@ -124,12 +124,31 @@ async def test_request_calibration_builds_candidate_and_records_attempt(service,
         latest_measured_offset=OffsetVector(freq_hz=0.03, voltage_pct=0.5, phase_deg=1.0),
     )
     candidate = await service.request_calibration(
-        HUB_ID, reference=REFERENCE, bounds=BOUNDS, epoch=1, seq=1, now=NOW, lease_ttl_s=30.0
+        HUB_ID, reference=REFERENCE, bounds=BOUNDS, now=NOW, lease_ttl_s=30.0
     )
     assert candidate is not None
     assert candidate.hub_id == HUB_ID
     assert candidate.calibration_id in fakes.calibration_attempts.attempts
     assert fakes.trace.appended[-1][0] == "CALIBRATION_ATTEMPT"
+
+
+async def test_request_calibration_without_epoch_seq_leaves_them_to_the_guardian(service, fakes):
+    """#30: no placeholder (epoch, seq). The candidate carries none, the PENDING attempt row carries none,
+    and the trace carries none -- the guardian assigns the real per-hub pair on og.calibration_command."""
+    fakes.drift.windows[HUB_ID] = DriftObservationWindow(
+        exceeded_per_summary=[True] * 10,
+        correlates_with_fleet_event=False,
+        latest_measured_offset=OffsetVector(freq_hz=0.03, voltage_pct=0.5, phase_deg=1.0),
+    )
+    candidate = await service.request_calibration(
+        HUB_ID, reference=REFERENCE, bounds=BOUNDS, now=NOW, lease_ttl_s=30.0
+    )
+    assert candidate is not None
+    assert candidate.epoch is None
+    assert candidate.seq is None
+    assert candidate.calibration_id in fakes.calibration_attempts.attempts
+    payload = fakes.trace.appended[-1][1]
+    assert "epoch" not in payload and "seq" not in payload
 
 
 async def test_record_calibration_result_corrected_returns_to_ok_es16(service, fakes):
