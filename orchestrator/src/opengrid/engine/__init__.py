@@ -326,6 +326,7 @@ class _EngineState:
     epoch: int = 1
     latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
     phase_timer: PhaseTimer = field(default_factory=PhaseTimer)
+    last_tick_at: float | None = None  # monotonic time the last tick completed (heartbeat liveness)
     escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
     pq_flush: Cadence | None = None
     gate_task: asyncio.Task[int] | None = None
@@ -343,6 +344,7 @@ async def timed_tick(state: _EngineState) -> None:
         await _engine_tick(state)
     finally:
         finished = time.monotonic()
+        state.last_tick_at = finished
         state.latency.record((finished - started) * 1000.0, state.phase_timer.phases)
         if state.latency.report_due(finished):
             summary = state.latency.summary()
@@ -433,6 +435,19 @@ async def _flush_pq_summaries(state: _EngineState) -> None:
         logger.exception("pq_ingest flush failed; retrying next interval")
 
 
+async def beat_if_ticking(state: Any, *, monotonic_now: float | None = None) -> bool:
+    """Write og-engine's heartbeat, run by `run_periodic` beside the dispatch tick -- but only while that
+    tick keeps completing (within 3 cycles), so a hung tick still reads as "engine down" to health. The
+    tick itself never waits on the heartbeat's synchronous commit (a host disk stall on 2026-09-26 made
+    that commit take up to 10 s, and the tick waited). Returns whether a heartbeat was written."""
+    now = time.monotonic() if monotonic_now is None else monotonic_now
+    last = state.last_tick_at
+    if last is None or now - last > 3 * state.cycle_interval_s:
+        return False
+    await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
+    return True
+
+
 async def persist_fleet_state(state: Any) -> None:
     """One fleet-persistence pass, run by `run_periodic` beside (never inside) the dispatch tick: flush
     the twin's buffered telemetry/SCADA/acks and hub_state rows, then the buffered PQ summaries. A failed
@@ -463,9 +478,8 @@ async def _engine_tick(state: _EngineState) -> None:
     # Fleet persistence (telemetry COPY, hub_state upsert, SCADA/ack rows, PQ summaries) runs in its own
     # periodic task (`persist_fleet_state`): nothing in this tick reads it back -- dispatch uses the
     # in-memory twin and the guardian its own MQTT view -- and it was ~700 ms of the tick's p99 (A11).
+    # The heartbeat is its own task too (`beat_if_ticking`), gated on this tick completing.
     phase = state.phase_timer.phase
-    with phase("heartbeat"):
-        await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
 
     with phase("gate_schedule"):
         triggers = state.gate_scheduler.due_triggers(
@@ -698,12 +712,15 @@ async def main(cfg: Config) -> None:
             persist_task = asyncio.create_task(
                 run_periodic("fleet-persist", state.cycle_interval_s, lambda: persist_fleet_state(state))
             )
+            heartbeat_task = asyncio.create_task(
+                run_periodic("heartbeat", state.cycle_interval_s, lambda: beat_if_ticking(state))
+            )
             try:
                 await run_forever(
                     lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
-                for task in {ingest_task, raw_task, lag_task, persist_task}:
+                for task in {ingest_task, raw_task, lag_task, persist_task, heartbeat_task}:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task

@@ -135,7 +135,7 @@ async def test_a_failed_fleet_flush_still_flushes_pq_summaries(monkeypatch) -> N
     assert calls == ["pq"]
 
 
-def test_the_dispatch_tick_no_longer_persists_the_fleet_twin() -> None:
+def test_the_dispatch_tick_no_longer_persists_the_fleet_twin_or_writes_the_heartbeat() -> None:
     import inspect
 
     import opengrid.engine as engine
@@ -143,3 +143,46 @@ def test_the_dispatch_tick_no_longer_persists_the_fleet_twin() -> None:
     source = inspect.getsource(engine._engine_tick)
     assert "fleet.flush(" not in source
     assert "_flush_pq_summaries(" not in source
+    assert "write_heartbeat(" not in source
+
+
+async def test_heartbeat_is_written_only_while_the_tick_keeps_completing(monkeypatch) -> None:
+    """Live 2026-09-26 04:30: a host disk stall made each synchronous heartbeat commit take up to 10 s, and
+    because the heartbeat was the tick's first await, dispatch waited on it. The heartbeat is now its own
+    task, and it still stops when the tick stops completing, so a hung tick still reads as engine down."""
+    import types
+
+    import opengrid.engine as engine
+
+    beats: list[str] = []
+
+    async def _write(pool, name):
+        beats.append(name)
+
+    monkeypatch.setattr(engine, "write_heartbeat", _write)
+    state = types.SimpleNamespace(
+        heartbeat_pool=object(), last_tick_at=None, cycle_interval_s=2.0, heartbeat_interval_s=5.0
+    )
+
+    assert await engine.beat_if_ticking(state, monotonic_now=100.0) is False  # no tick yet
+    state.last_tick_at = 98.0
+    assert await engine.beat_if_ticking(state, monotonic_now=100.0) is True
+    assert await engine.beat_if_ticking(state, monotonic_now=104.0) is True  # within 3 cycles (6 s)
+    assert await engine.beat_if_ticking(state, monotonic_now=104.5) is False  # tick stuck
+    assert beats == ["engine", "engine"]
+
+
+async def test_timed_tick_records_completion_even_when_the_tick_raises(monkeypatch) -> None:
+    import opengrid.engine as engine
+
+    async def _boom(state):
+        raise RuntimeError("tick failed")
+
+    monkeypatch.setattr(engine, "_engine_tick", _boom)
+    state = engine._EngineState.__new__(engine._EngineState)
+    state.latency = engine.CycleLatencyWindow(report_every_s=1e9)
+    state.latency.report_due(0.0)
+    state.last_tick_at = None
+    with contextlib.suppress(RuntimeError):
+        await engine.timed_tick(state)
+    assert state.last_tick_at is not None
