@@ -208,6 +208,58 @@ def _is_dual_unit(index: int, bank_count: int, dual_unit_share: float) -> bool:
     return math.floor((k + 1) * dual_unit_share) > math.floor(k * dual_unit_share)
 
 
+# Real ERCOT load-zone centroids (the same public geometry the simulators' map uses). A zone is huge;
+# real homes cluster around its metro, so a hub is scattered inside `_HUB_SCATTER_KM` of the centroid.
+_ZONE_CENTROIDS: dict[str, tuple[float, float]] = {
+    "LZ_NORTH": (32.78, -96.80),  # North Central (Dallas-Fort Worth)
+    "LZ_SOUTH": (29.90, -98.20),  # South Central (San Antonio - Austin)
+    "LZ_HOUSTON": (29.76, -95.37),  # Coast (Houston)
+    "LZ_WEST": (32.09, -100.44),  # West
+    "LZ_AEN": (30.27, -97.74),  # Austin Energy
+    "LZ_CPS": (29.42, -98.49),  # CPS Energy (San Antonio)
+    "LZ_RAYBN": (33.20, -96.10),  # Rayburn Country
+    "LZ_LCRA": (30.55, -98.39),  # LCRA
+}
+_HUB_SCATTER_KM = 45.0
+_KM_PER_DEGREE_LAT = 111.0
+
+
+def _hash_unit(text: str) -> float:
+    """A stable hash of `text` in [0, 1). FNV-1a plus murmur3's finalizer -- the avalanche step matters:
+    hub ids are sequential, and without it neighbouring ids produce neighbouring angles and the fleet
+    collapses onto a line instead of filling the zone."""
+    h = 2166136261
+    for char in text:
+        h = ((h ^ ord(char)) * 16777619) & 0xFFFFFFFF
+    h ^= h >> 15
+    h = (h * 2246822507) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 3266489909) & 0xFFFFFFFF
+    h ^= h >> 16
+    return h / 0x100000000
+
+
+def hub_coordinates(hub_id: str, zone: str) -> tuple[float | None, float | None]:
+    """Where this hub sits, as a (lat, lon) pair -- deterministic, so a hub never moves between seeds.
+
+    The simulated fleet has no real street addresses, so a hub is placed at a stable pseudo-random point
+    within ~45 km of its *real* load-zone centroid, the same way the simulators' reference map scatters
+    homes inside a real ZIP. The zone is real; the point inside it is not, and nothing downstream should
+    treat it as a surveyed location. Replace this with the real installation coordinate the moment the
+    fleet carries one -- every consumer already reads `og.hub.lat`/`lon`.
+
+    An unknown zone yields `(None, None)` rather than a guess.
+    """
+    centre = _ZONE_CENTROIDS.get(zone)
+    if centre is None:
+        return None, None
+    angle = _hash_unit(hub_id) * 2 * math.pi
+    radius_km = _HUB_SCATTER_KM * math.sqrt(_hash_unit(f"{hub_id}:r"))
+    lat = centre[0] + (radius_km / _KM_PER_DEGREE_LAT) * math.cos(angle)
+    lon = centre[1] + (radius_km / (_KM_PER_DEGREE_LAT * math.cos(math.radians(centre[0])))) * math.sin(angle)
+    return round(lat, 6), round(lon, 6)
+
+
 def build_topology(
     config: SimFleetTopologyConfig, *, banks_per_feeder: int = BANKS_PER_FEEDER_DEFAULT
 ) -> Topology:
@@ -233,6 +285,7 @@ def build_topology(
         e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default
         p_kw = config.p_kw_dual_unit if dual_unit else config.p_kw_default
         r_kwh = e_kwh * config.reserve_frac_default
+        _lat, _lon = hub_coordinates(hub_id, zone)
         hubs.append(
             Hub(
                 hub_id=hub_id,
@@ -243,6 +296,8 @@ def build_topology(
                 p_kw=p_kw,
                 eta_c=config.eta_c,
                 eta_d=config.eta_d,
+                lat=_lat,
+                lon=_lon,
             )
         )
         hub_zone_by_bank.setdefault(bank_id, {}).setdefault(zone, 0)
@@ -304,9 +359,11 @@ def _build_zone_block(
         dual_unit = _is_dual_unit(j, block.banks, config.dual_unit_share)
         e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default
         p_kw = config.p_kw_dual_unit if dual_unit else config.p_kw_default
+        block_hub_id = f"hub-{hub_offset + j:05d}"
+        block_lat, block_lon = hub_coordinates(block_hub_id, block.zone)
         hubs.append(
             Hub(
-                hub_id=f"hub-{hub_offset + j:05d}",
+                hub_id=block_hub_id,
                 bank_id=f"bank-{bank_offset + (j % block.banks):03d}",
                 zone=block.zone,
                 e_kwh=e_kwh,
@@ -314,6 +371,8 @@ def _build_zone_block(
                 p_kw=p_kw,
                 eta_c=config.eta_c,
                 eta_d=config.eta_d,
+                lat=block_lat,
+                lon=block_lon,
             )
         )
 

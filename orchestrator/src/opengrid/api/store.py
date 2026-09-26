@@ -284,8 +284,8 @@ class PgStore:
         # dynamic clause selection, not string-built SQL values (the same pattern repeats in every
         # other list_*/*_events method below, each with its own lint suppression on the literal).
         sql = f"""
-            SELECT h.hub_id, h.bank_id, h.zone, s.soc_kwh, s.p_kw, s.health, s.lease_epoch,
-                   s.lease_expires_at, s.last_command_id, s.last_seen_at, s.fault_code
+            SELECT h.hub_id, h.bank_id, h.zone, h.lat, h.lon, s.soc_kwh, s.p_kw, s.health,
+                   s.lease_epoch, s.lease_expires_at, s.last_command_id, s.last_seen_at, s.fault_code
             FROM og.hub_state s JOIN og.hub h ON h.hub_id = s.hub_id
             WHERE {" AND ".join(clauses)}
             ORDER BY s.hub_id LIMIT %s OFFSET %s
