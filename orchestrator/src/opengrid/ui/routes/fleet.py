@@ -45,6 +45,9 @@ _LEGACY_HUBS_PATH = "/og/api/fleet/hubs"
 # R3.1: operator manual targets (ramped by the engine) and the grid-charging schedule (FOLLOWUPS' API)
 _TARGETS_PATH = "/og/api/fleet/manual-targets"
 _CHARGE_WINDOWS_PATH = "/og/api/fleet/charge-windows"
+_HOME_STATIONS_PATH = "/og/api/fleet/home-stations"
+#: Owner asset classes (R3.1): shape + colour on the map, a column, a filter and a drawer badge.
+ASSET_LABELS: dict[str, str] = {"HOME": "Home battery", "MOBILE": "Truck", "UTILITY_SCALE": "Substation BESS"}
 DEFAULT_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 240
 #: D-30: most specific wins, Fleet < Provider < Zone < Substation < Feeder < Bank < Hub.
@@ -134,6 +137,8 @@ def map_hub(hub: dict[str, Any]) -> dict[str, Any]:
         "lon": hub.get("lon"),
         "serving_obligations": hub.get("serving_obligations") or [],
         "can_serve_services": hub.get("can_serve_services") or [],
+        "asset_class": hub.get("asset_class") or "HOME",
+        "rated_p_kw": hub.get("rated_p_kw"),
     }
 
 
@@ -290,6 +295,7 @@ class TableState:
     hw: tuple[str, ...] = ()
     fw: tuple[str, ...] = ()
     fw_not: str = ""
+    asset: tuple[str, ...] = ()
     sort: str = "hub"
     dir: str = "asc"
     size: int = DEFAULT_PAGE_SIZE
@@ -308,6 +314,7 @@ class TableState:
         out += [("fw", v) for v in self.fw]
         if self.fw_not:
             out.append(("fw_not", self.fw_not))
+        out += [("asset_class", v) for v in self.asset]
         return out
 
     def view_params(self) -> list[tuple[str, str]]:
@@ -356,6 +363,13 @@ class TableState:
             chips.append({"label": f"HW: {v}", "url": self.url(hw=_without(self.hw, v), cursor="")})
         for v in self.fw:
             chips.append({"label": f"FW: {v}", "url": self.url(fw=_without(self.fw, v), cursor="")})
+        for v in self.asset:
+            chips.append(
+                {
+                    "label": f"Type: {ASSET_LABELS[v]}",
+                    "url": self.url(asset=_without(self.asset, v), cursor=""),
+                }
+            )
         if self.fw_not:
             chips.append({"label": f"FW \u2260 {self.fw_not}", "url": self.url(fw_not="", cursor="")})
         return chips
@@ -393,6 +407,7 @@ def table_state(request: Request) -> TableState:
         hw=_values(qp.getlist("hw")),
         fw=_values(qp.getlist("fw")),
         fw_not=(qp.get("fw_not") or "").strip()[:64],
+        asset=tuple(dict.fromkeys(v.upper() for v in qp.getlist("asset_class") if v.upper() in ASSET_LABELS)),
         sort=qp.get("sort", "hub") if qp.get("sort", "hub") in SORT_COLUMNS else "hub",
         dir="desc" if qp.get("dir") == "desc" else "asc",
         size=int(size) if size in {str(s) for s in PAGE_SIZES} else DEFAULT_PAGE_SIZE,
@@ -432,6 +447,7 @@ def _approx(n: int | None) -> str:
 def _table_row(hub: dict[str, Any], targets: dict[str, dict[str, Any]]) -> dict[str, Any]:
     last_seen_at = hub.get("last_seen_at")
     return {
+        "asset_class": hub.get("asset_class") or "HOME",
         "hardware_revision": hub.get("hardware_revision"),
         "firmware_version": hub.get("firmware_version"),
         "target": targets.get(str(hub.get("hub_id"))),
@@ -490,8 +506,19 @@ async def fleet_screen(
             degraded = str(legacy_exc)
     hubs: list[dict[str, Any]] = [h for h in page.get("items", []) if isinstance(h, dict)]
 
-    # The map draws the current page (or the richer map payload when the API serves one; CR #19).
+    # The map draws the current page plus every truck and substation BESS (few, always worth seeing), or
+    # the richer map payload when the API serves one (CR #19).
     map_hubs = [map_hub(h) for h in hubs]
+    on_page = {h["hub_id"] for h in map_hubs}
+    special = await _optional_json(
+        _TABLE_PATH, params={"asset_class": ["MOBILE", "UTILITY_SCALE"], "limit": 100}
+    )
+    map_hubs += [
+        map_hub(h)
+        for h in (special or {}).get("items", [])
+        if isinstance(h, dict) and h.get("hub_id") not in on_page
+    ]
+    stations = await _optional_json(_HOME_STATIONS_PATH)
     from_map = map_hubs_from(await _optional_json(_MAP_PATH, params=_as_params(state.filter_params())))
     if from_map:
         map_hubs = from_map
@@ -522,6 +549,8 @@ async def fleet_screen(
             "state": state,
             "table_rows": [_table_row(h, targets) for h in hubs],
             "hw_options": hw_options,
+            "asset_labels": ASSET_LABELS,
+            "home_stations": (stations or {}).get("items", []) if isinstance(stations, dict) else [],
             "fw_options": fw_options,
             "target_count": len(targets),
             "charge_windows": charge_window_groups(windows),
@@ -615,6 +644,7 @@ async def hub_drilldown(request: Request, hub_id: str) -> HTMLResponse:
                 f"{_CHARGE_WINDOWS_PATH}/effective", params={"hub_id": hub_id}
             ),
             "activity_labels": ACTIVITY_LABELS,
+            "asset_labels": ASSET_LABELS,
             "role": role_of(request),
             "is_operator": is_operator(request),
         },

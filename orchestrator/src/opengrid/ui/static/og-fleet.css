@@ -159,3 +159,12 @@
 .fl-cw-window { display: flex; gap: 8px; align-items: center; }
 .fl-cw-window input[type=time] { min-height: 36px; }
 #cw-add { justify-self: start; }
+
+/* asset type icon (table, filter, drawer badge) */
+.fl-asset-icon { display: inline-block; width: 10px; height: 10px; background: var(--muted); vertical-align: middle; }
+.fl-asset-home { border-radius: 50%; }
+.fl-asset-mobile { border-radius: 1px; background: var(--status-info); }
+.fl-asset-utility_scale { transform: rotate(45deg) scale(.85); background: var(--series-pipeline-ac); }
+.fl-asset-cell { white-space: nowrap; }
+.fl-type-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; margin: 0 0 6px;
+  border: 1px solid var(--border); background: var(--panel-2); font-size: 12px; font-weight: 600; }

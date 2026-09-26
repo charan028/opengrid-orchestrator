@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import importlib
 import json
 import time
+import tomllib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Protocol, runtime_checkable
@@ -127,11 +129,13 @@ class HubFilter:
     hw: tuple[str, ...] = ()  # hardware revisions
     fw: tuple[str, ...] = ()  # firmware versions
     fw_not: str | None = None  # "FW != version": finds out-of-date hubs
+    asset_class: tuple[str, ...] = ()  # HOME / MOBILE / UTILITY_SCALE
 
     @property
     def empty(self) -> bool:
         return not (
             self.hw
+            or self.asset_class
             or self.fw
             or self.fw_not
             or self.zones
@@ -146,13 +150,20 @@ class HubFilter:
 
 @dataclass(frozen=True, slots=True)
 class Thresholds:
+    """Per-request context: health thresholds (02b S6.4) and the D-31 mobile unit ids."""
+
     online_s: float
     offline_s: float
+    mobile: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, cfg: Config) -> Thresholds:
         t = HealthThresholds.from_config(cfg)
-        return cls(online_s=float(t.hub_online_s), offline_s=float(t.hub_offline_s))
+        return cls(
+            online_s=float(t.hub_online_s),
+            offline_s=float(t.hub_offline_s),
+            mobile=tuple(sorted(mobile_units())),
+        )
 
 
 @dataclass(slots=True)
@@ -164,6 +175,67 @@ class Sql:
 def _like_prefix(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"{escaped}%"
+
+
+#: Owner asset classes (R3.1): a home battery, a D-31 mobile unit (truck), a substation BESS.
+ASSET_CLASSES = ("HOME", "MOBILE", "UTILITY_SCALE")
+_ASSET_SQL = (
+    "(CASE WHEN h.bank_id = ANY(%s) OR h.hub_id = ANY(%s) THEN 'MOBILE'"
+    " WHEN EXISTS (SELECT 1 FROM og.asset a WHERE a.asset_class = 'SUBSTATION'"
+    " AND (a.asset_id = h.hub_id OR a.bank_id = h.bank_id)) THEN 'UTILITY_SCALE' ELSE 'HOME' END)"
+)
+
+
+def asset_sql(th: Thresholds) -> Sql:
+    """`og.asset` SUBSTATION -> UTILITY_SCALE; SERVICES' [[assignment]] (via `selector.gate`) -> MOBILE."""
+    return Sql(_ASSET_SQL, [list(th.mobile), list(th.mobile)])
+
+
+def _gate_attr(name: str) -> Any:
+    """A reader from `opengrid.selector.gate` (OPTIMIZER owns the D-31 registry reader), or None on a
+    build that does not have it yet -- then no hub is MOBILE."""
+    try:
+        module = importlib.import_module("opengrid.selector.gate")
+    except ImportError:
+        return None
+    return getattr(module, name, None)
+
+
+def mobile_units() -> dict[str, str]:
+    """`bank_id -> home-station zone` from `selector.gate.load_mobile_units` (the one D-31 reader)."""
+    loader = _gate_attr("load_mobile_units")
+    return dict(loader()) if loader is not None else {}
+
+
+def home_stations() -> list[dict[str, Any]]:
+    """The depots and their assigned units for the map and the drawer. Membership comes from
+    `load_mobile_units`; the display fields (name, lat/lon, charger) are read from the same registry
+    file that `selector.gate.resolve_mobile_home_stations_path` locates."""
+    resolve = _gate_attr("resolve_mobile_home_stations_path")
+    if resolve is None:
+        return []
+    path = resolve()
+    if not path.exists():
+        return []
+    with path.open("rb") as fh:
+        raw = tomllib.load(fh)
+    units = mobile_units()
+    by_station: dict[str, list[str]] = {}
+    for assignment in raw.get("assignment", []):
+        if str(assignment.get("bank_id")) in units:
+            by_station.setdefault(str(assignment["home_station_id"]), []).append(str(assignment["bank_id"]))
+    return [
+        {
+            "home_station_id": str(s["home_station_id"]),
+            "zone": s.get("zone"),
+            "lat": s.get("lat"),
+            "lon": s.get("lon"),
+            "charger_kw": s.get("charger_kw"),
+            "notes": s.get("notes"),
+            "units": by_station.get(str(s["home_station_id"]), []),
+        }
+        for s in raw.get("home_station", [])
+    ]
 
 
 def health_sql(th: Thresholds) -> Sql:
@@ -205,6 +277,10 @@ def where_clause(flt: HubFilter, th: Thresholds) -> Sql:
     if flt.fw_not:
         parts.append(f"{_FW_SQL} IS DISTINCT FROM %s")
         out.params.append(flt.fw_not)
+    if flt.asset_class:
+        a = asset_sql(th)
+        parts.append(f"{a.text} = ANY(%s)")
+        out.params.extend([*a.params, list(flt.asset_class)])
     out.text = " AND ".join(parts)
     return out
 
@@ -231,7 +307,8 @@ def page_query(
     effective_desc = descending != (sort == "age")
     backwards = cursor is not None and cursor[0] == "before"
     order_desc = effective_desc != backwards
-    params: list[Any] = [*key.params, *where.params]
+    asset = asset_sql(th)
+    params: list[Any] = [*asset.params, *key.params, *where.params]
     text = where.text
     if cursor is not None:
         op = "<" if order_desc else ">"
@@ -239,7 +316,7 @@ def page_query(
         params.extend([*key.params, cursor[1], cursor[2]])
     direction = "DESC" if order_desc else "ASC"
     sql = (
-        f"SELECT {_ROW_COLUMNS}, {key.text} AS sort_value {_FROM} WHERE {text}"
+        f"SELECT {_ROW_COLUMNS}, {asset.text} AS asset_class, {key.text} AS sort_value {_FROM} WHERE {text}"
         f" ORDER BY sort_value {direction}, h.hub_id {direction} LIMIT %s"
     )
     # the key is selected once (sort_value) and compared once in the cursor clause
@@ -338,6 +415,7 @@ def _filter(
     hw: Annotated[list[str] | None, Query()] = None,
     fw: Annotated[list[str] | None, Query()] = None,
     fw_not: Annotated[str | None, Query(max_length=64)] = None,
+    asset_class: Annotated[list[str] | None, Query()] = None,
 ) -> HubFilter:
     states: list[str] = []
     for value in health or []:
@@ -361,7 +439,17 @@ def _filter(
         hw=tuple(v for v in hw or [] if v),
         fw=tuple(v for v in fw or [] if v),
         fw_not=(fw_not or "").strip() or None,
+        asset_class=_asset_classes(asset_class),
     )
+
+
+def _asset_classes(values: list[str] | None) -> tuple[str, ...]:
+    out = tuple(dict.fromkeys(v.upper() for v in values or [] if v))
+    if any(v not in ASSET_CLASSES for v in out):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"asset_class must be one of {ASSET_CLASSES}"
+        )
+    return out
 
 
 def shape_hub(row: dict[str, Any], th: Thresholds, *, now: datetime) -> dict[str, Any]:
@@ -564,6 +652,65 @@ _DETAIL_CALIBRATION = (
     "SELECT to_jsonb(c.*) AS row FROM og.calibration_command c WHERE c.hub_id = %s"
     " ORDER BY c.created_at DESC NULLS LAST LIMIT 1"
 )
+_DETAIL_SUBSTATION = (
+    "SELECT to_jsonb(a.*) AS row FROM og.asset a WHERE a.asset_class = 'SUBSTATION'"
+    " AND (a.asset_id = %s OR a.bank_id = %s) LIMIT 1"
+)
+#: A truck within this many degrees (~1 km) of its depot is "at home station".
+AT_HOME_DEG = 0.01
+
+
+async def _asset_detail(
+    store: FleetRowsStore, th: Thresholds, hub_id: str, hub: dict[str, Any]
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    """(asset_class, truck block, substation block) for the drawer. A truck's charging is allowed only
+    at its home station (D-31); the gate has no deployment schedule yet, so it fails closed."""
+    bank_id = str(hub.get("bank_id") or "")
+    if hub_id in th.mobile or bank_id in th.mobile:
+        station = next((s for s in home_stations() if hub_id in s["units"] or bank_id in s["units"]), None)
+        lat, lon = _num(hub.get("lat")), _num(hub.get("lon"))
+        at_home = (
+            station is not None
+            and lat is not None
+            and lon is not None
+            and station.get("lat") is not None
+            and abs(lat - float(station["lat"])) <= AT_HOME_DEG
+            and abs(lon - float(station["lon"])) <= AT_HOME_DEG
+        )
+        return (
+            "MOBILE",
+            {
+                "home_station": station,
+                "location": {"lat": lat, "lon": lon},
+                "status": "AT_HOME_STATION" if at_home else "AWAY",
+                "charging_allowed": False,
+                "charging_note": "Charges only at its home station (D-31); held off until a deployment "
+                "schedule exists (the gate fails closed).",
+                "next_return": None,
+            },
+            None,
+        )
+    rows = await _optional_rows(store, _DETAIL_SUBSTATION, (hub_id, bank_id))
+    if rows:
+        a = dict(rows[0]["row"])
+        p_kw, e_kwh = _num(a.get("p_kw")), _num(a.get("e_kwh"))
+        return (
+            "UTILITY_SCALE",
+            None,
+            {
+                "asset_id": a.get("asset_id"),
+                "mw": round(p_kw / 1000, 3) if p_kw is not None else None,
+                "mwh": round(e_kwh / 1000, 3) if e_kwh is not None else None,
+                "poi_import_kva": _num(a.get("poi_import_kva")),
+                "poi_export_kva": _num(a.get("poi_export_kva")),
+                "feeder_id": a.get("feeder_id"),
+                "substation_id": a.get("substation_id"),
+                "status": a.get("status"),
+            },
+        )
+    return "HOME", None, None
+
+
 _DETAIL_COMMAND = (
     "SELECT to_jsonb(v.*) AS verdict FROM og.verdict v WHERE v.command_batch_id::text = %s LIMIT 1"
 )
@@ -650,8 +797,12 @@ async def hub_detail(
         verdict = dict(found[0]["verdict"]) if found else None
     e_kwh, r_kwh, soc_kwh = _num(hub.get("e_kwh")), _num(hub.get("r_kwh")), _num(state.get("soc_kwh"))
     merged = {**bank, **hub}
+    asset_class, mobile, utility = await _asset_detail(store, th, hub_id, hub)
     return {
         "hub_id": hub_id,
+        "asset_class": asset_class,
+        "mobile": mobile,
+        "utility_scale": utility,
         "status": {
             "health": shaped["health"],
             "health_label": shaped["health_label"],
@@ -727,3 +878,9 @@ def _parse_ts(value: Any) -> datetime | None:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     return None
+
+
+@router.get("/home-stations")
+async def list_home_stations(_identity: Annotated[Identity, Depends(require_viewer)]) -> dict[str, Any]:
+    """D-31 depots with their assigned mobile units (for the map's depot layer and truck lines)."""
+    return {"items": home_stations()}

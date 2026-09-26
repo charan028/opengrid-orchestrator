@@ -307,3 +307,93 @@ def test_search_firmware_lists_distinct_versions(
     assert body["items"] == [{"id": "4.2.1"}, {"id": "4.3.0"}]
     ok = search_client.get("/og/api/fleet/table?hw=C1&fw=4.2.1&fw_not=4.3.0&sort=hw", headers=VIEWER_HEADERS)
     assert ok.status_code == 200, ok.text
+
+
+def test_asset_class_is_derived_and_filterable() -> None:
+    th = Thresholds(online_s=4.0, offline_s=30.0, mobile=("trailer-mb-01",))
+    w = where_clause(HubFilter(asset_class=("MOBILE", "UTILITY_SCALE")), th)
+    assert "og.asset a WHERE a.asset_class = 'SUBSTATION'" in w.text
+    assert w.params == [["trailer-mb-01"], ["trailer-mb-01"], ["MOBILE", "UTILITY_SCALE"]]
+    q = page_query(HubFilter(), th, sort="hub", descending=False, cursor=None, limit=25)
+    assert "AS asset_class" in q.text
+    assert q.text.count("%s") == len(q.params)
+
+
+def test_truck_detail_names_its_home_station(
+    search_client: TestClient, rows_store: RecordingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fleet_search, "mobile_units", lambda: {"trailer-mb-01": "LZ_AEN"})
+    station = {
+        "home_station_id": "hs-1",
+        "zone": "LZ_AEN",
+        "lat": 30.401,
+        "lon": -97.719,
+        "units": ["trailer-mb-01"],
+    }
+    monkeypatch.setattr(fleet_search, "home_stations", lambda: [station])
+    seen = datetime.now(UTC).isoformat()
+    rows_store.answers.append(
+        [
+            {
+                "hub": {
+                    "hub_id": "trailer-mb-01",
+                    "bank_id": "trailer-mb-01",
+                    "zone": "LZ_AEN",
+                    "e_kwh": 600,
+                    "r_kwh": 60,
+                    "p_kw": 250,
+                    "lat": 30.401,
+                    "lon": -97.719,
+                },
+                "state": {"soc_kwh": 300, "p_kw": 0, "last_seen_at": seen},
+                "bank": {},
+            }
+        ]
+    )
+    body = search_client.get("/og/api/fleet/hubs/trailer-mb-01/detail", headers=VIEWER_HEADERS).json()
+    assert body["asset_class"] == "MOBILE"
+    assert body["mobile"]["status"] == "AT_HOME_STATION" and body["mobile"]["charging_allowed"] is False
+    assert body["mobile"]["home_station"]["home_station_id"] == "hs-1"
+    stations = search_client.get("/og/api/fleet/home-stations", headers=VIEWER_HEADERS).json()
+    assert stations["items"] == [station]
+
+
+def test_substation_detail_from_og_asset(search_client: TestClient, rows_store: RecordingStore) -> None:
+    rows_store.answers.extend(
+        [
+            [
+                {
+                    "hub": {
+                        "hub_id": "sub-LZ_AEN-00",
+                        "bank_id": "b-sub",
+                        "zone": "LZ_AEN",
+                        "e_kwh": 16000,
+                        "r_kwh": 0,
+                        "p_kw": 4000,
+                    },
+                    "state": {"soc_kwh": 8000, "p_kw": 0},
+                    "bank": {},
+                }
+            ],
+            [],
+            [],
+            [],
+            [
+                {
+                    "row": {
+                        "asset_id": "sub-LZ_AEN-00",
+                        "p_kw": 4000,
+                        "e_kwh": 16000,
+                        "poi_import_kva": 4000,
+                        "poi_export_kva": 3500,
+                        "feeder_id": "F-7",
+                        "substation_id": "S-1",
+                        "status": "ACTIVE",
+                    }
+                }
+            ],
+        ]
+    )
+    body = search_client.get("/og/api/fleet/hubs/sub-LZ_AEN-00/detail", headers=VIEWER_HEADERS).json()
+    assert body["asset_class"] == "UTILITY_SCALE"
+    assert body["utility_scale"]["mw"] == 4.0 and body["utility_scale"]["poi_export_kva"] == 3500.0

@@ -65,6 +65,14 @@
         {% endfor %}
       </div>
     </details>
+    <details class="fl-multi" id="flt-asset">
+      <summary>Asset type{% if state.asset %} ({{ state.asset|length }}){% endif %}</summary>
+      <div class="fl-multi-list">
+        {% for key, label in asset_labels.items() %}
+        <label class="fl-check"><input type="checkbox" name="asset_class" value="{{ key }}" {{ 'checked' if key in state.asset else '' }}> <span class="fl-asset-icon fl-asset-{{ key|lower }}" aria-hidden="true"></span> {{ label }}</label>
+        {% endfor %}
+      </div>
+    </details>
     <details class="fl-multi" id="flt-hw">
       <summary>HW rev{% if state.hw %} ({{ state.hw|length }}){% endif %}</summary>
       <div class="fl-multi-list">
@@ -149,6 +157,7 @@
           </th>
           {% if key == 'kw' %}<th scope="col">Activity</th>{% endif %}
           {% endfor %}
+          <th scope="col">Asset type</th>
         </tr>
       </thead>
       <tbody>
@@ -167,9 +176,10 @@
           <td>{{ row.age_badge|safe }}</td>
           <td>{{ row.hardware_revision or '—' }}</td>
           <td>{{ row.firmware_version or '—' }}</td>
+          <td class="fl-asset-cell"><span class="fl-asset-icon fl-asset-{{ row.asset_class|lower }}" aria-hidden="true"></span> {{ asset_labels.get(row.asset_class, row.asset_class) }}</td>
         </tr>
         {% else %}
-        <tr><td class="empty" colspan="{{ 11 if is_operator else 10 }}">No hubs match these filters. Remove a chip above or Reset to see the fleet.</td></tr>
+        <tr><td class="empty" colspan="{{ 12 if is_operator else 11 }}">No hubs match these filters. Remove a chip above or Reset to see the fleet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -191,7 +201,7 @@
     <button type="button" class="btn" id="fleet-select-clear">Clear selection</button>
     {% endif %}
   </div>
-  <div id="fleet-map" class="og-map og-map-tall" data-hubs='{{ map_hubs|tojson }}'></div>
+  <div id="fleet-map" class="og-map og-map-tall" data-hubs='{{ map_hubs|tojson }}' data-stations='{{ home_stations|tojson }}'></div>
 </section>
 
 {# 3. hub detail side drawer #}

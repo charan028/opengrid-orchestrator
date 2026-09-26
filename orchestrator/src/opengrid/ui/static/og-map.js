@@ -464,10 +464,81 @@
    * The homes. Canvas-rendered (thousands of individually styled markers is exactly the case Leaflet's
    * canvas renderer exists for). `opts.colorBy` is "activity" (Control room) or "health" (Fleet).
    */
+  /**
+   * A truck (square) or substation BESS (diamond sized by MW) marker: a DOM divIcon, so the SHAPE tells
+   * the asset class apart as well as the colour (colour-blind safe). `setStyle`/`bringToFront` mirror the
+   * circle markers' API so selection highlighting treats every hub alike.
+   */
+  function assetMarker(at, hub, color) {
+    const truck = hub.asset_class === "MOBILE";
+    const mw = Number(hub.rated_p_kw || 0) / 1000;
+    const size = truck ? 14 : Math.round(Math.max(14, Math.min(36, 14 + Math.sqrt(mw) * 6)));
+    const marker = L.marker(at, {
+      pane: "ogHubs",
+      keyboard: false,
+      icon: L.divIcon({
+        className: "og-asset-marker " + (truck ? "og-asset-truck" : "og-asset-sub"),
+        html: "<span style=\"background:" + color + "\"></span>",
+        iconSize: [size, size],
+      }),
+    });
+    marker.setStyle = function (style) {
+      const el = marker.getElement();
+      if (el) {
+        el.style.outline = style.weight >= 3 ? "3px solid " + style.color : "";
+      }
+    };
+    marker.bringToFront = function () { marker.setZIndexOffset(1000); };
+    return marker;
+  }
+
+  /** Asset-class layer keys, labels and legend rows (Fleet and Control room). */
+  map.ASSET_CLASSES = [
+    { key: "hubs", cls: "HOME", label: "Home batteries", shape: "dot" },
+    { key: "trucks", cls: "MOBILE", label: "Trucks (mobile storage)", shape: "square" },
+    { key: "substations", cls: "UTILITY_SCALE", label: "Substation BESS (size = MW)", shape: "diamond" },
+    { key: "depots", cls: null, label: "Home stations (depots)", shape: "depot" },
+  ];
+  map.assetLayerItems = function assetLayerItems() {
+    return map.ASSET_CLASSES.map(function (a) { return { key: a.key, label: a.label }; });
+  };
+  map.assetLegendItems = function assetLegendItems() {
+    return map.ASSET_CLASSES.map(function (a) {
+      return { label: a.label, color: og.token("--muted"), shape: a.shape };
+    });
+  };
+
+  /** Depots (D-31 home stations), each with a dashed line to every assigned truck that is away. */
+  map.addDepotLayer = function addDepotLayer(handle, stations, hubs) {
+    const group = L.layerGroup();
+    const byId = {};
+    (hubs || []).forEach(function (h) { byId[h.hub_id] = h; byId[h.bank_id] = byId[h.bank_id] || h; });
+    (stations || []).forEach(function (s) {
+      if (s.lat == null || s.lon == null) {
+        return;
+      }
+      L.marker([s.lat, s.lon], {
+        pane: "ogHubs",
+        icon: L.divIcon({ className: "og-asset-marker og-asset-depot", html: "<span></span>", iconSize: [18, 18] }),
+      }).bindPopup("<strong>" + s.home_station_id + "</strong> &middot; " + (s.zone || "") +
+        "<br>Home station" + (s.charger_kw ? " &middot; " + s.charger_kw + " kW charger" : "")).addTo(group);
+      (s.units || []).forEach(function (unit) {
+        const truck = byId[unit];
+        const at = truck && map.hubLatLng(truck);
+        if (at) {
+          L.polyline([[s.lat, s.lon], at], { color: og.token("--muted"), weight: 1.5, dashArray: "4 4" }).addTo(group);
+        }
+      });
+    });
+    handle.addLayer("depots", group);
+    return handle;
+  };
+
   map.addHubLayer = function addHubLayer(handle, hubs, opts) {
     opts = opts || {};
     const byId = {};
     const group = L.layerGroup();
+    const groups = { MOBILE: L.layerGroup(), UTILITY_SCALE: L.layerGroup() };
     (hubs || []).forEach(function (hub) {
       const at = map.hubLatLng(hub);
       if (!at) {
@@ -476,7 +547,8 @@
       const activity = map.activityOf(hub);
       const meta = opts.colorBy === "health" ? healthMeta(hub.health) : activityMeta(activity);
       const color = og.token(meta.token);
-      const marker = L.circleMarker(at, {
+      const special = groups[hub.asset_class];
+      const marker = special ? assetMarker(at, hub, color) : L.circleMarker(at, {
         renderer: handle.canvas,
         pane: "ogHubs",
         radius: 5,
@@ -501,9 +573,11 @@
         (canServe ? "<br>Can serve: " + canServe : "")
       );
       byId[hub.hub_id] = marker;
-      marker.addTo(group);
+      marker.addTo(special || group);
     });
     handle.addLayer("hubs", group);
+    handle.addLayer("trucks", groups.MOBILE);
+    handle.addLayer("substations", groups.UTILITY_SCALE);
     handle.hubMarkers = byId;
     return handle;
   };
