@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from opengrid.contracts.errors import RenominationError
+from opengrid.contracts.errors import IllegalTransitionError, RenominationError
 from opengrid.contracts.lifecycle import transition_obligation
 from opengrid.contracts.repository import ContractsRepo
 from opengrid.core.models.engine import RenominationPoint
@@ -52,6 +52,16 @@ async def exercise_renomination_point(
     if outcome == "RESELECTED":
         if point.obligation_id is None:
             raise RenominationError("R-RENOM-NO-OBLIGATION")
+        # The self-loop is DELIVERING -> DELIVERING only. Without this check a COMMITTED obligation took
+        # the COMMITTED -> DELIVERING edge (no reason required) and started "delivering" hours before its
+        # window (live 2026-09-26).
+        obligation = await repo.get_obligation(point.obligation_id)
+        if obligation is None or obligation.state != "DELIVERING":
+            raise IllegalTransitionError(
+                from_state=obligation.state if obligation else "UNKNOWN",
+                to_state="DELIVERING",
+                reason_code="R-RENOM-GATE",
+            )
         await transition_obligation(
             repo,
             trace,
