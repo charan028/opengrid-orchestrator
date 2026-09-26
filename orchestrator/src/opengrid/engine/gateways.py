@@ -46,6 +46,7 @@ from opengrid.allocator.models import (
     SubstitutionEvent,
 )
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
+from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, COMMIT_LOCK_OVERRIDE_REASONS, R_SUBSTITUTION
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine import pq_eligibility
@@ -118,6 +119,9 @@ GROUP BY r.obligation_id, r.bank_id, c.customer_id, o.service_type, o.contract_i
 
 #: Full-deployment duration assumed for an ERCOT_AS award whose product rule has none (ECRS, the shortest).
 DEFAULT_AS_DEPLOYMENT_MINUTES = 60
+#: The guardian's G-01-ENERGY keeps this fraction of each hub's capacity above reserve at lease end; an AS
+#: energy hold must cover it too.
+AS_HOLD_FLOOR_FRACTION = 0.01
 
 
 def as_energy_hold(now: datetime, hold_kw: object, duration_minutes: object) -> tuple[float, datetime]:
@@ -147,6 +151,45 @@ ORDER BY series, ts DESC, recorded_at DESC
 """
 
 _CONSERVATIVE_SCOPES_SQL = "SELECT scope_kind, scope_ref FROM og.scope_posture WHERE posture = 'CONSERVATIVE'"
+
+# The cheapest P50 price forecast per load zone over the next 24 h: the price at which a bank could
+# recharge the energy a headroom discharge spends now.
+_RECHARGE_PRICE_SQL = """
+SELECT series_key, MIN(p50)
+FROM og.forecast
+WHERE kind = 'price' AND interval_start_utc >= now() AND interval_start_utc < now() + interval '24 hours'
+GROUP BY series_key
+"""
+
+#: M1 TDSP delivery charge ($/MWh) on grid-drawn charging kWh, by the bank's load zone (09-optimizer-
+#: dispatcher-update.md D5 / config tdsp_tariffs: Oncor 60.295, CNP 64.130, AEP Central 58.0, AEP North
+#: 57.0 $/MWh). The zone -> TDSP correspondence is approximate (a load zone spans several TDSPs); an
+#: unknown zone takes the highest charge, so a headroom discharge is never under-costed.
+M1_USD_PER_MWH_BY_ZONE: dict[str, float] = {
+    "LZ_NORTH": 60.295,
+    "LZ_HOUSTON": 64.130,
+    "LZ_SOUTH": 58.0,
+    "LZ_WEST": 57.0,
+}
+_M1_FALLBACK_USD_PER_MWH = max(M1_USD_PER_MWH_BY_ZONE.values())
+
+
+def headroom_threshold_usd_per_mwh(
+    zone: str | None,
+    recharge_price_usd_per_mwh: float | None,
+    live_price_usd_per_mwh: float,
+    *,
+    round_trip_efficiency: float,
+) -> float:
+    """Architect finding (c) / 09 S1.8 (G9): headroom is discharged only when the RT price covers what
+    the spent energy costs to put back -- the cheapest recharge price ahead (else the live price) plus the
+    M1 delivery charge, grossed up for round-trip losses. Replaces the fixed $30/MWh. (The plan's water
+    value, once the selector publishes it, supersedes this bound.)"""
+    charge_price = (
+        recharge_price_usd_per_mwh if recharge_price_usd_per_mwh is not None else live_price_usd_per_mwh
+    )
+    m1 = M1_USD_PER_MWH_BY_ZONE.get(zone or "", _M1_FALLBACK_USD_PER_MWH)
+    return (max(charge_price, 0.0) + m1) / max(round_trip_efficiency, 1e-6)
 
 
 def _bank_zone(bank_id: str) -> str | None:
@@ -294,17 +337,38 @@ class EngineScheduleGateway:
             await cur.execute(_LATEST_ZONE_PRICES_SQL, {"product": _PRICE_PRODUCT})
             zone_rows = await cur.fetchall()
         conservative = await self._conservative_scopes()
+        recharge_by_zone = await self._recharge_prices()
         price_by_zone = {str(series): float(value) for series, value in zone_rows}
         prices = []
         conservative_banks: set[str] = set()
         for bank_id in bank_ids:
             zone = _bank_zone(bank_id)
-            prices.append(PriceSignal(bank_id=bank_id, price_usd_per_mwh=bank_price(zone, price_by_zone)))
+            live = bank_price(zone, price_by_zone)
+            threshold = headroom_threshold_usd_per_mwh(
+                zone,
+                recharge_by_zone.get(zone or ""),
+                live,
+                round_trip_efficiency=DEFAULT_ETA_C * DEFAULT_ETA_D,
+            )
+            prices.append(
+                PriceSignal(bank_id=bank_id, price_usd_per_mwh=live, threshold_usd_per_mwh=threshold)
+            )
             if ("BANK", bank_id) in conservative or (zone is not None and ("ZONE", zone) in conservative):
                 conservative_banks.add(bank_id)
         if not price_by_zone:
             logger.warning("no live price observed yet; allocator sees price=0.0 this cycle")
         return Schedule(prices=tuple(prices), conservative_bank_ids=frozenset(conservative_banks))
+
+    async def _recharge_prices(self) -> dict[str, float]:
+        """Cheapest P50 price ahead per zone (og.forecast); unreadable/empty -> the live price is used."""
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_RECHARGE_PRICE_SQL)
+                rows = await cur.fetchall()
+        except Exception:
+            logger.warning("recharge-price forecast unreadable; thresholds use the live price", exc_info=True)
+            return {}
+        return {str(series): float(p50) for series, p50 in rows if p50 is not None}
 
     async def _conservative_scopes(self) -> set[tuple[str, str]]:
         """K7 escalation: the guardian's CONSERVATIVE scopes (og.scope_posture, migration 0019). Unreadable
@@ -515,6 +579,7 @@ class EnergySufficiencyGateway:
         self._at_risk: set[str] = set()
         self._alerts_swept = False
         self.as_hold_ids: set[str] = set()
+        self._as_ids: set[str] = set()
 
     async def run(self, now: datetime) -> list[EnergySufficiencyResult]:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -526,6 +591,7 @@ class EnergySufficiencyGateway:
         # (obligation_id, average kW over the remaining draw, draw end, customer_id) per bank.
         by_bank: dict[str, list[tuple[str, float, datetime, str | None]]] = {}
         as_holds: set[str] = set()
+        as_all: set[str] = set()
         for row in rows:
             obligation_id, bank_id, required_kwh, draw_end, customer_id = row[:5]
             service_type, hold_kw, duration_minutes, as_deployed = (*row[5:9], None, None, None, False)[:4]
@@ -534,6 +600,7 @@ class EnergySufficiencyGateway:
                 # floor for a FULL deployment of its committed kW -- held or deployed -- not just the kWh
                 # of its remaining window.
                 kw, draw_end = as_energy_hold(now, hold_kw, duration_minutes)
+                as_all.add(str(obligation_id))
                 if not as_deployed:
                     as_holds.add(str(obligation_id))
             else:
@@ -545,6 +612,7 @@ class EnergySufficiencyGateway:
         #: Undeployed AS holds this cycle: energy-short is AT_RISK for them, never a SHORTFALL escalation
         #: (nothing is being delivered short -- the hold itself is the service).
         self.as_hold_ids = as_holds
+        self._as_ids = as_all
 
         if not self._alerts_swept:
             # Reconcile with alerts a previous engine raised (review #14): an obligation whose alert is
@@ -617,8 +685,16 @@ class EnergySufficiencyGateway:
                 for h in online_hubs
             ]
 
+            # AS energy hold margin, matching the guardian's G-01-ENERGY floor: the hold keeps reserve +
+            # 1% of capacity + kW x duration / eta_d, else the last leases of a full deployment are vetoed.
+            hold_margin_kwh = AS_HOLD_FLOOR_FRACTION * sum(
+                (getattr(h, "e_kwh", None) or 0.0) * h.eta_d for h in online_hubs
+            )
+
             for obligation_id, committed_kw, window_end, customer_id in obligations:
                 remaining_window_h = max((window_end - now).total_seconds(), 0.0) / 3600.0
+                if obligation_id in self._as_ids and remaining_window_h > 0:
+                    committed_kw += hold_margin_kwh / remaining_window_h
 
                 # K2: distribute every OTHER obligation on this bank's remaining required energy across
                 # the bank's online hubs, proportional to free_discharge_kw share -- the energy this

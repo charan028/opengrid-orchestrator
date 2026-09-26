@@ -27,7 +27,7 @@ async def _fake_load_banks(horizon_start, horizon_end, bank_ids):
     return (make_bank("B1", 10.0, range(1)),)
 
 
-async def _fake_load_scenarios(horizon_start, horizon_end):
+async def _fake_load_scenarios(horizon_start, horizon_end, bank_ids=()):
     return (zero_price_scenario(range(1)),)
 
 

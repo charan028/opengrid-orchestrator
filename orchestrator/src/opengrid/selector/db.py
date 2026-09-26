@@ -30,6 +30,7 @@ _FROZEN_COMMITMENTS_SQL = """
 """
 
 _BANK_IDS_SQL = "SELECT bank_id FROM og.bank ORDER BY bank_id"
+_BANK_ZONES_SQL = "SELECT bank_id, zone FROM og.bank WHERE bank_id = ANY(%(ids)s)"
 
 # ERCOT_AS obligations among the given ids, with their product's full-deployment duration: these are
 # capacity holds (energy locked above reserve, no drain) in the selector's SoC model.
@@ -106,6 +107,17 @@ async def load_as_hold_minutes(obligation_ids: list[str]) -> dict[str, float | N
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(_AS_HOLD_MINUTES_SQL, {"ids": obligation_ids})
         return {str(row[0]): (float(row[1]) if row[1] is not None else None) async for row in cur}
+
+
+async def load_bank_zones(bank_ids: list[str]) -> dict[str, str]:
+    """Read-only: `bank_id -> og.bank.zone` (its ERCOT load zone), so each bank is priced at its own
+    zone's forecast path."""
+    if not bank_ids:
+        return {}
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_BANK_ZONES_SQL, {"ids": bank_ids})
+        return {str(row[0]): str(row[1]) async for row in cur}
 
 
 async def load_bank_ids_rows() -> list[str]:

@@ -211,6 +211,22 @@ async def test_schedule_gateway_prices_each_bank_at_its_own_zone():
     assert schedule.conservative_bank_ids == frozenset()
 
 
+async def test_headroom_threshold_is_the_replacement_cost_not_a_fixed_30():
+    """Architect finding (c) / 09 S1.8 (G9): headroom discharges only when the RT price covers the
+    cheapest recharge ahead plus the M1 delivery charge, over round-trip efficiency -- ~$89/MWh for an
+    LZ_NORTH (Oncor) bank that can recharge at $20, where the fixed $30 destroyed replacement value."""
+    await _seed_fleet()
+    cursor = FakeCursor([[("LZ_NORTH", 16.0)], [], [("LZ_NORTH", 20.0)]])
+    (signal,) = (await EngineScheduleGateway(pool=FakePool(cursor)).schedule(["bank-000"])).prices
+    assert signal.price_usd_per_mwh == 16.0
+    assert signal.threshold_usd_per_mwh == pytest.approx((20.0 + 60.295) / (0.9487 * 0.9487), rel=1e-3)
+
+    # No forecast: the live price stands in for the recharge price; an unknown zone takes the highest M1.
+    assert gw.headroom_threshold_usd_per_mwh(None, None, 16.0, round_trip_efficiency=1.0) == pytest.approx(
+        16.0 + 64.130
+    )
+
+
 async def test_schedule_gateway_defaults_to_zero_price_when_no_data():
     gw = EngineScheduleGateway(pool=FakePool(FakeCursor([[], []])))
     schedule = await gw.schedule(["bank-000"])

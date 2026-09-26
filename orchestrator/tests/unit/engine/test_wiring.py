@@ -338,6 +338,42 @@ def test_a_reduced_grant_carries_its_k13_exception_onto_the_batch_items(grant_re
     assert item["reason_code"] == item_reason
 
 
+def test_a_held_as_award_is_carried_at_zero_kw_with_its_hold_reason() -> None:
+    """Guardian contract (R-GRANT-AS-HOLD): omitting a held AS award reads to G-19 as an unexplained 0 kW
+    and vetoes the batch. On a hold-only bank every online hub gets a hold item ramping toward 0 kW."""
+    fleet_module = FakeFleetModule(
+        {
+            "b1": [
+                RampingHubCap("h1", "b1", 10.0, p_kw=-10.0, ramp_kw_per_s=0.1),  # type: ignore[list-item]
+                RampingHubCap("h2", "b1", 10.0, p_kw=0.0, ramp_kw_per_s=0.1),  # type: ignore[list-item]
+            ]
+        }
+    )
+    hold = _grant("b1", kw="0").model_copy(update={"reason_code": "R-GRANT-AS-HOLD"})
+    items = engine._distribute_hub_items("b1", [hold], fleet_module=fleet_module, cycle_interval_s=2.0)
+
+    assert [i["hub_id"] for i in items] == ["h1", "h2"]
+    assert all(i["reason_code"] == "R-GRANT-AS-HOLD" for i in items)
+    assert all(i["obligation_id"] == str(hold.obligation_id) and i["obligation_granted_kw"] == "0" for i in items)
+    assert items[0]["p_kw_setpoint"] == pytest.approx(-10.0 + 0.1 * 2.0 * engine.RAMP_SAFETY_FACTOR)  # ramps down
+    assert items[1]["p_kw_setpoint"] == 0.0
+
+
+def test_a_hold_beside_an_active_grant_goes_first_on_one_hub_only() -> None:
+    """A hub applies the last item it receives, so the hold item leads the batch and the active grant's
+    item for the same hub follows; only one hold item is added when every hub is in use."""
+    fleet_module = FakeFleetModule(
+        {"b1": [RampingHubCap("h1", "b1", 10.0, p_kw=-6.0, ramp_kw_per_s=10.0)]}  # type: ignore[list-item]
+    )
+    hold = _grant("b1", kw="0").model_copy(update={"reason_code": "R-GRANT-AS-HOLD"})
+    items = engine._distribute_hub_items(
+        "b1", [hold, _grant("b1", kw="6")], fleet_module=fleet_module, cycle_interval_s=2.0
+    )
+
+    assert [i["reason_code"] for i in items] == ["R-GRANT-AS-HOLD", "R-GRANT-COMMITTED"]
+    assert items[-1]["p_kw_setpoint"] == pytest.approx(-6.0)  # the active grant's setpoint wins
+
+
 # --- guardian-hold degraded mode (02b S6.5) --------------------------------------------------------
 
 

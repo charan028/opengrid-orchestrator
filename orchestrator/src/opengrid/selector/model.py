@@ -48,6 +48,9 @@ _EPS = 1e-9
 #: C15 terminal-energy shortfall cost ($/kWh below the next-day floor, i.e. $1,000/MWh): above every
 #: MVP-S energy/capacity value, so energy is only drawn below the floor when a hard constraint needs it.
 TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH = 1.0
+#: An ERCOT_AS energy hold keeps this fraction of the bank's capacity above reserve too: the guardian's
+#: G-01-ENERGY floor at lease end (else the last leases of a full deployment are vetoed).
+AS_HOLD_FLOOR_FRACTION = 0.01
 _MIN_MEANINGFUL_KW = 1e-6  # below this, treat capacity as exactly 0 -- avoids HiGHS "tiny coefficient"
 # numerical errors on pathologically small (but nonzero) capacity readings.
 
@@ -238,11 +241,16 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                         for _var, hold_h, is_committed in holds
                         if is_committed
                     )
-                    slack = highs.addVariable(lb=0.0, ub=committed_hold_cap_kwh)
+                    # Matches the guardian's G-01-ENERGY floor (1% of capacity above reserve), else the
+                    # last leases of a full deployment are vetoed shortly before its end. Only with a
+                    # committed hold present (a candidate-only row at q=0 must not bind).
+                    margin_kwh = AS_HOLD_FLOOR_FRACTION * bank.capacity_kwh if committed_hold_cap_kwh > 0 else 0.0
+                    slack = highs.addVariable(lb=0.0, ub=committed_hold_cap_kwh + margin_kwh)
                     hold_slack_vars.append((scenario.scenario, slack))
                     required = highs.qsum([(hold_h / bank.eta_d) * var for var, hold_h, _c in holds])
                     highs.addConstr(
-                        soc_vars[bank.bank_id, t, scenario.scenario] + slack >= bank.reserve_kwh + required
+                        soc_vars[bank.bank_id, t, scenario.scenario] + slack
+                        >= bank.reserve_kwh + margin_kwh + required
                     )
                 next_e = highs.addVariable(lb=bank.reserve_kwh, ub=bank.capacity_kwh)
                 soc_vars[bank.bank_id, t + 1, scenario.scenario] = next_e
@@ -301,7 +309,7 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
     for scenario in inputs.scenarios:
         for bank in inputs.banks:
             for t in bank.max_discharge_kw:
-                price = scenario.price_usd_per_mwh.get(t, 0.0)
+                price = scenario.price_at(bank.bank_id, t)
                 h = h_vars[bank.bank_id, t, scenario.scenario]
                 obj_terms.append(scenario.probability * dt_h * (price / 1000.0) * h)
                 charge = charge_vars.get((bank.bank_id, t, scenario.scenario))

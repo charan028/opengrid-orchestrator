@@ -73,6 +73,7 @@ class _FakeHubCap:
     soc_kwh: float | None = None
     reserve_kwh: float | None = 7.84
     eta_d: float = 0.9487
+    e_kwh: float | None = None
 
 
 @dataclass
@@ -414,3 +415,20 @@ async def test_a_deployed_as_award_is_not_a_hold(monkeypatch, _patch_alert_raisi
     gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
     await gateway.run(NOW)
     assert gateway.as_hold_ids == set()
+
+
+async def test_the_as_energy_hold_includes_the_guardians_one_percent_floor(monkeypatch, _patch_alert_raising):
+    """Lead (matches G-01-ENERGY): the hold keeps reserve + 1% of capacity + kW x duration / eta_d, else
+    the last leases of a full deployment are vetoed ~2 minutes before its end."""
+    obligation_id = uuid4()
+    rows = [(obligation_id, "bank-01", 1.25, NOW + timedelta(minutes=15), uuid4(), "ERCOT_AS", 5.0, 60, False)]
+    monkeypatch.setattr(
+        gw.fleet,
+        "hub_capabilities",
+        lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=39.2, e_kwh=39.2)],
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    (result,) = await gateway.run(NOW)
+
+    assert result.required_kwh == pytest.approx(5.0 + 0.01 * 39.2 * 0.9487)

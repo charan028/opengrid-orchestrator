@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from datetime import UTC, datetime, timedelta
@@ -269,23 +269,49 @@ async def load_banks(
     return tuple(snapshots)
 
 
-async def load_scenarios(horizon_start: datetime, horizon_end: datetime) -> tuple[ScenarioPrice, ...]:
-    """P10/P50/P90 price scenarios via `forecast.scenarios` (02b S3)."""
+async def load_scenarios(
+    horizon_start: datetime, horizon_end: datetime, bank_ids: tuple[str, ...] = ()
+) -> tuple[ScenarioPrice, ...]:
+    """P10/P50/P90 price scenarios via `forecast.scenarios` (02b S3), per bank zone.
+
+    Architect finding (a): this took the LAST row per interval regardless of series or kind -- load-
+    forecast rows (MW) were folded into the price path and every bank was priced at whichever zone came
+    last (LZ_WEST). Now only `kind == "price"` points count; each bank gets its own load zone's path,
+    and the fleet path (for a bank with no zone path) is the mean of the zones."""
     points = await forecast.scenarios(horizon_start, horizon_end)
-    by_scenario: dict[str, dict[str, list[tuple[int, float]]]] = {}
+    zone_by_bank = await db.load_bank_zones(list(bank_ids)) if bank_ids else {}
+    return scenarios_from_points(points, horizon_start, zone_by_bank)
+
+
+def scenarios_from_points(
+    points: Sequence[Any], horizon_start: datetime, zone_by_bank: dict[str, str]
+) -> tuple[ScenarioPrice, ...]:
+    """Pure part of `load_scenarios`: group price points into per-zone paths per scenario."""
+    by_zone: dict[str, dict[str, dict[int, float]]] = {}  # scenario -> zone -> t -> price
     probability_by_scenario: dict[str, float] = {}
     for point in points:
+        if point.kind != "price":
+            continue
         t = int((point.interval_start - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
-        by_scenario.setdefault(point.scenario, {}).setdefault("prices", []).append((t, point.value))
+        by_zone.setdefault(point.scenario, {}).setdefault(point.series_key, {})[t] = float(point.value)
         probability_by_scenario[point.scenario] = point.probability
-    return tuple(
-        ScenarioPrice(
-            scenario=name,  # type: ignore[arg-type]
-            probability=probability_by_scenario[name],
-            price_usd_per_mwh=dict(data["prices"]),
+    result = []
+    for name, zones in by_zone.items():
+        fleet_path: dict[int, float] = {}
+        for t in sorted({t for path in zones.values() for t in path}):
+            values = [path[t] for path in zones.values() if t in path]
+            fleet_path[t] = sum(values) / len(values)
+        result.append(
+            ScenarioPrice(
+                scenario=name,  # type: ignore[arg-type]
+                probability=probability_by_scenario[name],
+                price_usd_per_mwh=fleet_path,
+                price_by_bank={
+                    bank_id: dict(zones[zone]) for bank_id, zone in zone_by_bank.items() if zone in zones
+                },
+            )
         )
-        for name, data in by_scenario.items()
-    )
+    return tuple(result)
 
 
 async def load_committed(
@@ -460,7 +486,7 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
 
     banks, scenarios, committed, candidates = (
         await load_banks(horizon_start, horizon_end, bank_ids),
-        await load_scenarios(horizon_start, horizon_end),
+        await load_scenarios(horizon_start, horizon_end, bank_ids),
         await load_committed(horizon_start, horizon_end, bank_ids),
         await load_candidates(horizon_start, horizon_end, bank_ids, contract_scope),
     )

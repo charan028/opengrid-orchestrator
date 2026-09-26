@@ -63,7 +63,9 @@ def test_an_undeployed_as_award_is_held_at_zero_with_no_shortfall_and_no_headroo
     result = cycle(T, _fleet(), LedgerView(calls=(_as_call(deployed=False),)), _PRICED, {}, ())
 
     assert result.held == (AS_ID,)
-    assert [g for g in result.grants if g.obligation_id == AS_ID] == []
+    # Present at 0 kW with R-GRANT-AS-HOLD: the guardian's G-19 needs the hold's reason in the batch.
+    (hold,) = [g for g in result.grants if g.obligation_id == AS_ID]
+    assert hold.granted_kw == 0.0 and hold.reason_code == "R-GRANT-AS-HOLD"
     assert result.shortfalls == ()  # holding IS the service, nothing is short
     # The locked capacity and the held energy are never exported as headroom.
     assert [g for g in result.grants if g.is_headroom] == []

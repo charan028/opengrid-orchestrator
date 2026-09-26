@@ -78,7 +78,9 @@ def test_ts_05_50_multiple_concurrent_obligations_across_services_one_bank() -> 
     by_ob = {g.obligation_id: g.granted_kw for g in result.grants if not g.is_headroom}
     assert by_ob["o-dist"] == 40.0
     # ERCOT_AS is a capacity hold: undeployed it discharges nothing, but its 30 kW stays locked (K13).
-    assert "o-as" not in by_ob and result.held == ("o-as",)
+    # It is carried at 0 kW with R-GRANT-AS-HOLD (the guardian's G-19 signs the hold on its own reads).
+    assert by_ob["o-as"] == 0.0 and result.held == ("o-as",)
+    assert next(g for g in result.grants if g.obligation_id == "o-as").reason_code == "R-GRANT-AS-HOLD"
     assert by_ob["o-energy"] == 30.0  # only 30 left of the 100 kW bank after T1+T2
     shortfall = next(s for s in result.shortfalls if s.obligation_id == "o-energy")
     assert shortfall.shortfall_kw == 10.0
