@@ -38,8 +38,20 @@ solar_by_region_enabled = true
 
 # Solar share of load (opengrid.feeds.ercot_solar; rule in opengrid.core.solar_share): which ERCOT solar region(s) cover a load weather zone.
 # ERCOT's solar regions and load weather zones are different partitions, so only zones listed here get a
-# zonal share ("total" = system-wide always works). Empty until the mapping is agreed with the lead.
+# zonal share ("total" = system-wide always works). Keys are NP6-345-CD weather-zone series (the load side
+# of the ratio); values are NP4-745-CD solar regions. Proposed by county overlap with ERCOT's "Wind and Solar
+# Regions to County Mapping" (2024-05-31); rationale and caveats in
+# docs/orchestrator/07-delivery/integrations/solar-region-mapping.md. PROPOSED, pending lead sign-off.
+# Load zones reach these via forecast.service.DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE (LZ_AEN -> southC etc.).
 [feeds.ercot.solar_share_zones]
+coast = ["FarEast"]                     # Houston metro: Harris, Fort Bend, Brazoria, Galveston
+east = ["FarEast"]                      # Tyler, Longview, Lufkin
+farWest = ["FarWest"]                   # Midland, Odessa, Permian Basin
+north = ["NorthWest", "CenterWest"]     # Lubbock (NorthWest) and Wichita Falls (CenterWest)
+northC = ["CenterEast"]                 # DFW, Waco (Dallas, Tarrant, Collin, Denton, McLennan)
+southC = ["CenterEast", "SouthEast"]    # Austin (Travis, CenterEast) and San Antonio (Bexar, SouthEast)
+southern = ["SouthEast"]                # Corpus Christi, Laredo, Rio Grande Valley
+west = ["CenterWest"]                   # Abilene (Taylor), San Angelo (Tom Green)
 
 [feeds.eia]
 base_url = "https://api.eia.gov/v2"
