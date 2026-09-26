@@ -63,8 +63,9 @@ def live_base_url() -> str | None:
 
 
 # Extra Chromium switches, space-separated, e.g. on the shared base host (same disk as production Postgres):
-#   OG_E2E_CHROMIUM_ARGS="--disk-cache-dir=/dev/shm/og-e2e-cache --disk-cache-size=1"
-# Playwright puts the throwaway profile (--user-data-dir) under $TMPDIR, so run with TMPDIR=/dev/shm there too.
+#   OG_E2E_CHROMIUM_ARGS="--disk-cache-size=1"
+# Playwright puts the throwaway profile (--user-data-dir, and the disk cache inside it) under $TMPDIR, so run with
+# TMPDIR=/dev/shm there too. Do not pass one shared --disk-cache-dir: two contexts at once then hang on load.
 CHROMIUM_ARGS_ENV = "OG_E2E_CHROMIUM_ARGS"
 
 
