@@ -1,0 +1,324 @@
+"""Black-box client for the running dev stack (dev/README.md, WP D0), shared by the Q1/Q2 functional suites.
+
+Tests act through the operator API and the simulator control plane, the way an operator or an external system
+would, and read `og.*` rows only to assert on what the running processes did. The one exception is
+`offer()`, which sets `og.opportunity.value_per_mwh` right after admission: the API has no field for it (the
+intake prices its own offers from the forecast), and an unpriced market offer is correctly never selected.
+
+Configuration (all optional; the defaults match `dev/docker-compose.yml` and read `dev/secrets`):
+
+    OG_E2E_API            http://127.0.0.1:8080/og/api
+    OG_E2E_CONTROL        http://127.0.0.1:8091
+    OG_E2E_DSN            postgresql://opengrid:<OG_DB_PASSWORD>@127.0.0.1:<POSTGRES_PORT from dev/.env>/og
+    OG_E2E_PROXY_SECRET   <OG_API_PROXY_SECRET>   (og-api only trusts identity headers carrying it)
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
+
+import httpx
+import psycopg
+from psycopg.rows import dict_row
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEV_SECRETS = REPO_ROOT / "dev" / "secrets"
+DEV_ENV = REPO_ROOT / "dev" / ".env"
+INTERVAL = timedelta(minutes=15)
+
+#: How long an admission gate normally takes to decide a fresh contract's offer (next 2 s engine tick + solve).
+GATE_TIMEOUT_S = 90.0
+#: No ADMISSION plan for this long after the offer's own gate means the gate queue has drained.
+GATE_QUIET = timedelta(seconds=4)
+
+
+def _dev_value(path: Path, name: str, default: str = "") -> str:
+    if not path.exists():
+        return default
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == name and value.strip():
+            return value.strip()
+    return default
+
+
+def _dev_secret(name: str) -> str:
+    return _dev_value(DEV_SECRETS, name)
+
+
+def now_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+def quarter(offset: int = 1, *, at: datetime | None = None) -> datetime:
+    """The 15-minute interval boundary `offset` intervals after the current one (1 = the next boundary)."""
+    at = at or now_utc()
+    floored = at.replace(minute=at.minute - at.minute % 15, second=0, microsecond=0)
+    return floored + INTERVAL * offset
+
+
+def wait_until[T](
+    probe: Callable[[], T | None],
+    *,
+    timeout_s: float,
+    interval_s: float = 1.0,
+    what: str,
+) -> T:
+    """Poll `probe` until it returns something truthy; fail with `what` on timeout (never a bare sleep)."""
+    deadline = time.monotonic() + timeout_s
+    last: T | None = None
+    while time.monotonic() < deadline:
+        last = probe()
+        if last:
+            return last
+        time.sleep(interval_s)
+    raise AssertionError(f"timed out after {timeout_s:.0f}s waiting for {what} (last={last!r})")
+
+
+@dataclass(frozen=True)
+class Offer:
+    contract_id: UUID
+    opportunity_id: UUID
+    window_start: datetime
+    window_end: datetime
+    requested_kw: Decimal
+
+
+class Stack:
+    def __init__(self) -> None:
+        self.api_base = os.environ.get("OG_E2E_API", "http://127.0.0.1:8080/og/api").rstrip("/")
+        self.control_base = os.environ.get("OG_E2E_CONTROL", "http://127.0.0.1:8091").rstrip("/")
+        password = _dev_secret("OG_DB_PASSWORD")
+        port = _dev_value(DEV_ENV, "POSTGRES_PORT", "5432")
+        self.dsn = os.environ.get("OG_E2E_DSN", f"postgresql://opengrid:{password}@127.0.0.1:{port}/og")
+        secret = os.environ.get("OG_E2E_PROXY_SECRET") or _dev_secret("OG_API_PROXY_SECRET")
+        self._secret = secret
+        self.http = httpx.Client(timeout=30.0)
+        self.created_contracts: list[UUID] = []
+
+    # --- transport ---------------------------------------------------------------------------------
+
+    def headers(self, user: str = "operator") -> dict[str, str]:
+        return {"X-Remote-User": user, "X-OG-Proxy-Auth": self._secret}
+
+    def get(self, path: str, *, user: str = "operator", **params: Any) -> httpx.Response:
+        return self.http.get(f"{self.api_base}{path}", headers=self.headers(user), params=params)
+
+    def post(
+        self, path: str, body: dict[str, Any] | None = None, *, user: str = "operator"
+    ) -> httpx.Response:
+        return self.http.post(f"{self.api_base}{path}", headers=self.headers(user), json=body or {})
+
+    def patch(self, path: str, body: dict[str, Any], *, user: str = "operator") -> httpx.Response:
+        return self.http.patch(f"{self.api_base}{path}", headers=self.headers(user), json=body)
+
+    def control(self, method: str, path: str, body: dict[str, Any] | None = None) -> httpx.Response:
+        return self.http.request(method, f"{self.control_base}{path}", json=body)
+
+    def rows(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        with psycopg.connect(self.dsn, row_factory=dict_row) as conn:
+            return list(conn.execute(sql, params or {}).fetchall())
+
+    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute(sql, params or {})
+
+    def reachable(self) -> str | None:
+        """None when the stack answers, else why not (used to skip the whole suite cleanly)."""
+        try:
+            resp = self.get("/fleet/summary")
+        except httpx.HTTPError as exc:
+            return f"og-api not reachable at {self.api_base}: {exc}"
+        if resp.status_code != 200:
+            return f"og-api answered {resp.status_code} (proxy secret or identity config?)"
+        try:
+            self.rows("SELECT 1")
+        except psycopg.Error as exc:
+            return f"Postgres not reachable: {exc}"
+        return None
+
+    # --- arrange: contracts and offers -------------------------------------------------------------
+
+    def create_contract(self, service_type: str, tier: str, *, variant: str | None = None) -> UUID:
+        body = {
+            "customer_id": str(uuid4()),
+            "service_type": service_type,
+            "variant": variant,
+            "tier": tier,
+            "profile_ref": f"e2e-{service_type.lower()}@1",
+            "start_at": (now_utc() - timedelta(days=1)).isoformat(),
+            "renomination_allowed": False,
+            "penalty_alpha": "0.01",
+            "penalty_beta": "0.25",
+            "penalty_theta": "0.10",
+        }
+        resp = self.post("/contracts", body)
+        assert resp.status_code == 201, resp.text
+        contract_id = UUID(resp.json()["contract_id"])
+        self.created_contracts.append(contract_id)
+        return contract_id
+
+    def add_product_rule(
+        self,
+        contract_id: UUID,
+        *,
+        product_code: str,
+        min_qty_kw: float,
+        increment_kw: float,
+        block: bool,
+        duration_minutes: int,
+        variable_kind: str,
+    ) -> None:
+        self.execute(
+            """INSERT INTO og.product_rule (product_rule_id, contract_id, product_code, min_qty_kw, increment_kw,
+                                            block, duration_minutes, variable_kind)
+               VALUES (%(id)s, %(c)s, %(code)s, %(min)s, %(inc)s, %(block)s, %(dur)s, %(kind)s)""",
+            {
+                "id": uuid4(),
+                "c": contract_id,
+                "code": product_code,
+                "min": min_qty_kw,
+                "inc": increment_kw,
+                "block": block,
+                "dur": duration_minutes,
+                "kind": variable_kind,
+            },
+        )
+
+    def offer(
+        self,
+        contract_id: UUID,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        requested_kw: float,
+        value_per_mwh: float,
+    ) -> Offer:
+        resp = self.post(
+            "/opportunities",
+            {
+                "contract_id": str(contract_id),
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "requested_kw": str(requested_kw),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        opportunity_id = UUID(resp.json()["opportunity_id"])
+        self.execute(
+            "UPDATE og.opportunity SET value_per_mwh = %(v)s WHERE opportunity_id = %(o)s",
+            {"v": value_per_mwh, "o": opportunity_id},
+        )
+        return Offer(
+            contract_id,
+            opportunity_id,
+            window_start,
+            window_end,
+            Decimal(str(requested_kw)),
+        )
+
+    def end_contract(self, contract_id: UUID) -> None:
+        self.patch(f"/contracts/{contract_id}", {"status": "ENDED"})
+
+    # --- observe ------------------------------------------------------------------------------------
+
+    def obligation(self, offer: Offer) -> dict[str, Any] | None:
+        found = self.rows(
+            "SELECT * FROM og.obligation WHERE opportunity_id = %(o)s",
+            {"o": offer.opportunity_id},
+        )
+        return found[0] if found else None
+
+    def wait_decided(self, offer: Offer, *, timeout_s: float = GATE_TIMEOUT_S) -> dict[str, Any]:
+        """Wait until the selector has decided the offer. A selected (or rejected) offer leaves OFFERED; an
+        offer the gate declined for lack of headroom correctly stays OFFERED with nothing recorded against
+        it, so that case is recognised by an ADMISSION plan written after the offer followed by a quiet
+        gate queue (gates run one at a time, ~0.1 s each)."""
+
+        def decided() -> dict[str, Any] | None:
+            ob = self.obligation(offer)
+            if ob is None:
+                return None
+            if ob["state"] != "OFFERED":
+                return ob
+            plans = self.rows(
+                """SELECT max(p.created_at) AS last_plan, now() AS db_now FROM og.plan p
+                   WHERE p.gate_kind = 'ADMISSION'
+                     AND p.created_at > (SELECT admitted_at FROM og.opportunity WHERE opportunity_id = %(o)s)""",
+                {"o": offer.opportunity_id},
+            )[0]
+            if plans["last_plan"] and plans["db_now"] - plans["last_plan"] > GATE_QUIET:
+                return ob
+            return None
+
+        return wait_until(
+            decided,
+            timeout_s=timeout_s,
+            what=f"a gate decision on opportunity {offer.opportunity_id}",
+        )
+
+    def free_window(
+        self, intervals: int, *, first_offset: int = 3, last_offset: int = 88
+    ) -> tuple[datetime, datetime]:
+        """The earliest run of `intervals` consecutive 15-minute intervals (inside the selector's 24 h horizon)
+        with no live commitment at all, so a scenario's capacity is never taken by an earlier run's (still
+        locked, K13) obligations."""
+        base = quarter(0)
+        taken = {
+            row["interval_start"]
+            for row in self.rows(
+                """SELECT DISTINCT c.interval_start FROM og.commitment c
+                   WHERE c.interval_start >= %(a)s
+                     AND NOT EXISTS (SELECT 1 FROM og.commitment n WHERE n.supersedes = c.commitment_id)""",
+                {"a": base},
+            )
+        }
+        for offset in range(first_offset, last_offset - intervals):
+            window = [base + INTERVAL * (offset + i) for i in range(intervals)]
+            if not taken.intersection(window):
+                return window[0], window[-1] + INTERVAL
+        raise AssertionError(
+            f"no {intervals} free intervals in the next {last_offset} (reset the dev database?)"
+        )
+
+    def wait_state(self, offer: Offer, states: set[str], *, timeout_s: float) -> dict[str, Any]:
+        return wait_until(
+            lambda: ob if (ob := self.obligation(offer)) and ob["state"] in states else None,
+            timeout_s=timeout_s,
+            what=f"opportunity {offer.opportunity_id} to reach {sorted(states)}",
+        )
+
+    def active_commitments(self, obligation_id: UUID) -> dict[datetime, Decimal]:
+        """interval_start -> committed kW for the obligation's live commitment rows (a row another row
+        supersedes is history, not the current commitment)."""
+        found = self.rows(
+            """SELECT c.interval_start, c.committed_kw FROM og.commitment c
+               WHERE c.obligation_id = %(ob)s
+                 AND NOT EXISTS (SELECT 1 FROM og.commitment n WHERE n.supersedes = c.commitment_id)""",
+            {"ob": obligation_id},
+        )
+        return {row["interval_start"]: row["committed_kw"] for row in found}
+
+    def commitment_history(self, obligation_id: UUID) -> list[dict[str, Any]]:
+        return self.rows(
+            "SELECT * FROM og.commitment WHERE obligation_id = %(ob)s ORDER BY created_at",
+            {"ob": obligation_id},
+        )
+
+    def trace_reason_codes(self, since: datetime) -> list[str]:
+        found = self.rows(
+            "SELECT reason_codes FROM og.trace WHERE created_at >= %(t)s AND reason_codes IS NOT NULL",
+            {"t": since},
+        )
+        return [code for row in found for code in row["reason_codes"]]
+
+    def iter_created_contracts(self) -> Iterator[UUID]:
+        yield from self.created_contracts
