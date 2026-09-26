@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.render import render_status_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
+from opengrid.ui.routes.fleet import map_hub
 from opengrid.ui.routes.health import ack_message, degraded_context
 from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
 from opengrid.ui.templating import templates
@@ -57,6 +58,18 @@ async def control_room(request: Request) -> HTMLResponse:
     except ApiUnavailable as exc:
         logger.warning("control room: market ticker series unavailable: %s", exc)
 
+    # Customer sites for the map (CR #19 item 1). The endpoint is still being built; an empty layer is
+    # the correct read until it answers, and never degrades the screen.
+    customers: list[dict[str, Any]] = []
+    try:
+        raw_customers = await get_json("/og/api/customers/map")
+        items = (
+            raw_customers.get("items", raw_customers) if isinstance(raw_customers, dict) else raw_customers
+        )
+        customers = items if isinstance(items, list) else []
+    except ApiUnavailable as exc:
+        logger.info("control room: /og/api/customers/map not serving yet (%s)", exc)
+
     story = None
     try:
         raw_obl = await get_json("/og/api/dispatch/opportunities")
@@ -74,6 +87,8 @@ async def control_room(request: Request) -> HTMLResponse:
             "story": story,
             "alert_rows": [_alert_row(entry) for entry in health.get("alerts", []) or []],
             "hubs": hubs,
+            "map_hubs": [map_hub(h) for h in hubs],
+            "customers": customers,
             "ticker": series_chart_view(ticker_rows, series_key="price"),
             "degraded": degraded,
             **degraded_context(health),
