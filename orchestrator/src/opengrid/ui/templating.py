@@ -38,6 +38,7 @@ NAV_SCREENS: tuple[dict[str, str], ...] = (
     {"label": "System Health", "path": f"{BASE_PATH}/health", "icon": "pulse"},
     {"label": "Profitability", "path": f"{BASE_PATH}/profitability", "icon": "dollar"},
     {"label": "Billing & audit", "path": f"{BASE_PATH}/billing", "icon": "scroll"},
+    {"label": "Power quality", "path": f"{BASE_PATH}/pq", "icon": "wave"},
 )
 
 #: Links out of the console, shown under the screens. `/ogsim/` is the integration-sims control plane

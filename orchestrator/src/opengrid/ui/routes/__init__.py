@@ -42,7 +42,7 @@ router.include_router(health.router)
 
 # ui-b's screens (BUILD.md S4 ownership split). Imported by name so a missing module during early build
 # degrades to "screen not mounted yet" rather than breaking ui-a's own screens or the app startup.
-_UI_B_SCREENS = ("dispatch", "markets", "profitability", "billing_audit")
+_UI_B_SCREENS = ("dispatch", "markets", "profitability", "billing_audit", "pq")
 for _screen in _UI_B_SCREENS:
     try:
         _module = __import__(f"opengrid.ui.routes.{_screen}", fromlist=["router"])

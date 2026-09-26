@@ -1638,3 +1638,15 @@ label > select {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* --- definition lists (Power quality: bank measurement, inverter characterization) ------------- */
+.og-deflist {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.og-deflist dt { color: var(--muted); }
+.og-deflist dd { margin: 0; font-variant-numeric: tabular-nums; }

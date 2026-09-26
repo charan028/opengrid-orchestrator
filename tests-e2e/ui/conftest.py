@@ -82,6 +82,13 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/forecast": _load("markets_forecast.json"),
         "/og/api/profitability/summary": _load("profitability_summary.json"),
         "/og/api/views/settlement": _load("views_settlement.json"),
+        "/og/api/work-orders": _load("pq_work_orders.json"),
+        "/og/api/hubs/hub-01998/waveform": _load("pq_waveform.json"),
+        "/og/api/hubs/hub-01998/spectrum": _load("pq_spectrum.json"),
+        "/og/api/hubs/hub-01998/asset-health": _load("pq_asset_health.json"),
+        "/og/api/hubs/hub-01998/calibration-history": _load("pq_calibration.json"),
+        "/og/api/fleet/hubs/hub-01998": _load("pq_hub_location.json"),
+        "/og/api/banks/bank-038/pq": _load("pq_bank.json"),
         "/og/api/billing/invoice-lines": _load("billing_invoice_lines.json"),
         "/og/api/trace/events": _load("billing_trace_events.json"),
     }
@@ -108,9 +115,10 @@ def _route_modules() -> list[ModuleType]:
     import opengrid.ui.routes.fleet as fleet
     import opengrid.ui.routes.health as health
     import opengrid.ui.routes.markets as markets
+    import opengrid.ui.routes.pq as pq
     import opengrid.ui.routes.profitability as profitability
 
-    return [api_client, billing_audit, control_room, dispatch, fleet, health, markets, profitability]
+    return [api_client, billing_audit, control_room, dispatch, fleet, health, markets, pq, profitability]
 
 
 def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,0 +1,40 @@
+{
+  "hub_id": "hub-01998",
+  "asset_state": "DEGRADED",
+  "inverter_pq": {
+    "hub_id": "hub-01998",
+    "kva_rating": "11.5",
+    "pf_min_leading": "0.9",
+    "pf_min_lagging": "0.9",
+    "freq_offset_hz": "0.012",
+    "voltage_offset_pct": "0.8",
+    "thd_current_pct": "2.04",
+    "phase_angle_error_deg": "0.4",
+    "quality_score": "0.71",
+    "asset_state": "DEGRADED",
+    "asset_state_since": "2026-09-26T16:14:04+00:00",
+    "consecutive_correctable_drifts": 2,
+    "last_estimated_at": "2026-09-26T19:00:00+00:00",
+    "last_recalibration_at": null
+  },
+  "history": [
+    {
+      "asset_event_id": "33333333-0000-0000-0000-000000000001",
+      "hub_id": "hub-01998",
+      "work_order_id": null,
+      "event_type": "STATE_CHANGE",
+      "from_state": "OK",
+      "to_state": "DEGRADED",
+      "old_inverter_serial": null,
+      "new_inverter_serial": null,
+      "old_firmware": null,
+      "new_firmware": null,
+      "reason_code": "R-ASSET-DRIFT",
+      "occurred_at": "2026-09-26T16:14:04+00:00"
+    }
+  ],
+  "open_work_order": {
+    "severity": "HIGH",
+    "status": "OPEN"
+  }
+}

@@ -17,6 +17,7 @@ SCREENS: tuple[tuple[str, str], ...] = (
     (f"{BASE_PATH}/health", "System Health"),
     (f"{BASE_PATH}/profitability", "Profitability"),
     (f"{BASE_PATH}/billing", "Billing & audit"),
+    (f"{BASE_PATH}/pq", "Power quality & assets"),
 )
 
 # (path, SSE stream name) -- screens that subscribe to `/og/api/stream/<name>` via `og.sse` (02b S7.2).
