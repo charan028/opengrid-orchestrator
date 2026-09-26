@@ -40,6 +40,29 @@ def _load_schema(kind: str) -> dict[str, Any]:
     return data
 
 
+@cache
+def _validator_for(kind: str) -> jsonschema.protocols.Validator:
+    """One compiled `Validator` per schema `kind`, built once and reused.
+
+    `jsonschema.validate()` (the convenience function this replaced) re-verifies the *schema itself*
+    (`check_schema`) on every single call in addition to validating the instance -- fine for a one-off
+    call, but ruinous at MQTT ingest volume (~1,000 msg/s at 2,000 hubs): live profiling
+    (`py-spy dump` against `og-engine`) caught `_mqtt_ingest_loop` stuck synchronously inside
+    `jsonschema.validators.validate -> check_schema -> iter_errors` on the event loop's only thread,
+    which starved every other coroutine (including `opengrid.fleet.flush`'s DB writes) and made the
+    ingest path fall further and further behind wall-clock time until every hub read as stale --
+    the actual mechanism behind qa/merge-notes.md section 12's "og-sim-fleet goes idle" symptom (the
+    simulator itself was confirmed still publishing on schedule; this consumer-side validation cost is
+    what made ingestion never catch up). Compiling the validator once and calling
+    `Validator.validate()` skips the redundant re-check on every message with no change in what is
+    accepted or rejected.
+    """
+    schema = _load_schema(kind)
+    cls = jsonschema.validators.validator_for(schema)
+    cls.check_schema(schema)
+    return cls(schema)
+
+
 class SchemaValidationError(ValueError):
     """Raised when an MQTT payload fails validation against its `interfaces/mqtt/*.schema.json`."""
 
@@ -49,9 +72,9 @@ def validate_payload(kind: str, payload: dict[str, Any]) -> None:
     Raises SchemaValidationError with the jsonschema-reported reason; never silently accepts an
     invalid message (BUILD.md S5a security: "validate all inbound messages against interfaces/").
     """
-    schema = _load_schema(kind)
+    validator = _validator_for(kind)
     try:
-        jsonschema.validate(instance=payload, schema=schema)
+        validator.validate(instance=payload)
     except jsonschema.ValidationError as exc:
         raise SchemaValidationError(f"{kind}: {exc.message}") from exc
 

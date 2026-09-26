@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from opengrid.platform import mqtt
 from opengrid.platform.config import load_config
 from opengrid.platform.mqtt import SchemaValidationError, topic, validate_payload
 
@@ -54,6 +55,32 @@ def test_validate_payload_rejects_bad_enum():
     }
     with pytest.raises(SchemaValidationError):
         validate_payload("telemetry", payload)
+
+
+def test_validate_payload_reuses_one_compiled_validator_per_kind():
+    """Regression: `validate_payload` must not re-verify the schema itself (`jsonschema.validate`'s
+    `check_schema`) on every call -- at MQTT ingest volume (~1,000 msg/s for 2,000 hubs) that made
+    `og-engine`'s single-threaded ingest loop fall permanently behind wall-clock time (confirmed live
+    via `py-spy dump`), which is the actual mechanism behind qa/merge-notes.md section 12's "og-sim-fleet
+    goes idle" symptom. `_validator_for` is `@cache`d, so the same `Validator` instance must come back
+    for repeated calls with the same `kind`."""
+    payload = {
+        "hub_id": "hub-1",
+        "bank_id": "bank-1",
+        "zone": "LZ_NORTH",
+        "ts": datetime.now(UTC).isoformat(),
+        "soc_kwh": 5.0,
+        "p_kw": -1.5,
+        "health": "online",
+        "seq": 1,
+        "epoch": 1,
+    }
+    validate_payload("telemetry", payload)
+    validate_payload("telemetry", payload)
+
+    first = mqtt._validator_for("telemetry")
+    second = mqtt._validator_for("telemetry")
+    assert first is second
 
 
 def test_validate_payload_command_batch():

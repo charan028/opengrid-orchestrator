@@ -27,6 +27,8 @@ _FROZEN_COMMITMENTS_SQL = """
       AND interval_start < %(horizon_end)s AND interval_end > %(horizon_start)s
 """
 
+_BANK_IDS_SQL = "SELECT bank_id FROM og.bank ORDER BY bank_id"
+
 _OFFERED_OPPORTUNITIES_SQL = """
     SELECT o.opportunity_id, o.contract_id, o.window_start, o.window_end, o.requested_kw,
            o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
@@ -74,6 +76,17 @@ async def load_frozen_commitments(horizon_start: str, horizon_end: str) -> dict[
     for obligation_id, interval_start, committed_kw in rows:
         frozen[obligation_id][_interval_key(interval_start)] = committed_kw
     return dict(frozen)
+
+
+async def load_bank_ids_rows() -> list[str]:
+    """Read-only: every real `bank_id` currently in `og.bank` (the fleet topology's source of truth,
+    seeded by `opengrid.fleet.seed`), ordered for determinism. `gate._configured_bank_ids` uses this
+    instead of fabricating an id list from a count + format guess, so selector can never propose or
+    reserve capacity against a bank that does not actually exist in the topology."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_BANK_IDS_SQL)
+        return [row[0] async for row in cur]
 
 
 async def load_offered_opportunities_rows(

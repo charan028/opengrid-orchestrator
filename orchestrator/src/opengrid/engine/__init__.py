@@ -256,11 +256,14 @@ async def main(cfg: Config) -> None:
     itself (it is the only module that knows which series matters per contract, 02b S6.5); an
     unavailable guardian is enforced here (`guardian_is_available`, "hold, don't pile up batches").
     """
+    import opengrid.feeds as feeds_mod
     import opengrid.fleet as fleet_mod
     import opengrid.ledger as ledger_mod
     from opengrid.engine.gateways import FleetCapabilityProvider, build_gateways
     from opengrid.engine.pg_backend import PgEngineBackend
     from opengrid.fleet.pg_backend import PgFleetBackend
+    from opengrid.forecast import configure as configure_forecast
+    from opengrid.forecast.pg_backend import PgForecastBackend
     from opengrid.ledger import ReservationLedger
     from opengrid.ledger.pg_backend import PgGrantBackend, PgLedgerBackend
     from opengrid.platform.config import resolve_secret
@@ -273,6 +276,16 @@ async def main(cfg: Config) -> None:
     try:
         fleet_mod.configure(PgFleetBackend(pool), cfg)
         await fleet_mod.load_topology()
+
+        # `opengrid.forecast`'s module-level facade is also a per-process singleton (like `ledger`
+        # below): `selector.run_gate`'s `forecast.scenarios()` call runs inside this og-engine process,
+        # not og-feeds's, so it needs its own `configure()` call here too, even though `run_forecast_cycle`
+        # (the only caller of `history`) only ever runs in og-feeds -- `scenarios()` itself is a read-only
+        # `og.forecast` query and never touches `history`, so passing `opengrid.feeds` unconfigured in
+        # this process is safe (qa/merge-notes.md's "og-sim-fleet idle" investigation traced A4/A5's
+        # missing commitments the rest of the way to `RuntimeError: opengrid.forecast.configure() must be
+        # called before scenarios()` -- never wired here, so every gate crashed before ever reserving).
+        configure_forecast(cfg, history=feeds_mod, backend=PgForecastBackend(pool))
 
         # opengrid.ledger's module-level facade (reserve/release/persist_grants/ledger_version) is a
         # per-process singleton wired exactly once, here -- selector.run_gate's ledger.reserve() calls

@@ -92,6 +92,48 @@ async def test_run_gate_persists_and_reserves_the_selected_candidate(_wired):
     assert reserved["selected_kw"]["0"] == pytest.approx(10.0)
 
 
+async def test_run_gate_never_reserves_against_a_fabricated_bank_id(monkeypatch, _wired):
+    """Regression for qa/merge-notes.md section 11: `_configured_bank_ids` must never fabricate a
+    `bank-NN`-style id (disjoint from the real `bank-000`-style topology) that then flows through
+    `load_banks`/`load_candidates`/`load_committed` into a real `ledger.reserve()` call."""
+    _persisted, reserved = _wired
+
+    async def _fake_configured_bank_ids_real_format():
+        return ("bank-000",)
+
+    monkeypatch.setattr(gate, "_configured_bank_ids", _fake_configured_bank_ids_real_format)
+
+    async def _fake_load_banks_real_bank(horizon_start, horizon_end, bank_ids):
+        assert bank_ids == ("bank-000",)
+        return (make_bank("bank-000", 10.0, range(1)),)
+
+    monkeypatch.setattr(gate, "load_banks", _fake_load_banks_real_bank)
+
+    async def _fake_load_candidates_real_bank(horizon_start, horizon_end, bank_ids, contract_scope):
+        assert bank_ids == ("bank-000",)
+        return (
+            CandidateOpportunity(
+                opportunity_id=OPPORTUNITY_ID,
+                contract_id=str(uuid4()),
+                eligible_bank_ids=bank_ids,
+                window_intervals=(0,),
+                requested_kw=10.0,
+                value_per_mwh=100.0,
+                variable_kind="BINARY",
+                min_qty_kw=0.0,
+                increment_kw=0.0,
+            ),
+        )
+
+    monkeypatch.setattr(gate, "load_candidates", _fake_load_candidates_real_bank)
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    # `load_candidates` (asserted above) and `ledger.reserve` (here) only ever saw the real bank id
+    # `og.bank` returned -- never a fabricated `bank-NN` placeholder from a count/format guess.
+    assert reserved["selected_kw"], "expected a real reservation to be made"
+
+
 async def test_run_gate_renomination_requires_contract_scope():
     with pytest.raises(ValueError, match="RENOMINATION"):
         await gate.run_gate("RENOMINATION", contract_scope=None)

@@ -17,7 +17,6 @@ from uuid import UUID, uuid4
 from opengrid import forecast, ledger
 from opengrid.core.models.engine import Plan
 from opengrid.fleet import capability as fleet_capability
-from opengrid.platform.config import load_config
 from opengrid.selector import db
 from opengrid.selector.extract import extract_plan
 from opengrid.selector.model import build_mode_o_model
@@ -299,10 +298,12 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
 
 
 async def _configured_bank_ids() -> tuple[str, ...]:
-    """MVP-S bank list is configuration, not solver output (02a S3.1): `[fleet].banks` in
-    `orchestrator.toml`/`test.toml` gives the count; ids follow the `bank-NN` text-code convention used
-    elsewhere in the codebase (`og.bank.bank_id`, 02b S4.2 -- see `opengrid.api.store`'s docstring for
-    the same convention, e.g. `"bank-01"`). Overridden by tests."""
-    cfg = load_config()
-    bank_count = int(cfg.get("fleet.banks", 0))
-    return tuple(f"bank-{i:02d}" for i in range(1, bank_count + 1))
+    """The real bank list, read from `og.bank` (02b S4.2), the fleet topology's single source of truth
+    (seeded by `opengrid.fleet.seed` from `integration-sims/config/fleet.yaml`, id scheme `bank-000`..
+    `bank-039`). Never fabricated from a count + format guess: an earlier version of this function
+    synthesised `f"bank-{i:02d}"` ids (`"bank-01".."bank-NN"`), which are a completely disjoint id space
+    from the real `bank-000`-style ids, so every `fleet.capability(bank_id, ...)` call raised
+    `LookupError` and `run_gate` never reserved anything (`qa/merge-notes.md` section 11). Overridden by
+    tests via `db.load_bank_ids_rows`."""
+    bank_ids = await db.load_bank_ids_rows()
+    return tuple(bank_ids)

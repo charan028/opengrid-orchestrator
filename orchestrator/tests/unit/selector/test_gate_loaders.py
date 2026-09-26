@@ -98,14 +98,36 @@ async def test_load_candidates_drops_a_row_whose_window_does_not_overlap_the_hor
     assert candidates == ()
 
 
-async def test_configured_bank_ids_reads_fleet_banks_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FakeConfig:
-        def get(self, key: str, default: object = None) -> object:
-            assert key == "fleet.banks"
-            return 3
+async def test_configured_bank_ids_reads_real_bank_ids_from_og_bank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_configured_bank_ids` must read the real topology from `og.bank` (seeded by
+    `opengrid.fleet.seed` with `bank-000`..`bank-039`-style ids), never fabricate a `bank-NN` list from
+    a configured count (qa/merge-notes.md section 11 -- the two id spaces are disjoint)."""
 
-    monkeypatch.setattr(gate, "load_config", lambda: _FakeConfig())
+    async def _fake_bank_ids_rows() -> list[str]:
+        return ["bank-000", "bank-001", "bank-002"]
+
+    monkeypatch.setattr(db, "load_bank_ids_rows", _fake_bank_ids_rows)
 
     bank_ids = await gate._configured_bank_ids()
 
-    assert bank_ids == ("bank-01", "bank-02", "bank-03")
+    assert bank_ids == ("bank-000", "bank-001", "bank-002")
+
+
+async def test_configured_bank_ids_never_fabricates_ids_not_returned_by_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: whatever `og.bank` returns is passed through verbatim -- no `bank-NN`-style id is
+    synthesised from a count, even when the real ids use an unexpected count or format."""
+
+    async def _fake_bank_ids_rows() -> list[str]:
+        return ["bank-007"]
+
+    monkeypatch.setattr(db, "load_bank_ids_rows", _fake_bank_ids_rows)
+
+    bank_ids = await gate._configured_bank_ids()
+
+    assert bank_ids == ("bank-007",)
+    assert "bank-01" not in bank_ids
+    assert "bank-00" not in bank_ids

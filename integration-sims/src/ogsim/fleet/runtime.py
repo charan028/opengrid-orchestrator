@@ -254,14 +254,26 @@ async def run_fleet(
     """Async shell: subscribes to inbound topics, ticks `engine` on
     `config.telemetry_interval_s`, and publishes telemetry. Intended to run
     under `asyncio.gather` alongside a message-consuming task (which
-    publishes acks as command batches arrive); kept thin and deliberately
-    not unit-tested (the engine above is)."""
+    publishes acks as command batches arrive).
+
+    One tick's body (physics step + publish) is wrapped in its own
+    try/except: a single bad tick -- a transient publish failure, a
+    momentarily unreachable broker, anything that would otherwise raise out
+    of this `while True` loop -- must never silently end telemetry for the
+    rest of the process's life (qa/merge-notes.md section 12: og-sim-fleet
+    going idle after one burst per restart, with nothing logged and no
+    crash/restart to explain why). The error is logged and the loop keeps
+    ticking on schedule; a hub simply misses one telemetry publish rather
+    than every hub going stale forever."""
     await client.subscribe("cmd/+/batch", qos=1)
     await client.subscribe("stop/#", qos=1)
     await client.subscribe("lease/+", qos=1)
     await client.subscribe("scenario/cmd", qos=1)
     while True:
         now = clock.now()
-        engine.tick(now)
-        await client.publish_batch("telemetry", engine.telemetry_messages(now), qos=0)
+        try:
+            engine.tick(now)
+            await client.publish_batch("telemetry", engine.telemetry_messages(now), qos=0)
+        except Exception:
+            logger.exception("fleet tick failed; continuing telemetry loop")
         await clock.sleep(engine.config.telemetry_interval_s)

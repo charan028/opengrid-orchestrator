@@ -17,6 +17,62 @@ def test_interval_key_falls_back_to_str_for_non_datetime():
     assert db._interval_key("2026-09-26T12:15:00") == "2026-09-26T12:15:00"
 
 
+async def test_load_bank_ids_rows_returns_real_format_ids_from_a_fake_pool(monkeypatch):
+    """`load_bank_ids_rows` must return exactly what `og.bank` has -- real `bank-000`-style ids, not a
+    fabricated `bank-NN` count-based list (qa/merge-notes.md section 11)."""
+
+    class _FakeCursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        async def execute(self, sql, params=None):
+            assert "og.bank" in sql
+
+        def __aiter__(self):
+            return self._aiter_rows()
+
+        async def _aiter_rows(self):
+            for row in self._rows:
+                yield row
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeConn:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def cursor(self):
+            return _FakeCursor(self._rows)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakePool:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def connection(self):
+            return _FakeConn(self._rows)
+
+    fake_pool = _FakePool([("bank-000",), ("bank-001",), ("bank-039",)])
+
+    async def _fake_get_pool():
+        return fake_pool
+
+    monkeypatch.setattr(db, "get_pool", _fake_get_pool)
+
+    bank_ids = await db.load_bank_ids_rows()
+
+    assert bank_ids == ["bank-000", "bank-001", "bank-039"]
+
+
 async def test_load_frozen_commitments_shapes_rows_by_obligation_and_interval(monkeypatch):
     obligation_id = uuid4()
     t0 = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)
