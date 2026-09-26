@@ -54,11 +54,13 @@ user_agent = "OpenGrid-Orchestrator-Dev (dev@localhost)"
 grid_point = "EWX/156,91"
 
 [feeds.staleness]
-# Matches base's R2 hotfix (2026-09-26): live ERCOT prices post about 30 min after the interval starts,
-# and load posts about a day behind, so 600 s / 1800 s flagged healthy feeds as stale.
-ercot_price_fresh_s = 2700
+# Simulated feeds post on time, so the dev stack keeps main's short windows: DEMO-2 step 18 and the chaos
+# harness's feed-stale test (TS-C-01, mode H) reach "Feed stale" within minutes. Base's R2 hotfix values
+# (2700 s / 172800 s: live ERCOT prices post about 30 min late, load about a day behind) are only in
+# docker.live-feeds.toml, the one config that polls the live APIs.
+ercot_price_fresh_s = 600
 ercot_price_lgv_s = 900
-ercot_load_fresh_s = 172800
+ercot_load_fresh_s = 1800
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800
