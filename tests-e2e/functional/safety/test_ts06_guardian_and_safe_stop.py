@@ -229,14 +229,17 @@ def test_ts_06_17_with_the_guardian_down_a_command_is_never_treated_as_passed(st
         stack.compose("start", "og-guardian")
         stack.wait_process_up("guardian")
 
-    # Right after a restart the guardian may still answer TIMEOUT on its own clock check (G-20, K12); what
-    # matters is that it resumes judging, so allow a few attempts for a real PASS/VETO verdict.
-    for _ in range(5):
-        recovered = stack.manual_command(hub["hub_id"], float(hub["p_kw"]))
-        assert recovered.status_code in {200, 409}, f"the guardian did not resume judging: {recovered.text}"
-        if _verdict(recovered)["outcome"] != "TIMEOUT":
-            break
-    assert _verdict(recovered)["outcome"] in {"PASS", "VETOED", "PARTLY_VETOED"}, recovered.text
+    # After a restart the guardian first drains the batches the engine queued while it was down (oldest first),
+    # and may answer TIMEOUT on its own clock check (G-20, K12). What matters is that it resumes judging.
+    def judged() -> dict | None:
+        resp = stack.manual_command(hub["hub_id"], float(hub["p_kw"]))
+        if resp.status_code == 503:
+            return None
+        assert resp.status_code in {200, 409}, resp.text
+        verdict = _verdict(resp)
+        return verdict if verdict["outcome"] in {"PASS", "VETOED", "PARTLY_VETOED"} else None
+
+    wait_until(judged, timeout_s=180, interval_s=5, what="the restarted guardian to judge a fresh command")
 
 
 def test_ts_06_23_safe_stop_engages_with_engine_and_guardian_both_down(stack: Stack) -> None:
