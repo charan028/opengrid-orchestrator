@@ -10,10 +10,37 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+#: Live bug fix, 2026-09-26 (FLEET-SIM, e2e A11 regression: "a bank_overload injection from
+#: ogsim.control never changes the SCADA sim's readings"). Root cause: several shipped scenario files
+#: (e.g. `scenarios/bank_overload_and_utility_limit.yaml`'s `target: BANK_07`,
+#: `scenarios/compound_stress.yaml`'s `target: BANK_12`) name banks in an uppercase/underscore
+#: placeholder format that never matches this sim's real `bank-NNN` ids -- `_resolve_targets` used an
+#: exact-match lookup, so the anomaly silently resolved to zero banks and `_apply` had nothing to loop
+#: over. This pattern accepts "BANK_07", "bank_07", "bank-007", "BANK07" etc. as all naming the same
+#: real bank -- case-insensitive, dash/underscore/no-separator, any digit width.
+_BANK_REF_PATTERN = re.compile(r"^bank[-_]?(\d+)$", re.IGNORECASE)
+
+
+def normalize_bank_ref(ref: str, bank_ids: list[str]) -> str | None:
+    """The real bank id `ref` names, or `None` if it names no bank in `bank_ids`. An exact match wins
+    first (so a ref that already IS a real id, any shape, always resolves); otherwise `ref` is parsed
+    as `bank[-_]?<digits>` (case-insensitive) and re-formatted to this sim's own `bank-{n:03d}` scheme
+    for the lookup."""
+    if ref in bank_ids:
+        return ref
+    match = _BANK_REF_PATTERN.match(ref.strip())
+    if match is None:
+        return None
+    candidate = f"bank-{int(match.group(1)):03d}"
+    return candidate if candidate in bank_ids else None
+
 
 SCADA_ANOMALY_TYPES = frozenset(
     {
@@ -92,8 +119,9 @@ class ScadaAnomalyManager:
     def _resolve_targets(self, target_kind: str | None, target_ref: str) -> list[str]:
         if target_ref in ("*", "") or target_kind == "sim":
             return list(self.bank_ids)
-        if target_kind == "bank" or target_ref in self.modifiers:
-            return [target_ref] if target_ref in self.modifiers else []
+        normalized_bank = normalize_bank_ref(target_ref, self.bank_ids)
+        if target_kind == "bank" or normalized_bank is not None:
+            return [normalized_bank] if normalized_bank is not None else []
         if target_kind == "zone" or target_ref in self.zones:
             return [b for b, z in zip(self.bank_ids, self.zones, strict=True) if z == target_ref]
         return []
