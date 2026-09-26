@@ -1,0 +1,34 @@
+{
+  "_purpose": "Cross-package fixture (BUILD.md S1: opengrid/ogsim share no code, only the wire/id scheme): opengrid.fleet.seed.build_topology and ogsim.fleet.state.build_fleet_state must both reproduce this exact hub/bank id, zone and dual-unit assignment for the same base+zone_blocks config. Read by orchestrator/tests/unit/fleet/test_seed_zone_blocks.py and integration-sims/tests/test_fleet_zone_blocks.py. Computed by hand from the documented rule (see ZoneBlockConfig's docstring in both config modules), not by running either package's code, so a shared formula bug can't produce a fixture that fools both tests.",
+  "base": {
+    "hub_count": 4,
+    "bank_count": 2,
+    "zones": ["LZ_NORTH", "LZ_SOUTH"],
+    "dual_unit_share": 0.5,
+    "e_kwh_default": 39.2,
+    "e_kwh_dual_unit": 78.4,
+    "p_kw_default": 11.0,
+    "p_kw_dual_unit": 20.0,
+    "reserve_frac_default": 0.2
+  },
+  "zone_blocks": [
+    {"zone": "LZ_AEN", "banks": 1, "homes_per_bank": 4, "enabled": true},
+    {"zone": "LZ_CPS", "banks": 1, "homes_per_bank": 2, "enabled": false}
+  ],
+  "expected_hubs": [
+    {"hub_id": "hub-00000", "bank_id": "bank-000", "zone": "LZ_NORTH", "dual_unit": false},
+    {"hub_id": "hub-00001", "bank_id": "bank-001", "zone": "LZ_SOUTH", "dual_unit": false},
+    {"hub_id": "hub-00002", "bank_id": "bank-000", "zone": "LZ_NORTH", "dual_unit": true},
+    {"hub_id": "hub-00003", "bank_id": "bank-001", "zone": "LZ_SOUTH", "dual_unit": true},
+    {"hub_id": "hub-00004", "bank_id": "bank-002", "zone": "LZ_AEN", "dual_unit": false},
+    {"hub_id": "hub-00005", "bank_id": "bank-002", "zone": "LZ_AEN", "dual_unit": true},
+    {"hub_id": "hub-00006", "bank_id": "bank-002", "zone": "LZ_AEN", "dual_unit": false},
+    {"hub_id": "hub-00007", "bank_id": "bank-002", "zone": "LZ_AEN", "dual_unit": true}
+  ],
+  "expected_banks": [
+    {"bank_id": "bank-000", "zone": "LZ_NORTH"},
+    {"bank_id": "bank-001", "zone": "LZ_SOUTH"},
+    {"bank_id": "bank-002", "zone": "LZ_AEN"}
+  ],
+  "note": "LZ_CPS is disabled, so it reserves NO ids: only 8 hubs / 3 banks total, and bank-002 is LZ_AEN (not LZ_CPS), proving a disabled block is skipped rather than reserving a numbering gap."
+}

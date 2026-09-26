@@ -10,6 +10,20 @@ mqtt:
 bank_count: 40
 zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
 
+# Optional extra load-zone blocks (build phase, 2026-09-26): must mirror fleet.yaml's own
+# zone_blocks: entry for entry (same manual-duplication pattern bank_count/zones already use
+# across the two config files) so ogsim.scada covers exactly the banks ogsim.fleet seeds.
+# Disabled by default -- no behaviour change until a block is turned on in BOTH files.
+zone_blocks:
+  - zone: LZ_AEN
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+  - zone: LZ_CPS
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+
 publish_interval_s: 2.0
 # feeder segment (~50 homes), not a single distribution transformer.
 bank_kva_rating_default: 600.0

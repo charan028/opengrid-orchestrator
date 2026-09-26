@@ -67,7 +67,9 @@ def test_build_inverter_pq_state_differs_across_seeds() -> None:
 
 def test_dual_unit_hub_has_two_inverter_units() -> None:
     config, state, pq = _build(seed=0)
-    dual_unit_hub_id = "hub-00004"  # first dual-unit hub for hub_count=20, dual_unit_share=0.2
+    # First dual-unit hub for hub_count=20, bank_count=2, dual_unit_share=0.2: the per-bank-offset
+    # rule (ogsim.fleet.state._dual_unit_mask) selects k = i // bank_count = 4 -> i in {8, 9}.
+    dual_unit_hub_id = "hub-00008"
     assert state.e_kwh[state.index_of(dual_unit_hub_id)] == config.e_kwh_dual_unit
     units = pq.indices_for_hub(dual_unit_hub_id)
     assert len(units) == 2
@@ -82,11 +84,11 @@ def test_single_unit_hub_has_one_inverter_unit() -> None:
 
 def test_inverter_state_returns_a_snapshot_per_unit_on_the_hub() -> None:
     _, _, pq = _build(seed=0)
-    snapshots = inverter_state(pq, "hub-00004")
+    snapshots = inverter_state(pq, "hub-00008")
     assert len(snapshots) == 2
-    assert {s.unit_id for s in snapshots} == {"hub-00004-inv0", "hub-00004-inv1"}
+    assert {s.unit_id for s in snapshots} == {"hub-00008-inv0", "hub-00008-inv1"}
     for snapshot in snapshots:
-        assert snapshot.hub_id == "hub-00004"
+        assert snapshot.hub_id == "hub-00008"
         assert 0.0 <= snapshot.quality_score <= 1.0
 
 
@@ -365,7 +367,7 @@ def test_replace_inverter_clears_active_calibration_drift_on_that_hub() -> None:
 def test_replace_inverter_names_both_units_distinctly_for_a_dual_unit_home() -> None:
     _, _, pq = _build(seed=9)
     manager = PqAnomalyManager(pq)
-    hub_id = "hub-00004"  # dual-unit hub
+    hub_id = "hub-00008"  # dual-unit hub
     rng = np.random.default_rng(1)
     replace_inverter(pq, manager, hub_id, new_serial="SN-BASE", new_firmware="FW-2.0.0", rng=rng)
     idx = pq.indices_for_hub(hub_id)

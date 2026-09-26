@@ -34,6 +34,26 @@ dual_unit_share: 0.2
 e_kwh_dual_unit: 78.4  # Dual-unit home usable kWh (2 Base Power battery units).
 p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
 
+# Optional extra load-zone blocks (build phase, 2026-09-26: Austin Energy / CPS Energy regulated
+# municipal utilities -- see docs/orchestrator/07-delivery/08-market-model-two-markets.md). Disabled
+# by default: an `enabled: false` block reserves NO hub/bank ids, so the base 2,000-hub/40-bank fleet
+# above is byte-for-byte unchanged whether or not this list is present. Enabling a block starts its
+# ids at hub-02000/bank-040 (or after the previous enabled block, in list order) and never renumbers
+# the base fleet or an earlier block -- see `opengrid.fleet.seed.ZoneBlockConfig`/
+# `ogsim.common.config.ZoneBlockConfig` for the exact id/dual-unit rule. Homes-per-bank is 50 (same as
+# the base fleet) so the same 0.2 dual_unit_share above yields 10 dual-unit homes per new bank too.
+# `[forecast].price_series`/`load_series` (orchestrator.toml) and `[zone_default_tdsp]`
+# (tdsp_tariffs.toml) must also be updated when a block is enabled -- see those files' own comments.
+zone_blocks:
+  - zone: LZ_AEN
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+  - zone: LZ_CPS
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+
 guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
 # Local/dev override (hex or base64 32-byte Ed25519 public key), takes
 # precedence over guardian_public_key_path when non-empty:
