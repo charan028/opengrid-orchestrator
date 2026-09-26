@@ -328,9 +328,7 @@ def as_awards_view(
     allocator supplies them.
     """
     active_by_obligation = {
-        str(row.get("obligation_id")): row
-        for row in deployments
-        if row.get("obligation_id") is not None
+        str(row.get("obligation_id")): row for row in deployments if row.get("obligation_id") is not None
     }
     all_deployment = next((row for row in deployments if row.get("obligation_id") is None), None)
     rows: list[dict[str, Any]] = []
