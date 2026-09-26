@@ -69,6 +69,11 @@ class NwsClient:
             raise FeedHttpError(response.status_code, f"NWS hourly forecast -> {response.status_code}")
 
         payload = response.json()
-        updated_str = payload["properties"]["updated"]
+        props = payload["properties"]
+        # api.weather.gov stopped sending `updated` (live payloads carry `updateTime`, plus
+        # `generatedAt`); a KeyError here aborted every feeds tick and re-polled NWS each cycle.
+        updated_str = props.get("updated") or props.get("updateTime") or props.get("generatedAt")
+        if not updated_str:
+            raise FeedHttpError(response.status_code, "NWS hourly forecast: no updateTime/updated field")
         self._last_updated = datetime.fromisoformat(updated_str)
         return nws_forecast_to_feed_obs(payload, recorded_at=recorded_at)

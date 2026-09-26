@@ -102,3 +102,19 @@ async def test_hourly_forecast_error_status_raises() -> None:
     client = _client(httpx.MockTransport(handler))
     with pytest.raises(FeedHttpError):
         await client.hourly_forecast(GridPoint(office="EWX", x=156, y=91), recorded_at=RECORDED_AT)
+
+
+async def test_hourly_forecast_accepts_update_time_instead_of_updated() -> None:
+    """Live api.weather.gov payloads (2026-09) carry `updateTime`/`generatedAt`, not `updated`."""
+    import copy
+
+    payload = copy.deepcopy(FORECAST_PAYLOAD)
+    payload["properties"]["updateTime"] = payload["properties"].pop("updated")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = _client(httpx.MockTransport(handler))
+    obs = await client.hourly_forecast(GridPoint(office="EWX", x=156, y=91), recorded_at=RECORDED_AT)
+    assert obs
+    assert client._last_updated == datetime.fromisoformat("2026-09-26T17:00:00+00:00")
