@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from opengrid.core.models.engine import ServiceType as CoreServiceType
+
 # Lower-case, matching the MQTT/URL scope vocabulary (`og/v1/stop/<scope>/<id>`, 02b S6.2) --
 # converted to `opengrid.safestop.Scope`'s upper-case literal at the call site.
 SafestopScopeName = Literal["fleet", "zone", "bank"]
@@ -72,7 +74,7 @@ class RetentionPolicyUpdate(_Api):
 
 # -- contracts / opportunities CRUD ------------------------------------------------------------------
 
-ServiceType = Literal["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY"]
+ServiceType = CoreServiceType  # one definition: opengrid.core.models.engine
 Tier = Literal["L0", "L1", "L2", "T1", "T2", "T3", "T4"]
 
 

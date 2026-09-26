@@ -1,8 +1,9 @@
 # OpenGrid Orchestrator — Build Brief (MVP-S)
 
 Read this first, then `docs/team/NOTICES.md` (requirement changes). The design is fixed by the approved documents in
-`docs/orchestrator/07-delivery/` in this repo. The lead's workspace path `D:\Projects\OpenGrid\docs\orchestrator\` is
-the same set; the repo copy is what contributors use.
+`docs/orchestrator/` in this repo. **The repo copy is the single source of truth for all specifications.** Edit it
+here and push it with the related change. No Word files (`.doc`, `.docx`) in the repo; Markdown only. Project dates in
+documents use the actual date of the change.
 
 - `00-invariants.md` — canonical K1–K13 and guardian checks (G-01…G-20);
 - `01-saturday-delivery-plan.md` — scope, acceptance A1–A11, rules in §7a;
@@ -127,8 +128,12 @@ Process entry points (fixed): `python -m opengrid.feeds`, `opengrid.engine`, `op
 - **Server (integration, DB, MQTT, live APIs):**
   `powershell -File tools\remote.ps1 -Ws <your-ws> -Cmd "<bash command>"`. The script:
   - syncs the whole repo to `/opt/opengrid/work/<ws>` and runs the command as user `opengrid`;
-  - sets `OG_DB=og_t_<ws>` (your own Postgres database), `OG_MQTT_ROOT=ogtest/<ws>` (your own topic root; the
-    ACL allows it for all og users) and the env files (`secrets.env`, `api_keys.env`).
+  - sets `OG_DB=og_t_<ws>` (your own Postgres database) and `OG_MQTT_ROOT=ogtest/<ws>` (your own topic root);
+  - loads `secrets.env` and `api_keys.env` with every `OG_MQTT_*` line removed. MQTT credentials come only from the
+    workspace's own `/opt/opengrid/work/<ws>/.mqtt.env`: user `ogw_<ws>`, whose ACL allows `ogtest/<ws>/#` only. It
+    is created by `deploy/mosquitto/provision_ws_users.sh`. A workspace can never authenticate as a production
+    MQTT user, and its MQTT clients refuse to start if `.mqtt.env` is missing;
+  - never start orchestrator processes or simulators from a workspace against the shared broker (§6).
 
   Workspaces: arch, feeds, fcst, ctr, sel, ledg, alloc, eng, guard, stop, settle, hlth, api, uia, uib, sims, mkt,
   merge, qa, ui, sec, rev1, rev2, prop. Use only yours.

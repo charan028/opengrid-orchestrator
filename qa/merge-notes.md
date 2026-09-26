@@ -376,6 +376,64 @@ offline` -- consistent with the same post-restart telemetry-catch-up window obse
 session (section 12), not a regression; a rerun a minute or two after a restart has consistently shown
 2,000/2,000 online in every prior check this session.
 
+## 18. FIXED — S17's "100% G-14 PROPOSAL_NOT_FOUND" (owner: guardian/engine, energy-sufficiency agent)
+
+Root cause was two compounding bugs, both now fixed:
+
+1. `opengrid.engine.build_command_batch_row` hardcoded `trace_pre_image_id=None` and
+   `propose_batch_to_guardian` never wrote an `RT_ALLOCATION` trace row at all -- there was never a
+   pre-image to find, for any batch, ever.
+2. Even had one existed, `GuardianService._run_checks` called
+   `self.ports.trace.exists_preimage(batch.command_batch_id)` -- but the pre-image's durable key is
+   `og.trace.trace_id` (== `og.command_batch.trace_pre_image_id`, the DDL's own FK), a DIFFERENT id from
+   `command_batch_id`. `PgTraceBackend.exists_preimage` correctly looks up by `trace_id`; it was just
+   being asked about the wrong id.
+
+Fix: `propose_batch_to_guardian` now (a) distributes each bank-level `Grant` across the bank's online
+hubs into per-hub `ProposedItem`s (`_distribute_hub_items`, proportional to `free_discharge_kw`), (b)
+`await trace.append(...)` FIRST and takes its returned `trace_id` as the canonical
+`trace_pre_image_id`, (c) inserts `og.command_batch` with that id, THEN (d) notifies guardian -- in that
+order, so the pre-image is always durably committed before the guardian can be woken (K10).
+`GuardianService` now checks `exists_preimage(batch.trace_pre_image_id)` and fails closed if that field
+is `None`. Also added missing `conn.commit()` calls in `PgEngineBackend.insert_command_batch`/
+`notify_guardian` (previously uncommitted, unlike every other write path in this codebase).
+
+Known follow-up, not fixed here (flagging for the allocator/engine owners): `epoch` is a static `1` for
+the process lifetime and `seq` is the engine's global per-tick counter -- sufficient for MVP-S's G-13
+freshness check (strictly increasing per bank) but not a real epoch-bump-on-restart scheme; `lease_ttl_s`
+defaults to 30s (`[allocator].lease_ttl_s` config, matching `opengrid.allocator.cycle`'s own default) and
+per-hub setpoint distribution is a proportional-by-free-capacity heuristic, not the allocator's own
+per-hub water-fill result (which `og.grant` does not currently persist at hub granularity, 02a S1.10).
+
+Proof: `orchestrator/tests/unit/guardian/test_trace_preimage_integration.py` (new) runs the real
+`TraceStore` over an in-memory backend through the full write path
+(`engine.propose_batch_to_guardian`) and read path (`GuardianService.evaluate_and_sign`) and asserts
+`verdict.outcome == "PASS"`. `orchestrator/tests/unit/engine/test_wiring.py` gained a matching ordering
+test. **Not run**: a live-server integration test via `tools/remote.ps1` -- this pass had no server
+credentials/workspace in scope; the deploy/coordinator should re-run the S17 verdict-sampling query
+after deploying this fix to confirm 62,200-style G-14 vetoes stop.
+
+## 18. Combined-deploy pass: real interval-key bug found and fixed (freeze lifted)
+
+With the G-14 fix, energy-sufficiency wiring, AS product-code fix, and DIST_DEFERRAL pricing all landed,
+the selector's LP finally selected a real candidate for the first time this session -- which immediately
+surfaced a **pre-existing, previously-unexercised bug** in `opengrid.selector.gate.run_gate`:
+`selected_kw` was keyed by the bare interval index (`str(t)`), not `opengrid.ledger.encode_interval_key
+(bank_id, interval_start, interval_end)` -- confirmed live: every `run_gate` call that selected anything
+crashed the whole `og-engine` tick with `ValueError: malformed reservation interval key: '6'`
+(`ledger.decode_interval_key`). This also hid a second bug: keying by `t` alone collides across banks
+sharing the same interval index, silently keeping only the last bank's amount for a candidate split
+across multiple banks. Fixed directly (freeze lifted, "edit any path needed for integration"): `gate.py`
+now builds the real interval bounds from `horizon_start`/`INTERVAL_MINUTES` and calls
+`encode_interval_key` per (bank, interval) pair, only for allocations `> 0`. Updated
+`test_run_gate_persists_and_reserves_the_selected_candidate`, which had the old `str(t)` shape baked
+into its assertion.
+
+**Unrelated failure noticed in the same test run, not touched:**
+`test_kpi_40_banks_96_intervals_3_scenarios_solves_under_30s` now takes 53.3s against a 30s budget
+(35,456 vars / 23,936 rows) -- solver-performance tuning at the new 40-bank/600-kVA scale, outside this
+fix's scope; flagging for whoever owns selector performance next.
+
 ## 7. Pre-existing mypy finding (not introduced by this pass)
 
 `mypy orchestrator/src/opengrid/fleet` reports one pre-existing error unrelated to the A3 additions:

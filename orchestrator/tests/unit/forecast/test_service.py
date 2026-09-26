@@ -147,6 +147,49 @@ async def test_compute_and_persist_widens_band_when_series_stale():
 
 
 @pytest.mark.asyncio
+async def test_load_zone_load_is_summed_from_its_weather_zones():
+    """Bug regression: `np6-345-cd` (`feeds.normalize.ercot_load_to_feed_obs`) posts actual system
+    load under ERCOT *weather*-zone series names (`north`, `northC`, ...), never under a load-zone key
+    like `LZ_NORTH` -- so defaulting `load_series` to `[fleet].zones` and reading history directly
+    under that key silently found zero data every cycle. `DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE` must map
+    `LZ_NORTH` to its weather zones (`north`, `northC`) and sum them into the `LZ_NORTH` forecast."""
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    # One sample per weather zone, both at the same instant, far enough back that the same-slot pool
+    # (needs >= 3 samples) never fills -- the diurnal fallback fires deterministically for every step,
+    # and with a single summed timestamp its p10/p50/p90 all equal the summed value exactly.
+    history = FakeHistory(
+        {
+            "north": [_obs("north", horizon_start - timedelta(days=1), 100.0)],
+            "northC": [_obs("northC", horizon_start - timedelta(days=1), 50.0)],
+        }
+    )
+    backend = FakeBackend()
+    cfg = _cfg(price_series=[], load_series=["LZ_NORTH"])
+
+    rows = await compute_and_persist(cfg, history, backend, now=_NOW)
+
+    assert len(rows) == 96
+    assert all(r.series_key == "LZ_NORTH" and r.kind == "load" for r in rows)
+    assert all(r.p50 == pytest.approx(150.0) for r in rows)  # 100 (north) + 50 (northC)
+
+
+@pytest.mark.asyncio
+async def test_load_zone_without_weather_mapping_logs_and_falls_back(caplog: pytest.LogCaptureFixture):
+    """An unmapped load zone falls back to reading its own code directly (the pre-fix behaviour) but
+    must say so loudly (BUILD.md S5a "no silent fallbacks"), not just silently produce zero rows."""
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory({"LZ_UNMAPPED": _rich_history("LZ_UNMAPPED", horizon_start)})
+    backend = FakeBackend()
+    cfg = _cfg(price_series=[], load_series=["LZ_UNMAPPED"])
+
+    with caplog.at_level("WARNING"):
+        rows = await compute_and_persist(cfg, history, backend, now=_NOW)
+
+    assert len(rows) == 96  # still computed, via the direct-key fallback
+    assert any("weather-zone mapping" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_compute_and_persist_skips_series_with_no_history_at_all():
     history = FakeHistory({})
     backend = FakeBackend()

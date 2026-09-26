@@ -4,12 +4,28 @@ never depends on a running market server or MQTT broker."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ogsim.control import market_client, mqtt_pub
+
+
+@pytest.fixture(autouse=True)
+def _never_production_mqtt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests are never the production sim: no production marker, and a non-production topic root
+    unless the environment (tools/remote.ps1's OG_MQTT_ROOT) already provides one. Without this, the
+    shipped YAML's `og/v1` root is (correctly) refused by `ogsim.common.config`."""
+    monkeypatch.delenv("OGSIM_ENV", raising=False)
+    if not os.environ.get("OG_MQTT_ROOT"):
+        monkeypatch.setenv("OG_MQTT_ROOT", "ogtest/unit")
+    if os.environ.get("OG_WS") and not os.environ.get("OG_MQTT_WS_USER"):
+        # An unprovisioned server workspace: unit tests never connect, but config loading requires a
+        # workspace user (never the production ones).
+        monkeypatch.setenv("OG_MQTT_WS_USER", "ogw_unit")
+        monkeypatch.setenv("OG_MQTT_WS_PASSWORD", "unit-test-not-a-credential")
 
 
 @pytest.fixture(autouse=True)

@@ -9,12 +9,14 @@ exercised in tests only through `_get_pool`, which callers/tests may monkeypatch
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.timeutil import to_utc
 from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 
@@ -30,13 +32,14 @@ _FROZEN_COMMITMENTS_SQL = """
 _BANK_IDS_SQL = "SELECT bank_id FROM og.bank ORDER BY bank_id"
 
 _OFFERED_OPPORTUNITIES_SQL = """
-    SELECT o.opportunity_id, o.contract_id, o.window_start, o.window_end, o.requested_kw,
-           o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
+    SELECT o.opportunity_id, ob.obligation_id, o.contract_id, o.window_start, o.window_end,
+           o.requested_kw, o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
            pr.variable_kind, pr.min_qty_kw, pr.increment_kw
     FROM og.opportunity o
     JOIN og.contract c ON c.contract_id = o.contract_id
+    JOIN og.obligation ob ON ob.opportunity_id = o.opportunity_id
     LEFT JOIN og.product_rule pr ON pr.product_rule_id = o.product_rule_id
-    WHERE o.state = 'OFFERED'
+    WHERE o.state = 'OFFERED' AND ob.state = 'OFFERED'
       AND o.window_start < %(horizon_end)s AND o.window_end > %(horizon_start)s
       AND (%(contract_scope)s::uuid IS NULL OR o.contract_id = %(contract_scope)s::uuid)
 """
@@ -52,7 +55,11 @@ async def get_pool() -> AsyncConnectionPool:
 
 
 def _interval_key(interval_start: Any) -> str:
-    return interval_start.isoformat() if hasattr(interval_start, "isoformat") else str(interval_start)
+    """UTC ISO key for an interval start. Postgres hands `timestamptz` back in the session zone, and
+    `gate.load_committed` matches keys against UTC horizon intervals, so the zone must be normalized."""
+    if isinstance(interval_start, datetime):
+        return to_utc(interval_start).isoformat()
+    return str(interval_start)
 
 
 async def load_frozen_commitments_rows(horizon_start: str, horizon_end: str) -> list[tuple[UUID, Any, float]]:

@@ -43,6 +43,11 @@ from opengrid.core.physics import hub_sustainable_discharge_kw
 
 _EPS = 1e-9
 _DEFAULT_PRICE_THRESHOLD_USD_PER_MWH = 30.0
+# 02a S5's "hold horizon (the lease TTL, not 2 s)": how long a discharge grant must be SUSTAINABLE for,
+# not merely instantaneously safe -- K7's hold-the-last-setpoint-until-lease-expiry duration (00-
+# invariants.md K7: "30 s during events, 60 s otherwise"). The conservative (shorter) default is used
+# unless the caller knows the actual per-cycle lease TTL.
+_DEFAULT_LEASE_TTL_S = 30.0
 
 
 def cycle(
@@ -58,6 +63,7 @@ def cycle(
     dwell_states: MutableMapping[str, DwellState] | None = None,
     price_threshold_usd_per_mwh: float = _DEFAULT_PRICE_THRESHOLD_USD_PER_MWH,
     dt_c_s: float = 2.0,
+    lease_ttl_s: float = _DEFAULT_LEASE_TTL_S,
     stickiness: float = 0.2,
 ) -> CycleResult:
     """Run one S1-S7 cycle across every bank in `fleet_state`.
@@ -74,7 +80,7 @@ def cycle(
 
     hubs_by_bank: dict[str, list[HubSnapshot]] = {}
     for hub in fleet_state.hubs:
-        hubs_by_bank.setdefault(hub.bank_id, []).append(_cap_sustainable_discharge(hub, dt_c_s))
+        hubs_by_bank.setdefault(hub.bank_id, []).append(_cap_sustainable_discharge(hub, lease_ttl_s))
 
     calls_by_bank: dict[str, list[ObligationCall]] = {}
     for call in ledger_view.calls:
@@ -92,11 +98,14 @@ def cycle(
         calls = tuple(calls_by_bank.get(bank_id, ()))
         hubs_by_obligation = _index_hubs_by_obligation(hubs_by_bank.get(bank_id, ()), calls)
 
-        shortfall_reason = (
-            reasons.R_COMMIT_LOCK_OVERRIDE_L2 if bank_id in l2_banks else reasons.R_COMMIT_LOCK_INFEASIBLE
-        )
+        # K13 exception behind any shortfall on this bank: an L2 instruction binds first; otherwise the
+        # dominant cause among device faults (L0), the reserve floor (L1) and unknown-state hubs.
+        hub_loss_reason = classify_hub_loss(hubs_by_bank.get(bank_id, ()))
+        shortfall_reason = reasons.R_COMMIT_LOCK_OVERRIDE_L2 if bank_id in l2_banks else hub_loss_reason
         tier_result = allocate_tiers(bank_id, calls, cap, shortfall_reason=shortfall_reason)
         shortfalls.extend(tier_result.shortfalls)
+        short_obligations = {s.obligation_id: s.reason_code for s in tier_result.shortfalls}
+        tier_short = set(short_obligations)  # short at the bank-capability step (vs. no hub substitute)
 
         remaining_headroom = tier_result.remaining_capability_kw
 
@@ -145,7 +154,17 @@ def cycle(
                 call.obligation_id, bank_id, eligible, tier_granted, stickiness=stickiness
             )
             if result.shortfall is not None:
-                shortfalls.append(result.shortfall)
+                realized_short = dataclasses_replace(result.shortfall, reason_code=hub_loss_reason)
+                shortfalls.append(realized_short)
+                short_obligations.setdefault(call.obligation_id, realized_short.reason_code)
+            if call.obligation_id in short_obligations:
+                # A grant below the committed kW carries its K13 exception (G-19 accepts only these); an
+                # obligation already in SHORTFALL carries the best-effort shortfall code G-19 corroborates.
+                reason_code = short_obligations[call.obligation_id]
+                if call.in_shortfall:
+                    reason_code = best_effort_reason(
+                        reason_code, at_bank_capacity=call.obligation_id in tier_short
+                    )
             if result.event is not None:
                 substitutions.append(result.event)
 
@@ -195,14 +214,68 @@ def cycle(
     )
 
 
-def _cap_sustainable_discharge(hub: HubSnapshot, dt_c_s: float) -> HubSnapshot:
-    """CORE-003/K1: when fleet supplies `soc_kwh`/`reserve_kwh`, further cap `free_discharge_kw` by
-    `hub_sustainable_discharge_kw` for this cycle's `dt_c_s` -- a sliver of energy just above reserve
-    must not be offered to water-filling/PI at the hub's full power rating for a whole interval. A
-    no-op when fleet has not (yet) supplied SoC/reserve for this hub (MVP-S: optional fields)."""
+def best_effort_reason(lock_reason: str, *, at_bank_capacity: bool) -> str:
+    """Owner decision 2026-09-26: a SHORTFALL obligation keeps receiving its maximum feasible kW; that
+    partial grant carries the shortfall code (`core.reasons.LOCK_REASON_BY_SHORTFALL`'s keys) that the
+    guardian's G-19 corroborates: an L2 instruction, the bank's capability, or no substitute hub. L0/L1
+    keep their own K13 code (corroborated from the guardian's capability read)."""
+    if lock_reason == reasons.R_COMMIT_LOCK_OVERRIDE_L2:
+        return reasons.R_SHORTFALL_L2_INSTRUCTION
+    if lock_reason == reasons.R_COMMIT_LOCK_INFEASIBLE:
+        return reasons.R_SHORTFALL_BANK_CAPACITY if at_bank_capacity else reasons.R_SHORTFALL_NO_SUBSTITUTE
+    return lock_reason
+
+
+def classify_hub_loss(hubs: Sequence[HubSnapshot]) -> str:
+    """The K13 exception behind a bank's lost hub capacity this cycle (02a S2.1 lock paths, ES05-S03),
+    from each hub's nameplate `rated_kw` against what it can deliver now:
+
+    - L0 (`R-COMMIT-LOCK-OVERRIDE-L0`, device safety): capacity of hubs excluded for a FAULT;
+    - L1 (`R-COMMIT-LOCK-OVERRIDE-L1`, homeowner reserve): capacity healthy hubs cannot deliver because
+      their SoC is near the reserve floor (the K1 caps: `hub_capability` and the lease-horizon cap);
+    - otherwise `R-COMMIT-LOCK-INFEASIBLE` (stale/offline hubs of unknown state, no substitute).
+
+    The largest of the three wins; ties go L0 > L1 > infeasible. A hub without `rated_kw` counts
+    nothing, so missing data can never manufacture an override."""
+    l0 = l1 = unknown = 0.0
+    for hub in hubs:
+        if hub.rated_kw is None:
+            continue
+        if hub.health == "FAULT":
+            l0 += hub.rated_kw
+        elif hub.is_healthy and hub.soc_kwh is not None:
+            l1 += max(hub.rated_kw - hub.free_discharge_kw, 0.0)
+        elif not hub.is_healthy:
+            unknown += hub.rated_kw
+    ranked = (
+        (l0, reasons.R_COMMIT_LOCK_OVERRIDE_L0),
+        (l1, reasons.R_COMMIT_LOCK_OVERRIDE_L1),
+        (unknown, reasons.R_COMMIT_LOCK_INFEASIBLE),
+    )
+    best_kw, best_reason = max(ranked, key=lambda r: r[0])  # max keeps the first of equal values
+    return best_reason if best_kw > _EPS else reasons.R_COMMIT_LOCK_INFEASIBLE
+
+
+def _cap_sustainable_discharge(hub: HubSnapshot, lease_ttl_s: float) -> HubSnapshot:
+    """CORE-003/K1: cap `free_discharge_kw` by the ENERGY the hub can sustain for the command's full
+    HOLD HORIZON -- the lease TTL (`lease_ttl_s`), not merely the 2 s tick -- via
+    `hub_sustainable_discharge_kw`. A sliver of energy just above reserve must not be offered to
+    water-filling/PI at the hub's full power rating for the whole lease duration; capacity (kW) alone
+    is not sufficient (user requirement: energy above reserve must be checked continuously).
+
+    K7/dispatch-live pass: when the fleet twin has NOT supplied a live `soc_kwh`/`reserve_kwh` reading
+    for this hub this cycle (`None` -- always the case for a stale/offline/fault hub,
+    `opengrid.fleet.hub_capabilities`), this is never trusted as "assume full power is safe". The
+    conservative fallback is 0 kW discharge capability, exactly like a hub the fleet twin already
+    excluded -- a missing or stale SoC reading must NEVER silently imply `free_discharge_kw` at face
+    value is safe to promise for the whole lease (this replaces a prior "trust it as-is" no-op that was
+    the reported silent full-power fallback bug).
+    """
     if hub.soc_kwh is None or hub.reserve_kwh is None:
-        return hub
-    dt_h = dt_c_s / 3600.0
+        if hub.free_discharge_kw <= 0.0:
+            return hub
+        return dataclasses_replace(hub, free_discharge_kw=0.0)
+    dt_h = lease_ttl_s / 3600.0
     sustainable_kw = hub_sustainable_discharge_kw(
         hub.soc_kwh, hub.reserve_kwh, hub.free_discharge_kw, dt_h, hub.eta_d
     )

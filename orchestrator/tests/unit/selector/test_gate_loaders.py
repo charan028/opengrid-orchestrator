@@ -21,6 +21,7 @@ HORIZON_END = HORIZON_START + timedelta(hours=24)
 def _row(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "opportunity_id": uuid4(),
+        "obligation_id": uuid4(),
         "contract_id": uuid4(),
         "window_start": HORIZON_START,
         "window_end": HORIZON_START + timedelta(minutes=30),
@@ -51,6 +52,7 @@ async def test_load_candidates_shapes_offered_opportunity_rows(monkeypatch: pyte
     assert len(candidates) == 1
     c = candidates[0]
     assert c.opportunity_id == str(row["opportunity_id"])
+    assert c.obligation_id == str(row["obligation_id"])
     assert c.contract_id == str(row["contract_id"])
     assert c.eligible_bank_ids == ("bank-01",)
     assert c.window_intervals == (0, 1)  # 30 minutes / 15-min intervals

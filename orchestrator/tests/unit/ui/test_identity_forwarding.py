@@ -13,23 +13,11 @@ from fastapi.testclient import TestClient
 import opengrid.ui as ui
 import opengrid.ui.api_client as api_client
 import opengrid.ui.routes.health as health_route
-from opengrid.ui.role import role_of
 
 
 def _request_with(headers: dict[str, str]) -> Request:
     scope = {"type": "http", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
     return Request(scope)
-
-
-def test_role_falls_back_to_remote_user_when_no_role_header() -> None:
-    assert role_of(_request_with({"X-Remote-User": "operator"})) == "operator"
-    assert role_of(_request_with({"X-Remote-User": "viewer"})) == "viewer"
-    assert role_of(_request_with({"X-Remote-User": "alice"})) == "viewer"
-    assert role_of(_request_with({})) == "viewer"
-
-
-def test_explicit_role_header_still_wins() -> None:
-    assert role_of(_request_with({"X-OG-Role": "viewer", "X-Remote-User": "operator"})) == "viewer"
 
 
 @pytest.mark.asyncio

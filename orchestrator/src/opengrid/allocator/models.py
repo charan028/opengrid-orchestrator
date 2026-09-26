@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+from opengrid.core.models.engine import ServiceType
+from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
+
 Tier = Literal["T1", "T2", "T3", "T4"]
 TIER_ORDER: tuple[Tier, ...] = ("T1", "T2", "T3", "T4")
 
@@ -28,14 +31,22 @@ class HubSnapshot:
     tau: float = 1.0  # priority/duration weight for water-filling (S5.5)
     served_last_cycle: bool = False
     health: Literal["OK", "STALE", "FAULT", "LAGGING"] = "OK"
-    # CORE-003/K1: optional SoC/reserve/efficiency, when fleet supplies them, so the allocator's own
-    # capability path can additionally cap `free_discharge_kw` by `hub_sustainable_discharge_kw` --
-    # `hub_capability()`'s reserve-safe cap alone still lets a sliver of energy just above reserve be
-    # offered at the hub's full power rating for an entire interval. `None` means "trust
-    # free_discharge_kw as-is" (fleet not yet wired to supply these for MVP-S).
+    # CORE-003/K1: SoC/reserve/capacity/efficiency, live from the fleet twin's telemetry (engine's
+    # `EngineFleetGateway.fleet_state`), so the allocator's own capability path can cap
+    # `free_discharge_kw` by `hub_sustainable_discharge_kw` over the command's HOLD HORIZON (the lease
+    # TTL, not just the 2 s tick) -- `hub_capability()`'s reserve-safe cap alone still lets a sliver of
+    # energy just above reserve be offered at the hub's full power rating for the whole lease duration.
+    # `None` means the fleet twin has no live/fresh SoC for this hub this cycle -- K7's conservative
+    # fallback is 0 kW discharge capability, NEVER trusting `free_discharge_kw` at face value (a stale
+    # or missing SoC reading must never silently imply full power is safe).
     soc_kwh: float | None = None
     reserve_kwh: float | None = None
-    eta_d: float = 0.9487
+    e_kwh: float | None = None  # usable energy capacity, for the symmetric charge-side cap
+    eta_c: float = DEFAULT_ETA_C
+    eta_d: float = DEFAULT_ETA_D
+    # Nameplate discharge kW regardless of health/SoC, so a shortfall can be attributed to the K13
+    # exception that caused it (device fault = L0, reserve floor = L1). `None`: unknown, attributes nothing.
+    rated_kw: float | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -65,12 +76,15 @@ class ObligationCall:
 
     obligation_id: str
     bank_id: str
-    service_type: Literal["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY"]
+    service_type: ServiceType
     tier: Tier
     committed_kw: float
     eligible_hub_ids: tuple[str, ...]
     prior_granted_kw: float | None = None
     value_per_mwh: float = 0.0
+    #: Already escalated to SHORTFALL mid-window: still dispatched best-effort (owner decision 2026-09-26),
+    #: its partial grants carry the shortfall code G-19 corroborates.
+    in_shortfall: bool = False
 
 
 @dataclass(frozen=True, slots=True)

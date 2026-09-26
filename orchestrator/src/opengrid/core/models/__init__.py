@@ -4,6 +4,6 @@ Re-exported as `opengrid.contracts` is NOT done for MVP-S (no such alias module 
 from `opengrid.core.models.<mqtt|engine|platform>` per BUILD.md's actual repo layout.
 """
 
-from opengrid.core.models import engine, mqtt, platform
+from opengrid.core.models import engine, mqtt, platform, pq
 
-__all__ = ["engine", "mqtt", "platform"]
+__all__ = ["engine", "mqtt", "platform", "pq"]

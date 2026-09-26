@@ -21,10 +21,38 @@ from ogsim.common.mqtt_client import SimMqttClient
 from ogsim.common.scenario import ScenarioCommand, parse_scenario_cmd, utc_timestamp
 from ogsim.fleet import household, physics
 from ogsim.fleet.anomalies import FLEET_ANOMALY_TYPES, FleetAnomalyManager
+from ogsim.fleet.calibration import (
+    CalibrationOutcome,
+    apply_calibration,
+    build_calibration_ack,
+    current_offsets,
+)
 from ogsim.fleet.commands import CommandVerdict, build_ack, evaluate_batch, utc_now_from_epoch
 from ogsim.fleet.lease import HoldTracker, lease_expiry_from_message
+from ogsim.fleet.pq import (
+    PQ_ANOMALY_TYPES,
+    InverterPqState,
+    InverterSnapshot,
+    PqAnomalyManager,
+    build_inverter_pq_state,
+    replace_inverter,
+    tick_ambient_drift,
+)
+from ogsim.fleet.pq import inverter_state as pq_inverter_state
 from ogsim.fleet.state import FleetState, build_fleet_state
 from ogsim.fleet.stop import StopRegistry, ramp_toward_zero, verify_stop_event
+from ogsim.fleet.wave import (
+    HarmonicDetailScheduler,
+    RotatingAuditSampler,
+    SummaryScheduler,
+    WaveConfig,
+    build_summary_message,
+    capture_request_expired,
+    current_rms_a,
+    hub_phase_connection,
+    set_current_rms,
+    synthesize_raw_capture,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +66,49 @@ class FleetEngine:
         self.rng = np.random.default_rng(seed)
         self.state: FleetState = build_fleet_state(config, self.rng)
         self.anomalies = FleetAnomalyManager(self.state)
+        self.pq: InverterPqState = build_inverter_pq_state(config, self.state, self.rng)
+        self.pq_anomalies = PqAnomalyManager(self.pq)
+        self.wave_config = WaveConfig(
+            harmonic_detail_interval_s=config.wave_harmonic_detail_interval_s,
+            harmonic_detail_delta_pct=config.wave_harmonic_detail_delta_pct,
+            raw_audit_sample_pct_per_min=config.wave_raw_audit_sample_pct_per_min,
+            sync_source=config.wave_sync_source,
+            sync_quality_ns=config.wave_sync_quality_ns,
+        )
+        self._harmonic_detail = HarmonicDetailScheduler(
+            self.wave_config.harmonic_detail_interval_s, self.wave_config.harmonic_detail_delta_pct
+        )
+        # Gates the whole summary message per hub (default 10 s or a >1% THD_I change): a full summary
+        # per hub every 2 s tick was ~1,000 msg/s into the orchestrator (wave-2 rate fix).
+        self._summary_gate = SummaryScheduler(config.wave_summary_interval_s, config.wave_summary_delta_pct)
+        self._wave_audit = RotatingAuditSampler(self.wave_config.raw_audit_sample_pct_per_min)
         self.stops = StopRegistry()
         self.holds = HoldTracker(config.lease_hold_after_expiry_s)
         self._last_tick_at: float | None = None
 
     def handle_scenario_cmd(self, raw: dict[str, Any]) -> ActiveAnomalyStarted | None:
         cmd = parse_scenario_cmd(raw)
+        if cmd.catalogue_type == "replace_inverter":
+            replace_inverter(
+                self.pq,
+                self.pq_anomalies,
+                cmd.target_ref,
+                str(cmd.params.get("new_serial", "")),
+                str(cmd.params.get("new_firmware", "")),
+                self.rng,
+            )
+            return ActiveAnomalyStarted(cmd)
+        if cmd.catalogue_type in PQ_ANOMALY_TYPES:
+            self.pq_anomalies.start(
+                cmd.id,
+                cmd.catalogue_type,
+                cmd.target_kind,
+                cmd.target_ref,
+                cmd.params,
+                cmd.start_epoch,
+                cmd.duration_s,
+            )
+            return ActiveAnomalyStarted(cmd)
         if cmd.catalogue_type not in FLEET_ANOMALY_TYPES:
             return None
         self.anomalies.start(
@@ -56,6 +121,103 @@ class FleetEngine:
             cmd.duration_s,
         )
         return ActiveAnomalyStarted(cmd)
+
+    def handle_calibration_command(
+        self, command: dict[str, Any], public_key: Ed25519PublicKey, now: float
+    ) -> dict[str, Any]:
+        """Verifies and applies a `CalibrationCommand` (§6.7) against
+        `ogsim.fleet.pq`, returning the `CalibrationAck`-shaped message."""
+        outcome: CalibrationOutcome = apply_calibration(
+            self.pq, self.pq_anomalies, command, public_key, now, self.config.pq_calibration_rate_limit_s
+        )
+        return build_calibration_ack(
+            outcome,
+            utc_timestamp(now),
+            command=command,
+            fallback_offsets=current_offsets(self.pq, str(command.get("hub_id", ""))),
+        )
+
+    def inverter_state(self, hub_id: str) -> list[InverterSnapshot]:
+        """Clean, WP-H-facing accessor (§7.4): the per-unit parameters needed
+        to synthesize a waveform for `hub_id`. This engine never generates
+        samples itself."""
+        return pq_inverter_state(self.pq, hub_id)
+
+    def wave_summary_messages(self, now: float) -> list[tuple[str, dict[str, Any]]]:
+        """Builds (topic_suffix, message) pairs for the periodic PQ waveform summary
+        (06-service-profiles-and-power-quality.md S6.4a/S6.4b, WP-H), one per hub not
+        currently telemetry-suppressed (mirrors `telemetry_messages`'s suppression
+        check)."""
+        state = self.state
+        m = self.anomalies.modifiers
+        messages: list[tuple[str, dict[str, Any]]] = []
+        for i in range(len(state.hub_ids)):
+            if m.telemetry_suppressed[i]:
+                continue
+            hub_id = state.hub_ids[i]
+            snapshots = self.inverter_state(hub_id)
+            if not snapshots:
+                continue
+            avg_thd = sum(s.thd_current_pct for s in snapshots) / len(snapshots)
+            if not self._summary_gate.due(hub_id, now, avg_thd):
+                continue
+            include_harmonics = self._harmonic_detail.due(hub_id, now, avg_thd)
+            msg = build_summary_message(
+                hub_id,
+                state.bank_ids[i],
+                state.zones[i],
+                snapshots,
+                utc_timestamp(now),
+                include_harmonics=include_harmonics,
+                config=self.wave_config,
+            )
+            per_unit_kw = float(state.p_kw_applied[i]) / len(snapshots)
+            for snapshot in snapshots:
+                set_current_rms(msg, snapshot.phase_connection, current_rms_a(per_unit_kw))
+            messages.append((f"scada/wave/{state.zones[i]}/{state.bank_ids[i]}/{hub_id}/summary", msg))
+        return messages
+
+    def wave_rotating_audit_captures(self, now: float) -> list[tuple[str, dict[str, Any]]]:
+        """S6.4b trigger policy item (iii): the low-rate rotating audit sample this sim
+        self-triggers (rather than an inbound request), bounded to
+        `config.wave_raw_audit_sample_pct_per_min` percent of the fleet per minute."""
+        due_hub_ids = self._wave_audit.due_hub_ids(self.state.hub_ids, now)
+        items = (self._build_raw_capture_message(hub_id, "ROTATING_AUDIT", now) for hub_id in due_hub_ids)
+        return [item for item in items if item is not None]
+
+    def _build_raw_capture_message(
+        self, hub_id: str, trigger_reason: str, now: float
+    ) -> tuple[str, dict[str, Any]] | None:
+        idx = self.state.hub_index.get(hub_id)
+        snapshots = self.inverter_state(hub_id)
+        if idx is None or not snapshots:
+            return None
+        phase_connection = hub_phase_connection([s.phase_connection for s in snapshots])
+        msg = synthesize_raw_capture(
+            hub_id,
+            phase_connection,
+            snapshots,
+            float(self.state.p_kw_applied[idx]),
+            trigger_reason,
+            utc_timestamp(now),
+            self.wave_config,
+        )
+        zone, bank_id = self.state.zones[idx], self.state.bank_ids[idx]
+        return f"scada/wave/{zone}/{bank_id}/{hub_id}/raw", msg
+
+    def handle_wave_capture_request(
+        self, request: dict[str, Any], now: float
+    ) -> tuple[str, dict[str, Any]] | None:
+        """S6.4b: on-demand capture trigger from the orchestrator/API
+        (`waveform_capture_request.schema.json`). Ignored (returns None) if this engine
+        cannot capture/publish before the request's own `expires_at`, or the hub is
+        unknown -- the hub-side half of "the hub ignores the request if it cannot
+        capture and publish before this deadline"."""
+        if capture_request_expired(request, now):
+            return None
+        hub_id = str(request.get("hub_id", ""))
+        trigger_reason = str(request.get("trigger_reason", "API_REQUEST"))
+        return self._build_raw_capture_message(hub_id, trigger_reason, now)
 
     def handle_stop_event(
         self,
@@ -79,10 +241,9 @@ class FleetEngine:
                 event.get("key_id"),
             )
             return False
-        self.stops.apply_stop_event(
-            str(event.get("action", "")), str(event.get("scope", "")), event.get("scope_id")
-        )
-        return True
+        # Per-stop state (K8): a RELEASE lifts only its own stop_id; a replayed or out-of-order event
+        # that changes nothing returns False.
+        return self.stops.apply_verified_event(event)
 
     def handle_lease_message(self, hub_id: str, expires_at: str) -> None:
         idx = self.state.hub_index.get(hub_id)
@@ -118,6 +279,8 @@ class FleetEngine:
         self._last_tick_at = now
         self.anomalies.tick(now)
         self.anomalies.accumulate_drift(dt_s)
+        self.pq_anomalies.tick(now)
+        tick_ambient_drift(self.pq, dt_s, self.rng)
 
         state = self.state
         home_net = household.net_home_load_kw(now, state.phase_offset_s, state.pv_capacity_kw, self.rng)
@@ -126,6 +289,7 @@ class FleetEngine:
 
         effective_commanded = state.p_kw_commanded * self.anomalies.modifiers.follow_fraction
         effective_commanded = np.where(self.anomalies.modifiers.inverter_tripped, 0.0, effective_commanded)
+        effective_commanded = effective_commanded + self._pq_dispatch_bias_by_hub()
 
         for i, (zone, bank_id) in enumerate(zip(state.zones, state.bank_ids, strict=True)):
             hub_id = state.hub_ids[i]
@@ -156,6 +320,22 @@ class FleetEngine:
         )
         state.soc_kwh = new_soc
         state.p_kw_applied = applied
+
+    def _pq_dispatch_bias_by_hub(self) -> np.ndarray:
+        """Aggregates `phase_imbalance_injection`'s per-unit `dispatch_bias_kw`
+        (§7.2) onto `self.state`'s per-hub index, summing a dual-unit home's
+        two units' biases onto its one hub row."""
+        bias_kw = np.zeros(len(self.state.hub_ids))
+        pq_bias = self.pq_anomalies.dispatch_bias_kw
+        if not np.any(pq_bias != 0.0):
+            return bias_kw
+        for i, hub_id in enumerate(self.pq.hub_ids):
+            if pq_bias[i] == 0.0:
+                continue
+            idx = self.state.hub_index.get(hub_id)
+            if idx is not None:
+                bias_kw[idx] += pq_bias[i]
+        return bias_kw
 
     def telemetry_messages(self, now: float) -> list[tuple[str, dict[str, Any]]]:
         """Builds `(topic_suffix, message)` pairs for every hub not currently
@@ -269,11 +449,23 @@ async def run_fleet(
     await client.subscribe("stop/#", qos=1)
     await client.subscribe("lease/+", qos=1)
     await client.subscribe("scenario/cmd", qos=1)
+    await client.subscribe("scada/wave/+/+/+/request", qos=1)
+    # 06-service-profiles-and-power-quality.md S6.7 (WP-I): guardian-signed remote-
+    # calibration commands, handled by `FleetEngine.handle_calibration_command` (already
+    # implemented, this file's own docstring above -- only the subscribe was missing).
+    await client.subscribe("cmd/cal/+", qos=1)
     while True:
         now = clock.now()
         try:
             engine.tick(now)
             await client.publish_batch("telemetry", engine.telemetry_messages(now), qos=0)
+            # WP-H (06-service-profiles-and-power-quality.md S6.4/S7.4): periodic PQ
+            # waveform summary (fast sub-block every tick, harmonic-detail sub-block
+            # gated by HarmonicDetailScheduler) plus this sim's own rotating audit
+            # sample of raw captures (S6.4b trigger policy item iii) -- a triggered
+            # capture request is handled separately, in `_dispatch_message` below.
+            await client.publish_batch("pq_waveform_summary", engine.wave_summary_messages(now), qos=0)
+            await client.publish_batch("pq_waveform_raw", engine.wave_rotating_audit_captures(now), qos=1)
         except Exception:
             logger.exception("fleet tick failed; continuing telemetry loop")
         await clock.sleep(engine.config.telemetry_interval_s)

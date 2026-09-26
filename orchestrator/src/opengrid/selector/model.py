@@ -45,6 +45,9 @@ import highspy
 from opengrid.selector.types import ModelInputs
 
 _EPS = 1e-9
+#: C15 terminal-energy shortfall cost ($/kWh below the next-day floor, i.e. $1,000/MWh): above every
+#: MVP-S energy/capacity value, so energy is only drawn below the floor when a hard constraint needs it.
+TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH = 1.0
 _MIN_MEANINGFUL_KW = 1e-6  # below this, treat capacity as exactly 0 -- avoids HiGHS "tiny coefficient"
 # numerical errors on pathologically small (but nonzero) capacity readings.
 
@@ -186,6 +189,7 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
     charge_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
     soc_balance_rows: dict[tuple[str, int, str], highspy.highs_cons] = {}
     terminal_soc_rows: dict[tuple[str, str], highspy.highs_cons] = {}
+    terminal_shortfall_vars: dict[tuple[str, str], highspy.highs_var] = {}
 
     for bank in inputs.banks:
         if not bank.models_soc:
@@ -219,9 +223,16 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     - bank.self_discharge_kwh_per_h * dt_h
                 )
 
+            # C15 as a penalized target, not a hard floor: `terminal SoC >= initial` was infeasible
+            # whenever the bank cannot recharge within the horizon (no charge headroom, or just the
+            # unavoidable self-discharge), which forced every live gate to RULE_FALLBACK (2026-09-26).
+            # The shortfall below the floor costs TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH, above any
+            # MVP-S energy value, so the LP only dips below it when a hard constraint requires it.
             terminal_t = intervals[-1] + 1
+            shortfall = highs.addVariable(lb=0.0)
+            terminal_shortfall_vars[bank.bank_id, scenario.scenario] = shortfall
             terminal_soc_rows[bank.bank_id, scenario.scenario] = highs.addConstr(
-                soc_vars[bank.bank_id, terminal_t, scenario.scenario]
+                soc_vars[bank.bank_id, terminal_t, scenario.scenario] + shortfall
                 >= bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh
             )
 
@@ -236,7 +247,20 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
         if not obligation_vars:
             continue
         total_kw = highs.qsum(obligation_vars)
-        obj_terms.append((c.value_per_mwh / 1000.0 - c.degradation_cost_per_kwh) * dt_h * total_kw)
+        # `degradation_cost_per_kwh` (02a S3.4's c_deg) prices the wear of actually *cycling* the
+        # battery -- it belongs on `MARKET` candidates (ERCOT_ENERGY spot arbitrage: charge low,
+        # discharge high, real round-trip throughput every interval). `FIRM` (HOME/DIST_DEFERRAL/
+        # PARTNER_CAPACITY) and `AS` (ERCOT_AS) candidates are *capacity holds* -- their value
+        # (`value_per_mwh`: a capacity payment or MCPC, not an energy-arbitrage spread) is priced per
+        # 02a S1's C3 as its own additive floor, separate from the cycling economics (spec line "C3 |
+        # The ONE additive floor (AS hold + robust firm energy)"). Charging them the full per-kWh
+        # cycling degradation anyway made every low-$/MWh capacity-hold candidate's objective
+        # coefficient strictly negative (e.g. a $5.37/MWh AS MCPC minus a $30/MWh-equivalent
+        # degradation cost) regardless of available headroom -- `x_o=0`/`q_o=0` was the solver's
+        # correct answer given that flawed input, identical in kind to the DIST_DEFERRAL
+        # `value_per_mwh=None` bug this same objective already had (`qa/merge-notes.md` S15).
+        degradation_usd_per_kwh = c.degradation_cost_per_kwh if c.category == "MARKET" else 0.0
+        obj_terms.append((c.value_per_mwh / 1000.0 - degradation_usd_per_kwh) * dt_h * total_kw)
     for co in inputs.committed:
         obligation_vars = vars_by_obligation.get(co.obligation_id, [])
         if not obligation_vars:
@@ -255,6 +279,12 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     # w_b, a per-bank wheeling tariff, is not yet a modeled parameter anywhere in this
                     # codebase -- see the module's final-report note).
                     obj_terms.append(-scenario.probability * dt_h * (price / 1000.0) * charge)
+
+    probability_by_scenario: dict[str, float] = {s.scenario: s.probability for s in inputs.scenarios}
+    for (_bank_id, scenario_name), shortfall in terminal_shortfall_vars.items():
+        obj_terms.append(
+            -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH * shortfall
+        )
 
     if obj_terms:
         objective = obj_terms[0]

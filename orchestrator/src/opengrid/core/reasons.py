@@ -37,12 +37,24 @@ R_SUBSTITUTION = "R-SUBSTITUTION"
 R_GRANT_COMMITTED = "R-GRANT-COMMITTED"
 R_GRANT_HEADROOM = "R-GRANT-HEADROOM"
 R_GRANT_DIST_DEFERRAL_PI = "R-GRANT-DIST-DEFERRAL-PI"
+#: Need-basis delivery (00-invariants.md K13, owner decision 2026-09-26): a measured closed-loop profile's
+#: grant follows the customer's measured need below its reserved maximum; the reservation stays locked.
+R_GRANT_CLOSED_LOOP = "R-GRANT-CLOSED-LOOP"
 
 # --- Shortfall reasons reported against the obligation that could not be fully served (never a
 # reallocation to a different obligation -- 00-invariants.md K13) ---------------------------------
 R_SHORTFALL_BANK_CAPACITY = "R-SHORTFALL-BANK-CAPACITY"
 R_SHORTFALL_NO_SUBSTITUTE = "R-SHORTFALL-NO-SUBSTITUTE"
 R_SHORTFALL_L2_INSTRUCTION = "R-SHORTFALL-L2-INSTRUCTION"
+
+#: A best-effort partial grant after a mid-window SHORTFALL (owner decision 2026-09-26) carries the shortfall
+#: reason; this is the K13 lock-exception it stands for. One copy, for the engine's escalation and the
+#: guardian's G-19 corroboration alike.
+LOCK_REASON_BY_SHORTFALL: dict[str, str] = {
+    R_SHORTFALL_L2_INSTRUCTION: R_COMMIT_LOCK_OVERRIDE_L2,
+    R_SHORTFALL_NO_SUBSTITUTE: R_COMMIT_LOCK_INFEASIBLE,
+    R_SHORTFALL_BANK_CAPACITY: R_COMMIT_LOCK_INFEASIBLE,
+}
 
 # --- L2 grid-authority instruction handling (K5) --------------------------------------------------
 R_L2_INSTRUCTION_LIMIT = "R-L2-INSTRUCTION-LIMIT"
@@ -57,6 +69,14 @@ R_HUB_RAMP_LIMIT = "HUB_RAMP_LIMIT"
 R_FLEET_RAMP_CAP = "FLEET_RAMP_CAP"
 R_FEEDER_RAMP_CEILING = "FEEDER_RAMP_CEILING"
 R_ONE_BUYER_EXCEEDED = "ONE_BUYER_EXCEEDED"
+
+# --- G-01-ENERGY: lease-duration energy projection (K1), independent of the instantaneous G-01 check
+R_RESERVE_FLOOR_LEASE = "RESERVE_FLOOR_LEASE"
+R_CHARGE_CEILING_LEASE = "CHARGE_CEILING_LEASE"
+
+# --- Continuous per-obligation energy-sufficiency check (K1, 03-decision-engine.md S8.11) ----------
+R_ENERGY_SOC_MISSING = "R-ENERGY-SOC-MISSING"
+ALR_ENERGY_SHORTFALL_RISK = "ALR-ENERGY-SHORTFALL-RISK"
 
 # --- Gateway/dependency timeout handling (ALLOC-05: allocator run_cycle) --------------------------
 R_GATEWAY_TIMEOUT = "R-GATEWAY-TIMEOUT"

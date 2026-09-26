@@ -13,6 +13,8 @@ Environment=PYTHONPATH=/opt/opengrid/current/orchestrator/src
 Environment=OG_CONFIG=/opt/opengrid/current/orchestrator/config/orchestrator.toml
 EnvironmentFile=/etc/opengrid/secrets.env
 EnvironmentFile=/etc/opengrid/api_keys.env
+# og-api only (never secrets.env, which the sims load): the Apache proxy secret.
+EnvironmentFile=/etc/opengrid/api_proxy.env
 ExecStart=/opt/opengrid/venv/bin/python -m opengrid.api
 Restart=always
 RestartSec=2

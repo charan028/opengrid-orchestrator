@@ -30,6 +30,7 @@ def draft_invoice_lines(
     *,
     service_type: ServiceType,
     delivered_kwh: Decimal,
+    committed_kwh: Decimal,
     price_per_kwh: Decimal,
     revenue: Decimal,
     performance_factor: Decimal,
@@ -37,7 +38,14 @@ def draft_invoice_lines(
 ) -> list[InvoiceLineDraft]:
     """Which invoice lines this obligation-interval posts, per the table above. `performance_factor`
     is `performance.compute_compliance_pct`'s result (or 1 if there is none), used to scale
-    `CAPACITY_PAYMENT` per 02a S7.3's "x performance factor" rule."""
+    `CAPACITY_PAYMENT` per 02a S7.3's "x performance factor" rule.
+
+    `CAPACITY_PAYMENT` for `PARTNER_CAPACITY`/`DIST_DEFERRAL` (and `ERCOT_AS`) is `committed_kwh *
+    price_per_kwh * performance_factor` -- committed capacity valued at the contract price, scaled
+    once by performance. It is deliberately *not* `revenue * performance_factor`: `revenue` (`pnl.
+    revenue`, profitability.py) is already `price_per_kwh * delivered_kwh`, and `delivered_kwh`
+    already reflects any shortfall, so multiplying that by `performance_factor` again double-counts
+    the shortfall (e.g. 80% delivery would bill ~64% instead of 80% of the committed payment)."""
     if service_type == "HOME":
         return []
 
@@ -48,11 +56,11 @@ def draft_invoice_lines(
             )
         ]
     else:
-        capacity_amount = revenue * performance_factor
+        capacity_amount = committed_kwh * price_per_kwh * performance_factor
         lines = [
             InvoiceLineDraft(
                 line_type="CAPACITY_PAYMENT",
-                quantity=delivered_kwh,
+                quantity=committed_kwh,
                 unit="kWh",
                 rate=price_per_kwh,
                 amount=capacity_amount,

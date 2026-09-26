@@ -4,9 +4,11 @@ ledger timeline, opportunity admission, and the dispatch SSE stream.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from psycopg_pool import AsyncConnectionPool
 from sse_starlette.sse import EventSourceResponse
 
 from opengrid.api.auth import Identity, require_operator, require_viewer
@@ -15,9 +17,14 @@ from opengrid.api.schemas import OpportunityCreate
 from opengrid.api.sse import sse_response
 from opengrid.api.store import StoreProtocol
 from opengrid.contracts import AdmissionError, admit
+from opengrid.invariants import InvariantsSummary, read_summary
 from opengrid.platform.config import Config
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/og/api", tags=["dispatch"])
+
+_UNAVAILABLE_INVARIANTS_SUMMARY = InvariantsSummary.unavailable()
 
 
 @router.get("/dispatch/opportunities")
@@ -98,27 +105,54 @@ async def stream_dispatch(
     return sse_response(request, interval_s=2.0, heartbeat_s=cfg.get("api.sse_heartbeat_s", 15), fetch=fetch)
 
 
+def _get_optional_pool(request: Request) -> AsyncConnectionPool | None:
+    """Like `opengrid.api.deps.get_pool`, but tolerant of `app.state.pool` never having been set: this
+    router's own unit test suite overrides every OTHER dependency and never runs the real app lifespan
+    (`opengrid.api.app._lifespan`) that would set it. A missing pool degrades this stream's invariant
+    counters to "not yet measured" rather than failing the whole control-room stream over an unrelated
+    dependency (K7: degrade, don't trip)."""
+    return getattr(request.app.state, "pool", None)
+
+
+async def _invariants_summary(pool: AsyncConnectionPool | None) -> InvariantsSummary:
+    if pool is None:
+        return _UNAVAILABLE_INVARIANTS_SUMMARY
+    try:
+        return await read_summary(pool)
+    except Exception:
+        logger.warning("opengrid.invariants summary read failed", exc_info=True)
+        return _UNAVAILABLE_INVARIANTS_SUMMARY
+
+
 @router.get("/stream/control-room")
 async def stream_control_room(
     request: Request,
     store: Annotated[StoreProtocol, Depends(get_store)],
     cfg: Annotated[Config, Depends(get_config)],
     _identity: Annotated[Identity, Depends(require_viewer)],
+    # Trailing + defaulted (unlike every other dependency here): `tests/unit/api/test_sse.py` calls this
+    # coroutine directly (bypassing FastAPI's dependency injection) with only `store`/`cfg`/`_identity`
+    # given by keyword, so `pool` needs a real Python default to remain callable that way.
+    pool: Annotated[AsyncConnectionPool | None, Depends(_get_optional_pool)] = None,
 ) -> EventSourceResponse:
     """Price/load ticker, fleet MW/MWh, active commitment count, net margin, invariant counters, open
-    alerts (02b S7.2, S8 screen 1)."""
+    alerts (02b S7.2, S8 screen 1). The invariant counters are a measured read of `og.invariant_check`
+    (`opengrid.invariants.read_summary`, populated by that package's periodic K1/K2 checks), not a
+    constant."""
 
     async def fetch() -> dict[str, Any]:
         active_commitment_count = await store.count_active_commitments()
         alerts = await store.list_alerts(open_only=True)
         hubs = await store.list_hubs(zone=None, bank_id=None, health=None, limit=2000, offset=0)
         fleet_mw = sum(h["p_kw"] for h in hubs) / 1000.0
+        invariants = await _invariants_summary(pool)
         return {
             "active_commitment_count": active_commitment_count,
             "fleet_mw": fleet_mw,
             "open_alert_count": len(alerts),
-            "reserve_breach_count": 0,
-            "double_sold_kwh": 0,
+            "reserve_breach_count": invariants.reserve_breaches,
+            "double_sold_kwh": invariants.double_sold_kwh,
+            "invariants_checked_at": invariants.as_of.isoformat() if invariants.as_of else None,
         }
 
     return sse_response(request, interval_s=2.0, heartbeat_s=cfg.get("api.sse_heartbeat_s", 15), fetch=fetch)

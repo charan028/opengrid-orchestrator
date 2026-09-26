@@ -106,10 +106,13 @@ async def test_evaluate_alerts_raises_and_clears_process_down() -> None:
             )
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 7  # every one of the 7 processes never reported a heartbeat
+        # 5, not all 6 `ALL_PROCESSES` entries: `settle` (this evaluator's own host process, 02b S1.2)
+        # is always "ok" regardless of its heartbeat row (defect fix -- see
+        # `opengrid.health.rules.classify_all_processes`'s `self_process` docstring).
+        assert row[0] == 5
 
         async with pool.connection() as conn:
-            for process in ("feeds", "engine", "guardian", "safestop", "sim", "settle", "api"):
+            for process in ("feeds", "engine", "guardian", "safestop", "settle", "api"):
                 await conn.execute(
                     "INSERT INTO og.heartbeat (process, pid, ts, status) VALUES (%s, 1, now(), 'ok') "
                     "ON CONFLICT (process) DO UPDATE SET ts = now()",

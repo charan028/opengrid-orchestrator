@@ -13,12 +13,15 @@ from opengrid.health.rules import (
     classify_hub_health,
     derive_degraded_modes,
     evaluate_cycle_latency_alert,
+    evaluate_energy_shortfall_risk_alert,
     evaluate_feed_alert,
     evaluate_guardian_timeout_alert,
     evaluate_hub_offline_ratio_alert,
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
     evaluate_scada_overload_alert,
+    evaluate_sim_offline_alert,
+    is_fallback_feed_needed,
 )
 
 NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
@@ -50,6 +53,32 @@ def test_process_that_never_reported_is_down() -> None:
     result = classify_all_processes([], now=NOW, thresholds=THRESHOLDS)
     assert all(p.status == "down" for p in result)
     assert {p.process for p in result} == set(ALL_PROCESSES)
+
+
+def test_sim_is_not_a_monitored_process() -> None:
+    """Defect fix: `ogsim` is an external system that never writes an `og.heartbeat` row (BUILD.md S1,
+    `ogsim` shares no code with `opengrid`), so it must not be in the heartbeat-monitored set -- expecting
+    a "sim" row made `ALR-PROCESS-DOWN:sim` permanently open."""
+    assert "sim" not in ALL_PROCESSES
+
+
+def test_self_process_is_always_ok_regardless_of_its_heartbeat_row() -> None:
+    """Defect fix: `settle` (health's own host process, 02b S1.2) must never classify itself as down --
+    reaching this call at all proves it is alive, so a stale or missing `settle` heartbeat row (e.g. a
+    transient DB hiccup on that very write) must not misreport it."""
+    stale_heartbeat = [_heartbeat("settle", THRESHOLDS.heartbeat_down_after_s + 100)]
+    result = classify_all_processes(stale_heartbeat, now=NOW, thresholds=THRESHOLDS, self_process="settle")
+    settle = next(p for p in result if p.process == "settle")
+    assert settle.status == "ok"
+    assert settle.last_seen_at == NOW
+
+
+def test_self_process_none_leaves_normal_classification() -> None:
+    """Without `self_process`, a stale heartbeat still classifies as down (no special-casing by default)."""
+    stale_heartbeat = [_heartbeat("settle", THRESHOLDS.heartbeat_down_after_s + 100)]
+    result = classify_all_processes(stale_heartbeat, now=NOW, thresholds=THRESHOLDS)
+    settle = next(p for p in result if p.process == "settle")
+    assert settle.status == "down"
 
 
 # --- hub health classification -------------------------------------------------------------------
@@ -162,6 +191,26 @@ def test_feed_alert_critical_when_breaker_open() -> None:
 
 def test_process_down_alert_only_when_down() -> None:
     assert evaluate_process_down_alert(ProcessHealth("engine", "ok", NOW)) is None
+
+
+def test_energy_shortfall_risk_alert_shape() -> None:
+    finding = evaluate_energy_shortfall_risk_alert(
+        obligation_id="OBL-1", customer_id="CUST-A", margin_kwh=-3.5, time_to_depletion_h=0.75
+    )
+    assert finding.rule == "ALR-ENERGY-SHORTFALL-RISK"
+    assert finding.severity == "critical"
+    assert finding.condition_key == "ALR-ENERGY-SHORTFALL-RISK:OBL-1"
+    assert finding.detail["obligation_id"] == "OBL-1"
+    assert finding.detail["margin_kwh"] == -3.5
+    assert finding.detail["time_to_depletion_h"] == 0.75
+
+
+def test_energy_shortfall_risk_alert_handles_no_depletion_time() -> None:
+    finding = evaluate_energy_shortfall_risk_alert(
+        obligation_id="OBL-2", customer_id=None, margin_kwh=-1.0, time_to_depletion_h=None
+    )
+    assert "depletes in" not in finding.summary
+    assert finding.detail["time_to_depletion_h"] is None
     finding = evaluate_process_down_alert(ProcessHealth("engine", "down", NOW))
     assert finding is not None
     assert finding.rule == "ALR-PROCESS-DOWN"
@@ -230,3 +279,54 @@ def test_scada_overload_alert_critical_matches_default_anomaly_injection() -> No
     finding = evaluate_scada_overload_alert("bank-000", 75.0 * 1.20 + 0.1, 75.0, thresholds=THRESHOLDS)
     assert finding is not None
     assert finding.severity == "critical"
+
+
+# --- EIA fallback-feed suppression (defect fix) -----------------------------------------------------
+
+
+def _ercot_np6_345(*, last_value_at: datetime | None, breaker_open: bool = False) -> FeedStatus:
+    return FeedStatus(
+        source="ERCOT", product="np6-345-cd", last_value_at=last_value_at, breaker_open=breaker_open
+    )
+
+
+def test_fallback_not_needed_when_primary_fresh_and_breaker_closed() -> None:
+    primary = _ercot_np6_345(last_value_at=NOW)
+    assert is_fallback_feed_needed(primary, now=NOW, primary_threshold_s=60) is False
+
+
+def test_fallback_needed_when_primary_breaker_open() -> None:
+    primary = _ercot_np6_345(last_value_at=NOW, breaker_open=True)
+    assert is_fallback_feed_needed(primary, now=NOW, primary_threshold_s=60) is True
+
+
+def test_fallback_needed_when_primary_stale() -> None:
+    primary = _ercot_np6_345(last_value_at=NOW - timedelta(seconds=120))
+    assert is_fallback_feed_needed(primary, now=NOW, primary_threshold_s=60) is True
+
+
+def test_fallback_needed_when_primary_never_seen() -> None:
+    assert is_fallback_feed_needed(None, now=NOW, primary_threshold_s=60) is True
+
+
+# --- ALR-SIM-OFFLINE (defect fix) -------------------------------------------------------------------
+
+
+def test_sim_offline_alert_none_when_no_data_yet() -> None:
+    """Cold start (no fleet telemetry or SCADA reading has ever arrived) is not evidence of an offline
+    sim -- only a signal that used to be fresh going stale is."""
+    assert evaluate_sim_offline_alert(None, None, now=NOW, thresholds=THRESHOLDS) is None
+
+
+def test_sim_offline_alert_none_when_either_signal_fresh() -> None:
+    assert evaluate_sim_offline_alert(NOW, None, now=NOW, thresholds=THRESHOLDS) is None
+    assert evaluate_sim_offline_alert(None, NOW, now=NOW, thresholds=THRESHOLDS) is None
+
+
+def test_sim_offline_alert_critical_when_both_signals_stale() -> None:
+    old = NOW - timedelta(seconds=THRESHOLDS.sim_offline_s + 1)
+    finding = evaluate_sim_offline_alert(old, old, now=NOW, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-SIM-OFFLINE"
+    assert finding.severity == "critical"
+    assert finding.condition_key == "ALR-SIM-OFFLINE"

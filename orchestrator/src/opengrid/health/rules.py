@@ -33,12 +33,28 @@ def classify_process_status(
 
 
 def classify_all_processes(
-    heartbeats: Iterable[Heartbeat], *, now: datetime, thresholds: HealthThresholds
+    heartbeats: Iterable[Heartbeat],
+    *,
+    now: datetime,
+    thresholds: HealthThresholds,
+    self_process: str | None = None,
 ) -> tuple[ProcessHealth, ...]:
-    """Classify all 7 processes, including ones that never reported (`heartbeat is None` -> DOWN)."""
+    """Classify every `ALL_PROCESSES` entry, including ones that never reported (`heartbeat is None` ->
+    DOWN).
+
+    `self_process`, when given, names the process this code is itself executing inside right now (health
+    always runs inside `og-settle`, 02b S1.2/S6.4): that entry is always "ok" with `last_seen_at=now`
+    regardless of its `og.heartbeat` row, because reaching this call at all proves it is alive (defect
+    fix: a stale/momentarily-missing `settle` heartbeat write -- e.g. a slow disk or a transient DB
+    hiccup on the very write this same process makes -- must never make a live process misreport itself
+    as down; nothing external needs to observe `settle`'s own heartbeat to know settle is running this
+    evaluation).
+    """
     by_process = {hb.process: hb for hb in heartbeats}
     return tuple(
-        ProcessHealth(
+        ProcessHealth(process=process, status="ok", last_seen_at=now)
+        if process == self_process
+        else ProcessHealth(
             process=process,
             status=classify_process_status(by_process.get(process), now=now, thresholds=thresholds),
             last_seen_at=by_process[process].ts if process in by_process else None,
@@ -117,8 +133,63 @@ def evaluate_feed_alert(
     return None
 
 
+def is_fallback_feed_needed(
+    primary_feed_status: FeedStatus | None, *, now: datetime, primary_threshold_s: float
+) -> bool:
+    """ALR-FEED-STALE fallback-suppression (defect fix): EIA backs ERCOT's system-load product
+    (`np6-345-cd`) only while ERCOT's own breaker is open or its own reading is stale --
+    `opengrid.feeds.scheduler._poll_eia_fallback` runs only from inside `_poll_ercot_product` when its
+    breaker blocks the request, so EIA is never even polled while ERCOT is healthy. An old/stale EIA
+    `feed_status` row is then normal, not a problem, and must not raise `ALR-FEED-STALE` on its own; it
+    only matters once the primary it backs is itself unavailable.
+
+    `primary_feed_status=None` (ERCOT's own row has never been seen at all) can't be distinguished from
+    "primary is fine", so this returns `True` (don't suppress) rather than risk hiding a real gap.
+    """
+    if primary_feed_status is None:
+        return True
+    if primary_feed_status.breaker_open:
+        return True
+    return is_stale(primary_feed_status.last_value_at, primary_threshold_s, now=now)
+
+
+def evaluate_sim_offline_alert(
+    latest_fleet_seen_at: datetime | None,
+    latest_scada_seen_at: datetime | None,
+    *,
+    now: datetime,
+    thresholds: HealthThresholds,
+) -> AlertFinding | None:
+    """ALR-SIM-OFFLINE (critical): `ogsim` (the integration simulators) is an external system that shares
+    no code with `opengrid` (BUILD.md S1) and never writes an `og.heartbeat` row (see `ALL_PROCESSES`'s
+    docstring), so its liveness is inferred from its own MQTT-driven writes instead -- the freshest hub
+    telemetry (`og.hub_state.last_seen_at`, written by `ogsim.fleet`) and the freshest SCADA reading
+    (`og.feed_obs` where `source='scada'`, written by `ogsim.scada`).
+
+    Neither signal existing yet (a cold start, before any telemetry has ever arrived) is not evidence of
+    an offline sim -- only "used to be fresh, now isn't" is, so this returns `None` when both are `None`.
+    """
+    candidates = [ts for ts in (latest_fleet_seen_at, latest_scada_seen_at) if ts is not None]
+    if not candidates:
+        return None
+    freshest = max(candidates)
+    if not is_stale(freshest, thresholds.sim_offline_s, now=now):
+        return None
+    return AlertFinding(
+        rule="ALR-SIM-OFFLINE",
+        severity="critical",
+        summary=f"Integration simulators silent for over {thresholds.sim_offline_s:.0f}s "
+        "(no fleet telemetry or SCADA reading)",
+        condition_key="ALR-SIM-OFFLINE",
+        detail={
+            "latest_fleet_seen_at": latest_fleet_seen_at.isoformat() if latest_fleet_seen_at else None,
+            "latest_scada_seen_at": latest_scada_seen_at.isoformat() if latest_scada_seen_at else None,
+        },
+    )
+
+
 def evaluate_process_down_alert(process_health: ProcessHealth) -> AlertFinding | None:
-    """ALR-PROCESS-DOWN (critical) -- any of the 7 processes."""
+    """ALR-PROCESS-DOWN (critical) -- any monitored `opengrid` process (`ALL_PROCESSES`)."""
     if process_health.status != "down":
         return None
     return AlertFinding(
@@ -206,6 +277,37 @@ def evaluate_scada_overload_alert(
         summary=f"Bank {bank_id} SCADA load {load_kva:.1f} kVA over rating {kva_rating:.1f} kVA ({ratio:.0%})",
         condition_key=f"ALR-SCADA-OVERLOAD:{bank_id}",
         detail={"bank_id": bank_id, "load_kva": load_kva, "kva_rating": kva_rating, "ratio": ratio},
+    )
+
+
+def evaluate_energy_shortfall_risk_alert(
+    *,
+    obligation_id: str,
+    customer_id: str | None,
+    margin_kwh: float,
+    time_to_depletion_h: float | None,
+) -> AlertFinding:
+    """ALR-ENERGY-SHORTFALL-RISK (K1, continuous per-obligation energy-sufficiency check): a committed
+    obligation's eligible hubs no longer hold enough energy above reserve to sustain its remaining
+    delivery window. Always `critical` -- unlike the other alert rules here, this one is raised
+    directly by the allocator/engine energy-sufficiency hook the instant AT_RISK is detected (not
+    polled for by the health evaluator), so there is no severity threshold to size here; this function
+    exists so the health module owns exactly one place that names the rule/severity/summary shape,
+    matching every other `ALR-*` rule in this file (BUILD.md S1 "no duplicated functions")."""
+    return AlertFinding(
+        rule="ALR-ENERGY-SHORTFALL-RISK",
+        severity="critical",
+        summary=(
+            f"Obligation {obligation_id} energy margin {margin_kwh:.2f} kWh"
+            + (f", depletes in {time_to_depletion_h:.2f}h" if time_to_depletion_h is not None else "")
+        ),
+        condition_key=f"ALR-ENERGY-SHORTFALL-RISK:{obligation_id}",
+        detail={
+            "obligation_id": obligation_id,
+            "customer_id": customer_id,
+            "margin_kwh": margin_kwh,
+            "time_to_depletion_h": time_to_depletion_h,
+        },
     )
 
 

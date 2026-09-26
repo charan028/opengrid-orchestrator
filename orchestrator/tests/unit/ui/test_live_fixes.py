@@ -77,12 +77,12 @@ def test_ack_message_is_operator_readable() -> None:
 
 def test_pipeline_cards_carry_energy_fields_or_dash() -> None:
     rows = [
-        {"obligation_id": "a", "state": "COMMITTED", "energy_margin_kwh": 12.5, "time_to_depletion_min": 40},
+        {"obligation_id": "a", "state": "COMMITTED", "energy_margin_kwh": 12.5, "time_to_depletion_h": 0.67},
         {"obligation_id": "b", "state": "COMMITTED"},
     ]
     cards = pipeline_view(rows, now=_NOW)["columns"][2]["items"]
-    assert cards[0]["energy_margin_kwh"] == 12.5 and cards[0]["time_to_depletion_min"] == 40
-    assert cards[1]["energy_margin_kwh"] is None and cards[1]["time_to_depletion_min"] is None
+    assert cards[0]["energy_margin_kwh"] == 12.5 and cards[0]["time_to_depletion_h"] == 0.67
+    assert cards[1]["energy_margin_kwh"] is None and cards[1]["time_to_depletion_h"] is None
 
 
 def test_dispatch_page_renders_energy_line(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,7 +93,7 @@ def test_dispatch_page_renders_energy_line(monkeypatch: pytest.MonkeyPatch) -> N
                     "obligation_id": "a",
                     "state": "COMMITTED",
                     "energy_margin_kwh": 12.5,
-                    "time_to_depletion_min": 40,
+                    "time_to_depletion_h": 0.67,
                 }
             ]
         if path.startswith("/og/api/ledger/"):
@@ -104,4 +104,4 @@ def test_dispatch_page_renders_energy_line(monkeypatch: pytest.MonkeyPatch) -> N
     app = FastAPI()
     app.include_router(ui.build_router(), prefix="/og")
     body = TestClient(app).get("/og/dispatch").text
-    assert "energy margin 12.5 kWh" in body and "depletion in 40 min" in body
+    assert "energy margin: 12.50 kWh" in body and "depletes in: 0.67h" in body

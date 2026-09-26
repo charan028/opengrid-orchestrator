@@ -11,6 +11,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from opengrid.core.models.pq import TelemetryPq
+
 
 class _Wire(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -27,6 +29,9 @@ class Telemetry(_Wire):
     seq: int
     epoch: int
     fault_code: str | None = None
+    # Optional, additive per-phase electrical quality (06-service-profiles-and-power-quality.md S6.1);
+    # existing consumers that ignore unknown/absent fields are unaffected.
+    pq: TelemetryPq | None = None
 
 
 class CommandItem(_Wire):
@@ -57,10 +62,14 @@ class CommandBatch(_Wire):
     signature: str
 
     def signing_payload(self) -> dict[str, Any]:
-        """Fields covered by the Ed25519 signature, per interfaces/crypto.md S2.1 (excludes
-        key_id/signature)."""
-        data: dict[str, Any] = self.model_dump(mode="json", exclude={"key_id", "signature"})
+        """Fields covered by the Ed25519 signature: exactly the 7 listed in interfaces/crypto.md
+        S2.1, which is also exactly what the hub recomputes (ogsim.fleet.commands._SIGNED_FIELDS).
+        `precondition`/`lease` are not signed; including them (even as null) breaks verification."""
+        data: dict[str, Any] = self.model_dump(mode="json", include=set(COMMAND_BATCH_SIGNED_FIELDS))
         return data
+
+
+COMMAND_BATCH_SIGNED_FIELDS = ("batch_id", "bank_id", "epoch", "seq", "issued_at", "expires_at", "items")
 
 
 class Ack(_Wire):
@@ -98,9 +107,25 @@ class Lease(_Wire):
 
 class ScadaBankSignal(_Wire):
     bank_id: str
-    signal: Literal["APPARENT_POWER_KVA", "REAL_POWER_KW", "VOLTAGE_PU", "CURRENT_A"]
+    # Per-phase signals (06-service-profiles-and-power-quality.md S6.2) added additively; the schema's
+    # one-signal-per-message shape is unchanged -- a per-phase reading is three messages.
+    signal: Literal[
+        "APPARENT_POWER_KVA",
+        "REAL_POWER_KW",
+        "VOLTAGE_PU",
+        "CURRENT_A",
+        "VOLTAGE_A_PU",
+        "VOLTAGE_B_PU",
+        "VOLTAGE_C_PU",
+        "CURRENT_A_PHASE_A",
+        "CURRENT_A_PHASE_B",
+        "CURRENT_A_PHASE_C",
+        "FREQUENCY_HZ",
+        "THD_V_PCT",
+        "THD_I_PCT",
+    ]
     value: float
-    unit: Literal["kVA", "kW", "pu", "A"]
+    unit: Literal["kVA", "kW", "pu", "A", "Hz", "%"]
     quality: Literal["good", "stale", "missing", "out_of_range", "comm_fail"]
     ts: datetime
 

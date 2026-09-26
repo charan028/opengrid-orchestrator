@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://opengrid.example/interfaces/mqtt/stop.schema.json",
   "title": "StopEvent",
-  "description": "Safestop (ENGAGE) or Guardian (RELEASE, Tier-2 approved) -> hubs, published on <root>/stop/<scope>/<id>, QoS 1, retained. An empty retained payload on the same topic clears (releases) the stop.",
+  "description": "Safestop (ENGAGE) or Guardian (RELEASE, Tier-2 approved) -> hubs, published on <root>/stop/<scope>/<id>, QoS 1, retained. A guardian RELEASE reuses its ENGAGE's stop_id and topic, replacing the retained ENGAGE. An empty retained payload is broker housekeeping and never changes stop state (K8).",
   "type": "object",
   "additionalProperties": false,
   "required": ["stop_id", "scope", "action", "reason", "issued_by", "issued_at", "key_id", "signature"],

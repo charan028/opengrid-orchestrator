@@ -25,8 +25,11 @@
         <div title="{{ item.obligation_id }}">{{ (item.obligation_id or '')[:8] }}</div>
         <div class="og-card-meta">{{ item.service_type }} &middot; {{ item.tier }} &middot; {{ item.committed_qty_kw }} kW</div>
         <div class="og-card-meta">customer {{ item.customer_id }}</div>
-        {% if item.energy_margin_kwh is not none or item.time_to_depletion_min is not none %}
-        <div class="og-card-meta">energy margin {{ item.energy_margin_kwh if item.energy_margin_kwh is not none else '-' }} kWh &middot; depletion in {{ item.time_to_depletion_min if item.time_to_depletion_min is not none else '-' }} min</div>
+        {% if item.raw_state in ("COMMITTED", "DELIVERING") %}
+        <div class="og-card-meta">
+          energy margin: {{ "%.2f"|format(item.energy_margin_kwh) if item.energy_margin_kwh is not none else "--" }} kWh
+          &middot; depletes in: {{ "%.2f"|format(item.time_to_depletion_h) + "h" if item.time_to_depletion_h is not none else "--" }}
+        </div>
         {% endif %}
         {% if item.reason_code %}<div class="og-card-meta">{{ item.reason_code }}</div>{% endif %}
         {% if item.decision %}<div class="og-decision">{{ item.decision }}</div>{% endif %}
@@ -182,11 +185,12 @@
             decisionEl.textContent = decisionText;
             card.appendChild(decisionEl);
           }
-          if (item.energy_margin_kwh != null || item.time_to_depletion_min != null) {
+          if (state === "COMMITTED" || state === "DELIVERING") {
             var energyLine = document.createElement("div");
             energyLine.className = "og-card-meta";
-            energyLine.textContent = "energy margin " + (item.energy_margin_kwh != null ? item.energy_margin_kwh : "-")
-              + " kWh · depletion in " + (item.time_to_depletion_min != null ? item.time_to_depletion_min : "-") + " min";
+            var margin = item.energy_margin_kwh != null ? item.energy_margin_kwh.toFixed(2) + " kWh" : "--";
+            var depletion = item.time_to_depletion_h != null ? item.time_to_depletion_h.toFixed(2) + "h" : "--";
+            energyLine.textContent = "energy margin: " + margin + " · depletes in: " + depletion;
             card.appendChild(energyLine);
           }
           column.appendChild(card);

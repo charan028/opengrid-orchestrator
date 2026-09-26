@@ -38,3 +38,36 @@ guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
 # Local/dev override (hex or base64 32-byte Ed25519 public key), takes
 # precedence over guardian_public_key_path when non-empty:
 guardian_public_key_path_dev: ""
+
+# Per-inverter power-quality imperfection model (06-service-profiles-and-power-quality.md
+# §3.1/§7.1/§7.3). One unit per hub; dual-unit homes (above) get two independently-seeded units.
+inverter_pq:
+  freq_offset_std_hz: 0.01
+  voltage_offset_std_pct: 0.5
+  thd_current_median_pct: 2.0
+  thd_current_p95_pct: 4.5
+  harmonic_phase_lock: false   # false = diverse (cancellation regime), true = locked (stacking regime)
+  ride_through_class_default: CATEGORY_III
+  calibration_rate_limit_s: 86400.0  # at most one remote-calibration attempt per unit per 24h
+
+# Waveform summary/raw generation and publication (06-service-profiles-and-power-quality.md
+# §6.4/§7.4, WP-H). The harmonic-detail sub-block publishes every harmonic_detail_interval_s
+# OR sooner if aggregate THD_I moves by more than harmonic_detail_delta_pct (§6.4b bandwidth
+# mitigation). Raw captures are triggered-only; raw_audit_sample_pct_per_min bounds this sim's
+# own rotating self-audit sample (§6.4b trigger policy item iii) to that % of the fleet/minute.
+#
+# summary_interval_s/summary_delta_pct (S9 wave-2 fix): gates the summary MESSAGE ITSELF, not
+# just its harmonic-detail sub-block -- the old behaviour published a full summary every
+# telemetry_interval_s (2.0s default) regardless, which is the ~1,000 msg/s at 2,000 hubs that
+# stalled opengrid.pq_ingest's one-insert-per-message path. 10s sits at the slow end of the
+# 2-10s L-RT telemetry cadence band (03 §3.1) and stays within §5.4's monitoring-cadence
+# requirement. At 2,000 hubs this is ~200 msg/s; at 10,000 hubs, ~1,000 msg/s (see the wave-2
+# build report for the full bandwidth math).
+wave:
+  harmonic_detail_interval_s: 30.0
+  harmonic_detail_delta_pct: 1.0
+  raw_audit_sample_pct_per_min: 1.0
+  sync_source: ptp
+  sync_quality_ns: 50.0
+  summary_interval_s: 10.0
+  summary_delta_pct: 1.0

@@ -47,6 +47,12 @@ def to_wire_scope(scope: Scope, scope_ref: str) -> tuple[Literal["fleet", "zone"
 def stop_topic_suffix(scope: Scope, scope_ref: str, stop_id: UUID) -> str:
     """`<root>/stop/<scope>/<id>` suffix (topics.md); `<scope>` includes the zone/bank ref inline."""
     wire_scope, scope_id = to_wire_scope(scope, scope_ref)
+    return wire_stop_topic_suffix(wire_scope, scope_id, stop_id)
+
+
+def wire_stop_topic_suffix(wire_scope: str, scope_id: str | None, stop_id: UUID | str) -> str:
+    """The same suffix from a wire `StopEvent`'s own `(scope, scope_id, stop_id)`: a guardian RELEASE
+    carries its ENGAGE's `stop_id`, so it lands on (and replaces) that ENGAGE's retained topic."""
     scope_part = wire_scope if scope_id is None else f"{wire_scope}/{scope_id}"
     return f"stop/{scope_part}/{stop_id}"
 

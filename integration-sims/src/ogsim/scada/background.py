@@ -4,6 +4,16 @@ Tries to seed a background-load shape from the historical
 `substation_load_kw` series at `history_tsv_path` (server-only); falls
 back to a synthetic diurnal curve when that file is absent, malformed, or
 unreadable -- never crashes on a missing path (BUILD.md explicit ask).
+
+`substation_load_kw` is the WHOLE simulated feeder's aggregate reading (every
+`bank_count` bank/feeder segment together, `~bank_count * 50` homes), not one
+bank's share -- `BackgroundLoadModel` divides it by `bank_count` so each bank
+gets its own ~1/`bank_count` slice. Skipping that division (the defect this
+module was fixed for) replayed the entire substation's ~3,000 kW history mean
+onto every one of the 40 banks independently: each bank reported ~3,000 kVA
+against its 600 kVA rating, raising 40 simultaneous false `ALR-SCADA-OVERLOAD`
+alerts on the live server (a bank's realistic load is background *plus*
+battery net power, both well under the rating outside an injected anomaly).
 """
 
 from __future__ import annotations
@@ -56,7 +66,13 @@ class BackgroundLoadModel:
         self, bank_count: int, base_kw_default: float, history_tsv_path: str, rng: np.random.Generator
     ):
         history_mean = load_history_mean_kw(history_tsv_path)
-        self.base_kw = history_mean if history_mean is not None else base_kw_default
+        if history_mean is not None and bank_count > 0:
+            # `history_mean` is the whole feeder's (all `bank_count` banks') aggregate reading --
+            # see module docstring. Scale it down to this bank's approximate share instead of
+            # replaying the substation-wide total onto every bank independently.
+            self.base_kw = history_mean / bank_count
+        else:
+            self.base_kw = base_kw_default
         self.per_bank_multiplier = rng.uniform(0.8, 1.2, size=bank_count)
 
     def load_kw(self, epoch_seconds: float, noise: np.ndarray) -> np.ndarray:

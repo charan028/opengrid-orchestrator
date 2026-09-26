@@ -11,8 +11,9 @@ from opengrid.core.limits import (
     check_hub_ramp,
     check_one_buyer,
     check_reserve_floor,
+    check_reserve_floor_over_lease,
 )
-from opengrid.core.physics import BankParams, HubParams
+from opengrid.core.physics import BankParams, HubParams, project_soc_over_lease_kwh
 
 HUB = HubParams(e_kwh=13.5, r_kwh=2.7, p_kw=5.0)
 BANK = BankParams(kva_rating=75.0, reserve_kva=5.0)
@@ -31,6 +32,22 @@ def test_reserve_floor_ok_above_margin():
 def test_hub_power_limit():
     assert check_hub_power(5.0, HUB).ok
     assert not check_hub_power(11.5, HUB).ok
+
+
+def test_dual_unit_home_is_capped_at_its_own_rating_not_one_inverter():
+    """Regression: min(inverter_cap_kw=11, p_kw) capped the 20 kW dual-unit homes at 11 kW."""
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0)
+    single = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0)
+    assert check_hub_power(20.0, dual, inverter_cap_kw=11.0).ok
+    assert check_hub_power(-20.0, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(21.0, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(11.5, single, inverter_cap_kw=11.0).ok
+
+
+def test_per_unit_cap_binds_times_a_known_unit_count():
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=24.0, units=2)
+    assert check_hub_power(22.0, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(22.5, dual, inverter_cap_kw=11.0).ok
 
 
 def test_bank_kva_limit():
@@ -202,3 +219,51 @@ def test_check_fleet_ramp_cap_property_uses_the_right_cap_for_firm_vs_non_firm(
     cap_per_min = 50_000.0 if is_firm_event else 10_000.0
     cap_kw = cap_per_min * (dt_s / 60.0)
     assert result.ok == (abs(fleet_delta_kw) <= cap_kw + 1e-9)
+
+
+# --- G-01-ENERGY: lease-duration energy projection (K1) --------------------------------------------
+
+
+@given(
+    e_kwh=st.floats(min_value=1, max_value=200, allow_nan=False),
+    soc_frac=st.floats(min_value=0, max_value=1, allow_nan=False),
+    r_frac=st.floats(min_value=0, max_value=1, allow_nan=False),
+    p_kw=st.floats(min_value=1e-3, max_value=100, allow_nan=False),  # a genuine (nonzero) discharge
+    lease_ttl_h=st.floats(min_value=1e-3, max_value=24, allow_nan=False),
+    margin_pct=st.floats(min_value=0, max_value=0.5, allow_nan=False),
+)
+def test_property_a_no_command_ever_implies_discharging_below_reserve_within_its_lease(
+    e_kwh, soc_frac, r_frac, p_kw, lease_ttl_h, margin_pct
+):
+    """Property (a): whenever `check_reserve_floor_over_lease` PASSES a genuine discharge command, the
+    hub's projected SoC at the END of the command's full lease duration is still >= reserve + margin --
+    for ANY physically-valid combination of SoC/capacity/reserve/power/lease-length/margin (0 <= r_kwh
+    <= soc_kwh's own [0, e_kwh] range is not required here -- soc CAN start below reserve, that's exactly
+    the case this check must catch). This is the exact guarantee G-01-ENERGY exists to make (capacity/kW
+    headroom alone is not enough)."""
+    soc_kwh = soc_frac * e_kwh
+    r_kwh = r_frac * e_kwh
+    params = HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw)
+    result = check_reserve_floor_over_lease(soc_kwh, -p_kw, lease_ttl_h, params, margin_pct=margin_pct)
+    projected = project_soc_over_lease_kwh(soc_kwh, -p_kw, lease_ttl_h, params.eta_c, params.eta_d)
+    if result.ok:
+        assert projected >= r_kwh + e_kwh * margin_pct - 1e-6
+    else:
+        assert projected < r_kwh + e_kwh * margin_pct + 1e-6
+        assert result.reason == reasons.R_RESERVE_FLOOR_LEASE
+
+
+@given(
+    e_kwh=st.floats(min_value=1, max_value=200, allow_nan=False),
+    soc_frac=st.floats(min_value=0, max_value=1, allow_nan=False),
+    p_kw=st.floats(min_value=1e-3, max_value=100, allow_nan=False),  # a genuine (nonzero) charge
+    lease_ttl_h=st.floats(min_value=1e-3, max_value=24, allow_nan=False),
+)
+def test_check_reserve_floor_over_lease_symmetric_charge_ceiling(e_kwh, soc_frac, p_kw, lease_ttl_h):
+    """Symmetric charge-direction half of property (a): a charge command that would overfill above
+    `e_kwh` before the lease expires is vetoed too."""
+    soc_kwh = soc_frac * e_kwh
+    params = HubParams(e_kwh=e_kwh, r_kwh=0.0, p_kw=p_kw)
+    result = check_reserve_floor_over_lease(soc_kwh, p_kw, lease_ttl_h, params)
+    projected = project_soc_over_lease_kwh(soc_kwh, p_kw, lease_ttl_h, params.eta_c, params.eta_d)
+    assert result.ok == (projected <= e_kwh + 1e-9)

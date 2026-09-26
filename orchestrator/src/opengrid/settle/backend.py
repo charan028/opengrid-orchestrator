@@ -83,9 +83,12 @@ class SettleBackend(Protocol):
     `opengrid.settle.__init__.settle` is safe to call concurrently for different obligations because
     every write here is scoped to a single `obligation_id`/`interval_start`."""
 
-    async def fetch_context(self, obligation_id: UUID) -> ObligationSettlementContext:
+    async def fetch_context(
+        self, obligation_id: UUID, interval_start: datetime | None = None
+    ) -> ObligationSettlementContext:
         """Contract/obligation terms needed for M&V, billing and profitability. Raises `LookupError`
-        if the obligation does not exist."""
+        if the obligation does not exist. With `interval_start`, `wholesale_price_per_kwh` is the
+        market price for that 15-minute interval (independent of the contract price)."""
         ...
 
     async def fetch_power_samples(
@@ -221,4 +224,9 @@ class SettleBackend(Protocol):
         not yet been metered (02a S2.1's `FULFILLED/SHORTFALL -> SETTLED` transition trigger). Used
         by `opengrid.settle.main`'s tick; the pure `settle()` orchestration above does not call this
         itself so unit tests can call `settle()` directly for one obligation-interval."""
+        ...
+
+    async def fetch_settleable_obligations(self) -> list[UUID]:
+        """`FULFILLED`/`SHORTFALL` obligations whose every window interval is metered, with P&L posted and
+        (for every service but HOME) an invoice line -- ready for `-> SETTLED` (02a S2.1)."""
         ...

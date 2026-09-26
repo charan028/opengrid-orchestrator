@@ -16,6 +16,8 @@ DEFAULT_ETA_C = 0.9487
 DEFAULT_ETA_D = 0.9487
 DEFAULT_SELF_DISCHARGE_KWH_PER_H = 0.0005
 DEFAULT_INVERTER_CAP_KW = 11.0  # CORE-004: named default hub inverter power cap, not a bare literal
+#: 02a S6.1 G-04 default ("firm ramp Kc/3 per minute"): a hub reaches its full power rating in 3 min.
+FIRM_RAMP_MINUTES_TO_FULL_POWER = 3.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +28,17 @@ class HubParams:
     eta_c: float = DEFAULT_ETA_C
     eta_d: float = DEFAULT_ETA_D
     self_discharge_kwh_per_h: float = DEFAULT_SELF_DISCHARGE_KWH_PER_H
-    ramp_kw_per_s: float | None = None  # None = unconstrained ramp for this hub
+    ramp_kw_per_s: float | None = None  # None = the 02a S6.1 firm default, see `hub_ramp_kw_per_s`
+    units: int | None = None  # battery/inverter units in the home when known (G-02 per-unit cap), else None
+
+
+def hub_ramp_kw_per_s(params: HubParams) -> float:
+    """G-04/K4 per-hub ramp bound in kW/s: the hub's own `ramp_kw_per_s`, else the 02a S6.1 firm
+    default (full power rating over `FIRM_RAMP_MINUTES_TO_FULL_POWER`). The one definition both the
+    engine (when it builds per-hub setpoints) and the guardian (G-04) use."""
+    if params.ramp_kw_per_s is not None:
+        return params.ramp_kw_per_s
+    return params.p_kw / FIRM_RAMP_MINUTES_TO_FULL_POWER / 60.0
 
 
 def soc_step(
@@ -67,6 +79,59 @@ def hub_sustainable_discharge_kw(
         return 0.0
     energy_limited_kw = (available_kwh * eta_d) / dt_h
     return min(max(p_kw, 0.0), energy_limited_kw)
+
+
+def hub_sustainable_charge_kw(
+    soc_kwh: float,
+    e_kwh: float,
+    p_kw: float,
+    dt_h: float,
+    eta_c: float,
+) -> float:
+    """Symmetric to `hub_sustainable_discharge_kw` (CORE-003/K1): the charge power (kW, >= 0)
+    actually sustainable for a FULL interval of length `dt_h` without overfilling the hub above
+    `e_kwh`, given only the headroom `e_kwh - soc_kwh` available to absorb charge. A sliver of
+    headroom just below full cannot be commanded at the hub's full rated power for a whole interval
+    without exceeding `e_kwh` part-way through -- callers use this (not the raw `p_kw` rating) as the
+    ceiling offered to any charge-side capability path (allocator continuous energy checks, guardian
+    G-01-ENERGY charge-direction projection).
+    """
+    headroom_kwh = max(e_kwh - soc_kwh, 0.0)
+    if headroom_kwh <= 0.0 or dt_h <= 0.0 or eta_c <= 0.0:
+        return 0.0
+    energy_limited_kw = headroom_kwh / (eta_c * dt_h)
+    return min(max(p_kw, 0.0), energy_limited_kw)
+
+
+def hub_available_energy_kwh(soc_kwh: float, reserve_kwh: float, eta_d: float) -> float:
+    """Energy (kWh, >= 0) deliverable from a hub before its SoC reaches the reserve floor, at
+    discharge efficiency `eta_d` (03-decision-engine.md S8.11's $E^{free}_i \\eta_d$ term). This is
+    the ENERGY-side complement to `hub_sustainable_discharge_kw`'s power-side cap: capacity (kW) alone
+    is not enough to know a hub can sustain a committed delivery for its whole remaining window -- the
+    continuous per-obligation energy-sufficiency check (K1) sums this across a obligation's eligible
+    hubs, net of energy already reserved for OTHER committed obligations on the same hubs (K2).
+    """
+    return max(soc_kwh - reserve_kwh, 0.0) * eta_d
+
+
+def project_soc_over_lease_kwh(
+    soc_kwh: float,
+    p_kw: float,
+    lease_ttl_h: float,
+    eta_c: float,
+    eta_d: float,
+) -> float:
+    """Project SoC forward over a command's full lease duration (`lease_ttl_h`) under a CONSTANT
+    commanded power `p_kw` (+charge / -discharge, same sign convention as `soc_step`), ignoring
+    self-discharge (a lease-duration guardian projection is deliberately conservative/simple, not a
+    full forward simulation -- 02a S6's G-01 formula: `soc - p_cmd * lease_ttl_h / eta_d >= reserve`
+    for discharge, symmetrically `soc + p_cmd * lease_ttl_h * eta_c <= e_kwh` for charge). Used by
+    G-01-ENERGY to check the guardian's OWN independently-read SoC holds for the command's WHOLE lease,
+    not just the instant it is issued.
+    """
+    p_c = max(p_kw, 0.0)
+    p_d = max(-p_kw, 0.0)
+    return soc_kwh + eta_c * p_c * lease_ttl_h - (p_d * lease_ttl_h) / eta_d
 
 
 def hub_capability(soc_kwh: float, params: HubParams) -> tuple[float, float]:

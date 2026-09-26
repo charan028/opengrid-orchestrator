@@ -103,13 +103,21 @@ class ScadaEngine:
         return signals, instructions
 
     def _instruction_message(self, pending: dict[str, Any], now: float) -> dict[str, Any]:
+        """Blocker fix: `pending["lift"]` (set by `ScadaAnomalyManager._revert`'s
+        `utility_instruction` branch) sets `expires_at` to THIS message's own `issued_at` --
+        already in the past the instant it arrives -- instead of `None` ("never expires").
+        `opengrid.fleet._active_utility_limit_kw` already treats `expires_at <= now` as
+        inactive (the SAME mechanism the rule-based auto-instruction relies on to eventually
+        age out), so this needs no orchestrator-side change: it is the model's own existing
+        way an instruction ends, applied here explicitly instead of never being used."""
+        ts = utc_timestamp(now)
         return {
             "instruction_id": str(uuid.uuid4()),
             "bank_id": pending["bank_id"],
             "kind": pending["kind"],
             "limit_kw": pending.get("limit_kw"),
-            "issued_at": utc_timestamp(now),
-            "expires_at": None,
+            "issued_at": ts,
+            "expires_at": ts if pending.get("lift") else None,
             "issued_by": "SCENARIO_ANOMALY",
         }
 

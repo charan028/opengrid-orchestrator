@@ -213,7 +213,13 @@ class StoreProtocol(Protocol):
         reason: str | None,
         trace_id: UUID | None,
         confirmed_at: datetime | None,
-    ) -> UUID: ...
+        approver_ref: str | None = None,
+        created_at: datetime | None = None,
+    ) -> UUID:
+        """`approver_ref` defaults to `operator_ref` (single-operator actions); the two-person stop
+        RELEASE passes the second operator, and `created_at` = when operator A requested it (the
+        guardian's `requested_at`; defaults to the insert time)."""
+        ...
 
 
 def _row_or_none(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -366,12 +372,16 @@ class PgStore:
         clauses: list[str] = ["1=1"]
         params: list[Any] = []
         if state is not None:
-            clauses.append("state = %s")
+            clauses.append("o.state = %s")
             params.append(state)
         sql = f"""
-            SELECT obligation_id, opportunity_id, contract_id, service_type, tier, window_start,
-                   window_end, committed_qty_kw, state, at_risk, last_reason_code, version
-            FROM og.obligation WHERE {" AND ".join(clauses)} ORDER BY updated_at DESC LIMIT 500
+            SELECT o.obligation_id, o.opportunity_id, o.contract_id, o.service_type, o.tier,
+                   o.window_start, o.window_end, o.committed_qty_kw, o.state, o.at_risk,
+                   o.last_reason_code, o.version,
+                   es.margin_kwh AS energy_margin_kwh, es.time_to_depletion_h
+            FROM og.obligation o
+            LEFT JOIN og.obligation_energy_status es ON es.obligation_id = o.obligation_id
+            WHERE {" AND ".join(clauses)} ORDER BY o.updated_at DESC LIMIT 500
         """  # noqa: S608 -- clause fragments are hard-coded, values are bound as `%s` params
         rows = await self._fetch(sql, tuple(params))
         return [Obligation(**row) for row in rows]
@@ -427,17 +437,11 @@ class PgStore:
         return [Grant(**row) for row in rows]
 
     async def _fetch_by_uuid_bank_id(self, sql: str, bank_id: str) -> list[dict[str, Any]]:
-        """`og.reservation`/`og.grant`'s `bank_id` column is `uuid` while the fleet twin's bank
-        identifiers are text codes like `"bank-01"` (`og.bank.bank_id TEXT`, 02b S4.2) -- a pre-existing
-        schema/model mismatch outside `api`'s ownership (see the package README). A path `bank_id` that
-        is not a UUID can therefore never match a row; returning an empty timeline for it is the
-        correct read (not a guess) until the two identifier spaces are reconciled, so this catches only
-        that one specific, already-diagnosed error rather than swallowing failures broadly.
-        """
-        try:
-            UUID(bank_id)
-        except ValueError:
-            return []
+        """`og.reservation`/`og.grant.bank_id` are TEXT since `migrations/0004_bank_id_text.sql`, matching
+        the fleet twin's `"bank-000"` codes. The earlier "not a UUID -> return []" short-circuit outlived
+        that migration and hid every reservation and grant from the Dispatch ledger timeline (seen live
+        2026-09-26: 22 rows in og.reservation for bank-007, `/og/api/ledger/bank-007/timeline` returned
+        none)."""
         return await self._fetch(sql, (bank_id,))
 
     async def list_commitments(self, *, limit: int = 200) -> list[Commitment]:
@@ -650,14 +654,16 @@ class PgStore:
         reason: str | None,
         trace_id: UUID | None,
         confirmed_at: datetime | None,
+        approver_ref: str | None = None,
+        created_at: datetime | None = None,
     ) -> UUID:
         action_id = uuid4()
         await self._execute(
             """
             INSERT INTO og.operator_action
                 (operator_action_id, operator_ref, action_kind, target_ref, tier, reason,
-                 confirmed_at, approver_ref, trace_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 confirmed_at, approver_ref, trace_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, coalesce(%s, now()))
             """,
             (
                 action_id,
@@ -667,8 +673,9 @@ class PgStore:
                 tier,
                 reason,
                 confirmed_at,
-                operator_ref,
+                approver_ref if approver_ref is not None else operator_ref,
                 trace_id,
+                created_at,
             ),
         )
         return action_id

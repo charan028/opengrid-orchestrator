@@ -10,9 +10,19 @@
 # Must be run as root (installed at /opt/opengrid/deploy/scripts/deploy.sh so it survives
 # across releases). There is no sudo on this host; this script is invoked directly by
 # whoever holds the root SSH session, per BUILD.md/02b-mvp-s-spec-platform.md §9.
+#
+# Delivery preflight (policy pending the owner's decision -- warn, never hard-block): restarting
+# og-engine/og-guardian/og-sim-* while a FIRM or AS obligation is DELIVERING interrupts it (hubs hold
+# their last setpoint only for lease + hold, ~35 s). If any is delivering, the deploy stops with a
+# warning unless `--during-delivery` is given, in which case it warns and proceeds.
 set -euo pipefail
 
-RELEASE_SRC="${1:?usage: deploy.sh <release_dir>}"
+DURING_DELIVERY=0
+if [ "${1:-}" = "--during-delivery" ]; then
+  DURING_DELIVERY=1
+  shift
+fi
+RELEASE_SRC="${1:?usage: deploy.sh [--during-delivery] <release_dir>}"
 BASE=/opt/opengrid
 RELEASES="$BASE/releases"
 CURRENT="$BASE/current"
@@ -31,6 +41,24 @@ fi
 
 mkdir -p "$RELEASES" /var/log/opengrid
 ts() { date -Is; }
+
+# FIRM and AS services (02a S3.7 priority buckets); ERCOT_ENERGY is market, HOME never delivers here.
+DELIVERING="$(runuser -u opengrid -- bash -c '
+  set -a; . /etc/opengrid/secrets.env; set +a
+  PGPASSWORD="$OG_DB_PASSWORD" psql -h 127.0.0.1 -U opengrid -d og -At -F " " -c "
+    SELECT service_type, obligation_id, window_end FROM og.obligation
+    WHERE state = '"'"'DELIVERING'"'"'
+      AND service_type IN ('"'"'ERCOT_AS'"'"','"'"'DIST_DEFERRAL'"'"','"'"'PARTNER_CAPACITY'"'"','"'"'DATA_CENTER'"'"')"
+' 2>/dev/null || echo "UNKNOWN (preflight query failed)")"
+if [ -n "$DELIVERING" ]; then
+  echo "$(ts) WARNING: FIRM/AS obligations are DELIVERING; a restart interrupts them:" | tee -a "$LOG"
+  echo "$DELIVERING" | sed 's/^/    /' | tee -a "$LOG"
+  if [ "$DURING_DELIVERY" -ne 1 ]; then
+    echo "$(ts) deploy NOT started: re-run with --during-delivery to deploy anyway" | tee -a "$LOG"
+    exit 3
+  fi
+  echo "$(ts) --during-delivery given: proceeding" | tee -a "$LOG"
+fi
 
 TS="$(date +%Y%m%d%H%M%S)"
 NEW_RELEASE="$RELEASES/$TS"

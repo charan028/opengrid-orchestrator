@@ -63,16 +63,25 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_ENERGY_SERIES_KEY",
+    "FLEET_ZONES",
     "ForecastScenariosFn",
     "configure",
+    "energy_series_key_for_zone",
     "reset_for_testing",
     "run_intake_gate",
 ]
 
-#: ERCOT settlement-point/load-zone the demo contracts' energy price is read against. A real
-#: deployment would key this per contract (`Contract.territory_id`/`profile_ref`) -- MVP-S has one
-#: ERCOT_ENERGY demo contract, so one configured series is enough; documented rather than hidden
-#: (BUILD.md S5a).
+#: The fleet's known load zones (`[fleet].zones`, `orchestrator/config/orchestrator.toml`), kept as a
+#: named constant here (not re-typed at each call site, BUILD.md S5a) so `energy_series_key_for_zone`
+#: can tell "this bank's real zone" apart from an unrecognized/placeholder value.
+FLEET_ZONES: tuple[str, ...] = ("LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST")
+
+#: ERCOT settlement-point/load-zone `energy_series_key_for_zone` falls back to when a contract's
+#: capacity has no known bank zone -- a **documented fallback**, never a silent one (BUILD.md S5a "no
+#: silent fallbacks": every use logs when it falls back, see `energy_series_key_for_zone`). Every
+#: contract's energy price used to be hardcoded to this single zone regardless of which bank(s) its
+#: capacity actually sits on, which misprices the ~3/4 of fleet capacity that isn't in `LZ_HOUSTON`
+#: (02a S6.1's $v^E_{b,t,\omega}$ is defined *per bank*, not fleet-wide).
 #:
 #: Must be a **load-zone** code (`[fleet].zones`, e.g. `LZ_HOUSTON`), never a hub code: `feeds.ercot`
 #: queries `np6-905-cd` with `settlementPointType=LZ` (`forecast/README.md`'s canonical series-key
@@ -83,6 +92,21 @@ __all__ = [
 #: opportunities despite live ERCOT prices flowing into `feed_obs` -- the exact class of bug
 #: `forecast/service.py`'s own `DEFAULT_PRICE_SERIES` docstring already fixed once for that module.
 DEFAULT_ENERGY_SERIES_KEY = "LZ_HOUSTON"
+
+
+def energy_series_key_for_zone(bank_zone: str | None) -> str:
+    """The `np6-905-cd` series key to price a bank's energy candidates against: the bank's own load
+    zone (02a S6.1's $v^E_{b,t,\\omega}$, defined per bank `b`) when it is one of `FLEET_ZONES`, else
+    `DEFAULT_ENERGY_SERIES_KEY` (`LZ_HOUSTON`) as a documented, logged fallback -- a missing/unknown
+    zone must never silently mean "assume Houston" without a trace of why (BUILD.md S5a "no silent
+    fallbacks")."""
+    if bank_zone in FLEET_ZONES:
+        return bank_zone  # narrowed by the `in FLEET_ZONES` check
+    logger.warning(
+        "bank has no known load zone; falling back to the default energy series",
+        extra={"bank_zone": bank_zone, "fallback_series_key": DEFAULT_ENERGY_SERIES_KEY},
+    )
+    return DEFAULT_ENERGY_SERIES_KEY
 
 
 class ForecastScenariosFn(Protocol):
@@ -108,19 +132,31 @@ def configure(
     *,
     forecast_scenarios: ForecastScenariosFn | None = None,
     energy_series_key: str = DEFAULT_ENERGY_SERIES_KEY,
+    bank_zone: str | None = None,
 ) -> None:
     """Wire this module's dependencies once at process startup (`opengrid.engine.main`, alongside
     `opengrid.contracts.configure`). `forecast_scenarios` is injected (not a direct
     `opengrid.forecast` import) so intake stays testable with a fake and has no import-time coupling
     to a sibling module's own `configure()` state (mirrors `opengrid.forecast`'s own `HistoryProvider`
-    injection pattern)."""
+    injection pattern).
+
+    `bank_zone`, when given, is resolved through `energy_series_key_for_zone` and takes priority over
+    `energy_series_key` -- the caller's own bank's load zone (e.g. `og.bank.zone`) is the correct price
+    series for that bank's energy candidates (02a S6.1's per-bank $v^E_{b,t,\\omega}$), not a
+    fleet-wide constant. Omit `bank_zone` (its default) to keep the explicit `energy_series_key`
+    override, which stays `DEFAULT_ENERGY_SERIES_KEY` (`LZ_HOUSTON`) unless a caller sets it -- MVP-S's
+    single `og-engine` process configures intake once for the whole fleet today; whoever wires this
+    call per contract/bank (`opengrid.engine`, BUILD.md S4) should pass that bank's own zone here."""
     global _state
+    resolved_energy_series_key = (
+        energy_series_key_for_zone(bank_zone) if bank_zone is not None else energy_series_key
+    )
     _state = _IntakeState(
         repo=repo,
         trace=trace,
         market=market,
         forecast_scenarios=forecast_scenarios,
-        energy_series_key=energy_series_key,
+        energy_series_key=resolved_energy_series_key,
     )
 
 
@@ -222,6 +258,12 @@ async def _admit_candidate(
 
     try:
         if value_per_mwh is None:
+            # Every ERCOT/deferral lane prices its candidates (admit_priced below); an unpriced one
+            # would settle 0 revenue, so it is flagged loudly rather than admitted silently.
+            logger.warning(
+                "intake candidate has no value_per_mwh: admitted unpriced (settles 0 revenue)",
+                extra={"contract_id": str(contract.contract_id), "service_type": contract.service_type},
+            )
             opportunity = await admit(
                 state.repo, state.trace, contract.contract_id, window_start, window_end, requested_kw
             )

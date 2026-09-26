@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/pq_waveform_summary.schema.json",
+  "title": "PqWaveformSummary",
+  "description": "Hub -> orchestrator, published on <root>/scada/wave/<zone>/<bank_id>/<hub_id>/summary, QoS 0, at the hub's telemetry cadence (06-service-profiles-and-power-quality.md S6.4a). Mirrors og.pq_waveform_summary (orchestrator/migrations/0011_asset_health.sql). Per S6.4a's bandwidth mitigation, a publish may carry only the 'fast' sub-block (RMS/freq/PF/aggregate THD) with harmonics_v/harmonics_i omitted, or the full summary including the harmonic-detail sub-block; both shapes validate against this schema since the harmonics fields are optional. The wire encoding SHOULD be a compact binary/CBOR form of this same shape, not verbose JSON, for bandwidth (S6.4a); this schema is the canonical field definition either way.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hub_id", "bank_id", "zone", "ts", "sync_source", "sync_quality_ns"],
+  "properties": {
+    "hub_id": { "type": "string", "minLength": 1 },
+    "bank_id": { "type": "string", "minLength": 1 },
+    "zone": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time" },
+    "v_rms_a": { "type": ["number", "null"] },
+    "v_rms_b": { "type": ["number", "null"] },
+    "v_rms_c": { "type": ["number", "null"] },
+    "i_rms_a": { "type": ["number", "null"] },
+    "i_rms_b": { "type": ["number", "null"] },
+    "i_rms_c": { "type": ["number", "null"] },
+    "freq_hz": { "type": ["number", "null"] },
+    "pf_a": { "type": ["number", "null"], "minimum": -1, "maximum": 1 },
+    "pf_b": { "type": ["number", "null"], "minimum": -1, "maximum": 1 },
+    "pf_c": { "type": ["number", "null"], "minimum": -1, "maximum": 1 },
+    "thd_v_pct_a": { "type": ["number", "null"], "minimum": 0 },
+    "thd_v_pct_b": { "type": ["number", "null"], "minimum": 0 },
+    "thd_v_pct_c": { "type": ["number", "null"], "minimum": 0 },
+    "thd_i_pct_a": { "type": ["number", "null"], "minimum": 0 },
+    "thd_i_pct_b": { "type": ["number", "null"], "minimum": 0 },
+    "thd_i_pct_c": { "type": ["number", "null"], "minimum": 0 },
+    "phase_angle_deg_a": { "type": ["number", "null"] },
+    "phase_angle_deg_b": { "type": ["number", "null"] },
+    "phase_angle_deg_c": { "type": ["number", "null"] },
+    "harmonics_v": { "$ref": "#/$defs/harmonics" },
+    "harmonics_i": { "$ref": "#/$defs/harmonics" },
+    "sync_source": { "type": "string", "enum": ["ptp", "gps", "ntp_disciplined"] },
+    "sync_quality_ns": { "type": "number", "minimum": 0, "description": "Estimated clock offset; a summary computed against a poor sync reference must be treated as stale for cross-hub phase comparison (S6.5 risk note)." }
+  },
+  "$defs": {
+    "harmonics": {
+      "description": "Order (2-50, as a string key) -> magnitude (% of fundamental) and angle (degrees, relative to sync_source).",
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mag_pct", "angle_deg"],
+        "properties": {
+          "mag_pct": { "type": "number", "minimum": 0 },
+          "angle_deg": { "type": "number" }
+        }
+      }
+    }
+  }
+}

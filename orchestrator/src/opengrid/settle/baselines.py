@@ -7,6 +7,7 @@
 | ERCOT_AS           | award x MCPC; hold compliance (SOC >= H_k r/eta_d)                   |
 | DIST_DEFERRAL      | SCADA_OUTCOME -- bank apparent power <= limit for the need-window    |
 | PARTNER_CAPACITY   | DIRECT_HUB_METER -- event-average delivered vs. committed            |
+| DATA_CENTER        | AMI_INTERVAL -- site-meter kW vs. committed bridging capacity (S4.b) |
 
 MVP-S simplification (documented, not a spec deviation): for every non-HOME service the baseline
 target for one interval is the obligation's committed capacity held for that interval's duration --
@@ -28,6 +29,7 @@ METER_SOURCE_BY_SERVICE: dict[ServiceType, MeterSource] = {
     "ERCOT_AS": "DIRECT_HUB_METER",
     "DIST_DEFERRAL": "SCADA_OUTCOME",
     "PARTNER_CAPACITY": "DIRECT_HUB_METER",
+    "DATA_CENTER": "AMI_INTERVAL",
 }
 
 

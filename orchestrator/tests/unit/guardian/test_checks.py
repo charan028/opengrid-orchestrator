@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.guardian import checks
+from opengrid.guardian.config import DEFAULT_INVERTER_CAP_KW
 from opengrid.guardian.ports import L2Instruction, ProposedItem
 
 HUB = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0)
@@ -31,6 +32,27 @@ def test_g01_reserve_floor_positive():
     assert checks.check_g01_reserve(_item(), HUB, soc_kwh=20.0).ok
 
 
+def test_g01_energy_lease_negative_discharge_drains_below_reserve_before_lease_expires():
+    """K1: 3 kWh above reserve (10.84 - 7.84) can sustain 3 kW discharge for only ~1h before hitting
+    reserve; a 2h lease at that rate would breach reserve partway through even though the instantaneous
+    G-01 check (current SoC only) passes right now."""
+    r = checks.check_g01_energy_lease(_item(p_kw=-3.0), HUB, soc_kwh=10.84, lease_ttl_h=2.0)
+    assert not r.ok and r.rule_id == "G-01-ENERGY" and r.reason == "RESERVE_FLOOR_LEASE"
+    # The instantaneous check alone would have passed -- proving this is a genuinely independent check.
+    assert checks.check_g01_reserve(_item(p_kw=-3.0), HUB, soc_kwh=10.84).ok
+
+
+def test_g01_energy_lease_positive_ample_energy_for_whole_lease():
+    assert checks.check_g01_energy_lease(_item(p_kw=-3.0), HUB, soc_kwh=39.2, lease_ttl_h=2.0).ok
+
+
+def test_g01_energy_lease_negative_charge_overfills_before_lease_expires():
+    """Symmetric charge-direction projection: charging at 11 kW for a 3h lease from near-full SoC
+    would overfill above e_kwh partway through."""
+    r = checks.check_g01_energy_lease(_item(p_kw=11.0), HUB, soc_kwh=38.0, lease_ttl_h=3.0)
+    assert not r.ok and r.rule_id == "G-01-ENERGY" and r.reason == "CHARGE_CEILING_LEASE"
+
+
 def test_g02_hub_power_negative():
     r = checks.check_g02_hub_power(_item(p_kw=20.0), HUB, inverter_cap_kw=11.0)
     assert not r.ok and r.rule_id == "G-02"
@@ -38,6 +60,22 @@ def test_g02_hub_power_negative():
 
 def test_g02_hub_power_positive():
     assert checks.check_g02_hub_power(_item(p_kw=10.0), HUB, inverter_cap_kw=11.0).ok
+
+
+def test_g02_dual_unit_home_at_20_kw_passes_and_21_kw_is_vetoed():
+    """Regression (demo-critical): the guardian's default 11 kW cap vetoed every dual-unit home command
+    above 11 kW. The home's own 20 kW rating is the cap."""
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0)
+    assert checks.check_g02_hub_power(_item(p_kw=-20.0), dual, inverter_cap_kw=DEFAULT_INVERTER_CAP_KW).ok
+    r = checks.check_g02_hub_power(_item(p_kw=21.0), dual, inverter_cap_kw=DEFAULT_INVERTER_CAP_KW)
+    assert not r.ok and r.rule_id == "G-02"
+
+
+def test_g02_single_unit_home_above_11_kw_is_vetoed():
+    single = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0)
+    assert not checks.check_g02_hub_power(
+        _item(p_kw=11.5), single, inverter_cap_kw=DEFAULT_INVERTER_CAP_KW
+    ).ok
 
 
 def test_g03_bank_kva_negative():

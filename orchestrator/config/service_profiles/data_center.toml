@@ -1,0 +1,88 @@
+# DATA_CENTER service profile, version 1 (WP-F).
+# Spec: docs/orchestrator/07-delivery/06-service-profiles-and-power-quality.md S4.b (control law, PQ selection,
+# ride-through, M&V), S1.3-1.5 (ServiceProfile fields), S2 (PowerQualityEnvelope), S5.5.3 (asset-state
+# eligibility), stories ES12/ES17; activation gate per 02-architecture/03-decision-engine.md S2.7.
+#
+# This file is a template. It becomes one og.service_profile row and one og.pq_envelope row per contract when
+# the contract is instantiated: ids are generated, and the [instantiation] rules turn the contract's committed
+# kW, site meter id and bridge duration into the per-contract numbers. Values marked "per contract" in the
+# comments are defaults that a contract may tighten; loosening one is a new profile version (03 S2.7, V-27).
+#
+# Wired: DATA_CENTER is a registered ServiceType (core/models/engine.py) and an allowed og.contract.service_type
+# (migrations/0013_service_type_data_center.sql); the selector treats it as FIRM and settle meters it at the site
+# meter (AMI_INTERVAL).
+
+[profile]
+service_type = "DATA_CENTER"
+profile_ref = "data-center-profile@1"      # "<name>@<version>", same form as the seeded contracts' profile_ref
+version = 1
+variant = "BRIDGING"                       # firm bridging capacity (S4.b), distinct from LARGE_LOAD events
+tier = "T1"                                # firm contract
+
+[service_profile]
+control_primitive = "CLOSED_LOOP_REGULATION"   # S4.b
+target_quantity = "KW"
+target_scope = "SITE_METER"
+setpoint_source = "MEASURED_FEEDBACK"
+feedback_signal_ref = "site_meter:{site_id}:p_kw"   # {site_id} is filled at instantiation
+response_time_s = 2.0                          # S4.b: committed kW within <= 2 s of a declared bridging event
+ramp_limit_unit = "kw_per_min"
+priority_tier = "T1"                           # must equal [profile].tier (S1.3 conformance check)
+mv_method = "DIRECT_HUB_METER"                 # S4.b
+settlement_metric = "capacity_payment_x_pf"    # S4.b; PF redefined as min(PF_kW, PF_PQ), see [settlement]
+failure_behaviour = "HOLD_THEN_SCHEDULE"       # S4.b; hold the smaller PQ-compliant delivery, report shortfall
+
+[control]
+# S4.b fast inner loop: u_k = u_{k-1} + Kp * (P_target - P_meter_k). Proportional only: during a bridge the
+# site's own UPS/transfer logic is the integrating authority (K9), the fleet acts as feed-forward to it.
+fast_loop = "PROPORTIONAL_ONLY"
+integrator = false
+feedback_freshness_s = 2.0                     # 03 S2.7 static rule: a closed-loop point has a freshness gate
+
+[instantiation]
+# ramp_limit (kW/min) = committed_kw * 60 / response_time_s, so the full committed kW is reachable within
+# response_time_s.
+ramp_limit_per_committed_kw_per_min = 30.0
+accuracy_tolerance_fraction_of_committed = 0.02   # per contract; steady-state error in kW at the site meter
+deadband_fraction_of_committed = 0.01             # per contract
+sustain_duration_required = true                  # the contract must state the bridge duration (no default)
+
+[eligibility]
+# S4.b inverter selection by PQ quality. The filter itself is the allocator's (S5.2 step 1); these are the
+# profile's parameters for it.
+min_quality_score = 0.8                        # starting value; recalibrate from measured fleet data (S9.3)
+required_ride_through_class = "CATEGORY_III"   # units below Category III are never eligible (S4.b)
+eligible_asset_states = ["OK", "WATCH"]        # S5.5.3: WATCH is eligible but deprioritized
+excluded_asset_states = ["DEGRADED", "QUARANTINED", "AWAITING_REPLACEMENT", "RECOMMISSIONING"]
+pq_aware_selection = true                      # S4.c contrast: ERCOT_ENERGY arbitrage does not use it
+
+[pq_envelope]
+# S4.b "full envelope enforced"; ES12's values where the story states them. All per contract.
+phase_config = "3P"                            # S4.b: required
+max_phase_imbalance_pct = 1.5                  # ES12
+voltage_band_pct = 2.0                         # ES12 (S4.b: +/-2-3 % typical)
+ride_through_class = "CATEGORY_III"            # S4.b default for firm bridging contracts
+pf_min = 0.95                                  # S4.b "PF >= 0.95 typical"
+reactive_requirement = "pf >= 0.95 at the site meter during a bridge"
+# S4.b "THD_V/THD_I at IEEE 519's tighter bus-voltage-class bands": IEEE 519-2014 Table 1 (THD_V) and
+# Table 4 (TDD, Isc/IL < 20) give 2.5 % for the 69-161 kV class, versus 5 % for 1-69 kV.
+thd_voltage_limit_pct = 2.5
+thd_current_limit_pct = 2.5
+# Frequency is set by the interconnection in grid-parallel operation, so it keeps the fleet-default tolerance
+# (S2) instead of a tighter value the fleet could not control. rocof, flicker and the per-line current cap are
+# not set; see the PR's open questions.
+freq_tolerance_hz = 0.5
+
+[settlement]
+# S4.b: CAPACITY_PAYMENT x PF with PF = min(PF_kW, PF_PQ); a separate pq_compliance_pct line reports the share
+# of the bridging interval inside the full envelope. Each line names the M&V output it is computed from
+# (03 S2.7 static rule: every billing line references an M&V output).
+performance_factor = "min(pf_kw, pf_pq)"
+
+[[settlement.lines]]
+name = "capacity_payment_x_pf"
+mv_output = "delivered_kw_vs_committed_per_interval"
+
+[[settlement.lines]]
+name = "pq_compliance_pct"
+mv_output = "share_of_bridge_inside_envelope"

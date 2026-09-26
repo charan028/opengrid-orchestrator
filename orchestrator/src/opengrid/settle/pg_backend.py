@@ -7,10 +7,12 @@ Kept separate from `opengrid.settle.backend` so the Protocol + pure orchestratio
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
@@ -42,14 +44,67 @@ JOIN og.opportunity opp ON opp.opportunity_id = o.opportunity_id
 WHERE o.obligation_id = %(obligation_id)s
 """
 
+#: The obligation's load zone (the zone of its reserved banks: banks overlapping the interval first,
+#: then the most reserved kW) and that zone's ERCOT real-time SPP (NP6-905-CD, `ts` = the 15-minute
+#: interval start) for the interval, else the nearest earlier value within 1 h.
+_FETCH_WHOLESALE_SPP_SQL = """
+WITH zone AS (
+    SELECT b.zone
+    FROM og.reservation r JOIN og.bank b ON b.bank_id = r.bank_id::text
+    WHERE r.obligation_id = %(obligation_id)s
+    GROUP BY b.zone
+    ORDER BY bool_or(r.interval_start < %(interval_start)s + interval '15 minutes'
+                     AND r.interval_end > %(interval_start)s) DESC,
+             sum(r.amount) DESC, b.zone
+    LIMIT 1
+)
+SELECT z.zone, f.ts, f.value
+FROM zone z
+LEFT JOIN LATERAL (
+    SELECT ts, value FROM og.feed_obs
+    WHERE source = 'ERCOT' AND product = 'np6-905-cd' AND series = z.zone
+      AND ts <= %(interval_start)s AND ts > %(interval_start)s - interval '1 hour'
+    ORDER BY ts DESC, recorded_at DESC
+    LIMIT 1
+) f ON true
+"""
+
+#: One 1-minute sample per minute of the interval: the kW the obligation actually received. Per bank the
+#: hubs' measured discharge (-sum of p_kw, 2 s telemetry averaged per hub per minute; charging counts as
+#: 0) is attributed to this obligation by its share of the bank's granted kW that minute (other
+#: obligations and headroom exports share the same hubs), then summed over its banks. A minute with no
+#: grant for the obligation attributes 0. Replaces a query that averaged raw per-hub 2 s samples as if
+#: they were the obligation's 1-minute kW (signed, per hub): every obligation metered ~0 kWh (live
+#: 2026-09-26: ERCOT_AS delivering 500 kW metered -0.08 kWh per 15 min).
 _FETCH_TELEMETRY_SQL = """
-SELECT hub_id, ts, p_kw
-FROM og.telemetry
-WHERE hub_id IN (SELECT hub_id FROM og.hub WHERE bank_id IN (
-        SELECT bank_id FROM og.reservation WHERE obligation_id = %(obligation_id)s
-    ))
-  AND ts >= %(interval_start)s AND ts < %(interval_end)s
-ORDER BY ts
+WITH banks AS (
+    SELECT DISTINCT bank_id FROM og.reservation
+    WHERE obligation_id = %(obligation_id)s
+      AND interval_start < %(interval_end)s AND interval_end > %(interval_start)s
+),
+tel AS (
+    SELECT date_trunc('minute', t.ts) AS m, h.bank_id, t.hub_id, avg(t.p_kw) AS p
+    FROM og.telemetry t JOIN og.hub h USING (hub_id)
+    WHERE h.bank_id IN (SELECT bank_id FROM banks)
+      AND t.ts >= %(interval_start)s AND t.ts < %(interval_end)s
+    GROUP BY 1, 2, 3
+),
+bank_kw AS (SELECT m, bank_id, greatest(-sum(p), 0) AS discharge_kw FROM tel GROUP BY 1, 2),
+cyc AS (
+    SELECT date_trunc('minute', created_at) AS m, cycle_id, bank_id,
+           coalesce(sum(granted_kw) FILTER (WHERE obligation_id = %(obligation_id)s), 0) AS ob_kw,
+           sum(granted_kw) AS tot_kw
+    FROM og.grant
+    WHERE bank_id IN (SELECT bank_id FROM banks)
+      AND created_at >= %(interval_start)s AND created_at < %(interval_end)s
+    GROUP BY 1, 2, 3
+),
+share AS (SELECT m, bank_id, avg(ob_kw) AS ob_kw, avg(tot_kw) AS tot_kw FROM cyc GROUP BY 1, 2)
+SELECT b.m AS ts,
+       sum(b.discharge_kw * CASE WHEN s.tot_kw > 0 THEN s.ob_kw / s.tot_kw ELSE 0 END) AS kw
+FROM bank_kw b LEFT JOIN share s USING (m, bank_id)
+GROUP BY b.m
+ORDER BY b.m
 """
 
 _FETCH_ACTIVE_METER_SQL = """
@@ -139,6 +194,30 @@ ORDER BY o.obligation_id, gs.interval_start
 LIMIT 500
 """
 
+_FETCH_SETTLEABLE_SQL = """
+SELECT o.obligation_id
+FROM og.obligation o
+WHERE o.state IN ('FULFILLED', 'SHORTFALL')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM generate_series(
+          date_trunc('hour', o.window_start)
+              + (floor(extract(minute FROM o.window_start) / 15) * interval '15 minutes'),
+          o.window_end - interval '15 minutes',
+          interval '15 minutes'
+      ) AS gs(interval_start)
+      WHERE NOT EXISTS (
+          SELECT 1 FROM og.meter_interval mi
+          WHERE mi.obligation_id = o.obligation_id AND mi.interval_start = gs.interval_start
+            AND mi.superseded_by IS NULL
+      )
+  )
+  AND EXISTS (SELECT 1 FROM og.pnl p WHERE p.obligation_id = o.obligation_id)
+  AND (o.service_type = 'HOME'
+       OR EXISTS (SELECT 1 FROM og.invoice_line il WHERE il.obligation_id = o.obligation_id))
+LIMIT 200
+"""
+
 _INSERT_PNL_SQL = """
 INSERT INTO og.pnl
     (pnl_id, obligation_id, interval_start, interval_end, revenue, energy_cost, degradation_cost,
@@ -149,6 +228,21 @@ VALUES (%(id)s, %(obligation_id)s, %(interval_start)s, %(interval_end)s, %(reven
 """
 
 
+_logger = logging.getLogger(__name__)
+_ZERO = Decimal("0")
+_KWH_PER_MWH = Decimal("1000")
+
+
+def wholesale_from_spp(spp: Mapping[str, Any] | None, interval_start: datetime | None) -> tuple[Decimal, str]:
+    """`(wholesale $/kWh, flag)` from a `_FETCH_WHOLESALE_SPP_SQL` row: "SPP" when the price is for
+    `interval_start` itself, "SPP_PRIOR" for an earlier value within 1 h, "MISSING" (0 $/kWh) when
+    there is none -- no zone, no interval, or no SPP in the last hour."""
+    if spp is None or interval_start is None or spp.get("value") is None:
+        return _ZERO, "MISSING"
+    price = Decimal(str(spp["value"])) / _KWH_PER_MWH
+    return price, "SPP" if spp["ts"] == interval_start else "SPP_PRIOR"
+
+
 @dataclass(frozen=True, slots=True)
 class PgSettleBackend:
     """`SettleBackend` backed by Postgres. Assumes the caller (`settle.main`) provides one pool per
@@ -156,12 +250,26 @@ class PgSettleBackend:
 
     pool: AsyncConnectionPool
 
-    async def fetch_context(self, obligation_id: UUID) -> ObligationSettlementContext:
+    async def fetch_context(
+        self, obligation_id: UUID, interval_start: datetime | None = None
+    ) -> ObligationSettlementContext:
+        spp: dict[str, Any] | None = None
         async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(_FETCH_CONTEXT_SQL, {"obligation_id": obligation_id})
             row = await cur.fetchone()
+            if row is not None and interval_start is not None:
+                await cur.execute(
+                    _FETCH_WHOLESALE_SPP_SQL,
+                    {"obligation_id": obligation_id, "interval_start": interval_start},
+                )
+                spp = await cur.fetchone()
         if row is None:
             raise LookupError(f"obligation not found: {obligation_id}")
+        if row["value_per_mwh"] is None and row["service_type"] != "HOME":
+            _logger.warning(
+                "obligation has no opportunity value_per_mwh: revenue settles as 0 (flagged)",
+                extra={"obligation_id": str(obligation_id), "service_type": row["service_type"]},
+            )
 
         penalty = None
         if row["penalty_alpha"] is not None and row["penalty_beta"] is not None:
@@ -171,9 +279,19 @@ class PgSettleBackend:
                 theta=row["penalty_theta"] or Decimal("0"),
             )
         price_per_kwh = (row["value_per_mwh"] or Decimal("0")) / Decimal("1000")
-        # MVP-S simplification: wholesale price basis mirrors the contract's own value_per_mwh until
-        # `feeds`/`forecast` wiring lands a per-bank market price lookup here (02a S7.4 Open points).
-        wholesale_price_per_kwh = price_per_kwh
+        # Wholesale basis = the bank zone's real-time SPP for the interval, never the contract price
+        # (mirroring it made energy_cost = revenue / eta_d > revenue: every delivery settled negative).
+        wholesale_price_per_kwh, flag = wholesale_from_spp(spp, interval_start)
+        if flag != "SPP":
+            _logger.warning(
+                "settle wholesale price is %s for this interval",
+                flag,
+                extra={
+                    "obligation_id": str(obligation_id),
+                    "interval_start": interval_start.isoformat() if interval_start else None,
+                    "zone": spp["zone"] if spp else None,
+                },
+            )
         today = datetime.now(UTC).date()  # MVP-S: daily billing period, UTC calendar date
         return ObligationSettlementContext(
             obligation_id=row["obligation_id"],
@@ -187,6 +305,7 @@ class PgSettleBackend:
             penalty=penalty,
             period_start=today,
             period_end=today,
+            wholesale_price_flag=flag,
         )
 
     async def fetch_power_samples(
@@ -202,7 +321,8 @@ class PgSettleBackend:
                 },
             )
             rows = await cur.fetchall()
-        return [PowerSample(hub_id=r["hub_id"], ts=r["ts"], kw=Decimal(str(r["p_kw"]))) for r in rows]
+        # One attributed sample per minute (see `_FETCH_TELEMETRY_SQL`), not one per hub.
+        return [PowerSample(hub_id="obligation", ts=r["ts"], kw=Decimal(str(r["kw"]))) for r in rows]
 
     async def fetch_active_meter_interval(
         self, obligation_id: UUID, interval_start: datetime
@@ -426,6 +546,12 @@ class PgSettleBackend:
             )
             rows = await cur.fetchall()
         return [MeterIntervalExportRow(**r) for r in rows]
+
+    async def fetch_settleable_obligations(self) -> list[UUID]:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_FETCH_SETTLEABLE_SQL)
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
 
     async def fetch_pending_intervals(self) -> list[tuple[UUID, datetime, datetime]]:
         async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

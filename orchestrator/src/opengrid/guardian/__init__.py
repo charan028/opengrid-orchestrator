@@ -13,6 +13,8 @@ fakes (see `opengrid.guardian.ports`) and either call it directly or through `co
 from __future__ import annotations
 
 from opengrid.core.models.engine import CommandBatchRow, Verdict
+from opengrid.core.models.pq import CalibrationCommand
+from opengrid.guardian.pq_ports import ProposedCalibrationCommand
 from opengrid.guardian.service import GuardianService
 
 _service: GuardianService | None = None
@@ -37,4 +39,19 @@ async def evaluate_and_sign(batch: CommandBatchRow) -> Verdict:
     return await _service.evaluate_and_sign(batch)
 
 
-__all__ = ["GuardianService", "configure", "evaluate_and_sign"]
+async def evaluate_and_sign_calibration(proposed: ProposedCalibrationCommand) -> CalibrationCommand | None:
+    """S6.7/K14: run G-20 then G-25 on a candidate calibration command; on PASS return the signed
+    `CalibrationCommand` (guardian-assigned per-hub `epoch`/`seq`), else `None` (a hold, traced).
+
+    Cross-process callers do not call this: the ladder (`opengrid.assets`) records a PENDING
+    `og.calibration_attempt` row, and `og-guardian` polls, evaluates and publishes it on
+    `<root>/cmd/cal/<hub_id>` itself (`main.process_pending_calibrations`). The signing key never
+    leaves the guardian process."""
+    if _service is None:
+        raise RuntimeError(
+            "opengrid.guardian.configure(service) must be called before evaluate_and_sign_calibration"
+        )
+    return await _service.evaluate_and_sign_calibration(proposed)
+
+
+__all__ = ["GuardianService", "configure", "evaluate_and_sign", "evaluate_and_sign_calibration"]

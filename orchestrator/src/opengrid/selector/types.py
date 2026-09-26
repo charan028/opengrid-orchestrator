@@ -86,6 +86,7 @@ class CandidateOpportunity:
     """
 
     opportunity_id: str
+    obligation_id: str
     contract_id: str
     eligible_bank_ids: tuple[str, ...]
     window_intervals: tuple[int, ...]
@@ -100,6 +101,9 @@ class CandidateOpportunity:
     """Rule-fallback (F2) priority bucket (02a S3.7 "firm first, then AS, then market"). `HOME`,
     `DIST_DEFERRAL` and `PARTNER_CAPACITY` opportunities are `FIRM`; `ERCOT_AS` is `AS`; `ERCOT_ENERGY`
     (spot-like) is `MARKET`. Independent of `variable_kind`, which governs the LP/MILP's variable shape."""
+    service_type: str = ""
+    """The contract's service type (e.g. DATA_CENTER): PQ-sensitive profiles are capped at their
+    PQ-eligible capacity at commit time (WP-D)."""
 
 
 @dataclass(frozen=True, slots=True)

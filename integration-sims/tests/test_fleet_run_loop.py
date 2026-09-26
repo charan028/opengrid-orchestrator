@@ -30,6 +30,9 @@ class _FakeBatchClient:
     topic_root: str = "og/v1"
     subscriptions: list[str] = field(default_factory=list)
     publish_batches: list[list[tuple[str, dict[str, Any]]]] = field(default_factory=list)
+    publish_batches_by_schema: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = field(
+        default_factory=list
+    )
     fail_next: bool = False
 
     def topic(self, suffix: str) -> str:
@@ -45,6 +48,15 @@ class _FakeBatchClient:
             self.fail_next = False
             raise RuntimeError("simulated transient publish failure")
         self.publish_batches.append(items)
+        self.publish_batches_by_schema.append((schema_name, items))
+
+    def telemetry_batches(self) -> list[list[tuple[str, dict[str, Any]]]]:
+        return [items for schema, items in self.publish_batches_by_schema if schema == "telemetry"]
+
+
+# `run_fleet` makes one `publish_batch` call per tick for each of: telemetry, the
+# WP-H PQ waveform summary, and the WP-H rotating raw-capture audit sample (S6.4/S7.4).
+_PUBLISHES_PER_TICK = 3
 
 
 @pytest.fixture
@@ -75,15 +87,19 @@ async def test_run_fleet_publishes_telemetry_every_tick_indefinitely(engine: Fle
             clock.advance(engine.config.telemetry_interval_s)
             for _ in range(50):
                 await asyncio.sleep(0)
-            assert len(client.publish_batches) == tick + 1, "expected one publish per elapsed interval"
+            assert len(client.publish_batches) == (tick + 1) * _PUBLISHES_PER_TICK, (
+                "expected one telemetry + one PQ-summary + one PQ-raw-audit publish per elapsed interval"
+            )
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    assert len(client.publish_batches) == 6
-    # Every published batch actually carries telemetry for the fleet's hubs.
-    for batch in client.publish_batches:
+    assert len(client.publish_batches) == 6 * _PUBLISHES_PER_TICK
+    # Every published telemetry batch actually carries telemetry for the fleet's hubs.
+    telemetry_batches = client.telemetry_batches()
+    assert len(telemetry_batches) == 6
+    for batch in telemetry_batches:
         assert len(batch) == engine.config.hub_count
 
 
@@ -98,20 +114,22 @@ async def test_run_fleet_survives_a_transient_publish_failure_and_keeps_ticking(
     try:
         for _ in range(50):
             await asyncio.sleep(0)
-        assert len(client.publish_batches) == 1
+        assert len(client.publish_batches) == _PUBLISHES_PER_TICK
 
         client.fail_next = True
         clock.advance(engine.config.telemetry_interval_s)
         for _ in range(50):
             await asyncio.sleep(0)
-        # The failing tick did not add a recorded batch (it raised inside publish_batch)...
-        assert len(client.publish_batches) == 1
+        # The failing tick did not add ANY recorded batch for that tick (the first
+        # publish_batch call -- telemetry -- raised, and the whole tick body is wrapped
+        # in one try/except, so the two PQ-waveform publishes after it never ran either).
+        assert len(client.publish_batches) == _PUBLISHES_PER_TICK
 
         # ...but the loop is still alive and publishes normally on the next tick.
         clock.advance(engine.config.telemetry_interval_s)
         for _ in range(50):
             await asyncio.sleep(0)
-        assert len(client.publish_batches) == 2
+        assert len(client.publish_batches) == 2 * _PUBLISHES_PER_TICK
         assert not task.done(), "run_fleet must still be running after a transient tick failure"
     finally:
         task.cancel()

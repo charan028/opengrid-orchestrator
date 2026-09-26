@@ -5,12 +5,10 @@ Owned by the `deploy` role (BUILD.md). Covers everything installed by
 reverse-proxy config, backups, and log rotation. See `02b-mvp-s-spec-platform.md` §9 for the
 design this implements.
 
-**Status as of this install:** systemd units are installed but **not enabled/started** — the
-application code (`opengrid`, `ogsim` packages) does not exist yet. Nothing under `/opt/opengrid`
-has a `current` symlink or a release. The Apache route and basic auth are live now (they don't
-need the app to exist to be verified — see "Verification" below), so `/og/` and `/ogsim/`
-correctly return 401 without credentials today, and will return 502/503 with credentials until
-a release is deployed and the units are started.
+**Status (2026-09-26):** all ten units are enabled and running from `/opt/opengrid/current`, a
+release under `/opt/opengrid/releases/<timestamp>` deployed with `deploy.sh` (below) from a
+`git archive` of `main` in the server checkout `/opt/opengrid/src`. `/og/` and `/ogsim/` return 401
+without credentials and serve the app with them.
 
 ## Processes
 

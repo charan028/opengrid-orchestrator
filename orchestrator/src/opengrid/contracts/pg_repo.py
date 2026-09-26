@@ -284,16 +284,23 @@ class PgContractsRepo:
             return _opportunity_from_row(row) if row else None
 
     async def update_opportunity_state(
-        self, opportunity_id: UUID, *, state: str, reason_code: str | None, decided_at: datetime
+        self,
+        opportunity_id: UUID,
+        *,
+        state: str,
+        reason_code: str | None,
+        decided_at: datetime,
+        gate_id: UUID | None = None,
     ) -> Opportunity:
         async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 """
-                UPDATE og.opportunity SET state = %s, reason_code = %s, decided_at = %s
+                UPDATE og.opportunity
+                SET state = %s, reason_code = %s, decided_at = %s, gate_id = COALESCE(%s, gate_id)
                 WHERE opportunity_id = %s
                 RETURNING *
                 """,
-                (state, reason_code, decided_at, opportunity_id),
+                (state, reason_code, decided_at, gate_id, opportunity_id),
             )
             row = await cur.fetchone()
             await conn.commit()
@@ -341,6 +348,18 @@ class PgContractsRepo:
                     raise LookupError(f"no such obligation: {obligation_id}")
                 raise ConcurrentUpdateError(obligation_id, expected_version)
             return _obligation_from_row(row)
+
+    async def set_obligation_at_risk(self, obligation_id: UUID, at_risk: bool) -> Obligation:
+        async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "UPDATE og.obligation SET at_risk = %s, updated_at = now() WHERE obligation_id = %s RETURNING *",
+                (at_risk, obligation_id),
+            )
+            row = await cur.fetchone()
+            await conn.commit()
+        if row is None:
+            raise LookupError(f"no such obligation: {obligation_id}")
+        return _obligation_from_row(row)
 
     async def active_obligations_by_interval(
         self,

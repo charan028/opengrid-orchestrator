@@ -26,7 +26,7 @@ from `feed_obs` for display, using the keys below.
 | `feed_obs.product` | `feed_obs.series` | Meaning | Unit | `forecast` kind |
 |---|---|---|---|---|
 | `np6-905-cd` | one of `[fleet].zones` (e.g. `LZ_NORTH`) | ERCOT settlement point price (queried with `settlementPointType=LZ` -- a **load-zone** code, never a hub code like `HB_HUBAVG`) | `usd_per_mwh` | `price` |
-| `np6-345-cd` | one of `[fleet].zones` (e.g. `LZ_NORTH`) | ERCOT actual system load by weather zone | `mw` | `load` |
+| `np6-345-cd` | a **weather-zone** column (`coast`, `east`, `farWest`, `north`, `northC`, `southern`, `southC`, `west`, `total` -- `feeds/normalize.py`'s `_LOAD_ZONE_COLUMNS`) | ERCOT actual system load by weather zone | `mw` | `load` (persisted under the **load-zone** key, summed from its mapped weather zones -- see below) |
 | `np4-732-cd` | `actual` \| `forecast` | ERCOT system-wide wind output (no zonal breakdown) | `mw` | not modeled yet (gap) |
 | `np4-737-cd` | `actual` \| `forecast` | ERCOT system-wide solar output (no zonal breakdown) | `mw` | not modeled yet (gap) |
 | `np4-188-cd` | ancillary product code (e.g. `NSPIN`, `RRS`, `ECRS`) | Day-ahead AS clearing price | `usd_per_mwh` | not modeled yet (gap) |
@@ -34,12 +34,22 @@ from `feed_obs` for display, using the keys below.
 | `nws-hourly` | `temperature` \| `dewpoint` \| `sky_cover` | NWS hourly forecast | `degc` \| `degc` \| `pct` | not modeled (weather, not price/load) |
 
 `price_series`/`load_series` (`[forecast]` config, `service.py`) both default to `[fleet].zones` when
-unset -- **not** a hub code -- because that is the only series key the LZ-scoped price/load feeds ever
-actually populate (this was previously a bug: the default was `HB_HUBAVG`, a settlement point
+unset -- **not** a hub code -- because that is the only series key the LZ-scoped price feed ever
+actually populates (this was previously a bug: the default was `HB_HUBAVG`, a settlement point
 `np6-905-cd` never returns under `settlementPointType=LZ`, so no price forecast was ever produced from
 the real feed under defaults). Any deployment that widens `np6-905-cd`'s query to include hub-type
 settlement points, or wants a distinct price/load series set, must set `[forecast].price_series`/
 `load_series` explicitly.
+
+**Load zone != weather zone.** `og.feed_obs` never carries a `np6-345-cd` row under a load-zone key
+like `series="LZ_NORTH"` -- `ercot_load_to_feed_obs` only ever writes the weather-zone column names
+above. `load_series`' entries are still load-zone codes (matching `[fleet].zones`, what the selector's
+per-bank load lookups expect), so `service.py`'s `DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE` maps each load
+zone to the weather zone(s) that approximate it and sums their actual load into that load zone's
+forecast (this was previously a second, silent instance of the same "wrong series key -> zero history"
+bug the price-series fix above already covers once). The mapping is documented as approximate --
+ERCOT's weather zones and load zones are different grid partitions -- and overridable via
+`[forecast].weather_zones_by_load_zone`.
 
 **Known gap:** wind, solar and AS-price series have no `ForecastKind`/scenario path into the selector
 yet (02a S3.2 only calls for the one price series per bank for MVP-S's 5 services). Widening

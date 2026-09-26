@@ -82,11 +82,48 @@ Signed the same way, over the JCS bytes of the `StopEvent` fields excluding `sig
 `safestop` key may sign `action="ENGAGE"`; `action="RELEASE"` must be signed by the `guardian` key after
 Tier-2 (two-person) approval — a verifier rejects a `RELEASE` signed by the `safestop` key.
 
+Rules a verifier (the hub) applies on top of the signature (K8):
+
+- A `RELEASE` must name a second approver: `approver_ref` non-empty and different from `issued_by`.
+- Stop state is kept **per `stop_id`**, not per scope. A scope is stopped while any of its ENGAGE `stop_id`s
+  is outstanding. A `RELEASE` removes only its own `stop_id`; an unknown or already-released `stop_id` changes
+  nothing (so a replayed old `RELEASE` never lifts a newer stop), and an ENGAGE whose `stop_id` was already
+  released is ignored (so retained messages may arrive in any order on reconnect).
+- Backstop: a `RELEASE` whose `issued_at` is earlier than the newest ENGAGE seen for its scope is ignored.
+- The guardian publishes (via `og-safestop`) each `RELEASE` with its ENGAGE's `stop_id`, on that ENGAGE's own
+  topic, replacing the retained ENGAGE. After a retention window (`[safestop].release_retain_s`, default 24 h)
+  `og-safestop` clears the topic with an empty retained payload. An empty or non-object payload is broker
+  housekeeping only and never changes stop state.
+
 ### 2.4 Trace hash chain (not Ed25519 — SHA-256 only; see `interfaces/mqtt/topics.md` note)
 
 Trace records are hash-chained, not signed. `record_hash = sha256_hex(JCS(header))` where `header` includes
 `prev_hash`. See `orchestrator/src/opengrid/core/tracehash.py` (owner: architect) for the canonical
 implementation; simulators never need to reproduce trace hashing, only command/verdict/stop signing above.
+
+### 2.5 Calibration command (`og/v1/cmd/cal/<hub_id>`) and its ack (`og/v1/ack/cal/<hub_id>`)
+
+Signed by the **guardian** key only, the same way as §2.1: Ed25519 over the JCS bytes of every
+`CalibrationCommand` field except `key_id`/`signature`, i.e. `calibration_id, hub_id, epoch, seq, issued_at,
+expires_at, reference, correction, bounds` (`CalibrationCommand.signing_payload()`; pinned in
+`interfaces/fixtures/signed_calibration_command.json`). The guardian signs only after G-20 and G-25 pass
+(including the fleet-wide budget, concurrency and systemic-drift caps) and only once per calibration attempt.
+
+- `(epoch, seq)` is per hub and strictly increasing. The guardian assigns it from a durable counter
+  (`og.calibration_command`, `epoch` = 1, `seq` = previous + 1). A hub rejects (`STALE_SEQ`) any command whose
+  `(epoch, seq)` does not exceed the last one it applied, and any command outside `issued_at <= now <
+  expires_at`.
+- Rollback is hub-local: a hub whose applied correction made it worse restores its own pre-command
+  parameters within the same apply and acks `WORSE_ROLLED_BACK`; no second command is sent.
+- The hub acks every command on `ack/cal/<hub_id>`, echoing `epoch`/`seq` and giving `reject_reason` when it
+  did not apply it. The orchestrator acts on an ack at most once, and only if the topic hub, the ack's
+  `hub_id`, the issued command's hub and `calibration_id` all match and `(epoch, seq)` equals the issued
+  command's. `STALE_SEQ`, `BAD_SIGNATURE` and `UNKNOWN_HUB` rejections are protocol errors (alert), never
+  evidence of inverter drift.
+- Hub-signed acks (additive): an ack MAY carry `key_id`/`signature`, an Ed25519 signature by the hub's own key
+  over the JCS bytes of every other ack field. When present it is enforced: it must verify against the key
+  registered for that hub, and a signed ack from a hub with no registered key is rejected. Unsigned acks
+  remain accepted while hub keys are not provisioned.
 
 ## 3. Key provisioning (reference only, no secret values here)
 

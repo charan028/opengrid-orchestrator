@@ -4,15 +4,30 @@ Mirrors `ogsim.market.config`'s env-driven dataclass style, but also reads
 an optional YAML file (path from env, e.g. `OGSIM_FLEET_CONFIG`) so the
 sim harness scale (§4.1/§5) can be tuned without code changes. A missing
 YAML file falls back to defaults, never crashes (02b §4/§5 defaults).
+
+Precedence and production safety (mirrors the orchestrator's platform/config.py):
+- environment variables always win over the YAML (`OG_MQTT_ROOT`/`OG_MQTT_HOST`/`OG_MQTT_PORT`, and
+  `OGSIM_GUARDIAN_PUBLIC_KEY_PATH`/`OGSIM_SAFESTOP_PUBLIC_KEY_PATH` for the key paths);
+- the default YAML path is the one shipped next to this package (`<install>/config/*.yaml`), never a
+  path relative to the working directory;
+- the production topic root `og/v1` and the production guardian/safestop public keys are used ONLY
+  when the process is explicitly marked production (`OGSIM_ENV=prod`, set in the production units)
+  and is not an agent workspace (`OG_WS` unset). Anything else refuses to start.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import yaml
+
+#: `integration-sims/` of this install (src/ogsim/common/config.py -> parents[3]).
+INSTALL_DIR = Path(__file__).resolve().parents[3]
+DEFAULT_FLEET_CONFIG_PATH = INSTALL_DIR / "config" / "fleet.yaml"
+DEFAULT_SCADA_CONFIG_PATH = INSTALL_DIR / "config" / "scada.yaml"
 
 DEFAULT_ZONES: tuple[str, ...] = ("LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST")
 
@@ -37,6 +52,47 @@ def load_yaml_file(path: str) -> dict[str, Any]:
     return dict(data) if isinstance(data, dict) else {}
 
 
+#: The production MQTT topic root. Only an explicitly marked production process may use it.
+PRODUCTION_TOPIC_ROOT = "og/v1"
+#: The production marker: the production og-sim-* units set `OGSIM_ENV=prod`; nothing else does.
+PRODUCTION_ENV = "prod"
+
+
+class WorkspaceConfigError(RuntimeError):
+    """A non-production run (an agent workspace, `OG_WS` set by tools/remote.ps1, or any process without
+    `OGSIM_ENV=prod`) that would otherwise fall back to a production default -- the production topic
+    root or the production guardian/safestop public keys."""
+
+
+def workspace_name() -> str:
+    """The agent workspace this process runs in (`OG_WS`, set by tools/remote.ps1), or ""."""
+    return os.environ.get("OG_WS", "").strip()
+
+
+def is_production() -> bool:
+    """True only for an explicitly marked production process (`OGSIM_ENV=prod`) outside any workspace.
+    A workspace that also claims production is refused outright."""
+    marked = os.environ.get("OGSIM_ENV", "").strip() == PRODUCTION_ENV
+    if marked and workspace_name():
+        raise WorkspaceConfigError(
+            f"OG_WS={workspace_name()!r} with OGSIM_ENV={PRODUCTION_ENV!r}: a workspace is never production"
+        )
+    return marked
+
+
+def resolve_topic_root(raw: dict[str, Any]) -> str:
+    """`OG_MQTT_ROOT` always wins over the YAML `topic_root` (as in the orchestrator's config), else the
+    YAML value, else the production root -- which is refused unless the process is marked production
+    (`is_production`). A workspace or dev sim must never publish telemetry or acks into production."""
+    root = os.environ.get("OG_MQTT_ROOT", "").strip() or str(raw.get("topic_root", PRODUCTION_TOPIC_ROOT))
+    if root.rstrip("/") == PRODUCTION_TOPIC_ROOT and not is_production():
+        raise WorkspaceConfigError(
+            f"topic root {root!r} is production, but this process is not marked production "
+            f"(OGSIM_ENV={os.environ.get('OGSIM_ENV', '')!r}, OG_WS={workspace_name()!r}): set OG_MQTT_ROOT"
+        )
+    return root
+
+
 @dataclass(frozen=True)
 class MqttSettings:
     host: str
@@ -46,13 +102,33 @@ class MqttSettings:
     topic_root: str
 
 
+def resolve_mqtt_credentials(role_user: str, role_password_env: str) -> tuple[str, str]:
+    """Broker credentials, mirroring the orchestrator's `platform.mqtt.resolve_mqtt_credentials`:
+    `OG_MQTT_WS_USER`/`OG_MQTT_WS_PASSWORD` (a workspace, `ogw_<ws>`, reaching only `ogtest/<ws>/#`)
+    always win; otherwise the production role user with its password env var. A workspace (`OG_WS`)
+    without workspace credentials, or a workspace user without a password, is refused."""
+    ws_user = os.environ.get("OG_MQTT_WS_USER", "").strip()
+    if ws_user:
+        ws_password = os.environ.get("OG_MQTT_WS_PASSWORD", "")
+        if not ws_password:
+            raise WorkspaceConfigError("OG_MQTT_WS_USER is set but OG_MQTT_WS_PASSWORD is empty")
+        return ws_user, ws_password
+    if workspace_name():
+        raise WorkspaceConfigError(
+            f"OG_WS={workspace_name()!r} is set but OG_MQTT_WS_USER is not: a workspace never uses the "
+            "production MQTT users"
+        )
+    return role_user, os.environ.get(role_password_env, "")
+
+
 def mqtt_settings_from_env(raw: dict[str, Any]) -> MqttSettings:
+    username, password = resolve_mqtt_credentials("og_sim", "OG_MQTT_SIM_PASSWORD")
     return MqttSettings(
-        host=str(raw.get("host", os.environ.get("OG_MQTT_HOST", "127.0.0.1"))),
-        port=int(raw.get("port", os.environ.get("OG_MQTT_PORT", "1883"))),
-        username="og_sim",
-        password=os.environ.get("OG_MQTT_SIM_PASSWORD", ""),
-        topic_root=str(raw.get("topic_root", os.environ.get("OG_MQTT_ROOT", "og/v1"))),
+        host=str(os.environ.get("OG_MQTT_HOST") or raw.get("host", "127.0.0.1")),
+        port=int(os.environ.get("OG_MQTT_PORT") or raw.get("port", 1883)),
+        username=username,
+        password=password,
+        topic_root=resolve_topic_root(raw),
     )
 
 
@@ -95,20 +171,57 @@ class FleetConfig:
     guardian_public_key_path_dev: str = ""
     safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
     safestop_public_key_path_dev: str = ""
+    # Per-inverter power-quality imperfection model (06-service-profiles-and-power-quality.md
+    # §3.1/§7.1/§7.3), seeded once per unit at build time plus a slow ambient drift each tick.
+    pq_freq_offset_std_hz: float = 0.01
+    pq_voltage_offset_std_pct: float = 0.5
+    pq_thd_current_median_pct: float = 2.0
+    pq_thd_current_p95_pct: float = 4.5
+    # false = diverse per-unit harmonic phase angles (cancellation regime, §3.2b); true = all
+    # units on one firmware batch share identical angles (stacking/worst-case regime).
+    pq_harmonic_phase_lock: bool = False
+    pq_ride_through_class_default: str = "CATEGORY_III"
+    # Remote-calibration rate limit, §5.5.4: at most one attempt per unit per rolling window.
+    pq_calibration_rate_limit_s: float = 86400.0
+    # Waveform summary/raw generation and publication (06-service-profiles-and-power-quality.md
+    # §6.4/§7.4, WP-H), seeded from `fleet.yaml`'s `wave:` block.
+    wave_harmonic_detail_interval_s: float = 30.0
+    wave_harmonic_detail_delta_pct: float = 1.0
+    wave_raw_audit_sample_pct_per_min: float = 1.0
+    wave_sync_source: str = "ptp"
+    wave_sync_quality_ns: float = 50.0
+    # S9 wave-2 fix: gates the summary message itself (not just its harmonic-detail
+    # sub-block) to this cadence/deadband -- see fleet.yaml's `wave:` block comment.
+    wave_summary_interval_s: float = 10.0
+    wave_summary_delta_pct: float = 1.0
 
     def public_key_path(self) -> str:
         """Guardian public key path; dev override wins when set, so local
-        runs don't need /etc access."""
-        return self.guardian_public_key_path_dev or self.guardian_public_key_path
+        runs don't need /etc access. A workspace must set the override: it
+        never falls back to the production guardian key."""
+        return _key_path(self.guardian_public_key_path_dev, self.guardian_public_key_path, "guardian")
 
     def safestop_key_path(self) -> str:
         """Safestop public key path (crypto.md §2.3: the only key allowed to
-        sign a StopEvent `action="ENGAGE"`); dev override wins when set."""
-        return self.safestop_public_key_path_dev or self.safestop_public_key_path
+        sign a StopEvent `action="ENGAGE"`); dev override wins when set, and
+        is mandatory in a workspace."""
+        return _key_path(self.safestop_public_key_path_dev, self.safestop_public_key_path, "safestop")
+
+
+def _key_path(dev_override: str, production_path: str, which: str) -> str:
+    if dev_override:
+        return dev_override
+    if not is_production():
+        raise WorkspaceConfigError(
+            f"no {which} public key override is set and this process is not marked production "
+            f"(OGSIM_ENV=prod): set OGSIM_{which.upper()}_PUBLIC_KEY_PATH (or {which}_public_key_path_dev) "
+            f"rather than trusting the production key {production_path!r}"
+        )
+    return production_path
 
 
 def load_fleet_config(path: str | None = None) -> FleetConfig:
-    path = path or os.environ.get("OGSIM_FLEET_CONFIG", "integration-sims/config/fleet.yaml")
+    path = path or os.environ.get("OGSIM_FLEET_CONFIG") or str(DEFAULT_FLEET_CONFIG_PATH)
     raw = load_yaml_file(path)
     defaults = FleetConfig(mqtt=mqtt_settings_from_env(raw.get("mqtt", {})))
     return FleetConfig(
@@ -135,10 +248,62 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         ),
         bank_kva_rating_default=float(raw.get("bank_kva_rating_default", defaults.bank_kva_rating_default)),
         guardian_public_key_path=str(raw.get("guardian_public_key_path", defaults.guardian_public_key_path)),
-        guardian_public_key_path_dev=str(raw.get("guardian_public_key_path_dev", "")),
+        guardian_public_key_path_dev=str(
+            os.environ.get("OGSIM_GUARDIAN_PUBLIC_KEY_PATH") or raw.get("guardian_public_key_path_dev", "")
+        ),
         safestop_public_key_path=str(raw.get("safestop_public_key_path", defaults.safestop_public_key_path)),
-        safestop_public_key_path_dev=str(raw.get("safestop_public_key_path_dev", "")),
+        safestop_public_key_path_dev=str(
+            os.environ.get("OGSIM_SAFESTOP_PUBLIC_KEY_PATH") or raw.get("safestop_public_key_path_dev", "")
+        ),
+        **_inverter_pq_fields(raw, defaults),
+        **_wave_fields(raw, defaults),
     )
+
+
+def _inverter_pq_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:
+    """Reads the optional `inverter_pq:` YAML block (§7.3), defaulting every field
+    independently so a partial or absent block never crashes config loading."""
+    block = raw.get("inverter_pq", {})
+    block = block if isinstance(block, dict) else {}
+    return {
+        "pq_freq_offset_std_hz": float(block.get("freq_offset_std_hz", defaults.pq_freq_offset_std_hz)),
+        "pq_voltage_offset_std_pct": float(
+            block.get("voltage_offset_std_pct", defaults.pq_voltage_offset_std_pct)
+        ),
+        "pq_thd_current_median_pct": float(
+            block.get("thd_current_median_pct", defaults.pq_thd_current_median_pct)
+        ),
+        "pq_thd_current_p95_pct": float(block.get("thd_current_p95_pct", defaults.pq_thd_current_p95_pct)),
+        "pq_harmonic_phase_lock": bool(block.get("harmonic_phase_lock", defaults.pq_harmonic_phase_lock)),
+        "pq_ride_through_class_default": str(
+            block.get("ride_through_class_default", defaults.pq_ride_through_class_default)
+        ),
+        "pq_calibration_rate_limit_s": float(
+            block.get("calibration_rate_limit_s", defaults.pq_calibration_rate_limit_s)
+        ),
+    }
+
+
+def _wave_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:
+    """Reads the optional `wave:` YAML block (§7.3/§7.4, WP-H), defaulting every field
+    independently so a partial or absent block never crashes config loading."""
+    block = raw.get("wave", {})
+    block = block if isinstance(block, dict) else {}
+    return {
+        "wave_harmonic_detail_interval_s": float(
+            block.get("harmonic_detail_interval_s", defaults.wave_harmonic_detail_interval_s)
+        ),
+        "wave_harmonic_detail_delta_pct": float(
+            block.get("harmonic_detail_delta_pct", defaults.wave_harmonic_detail_delta_pct)
+        ),
+        "wave_raw_audit_sample_pct_per_min": float(
+            block.get("raw_audit_sample_pct_per_min", defaults.wave_raw_audit_sample_pct_per_min)
+        ),
+        "wave_sync_source": str(block.get("sync_source", defaults.wave_sync_source)),
+        "wave_sync_quality_ns": float(block.get("sync_quality_ns", defaults.wave_sync_quality_ns)),
+        "wave_summary_interval_s": float(block.get("summary_interval_s", defaults.wave_summary_interval_s)),
+        "wave_summary_delta_pct": float(block.get("summary_delta_pct", defaults.wave_summary_delta_pct)),
+    }
 
 
 @dataclass(frozen=True)
@@ -157,7 +322,7 @@ class ScadaConfig:
 
 
 def load_scada_config(path: str | None = None) -> ScadaConfig:
-    path = path or os.environ.get("OGSIM_SCADA_CONFIG", "integration-sims/config/scada.yaml")
+    path = path or os.environ.get("OGSIM_SCADA_CONFIG") or str(DEFAULT_SCADA_CONFIG_PATH)
     raw = load_yaml_file(path)
     defaults = ScadaConfig(mqtt=mqtt_settings_from_env(raw.get("mqtt", {})))
     return ScadaConfig(
@@ -175,10 +340,18 @@ def load_scada_config(path: str | None = None) -> ScadaConfig:
 
 
 __all__ = [
+    "DEFAULT_FLEET_CONFIG_PATH",
+    "DEFAULT_SCADA_CONFIG_PATH",
+    "PRODUCTION_ENV",
+    "PRODUCTION_TOPIC_ROOT",
     "FleetConfig",
     "MqttSettings",
     "ScadaConfig",
+    "WorkspaceConfigError",
+    "is_production",
     "load_fleet_config",
     "load_scada_config",
     "load_yaml_file",
+    "resolve_topic_root",
+    "workspace_name",
 ]

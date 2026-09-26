@@ -15,7 +15,9 @@ re-deriving these formulas; `orchestrator/tools/dupcheck.py` enforces it.
 - `timeutil.py` -- 15-min interval alignment, UTC/America-Chicago conversion, command freshness (K6),
   clock-quality check (K12).
 - `models/` -- pydantic v2 contracts: `mqtt.py` (wire messages), `engine.py` (og.* engine tables),
-  `platform.py` (fleet/health tables).
+  `platform.py` (fleet/health tables), `pq.py` (MVP-S+ service-profile/power-quality/asset-health
+  contracts: `ServiceProfile`, `PowerQualityEnvelope`, waveform/calibration wire messages, and the
+  `og.hub_inverter_pq`/`pq_waveform_*`/`calibration_attempt`/`maintenance_work_order`/`asset_event` rows).
 
 ## How to test
 

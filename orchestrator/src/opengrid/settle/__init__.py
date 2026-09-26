@@ -103,7 +103,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     backend = _require_backend()
     trace_store = _require_trace_store()
 
-    ctx = await backend.fetch_context(obligation_id)
+    ctx = await backend.fetch_context(obligation_id, interval_start)
     duration_hours = _duration_hours(interval_start, interval_end)
     interval_minutes = int(duration_hours * Decimal("60"))
 
@@ -211,6 +211,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     drafts = draft_invoice_lines(
         service_type=ctx.service_type,
         delivered_kwh=metering.delivered_kwh,
+        committed_kwh=committed_kwh,
         price_per_kwh=ctx.price_per_kwh,
         revenue=pnl.revenue,
         performance_factor=performance_factor,
@@ -249,6 +250,8 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
                 "delivered_kwh": str(metering.delivered_kwh),
                 "net_value": str(pnl.net_value),
                 "quality_flag": metering.quality_flag,
+                "wholesale_price_per_kwh": str(ctx.wholesale_price_per_kwh),
+                "wholesale_price_flag": ctx.wholesale_price_flag,
             },
         )
 
@@ -280,6 +283,28 @@ async def run_settle_cycle(*, max_concurrency: int = _DEFAULT_MAX_CONCURRENCY) -
     results = await asyncio.gather(*(_settle_one(o, s, e) for o, s, e in pending))
     settled_count = sum(1 for ok in results if ok)
     return settled_count
+
+
+R_SETTLED = "R-SETTLED"
+
+
+async def close_settled_obligations() -> int:
+    """02a S2.1 `FULFILLED/SHORTFALL -> SETTLED`, once every interval of the obligation's window is
+    metered and its P&L (and, except HOME, invoice) rows are posted (`fetch_settleable_obligations`).
+    Idempotent: a settled obligation no longer matches the query, and a lost optimistic-lock race is
+    skipped until the next cycle. Traced by `opengrid.contracts` (SETTLEMENT, `R-SETTLED`). Returns the
+    number settled."""
+    from opengrid import contracts
+
+    settled = 0
+    for obligation_id in await _require_backend().fetch_settleable_obligations():
+        try:
+            await contracts.transition_obligation(obligation_id, "SETTLED", reason_code=R_SETTLED)
+        except Exception:
+            _logger.exception("could not settle obligation", extra={"obligation_id": str(obligation_id)})
+            continue
+        settled += 1
+    return settled
 
 
 async def run_trace_pruning_cycle() -> dict[str, int]:

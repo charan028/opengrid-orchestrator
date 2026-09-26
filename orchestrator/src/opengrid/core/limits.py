@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from opengrid.core import reasons
-from opengrid.core.physics import BankParams, HubParams, recharge_headroom
+from opengrid.core.physics import BankParams, HubParams, project_soc_over_lease_kwh, recharge_headroom
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,9 +36,37 @@ def check_reserve_floor(soc_kwh: float, params: HubParams, *, margin_pct: float 
     return LimitResult.passed()
 
 
+def check_reserve_floor_over_lease(
+    soc_kwh: float,
+    p_kw: float,
+    lease_ttl_h: float,
+    params: HubParams,
+    *,
+    margin_pct: float = 0.01,
+) -> LimitResult:
+    """G-01-ENERGY/K1: project the hub's reported SoC across the command's FULL lease duration (not
+    just the instant it is issued) and check it still clears reserve + margin throughout (discharge)
+    or never overfills above `e_kwh` (charge). A command whose power is well within the instantaneous
+    G-01 check can still drain a hub below reserve *before its lease expires* if the hub does not hold
+    enough energy above reserve for the whole lease -- capacity (kW) alone is not sufficient (user
+    requirement: energy above reserve must be checked continuously, not just power headroom).
+    """
+    projected = project_soc_over_lease_kwh(soc_kwh, p_kw, lease_ttl_h, params.eta_c, params.eta_d)
+    if p_kw < 0:  # discharging
+        margin_kwh = params.e_kwh * margin_pct
+        if projected < params.r_kwh + margin_kwh:
+            return LimitResult.failed(reasons.R_RESERVE_FLOOR_LEASE)
+    elif p_kw > 0:  # charging
+        if projected > params.e_kwh + 1e-9:
+            return LimitResult.failed(reasons.R_CHARGE_CEILING_LEASE)
+    return LimitResult.passed()
+
+
 def check_hub_power(p_kw: float, params: HubParams, *, inverter_cap_kw: float = 11.0) -> LimitResult:
-    """G-02/K4: |P| <= min(inverter cap, per-hub cap)."""
-    cap = min(inverter_cap_kw, params.p_kw)
+    """G-02/K4: |P| <= the home's own rated power `params.p_kw` (11 kW single unit, 20 kW dual unit).
+    `inverter_cap_kw` is a PER-UNIT limit: it also binds, times the unit count, only when the unit count
+    is known (`params.units`). It is never a per-home cap -- that vetoed every dual-unit home above 11 kW."""
+    cap = params.p_kw if params.units is None else min(params.p_kw, inverter_cap_kw * params.units)
     if abs(p_kw) > cap + 1e-9:
         return LimitResult.failed(reasons.R_HUB_POWER_LIMIT)
     return LimitResult.passed()

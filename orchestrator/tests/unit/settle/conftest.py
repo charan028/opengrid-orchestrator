@@ -50,6 +50,7 @@ class FakeSettleBackend:
     invoice_lines: dict[tuple[UUID, str], ExistingInvoiceLineRow] = field(default_factory=dict)
     pnl_rows: dict[tuple[UUID, datetime], ExistingPnl] = field(default_factory=dict)
     pending: list[tuple[UUID, datetime, datetime]] = field(default_factory=list)
+    settleable: list[UUID] = field(default_factory=list)
 
     insert_meter_interval_calls: int = 0
     insert_invoice_line_calls: int = 0
@@ -60,7 +61,9 @@ class FakeSettleBackend:
     meter_interval_insert_log: list[tuple[UUID, datetime]] = field(default_factory=list)
     pnl_insert_log: list[tuple[UUID, datetime]] = field(default_factory=list)
 
-    async def fetch_context(self, obligation_id: UUID) -> ObligationSettlementContext:
+    async def fetch_context(
+        self, obligation_id: UUID, interval_start: datetime | None = None
+    ) -> ObligationSettlementContext:
         return self.obligations[obligation_id].context
 
     async def fetch_power_samples(
@@ -183,6 +186,9 @@ class FakeSettleBackend:
 
     async def fetch_pending_intervals(self) -> list[tuple[UUID, datetime, datetime]]:
         return self.pending
+
+    async def fetch_settleable_obligations(self) -> list[UUID]:
+        return self.settleable
 
 
 @dataclass

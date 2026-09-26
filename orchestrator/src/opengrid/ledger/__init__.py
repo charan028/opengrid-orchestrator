@@ -19,6 +19,7 @@ Reservation key encoding: `reserve()`'s fixed signature carries only `obligation
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
@@ -49,12 +50,26 @@ ALLOWED_RELEASE_REASONS: frozenset[str] = frozenset(
 _SUBSTITUTION_REASON = "R-SUBSTITUTION"
 
 
+#: `og.commitment.reason_code` for the equality-freeze rows `reserve()` writes (02a S1.6 column default:
+#: the selection gate produced the commitment).
+_COMMITMENT_REASON = "R-GATE-SELECT"
+
+#: Reason for releasing a reservation whose obligation never reached `COMMITTED` (no commitment row):
+#: the commit did not complete, which is the `SELECTED -> REJECTED` edge's code (02a S2.1).
+_UNCOMMITTED_RELEASE_REASON = "R-COMMIT-LOCK-INFEASIBLE"
+
+#: `reserve()` reason code when the obligation already holds active reservations (K13: a committed
+#: obligation is never re-reserved on top of itself; re-nomination supersedes, it does not stack).
+R_ALREADY_COMMITTED = "R-COMMIT-ALREADY-COMMITTED"
+
+
 class ReservationError(Exception):
     """Raised by `reserve()` with `.reason_code` set (e.g. `R-COMMIT-LOCK-INFEASIBLE`)."""
 
-    def __init__(self, reason_code: str) -> None:
+    def __init__(self, reason_code: str, detail: dict[str, object] | None = None) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+        self.detail: dict[str, object] = detail or {}
 
 
 class CommitmentLockViolation(ReservationError):  # noqa: N818 -- name fixed by BUILD.md's task brief (K13)
@@ -95,6 +110,45 @@ class ReservationRecord:
         return self.released_at is None
 
 
+@dataclass(frozen=True, slots=True)
+class CommitmentRecord:
+    """Row shape of `og.commitment` (migrations/0001_init.sql): the equality freeze of one obligation's
+    committed kW for one interval, summed across banks (02a S1.6/S2.2). Written only by `reserve()`, in
+    the same transaction as the reservations it freezes."""
+
+    commitment_id: UUID
+    obligation_id: UUID
+    plan_id: UUID
+    interval_start: datetime
+    interval_end: datetime
+    committed_kw: Decimal
+    variable_kind: str
+    reason_code: str = _COMMITMENT_REASON
+
+
+def build_commitments(
+    obligation_id: UUID, plan_id: UUID, records: list[ReservationRecord], variable_kind: str
+) -> list[CommitmentRecord]:
+    """One `CommitmentRecord` per distinct interval in `records`, `committed_kw` = the sum of that
+    interval's reservations across banks (kW)."""
+    totals: dict[tuple[datetime, datetime], Decimal] = {}
+    for record in records:
+        key = (record.interval_start, record.interval_end)
+        totals[key] = totals.get(key, Decimal(0)) + record.amount_kw
+    return [
+        CommitmentRecord(
+            commitment_id=uuid4(),
+            obligation_id=obligation_id,
+            plan_id=plan_id,
+            interval_start=start,
+            interval_end=end,
+            committed_kw=kw,
+            variable_kind=variable_kind,
+        )
+        for (start, end), kw in sorted(totals.items())
+    ]
+
+
 class CapabilityProvider(Protocol):
     """The single source of `bank_id`/`interval`-scoped capability (`opengrid.fleet.capability`, 02b
     S4). Injected rather than imported directly so the ledger's decision logic is DB/fleet-free for
@@ -133,8 +187,17 @@ class LedgerBackend(Protocol):
     implementation (`opengrid.ledger.pg_backend.PgLedgerBackend`) uses `SELECT ... FOR UPDATE` inside a
     serializable transaction; tests use an in-memory fake (see `tests/unit/ledger/conftest.py`)."""
 
+    def write_guard(self) -> AbstractAsyncContextManager[None]:
+        """Cross-process mutual exclusion for one check-then-write sequence (K2 across `og-engine`
+        processes; the in-process `asyncio.Lock` only covers one process)."""
+        ...
+
     async def next_version(self) -> int:
         """Atomically allocate and return the next monotonic ledger version."""
+        ...
+
+    async def current_version(self) -> int:
+        """The latest durably written ledger version (0 for an empty ledger)."""
         ...
 
     async def active_reservations(self, bank_id: str, interval_start: datetime) -> list[ReservationRecord]:
@@ -145,9 +208,18 @@ class LedgerBackend(Protocol):
 
     async def get_reservation(self, reservation_id: UUID) -> ReservationRecord | None: ...
 
-    async def insert_reservations(self, records: list[ReservationRecord]) -> None: ...
+    async def insert_reservations(
+        self, records: list[ReservationRecord], commitments: list[CommitmentRecord]
+    ) -> None:
+        """Insert reservations and their commitment rows atomically (one transaction)."""
+        ...
 
     async def mark_released(self, reservation_id: UUID, *, reason: str, version: int) -> None: ...
+
+    async def release_uncommitted(self, *, reason: str, version: int) -> int:
+        """Release every active reservation whose obligation has no active commitment row; returns
+        the count released."""
+        ...
 
 
 @dataclass
@@ -208,12 +280,19 @@ class ReservationLedger:
         self._cache = _ReadCache()
         self._write_lock = asyncio.Lock()
         self._version = 0
+        self._version_loaded = False
 
     async def _bump_version(self) -> int:
         self._version = await self._backend.next_version()
+        self._version_loaded = True
         return self._version
 
     async def ledger_version(self) -> int:
+        """The durable ledger version. Loaded from the backend on first use, so a restarted process
+        stamps the same version the guardian reads independently (G-09) instead of restarting at 0."""
+        if not self._version_loaded:
+            self._version = max(self._version, await self._backend.current_version())
+            self._version_loaded = True
         return self._version
 
     async def reservations_for_obligation(self, obligation_id: UUID) -> list[ReservationRecord]:
@@ -235,15 +314,23 @@ class ReservationLedger:
         obligation_id: UUID,
         selected_kw_by_interval: dict[str, Decimal],
         plan_id: UUID,
+        *,
+        variable_kind: str = "CONTINUOUS",
     ) -> None:
-        """The one-buyer check (K2) + commitment-lock entry point (02a S4.1/4.2). Equality-freezes
-        `selected_kw_by_interval` as this obligation's committed reservations. Raises `ReservationError`
-        with no partial writes on failure (all-or-nothing across the obligation's intervals)."""
-        async with self._write_lock:
+        """The one-buyer check (K2) + commitment-lock entry point (02a S4.1/4.2). Writes the obligation's
+        reservations and its equality-freeze `og.commitment` rows (one per interval, kW summed across
+        banks) in one transaction. Raises `ReservationError` with no partial writes on failure
+        (all-or-nothing across the obligation's intervals); `R_ALREADY_COMMITTED` if the obligation
+        already holds active reservations (K13)."""
+        async with self._write_lock, self._backend.write_guard():
             parsed: list[tuple[str, datetime, datetime, Decimal]] = []
             for key, kw in selected_kw_by_interval.items():
                 bank_id, interval_start, interval_end = decode_interval_key(key)
                 parsed.append((bank_id, interval_start, interval_end, kw))
+
+            held = await self._backend.reservations_for_obligation(obligation_id)
+            if any(r.is_active for r in held):
+                raise ReservationError(R_ALREADY_COMMITTED)
 
             for bank_id, interval_start, _interval_end, kw in parsed:
                 existing = await self._backend.active_reservations(bank_id, interval_start)
@@ -251,7 +338,16 @@ class ReservationLedger:
                 capability_kw = await self._capability.capability_kw(bank_id, interval_start)
                 result: LimitResult = check_one_buyer([*existing_kw, float(kw)], float(capability_kw))
                 if not result.ok:
-                    raise ReservationError("R-COMMIT-LOCK-INFEASIBLE")
+                    raise ReservationError(
+                        "R-COMMIT-LOCK-INFEASIBLE",
+                        {
+                            "bank_id": bank_id,
+                            "interval_start": interval_start.isoformat(),
+                            "requested_kw": float(kw),
+                            "reserved_by_others_kw": sum(existing_kw),
+                            "capability_kw": float(capability_kw),
+                        },
+                    )
 
             version = await self._bump_version()
             records = [
@@ -266,10 +362,26 @@ class ReservationLedger:
                 )
                 for bank_id, interval_start, interval_end, kw in parsed
             ]
-            await self._backend.insert_reservations(records)
+            commitments = build_commitments(obligation_id, plan_id, records, variable_kind)
+            await self._backend.insert_reservations(records, commitments)
             for record in records:
                 self._cache.put(record)
-            _ = plan_id  # carried through to the trace/commitment write by the caller (selector/allocator)
+
+    async def release_uncommitted(self) -> int:
+        """Release every active reservation whose obligation never got a commitment row (a commit that
+        did not complete, or rows written before `reserve()` froze commitments). Such rows hold K2
+        headroom for an obligation nothing will ever deliver. Safe under K13: an obligation without a
+        commitment is not committed. Returns the number of reservations released. Intended for process
+        start-up (`og-engine`), so the read cache is simply reset rather than patched."""
+        async with self._write_lock:
+            version = await self._bump_version()
+            released = await self._backend.release_uncommitted(
+                reason=_UNCOMMITTED_RELEASE_REASON, version=version
+            )
+            # With nothing released the bumped version was never written; resync to the durable one.
+            self._version = await self._backend.current_version()
+            self._cache = _ReadCache()
+            return released
 
     async def release(self, reservation_id: UUID, reason_code: str) -> None:
         """Release a committed reservation in place (02a S1.9). K13: only `ALLOWED_RELEASE_REASONS`
@@ -334,7 +446,7 @@ class ReservationLedger:
         different obligation is forbidden -- 02a S5.1 S5, ES05-S04). Releases the old reservation with
         the exempt `R-SUBSTITUTION` reason and inserts a replacement that preserves the obligation's
         committed total. Returns the new reservation id."""
-        async with self._write_lock:
+        async with self._write_lock, self._backend.write_guard():
             record = self._cache.get(from_reservation_id) or await self._backend.get_reservation(
                 from_reservation_id
             )
@@ -373,7 +485,9 @@ class ReservationLedger:
                 amount_kw=record.amount_kw,
                 ledger_version=insert_version,
             )
-            await self._backend.insert_reservations([new_record])
+            # Substitution moves where the committed kW is realized; the commitment row is unchanged
+            # (02a S2.1: "never a `commitment` write").
+            await self._backend.insert_reservations([new_record], [])
             self._cache.put(new_record)
             return new_record.reservation_id
 
@@ -404,14 +518,29 @@ def _require_instance() -> ReservationLedger:
     return _instance
 
 
-async def reserve(obligation_id: UUID, selected_kw_by_interval: dict[str, Decimal], plan_id: UUID) -> None:
+async def reserve(
+    obligation_id: UUID,
+    selected_kw_by_interval: dict[str, Decimal],
+    plan_id: UUID,
+    *,
+    variable_kind: str = "CONTINUOUS",
+) -> None:
     """Attempt to reserve `selected_kw_by_interval` for `obligation_id` against each interval's bank
-    capability (K2: one-buyer check via `opengrid.core.limits.check_one_buyer`). On success, transitions
-    the obligation `SELECTED -> COMMITTED` and inserts the equality-freeze `commitment` row(s) (02a
-    S2.1). On failure with no substitute, transitions `SELECTED -> REJECTED` and raises
-    `ReservationError("R-COMMIT-LOCK-INFEASIBLE")`.
+    capability (K2: one-buyer check via `opengrid.core.limits.check_one_buyer`). On success, inserts the
+    reservations and the equality-freeze `commitment` row(s) atomically (02a S2.1); the caller
+    (`opengrid.selector.gate`) then transitions the obligation `SELECTED -> COMMITTED` through
+    `opengrid.contracts`. On failure raises `ReservationError("R-COMMIT-LOCK-INFEASIBLE")` with nothing
+    written, and the caller transitions `SELECTED -> REJECTED`.
     """
-    await _require_instance().reserve(obligation_id, selected_kw_by_interval, plan_id)
+    await _require_instance().reserve(
+        obligation_id, selected_kw_by_interval, plan_id, variable_kind=variable_kind
+    )
+
+
+async def release_uncommitted() -> int:
+    """Release active reservations of obligations that hold no commitment row (see
+    `ReservationLedger.release_uncommitted`). Called once at `og-engine` start-up."""
+    return await _require_instance().release_uncommitted()
 
 
 async def release(reservation_id: UUID, reason_code: str) -> None:

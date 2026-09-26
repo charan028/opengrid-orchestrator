@@ -133,3 +133,26 @@ async def test_other_obligations_are_unaffected_by_a_renomination(repo: FakeCont
     await contracts.exercise_renomination_point(point.renomination_point_id, "RESELECTED")
 
     assert repo.obligations[bystander.obligation_id] == bystander
+
+
+async def test_reselection_of_a_committed_not_yet_delivering_obligation_is_refused(
+    repo: FakeContractsRepo,
+) -> None:
+    """Regression (live 2026-09-26): RESELECTED on a COMMITTED obligation took the COMMITTED ->
+    DELIVERING edge and started it hours before its window. The self-loop is DELIVERING-only; nothing
+    is written and the point stays unexercised."""
+    obligation = _delivering_obligation(state="COMMITTED", version=2)
+    repo.obligations[obligation.obligation_id] = obligation
+    point = RenominationPoint(
+        renomination_point_id=uuid4(),
+        contract_id=obligation.contract_id,
+        obligation_id=obligation.obligation_id,
+        scheduled_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    repo.renomination_points[point.renomination_point_id] = point
+
+    with pytest.raises(contracts.IllegalTransitionError):
+        await contracts.exercise_renomination_point(point.renomination_point_id, "RESELECTED")
+
+    assert repo.obligations[obligation.obligation_id] == obligation
+    assert repo.renomination_points[point.renomination_point_id].exercised_at is None

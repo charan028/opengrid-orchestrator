@@ -37,6 +37,11 @@ from playwright.sync_api import Browser, Page
 
 LIVE_BASE_URL_ENV = "OG_UI_BASE_URL"
 ROLE_HEADER = "X-OG-Role"
+# `opengrid.ui.role` trusts `X-Remote-User` only when the request also carries the proxy secret that
+# Apache (or the dev proxy) injects as `X-OG-Proxy-Auth` (`opengrid.api.auth.proxy_authenticated`), and
+# maps the identity to a role through `[api.roles]` on `app.state.config`. Fixture mode sets both.
+PROXY_SECRET = "e2e-proxy-secret"  # noqa: S105 -- a test value, not a secret
+PROXY_AUTH_HEADER = "X-OG-Proxy-Auth"
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "orchestrator" / "tests" / "unit" / "ui" / "fixtures"
 _SERVER_READY_TIMEOUT_S = 15.0
 _SERVER_STOP_TIMEOUT_S = 5.0
@@ -115,7 +120,7 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
             raise ApiUnavailable(f"no fixture registered for GET {path}")
         return gets[path]
 
-    async def fake_post_json(path: str, payload: dict[str, Any]) -> Any:
+    async def fake_post_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
         if path not in posts:
             raise ApiUnavailable(f"no fixture registered for POST {path}")
         return posts[path]
@@ -134,7 +139,12 @@ def _build_app(ready: threading.Event) -> FastAPI:
         ready.set()
         yield
 
+    from opengrid.api.auth import PROXY_SECRET_ENV
+    from opengrid.platform.config import Config
+
+    os.environ.setdefault(PROXY_SECRET_ENV, PROXY_SECRET)
     app = FastAPI(lifespan=lifespan)
+    app.state.config = Config({"api": {"roles": {"operator": ["operator"], "viewer": ["viewer"]}}})
     app.include_router(ui.build_router(), prefix="/og")
 
     @app.get("/og/api/stream/{name}")
@@ -179,9 +189,10 @@ def ui_base_url() -> Iterator[str]:
 
 
 def _role_page(browser: Browser, base_url: str, role: str) -> Iterator[Page]:
-    context = browser.new_context(
-        base_url=base_url, extra_http_headers={ROLE_HEADER: role, "X-Remote-User": role}
-    )
+    headers = {ROLE_HEADER: role, "X-Remote-User": role}
+    if not live_base_url():
+        headers[PROXY_AUTH_HEADER] = os.environ.get("OG_API_PROXY_SECRET", PROXY_SECRET)
+    context = browser.new_context(base_url=base_url, extra_http_headers=headers)
     page = context.new_page()
     page.route(_MAP_TILE_URL_GLOB, lambda route: route.abort())  # map tiles add nothing to the assertions
     try:

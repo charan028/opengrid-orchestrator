@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse
 
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.render import render_status_badge
-from opengrid.ui.role import is_operator, role_of
+from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.routes.health import ack_message
 from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
 from opengrid.ui.templating import templates
@@ -127,7 +127,7 @@ async def ack_alert(request: Request, alert_id: int = Form(...)) -> HTMLResponse
     if not is_operator(request):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="operator role required")
     try:
-        alert = await post_json(f"/og/api/alerts/{alert_id}/ack", {})
+        alert = await post_json(f"/og/api/alerts/{alert_id}/ack", {}, remote_user=remote_user(request))
     except ApiUnavailable as exc:
         logger.warning("control room alert ack failed for alert_id=%s: %s", alert_id, exc)
         return templates.TemplateResponse(

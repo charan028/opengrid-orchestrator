@@ -54,16 +54,32 @@ class FakeTrace:
     def __init__(self, *, preimage_exists: bool = True) -> None:
         self.preimage_exists = preimage_exists
         self.appended: list[tuple[UUID, dict]] = []
+        self.calibration_verdicts: list[tuple[UUID, dict]] = []
+        self.release_verdicts: list[tuple[UUID, dict]] = []
+        self.preimage_refs_checked: list[UUID] = []
 
     async def exists_preimage(self, decision_ref: UUID) -> bool:
+        self.preimage_refs_checked.append(decision_ref)
         return self.preimage_exists
 
     async def append_verdict(self, batch_id: UUID, payload: dict) -> None:
         self.appended.append((batch_id, payload))
 
+    async def append_calibration_verdict(self, calibration_id: UUID, payload: dict) -> None:
+        self.calibration_verdicts.append((calibration_id, payload))
+
+    async def append_stop_release_verdict(self, operator_action_id: UUID, payload: dict) -> None:
+        self.release_verdicts.append((operator_action_id, payload))
+
 
 class FailingTrace(FakeTrace):
     async def append_verdict(self, batch_id: UUID, payload: dict) -> None:
+        raise RuntimeError("boom")
+
+    async def append_calibration_verdict(self, calibration_id: UUID, payload: dict) -> None:
+        raise RuntimeError("boom")
+
+    async def append_stop_release_verdict(self, operator_action_id: UUID, payload: dict) -> None:
         raise RuntimeError("boom")
 
 
@@ -140,6 +156,16 @@ class FakeSafeStop:
         return (scope, scope_ref) in self.stopped
 
 
+class FakeBankMembers:
+    """The guardian's own per-bank member snapshots (G-19 override capability evidence)."""
+
+    def __init__(self) -> None:
+        self.members: dict[str, list[HubSnapshot]] = {}
+
+    async def member_snapshots(self, bank_id: str) -> list[HubSnapshot]:
+        return list(self.members.get(bank_id, []))
+
+
 @dataclass
 class Fakes:
     clock: FakeClock
@@ -153,6 +179,7 @@ class Fakes:
     leases: FakeLeases
     l2_instructions: FakeL2Instructions
     safe_stop: FakeSafeStop
+    bank_members: FakeBankMembers | None = None
 
     def as_ports(self) -> GuardianPorts:
         return GuardianPorts(
@@ -167,6 +194,7 @@ class Fakes:
             leases=self.leases,
             l2_instructions=self.l2_instructions,
             safe_stop=self.safe_stop,
+            bank_members=self.bank_members,
         )
 
 
@@ -207,12 +235,19 @@ def make_hub_snapshot(*, soc_kwh: float = 20.0, prev_p_kw: float = 0.0, p_kw: fl
     )
 
 
-def make_bank_snapshot(*, bank_load_kva: float = 10.0, kva_rating: float = 75.0) -> BankSnapshot:
+def make_bank_snapshot(
+    *,
+    bank_load_kva: float = 10.0,
+    kva_rating: float = 75.0,
+    bank_load_age_s: float = 1.0,
+    feeder_id: str | None = None,
+) -> BankSnapshot:
     return BankSnapshot(
         params=BankParams(kva_rating=kva_rating, reserve_kva=5.0),
         bank_load_kva=bank_load_kva,
-        feeder_id=None,
+        feeder_id=feeder_id,
         feeder_ceiling_kw_per_min=None,
+        bank_load_age_s=bank_load_age_s,
     )
 
 

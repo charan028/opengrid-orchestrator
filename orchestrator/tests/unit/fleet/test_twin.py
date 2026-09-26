@@ -23,6 +23,7 @@ class FakeFleetBackend:
     upserted: list[HubState] = field(default_factory=list)
     copied_rows: list[fleet.TelemetryRow] = field(default_factory=list)
     recorded_scada: list = field(default_factory=list)
+    acks: list = field(default_factory=list)
 
     async def load_hubs(self) -> list[Hub]:
         return self.hubs
@@ -39,8 +40,11 @@ class FakeFleetBackend:
     async def copy_telemetry(self, rows: list[fleet.TelemetryRow]) -> None:
         self.copied_rows.extend(rows)
 
-    async def record_scada_observation(self, signal) -> None:
-        self.recorded_scada.append(signal)
+    async def record_scada_observations(self, signals) -> None:
+        self.recorded_scada.extend(signals)
+
+    async def insert_acks(self, acks) -> None:
+        self.acks.extend(acks)
 
 
 def _cfg(**overrides: float) -> Config:
@@ -180,7 +184,7 @@ async def test_flush_reclassifies_hubs_that_stopped_publishing_without_new_telem
     later = now + timedelta(seconds=45)
     assert fleet.hub_health("h1", now=later) == "offline"
     await fleet.flush(now=later)
-    assert backend.upserted[-1].health == "stale"  # HubState model has no "offline" literal
+    assert backend.upserted[-1].health == "offline"  # persisted with the full health vocabulary
 
 
 async def test_unknown_bank_raises_lookup_error() -> None:
@@ -252,10 +256,42 @@ async def test_ingest_scada_signal_bounds_charge_headroom() -> None:
     )
     cap = await fleet.capability("bank-1", now)
     assert cap.max_charge_kw == pytest.approx(10.0)  # 50 kVA rating - 40 kVA load
-    # Dispatch-live pass: must also persist to the backend (og.feed_obs) so guardian/health -- separate
-    # processes -- can read the same reading independently of this process's in-memory cache.
-    assert len(backend.recorded_scada) == 1
-    assert backend.recorded_scada[0].bank_id == "bank-1"
+    # Persisted to og.feed_obs (guardian/health read it from other processes) -- but on flush, never
+    # inline on the MQTT ingest path.
+    assert backend.recorded_scada == []
+    await fleet.flush(now=now)
+    assert [s.bank_id for s in backend.recorded_scada] == ["bank-1"]
+
+
+async def test_scada_ingest_never_touches_the_database_and_flush_writes_latest_per_bank() -> None:
+    """Regression (live 2026-09-26): a per-message INSERT+COMMIT for every SCADA reading on the MQTT
+    ingest path fell behind under WAL pressure; aiomqtt queued the backlog in memory and the twin
+    processed telemetry minutes late, so all 2,000 hubs went stale/offline and dispatch stopped."""
+    now = datetime.now(UTC)
+    backend = FakeFleetBackend(hubs=[_hub("h1")], banks=[_bank(), _bank("bank-2")])
+    await _seed(backend)
+
+    for i, bank_id in enumerate(("bank-1", "bank-1", "bank-2")):
+        await fleet.ingest_scada_signal(
+            {
+                "bank_id": bank_id,
+                "signal": "APPARENT_POWER_KVA",
+                "value": 10.0 + i,
+                "unit": "kVA",
+                "quality": "good",
+                "ts": (now + timedelta(seconds=i)).isoformat(),
+            }
+        )
+    assert backend.recorded_scada == []
+
+    await fleet.flush(now=now)
+    assert sorted((s.bank_id, s.value) for s in backend.recorded_scada) == [
+        ("bank-1", 11.0),
+        ("bank-2", 12.0),
+    ]
+
+    await fleet.flush(now=now)  # nothing new buffered -> nothing rewritten
+    assert len(backend.recorded_scada) == 2
 
 
 async def test_utility_block_instruction_zeroes_capability() -> None:
@@ -327,6 +363,66 @@ async def test_expired_utility_instruction_no_longer_applies() -> None:
     assert cap.max_discharge_kw > 0.0
 
 
+async def test_ogsim_lift_message_unblocks_a_previously_blocked_bank() -> None:
+    """Read-only regression for the ogsim wave-2/blocker-3 fix (`ogsim.scada.anomalies`/
+    `runtime.py`): ending a `utility_instruction` anomaly now republishes the SAME kind with
+    `expires_at` set to its own `issued_at` (already in the past on arrival) instead of the
+    old hardcoded `None` ("never expires"). This feeds that EXACT message shape --
+    `ScadaEngine._instruction_message`'s output for `pending["lift"] = True`, reproduced here
+    without importing `ogsim` (BUILD.md S1: opengrid and ogsim share only `interfaces/`) --
+    into `fleet.ingest_utility_instruction` and confirms `fleet.capability`
+    (`_active_utility_limit_kw`'s consumer) reports the bank unblocked afterward, exactly as
+    it already does for the hand-crafted `test_expired_utility_instruction_no_longer_applies`
+    case above -- this test additionally asserts the BLOCK was actually active first, so it
+    proves a lift, not merely that a pre-expired instruction is ignorable."""
+    now = datetime.now(UTC)
+    hub = _hub("h1", p_kw=10.0)
+    backend = FakeFleetBackend(
+        hubs=[hub],
+        banks=[_bank(kva_rating=1000.0)],
+        states=[HubState(hub_id="h1", soc_kwh=10.0, p_kw=0.0, last_seen_at=now)],
+    )
+    await _seed(backend)
+
+    # 1. The anomaly starts: ogsim publishes a BLOCK with expires_at=None ("never expires" --
+    #    ogsim.scada.runtime.ScadaEngine._instruction_message's shape before a lift).
+    await fleet.ingest_utility_instruction(
+        {
+            "instruction_id": "00000000-0000-7000-8000-000000000004",
+            "bank_id": "bank-1",
+            "kind": "BLOCK",
+            "issued_at": (now - timedelta(seconds=5)).isoformat(),
+            "expires_at": None,
+            "issued_by": "SCENARIO_ANOMALY",
+        }
+    )
+    blocked = await fleet.capability("bank-1", now)
+    assert blocked.max_discharge_kw == 0.0
+    assert blocked.max_charge_kw == 0.0
+
+    # 2. The anomaly ends (natural expiry or manual cancel): ogsim's fix republishes the SAME
+    #    kind with expires_at == issued_at (already past) -- the "lift" message shape. Backed
+    #    off by 1s from `now` (not exactly `now`) so the comparison is robust regardless of
+    #    how much wall-clock time elapses between here and fleet.capability()'s own
+    #    datetime.now(UTC) call below.
+    lift_issued_at = (now - timedelta(seconds=1)).isoformat()
+    await fleet.ingest_utility_instruction(
+        {
+            "instruction_id": "00000000-0000-7000-8000-000000000005",
+            "bank_id": "bank-1",
+            "kind": "BLOCK",
+            "limit_kw": None,
+            "issued_at": lift_issued_at,
+            "expires_at": lift_issued_at,
+            "issued_by": "SCENARIO_ANOMALY",
+        }
+    )
+
+    unblocked = await fleet.capability("bank-1", now)
+    assert unblocked.max_discharge_kw > 0.0
+    assert unblocked.max_charge_kw > 0.0
+
+
 # --- restart recovery ------------------------------------------------------------------------------
 
 
@@ -340,3 +436,101 @@ async def test_load_topology_rehydrates_from_persisted_hub_state() -> None:
     await _seed(backend)
     cap = await fleet.capability("bank-1", now)
     assert "h1" not in cap.excluded_hub_ids
+
+
+async def test_a3_hub_acks_are_buffered_and_persisted_on_flush() -> None:
+    """A3: hub acknowledgements were never persisted (live 2026-09-26: visible only on MQTT). An
+    accepted ack sets the hub's last_command_id; every ack (accepted or rejected) is written on flush."""
+    now = datetime.now(UTC)
+    backend = FakeFleetBackend(
+        hubs=[_hub("h1")],
+        banks=[_bank()],
+        states=[HubState(hub_id="h1", soc_kwh=5.0, p_kw=0.0, last_seen_at=now)],
+    )
+    await _seed(backend)
+    accepted_batch = "5d3f0d8c-f0d4-4191-bfbc-eb94d834c621"
+
+    await fleet.ingest_ack(
+        {
+            "hub_id": "h1",
+            "batch_id": accepted_batch,
+            "accepted": True,
+            "applied_p_kw": -3.0,
+            "ts": now.isoformat(),
+        }
+    )
+    await fleet.ingest_ack(
+        {
+            "hub_id": "h1",
+            "batch_id": "6d3f0d8c-f0d4-4191-bfbc-eb94d834c621",
+            "accepted": False,
+            "reject_reason": "STALE_SEQ",
+            "ts": now.isoformat(),
+        }
+    )
+    assert backend.acks == []
+
+    await fleet.flush(now=now)
+
+    assert [(str(a.batch_id), a.accepted, a.reject_reason) for a in backend.acks] == [
+        (accepted_batch, True, None),
+        ("6d3f0d8c-f0d4-4191-bfbc-eb94d834c621", False, "STALE_SEQ"),
+    ]
+    assert str(backend.upserted[-1].last_command_id) == accepted_batch
+
+
+async def test_rated_discharge_is_structural_not_live() -> None:
+    """The admission-reject check needs what a bank could EVER deliver: every hub at rated power, capped
+    by the bank's kVA rating -- independent of health/SoC (a stale hub still counts)."""
+    backend = FakeFleetBackend(
+        hubs=[_hub("h1", p_kw=11.0), _hub("h2", p_kw=20.0)], banks=[_bank(kva_rating=600.0)], states=[]
+    )
+    await _seed(backend)
+
+    assert fleet.rated_discharge_kw("bank-1") == pytest.approx(31.0)
+    with pytest.raises(LookupError):
+        fleet.rated_discharge_kw("bank-unknown")
+
+
+async def test_a_failed_telemetry_write_requeues_the_rows(monkeypatch) -> None:
+    """Review #13: flush took the buffer before writing and dropped it on a database error, losing
+    telemetry (K1/K3 evidence). The rows now go back ahead of newer ones and are written next time."""
+    backend = FakeFleetBackend(hubs=[_hub("h1")], banks=[_bank()])
+    await _seed(backend)
+
+    async def _telemetry(seq: int) -> None:
+        await fleet.ingest_telemetry(
+            {
+                "hub_id": "h1",
+                "bank_id": "bank-1",
+                "zone": "LZ_NORTH",
+                "ts": datetime.now(UTC).isoformat(),
+                "soc_kwh": 10.0,
+                "p_kw": -2.0,
+                "health": "online",
+                "seq": seq,
+                "epoch": 1,
+            }
+        )
+
+    await _telemetry(1)
+    original = backend.copy_telemetry
+
+    async def _fail(rows):
+        raise RuntimeError("disk stall")
+
+    backend.copy_telemetry = _fail  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await fleet.flush()
+    await _telemetry(2)
+    backend.copy_telemetry = original  # type: ignore[method-assign]
+    await fleet.flush()
+
+    assert [r.seq for r in backend.copied_rows] == [1, 2]
+
+
+def test_requeue_is_bounded_and_drops_the_oldest(monkeypatch) -> None:
+    monkeypatch.setattr(fleet, "REQUEUE_MAX_ROWS", 3)
+    buffer = [4, 5]
+    fleet._requeue(buffer, [1, 2, 3], "telemetry")
+    assert buffer == [3, 4, 5]

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/calibration_command.schema.json",
+  "title": "CalibrationCommand",
+  "description": "Guardian -> hub, published on <root>/cmd/cal/<hub_id>, QoS 1, guardian-signed. Follows the existing signed-command pattern of command_batch.schema.json; see interfaces/crypto.md for the JCS signing input (all fields except signature/key_id). Guardian check G-25 (06-service-profiles-and-power-quality.md S6.7) refuses to sign unless bounds, rate limit and the no-active-sensitive-delivery check all pass.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["calibration_id", "hub_id", "epoch", "seq", "issued_at", "expires_at",
+               "reference", "correction", "bounds", "key_id", "signature"],
+  "properties": {
+    "calibration_id": { "type": "string", "format": "uuid" },
+    "hub_id": { "type": "string", "minLength": 1 },
+    "epoch": { "type": "integer", "minimum": 0 },
+    "seq": { "type": "integer", "minimum": 0 },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase_deg", "freq_hz", "amplitude_v", "sync_source"],
+      "properties": {
+        "phase_deg": { "type": "number" },
+        "freq_hz": { "type": "number" },
+        "amplitude_v": { "type": "number" },
+        "sync_source": { "type": "string", "enum": ["ptp", "gps", "ntp_disciplined"] }
+      }
+    },
+    "correction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "freq_hz": { "type": "number" },
+        "voltage_pct": { "type": "number" },
+        "phase_deg": { "type": "number" }
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_freq_hz", "max_voltage_pct", "max_phase_deg"],
+      "properties": {
+        "max_freq_hz": { "type": "number", "exclusiveMinimum": 0 },
+        "max_voltage_pct": { "type": "number", "exclusiveMinimum": 0 },
+        "max_phase_deg": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "key_id": { "type": "string" },
+    "signature": { "type": "string" }
+  }
+}
