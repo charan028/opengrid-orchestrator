@@ -133,15 +133,19 @@ class AssetHealthService:
         *,
         reference: CalibrationReference,
         bounds: CalibrationBounds,
-        epoch: int,
-        seq: int,
         now: datetime,
         lease_ttl_s: float,
+        epoch: int | None = None,
+        seq: int | None = None,
     ) -> CalibrationCandidate | None:
         """S5.4 step 3 / S5.5.4: build the calibration candidate for the guardian to sign, or `None` if
         the ladder's own primary checks refuse it (a live PQ-sensitive delivery still on this hub, the
         24h rate limit, or no fresh drift measurement to correct) -- in every `None` case the drift
-        proceeds toward escalation on its own timeline rather than being forced (S6.7)."""
+        proceeds toward escalation on its own timeline rather than being forced (S6.7).
+
+        `epoch`/`seq` are optional and normally omitted: the guardian assigns the real per-hub (epoch, seq)
+        on `og.calibration_command` when it signs, and the PENDING `og.calibration_attempt` row never
+        carries a placeholder (#30)."""
         if await self.ports.sensitive_grants.has_active_non_default_envelope_grant(hub_id):
             return None
         last_attempt = await self.ports.calibration_attempts.last_attempt_epoch_s(hub_id)

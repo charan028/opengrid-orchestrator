@@ -406,6 +406,9 @@ def test_g25_calibrate_confirm_records_a_pending_attempt_for_the_guardian(
     attempt = asset_ports.recorded[0]
     assert attempt["hub_id"] == HUB
     assert attempt["command_batch_id"] is None
+    # #30: the API writes no placeholder (epoch, seq); the guardian assigns them on og.calibration_command.
+    assert "epoch" not in attempt and "seq" not in attempt
+    assert "epoch" not in body and "seq" not in body
     assert str(attempt["calibration_id"]) == body["calibration_id"]
     assert body["correction"]["freq_hz"] == pytest.approx(-0.05)
     assert asset_ports.traced[0][0] == "CALIBRATION_ATTEMPT"

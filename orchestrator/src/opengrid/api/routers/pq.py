@@ -67,9 +67,6 @@ _PROPOSAL_TTL_S = 60.0
 _CAPTURE_PROPOSAL_KIND = "pq-waveform-capture"
 _CALIBRATE_PROPOSAL_KIND = "pq-calibrate"
 _MQTT_API_PASSWORD_ENV = "OG_MQTT_API_PASSWORD"  # noqa: S105 -- an env-var *name*, never a secret value
-#: Calibration commands have no durable per-hub lease epoch yet; the guardian assigns the real
-#: (epoch, seq) in `og.calibration_command` (migration 0016). Same placeholder `opengrid.assets.runner` uses.
-_CALIBRATION_EPOCH = 1
 
 #: Publishes one JSON payload to a topic suffix under `[mqtt].topic_root`.
 CapturePublisher = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -392,9 +389,7 @@ async def confirm_calibration(
             sync_source="ntp_disciplined",
         ),
         bounds=DEFAULT_CALIBRATION_BOUNDS,
-        epoch=_CALIBRATION_EPOCH,
-        seq=int(now.timestamp()),
-        now=now,
+        now=now,  # no epoch/seq: the guardian assigns them on og.calibration_command when it signs (#30)
         lease_ttl_s=DEFAULT_CALIBRATION_LEASE_TTL_S,
     )
     if candidate is None:
