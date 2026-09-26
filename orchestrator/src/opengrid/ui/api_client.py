@@ -25,7 +25,6 @@ _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _TIMEOUT_S = 3.0
 _POST_TIMEOUT_S = 5.0
 _ENV_BASE_URL = "OG_API_BASE_URL"
-_REMOTE_USER_HEADER = "X-Remote-User"
 
 #: The identity of the browser request a screen route is serving, bound per request by
 #: `opengrid.ui.routes` and forwarded to `opengrid.api` as `X-Remote-User` (its auth requires it on every
@@ -40,8 +39,9 @@ def bind_remote_user(user: str | None) -> Token[str | None]:
 
 
 def _headers() -> dict[str, str]:
-    user = _remote_user.get()
-    return {_REMOTE_USER_HEADER: user} if user else {}
+    """Headers for a first-paint GET: the bound (already proxy-verified) identity plus the proxy secret,
+    exactly as `post_json` sends them (`_identity_headers`), or none when no identity is bound."""
+    return _identity_headers(_remote_user.get()) or {}
 
 
 class ApiUnavailable(Exception):  # noqa: N818 -- shared symbol name; ui-b's screens already import it

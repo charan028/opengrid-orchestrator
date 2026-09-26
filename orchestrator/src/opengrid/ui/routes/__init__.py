@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.staticfiles import StaticFiles
 
 from opengrid.ui.api_client import bind_remote_user
+from opengrid.ui.role import remote_user
 from opengrid.ui.routes import control_room, fleet, health
 from opengrid.ui.templating import TEMPLATES_DIR
 
@@ -25,10 +26,12 @@ STATIC_DIR = TEMPLATES_DIR.parent / "static"
 
 
 async def _forward_remote_user(request: Request) -> None:
-    """Bind the browser request's `X-Remote-User` (set by Apache) so `opengrid.ui.api_client` forwards
-    it to `opengrid.api`. Async on purpose: a sync dependency runs in a worker thread and its
+    """Bind the request's proxy-verified identity (`opengrid.ui.role.remote_user`: `X-Remote-User` only
+    when Apache's `X-OG-Proxy-Auth` secret matched, else `None`) so `opengrid.ui.api_client` forwards it
+    to `opengrid.api` on first-paint reads. Never the raw header: the UI must not vouch for an identity
+    Apache did not assert. Async on purpose: a sync dependency runs in a worker thread and its
     `ContextVar.set` would not reach the endpoint."""
-    bind_remote_user(request.headers.get("x-remote-user"))
+    bind_remote_user(remote_user(request))
 
 
 router = APIRouter(dependencies=[Depends(_forward_remote_user)])

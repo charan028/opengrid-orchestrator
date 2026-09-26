@@ -26,6 +26,7 @@ async def test_get_json_forwards_bound_remote_user(monkeypatch: pytest.MonkeyPat
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["remote_user"] = request.headers.get("X-Remote-User")
+        seen["proxy_auth"] = request.headers.get("X-OG-Proxy-Auth")
         return httpx.Response(200, json={"ok": True})
 
     real_client = httpx.AsyncClient
@@ -34,16 +35,19 @@ async def test_get_json_forwards_bound_remote_user(monkeypatch: pytest.MonkeyPat
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
     monkeypatch.setattr(api_client.httpx, "AsyncClient", patched)
+    monkeypatch.setenv("OG_API_PROXY_SECRET", "s3cret")
     token = api_client.bind_remote_user("operator")
     try:
         assert await api_client.get_json("/og/api/health") == {"ok": True}
     finally:
         api_client._remote_user.reset(token)
     assert seen["remote_user"] == "operator"
+    assert seen["proxy_auth"] == "s3cret"
 
     seen.clear()
     await api_client.get_json("/og/api/health")
     assert seen["remote_user"] is None
+    assert seen["proxy_auth"] is None
 
 
 def test_ui_route_binds_remote_user_for_its_api_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,11 +58,19 @@ def test_ui_route_binds_remote_user_for_its_api_calls(monkeypatch: pytest.Monkey
         raise api_client.ApiUnavailable("stub")
 
     monkeypatch.setattr(health_route, "get_json", fake_get_json)
+    monkeypatch.setenv("OG_API_PROXY_SECRET", "s3cret")
     app = FastAPI()
     app.include_router(ui.build_router(), prefix="/og")
     client = TestClient(app)
-    assert client.get("/og/health", headers={"X-Remote-User": "operator"}).status_code == 200
+    proxied = {"X-Remote-User": "operator", "X-OG-Proxy-Auth": "s3cret"}
+    assert client.get("/og/health", headers=proxied).status_code == 200
     assert seen and seen[0] == "operator"
+
+    # Without Apache's secret (a local process on the loopback port) the identity is not forwarded.
+    for spoofed in ({"X-Remote-User": "operator"}, {"X-Remote-User": "operator", "X-OG-Proxy-Auth": "no"}):
+        seen.clear()
+        assert client.get("/og/health", headers=spoofed).status_code == 200
+        assert seen and seen[0] is None
 
 
 def test_status_badge_shows_the_status_when_no_label_is_given() -> None:
