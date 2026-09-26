@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -79,88 +80,91 @@ async def fetch_reservation_aggregates(
     return [(r[0], r[1], r[2], float(r[3]), float(r[4])) for r in rows]
 
 
-async def fetch_lock_candidates(
+async def fetch_lock_commitment_candidates(
     pool: AsyncConnectionPool, *, since: datetime, now: datetime, limit: int = _DEFAULT_BATCH_LIMIT
-) -> tuple[list[tuple[str, datetime, datetime, float, float, bool]], datetime | None]:
-    """K13: commitments whose interval has fully elapsed (`interval_end <= now`) since the last
-    watermark, with the lowest grant seen for that obligation during the interval, and whether the
-    trace carries an allowed override/substitution reason for that obligation in that window.
-
-    Two bounded queries: the commitment/grant join is capped by `interval_end` range + `limit`; the
-    trace lookup (`ALLOWED_K13_TRACE_REASONS`, via the GIN index on `reason_codes`) runs only for
-    candidates that actually dipped below their committed floor -- typically a small subset, if any --
-    never for every commitment in the batch. Non-dipped rows are returned with `has_allowed_reason=True`
-    (harmless: `find_lock_violations` never flags a row that didn't dip, regardless of that flag).
+) -> tuple[list[tuple[UUID, datetime, datetime, float]], datetime | None]:
+    """K13: active commitments (`supersedes IS NULL`) whose interval has fully elapsed
+    (`interval_end <= now`) since the last watermark -- one row per (obligation, interval), bounded by
+    the `interval_end` range plus `limit`. Callers combine each candidate with its own
+    `fetch_grant_cycle_series`/`fetch_earliest_covering_trace_at` (`invariants.checks.find_dip` decides
+    whether it actually dipped) -- this function only enumerates WHICH commitments need checking.
     Returns `(rows, new_watermark)`; `new_watermark` is the latest `interval_end` seen.
     """
     sql = """
-        SELECT c.obligation_id, c.interval_start, c.interval_end, c.committed_kw,
-               COALESCE(MIN(g.granted_kw), 0)::float8 AS min_granted_kw
+        SELECT c.obligation_id, c.interval_start, c.interval_end, c.committed_kw
         FROM og.commitment c
-        LEFT JOIN og.grant g
-            ON g.obligation_id = c.obligation_id
-           AND g.created_at >= c.interval_start AND g.created_at < c.interval_end
         WHERE c.supersedes IS NULL AND c.interval_end <= %(now)s AND c.interval_end > %(since)s
-        GROUP BY c.obligation_id, c.interval_start, c.interval_end, c.committed_kw
         ORDER BY c.interval_end
         LIMIT %(limit)s
     """
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(sql, {"now": now, "since": since, "limit": limit})
         rows = await cur.fetchall()
-
-    results: list[tuple[str, datetime, datetime, float, float, bool]] = []
-    for obligation_id, interval_start, interval_end, committed_kw, min_granted_kw in rows:
-        committed_kw = float(committed_kw)
-        min_granted_kw = float(min_granted_kw)
-        dipped = min_granted_kw < committed_kw - _KW_TOLERANCE
-        has_allowed_reason = (
-            True
-            if not dipped
-            else await _trace_has_allowed_reason(
-                pool,
-                obligation_id=str(obligation_id),
-                window_start=interval_start,
-                window_end=interval_end,
-            )
-        )
-        results.append(
-            (
-                str(obligation_id),
-                interval_start,
-                interval_end,
-                committed_kw,
-                min_granted_kw,
-                has_allowed_reason,
-            )
-        )
+    results = [(r[0], r[1], r[2], float(r[3])) for r in rows]
     new_watermark = results[-1][2] if results else None
     return results, new_watermark
 
 
-async def _trace_has_allowed_reason(
-    pool: AsyncConnectionPool, *, obligation_id: str, window_start: datetime, window_end: datetime
-) -> bool:
+async def fetch_grant_cycle_series(
+    pool: AsyncConnectionPool, *, obligation_id: UUID, window_start: datetime, window_end: datetime
+) -> list[tuple[datetime, float]]:
+    """K13: one `(timestamp, total_kw)` sample per allocator cycle (`og.grant.cycle_id`) for
+    `obligation_id` inside `[window_start, window_end)`, `total_kw` already SUMMED ACROSS EVERY BANK
+    that cycle granted to -- K13 is defined on the OBLIGATION's total delivery against its committed
+    floor (00-invariants.md), not on any one bank's share of it (verified live 2026-09-26: comparing a
+    single bank's grant row to the whole obligation's `committed_kw` falsely flagged an ERCOT_AS
+    obligation whose banks summed exactly to its commitment). `is_headroom` grants are excluded -- they
+    are uncommitted spot capacity, not delivery against this obligation. Sorted by timestamp ascending
+    for `checks.find_dip`'s gap-scan."""
     sql = """
-        SELECT EXISTS (
-            SELECT 1 FROM og.trace
-            WHERE reason_codes && %(allowed)s
-              AND scope ->> 'obligation_id' = %(obligation_id)s
-              AND created_at >= %(window_start)s AND created_at < %(window_end)s
+        SELECT MIN(g.created_at) AS ts, SUM(g.granted_kw)::float8 AS total_kw
+        FROM og.grant g
+        WHERE g.obligation_id = %(obligation_id)s AND g.is_headroom = false
+          AND g.created_at >= %(window_start)s AND g.created_at < %(window_end)s
+        GROUP BY g.cycle_id
+        ORDER BY ts
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            sql, {"obligation_id": obligation_id, "window_start": window_start, "window_end": window_end}
         )
+        rows = await cur.fetchall()
+    return [(r[0], float(r[1])) for r in rows]
+
+
+async def fetch_earliest_covering_trace_at(
+    pool: AsyncConnectionPool, *, obligation_id: UUID, window_start: datetime, window_end: datetime
+) -> datetime | None:
+    """K13: the earliest time in `[window_start, window_end)` at which the trace already carried an
+    allowed override/substitution/shortfall reason (`ALLOWED_K13_TRACE_REASONS`) for `obligation_id`, or
+    `None` if none exists in that window.
+
+    The engine/allocator (`opengrid.engine.gateways.EngineLedgerGateway.record_shortfalls`/
+    `record_substitution_events`) trace these with the obligation id in the trace row's `payload`
+    (`payload->>'obligation_id'`) -- `og.trace.scope` is never populated by any writer (verified live
+    2026-09-26: `TraceStore.append` takes no `scope` argument at all), so a lookup against `scope` can
+    never match anything a real K13 exception ever writes. `reason_codes && ALLOWED_K13_TRACE_REASONS`
+    uses the GIN index on `reason_codes` (`ix_trace_reason`) to keep this cheap even as `og.trace` grows;
+    it also runs only for candidates `checks.find_dip` already found dipping, never for every commitment.
+    """
+    sql = """
+        SELECT MIN(created_at) FROM og.trace
+        WHERE reason_codes && %(allowed)s
+          AND payload ->> 'obligation_id' = %(obligation_id)s
+          AND created_at >= %(window_start)s AND created_at < %(window_end)s
     """
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             sql,
             {
                 "allowed": list(ALLOWED_K13_TRACE_REASONS),
-                "obligation_id": obligation_id,
+                "obligation_id": str(obligation_id),
                 "window_start": window_start,
                 "window_end": window_end,
             },
         )
         row = await cur.fetchone()
-    return bool(row[0]) if row is not None else False
+    return row[0] if row is not None and row[0] is not None else None
 
 
 async def fetch_orphan_reservations(

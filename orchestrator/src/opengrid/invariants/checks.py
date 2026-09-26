@@ -12,16 +12,10 @@ the property tests are the other half.
 
 from __future__ import annotations
 
+import itertools
 from datetime import datetime
 
-from opengrid.invariants.models import (
-    CHECK_K1_RESERVE_BREACH,
-    CHECK_K2_DOUBLE_SOLD,
-    CHECK_K13_LOCK_VIOLATION,
-    CHECK_ORPHAN_COMMITMENT,
-    CHECK_ORPHAN_RESERVATION,
-    Violation,
-)
+from opengrid.invariants.models import Violation
 
 # Float-compare tolerances, matching `opengrid.core.limits`' own 1e-9-scale epsilons (no separate,
 # undocumented slop introduced here).
@@ -85,33 +79,104 @@ def find_double_sold(
     return violations
 
 
+#: A gap in grant activity longer than this many seconds is treated as an implicit zero-delivery sample
+#: (see `find_dip`'s docstring). A named default so `opengrid.invariants` can override it via
+#: `[invariants].k13_max_grant_gap_s` (BUILD.md S5a: no hard-coded thresholds) without this module
+#: needing to know about config at all.
+DEFAULT_K13_MAX_GRANT_GAP_S = 30.0
+
+
+def find_dip(
+    *,
+    interval_start: datetime,
+    interval_end: datetime,
+    committed_kw: float,
+    cycles: list[tuple[datetime, float]],
+    max_gap_s: float = DEFAULT_K13_MAX_GRANT_GAP_S,
+) -> tuple[float, datetime] | None:
+    """K13: the worst (lowest) delivery point for one committed obligation-interval, comparing the
+    OBLIGATION's total delivery (already summed across every bank it holds -- see
+    `invariants.queries.fetch_grant_cycle_series`'s docstring) against `committed_kw`.
+
+    A stretch with NO grant activity at all is not "no evidence of a problem" -- it is the most severe
+    possible dip, since nothing was delivered -- so a gap between two samples (or between a window
+    boundary and its nearest sample) longer than `max_gap_s` counts as an implicit zero-kW sample at the
+    gap's start. Verified live 2026-09-26: a mid-window silence produced no flagged violation because a
+    plain `MIN()` over only the cycles that DID report looked fine, missing the silent stretch entirely.
+
+    `cycles` must be sorted by timestamp ascending. Returns `(dip_kw, dip_at)` for the single worst point
+    found (a low-water mark is enough: the lock is either held throughout the interval or it is not), or
+    `None` if the interval never fell below `committed_kw` -- including no gap large enough to count --
+    at all.
+    """
+    worst_kw: float | None = None
+    worst_at: datetime | None = None
+
+    def _consider(kw: float, at: datetime) -> None:
+        nonlocal worst_kw, worst_at
+        if worst_kw is None or kw < worst_kw:
+            worst_kw, worst_at = kw, at
+
+    boundary_points = [interval_start, *(ts for ts, _kw in cycles), interval_end]
+    for prev, nxt in itertools.pairwise(boundary_points):
+        if (nxt - prev).total_seconds() > max_gap_s:
+            _consider(0.0, prev)  # nothing delivered for this stretch: the worst possible point
+
+    for ts, total_kw in cycles:
+        _consider(total_kw, ts)
+
+    if worst_kw is None or worst_at is None or worst_kw >= committed_kw - _KW_TOLERANCE:
+        return None
+    return worst_kw, worst_at
+
+
+def _dip_is_covered(dip_at: datetime, earliest_covering_at: datetime | None) -> bool:
+    """K13 coverage policy -- the single place this rule lives, so it can change in one edit if the
+    owner's policy changes (task brief). A delivery dip is an ALLOWED consequence of a committed
+    obligation's SHORTFALL transition (K13's `R-COMMIT-LOCK-OVERRIDE-L0/L1/L2`/
+    `R-COMMIT-LOCK-INFEASIBLE` reasons, or a recorded `R-SUBSTITUTION`/`R-AS-RELEASE`) for as long as
+    that transition was already on record AT OR BEFORE the dip -- the rest of the window after a
+    mid-window SHORTFALL is its recorded consequence, not a fresh, unexplained violation. A dip that
+    happened BEFORE any such transition was traced is not excused by one recorded later.
+    """
+    return earliest_covering_at is not None and earliest_covering_at <= dip_at
+
+
 def find_lock_violations(
-    rows: list[tuple[str, datetime, datetime, float, float, bool]],
+    rows: list[tuple[str, datetime, datetime, float, float, datetime, datetime | None]],
 ) -> list[Violation]:
     """K13: a committed obligation's realized (granted) kW dipped below its committed floor during the
-    committed interval, with no allowed override/substitution reason code found in the trace for that
-    obligation in that window.
+    committed interval (`invariants.find_dip`), and that dip is not covered by an already-traced K13
+    exception (`_dip_is_covered`).
 
-    `rows`: `(obligation_id, interval_start, interval_end, committed_kw, min_granted_kw,
-    has_allowed_reason)` -- `min_granted_kw` is the worst (lowest) grant seen for the obligation across
-    the interval (a single low-water mark is enough: the lock is either held throughout or it is not);
-    `has_allowed_reason` is a trace lookup already done in SQL (`invariants.queries.fetch_lock_candidates`
-    joins `og.trace.reason_codes` against `opengrid.core.reasons.COMMIT_LOCK_OVERRIDE_REASONS |
-    {R_AS_RELEASE, R_SUBSTITUTION}` -- 00-invariants.md K13's own exception list, never re-declared here).
+    `rows`: `(obligation_id, interval_start, interval_end, committed_kw, dip_kw, dip_at,
+    earliest_covering_at)` -- callers (`opengrid.invariants.__init__`) only include rows where
+    `find_dip` already found a dip; `earliest_covering_at` is `invariants.queries.
+    fetch_earliest_covering_trace_at`'s result for that obligation/window, or `None`.
     """
     violations = []
-    for obligation_id, interval_start, interval_end, committed_kw, min_granted_kw, has_allowed_reason in rows:
-        if min_granted_kw < committed_kw - _KW_TOLERANCE and not has_allowed_reason:
-            violations.append(
-                Violation(
-                    scope={"obligation_id": obligation_id, "interval_start": interval_start.isoformat()},
-                    detail={
-                        "committed_kw": committed_kw,
-                        "min_granted_kw": min_granted_kw,
-                        "interval_end": interval_end.isoformat(),
-                    },
-                )
+    for (
+        obligation_id,
+        interval_start,
+        interval_end,
+        committed_kw,
+        dip_kw,
+        dip_at,
+        earliest_covering_at,
+    ) in rows:
+        if _dip_is_covered(dip_at, earliest_covering_at):
+            continue
+        violations.append(
+            Violation(
+                scope={"obligation_id": obligation_id, "interval_start": interval_start.isoformat()},
+                detail={
+                    "committed_kw": committed_kw,
+                    "dip_kw": dip_kw,
+                    "dip_at": dip_at.isoformat(),
+                    "interval_end": interval_end.isoformat(),
+                },
             )
+        )
     return violations
 
 
@@ -150,14 +215,3 @@ def find_orphan_commitments(
         )
         for commitment_id, obligation_id, interval_start, obligation_state in rows
     ]
-
-
-#: Maps each check name to the `Violation`-producing function above (used by `invariants.__init__` to
-#: keep the run loop generic rather than hand-listing every check by name twice).
-CHECK_FUNCTIONS = {
-    CHECK_K1_RESERVE_BREACH: find_reserve_breaches,
-    CHECK_K2_DOUBLE_SOLD: find_double_sold,
-    CHECK_K13_LOCK_VIOLATION: find_lock_violations,
-    CHECK_ORPHAN_RESERVATION: find_orphan_reservations,
-    CHECK_ORPHAN_COMMITMENT: find_orphan_commitments,
-}

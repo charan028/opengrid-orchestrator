@@ -59,25 +59,110 @@ def test_find_double_sold_clean_when_within_capacity() -> None:
 # --- K13: commitment-lock violation ------------------------------------------------------------------
 
 
-def test_find_lock_violations_detects_dip_without_allowed_reason() -> None:
+def test_find_lock_violations_detects_dip_without_covering_reason() -> None:
     start = NOW
     end = NOW + timedelta(minutes=15)
-    rows = [("ob-1", start, end, 100.0, 40.0, False)]  # granted well below committed, no override
+    dip_at = start + timedelta(minutes=5)
+    rows = [("ob-1", start, end, 100.0, 40.0, dip_at, None)]  # no covering trace at all
     violations = checks.find_lock_violations(rows)
     assert len(violations) == 1
     assert violations[0].scope == {"obligation_id": "ob-1", "interval_start": start.isoformat()}
     assert violations[0].detail["committed_kw"] == 100.0
-    assert violations[0].detail["min_granted_kw"] == 40.0
+    assert violations[0].detail["dip_kw"] == 40.0
 
 
-def test_find_lock_violations_clean_when_allowed_reason_present() -> None:
-    rows = [("ob-1", NOW, NOW + timedelta(minutes=15), 100.0, 40.0, True)]
+def test_find_lock_violations_clean_when_covering_reason_at_or_before_dip() -> None:
+    start = NOW
+    dip_at = start + timedelta(minutes=5)
+    rows = [("ob-1", start, start + timedelta(minutes=15), 100.0, 40.0, dip_at, dip_at)]
     assert checks.find_lock_violations(rows) == []
 
 
-def test_find_lock_violations_clean_when_not_dipped() -> None:
-    rows = [("ob-1", NOW, NOW + timedelta(minutes=15), 100.0, 100.0, False)]
-    assert checks.find_lock_violations(rows) == []
+def test_find_lock_violations_flagged_when_covering_reason_after_dip() -> None:
+    """A SHORTFALL traced AFTER the dip does not retroactively excuse it (checks._dip_is_covered)."""
+    start = NOW
+    dip_at = start + timedelta(minutes=5)
+    covering_at = start + timedelta(minutes=6)
+    rows = [("ob-1", start, start + timedelta(minutes=15), 100.0, 40.0, dip_at, covering_at)]
+    assert len(checks.find_lock_violations(rows)) == 1
+
+
+# --- K13: find_dip (worst delivery point, including implicit-zero gaps) -------------------------------
+
+
+def test_find_dip_none_when_never_below_committed() -> None:
+    # A window no wider than the cycles' own coverage plus max_gap_s -- no implicit-zero gap forms,
+    # isolating the "did any recorded cycle dip" question from the separate gap-detection behaviour.
+    start = NOW
+    end = start + timedelta(seconds=6)
+    cycles = [(start + timedelta(seconds=2), 100.0), (start + timedelta(seconds=4), 100.0)]
+    assert checks.find_dip(interval_start=start, interval_end=end, committed_kw=100.0, cycles=cycles) is None
+
+
+def test_find_dip_detects_low_cycle_total() -> None:
+    start = NOW
+    end = start + timedelta(seconds=8)
+    low_at = start + timedelta(seconds=4)
+    cycles = [(start + timedelta(seconds=2), 100.0), (low_at, 40.0), (start + timedelta(seconds=6), 100.0)]
+    dip = checks.find_dip(interval_start=start, interval_end=end, committed_kw=100.0, cycles=cycles)
+    assert dip == (40.0, low_at)
+
+
+def test_find_dip_sums_grants_across_banks_in_the_same_cycle() -> None:
+    """The bug the lead reported: an obligation whose banks summed EXACTLY to its commitment must not be
+    flagged. `fetch_grant_cycle_series` sums across banks before `find_dip` ever sees a row, so a single
+    combined sample equal to the commitment is clean."""
+    start = NOW
+    end = start + timedelta(seconds=4)
+    cycles = [(start + timedelta(seconds=2), 500.0)]  # already summed across every bank for that cycle
+    assert checks.find_dip(interval_start=start, interval_end=end, committed_kw=500.0, cycles=cycles) is None
+
+
+def test_find_dip_detects_gap_with_no_grant_activity_at_all() -> None:
+    """The most important case: a stretch with literally no grant row is worse than any recorded low
+    value, and must not be invisible to a plain MIN() over only the cycles that DID report."""
+    start = NOW
+    end = NOW + timedelta(minutes=15)
+    # Grants for the first minute, then total silence for the rest of the 15-minute window.
+    cycles = [(start + timedelta(seconds=2), 100.0), (start + timedelta(seconds=4), 100.0)]
+    dip = checks.find_dip(
+        interval_start=start, interval_end=end, committed_kw=100.0, cycles=cycles, max_gap_s=30.0
+    )
+    assert dip is not None
+    dip_kw, dip_at = dip
+    assert dip_kw == 0.0
+    assert dip_at == start + timedelta(seconds=4)  # the gap starts right after the last real sample
+
+
+def test_find_dip_detects_gap_when_there_are_no_cycles_at_all() -> None:
+    start = NOW
+    end = NOW + timedelta(minutes=15)
+    dip = checks.find_dip(
+        interval_start=start, interval_end=end, committed_kw=100.0, cycles=[], max_gap_s=30.0
+    )
+    assert dip == (0.0, start)
+
+
+def test_find_dip_none_for_a_short_window_with_no_cycles_yet() -> None:
+    """A just-committed interval shorter than the gap threshold hasn't had time to prove anything either
+    way -- not enough elapsed silence to call it a gap yet."""
+    start = NOW
+    end = NOW + timedelta(seconds=10)
+    assert (
+        checks.find_dip(interval_start=start, interval_end=end, committed_kw=100.0, cycles=[], max_gap_s=30.0)
+        is None
+    )
+
+
+# --- K13: _dip_is_covered (the single-source coverage policy) ------------------------------------------
+
+
+def test_dip_is_covered_policy_directly() -> None:
+    dip_at = NOW
+    assert checks._dip_is_covered(dip_at, None) is False
+    assert checks._dip_is_covered(dip_at, dip_at) is True  # covering trace at the same instant counts
+    assert checks._dip_is_covered(dip_at, dip_at - timedelta(seconds=1)) is True  # before the dip
+    assert checks._dip_is_covered(dip_at, dip_at + timedelta(seconds=1)) is False  # after the dip
 
 
 # --- orphan reservations / commitments ----------------------------------------------------------------

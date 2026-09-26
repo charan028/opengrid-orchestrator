@@ -124,6 +124,38 @@ async def test_an_always_failing_job_is_reported_stalled() -> None:
     await runner.stop()
 
 
+async def test_stall_watch_adopts_alerts_from_a_previous_process() -> None:
+    """Health no longer clears foreign rules, so an ALR-SETTLE-STALLED left open by a previous og-settle
+    must be cleared by this one once the job progresses -- and not raised twice while it is still stalled."""
+    from opengrid.settle.main import StallWatch
+
+    stalled: dict[str, float] = {}
+    raised: list[object] = []
+    cleared: list[int] = []
+
+    async def _raise(finding) -> int:
+        raised.append(finding)
+        return 99
+
+    async def _clear(alert_id: int) -> None:
+        cleared.append(alert_id)
+
+    async def _find_open() -> dict[str, int]:
+        return {"settle": 7}
+
+    healthy = StallWatch(lambda: dict(stalled), raise_alert=_raise, clear_alert=_clear, find_open=_find_open)
+    await healthy.check()
+    assert cleared == [7] and raised == []
+
+    stalled["settle"] = 400.0
+    still = StallWatch(lambda: dict(stalled), raise_alert=_raise, clear_alert=_clear, find_open=_find_open)
+    await still.check()
+    assert raised == []  # adopted, not duplicated
+    stalled.clear()
+    await still.check()
+    assert cleared == [7, 7]
+
+
 async def test_asset_drift_job_runs_the_assets_sweep(monkeypatch) -> None:
     import opengrid.settle.main as settle_main
     from opengrid.assets.runner import RunOnceResult

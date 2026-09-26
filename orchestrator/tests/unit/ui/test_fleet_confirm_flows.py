@@ -16,7 +16,7 @@ import opengrid.ui.api_client as api_client
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
-_OPERATOR = {"X-OG-Role": "operator"}
+_OPERATOR = {"X-Remote-User": "alice"}
 
 
 def _load(name: str) -> Any:
@@ -47,6 +47,25 @@ def test_propose_safestop_renders_real_proposal_as_an_open_confirm_dialog(
     assert "remaining: 60.0" in body or "remaining: 60" in body
     # rendered already open (open_default=True, show_trigger=False): no separate trigger button
     assert "open: true" in body
+    # the real Apache-authenticated identity is forwarded to the API, never left off
+    assert fake_post_api.posted[-1]["remote_user"] == "alice"  # type: ignore[attr-defined]
+
+
+def test_propose_safestop_rejects_a_spoofed_x_og_role_header(
+    client: TestClient, fake_post_api: Callable[[dict[str, Any]], None]
+) -> None:
+    """A caller with no real operator identity must not gain access by setting `X-OG-Role` themselves --
+    Apache's `/og/` fragment never sets or strips that header, so it must never be trusted here."""
+    fake_post_api({"/og/api/safestop": _load("fleet_safestop_propose.json")})
+
+    response = client.post(
+        "/og/fleet/safestop/propose",
+        data={"scope": "fleet", "scope_id": "", "reason": "planned maintenance"},
+        headers={"X-OG-Role": "operator"},
+    )
+
+    assert response.status_code == 403
+    assert fake_post_api.posted == []  # type: ignore[attr-defined]
 
 
 def test_propose_safestop_renders_error_fragment_when_api_unavailable(
@@ -90,6 +109,22 @@ def test_confirm_safestop_renders_engaged_result(
     body = response.text
     assert "ENGAGED" in body
     assert result["trace_id"] in body
+    assert fake_post_api.posted[-1]["remote_user"] == "alice"  # type: ignore[attr-defined]
+
+
+def test_confirm_safestop_rejects_a_spoofed_x_og_role_header(
+    client: TestClient, fake_post_api: Callable[[dict[str, Any]], None]
+) -> None:
+    result = _load("fleet_safestop_confirm.json")
+    fake_post_api({"/og/api/safestop/11111111-1111-1111-1111-111111111111/confirm": result})
+
+    response = client.post(
+        "/og/fleet/safestop/11111111-1111-1111-1111-111111111111/confirm",
+        headers={"X-OG-Role": "operator"},
+    )
+
+    assert response.status_code == 403
+    assert fake_post_api.posted == []  # type: ignore[attr-defined]
 
 
 def test_confirm_safestop_renders_timeout_result_on_503(
@@ -135,6 +170,22 @@ def test_propose_command_renders_real_proposal_as_an_open_confirm_dialog(
     body = response.text
     assert proposal["summary"] in body
     assert f"/og/fleet/command/{proposal['proposal_id']}/confirm" in body
+    assert fake_post_api.posted[-1]["remote_user"] == "alice"  # type: ignore[attr-defined]
+
+
+def test_propose_command_rejects_a_spoofed_x_og_role_header(
+    client: TestClient, fake_post_api: Callable[[dict[str, Any]], None]
+) -> None:
+    fake_post_api({"/og/api/fleet/command": _load("fleet_command_propose.json")})
+
+    response = client.post(
+        "/og/fleet/command/propose",
+        data={"bank_id": "bank-01", "hub_id": "", "p_kw_setpoint": "5.0", "reason": "load test"},
+        headers={"X-OG-Role": "operator"},
+    )
+
+    assert response.status_code == 403
+    assert fake_post_api.posted == []  # type: ignore[attr-defined]
 
 
 def test_propose_command_requires_bank_or_hub_id(
@@ -166,6 +217,7 @@ def test_confirm_command_renders_pass_result(
     body = response.text
     assert "PASS" in body
     assert result["trace_id"] in body
+    assert fake_post_api.posted[-1]["remote_user"] == "alice"  # type: ignore[attr-defined]
 
 
 def test_confirm_command_renders_veto_result_on_409(
@@ -213,6 +265,7 @@ def test_health_ack_alert_relays_the_real_path_param_endpoint(
     body = response.text
     assert "ACKED" in body
     assert alert["acked_by"] in body
+    assert fake_post_api.posted[-1]["remote_user"] == "alice"  # type: ignore[attr-defined]
 
 
 def test_control_room_ack_alert_relays_the_real_path_param_endpoint(
@@ -225,6 +278,7 @@ def test_control_room_ack_alert_relays_the_real_path_param_endpoint(
 
     assert response.status_code == 200
     assert "ACKED" in response.text
+    assert fake_post_api.posted[-1]["remote_user"] == "alice"  # type: ignore[attr-defined]
 
 
 def test_ack_alert_is_forbidden_for_a_viewer(
@@ -235,3 +289,17 @@ def test_ack_alert_is_forbidden_for_a_viewer(
     response = client.post("/og/health/alerts/ack", data={"alert_id": "7"})
 
     assert response.status_code == 403
+
+
+def test_ack_alert_rejects_a_spoofed_x_og_role_header(
+    client: TestClient, fake_post_api: Callable[[dict[str, Any]], None]
+) -> None:
+    """Covers both the Health and Control room copies of the ack action (BUILD.md code-review round
+    item 5): a client-supplied `X-OG-Role` must not stand in for the missing real identity."""
+    fake_post_api({"/og/api/alerts/7/ack": _load("alert_ack.json")})
+
+    for path in ("/og/health/alerts/ack", "/og/alerts/ack"):
+        response = client.post(path, data={"alert_id": "7"}, headers={"X-OG-Role": "operator"})
+        assert response.status_code == 403
+
+    assert fake_post_api.posted == []  # type: ignore[attr-defined]

@@ -48,6 +48,7 @@ from opengrid.allocator.models import (
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
 from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, COMMIT_LOCK_OVERRIDE_REASONS, R_SUBSTITUTION
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine.alerts import clear_open_alerts
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.health.rules import evaluate_energy_shortfall_risk_alert
@@ -421,6 +422,7 @@ class EnergySufficiencyGateway:
         self._lookahead = timedelta(seconds=lookahead_s)
         # Obligations currently AT_RISK: the trace/alert is written on ENTRY only, not every 2 s cycle.
         self._at_risk: set[str] = set()
+        self._alerts_swept = False
 
     async def run(self, now: datetime) -> list[EnergySufficiencyResult]:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -440,10 +442,26 @@ class EnergySufficiencyGateway:
 
         results = await self._evaluate_banks(by_bank, now)
         now_at_risk = {r.obligation_id for r in results if r.at_risk}
-        for obligation_id in self._at_risk - now_at_risk:
+        recovered = self._at_risk - now_at_risk
+        for obligation_id in recovered:
             await self._set_at_risk(obligation_id, False)
         self._at_risk &= now_at_risk  # recovered obligations may alert again on a later entry
+        if recovered or not self._alerts_swept:
+            # This hook raised ALR-ENERGY-SHORTFALL-RISK, so it clears it (health only auto-clears its own
+            # rules). The first run also clears alerts left open by a previous engine process.
+            await self._clear_resolved_alerts(now_at_risk)
+            self._alerts_swept = True
         return results
+
+    async def _clear_resolved_alerts(self, still_at_risk: set[str]) -> None:
+        try:
+            await clear_open_alerts(
+                self._pool,
+                ALR_ENERGY_SHORTFALL_RISK,
+                lambda detail: str(detail.get("obligation_id")) not in still_at_risk,
+            )
+        except Exception:
+            logger.exception("could not clear resolved energy-shortfall alerts")
 
     @staticmethod
     async def _set_at_risk(

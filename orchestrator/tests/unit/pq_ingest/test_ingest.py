@@ -19,6 +19,9 @@ class FakeBackend:
         self.raw_indices: list[PqWaveformRawIndex] = []
         self.batch_calls: list[int] = []
         self.fail_batches = False
+        self.characterization_batches: list[int] = []
+        self.hub_inverter_pq: dict[str, object] = {}
+        self.fail_characterization = False
 
     async def insert_summary(self, row: PqWaveformSummaryRow) -> None:
         self.summaries.append(row)
@@ -34,6 +37,13 @@ class FakeBackend:
 
     async def latest_summaries(self, hub_ids, *, since):
         return [s for s in self.summaries if s.hub_id in hub_ids and s.ts >= since]
+
+    async def upsert_hub_inverter_pq_batch(self, rows) -> None:
+        if self.fail_characterization:
+            raise RuntimeError("simulated characterization backend failure")
+        self.characterization_batches.append(len(rows))
+        for row in rows:
+            self.hub_inverter_pq[row.hub_id] = row
 
 
 class FakeBlobStore:
@@ -193,3 +203,58 @@ async def test_latest_summaries_reads_through_backend(_configure) -> None:
     rows = await pq_ingest.latest_summaries(["hub-00000"], since=datetime(2020, 1, 1, tzinfo=UTC))
     assert len(rows) == 1
     assert rows[0].hub_id == "hub-00000"
+
+
+# ---------------------------------------------------------------------------
+# run_characterization_pass (blocker fix: og.hub_inverter_pq had 0 live rows)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_characterization_pass_upserts_hubs_with_enough_data(_configure) -> None:
+    backend, _ = _configure
+    now = datetime(2026, 9, 26, 0, 5, 0, tzinfo=UTC)  # within the default 15-min window of ts
+    await pq_ingest.ingest_summary(_SUMMARY_PAYLOAD)
+    await pq_ingest.flush_summaries()
+
+    characterized = await pq_ingest.run_characterization_pass(["hub-00000"], now=now)
+
+    assert characterized == 1
+    assert backend.characterization_batches == [1]  # one batched call, not one per hub
+    assert "hub-00000" in backend.hub_inverter_pq
+
+
+async def test_run_characterization_pass_is_one_batched_read_and_write_for_many_hubs(
+    _configure,
+) -> None:
+    backend, _ = _configure
+    now = datetime(2026, 9, 26, 0, 5, 0, tzinfo=UTC)
+    hub_ids = [f"hub-{i:05d}" for i in range(50)]
+    for hub_id in hub_ids:
+        await pq_ingest.ingest_summary({**_SUMMARY_PAYLOAD, "hub_id": hub_id})
+    await pq_ingest.flush_summaries()
+
+    characterized = await pq_ingest.run_characterization_pass(hub_ids, now=now)
+
+    assert characterized == 50
+    assert backend.characterization_batches == [50]  # one batch call for all 50 hubs
+
+
+async def test_run_characterization_pass_skips_hubs_without_enough_data(_configure) -> None:
+    backend, _ = _configure
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+
+    characterized = await pq_ingest.run_characterization_pass(["hub-nonexistent"], now=now)
+
+    assert characterized == 0
+    assert backend.characterization_batches == []
+
+
+async def test_run_characterization_pass_propagates_and_counts_backend_failure(_configure) -> None:
+    backend, _ = _configure
+    backend.fail_characterization = True
+    now = datetime(2026, 9, 26, 0, 5, 0, tzinfo=UTC)
+    await pq_ingest.ingest_summary(_SUMMARY_PAYLOAD)
+    await pq_ingest.flush_summaries()
+
+    with pytest.raises(RuntimeError, match="simulated characterization backend failure"):
+        await pq_ingest.run_characterization_pass(["hub-00000"], now=now)

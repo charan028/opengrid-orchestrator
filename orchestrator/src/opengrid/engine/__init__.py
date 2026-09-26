@@ -41,9 +41,10 @@ from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine import metrics as engine_metrics
+from opengrid.engine.alerts import clear_open_alerts
 from opengrid.engine.background import BackgroundIngest, run_periodic
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
-from opengrid.engine.gates import run_due_gates
+from opengrid.engine.gates import ALR_SELECTOR_GATE_FAILED, gate_failure_matches, run_due_gates
 from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
 from opengrid.health.queries import raise_alert
@@ -473,6 +474,15 @@ async def propose_all_banks[G](
     return failed
 
 
+async def characterize_hubs() -> int:
+    """One PQ characterization pass over every hub in the fleet twin (fills `og.hub_inverter_pq` from
+    measured waveform summaries; one batched read, one async-commit upsert). Run by `run_periodic` every
+    `[pq_ingest].characterization_interval_s`; a failure is logged there and retried next interval."""
+    from opengrid import fleet, pq_ingest
+
+    return await pq_ingest.run_characterization_pass(fleet.known_hub_ids())
+
+
 async def beat_if_ticking(state: Any, *, monotonic_now: float | None = None) -> bool:
     """Write og-engine's heartbeat, run by `run_periodic` beside the dispatch tick -- but only while that
     tick keeps completing (within 3 cycles), so a hung tick still reads as "engine down" to health. The
@@ -544,6 +554,9 @@ async def _engine_tick(state: _EngineState) -> None:
                     contract_id, plan_id, now
                 ),
                 observe_duration=engine_metrics.observe_gate,
+                clear_failure=lambda kind, scope: clear_open_alerts(
+                    state.heartbeat_pool, ALR_SELECTOR_GATE_FAILED, gate_failure_matches(kind, scope)
+                ),
             ),
         )
 
@@ -774,6 +787,18 @@ async def main(cfg: Config) -> None:
             persist_task = asyncio.create_task(
                 run_periodic("fleet-persist", state.cycle_interval_s, lambda: persist_fleet_state(state))
             )
+            characterize_task = asyncio.create_task(
+                run_periodic(
+                    "pq-characterize",
+                    float(
+                        cfg.get(
+                            "pq_ingest.characterization_interval_s",
+                            pq_mod.DEFAULT_CHARACTERIZATION_INTERVAL_S,
+                        )
+                    ),
+                    characterize_hubs,
+                )
+            )
             heartbeat_task = asyncio.create_task(
                 run_periodic("heartbeat", state.cycle_interval_s, lambda: beat_if_ticking(state))
             )
@@ -782,7 +807,15 @@ async def main(cfg: Config) -> None:
                     lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
-                background = (raw_task, cal_task, summary_task, lag_task, persist_task, heartbeat_task)
+                background = (
+                    raw_task,
+                    cal_task,
+                    summary_task,
+                    lag_task,
+                    persist_task,
+                    heartbeat_task,
+                    characterize_task,
+                )
                 for task in {ingest_task, *background}:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

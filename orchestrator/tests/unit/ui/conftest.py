@@ -16,8 +16,17 @@ from fastapi.testclient import TestClient
 
 import opengrid.ui as ui
 import opengrid.ui.api_client as api_client
+from opengrid.platform.config import Config
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# `opengrid.ui.role.role_of` maps the trusted `X-Remote-User` identity through `[api.roles]` config
+# (`opengrid.api.auth.role_for_identity`), the same table the API itself uses -- these tests exercise UI
+# route guards against named accounts, mirroring `tests/unit/api/test_safestop_release.py`'s ALICE/BOB.
+# The literal identities "operator"/"viewer" also resolve via `role_for_identity`'s zero-config fallback
+# (Apache's own accounts are named exactly that), so a bare `X-Remote-User: operator` works without being
+# listed here too.
+TEST_ROLES_CONFIG = Config({"api": {"roles": {"operator": ["alice", "bob"], "viewer": ["carol"]}}})
 
 
 def load_fixture(name: str) -> Any:
@@ -29,6 +38,7 @@ def load_fixture(name: str) -> Any:
 def app() -> FastAPI:
     application = FastAPI()
     application.include_router(ui.build_router(), prefix="/og")
+    application.state.config = TEST_ROLES_CONFIG
     return application
 
 

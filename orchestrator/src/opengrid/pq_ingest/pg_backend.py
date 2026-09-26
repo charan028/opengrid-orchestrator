@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.pq import PqWaveformRawIndex, PqWaveformSummaryRow
+from opengrid.pq_ingest.characterize import HubCharacterization
 
 # Waveform summaries are soft telemetry -- replayable from the hub's next publish and cross-checked by
 # the S6.5-step-2 audit job against raw captures -- never the ledger/commitment/trace tables that keep
@@ -43,6 +44,33 @@ INSERT INTO og.pq_waveform_summary (
 )
 ON CONFLICT (hub_id, ts) DO NOTHING
 """
+
+_UPSERT_HUB_INVERTER_PQ_SQL = """
+INSERT INTO og.hub_inverter_pq (
+    hub_id, phase_connection, kva_rating, freq_offset_hz, freq_offset_std_hz,
+    voltage_offset_pct, voltage_offset_std_pct, thd_current_pct, dominant_harmonics,
+    phase_angle_error_deg, quality_score, last_estimated_at
+) VALUES (
+    %(hub_id)s, %(phase_connection)s, %(kva_rating)s, %(freq_offset_hz)s, %(freq_offset_std_hz)s,
+    %(voltage_offset_pct)s, %(voltage_offset_std_pct)s, %(thd_current_pct)s, %(dominant_harmonics)s,
+    %(phase_angle_error_deg)s, %(quality_score)s, %(last_estimated_at)s
+)
+ON CONFLICT (hub_id) DO UPDATE SET
+    freq_offset_hz = EXCLUDED.freq_offset_hz,
+    freq_offset_std_hz = EXCLUDED.freq_offset_std_hz,
+    voltage_offset_pct = EXCLUDED.voltage_offset_pct,
+    voltage_offset_std_pct = EXCLUDED.voltage_offset_std_pct,
+    thd_current_pct = EXCLUDED.thd_current_pct,
+    dominant_harmonics = COALESCE(EXCLUDED.dominant_harmonics, og.hub_inverter_pq.dominant_harmonics),
+    phase_angle_error_deg = EXCLUDED.phase_angle_error_deg,
+    quality_score = EXCLUDED.quality_score,
+    last_estimated_at = EXCLUDED.last_estimated_at
+"""
+# `kva_rating`/`phase_connection` on a first INSERT only; `pf_min_leading`/`pf_min_lagging`/
+# `response_time_ms`/`ride_through_class`/`asset_state*` are omitted from BOTH the column list
+# and the UPDATE SET -- the table's own DEFAULTs apply on first insert (0011_asset_health.sql),
+# and a repeat characterization pass never clobbers whatever a later, better-informed writer of
+# those nameplate/asset-health fields has set (see characterize.py's own docstring).
 
 _INSERT_RAW_INDEX_SQL = """
 INSERT INTO og.pq_waveform_raw_index (
@@ -124,6 +152,39 @@ class PgPqIngestBackend:
         params["harmonics_v"] = Jsonb(params["harmonics_v"]) if row.harmonics_v is not None else None
         params["harmonics_i"] = Jsonb(params["harmonics_i"]) if row.harmonics_i is not None else None
         return params
+
+    async def upsert_hub_inverter_pq_batch(self, rows: Sequence[HubCharacterization]) -> None:
+        """S3.1/S5.1/S6.5, blocker fix: one `executemany` + one async commit for every hub
+        characterized this pass -- never a per-hub UPDATE. Async commit for the same reason as
+        `insert_summaries_batch`: `og.hub_inverter_pq` is "refreshed from a periodic sim/
+        estimation job... never billed directly" (the migration's own comment)."""
+        if not rows:
+            return
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ASYNC_COMMIT_SQL)
+            for start in range(0, len(rows), _BATCH_CHUNK_SIZE):
+                chunk = rows[start : start + _BATCH_CHUNK_SIZE]
+                await cur.executemany(
+                    _UPSERT_HUB_INVERTER_PQ_SQL, [self._characterization_params(row) for row in chunk]
+                )
+            await conn.commit()
+
+    @staticmethod
+    def _characterization_params(row: HubCharacterization) -> dict[str, object]:
+        return {
+            "hub_id": row.hub_id,
+            "phase_connection": row.phase_connection,
+            "kva_rating": row.kva_rating,
+            "freq_offset_hz": row.freq_offset_hz,
+            "freq_offset_std_hz": row.freq_offset_std_hz,
+            "voltage_offset_pct": row.voltage_offset_pct,
+            "voltage_offset_std_pct": row.voltage_offset_std_pct,
+            "thd_current_pct": row.thd_current_pct,
+            "dominant_harmonics": Jsonb(row.dominant_harmonics) if row.dominant_harmonics else None,
+            "phase_angle_error_deg": row.phase_angle_error_deg,
+            "quality_score": row.quality_score,
+            "last_estimated_at": row.last_estimated_at,
+        }
 
     async def insert_raw_index(self, row: PqWaveformRawIndex) -> None:
         params = row.model_dump(mode="json")

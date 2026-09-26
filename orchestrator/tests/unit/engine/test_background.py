@@ -63,6 +63,24 @@ async def test_raw_capture_handler_validates_off_loop_and_drops_invalid(monkeypa
     assert ingested == []
 
 
+async def test_characterization_pass_covers_every_hub_in_the_twin(monkeypatch) -> None:
+    import opengrid.fleet as fleet
+    import opengrid.pq_ingest as pq_ingest
+    from opengrid.engine import characterize_hubs
+
+    seen: list[list[str]] = []
+
+    async def _pass(hub_ids, **kwargs):
+        seen.append(list(hub_ids))
+        return len(hub_ids)
+
+    monkeypatch.setattr(fleet, "known_hub_ids", lambda: ["hub-1", "hub-2"])
+    monkeypatch.setattr(pq_ingest, "run_characterization_pass", _pass)
+
+    assert await characterize_hubs() == 2
+    assert seen == [["hub-1", "hub-2"]]
+
+
 async def test_waveform_summaries_are_ingested_off_the_mqtt_loop(monkeypatch) -> None:
     """Live 2026-09-26 06:04-06:09: pq_ingest.ingest_summary's size-triggered flush ran on the MQTT ingest
     loop and, during a host disk stall, held telemetry until hubs aged. The summary path is now a

@@ -28,3 +28,12 @@ summaries_flush_failed_total = Counter(
     "og_pq_ingest_summaries_flush_failed_total",
     "Batched summary flushes that raised (the rows were requeued, subject to the buffer cap).",
 )
+hubs_characterized_total = Counter(
+    "og_pq_ingest_hubs_characterized_total",
+    "Hubs upserted into og.hub_inverter_pq by a characterization pass.",
+)
+characterization_passes_total = Counter(
+    "og_pq_ingest_characterization_passes_total",
+    "Completed run_characterization_pass() calls, by outcome.",
+    labelnames=("outcome",),  # ok | failed
+)

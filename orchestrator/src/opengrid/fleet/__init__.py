@@ -487,6 +487,11 @@ def rated_discharge_kw(bank_id: str) -> float:
     return bank_capability([_hubs[h].params.p_kw for h in bank_rt.hub_ids], bank_rt.params)
 
 
+def known_hub_ids() -> list[str]:
+    """Every hub the twin has topology for (e.g. og-engine's periodic PQ characterization pass)."""
+    return list(_hubs.keys())
+
+
 def known_bank_ids() -> list[str]:
     """Every bank the twin has topology for (merge task, dispatch-live pass): the engine's
     `FleetGateway.bank_ids()` adapter reads this so `opengrid.allocator.run_cycle` covers every real

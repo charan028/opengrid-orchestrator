@@ -28,7 +28,9 @@ class _FakeQueries:
     def __init__(self) -> None:
         self.reserve_rows: list[tuple] = []
         self.reservation_agg_rows: list[tuple] = []
-        self.lock_rows: list[tuple] = []
+        self.lock_commitment_candidates: list[tuple] = []
+        self.grant_cycle_series_by_obligation: dict = {}
+        self.covering_trace_at_by_obligation: dict = {}
         self.orphan_reservation_rows: list[tuple] = []
         self.orphan_commitment_rows: list[tuple] = []
         self.states: dict[str, CheckState] = {}
@@ -44,8 +46,17 @@ class _FakeQueries:
     async def fetch_reservation_aggregates(self, pool, *, horizon_start):
         return self.reservation_agg_rows
 
-    async def fetch_lock_candidates(self, pool, *, since, now, limit=5000):
-        return self.lock_rows, (self.lock_rows[-1][2] if self.lock_rows else None)
+    async def fetch_lock_commitment_candidates(self, pool, *, since, now, limit=5000):
+        return (
+            self.lock_commitment_candidates,
+            (self.lock_commitment_candidates[-1][2] if self.lock_commitment_candidates else None),
+        )
+
+    async def fetch_grant_cycle_series(self, pool, *, obligation_id, window_start, window_end):
+        return self.grant_cycle_series_by_obligation.get(obligation_id, [])
+
+    async def fetch_earliest_covering_trace_at(self, pool, *, obligation_id, window_start, window_end):
+        return self.covering_trace_at_by_obligation.get(obligation_id)
 
     async def fetch_orphan_reservations(self, pool, *, limit=5000):
         return self.orphan_reservation_rows
@@ -125,11 +136,27 @@ async def test_run_once_detects_seeded_double_sold(fake_queries: _FakeQueries) -
 async def test_run_once_detects_seeded_lock_violation(fake_queries: _FakeQueries) -> None:
     from datetime import timedelta
 
-    fake_queries.lock_rows = [("ob-1", NOW, NOW + timedelta(minutes=15), 100.0, 10.0, False)]
+    fake_queries.lock_commitment_candidates = [("ob-1", NOW, NOW + timedelta(minutes=15), 100.0)]
+    fake_queries.grant_cycle_series_by_obligation["ob-1"] = [(NOW + timedelta(seconds=2), 10.0)]
+    # No covering trace registered for "ob-1" -- fetch_earliest_covering_trace_at defaults to None.
 
     outcomes = await invariants.run_once()
 
     assert outcomes[CHECK_K13_LOCK_VIOLATION].count == 1
+
+
+async def test_run_once_clean_when_lock_dip_is_covered(fake_queries: _FakeQueries) -> None:
+    from datetime import timedelta
+
+    interval_start = NOW
+    fake_queries.lock_commitment_candidates = [("ob-1", interval_start, NOW + timedelta(minutes=15), 100.0)]
+    dip_at = interval_start + timedelta(seconds=2)
+    fake_queries.grant_cycle_series_by_obligation["ob-1"] = [(dip_at, 10.0)]
+    fake_queries.covering_trace_at_by_obligation["ob-1"] = dip_at  # covered at or before the dip
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_K13_LOCK_VIOLATION].count == 0
 
 
 async def test_run_once_detects_seeded_orphans(fake_queries: _FakeQueries) -> None:

@@ -94,6 +94,55 @@ async def test_gate_duration_is_observed_even_when_the_gate_fails() -> None:
     assert seen == [("ADMISSION", 2.5)]
 
 
+async def test_a_gate_that_succeeds_again_clears_its_own_failure_alert() -> None:
+    """Health only auto-clears its own rules: ALR-SELECTOR-GATE-FAILED is cleared by the gate runner once
+    the same gate kind/scope succeeds; never on a failure."""
+    from opengrid.engine.gates import gate_failure_matches
+
+    outcomes = iter([RuntimeError("solver down"), "plan"])
+    cleared: list[tuple[str, object]] = []
+
+    class _Trigger:
+        gate_kind = "SCHEDULED_15MIN"
+        contract_scope = None
+
+    async def _intake(*args, **kwargs):
+        return None
+
+    async def _gate(*args, **kwargs):
+        result = next(outcomes)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    class _Trace:
+        async def append(self, *args):
+            return None
+
+    async def _alert(finding):
+        return None
+
+    async def _clear(kind, scope):
+        cleared.append((kind, scope))
+
+    kwargs = dict(
+        now=datetime.now(UTC),
+        run_intake=_intake,
+        run_gate=_gate,
+        trace=_Trace(),
+        raise_alert=_alert,
+        clear_failure=_clear,
+    )
+    assert await run_due_gates([_Trigger()], **kwargs) == 1
+    assert cleared == []
+    assert await run_due_gates([_Trigger()], **kwargs) == 0
+    assert cleared == [("SCHEDULED_15MIN", None)]
+
+    matches = gate_failure_matches("SCHEDULED_15MIN", None)
+    assert matches({"gate_kind": "SCHEDULED_15MIN", "contract_scope": None})
+    assert not matches({"gate_kind": "ADMISSION", "contract_scope": None})
+
+
 def test_flush_lag_reads_time_since_the_last_good_flush() -> None:
     now = {"t": 100.0}
     lag = m.FlushLag(clock=lambda: now["t"])

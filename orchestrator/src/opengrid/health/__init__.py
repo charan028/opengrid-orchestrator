@@ -29,6 +29,7 @@ from opengrid.health.metrics_scrape import (
     sum_metric,
 )
 from opengrid.health.model import (
+    HEALTH_OWNED_ALERT_RULES,
     CycleLatencySample,
     HealthSnapshot,
     HealthThresholds,
@@ -228,7 +229,9 @@ async def evaluate_alerts() -> None:
     guardian verdict timeout rate, reserve-breach counter) and insert `og.alert` rows (02b S6.4).
 
     Raises a new alert only when its `condition_key` has no currently-open row (TS-07-06: no duplicate
-    storm), and clears any open alert whose condition no longer evaluates true.
+    storm), and clears any open alert whose condition no longer evaluates true -- but only for a rule in
+    `HEALTH_OWNED_ALERT_RULES` (defect fix: this must never auto-clear an alert another module raised and
+    owns, e.g. `ALR-SETTLE-STALLED`, `ALR-SELECTOR-GATE-FAILED`, `ALR-ENERGY-SHORTFALL-RISK`).
     """
     pool = _require_pool()
     now = _now()
@@ -301,6 +304,11 @@ async def evaluate_alerts() -> None:
             await queries.raise_alert(pool, finding, opened_at=now)
 
     for key, alert in open_by_key.items():
+        # Defect fix: never auto-clear an alert this evaluator doesn't own the rule for -- see
+        # `HEALTH_OWNED_ALERT_RULES`'s docstring. Other modules (settle, selector, the allocator/engine
+        # energy hook, ...) raise and clear their own alerts; this pass must leave them alone.
+        if alert.rule not in HEALTH_OWNED_ALERT_RULES:
+            continue
         if key not in live_keys and alert.id is not None:
             await queries.clear_alert(pool, alert.id, cleared_at=now)
 

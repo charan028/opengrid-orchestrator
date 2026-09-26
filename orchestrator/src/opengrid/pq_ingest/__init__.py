@@ -24,6 +24,17 @@ buffer reaches `flush_batch_size`, so a burst never waits for the timer. Raw cap
 unaffected (S6.4b: triggered-only, ~68 kbps at 10,000 hubs -- never the bottleneck) and
 still insert one row per capture via `insert_raw_index`.
 
+**Blocker fixed (post-deploy report): `og.hub_inverter_pq` had 0 live rows.** Waveform
+summaries were being ingested but nothing aggregated them into the per-inverter
+characterization S5.1's quality score, the allocator's S5.2 eligibility filter and
+`opengrid.assets`'s drift sweep all read. `run_characterization_pass()` closes that gap:
+one batched read of every summary in the window (`PqIngestBackend.latest_summaries`,
+already used for other consumers) + `opengrid.pq_ingest.characterize`'s pure aggregation
++ one batched, async-commit upsert (`PqIngestBackend.upsert_hub_inverter_pq_batch`).
+Called by the caller's own periodic timer AT MOST every `characterization_interval_s`
+(default `DEFAULT_CHARACTERIZATION_INTERVAL_S`, 5 min) -- never per message, never per
+flush. See README for the wiring line.
+
 Module-level singleton facade, mirroring `opengrid.fleet`/`opengrid.ledger`: call
 `configure()` once per process (the engine-owned MQTT ingest loop does this at start-up),
 then call the free functions below. This package holds no MQTT client of its own -- the
@@ -43,7 +54,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
@@ -58,11 +69,14 @@ from opengrid.pq_ingest import metrics
 from opengrid.pq_ingest.aggregation import bank_measurement, fresh_summaries
 from opengrid.pq_ingest.blob_store import BlobStore
 from opengrid.pq_ingest.capture import PendingCaptureTracker, build_capture_request
+from opengrid.pq_ingest.characterize import HubCharacterization, characterize_fleet
 from opengrid.pq_ingest.raw_codec import decode_raw_samples, encode_raw_samples
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_CHARACTERIZATION_INTERVAL_S",
+    "DEFAULT_CHARACTERIZATION_WINDOW_S",
     "DEFAULT_FLUSH_BATCH_SIZE",
     "DEFAULT_FLUSH_INTERVAL_S",
     "DEFAULT_SUMMARY_BUFFER_MAX",
@@ -77,6 +91,7 @@ __all__ = [
     "ingest_summary",
     "latest_summaries",
     "pending_summary_count",
+    "run_characterization_pass",
 ]
 
 # S9 wave-2 build report's chosen defaults: `flush_interval_s` is the ENGINE's own timer period (not
@@ -88,6 +103,14 @@ __all__ = [
 DEFAULT_SUMMARY_BUFFER_MAX = 20_000
 DEFAULT_FLUSH_BATCH_SIZE = 500
 DEFAULT_FLUSH_INTERVAL_S = 2.0
+
+# `og.hub_inverter_pq` blocker fix: characterization is a periodic PASS (S5.1: "recomputed by a
+# periodic estimation job... not by the allocator per cycle"), never inline on the hot ingest
+# path. 5 min comfortably amortizes a full-fleet aggregation over many summaries; the window
+# matches S5.5.1's own 15-minute drift-observation window so the same summaries a drift sweep
+# would read are also what characterizes the "OK" baseline it compares against.
+DEFAULT_CHARACTERIZATION_INTERVAL_S = 300.0
+DEFAULT_CHARACTERIZATION_WINDOW_S = 900.0
 
 
 class PqIngestBackend(Protocol):
@@ -106,6 +129,11 @@ class PqIngestBackend(Protocol):
     async def latest_summaries(
         self, hub_ids: Sequence[str], *, since: datetime
     ) -> list[PqWaveformSummaryRow]: ...
+
+    async def upsert_hub_inverter_pq_batch(self, rows: Sequence[HubCharacterization]) -> None:
+        """Blocker fix: one batched upsert for every hub characterized this pass -- see
+        `pg_backend.PgPqIngestBackend.upsert_hub_inverter_pq_batch`."""
+        ...
 
 
 class _NotConfiguredError(RuntimeError):
@@ -255,6 +283,39 @@ async def latest_summaries(hub_ids: Sequence[str], *, since: datetime) -> list[P
     guardian/allocator gateways read PQ history through (S6.5 step 4's three consumers),
     kept here rather than duplicated in each caller (BUILD.md S1)."""
     return await _require_backend().latest_summaries(hub_ids, since=since)
+
+
+async def run_characterization_pass(
+    hub_ids: Sequence[str],
+    *,
+    now: datetime | None = None,
+    window_s: float = DEFAULT_CHARACTERIZATION_WINDOW_S,
+) -> int:
+    """Blocker fix: derives and upserts `og.hub_inverter_pq` characterization (S3.1/S5.1) for
+    every hub in `hub_ids` with enough measured summary history in the trailing `window_s`
+    (default 15 min). ONE batched read (`latest_summaries`, already grouped by hub in Python
+    by `characterize_fleet`) and ONE batched, async-commit upsert
+    (`PqIngestBackend.upsert_hub_inverter_pq_batch`) -- never one query/write per hub.
+
+    Called by the caller's own periodic timer AT MOST every `[pq_ingest].
+    characterization_interval_s` (default `DEFAULT_CHARACTERIZATION_INTERVAL_S`, 5 min; see
+    README) -- never per message, never per `flush_summaries()` call. Returns the number of
+    hubs characterized this pass (0 if none had enough data yet)."""
+    now = now or datetime.now(UTC)
+    since = now - timedelta(seconds=window_s)
+    backend = _require_backend()
+    try:
+        summaries = await backend.latest_summaries(list(hub_ids), since=since)
+        characterizations = characterize_fleet(summaries, now=now)
+        if characterizations:
+            await backend.upsert_hub_inverter_pq_batch(characterizations)
+    except Exception:
+        metrics.characterization_passes_total.labels(outcome="failed").inc()
+        logger.exception("pq characterization pass failed")
+        raise
+    metrics.characterization_passes_total.labels(outcome="ok").inc()
+    metrics.hubs_characterized_total.inc(len(characterizations))
+    return len(characterizations)
 
 
 def track_capture_request(request: WaveformCaptureRequest) -> None:

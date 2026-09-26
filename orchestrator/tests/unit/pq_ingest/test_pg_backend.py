@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from opengrid.core.models.pq import PqWaveformRawIndex, PqWaveformSummaryRow
+from opengrid.pq_ingest.characterize import HubCharacterization
 from opengrid.pq_ingest.pg_backend import PgPqIngestBackend
 
 pytestmark = pytest.mark.asyncio
@@ -127,6 +128,84 @@ async def test_insert_summaries_batch_empty_is_a_noop() -> None:
     backend = PgPqIngestBackend(pool)  # type: ignore[arg-type]
 
     await backend.insert_summaries_batch([])
+
+    assert cursor.executed == []
+    assert pool._conn.committed is False
+
+
+async def test_upsert_hub_inverter_pq_batch_executes_one_executemany_and_commits() -> None:
+    cursor = FakeCursor()
+    pool = FakePool(cursor)
+    backend = PgPqIngestBackend(pool)  # type: ignore[arg-type]
+    rows = [
+        HubCharacterization(
+            hub_id=f"hub-{i:05d}",
+            phase_connection="A",
+            kva_rating=11.6,
+            freq_offset_hz=0.01,
+            freq_offset_std_hz=0.005,
+            voltage_offset_pct=0.3,
+            voltage_offset_std_pct=0.1,
+            thd_current_pct=2.0,
+            dominant_harmonics=None,
+            phase_angle_error_deg=0.5,
+            quality_score=0.9,
+            last_estimated_at=datetime(2026, 9, 27, tzinfo=UTC),
+        )
+        for i in range(3)
+    ]
+
+    await backend.upsert_hub_inverter_pq_batch(rows)
+
+    assert any("SET LOCAL synchronous_commit" in sql for sql, _ in cursor.executed)
+    assert len(cursor.executed_many) == 1
+    sql, params_list = cursor.executed_many[0]
+    assert "INSERT INTO og.hub_inverter_pq" in sql
+    assert "ON CONFLICT (hub_id) DO UPDATE" in sql
+    assert [p["hub_id"] for p in params_list] == ["hub-00000", "hub-00001", "hub-00002"]
+    assert pool._conn.committed is True
+    # Nameplate/asset-health columns are never touched by this upsert (see the SQL's own
+    # comment) -- they must not appear in the parameter dict at all.
+    for params in params_list:
+        assert "pf_min_leading" not in params
+        assert "response_time_ms" not in params
+        assert "ride_through_class" not in params
+        assert "asset_state" not in params
+
+
+async def test_upsert_hub_inverter_pq_batch_wraps_harmonics_as_jsonb() -> None:
+    from psycopg.types.json import Jsonb
+
+    cursor = FakeCursor()
+    pool = FakePool(cursor)
+    backend = PgPqIngestBackend(pool)  # type: ignore[arg-type]
+    row = HubCharacterization(
+        hub_id="hub-00000",
+        phase_connection="A",
+        kva_rating=11.6,
+        freq_offset_hz=0.0,
+        freq_offset_std_hz=0.0,
+        voltage_offset_pct=0.0,
+        voltage_offset_std_pct=0.0,
+        thd_current_pct=2.0,
+        dominant_harmonics={"3": {"mag_pct": 1.2, "angle_deg": 30.0}},
+        phase_angle_error_deg=0.0,
+        quality_score=1.0,
+        last_estimated_at=datetime(2026, 9, 27, tzinfo=UTC),
+    )
+
+    await backend.upsert_hub_inverter_pq_batch([row])
+
+    _, params_list = cursor.executed_many[0]
+    assert isinstance(params_list[0]["dominant_harmonics"], Jsonb)
+
+
+async def test_upsert_hub_inverter_pq_batch_empty_is_a_noop() -> None:
+    cursor = FakeCursor()
+    pool = FakePool(cursor)
+    backend = PgPqIngestBackend(pool)  # type: ignore[arg-type]
+
+    await backend.upsert_hub_inverter_pq_batch([])
 
     assert cursor.executed == []
     assert pool._conn.committed is False

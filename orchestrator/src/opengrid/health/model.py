@@ -26,6 +26,28 @@ DegradedMode = Literal[
     "DIST_DEFERRAL_OPEN_LOOP",  # 02b S6.5 row 5: sim SCADA silent for a bank
 ]
 
+#: `og.alert` has no owner/source column (`migrations/0001_init.sql`), so this code-level allow-list is
+#: the fix for a live defect: `evaluate_alerts()`'s clear pass used to close ANY open alert whose
+#: rule+scope didn't match one of ITS OWN this-cycle findings -- which also closed alerts other modules
+#: raise and own the lifecycle of (`ALR-SETTLE-STALLED` from settle, `ALR-SELECTOR-GATE-FAILED` from
+#: selector, `ALR-ENERGY-SHORTFALL-RISK` raised directly by the allocator/engine hook, see
+#: `evaluate_energy_shortfall_risk_alert`'s docstring) within one ~5s cycle of them being raised. Only a
+#: rule in this set -- exactly the `ALR-*` rules `opengrid.health.evaluate_alerts` itself evaluates every
+#: cycle -- may be auto-cleared here; every other module clears its own alerts.
+HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
+    {
+        "ALR-FEED-STALE",
+        "ALR-FEED-LGV-EXHAUSTED",
+        "ALR-PROCESS-DOWN",
+        "ALR-HUB-OFFLINE-RATIO",
+        "ALR-CYCLE-P99",
+        "ALR-GUARDIAN-TIMEOUT-RATE",
+        "ALR-RESERVE-BREACH",
+        "ALR-SCADA-OVERLOAD",
+        "ALR-SIM-OFFLINE",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class HealthThresholds:

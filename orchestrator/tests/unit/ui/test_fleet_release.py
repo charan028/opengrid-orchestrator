@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 
 import opengrid.ui.api_client as api_client
 
-_ALICE = {"X-OG-Role": "operator", "X-Remote-User": "alice"}
-_BOB = {"X-OG-Role": "operator", "X-Remote-User": "bob"}
+_ALICE = {"X-Remote-User": "alice"}
+_BOB = {"X-Remote-User": "bob"}
 _PID = "22222222-2222-2222-2222-222222222222"
 
 
@@ -82,3 +82,22 @@ def test_release_routes_are_forbidden_for_a_viewer(
     fake_post_api({})
     response = client.post(f"/og/fleet/safestop/release/{_PID}/approve")
     assert response.status_code == 403
+
+
+def test_a_spoofed_x_og_role_header_does_not_grant_release_access(
+    client: TestClient, fake_post_api: Callable[[dict[str, Any]], None]
+) -> None:
+    """A caller with no (or an unmapped) `X-Remote-User` identity must not gain operator access just by
+    setting the client-controllable `X-OG-Role` header -- Apache's `/og/` fragment never touches it."""
+    fake_post_api({})
+    response = client.post(f"/og/fleet/safestop/release/{_PID}/approve", headers={"X-OG-Role": "operator"})
+    assert response.status_code == 403
+    assert fake_post_api.posted == []  # type: ignore[attr-defined]
+
+    response = client.post(
+        "/og/fleet/safestop/release/request",
+        data={"scope": "bank", "scope_id": "bank-01", "reason": "clear"},
+        headers={"X-OG-Role": "operator", "X-Remote-User": "mallory"},
+    )
+    assert response.status_code == 403
+    assert fake_post_api.posted == []  # type: ignore[attr-defined]

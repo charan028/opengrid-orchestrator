@@ -73,12 +73,13 @@ _trace_store: TraceStore | None = None
 _cadence: Cadence | None = None
 _trace_cadence: Cadence | None = None
 _k2_lookback_s: float = _DEFAULT_K2_LOOKBACK_S
+_k13_max_grant_gap_s: float = checks.DEFAULT_K13_MAX_GRANT_GAP_S
 
 
 def configure(pool: AsyncConnectionPool, cfg: Config) -> None:
     """Wire the module-level singletons. Called once from `opengrid.health.configure()` (this package
     has no process entry point of its own -- it runs inside `og-settle` via `run_due()`)."""
-    global _pool, _trace_store, _cadence, _trace_cadence, _k2_lookback_s
+    global _pool, _trace_store, _cadence, _trace_cadence, _k2_lookback_s, _k13_max_grant_gap_s
     _pool = pool
     _trace_store = TraceStore(PgTraceBackend(pool))
     _cadence = Cadence(float(cfg.get("invariants.interval_s", _DEFAULT_INTERVAL_S)))
@@ -86,6 +87,9 @@ def configure(pool: AsyncConnectionPool, cfg: Config) -> None:
         float(cfg.get("invariants.trace_verify_interval_s", _DEFAULT_TRACE_VERIFY_INTERVAL_S))
     )
     _k2_lookback_s = float(cfg.get("invariants.k2_lookback_s", _DEFAULT_K2_LOOKBACK_S))
+    _k13_max_grant_gap_s = float(
+        cfg.get("invariants.k13_max_grant_gap_s", checks.DEFAULT_K13_MAX_GRANT_GAP_S)
+    )
 
 
 def _require_pool() -> AsyncConnectionPool:
@@ -220,11 +224,47 @@ async def _run_double_sold_check(pool: AsyncConnectionPool, now: datetime) -> Ch
 
 
 async def _run_lock_violation_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:
+    """K13: enumerate elapsed commitment intervals since the watermark, find each one's worst delivery
+    point across ALL of the obligation's banks combined (`checks.find_dip`), and -- only for the ones
+    that actually dipped -- look up whether the trace already covers it (`checks.
+    _dip_is_covered`/`queries.fetch_earliest_covering_trace_at`). The per-obligation lookups only run for
+    candidates that dipped, typically a small subset of the batch."""
     start = time.perf_counter()
     state = await queries.get_check_state(pool, CHECK_K13_LOCK_VIOLATION)
     since = _parse_ts(state.watermark.get("since")) or _EPOCH
-    rows, new_end = await queries.fetch_lock_candidates(pool, since=since, now=now)
-    violations = checks.find_lock_violations(rows)
+    candidates, new_end = await queries.fetch_lock_commitment_candidates(pool, since=since, now=now)
+
+    dip_rows: list[tuple[str, datetime, datetime, float, float, datetime, datetime | None]] = []
+    for obligation_id, interval_start, interval_end, committed_kw in candidates:
+        cycles = await queries.fetch_grant_cycle_series(
+            pool, obligation_id=obligation_id, window_start=interval_start, window_end=interval_end
+        )
+        dip = checks.find_dip(
+            interval_start=interval_start,
+            interval_end=interval_end,
+            committed_kw=committed_kw,
+            cycles=cycles,
+            max_gap_s=_k13_max_grant_gap_s,
+        )
+        if dip is None:
+            continue
+        dip_kw, dip_at = dip
+        earliest_covering_at = await queries.fetch_earliest_covering_trace_at(
+            pool, obligation_id=obligation_id, window_start=interval_start, window_end=interval_end
+        )
+        dip_rows.append(
+            (
+                str(obligation_id),
+                interval_start,
+                interval_end,
+                committed_kw,
+                dip_kw,
+                dip_at,
+                earliest_covering_at,
+            )
+        )
+
+    violations = checks.find_lock_violations(dip_rows)
     outcome = CheckOutcome(
         CHECK_K13_LOCK_VIOLATION, tuple(violations), {"since": (new_end or since).isoformat()}
     )

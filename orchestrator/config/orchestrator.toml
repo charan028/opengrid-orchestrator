@@ -126,3 +126,5 @@ summary_buffer_max = 20000
 flush_batch_size = 500
 flush_interval_s = 2.0
 blob_store_dir = "/var/lib/opengrid/pq_waveform"
+# og.hub_inverter_pq characterization from measured summaries (one batched pass per interval).
+characterization_interval_s = 300.0

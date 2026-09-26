@@ -24,6 +24,7 @@ from ogsim.control.injector import InjectionSource, Injector, UnknownAnomalyType
 from ogsim.control.random_config import INTENSITY_PROFILES, load_random_config
 from ogsim.control.random_engine import RandomEngine
 from ogsim.control.scenarios import load_scenarios_dir, run_scenario
+from ogsim.control.schema_validation import ScenarioCmdValidationError
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 DEFAULT_SCENARIOS_DIR = Path(__file__).resolve().parents[3] / "scenarios"
@@ -104,6 +105,11 @@ def create_app(
                 source="manual",
             )
         except UnknownAnomalyTypeError as exc:
+            return JSONResponse(status_code=422, content={"error": str(exc)})
+        except ScenarioCmdValidationError as exc:
+            # Defense in depth (post-deploy defect: a catalogue entry whose wire_type was not
+            # yet in scenario_control.schema.json's enum returned a raw 500 here) -- a schema
+            # mismatch is a client-correctable request shape issue, not a server fault.
             return JSONResponse(status_code=422, content={"error": str(exc)})
         return {"ok": True, "anomaly": record.to_dict()}
 

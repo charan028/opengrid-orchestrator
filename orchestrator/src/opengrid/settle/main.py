@@ -24,6 +24,8 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
+from psycopg_pool import AsyncConnectionPool
+
 import opengrid.contracts as contracts
 import opengrid.health as health
 from opengrid.assets.runner import run_once as run_asset_drift_sweep
@@ -31,7 +33,7 @@ from opengrid.assets.service import AssetHealthService
 from opengrid.assets.wiring import build_asset_health_service
 from opengrid.contracts.pg_repo import PgContractsRepo
 from opengrid.health.model import AlertFinding
-from opengrid.health.queries import clear_alert, raise_alert
+from opengrid.health.queries import clear_alert, fetch_open_alerts, raise_alert
 from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 from opengrid.platform.heartbeat import write_heartbeat
@@ -141,13 +143,21 @@ class StallWatch:
         *,
         raise_alert: Callable[[AlertFinding], Awaitable[int]],
         clear_alert: Callable[[int], Awaitable[None]],
+        find_open: Callable[[], Awaitable[dict[str, int]]] | None = None,
     ) -> None:
         self._stalled = stalled
         self._raise = raise_alert
         self._clear = clear_alert
+        self._find_open = find_open
         self._open: dict[str, int | None] = {}
+        self._adopted = find_open is None
 
     async def check(self) -> None:
+        if not self._adopted:
+            # Alerts a previous og-settle raised are ours too: adopt them, so a recovered job clears them
+            # and a still-stalled one is not raised twice (health never clears this rule).
+            self._open.update(await self._find_open())  # type: ignore[misc]
+            self._adopted = True
         stalled = self._stalled()
         for job, age_s in stalled.items():
             if job in self._open:
@@ -168,6 +178,15 @@ class StallWatch:
             _logger.info("og-settle job progressing again", extra={"job": job})
             if alert_id is not None:
                 await self._clear(alert_id)
+
+
+async def open_stall_alerts(pool: AsyncConnectionPool) -> dict[str, int]:
+    """Open `ALR-SETTLE-STALLED` alerts by job (detail `job`), e.g. left by a previous og-settle."""
+    return {
+        str((a.detail or {}).get("job", "settle")): a.id
+        for a in await fetch_open_alerts(pool)
+        if a.rule == STALL_RULE and a.id is not None
+    }
 
 
 async def _run() -> None:
@@ -219,6 +238,7 @@ async def _run() -> None:
         lambda: runner.stalled({"settle": _STALL_INTERVALS * settle_interval_s}),
         raise_alert=lambda finding: raise_alert(pool, finding, opened_at=datetime.now(UTC)),
         clear_alert=lambda alert_id: clear_alert(pool, alert_id),
+        find_open=lambda: open_stall_alerts(pool),
     )
     jobs.append(("stall_watch", Cadence(health_interval_s), watch.check))
     try:

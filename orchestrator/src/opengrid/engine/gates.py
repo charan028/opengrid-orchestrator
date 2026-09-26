@@ -41,6 +41,13 @@ RunIntake = Callable[..., Awaitable[object]]
 RunGate = Callable[..., Awaitable[object]]
 RaiseAlert = Callable[[AlertFinding], Awaitable[object]]
 OnRenomination = Callable[[UUID, UUID | None], Awaitable[object]]
+ClearFailure = Callable[[str, UUID | None], Awaitable[object]]
+
+
+def gate_failure_matches(gate_kind: str, contract_scope: UUID | None) -> Callable[[dict[str, Any]], bool]:
+    """Matches the `detail` `_report_gate_failure` stores for this gate kind and contract scope."""
+    scope = str(contract_scope) if contract_scope else None
+    return lambda detail: detail.get("gate_kind") == gate_kind and detail.get("contract_scope") == scope
 
 
 async def run_due_gates(
@@ -54,6 +61,7 @@ async def run_due_gates(
     on_renomination: OnRenomination | None = None,
     observe_duration: Callable[[str, float], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    clear_failure: ClearFailure | None = None,
 ) -> int:
     """Run intake then the selector gate for each trigger. Returns the number of gates that failed.
     `observe_duration(gate_kind, seconds)` receives each gate's wall time (intake + gate), failed or not."""
@@ -69,6 +77,7 @@ async def run_due_gates(
                 trace=trace,
                 raise_alert=raise_alert,
                 on_renomination=on_renomination,
+                clear_failure=clear_failure,
             )
         finally:
             if observe_duration is not None:
@@ -86,6 +95,7 @@ async def _run_one(
     trace: TraceAppender,
     raise_alert: RaiseAlert,
     on_renomination: OnRenomination | None,
+    clear_failure: ClearFailure | None = None,
 ) -> bool:
     """One trigger: intake, then the gate, then its re-nomination points. Returns True if the gate failed."""
     scope = {"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
@@ -102,6 +112,13 @@ async def _run_one(
         logger.exception("selector gate failed", extra=scope)
         await _report_gate_failure(trigger, exc, trace=trace, raise_alert=raise_alert)
         return True
+    if clear_failure is not None:
+        # The alert raised on an earlier failure of this gate is ours to clear once it succeeds again
+        # (health only auto-clears its own rules).
+        try:
+            await clear_failure(str(trigger.gate_kind), trigger.contract_scope)
+        except Exception:
+            logger.exception("could not clear a resolved gate-failure alert", extra=scope)
     if trigger.gate_kind == "RENOMINATION" and on_renomination is not None and trigger.contract_scope:
         # The gate reached the contract's due re-nomination point(s): record them exercised, or the
         # engine re-runs this gate every tick (02a S1.7).

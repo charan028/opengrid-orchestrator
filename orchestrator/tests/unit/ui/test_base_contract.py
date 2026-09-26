@@ -67,7 +67,7 @@ def test_fleet_screen_lists_hubs_and_hides_writes_from_viewer(
     body = response.text
     assert "hub-0001" in body
     assert "hub-0002" in body
-    # viewer role (default, no X-OG-Role header) must not see manual command or safe stop controls
+    # viewer role (default, no X-Remote-User identity) must not see manual command or safe stop controls
     assert "Manual command" not in body
     assert "Scoped safe stop" not in body
 
@@ -77,7 +77,7 @@ def test_fleet_screen_shows_write_actions_for_operator(
 ) -> None:
     fake_api({"/og/api/fleet/hubs": load_fixture("hubs.json")})
 
-    response = client.get("/og/fleet", headers={"X-OG-Role": "operator"})
+    response = client.get("/og/fleet", headers={"X-Remote-User": "alice"})
 
     assert response.status_code == 200
     body = response.text
@@ -85,6 +85,21 @@ def test_fleet_screen_shows_write_actions_for_operator(
     assert "Scoped safe stop" in body
     assert "Propose safe stop (step 1 of 2)" in body
     assert 'hx-post="/og/fleet/safestop/propose"' in body
+
+
+def test_fleet_screen_does_not_show_write_actions_for_a_spoofed_x_og_role_header(
+    client: TestClient, fake_api: Callable[[dict[str, Any]], None]
+) -> None:
+    """A client-supplied `X-OG-Role: operator` (Apache never sets or strips this header) must not
+    unlock the operator-only controls -- only a real `X-Remote-User` mapped through `[api.roles]` does."""
+    fake_api({"/og/api/fleet/hubs": load_fixture("hubs.json")})
+
+    response = client.get("/og/fleet", headers={"X-OG-Role": "operator"})
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Manual command" not in body
+    assert "Scoped safe stop" not in body
 
 
 def test_fleet_hub_table_shows_a_per_row_age_column(

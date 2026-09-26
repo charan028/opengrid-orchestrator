@@ -187,6 +187,73 @@ async def test_evaluate_alerts_raises_once_and_clears_on_resolve(fake_queries: _
     assert len(fake_queries.cleared) == first_round_open
 
 
+async def test_evaluate_alerts_never_clears_a_foreign_alert(fake_queries: _FakeQueries) -> None:
+    """Defect fix: `evaluate_alerts()` must not auto-clear an alert another module raised and owns the
+    lifecycle of, even across several cycles where health's own findings never mention it (it previously
+    cleared ANY open alert whose rule+scope didn't match one of ITS OWN this-cycle findings, closing
+    `ALR-SETTLE-STALLED`/`ALR-SELECTOR-GATE-FAILED`/`ALR-ENERGY-SHORTFALL-RISK` within one ~5s cycle of
+    them being raised)."""
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    foreign_alerts = [
+        Alert(
+            id=101,
+            rule="ALR-SETTLE-STALLED",
+            severity="critical",
+            summary="settle cadence stalled",
+            detail={"process": "settle"},
+            opened_at=NOW,
+        ),
+        Alert(
+            id=102,
+            rule="ALR-SELECTOR-GATE-FAILED",
+            severity="critical",
+            summary="selector gate failed",
+            detail={},
+            opened_at=NOW,
+        ),
+        Alert(
+            id=103,
+            rule="ALR-ENERGY-SHORTFALL-RISK",
+            severity="critical",
+            summary="obligation OBL-1 energy margin -3.5 kWh",
+            detail={"obligation_id": "OBL-1"},
+            opened_at=NOW,
+        ),
+    ]
+    fake_queries.open_alerts = list(foreign_alerts)
+
+    for _ in range(3):  # several evaluation cycles -- must never touch the foreign alerts
+        await health.evaluate_alerts()
+
+    assert fake_queries.cleared == []
+    assert {a.id for a in fake_queries.open_alerts} == {101, 102, 103}
+
+
+async def test_evaluate_alerts_still_clears_its_own_resolved_alert(fake_queries: _FakeQueries) -> None:
+    """The other half of the same defect fix: restricting clears to `HEALTH_OWNED_ALERT_RULES` must not
+    stop health from clearing its own alerts once their condition genuinely resolves."""
+    fake_queries.heartbeats = []  # every monitored process down -> several ALR-PROCESS-DOWN findings
+    await health.evaluate_alerts()
+    engine_alert = next(
+        a
+        for a in fake_queries.open_alerts
+        if a.rule == "ALR-PROCESS-DOWN" and a.detail.get("process") == "engine"
+    )
+
+    # Engine now reports -> the alert's own condition no longer holds -> health must clear it.
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    await health.evaluate_alerts()
+
+    assert engine_alert.id in fake_queries.cleared
+    assert not any(a.rule == "ALR-PROCESS-DOWN" for a in fake_queries.open_alerts)
+
+
 async def test_evaluate_alerts_uses_per_feed_staleness_threshold(fake_queries: _FakeQueries) -> None:
     """Defect fix: ALR-FEED-STALE must use each feed's own `opengrid.feeds.staleness` budget, not
     `health.heartbeat_down_after_s` (a few-second, heartbeat-scale value applied to every feed

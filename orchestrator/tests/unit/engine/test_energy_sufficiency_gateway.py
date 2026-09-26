@@ -117,6 +117,46 @@ def _flags(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _alert_clears(monkeypatch):
+    """Records `clear_open_alerts` calls as (rule, detail -> matches) predicates to probe."""
+    calls: list = []
+
+    async def _fake_clear(pool, rule, matches):
+        calls.append((rule, matches))
+        return 0
+
+    monkeypatch.setattr(gw, "clear_open_alerts", _fake_clear)
+    return calls
+
+
+async def test_the_hook_clears_its_own_energy_alerts(monkeypatch, _alert_clears):
+    """Health only auto-clears its own rules, so ALR-ENERGY-SHORTFALL-RISK is cleared here: on the first
+    run (alerts a previous engine left open) and whenever an obligation leaves AT_RISK -- never for an
+    obligation that is still at risk."""
+    at_risk_id, fine_id = uuid4(), uuid4()
+    soc = {"value": None}
+    rows = [(at_risk_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=soc["value"])]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    await gateway.run(NOW)  # first run: at risk (no SoC), sweep leaves it alone
+    ((rule, matches),) = _alert_clears
+    assert rule == "ALR-ENERGY-SHORTFALL-RISK"
+    assert not matches({"obligation_id": str(at_risk_id)})
+    assert matches({"obligation_id": str(fine_id)})
+
+    await gateway.run(NOW)  # still at risk: no further clearing
+    assert len(_alert_clears) == 1
+
+    soc["value"] = 39.2
+    await gateway.run(NOW)  # recovered: its alert is cleared
+    assert len(_alert_clears) == 2
+    assert _alert_clears[1][1]({"obligation_id": str(at_risk_id)})
+
+
+@pytest.fixture(autouse=True)
 def _patch_alert_raising(monkeypatch):
     raised: list = []
 

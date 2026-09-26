@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse
 from opengrid.core.timeutil import to_utc
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.render import render_stale_badge, render_status_badge
-from opengrid.ui.role import is_operator, role_of
+from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.templating import BASE_PATH, templates
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ async def propose_safestop(
     _require_operator(request)
     payload = {"scope": scope, "scope_id": scope_id or None, "reason": reason}
     try:
-        proposal = await post_json(_SAFESTOP_PROPOSE_PATH, payload)
+        proposal = await post_json(_SAFESTOP_PROPOSE_PATH, payload, remote_user=remote_user(request))
     except ApiUnavailable as exc:
         logger.warning("fleet safestop propose failed: %s", exc)
         return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": str(exc)})
@@ -179,7 +179,9 @@ async def confirm_safestop(request: Request, proposal_id: str) -> HTMLResponse:
     the engaged/timeout/expired result -- never assumes success."""
     _require_operator(request)
     try:
-        result = await post_json(f"{_SAFESTOP_PROPOSE_PATH}/{proposal_id}/confirm", {})
+        result = await post_json(
+            f"{_SAFESTOP_PROPOSE_PATH}/{proposal_id}/confirm", {}, remote_user=remote_user(request)
+        )
     except ApiUnavailable as exc:
         logger.warning("fleet safestop confirm failed: %s", exc)
         return templates.TemplateResponse(
@@ -195,10 +197,6 @@ async def confirm_safestop(request: Request, proposal_id: str) -> HTMLResponse:
 
 
 # -- safe-stop RELEASE, two operators (K8: guardian-signed, og-safestop relays) -----------------------
-
-
-def _remote_user(request: Request) -> str | None:
-    return request.headers.get("x-remote-user")
 
 
 def _release_result(request: Request, **context: Any) -> HTMLResponse:
@@ -217,7 +215,7 @@ async def request_release(
     _require_operator(request)
     path = f"{_SAFESTOP_PROPOSE_PATH}/{scope}/{scope_id or 'FLEET'}/release"
     try:
-        accepted = await post_json(path, {"reason": reason}, remote_user=_remote_user(request))
+        accepted = await post_json(path, {"reason": reason}, remote_user=remote_user(request))
     except ApiUnavailable as exc:
         logger.warning("safestop release request failed: %s", exc)
         return _release_result(request, status_code=exc.status_code, message=str(exc))
@@ -254,7 +252,7 @@ async def approve_release(request: Request, proposal_id: str) -> HTMLResponse:
     _require_operator(request)
     try:
         result = await post_json(
-            f"{_SAFESTOP_PROPOSE_PATH}/release/{proposal_id}/approve", {}, remote_user=_remote_user(request)
+            f"{_SAFESTOP_PROPOSE_PATH}/release/{proposal_id}/approve", {}, remote_user=remote_user(request)
         )
     except ApiUnavailable as exc:
         logger.warning("safestop release approve failed: %s", exc)
@@ -288,7 +286,7 @@ async def propose_command(
         "reason": reason,
     }
     try:
-        proposal = await post_json(_COMMAND_PROPOSE_PATH, payload)
+        proposal = await post_json(_COMMAND_PROPOSE_PATH, payload, remote_user=remote_user(request))
     except ApiUnavailable as exc:
         logger.warning("fleet command propose failed: %s", exc)
         return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": str(exc)})
@@ -315,7 +313,9 @@ async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
     different outcome."""
     _require_operator(request)
     try:
-        result = await post_json(f"{_COMMAND_PROPOSE_PATH}/{proposal_id}/confirm", {})
+        result = await post_json(
+            f"{_COMMAND_PROPOSE_PATH}/{proposal_id}/confirm", {}, remote_user=remote_user(request)
+        )
     except ApiUnavailable as exc:
         logger.warning("fleet command confirm failed: %s", exc)
         result = exc.detail if isinstance(exc.detail, dict) else None
