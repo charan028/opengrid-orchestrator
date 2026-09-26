@@ -22,7 +22,7 @@ def test_run_chain_verify_renders_pass_result_via_shared_post_json(
     assert response.status_code == 200
     body = response.text
     assert "PASS" in body
-    assert "12 events checked" in body
+    assert "12 streams verified" in body
 
 
 def test_run_chain_verify_degrades_when_api_unavailable(

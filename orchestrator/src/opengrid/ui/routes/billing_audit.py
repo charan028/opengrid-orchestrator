@@ -58,10 +58,16 @@ def api_date(value: str | None, default: datetime) -> str:
 def export_period(from_: str | None, to: str | None, *, now: datetime | None = None) -> tuple[str, str]:
     """The CSV export's `from`/`to` as plain ISO dates, which `GET .../invoice-lines` requires (a blank
     field or a `datetime-local` value is a 422): blank defaults to the first of the current month and
-    today, in ERCOT local time; a datetime is cut to its date."""
+    TOMORROW, in ERCOT local time; a datetime is cut to its date.
+
+    Why tomorrow: the API keeps lines with `period_end <= to`, and a date compares as midnight, so
+    `to = today` would drop today's lines. Day-boundary edge: the default is the Chicago date, while the
+    API compares the stored period dates as given (settle writes them as dates), so between 19:00 and
+    24:00 CT (already the next UTC day) a line dated by UTC may fall one day later -- the +1 day margin
+    covers that too."""
     today = (now or datetime.now(UTC)).astimezone(_MARKET_TZ).date()
     start = (from_ or "").strip()[:10] or today.replace(day=1).isoformat()
-    end = (to or "").strip()[:10] or today.isoformat()
+    end = (to or "").strip()[:10] or (today + timedelta(days=1)).isoformat()
     return start, end
 
 
@@ -143,6 +149,8 @@ def chain_verify_result_view(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "passed": bool(result.get("passed")),
         "checked": result.get("checked", 0),
+        # `checked` is the number of hash-chained streams verified; an events count only if the API sends one
+        "events_checked": result.get("events_checked"),
         "first_broken": result.get("first_broken"),
     }
 
@@ -263,7 +271,9 @@ async def run_chain_verify(
     """HTMX partial: runs the chain-verify button, returns the pass/fail fragment (02b S7.1/S8)."""
     try:
         result = await post_json(
-            _TRACE_VERIFY_PATH, {"class": class_, "from": from_, "to": to}, remote_user=remote_user(request)
+            _TRACE_VERIFY_PATH,
+            {"class": class_ or None, "from": from_ or None, "to": to or None},
+            remote_user=remote_user(request),
         )
     except ApiUnavailable as exc:
         result = {"passed": False, "checked": 0, "first_broken": {"error": str(exc)}}

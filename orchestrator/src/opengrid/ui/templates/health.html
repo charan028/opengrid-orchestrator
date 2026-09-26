@@ -9,6 +9,7 @@
 <div class="og-degraded-banner" id="health-degraded-banner" role="alert"
      data-labels='{{ degraded_mode_labels|tojson }}'{% if not degraded_mode_banner %} hidden{% endif %}>{% if degraded_mode_banner %}Degraded mode: {{ degraded_mode_banner }}{% endif %}</div>
 {% with id_prefix="health" %}{% include "_partials/guardian_attention.html" %}{% endwith %}
+{% with id_prefix="health", alerts_link=base_path ~ "/health?alert_rule=ALR-SCOPE-CONSERVATIVE#health-alerts-panel" %}{% include "_partials/posture_strip.html" %}{% endwith %}
 
 <section class="og-panel" aria-label="Process status">
   <h2>Processes</h2>
@@ -44,19 +45,10 @@
     <div id="cycle-latency-chart" style="height: 140px;" data-empty="No samples yet: the engine does not export cycle metrics on this stack."></div>
     <p class="og-card-meta">No cycle-latency samples in the health payload yet (og-engine exports no metrics).</p>
   </div>
-  <div class="og-panel" aria-label="Alerts" aria-live="polite" aria-relevant="additions removals">
-    <h2>Alerts</h2>
-    <p>Open alerts with severity. Warnings are stale data; criticals are a process or hub outage.</p>
-    {% with columns=[{"key": "id", "label": "ID"}, {"key": "severity_badge", "label": "Severity", "html": true}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=alert_rows, empty_message='No alerts' %}
-      {% include "_partials/data_table.html" %}
-    {% endwith %}
-    {% if is_operator %}
-    <form class="og-form-inline" hx-post="{{ base_path }}/health/alerts/ack" hx-target="#ack-result">
-      <label>Alert id <input type="number" name="alert_id" min="1" required></label>
-      <button class="btn" type="submit">Acknowledge</button>
-    </form>
-    <div id="ack-result" role="status"></div>
-    {% endif %}
+  <div class="og-panel" aria-labelledby="health-alerts-heading">
+    <h2 id="health-alerts-heading">Alerts</h2>
+    <p>Open alerts, repeats grouped. Warnings are stale data; criticals are a process or hub outage.</p>
+    {% include "_partials/alerts_component.html" %}
   </div>
 </section>
 {% endblock %}
@@ -153,37 +145,6 @@
       },
     });
 
-    // `/api/stream/alerts` emits `{"open_alerts": [{id, rule, severity, summary, opened_at, acked_by}]}`
-    // -- rebuild the Alerts table body from it (text content only, never innerHTML of feed data).
-    og.sse("{{ base_path }}/api/stream/alerts", function (data) {
-      if (!data || !Array.isArray(data.open_alerts)) {
-        return;
-      }
-      var panel = document.querySelector('[aria-label="Alerts"] tbody');
-      if (!panel) {
-        return;
-      }
-      panel.innerHTML = "";
-      if (data.open_alerts.length === 0) {
-        var emptyRow = document.createElement("tr");
-        var emptyCell = document.createElement("td");
-        emptyCell.className = "empty";
-        emptyCell.colSpan = 4;
-        emptyCell.textContent = "No alerts";
-        emptyRow.appendChild(emptyCell);
-        panel.appendChild(emptyRow);
-        return;
-      }
-      data.open_alerts.forEach(function (alert) {
-        var tr = document.createElement("tr");
-        [alert.id, alert.severity, alert.summary, alert.opened_at].forEach(function (value) {
-          var td = document.createElement("td");
-          td.textContent = value != null ? String(value) : "-";
-          tr.appendChild(td);
-        });
-        panel.appendChild(tr);
-      });
-    });
   });
 </script>
 {% endblock %}

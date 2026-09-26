@@ -1,0 +1,28 @@
+{# copilot_answer.html -- one question and its answer in the docked panel (issue #26).
+   Params: question: str, answer: dict (text/tier/citations/model/confidence_label/intent/trace_id).
+
+   The `AI-assisted` badge appears only when a model actually produced the text (UI spec S3.0(h)); a
+   deterministic answer is not AI-assisted and must not claim to be. Citations are mandatory for any
+   substantive answer -- the spec forbids an unsourced assertion -- so they render as a list, not a
+   tooltip. #}
+<article class="og-copilot-turn" data-tier="{{ answer.tier }}">
+  <p class="og-copilot-question">{{ question }}</p>
+  <div class="og-copilot-answer">
+    <p>{{ answer.text }}</p>
+    {% if answer.citations %}
+    <ul class="og-copilot-citations">
+      {% for c in answer.citations %}
+      <li><span class="og-copilot-cite-label">{{ c.label }}</span><code>{{ c.source }}</code></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    <p class="og-copilot-meta">
+      {% if answer.model %}
+      <span class="og-ai-badge">AI-assisted &middot; {{ answer.model }}{% if answer.confidence_label %} &middot; confidence: {{ answer.confidence_label }}{% endif %}</span>
+      {% else %}
+      <span class="og-copilot-tier">answered from console data &middot; no model used</span>
+      {% endif %}
+      {% if answer.trace_id %}<span class="og-copilot-trace">trace {{ answer.trace_id[:8] }}</span>{% endif %}
+    </p>
+  </div>
+</article>

@@ -12,7 +12,7 @@
   <input type="datetime-local" id="to" name="to" value="{{ to or '' }}">
   <button class="btn" type="submit">Filter</button>
 </form>
-<a class="btn btn-primary" href="{{ base_path }}/billing/invoice-lines/export.csv?from={{ from_ or '' }}&amp;to={{ to or '' }}">Export CSV</a>
+<a class="btn btn-primary" href="{{ base_path }}/billing/invoice-lines/export.csv?from={{ from_ or '' }}&amp;to={{ to or '' }}" title="Blank dates export this month through tomorrow (Chicago time), so today's lines are included; the end date is inclusive of whole days.">Export CSV</a>
 {% endblock %}
 
 {% block content %}

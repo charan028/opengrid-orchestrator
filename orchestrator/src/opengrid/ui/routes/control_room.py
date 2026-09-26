@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.render import render_status_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
+from opengrid.ui.routes.alerts import panel_context, posture_context
 from opengrid.ui.routes.fleet import map_hub, map_hubs_from
 from opengrid.ui.routes.health import ack_message, degraded_context
 from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
@@ -88,6 +89,7 @@ async def control_room(request: Request) -> HTMLResponse:
     except ApiUnavailable as exc:
         logger.warning("control room: obligations unavailable for the headline: %s", exc)
 
+    posture = await posture_context()
     return templates.TemplateResponse(
         request,
         "control_room.html",
@@ -103,6 +105,13 @@ async def control_room(request: Request) -> HTMLResponse:
             "ticker": series_chart_view(ticker_rows, series_key="price"),
             "degraded": degraded,
             **degraded_context(health),
+            **panel_context(
+                request,
+                list(health.get("alerts") or []) if isinstance(health, dict) else [],
+                panel_id="control-room",
+                params=dict(request.query_params),
+            ),
+            **posture,
         },
     )
 

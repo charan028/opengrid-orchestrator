@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from opengrid.ui.api_client import bind_remote_user
 from opengrid.ui.role import remote_user
-from opengrid.ui.routes import control_room, fleet, health
+from opengrid.ui.routes import control_room, copilot, fleet, health
 from opengrid.ui.templating import TEMPLATES_DIR
 
 logger = logging.getLogger(__name__)
@@ -39,10 +39,11 @@ router.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 router.include_router(control_room.router)
 router.include_router(fleet.router)
 router.include_router(health.router)
+router.include_router(copilot.router)
 
 # ui-b's screens (BUILD.md S4 ownership split). Imported by name so a missing module during early build
 # degrades to "screen not mounted yet" rather than breaking ui-a's own screens or the app startup.
-_UI_B_SCREENS = ("dispatch", "markets", "profitability", "billing_audit", "pq")
+_UI_B_SCREENS = ("dispatch", "markets", "profitability", "billing_audit", "pq", "alerts")
 for _screen in _UI_B_SCREENS:
     try:
         _module = __import__(f"opengrid.ui.routes.{_screen}", fromlist=["router"])

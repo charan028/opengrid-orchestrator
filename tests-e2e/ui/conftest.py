@@ -37,6 +37,8 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from playwright.sync_api import Browser, Page
 
+import fleet_fixture
+
 LIVE_BASE_URL_ENV = "OG_UI_BASE_URL"
 # `opengrid.ui.role` trusts `X-Remote-User` only when the request also carries the proxy secret that
 # Apache (or the dev proxy) injects as `X-OG-Proxy-Auth` (`opengrid.api.auth.proxy_authenticated`), and
@@ -60,6 +62,21 @@ def live_base_url() -> str | None:
     return value.rstrip("/") if value else None
 
 
+# Extra Chromium switches, space-separated, e.g. on the shared base host (same disk as production Postgres):
+#   OG_E2E_CHROMIUM_ARGS="--disk-cache-dir=/dev/shm/og-e2e-cache --disk-cache-size=1"
+# Playwright puts the throwaway profile (--user-data-dir) under $TMPDIR, so run with TMPDIR=/dev/shm there too.
+CHROMIUM_ARGS_ENV = "OG_E2E_CHROMIUM_ARGS"
+
+
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args: dict[str, Any]) -> dict[str, Any]:
+    """pytest-playwright's launch args plus any `OG_E2E_CHROMIUM_ARGS` switches."""
+    extra = os.environ.get(CHROMIUM_ARGS_ENV, "").split()
+    if not extra:
+        return browser_type_launch_args
+    return {**browser_type_launch_args, "args": [*browser_type_launch_args.get("args", []), *extra]}
+
+
 def _load(name: str) -> Any:
     with (FIXTURES_DIR / name).open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -71,11 +88,72 @@ def _get_responses() -> dict[str, Any]:
     # the dispatch route reads reservations/grants/capacity *and* commitments off one timeline body
     timeline = {**_load("dispatch_ledger_timeline.json"), **_load("dispatch_commitments.json")}
     return {
-        "/og/api/health": _load("health.json"),
+        # health with enough alerts to page and group (3 banks' conservative repeats + distinct process alerts)
+        "/og/api/health": {
+            **_load("health.json"),
+            "alerts": [
+                *[
+                    {
+                        "id": i,
+                        "rule": "ALR-SCOPE-CONSERVATIVE",
+                        "severity": "warning",
+                        "scope_kind": "BANK",
+                        "scope_ref": ("bank-003", "bank-007", "bank-012")[i % 3],
+                        "summary": f"BANK:{('bank-003', 'bank-007', 'bank-012')[i % 3]} CONSERVATIVE: 40% vetoed",
+                        "opened_at": f"2026-09-26T17:{i:02d}:00+00:00",
+                        "acked_by": None,
+                    }
+                    for i in range(1, 16)
+                ],
+                *[
+                    {
+                        "id": 100 + i,
+                        "rule": "ALR-PROCESS-DOWN",
+                        "severity": "critical",
+                        "scope_kind": None,
+                        "scope_ref": None,
+                        "summary": f"Process p{i} heartbeat missing",
+                        "opened_at": f"2026-09-26T16:{i:02d}:00+00:00",
+                        "acked_by": None,
+                    }
+                    for i in range(1, 30)
+                ],
+            ],
+        },
+        "/og/api/views/scope-posture": {
+            "count": 3,
+            "conservative": [
+                {"scope_kind": "BANK", "scope_ref": b, "stop_requested": False}
+                for b in ("bank-003", "bank-007", "bank-012")
+            ],
+        },
         "/og/api/fleet/hubs": _load("hubs.json"),
         "/og/api/fleet/hubs/hub-0001": hub_detail,
         "/og/api/fleet/hubs/hub-0002": {**hub_detail, "hub_id": "hub-0002"},
-        "/og/api/dispatch/opportunities": _load("dispatch_obligations.json"),
+        # plus two awarded AS obligations (ECRS, NSPIN) so the AS deployment form renders
+        "/og/api/dispatch/opportunities": [
+            *_load("dispatch_obligations.json"),
+            *[
+                {
+                    "obligation_id": oid,
+                    "opportunity_id": oid,
+                    "contract_id": cid,
+                    "service_type": "ERCOT_AS",
+                    "tier": "T2",
+                    "state": "COMMITTED",
+                    "committed_qty_kw": "500.000",
+                    "at_risk": False,
+                    "last_reason_code": None,
+                    "window_start": "2026-09-26T19:00:00+00:00",
+                    "window_end": "2026-09-26T20:00:00+00:00",
+                    "version": 1,
+                }
+                for oid, cid in (
+                    ("aaaa0001-0000-0000-0000-00000000a5a1", "00000000-0000-7000-8000-000000000d03"),
+                    ("aaaa0002-0000-0000-0000-00000000a5a2", "00000000-0000-7000-8000-000000000d09"),
+                )
+            ],
+        ],
         "/og/api/dispatch/as-deployments": [],
         "/og/api/dispatch/plan/latest": _load("dispatch_plan.json"),
         "/og/api/ledger/BANK-0001/timeline": timeline,
@@ -83,6 +161,18 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/forecast": _load("markets_forecast.json"),
         "/og/api/profitability/summary": _load("profitability_summary.json"),
         "/og/api/views/settlement": _load("views_settlement.json"),
+        "/og/api/contracts": [
+            {
+                "contract_id": "00000000-0000-7000-8000-000000000d03",
+                "variant": "ECRS",
+                "service_type": "ERCOT_AS",
+            },
+            {
+                "contract_id": "00000000-0000-7000-8000-000000000d09",
+                "variant": "NSPIN",
+                "service_type": "ERCOT_AS",
+            },
+        ],
         "/og/api/profitability/per-kw": _load("profitability_per_kw.json"),
         "/og/api/profitability/lp-value": _load("profitability_lp_value.json"),
         "/og/api/work-orders": _load("pq_work_orders.json"),
@@ -94,6 +184,7 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/banks/bank-038/pq": _load("pq_bank.json"),
         "/og/api/billing/invoice-lines": _load("billing_invoice_lines.json"),
         "/og/api/trace/events": _load("billing_trace_events.json"),
+        **fleet_fixture.responses(),  # the Fleet table at scale (owner review R3)
     }
 
 
@@ -109,17 +200,21 @@ def _post_responses() -> dict[str, Any]:
             _load("ui19_bulk_confirm_1.json"),
             _load("ui19_bulk_confirm_2.json"),
         ],
+        "/og/api/ai/ask": _load("ai_ask.json"),
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
         "/og/api/alerts/7/ack": _load("alert_ack.json"),
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},
+        "/og/api/alerts/ack-bulk": {"results": [{"alert_id": i, "status": "acked"} for i in range(1, 200)]},
         "/og/api/dispatch/as-deployments": {"deployment_id": AS_DEPLOYMENT_ID, "status": "ACTIVE"},
     }
 
 
 def _route_modules() -> list[ModuleType]:
     import opengrid.ui.api_client as api_client
+    import opengrid.ui.routes.alerts as alerts
     import opengrid.ui.routes.billing_audit as billing_audit
     import opengrid.ui.routes.control_room as control_room
+    import opengrid.ui.routes.copilot as copilot
     import opengrid.ui.routes.dispatch as dispatch
     import opengrid.ui.routes.fleet as fleet
     import opengrid.ui.routes.health as health
@@ -127,7 +222,19 @@ def _route_modules() -> list[ModuleType]:
     import opengrid.ui.routes.pq as pq
     import opengrid.ui.routes.profitability as profitability
 
-    return [api_client, billing_audit, control_room, dispatch, fleet, health, markets, pq, profitability]
+    return [
+        alerts,
+        api_client,
+        billing_audit,
+        control_room,
+        copilot,
+        dispatch,
+        fleet,
+        health,
+        markets,
+        pq,
+        profitability,
+    ]
 
 
 def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,7 +247,8 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
         if path not in gets:
             raise ApiUnavailable(f"no fixture registered for GET {path}")
-        return gets[path]
+        body = gets[path]
+        return body(params) if callable(body) else body  # a callable answers per query (fleet_fixture)
 
     post_calls: dict[str, int] = {}
 

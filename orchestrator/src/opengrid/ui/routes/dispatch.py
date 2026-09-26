@@ -230,6 +230,35 @@ def ledger_timeline_view(
     }
 
 
+HELD_SERIES = "Held (AS/toll)"
+
+
+def apply_ledger_counts(scope: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Counts, title and drill-down lists from `GET /og/api/dispatch/ledger` itself (never from constants or
+    a paged hub list): `hub_count`, `available_hub_count` and the child scopes (fleet -> zones, zone ->
+    feeder segments)."""
+    children = [str(c.get("id")) for c in payload.get("children") or [] if c.get("id")]
+    hubs = int(payload.get("hub_count") or 0)
+    available = payload.get("available_hub_count")
+    level, sid = scope["level"], scope["id"]
+    if level == "fleet":
+        if children:
+            scope["zones"] = children
+        title = f"fleet ({len(children)} zones, {hubs:,} homes)"
+    elif level == "zone":
+        if children:
+            scope["banks"] = children
+        title = f"{sid} ({len(children)} feeder segments, {hubs:,} homes)"
+    elif level == "bank":
+        title = f"{sid} (feeder segment of {hubs:,} homes)"
+    else:
+        title = scope["title"]
+    scope["title"] = title
+    scope["hubs_in_scope"] = hubs
+    scope["available_hubs"] = available
+    return scope
+
+
 def ledger_api_view(payload: dict[str, Any], title: str, *, now: datetime) -> dict[str, Any] | None:
     """`GET /og/api/dispatch/ledger` (`{level, id, now, timeline[{t, capacity_kw, committed_kw,
     uncommitted_capacity_kw, over_committed_kw, committed_by_service, unallocated_committed_kw}], ...}`)
@@ -257,6 +286,24 @@ def ledger_api_view(payload: dict[str, Any], title: str, *, now: datetime) -> di
         }
         for service in services
     ]
+    # An AS award (or a toll) is a commitment granted 0 kW while held: its capacity is reserved but not
+    # committed, so it shows here as reserved minus committed rather than disappearing from the chart.
+    held = [
+        round(max(float(b.get("reserved_kw") or 0.0) - float(b.get("committed_kw") or 0.0), 0.0), 3)
+        for b in timeline
+    ]
+    if any(held):
+        series.append(
+            {
+                "name": HELD_SERIES,
+                "type": "line",
+                "stack": "ledger",
+                "areaStyle": {"opacity": 0.6},
+                "itemStyle": {"color": "token:--status-caution@0.8"},
+                "showSymbol": False,
+                "data": held,
+            }
+        )
     if any(col("unallocated_committed_kw")):
         series.append(
             {
@@ -303,6 +350,11 @@ def ledger_api_view(payload: dict[str, Any], title: str, *, now: datetime) -> di
         },
         "obligation_count": len(services),
         "series_noun": "service",
+        "held_kw_now": round(
+            max(float(current.get("reserved_kw") or 0.0) - float(current.get("committed_kw") or 0.0), 0.0), 3
+        ),
+        # The ledger only changes at the selector's gate (one bucket); stale only after two missed buckets.
+        "stale_after_s": 2 * 60 * int(payload.get("bucket_minutes") or 15),
         "capacity_kw": round(float(current.get("capacity_kw") or 0.0), 3),
         "hub_count": payload.get("hub_count"),
         "available_hub_count": payload.get("available_hub_count"),
@@ -520,6 +572,16 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
 
 #: NPRR1282 stored-energy duration per AS product (hours of full deployment the award must be able to hold).
 _AS_HOLD_HOURS: dict[str, int] = {"ECRS": 1, "NSPIN": 4, "NON_SPIN": 4, "NONSPIN": 4}
+#: Longest deployment the product rule allows, in minutes (ECRS 1 h, Non-Spin 4 h; tolling 90 min, D-29).
+AS_MAX_DEPLOY_MINUTES: dict[str, int] = {
+    "ECRS": 60,
+    "NSPIN": 240,
+    "NON_SPIN": 240,
+    "NONSPIN": 240,
+    "TOLLING": 90,
+}
+#: Only an AWARDED AS obligation is a hold that can be deployed; an OFFERED one is just an offer.
+_AS_AWARDED_STATES = frozenset({"COMMITTED", "DELIVERING", "SHORTFALL"})
 
 
 def contract_products(contracts: Any) -> dict[str, str]:
@@ -551,7 +613,7 @@ def as_awards_view(
     all_deployment = next((row for row in deployments if row.get("obligation_id") is None), None)
     rows: list[dict[str, Any]] = []
     for award in opportunities:
-        if award.get("service_type") != "ERCOT_AS":
+        if award.get("service_type") != "ERCOT_AS" or award.get("state") not in _AS_AWARDED_STATES:
             continue
         obligation_id = str(award.get("obligation_id") or "")
         deployment = active_by_obligation.get(obligation_id) or all_deployment
@@ -573,6 +635,9 @@ def as_awards_view(
         at_risk = bool(award.get("at_risk", False))
         if energy_held is not None and required_energy is not None:
             at_risk = at_risk or energy_held < required_energy
+        margin = _f(award.get("energy_margin_kwh"))
+        if margin is not None:
+            at_risk = at_risk or margin < 0
         rows.append(
             {
                 "obligation_id": obligation_id,
@@ -580,8 +645,10 @@ def as_awards_view(
                 "product": product or "ERCOT_AS",
                 "committed_kw": award.get("committed_qty_kw", award.get("requested_kw")),
                 "energy_held_kwh": energy_held,
+                "energy_margin_kwh": _f(award.get("energy_margin_kwh")),
                 "required_energy_kwh": required_energy,
                 "required_hours": required_hours,
+                "max_minutes": AS_MAX_DEPLOY_MINUTES.get(product),
                 "at_risk": at_risk,
                 "state": state,
                 "deployment_id": str(deployment["deployment_id"]) if deployment else None,
@@ -610,11 +677,18 @@ async def propose_as_deployment(
     obligation_id: str = Form(default=""),
     duration_minutes: int = Form(default=15),
     reason: str = Form(...),
+    product: str = Form(default=""),
 ) -> HTMLResponse:
-    """Step 1: render the exact AS deployment summary without changing system state."""
+    """Step 1: render the exact AS deployment summary without changing system state. One award at a time:
+    the API refuses a fleet-wide (ALL) deployment with 409, so the console never offers it. The duration is
+    capped by the award's product rule (the API remains the authority)."""
     _require_operator(request)
-    if not 1 <= duration_minutes <= 240:
-        return _action_result(request, message="Duration must be between 1 and 240 minutes.")
+    if not obligation_id.strip():
+        return _action_result(request, message="Choose the held award to deploy (one award per deployment).")
+    cap = AS_MAX_DEPLOY_MINUTES.get(product.strip().upper(), 240)
+    if not 1 <= duration_minutes <= cap:
+        label = product.strip().upper() or "this product"
+        return _action_result(request, message=f"Duration must be between 1 and {cap} minutes for {label}.")
     return templates.TemplateResponse(
         request,
         "_partials/as_deployment_confirm.html",
@@ -624,7 +698,7 @@ async def propose_as_deployment(
             "reason": reason,
             "confirm_url": f"{BASE_PATH}/dispatch/as-deployments/confirm",
             "summary": (
-                f"Deploy {obligation_id or 'all held ERCOT_AS awards'} for {duration_minutes} minutes "
+                f"Deploy award {obligation_id[:8]} ({product.strip().upper() or 'ERCOT_AS'}) for {duration_minutes} minutes "
                 f"({reason})"
             ),
         },
@@ -710,12 +784,20 @@ async def dispatch_page(
     bank_capacity_kw = 0.0
     commitments: list[dict[str, Any]] = []
     deployments: list[dict[str, Any]] = []
+    # Every hub, from the fleet map (the hub list is paged at 200, which undercounted the fleet); the hub
+    # list only as a fallback when the map is not serving.
     hubs: list[dict[str, Any]] = []
     try:
-        raw_hubs = await get_json("/og/api/fleet/hubs")
-        hubs = raw_hubs.get("items", []) if isinstance(raw_hubs, dict) else raw_hubs or []
+        raw_map = await get_json("/og/api/fleet/map")
+        hubs = list(raw_map.get("hubs") or []) if isinstance(raw_map, dict) else []
     except ApiUnavailable as exc:
-        logger.warning("dispatch: /og/api/fleet/hubs unavailable: %s", exc)
+        logger.info("dispatch: /og/api/fleet/map unavailable (%s); using the hub list", exc)
+    if not hubs:
+        try:
+            raw_hubs = await get_json("/og/api/fleet/hubs", params={"limit": 2000})
+            hubs = raw_hubs.get("items", []) if isinstance(raw_hubs, dict) else raw_hubs or []
+        except ApiUnavailable as exc:
+            logger.warning("dispatch: /og/api/fleet/hubs unavailable: %s", exc)
     scope = ledger_scope(level, id, hubs)
     if not scope["banks"] or scope["banks"] == [""]:
         scope["banks"] = [bank_id or await _default_bank_id()]
@@ -755,6 +837,9 @@ async def dispatch_page(
         if failed and len(failed) == len(scope["banks"]):
             degraded = degraded or "GET /og/api/ledger/<bank>/timeline failed for every bank in scope"
         scope["banks_unavailable"] = failed
+
+    if ledger_payload is not None:
+        apply_ledger_counts(scope, ledger_payload)
 
     # Grants and lock events stay per bank (the first bank in scope): they list rows, not a curve.
     try:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,6 +34,7 @@ def transport(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         seen.append(
             {
                 "path": request.url.path,
+                "body": json.loads(request.content) if request.content else None,
                 "params": dict(request.url.params),
                 "headers": dict(request.headers),
                 "timeout": request.extensions.get("timeout"),
@@ -110,9 +112,27 @@ def test_as_award_product_comes_from_the_contract() -> None:
         [{"contract_id": "d03", "variant": "ECRS"}, {"contract_id": "d09", "variant": "NSPIN"}]
     )
     awards = [
-        {"service_type": "ERCOT_AS", "obligation_id": "o1", "contract_id": "d03", "committed_qty_kw": "100"},
-        {"service_type": "ERCOT_AS", "obligation_id": "o2", "contract_id": "d09", "committed_qty_kw": "100"},
-        {"service_type": "ERCOT_AS", "obligation_id": "o3", "contract_id": "dxx", "committed_qty_kw": "100"},
+        {
+            "service_type": "ERCOT_AS",
+            "obligation_id": "o1",
+            "contract_id": "d03",
+            "state": "COMMITTED",
+            "committed_qty_kw": "100",
+        },
+        {
+            "service_type": "ERCOT_AS",
+            "obligation_id": "o2",
+            "contract_id": "d09",
+            "state": "COMMITTED",
+            "committed_qty_kw": "100",
+        },
+        {
+            "service_type": "ERCOT_AS",
+            "obligation_id": "o3",
+            "contract_id": "dxx",
+            "state": "COMMITTED",
+            "committed_qty_kw": "100",
+        },
     ]
     rows = {
         r["obligation_id"]: r
@@ -130,7 +150,10 @@ def test_as_award_product_comes_from_the_contract() -> None:
 # 6 -------------------------------------------------------------------------------------------------
 def test_export_period_defaults_and_cuts_datetimes() -> None:
     now = datetime(2026, 9, 27, 3, 0, tzinfo=UTC)  # 22:00 on Sep 26 in Chicago
-    assert export_period(None, None, now=now) == ("2026-09-01", "2026-09-26")
+    # `to` defaults to tomorrow (Chicago): the API keeps period_end <= to, so today's lines are included
+    assert export_period(None, None, now=now) == ("2026-09-01", "2026-09-27")
+    month_end = datetime(2026, 10, 1, 4, 0, tzinfo=UTC)  # 23:00 on Sep 30 in Chicago
+    assert export_period(None, None, now=month_end) == ("2026-09-01", "2026-10-01")
     assert export_period("2026-09-20T10:00", "2026-09-25T18:30", now=now) == ("2026-09-20", "2026-09-25")
 
 
@@ -148,3 +171,33 @@ def test_export_always_sends_both_dates_and_explains_errors(client: TestClient, 
     _set(transport, "/og/api/billing/invoice-lines", 422, {"detail": "bad dates"})
     bad = client.get("/og/billing/invoice-lines/export.csv", params={"from": "2026-09-20T10:00"}, headers=OP)
     assert bad.status_code == 422 and "could not be produced" in bad.text
+
+
+def test_chain_verify_sends_null_for_empty_filters_and_labels_streams(
+    client: TestClient, transport: list[Any]
+) -> None:
+    _set(transport, "/og/api/trace/verify", 200, {"passed": True, "checked": 7, "first_broken": None})
+    html = client.post("/og/billing/trace/verify?class=&from=&to=", headers=OP).text
+    assert "7 streams verified" in html and "events checked" not in html
+    call = next(c for c in transport[1:] if c["path"] == "/og/api/trace/verify")
+    assert call["body"] == {"class": None, "from": None, "to": None}
+
+
+def test_energy_cell_shows_requirement_and_margin_without_placeholder() -> None:
+    rows = as_awards_view(
+        [
+            {
+                "service_type": "ERCOT_AS",
+                "obligation_id": "o1",
+                "contract_id": "d03",
+                "state": "COMMITTED",
+                "committed_qty_kw": "100",
+                "energy_margin_kwh": "-5",
+            }
+        ],
+        [],
+        now=datetime.now(UTC),
+        product_by_contract={"d03": "ECRS"},
+    )
+    assert rows[0]["energy_held_kwh"] is None and rows[0]["required_energy_kwh"] == 100.0
+    assert rows[0]["energy_margin_kwh"] == -5.0 and rows[0]["at_risk"] is True

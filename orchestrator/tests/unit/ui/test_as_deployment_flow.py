@@ -33,7 +33,7 @@ def api_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, dict[str,
 def test_propose_only_renders_the_summary(client: TestClient, api_calls: list[Any]) -> None:
     resp = client.post("/og/dispatch/as-deployments/propose", data=FORM, headers={"X-Remote-User": "alice"})
     assert resp.status_code == 200
-    assert "Deploy obl-1 for 30 minutes (ERCOT deployment instruction)" in resp.text
+    assert "Deploy award obl-1 (ERCOT_AS) for 30 minutes (ERCOT deployment instruction)" in resp.text
     assert 'hx-post="/og/dispatch/as-deployments/confirm"' in resp.text
     assert api_calls == []
 

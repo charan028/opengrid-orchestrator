@@ -208,6 +208,10 @@ select:focus-visible,
   padding: 18px 12px 14px;
   position: sticky;
   top: 0;
+  /* `position: sticky` makes this its own stacking context, so without a z-index the main column --
+     which comes later in the DOM -- paints over anything the sidebar anchors, and a Leaflet map on the
+     screen behind swallowed the copilot panel's clicks (seen live). */
+  z-index: 40;
   height: 100vh;
   gap: 18px;
 }
@@ -1966,3 +1970,321 @@ label > select {
 
 .og-deflist dt { color: var(--muted); }
 .og-deflist dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* --- operator copilot (issue #26): launcher in the status bar, docked dismissible panel ---------- */
+
+.og-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.og-copilot-launcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+
+.og-copilot-launcher:hover,
+.og-copilot-launcher[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.og-copilot-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 90;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(70vh, 640px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  padding: 16px 18px 14px;
+}
+
+.og-copilot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.og-copilot-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.og-copilot-intro {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.og-copilot-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.og-copilot-turn {
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  padding-top: 12px;
+}
+
+.og-copilot-turn:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.og-copilot-question {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.og-copilot-answer > p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.og-copilot-citations {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.og-copilot-citations li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.og-copilot-cite-label {
+  color: var(--text);
+}
+
+.og-copilot-citations code {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.og-copilot-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 !important;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Visually distinct from the provenance labels, and never a substitute for them (UI spec S3.0(h)). */
+.og-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--series-pipeline-ac);
+  background: color-mix(in srgb, var(--series-pipeline-ac) 14%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--series-pipeline-ac) 55%, transparent);
+}
+
+.og-copilot-turn[data-tier="unavailable"] .og-copilot-answer > p,
+.og-copilot-turn[data-tier="declined"] .og-copilot-answer > p {
+  color: var(--status-caution);
+}
+
+.og-copilot-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.og-copilot-form input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .og-copilot-panel {
+    right: 8px;
+    left: 8px;
+    bottom: 8px;
+    width: auto;
+  }
+}
+
+/* Leaflet panes use z-index 100-1000; keep them inside the map's own stacking context. */
+.og-map {
+  isolation: isolate;
+}
+
+/* --- AS deployment form: one baseline for every control ------------------------------------------ */
+.as-deployment-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 14px;
+  margin-top: 14px;
+}
+
+.as-deployment-form .as-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.as-deployment-form .as-field-duration {
+  flex: 0 1 150px;
+}
+
+.as-deployment-form .as-field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  line-height: 1.2;
+}
+
+.as-deployment-form select,
+.as-deployment-form input[type="text"],
+.og-input-group {
+  height: 36px;
+  box-sizing: border-box;
+}
+
+.og-input-group {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+}
+
+.og-input-group input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.og-input-suffix {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 0;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.as-deployment-form .as-submit {
+  height: 36px;
+  flex: 0 0 auto;
+}
+
+.as-deployment-form .as-duration-hint {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .as-deployment-form .as-field,
+  .as-deployment-form .as-field-duration,
+  .as-deployment-form .as-submit {
+    flex: 1 1 100%;
+  }
+}
+
+/* --- alerts component (Control room, System Health) ---------------------------------------------- */
+.og-alerts-filters { margin-bottom: 10px; }
+
+.og-alerts-bulkbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.og-alerts-scroll {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.og-alerts-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+
+.og-alerts-pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.og-alerts-ack-result { margin-top: 8px; font-size: 13px; }
+
+.og-posture-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 8px 14px;
+  border: 1px solid color-mix(in srgb, var(--status-caution) 45%, var(--border));
+  background: color-mix(in srgb, var(--status-caution) 10%, var(--panel));
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.og-posture-why { color: var(--muted); font-size: 12px; }
