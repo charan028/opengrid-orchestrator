@@ -292,15 +292,23 @@ failure at step 1 shows **UNAVAILABLE** with the reason.
 ### 6.2 Manual command (one hub or bank)
 
 Fields: Bank id or Hub id (one is required), Setpoint (kW), Reason. The guardian evaluates the command when you
-confirm.
+confirm. A hub may move at most its ramp step in one 2-second cycle (G-04): about 0.12 kW for an 11 kW hub and
+0.22 kW for a 20 kW hub. A setpoint further from the hub's current output is refused, so manual commands are for
+small corrections; the engine ramps its own setpoints.
 
 | Result | Meaning |
 |---|---|
 | **PASS** | The guardian signed it; it goes to the hub in a signed batch. "Command accepted. Trace ..." |
-| **VETOED** (critical) | The guardian refused it: "Vetoed by guardian: G-02, ... Trace ...", with the rule ids (for example G-02 hub power, G-04 hub ramp, G-19 commitment lock, G-01 reserve, and since R2 the flow and territory checks G-26…G-33) |
+| **VETOED** (critical) | The guardian refused it: "Vetoed by guardian: G-02, ... Trace ...", with the rule ids (for example G-02 hub power, G-04 hub ramp, G-05 fleet ramp, G-19 commitment lock, G-01 reserve, and since R2 the flow and territory checks G-26…G-33) |
+| **PARTLY_VETOED** (critical) | The guardian refused it on per-hub rules only (G-04, G-26, G-27, G-31, ...); for a one-hub command this means refused. Same sentence as VETOED |
 | **TIMEOUT** | No guardian verdict within the poll window (check og-guardian on System Health). A guardian TIMEOUT verdict shows the TIMEOUT badge with "Vetoed by guardian: no rule ids given." |
 | **EXPIRED** | The proposal expired, or the hub id is unknown. Propose again |
 | **FAILED** | Anything else, with the error |
+
+**Known gap:** the guardian counts the kW of every manual (and bulk) command, refused ones included, against one
+shared ramp budget (G-05). After a burst of refused commands, every further manual command is refused with G-05.
+The budget frees up as newer engine cycles push it out: about 2 minutes on a fleet that is dispatching, but on an
+idle fleet only a restart of og-guardian clears it.
 
 ### 6.3 Scoped safe stop
 
@@ -376,7 +384,8 @@ Reason → **Propose for selection (step 1 of 2)** → **Send to selection**.
 - Results: **PASS** (every hub passed the guardian) or **PARTIAL** ("P of N hubs passed ..." with each refused
   hub and its rule ids), **TIMEOUT**, **EXPIRED**, **FAILED**.
 - The guardian checks and signs every hub's command; a selection never bypasses it. At most 500 hubs per bulk
-  command (a larger selection is refused).
+  command (a larger selection is refused). Each hub's step is bounded by G-04 and shares the manual G-05 budget
+  (6.2).
 
 ### 6.7 Power-quality actions
 
@@ -412,26 +421,24 @@ load). Several modes can be active together ("Feed stale + Guardian down").
 
 | Banner | Mode | Raised when | Clears when |
 |---|---|---|---|
-| Feed stale | `NO_NEW_COMMITMENTS` | Any feed is older than its freshness window, or its circuit breaker is open | Every feed is fresh and its breaker closed |
+| Feed stale | `NO_NEW_COMMITMENTS` | The price feed (`ERCOT:np6-905-cd`, the default `[health] firm_blocking_feeds`) is older than its freshness window, or its circuit breaker is open. Other feeds still raise `ALR-FEED-STALE` but do not block | The price feed is fresh and its breaker closed |
 | Engine down | `HOLD_LOCAL_AUTONOMY` | og-engine's heartbeat is missing (more than 15 s) | og-engine heartbeats again |
 | Guardian down | `HOLD` | og-guardian's heartbeat is missing | og-guardian heartbeats again |
-| SCADA silent | `DIST_DEFERRAL_OPEN_LOOP` | A bank's SCADA stops reporting | SCADA reports again |
+| SCADA silent | `DIST_DEFERRAL_OPEN_LOOP` | No SCADA bank reading at all for over 60 s (`[health] scada_silent_s`); never before the first reading | A SCADA reading arrives |
 
 - **Feed stale is enforced.** While it lasts, og-engine skips intake (trace `INTAKE_SKIPPED`) and every selector
   gate selects nothing new: offers stay OFFERED, and committed deliveries continue. An unreadable mode counts as
-  active. Contract admission (operator CRUD) is not blocked.
+  active. Contract admission (operator CRUD) is not blocked. Since R2 hotfix v3 only the price feed sets it; a
+  stale load, NWS, EIA or solar feed raises `ALR-FEED-STALE` only.
 - **The other modes are shown and recorded only.** With the guardian down, the engine's own heartbeat check makes
   it propose no batches (it holds) while it keeps allocating; with the engine down there is nothing to sign.
   Either way the hubs hold their last setpoint for the lease plus hold (about 35 s) and then serve their own
-  homes. **Known gap:** "SCADA silent" is never raised, and the DIST_DEFERRAL loop keeps using the last SCADA
-  reading.
+  homes. **Known gap:** "SCADA silent" is raised (`ALR-SCADA-SILENT`) but nothing acts on it: the DIST_DEFERRAL
+  loop keeps using the last SCADA reading.
 - Feed freshness windows (`orchestrator/config/orchestrator.toml` `[feeds.staleness]`): ERCOT price 2,700 s,
   ERCOT load 172,800 s (48 h), wind and solar 10,800 s (including the regional solar feed `np4-745-cd`), NWS
   10,800 s, EIA 10,800 s (counted only while the ERCOT load feed is stale), AS prices 93,600 s (they post once a
   day).
-- **Watch the regional solar feed.** `np4-745-cd` is new in this release and polled by default. If its row never
-  gets a value, "Feed stale" stays on and nothing new is committed anywhere: tell the lead, who can switch that
-  feed off in configuration without a deploy.
 
 ### 7.2 Guardian escalation (K7)
 
@@ -483,7 +490,8 @@ alert is raised or cleared and the degraded modes freeze.
 |---|---|---|---|
 | `ALR-PROCESS-DOWN` | critical | A process's heartbeat (feeds, engine, guardian, safestop, api) is missing for more than 15 s. "Process {name} heartbeat missing" | When it heartbeats again |
 | `ALR-SIM-OFFLINE` | critical | No fleet telemetry and no SCADA reading reached the database for 60 s. The engine writes both, so an og-engine outage also raises it | When readings arrive again |
-| `ALR-FEED-STALE` | warning | A feed's latest value is older than its freshness window (section 7.1). "Feed ERCOT:np6-905-cd stale for over 2700s" | When the feed is fresh again |
+| `ALR-FEED-STALE` | warning | A feed's latest value is older than its freshness window (section 7.1). "Feed ERCOT:np6-905-cd stale for over 2700s". Only the price feed also sets Feed stale | When the feed is fresh again |
+| `ALR-SCADA-SILENT` | critical | No SCADA bank reading at all for over 60 s (never before the first reading); shown as "SCADA silent" | og-settle clears it when a reading arrives |
 | `ALR-FEED-LGV-EXHAUSTED` | critical | A feed's circuit breaker is open (5 consecutive failures, or half of the last 10 polls) | When the breaker closes |
 | `ALR-HUB-OFFLINE-RATIO` | warning / critical | Offline plus fault hubs in a zone exceed 5% (warning) or 20% (critical). A hub is offline after 30 s without telemetry | When the ratio is 5% or less |
 | `ALR-SCADA-OVERLOAD` | warning / critical | A bank's latest SCADA apparent power exceeds its kVA rating (warning) or 120% of it (critical) | When the reading is at or under the rating |
@@ -511,10 +519,10 @@ it clears and re-opens.
 | Gap | What to do meanwhile |
 |---|---|
 | Run chain verify reports FAIL from an unfiltered page | Set From and To first, or use the API call in 6.9 |
+| After refused manual commands, later manual and bulk commands are refused with G-05 | Wait about 2 minutes while the fleet dispatches; on an idle fleet the lead restarts og-guardian |
 | Fleet table shows at most 200 hubs and does not update live | Filter by zone or bank; reload |
 | AS deploy form offers "all held AS awards" and 1-240 min; og-api refuses both beyond one award and its product | Deploy one award, within its product's window; never chain deployments |
-| Only Feed stale is enforced; "SCADA silent" is never raised | Treat the other banners as a call to act (7.1) |
-| A stale regional solar feed (`np4-745-cd`) keeps Feed stale on | Tell the lead (7.1) |
+| Only Feed stale (the price feed) is enforced; SCADA silent is shown only | Treat the other banners as a call to act (7.1) |
 | Escalations, Control-room banner and alerts reflect page load | Reload; System Health's banner and alerts are live |
 | Best-effort shortfall is labelled "Delivered short"; after a lifted L2 instruction the full commitment does not come back | Watch the grants, not the card |
 | One permanent `ALR-XFMR-UNMAPPED` warning per bank | Expected until transformers are mapped; acknowledge |

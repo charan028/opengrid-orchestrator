@@ -75,7 +75,7 @@ simulator, as `dev/config/dev.toml` does. That switch is configuration plus `sys
 | SCADA overload | [ogsim] `bank_overload` on the demo bank | `$BANK` | System Health, Dispatch |
 | Comms loss, best effort | [ogsim] `demo-03-zone-comms-loss` | `hub-00001`, then zone `LZ_SOUTH` | Fleet, System Health, Dispatch |
 | Guardian escalation (K7) | operator API burst | `$HUB`, a hub on the demo bank | Control room, System Health, Fleet |
-| Degraded mode | [ogsim] [feeds→sim] `feed_outage_and_stale` | `np6-905-cd` | System Health, Control room |
+| Degraded mode | [ogsim] [feeds→sim] `stale_posting`, 60 min, started during setup | `np6-905-cd` | System Health, Control room |
 | Scoped safe stop and release | operator actions, two operators | `bank-022` | Fleet |
 | Energy runs low | [ogsim] `reserve_floor_pressure` on the demo bank's zone | `$ZONE` | Dispatch, System Health |
 
@@ -89,7 +89,8 @@ the id you `DELETE` to end a moment early.
    `curl -u tester:... -X POST $SIM/api/random/pause` → `"paused": true`. Pausing does not cancel what is
    already active: list `curl -u tester:... "$SIM/api/anomalies?source=random"` and
    `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>` each one, then check `$SIM/api/anomalies` returns
-   `{"active": []}`. A restart of `og-sim-control` un-pauses random mode again; pause it after any restart.
+   `{"active": []}`. Since R2 hotfix v3 the pause is saved across a restart of `og-sim-control`, but an
+   unreadable state file resumes random mode, so check `curl -u tester:... $SIM/api/random/status` after one.
 2. **All processes up.** Open **System Health**: every process in the Processes table has a heartbeat time from
    the last few seconds (the Status column always reads `ok`, so read the time), no `ALR-PROCESS-DOWN`, no
    degraded-mode banner, and no open critical alert. One `ALR-XFMR-UNMAPPED` warning per commanded bank is
@@ -111,8 +112,12 @@ the id you `DELETE` to end a moment early.
    active ERCOT_AS awards are visible", give that contract an opportunity for the demo window as in item 3.
 5. **Three browser windows**: `og-op-a` (the one you present from), `og-op-b` (the second operator, for the
    release), and `viewer` on the Fleet screen.
-6. **The control plane.** Use the `curl` lines below. Its web page calls `/api/...` by absolute path, which the
-   server's Apache does not proxy under `/ogsim/`, so its buttons may not work there.
+6. **The control plane.** Use the `curl` lines below. R2 hotfix v3 gave its web page Run, Stop and Stop all
+   buttons, and support for a path prefix. But the repo's Apache and systemd config do not set that prefix
+   yet, so behind `/ogsim/` the page's calls may still fail.
+7. **Only when feeds read the simulator: start step 18's stale price now**, at least 50 minutes before step 18
+   (the `curl` is in step 18). Everything already committed keeps delivering, but nothing new is committed once
+   the price is 45 minutes old, so run the demo seed (item 3) first.
 
 ## The steps
 
@@ -137,7 +142,7 @@ Timing is the budget per step; the total is about 15 minutes.
   "Forecast band (P10 / P50 / P90)".
 - **Expect:** One price line per ERCOT load zone; each bank is dispatched and settled at its own zone's price,
   never at a hub price (decision D-10). Freshness rows for `np6-905-cd` (price), `np6-345-cd` (load),
-  `np4-732-cd` (wind), `np4-737-cd` (solar), `np4-745-cd` (solar by region, new in R2), `np4-188-cd` (AS), EIA
+  `np4-732-cd` (wind), `np4-737-cd` (solar), `np4-745-cd` (solar by region, where deployed), `np4-188-cd` (AS), EIA
   and NWS, each `LIVE` (or `SIM` when feeds read the simulator), failures `0`, breaker `closed`. The forecast
   band is drawn ahead of now for `LZ_NORTH`. The "Bid funnel" is derived from the pipeline, so it shows the
   demo offers.
@@ -255,8 +260,8 @@ skip to step 13.
   `shortfall-<obligation id>`, class `ALLOCATOR_SHORTFALL`), and its card turns amber (AT_RISK). Say (decision
   D-17): it keeps receiving the maximum feasible kW for the rest of the window, never 0, never stopped. The
   hubs themselves serve their homes on local autonomy once their lease lapses. The zone returns at 240 s; to end now,
-  `curl -u tester:... -X DELETE $SIM/api/anomalies/demo-03-zone-comms-loss:zone_mass_disconnect:90` (and
-  `...:hub_offline:0`).
+  `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/stop` (cancels its pending steps and
+  ends what it injected).
 - **Known gaps:**
   - The card moves to "Fulfilled / shortfall" with the text "Delivered short; penalty applies", although
     delivery continues.
@@ -279,8 +284,9 @@ skip to step 13.
   done; echo
   ```
 - **Show:** The printed status codes; then System Health (reload).
-- **Expect:** A row of `409`: the guardian vetoes every one (G-02 hub power; since R2 the flow checks, e.g. G-31,
-  may be listed too). More than 5% of a tick's commands vetoed puts `$BANK` (and its zone, if the zone crosses
+- **Expect:** A row of `409`: the guardian refuses every one, as VETOED or PARTLY_VETOED, with rule ids such as
+  G-04 hub ramp, G-26 home meter, G-27 transformer, G-31 peak and G-05 fleet ramp. An occasional TIMEOUT is
+  possible. More than 5% of a tick's commands vetoed puts `$BANK` (and its zone, if the zone crosses
   5% too) **CONSERVATIVE**: "Guardian escalations" shows "Scope held conservative" (`ALR-SCOPE-CONSERVATIVE`),
   and the engine stops selling spot headroom there. After three bad ticks it shows "Guardian requests a safe
   stop" (`ALR-SAFE-STOP-REQUESTED`) with **Review safe stop (two-step)**.
@@ -298,8 +304,11 @@ skip to step 13.
 ### Topic 9: a forged command, and the legitimate path
 
 **Step 17: The signed path, for contrast** (45 s)
-- **Action:** `/og/fleet`, "Manual command": hub `hub-00142`, setpoint `2`, reason `demo signed path`,
-  **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown.
+- **Order:** run this step before step 15. After step 15's burst the guardian refuses every manual command with
+  G-05 for a while (a known gap, operator guide 6.2).
+- **Action:** `/og/fleet`, "Manual command": hub `hub-00142` (idle, 0 kW), setpoint `0.1`, reason
+  `demo signed path`, **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown. A hub
+  moves at most about 0.12 kW per 2 s cycle (G-04), so a larger step would be refused.
 - **Show:** The confirm dialog (focus starts on Cancel, Tab to the confirm button, Escape closes); the result.
 - **Expect:** `PASS` "Command accepted. Trace ..." (the drill-down's last command id changes), or `VETOED` "Vetoed
   by guardian: <rule ids>. Trace ..."; the 409 in step 15 is the same veto seen from the API. Either way the
@@ -309,21 +318,21 @@ skip to step 13.
 
 ### Topic 10: degraded mode [feeds→sim]
 
-**Step 18: A feed goes down** [ogsim] (30 s, started about 10 minutes earlier)
-- **Where:** the dev stack, whose price freshness window is 600 s. On the server the window is 2,700 s since R2.
-  That is longer than this scenario's 17 minutes without new data, so there the banner appears only if the
-  breaker opens. Skip the step on the server unless the lead shortens the window for the run [root].
-- **Action:** Start it during step 3:
-  `curl -u tester:... -X POST $SIM/api/scenarios/feed_outage_and_stale/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
-  (np6-905-cd returns 503 for 120 s, then stops posting new data for 900 s). Now open System Health.
-- **Show:** The banner at the top; "Feed freshness"; "Alerts"; then Dispatch.
-- **Expect:** "Degraded mode: **Feed stale**" once the price feed is older than its window (`ALR-FEED-STALE`,
-  warning), or at once if its breaker opened (`ALR-FEED-LGV-EXHAUSTED`, critical). Markets shows the row's
-  failures and breaker. The banner is live on System Health; the Control room shows it on reload.
-- **Say:** Feed stale is enforced. While it lasts, og-engine skips intake and every selector gate commits
-  nothing new; the committed deliveries continue. The other modes (Engine down, Guardian down, SCADA silent)
-  are shown and recorded only. "Engine down" and "Guardian down" need `systemctl stop` [root] and interrupt
+**Step 18: A feed goes stale** [ogsim] (30 s, started at least 50 minutes earlier)
+- **Why the long lead time:** since R2 the price freshness window is 2,700 s on the server and on the dev stack
+  (the simulator stamps prices like ERCOT, at the 15-min interval start). The `feed_outage_and_stale` scenario
+  (120 s of 503, then 900 s without new data) no longer reaches it.
+- **Action:** during "Before you start", stop the price feed posting for an hour:
+  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "stale_posting", "target": "np6-905-cd", "params": {}, "duration": 3600}'`
+  (the response carries the anomaly's `id`). At step 18, open System Health, then Dispatch.
+- **Show:** The banner at the top; "Feed freshness"; "Alerts"; then the Dispatch pipeline.
+- **Expect:** "Degraded mode: **Feed stale**" once the price is older than 2,700 s (`ALR-FEED-STALE` "... stale
+  for over 2700s", warning). The banner is live on System Health; the Control room shows it on reload.
+- **Say:** Feed stale is enforced. While it lasts, og-engine skips intake and every selector gate commits nothing
+  new, and the committed deliveries continue. The other modes (Engine down, Guardian down, SCADA silent) are
+  shown and recorded only. "Engine down" and "Guardian down" need `systemctl stop` [root] and interrupt
   delivery, so they are not part of this run.
+- **End:** `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`. The banner clears once a fresh price posts.
 
 ### Topic 11: a scoped safe stop, released by two operators
 
@@ -407,10 +416,9 @@ skip to step 13.
 
 ## Reset between runs (3 minutes)
 
-1. **End anything still active:** `curl -u tester:... $SIM/api/anomalies`, then `DELETE` each id; confirm
-   `{"active": []}`. There is no "stop scenario" verb: `demo-03`'s +90 s step still fires after its first
-   step is cancelled; cancel it when it appears, or wait for
-   `GET $SIM/api/scenarios/demo-03-zone-comms-loss/status` to read `"running": false`.
+1. **End anything still active:** `curl -u tester:... -X POST $SIM/api/scenarios/stop-all` stops every scenario
+   and what it injected; `DELETE` any remaining direct injection (`curl -u tester:... $SIM/api/anomalies`, then
+   `DELETE $SIM/api/anomalies/<id>`, such as step 18's stale posting); confirm `{"active": []}`.
 2. **Let health clear:** the overload and offline-ratio alerts clear once their condition ends.
 3. **Release any stop still engaged** with two operators, as in step 20 (og-op-a requests, og-op-b approves).
 4. **End any AS deployment still active:** Dispatch, **Stop deploy**, or
