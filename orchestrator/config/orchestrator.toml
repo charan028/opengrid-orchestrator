@@ -116,7 +116,7 @@ engine_port = 9101
 
 [assets]
 # Asset-health drift sweep in og-settle (WATCH -> guardian-signed calibration, DEGRADED -> work order).
-drift_enabled = false
+drift_enabled = true
 drift_interval_s = 60.0
 
 [pq_ingest]
