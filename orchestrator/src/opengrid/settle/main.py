@@ -1,29 +1,27 @@
 """Process entry point for `og-settle` (BUILD.md S4, INTERFACES.md): `python -m opengrid.settle.main`.
 
-Wires the real Postgres-backed `SettleBackend`/`TraceStore` via `opengrid.settle.configure`, then runs
-three independent cadences on `opengrid.platform.process.run_forever`:
+Wires the real Postgres-backed `SettleBackend`/`TraceStore` via `opengrid.settle.configure`, then drives
+three cadences from ONE `opengrid.platform.process.run_forever` loop:
 
-- every `settle.interval_s` (default 60s): `run_settle_cycle()` -- meter, bill and value every
-  obligation-interval the backend reports as pending;
-- every `settle.trace_prune_interval_s` (default 60s, 02a S8.3's checkpoint cadence): `
-  run_trace_pruning_cycle()`.
-- `opengrid.health.run(pool, cfg)` (02b S6.4's evaluator: heartbeats, hub health, and the `ALR-*` alert
-  rules). Dispatch-live pass fix: this was never wired into any process at all -- `opengrid.health` was
-  fully built and tested but nothing ever called `evaluate_alerts()`/`evaluate_once()` in production, so
-  no alert (feed-stale, hub-offline-ratio, SCADA-overload, ...) could ever fire regardless of how well
-  the rule logic itself worked (qa/merge-notes.md). `og-settle` is the natural host: it is the only
-  process besides `og-health` (never built as its own unit, 02b S1.2 leaves that split for MVP-J) with a
-  slow-cadence maintenance-loop shape already, and health's own read model (`GET /og/api/health`) is
-  read by `api`/`ui`, not settle, so there is no ordering dependency between the two loops.
+- every `health.heartbeat_interval_s` (default 5 s): the process heartbeat and `opengrid.health`'s
+  evaluator (02b S6.4: heartbeats, hub health, the `ALR-*` alert rules);
+- every `settle.interval_s` (default 60 s): `run_settle_cycle()` -- meter, bill and value every pending
+  obligation-interval;
+- every `settle.trace_prune_interval_s` (default 60 s, 02a S8.3): `run_trace_pruning_cycle()`.
 
-Both maintenance loops write a heartbeat each tick (02b S6.4) so `health.evaluate_heartbeats()` can see
-`og-settle` is alive even on a tick that finds nothing to do; `health.run()` writes its own.
+One loop, not three: `run_forever` installs the process's SIGTERM handler, and a second concurrent
+`run_forever` replaces the first one's -- the other loops then never stopped and systemd had to SIGKILL
+og-settle after 90 s on every deploy (live 2026-09-26). The heartbeat is also written on the fast cadence:
+at the 60 s settle cadence, health (miss threshold 3 x 5 s) intermittently reported settle as down.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
+from collections.abc import Awaitable, Callable
 
 import opengrid.health as health
 from opengrid.platform.config import load_config
@@ -36,11 +34,40 @@ from opengrid.settle.pg_backend import PgSettleBackend
 from opengrid.trace import TraceStore
 from opengrid.trace.pg_backend import PgTraceBackend
 
-_PROCESS_NAME = "settle"  # must match opengrid.health.model.ALL_PROCESSES (dispatch-live pass fix: this
-# was "og-settle" here but "settle" everywhere health/other processes look it up, so
-# health.evaluate_heartbeats() always saw settle as permanently "down" regardless of its real status)
+_PROCESS_NAME = "settle"  # must match opengrid.health.model.ALL_PROCESSES
 _DEFAULT_SETTLE_INTERVAL_S = 60.0
 _DEFAULT_TRACE_PRUNE_INTERVAL_S = 60.0
+_DEFAULT_HEALTH_INTERVAL_S = 5.0
+
+_logger = logging.getLogger(__name__)
+
+
+class Cadence:
+    """Due-check for one periodic job inside a shared tick: due on the first call, then once at least
+    `interval_s` has elapsed on the (injectable) monotonic clock since it last ran."""
+
+    def __init__(self, interval_s: float, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self.interval_s = interval_s
+        self._clock = clock
+        self._last: float | None = None
+
+    def due(self) -> bool:
+        now = self._clock()
+        if self._last is not None and now - self._last < self.interval_s:
+            return False
+        self._last = now
+        return True
+
+
+async def run_due(jobs: list[tuple[str, Cadence, Callable[[], Awaitable[object]]]]) -> None:
+    """Run every due job; one job's failure is logged and never skips the others (K7)."""
+    for name, cadence, job in jobs:
+        if not cadence.due():
+            continue
+        try:
+            await job()
+        except Exception:
+            _logger.exception("og-settle job failed", extra={"job": name})
 
 
 async def _run() -> None:
@@ -48,28 +75,34 @@ async def _run() -> None:
     cfg = load_config(os.environ.get("OG_CONFIG"))
     pool = await make_pool(cfg)
     configure(PgSettleBackend(pool), TraceStore(PgTraceBackend(pool)), trace_pool=pool)
+    health.configure(pool, cfg)
 
-    settle_interval_s = float(cfg.get("settle.interval_s", _DEFAULT_SETTLE_INTERVAL_S))
-    trace_prune_interval_s = float(cfg.get("settle.trace_prune_interval_s", _DEFAULT_TRACE_PRUNE_INTERVAL_S))
+    health_interval_s = float(cfg.get("health.heartbeat_interval_s", _DEFAULT_HEALTH_INTERVAL_S))
 
-    async def settle_tick() -> None:
-        await write_heartbeat(pool, _PROCESS_NAME)
+    async def settle_job() -> None:
         settled_count = await run_settle_cycle()
         if settled_count:
             logger.info("settlement cycle complete", extra={"settled_count": settled_count})
 
-    async def trace_prune_tick() -> None:
+    async def prune_job() -> None:
         deleted = await run_trace_pruning_cycle()
         if deleted:
             logger.info("trace pruning cycle complete", extra={"deleted_by_stream": deleted})
 
-    await asyncio.gather(
-        run_forever(settle_tick, interval_s=settle_interval_s, process_name=_PROCESS_NAME),
-        run_forever(
-            trace_prune_tick, interval_s=trace_prune_interval_s, process_name=f"{_PROCESS_NAME}-trace"
+    jobs: list[tuple[str, Cadence, Callable[[], Awaitable[object]]]] = [
+        ("heartbeat", Cadence(health_interval_s), lambda: write_heartbeat(pool, _PROCESS_NAME)),
+        ("health", Cadence(health_interval_s), health.evaluate_once),
+        ("settle", Cadence(float(cfg.get("settle.interval_s", _DEFAULT_SETTLE_INTERVAL_S))), settle_job),
+        (
+            "trace_prune",
+            Cadence(float(cfg.get("settle.trace_prune_interval_s", _DEFAULT_TRACE_PRUNE_INTERVAL_S))),
+            prune_job,
         ),
-        health.run(pool, cfg),
-    )
+    ]
+    try:
+        await run_forever(lambda: run_due(jobs), interval_s=health_interval_s, process_name=_PROCESS_NAME)
+    finally:
+        await pool.close()
 
 
 def main() -> None:
