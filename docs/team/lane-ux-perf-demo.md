@@ -1,5 +1,7 @@
 # Lane: UX, performance tooling and demo (assignee: fancyviper007)
 
+> **First read `docs/team/NOTICES.md`.** It lists requirement changes that override this file (latest: 2026-09-25 evening: continuous energy checks, Base hardware 39.2 kWh / 11 kW with 20% 2-unit homes, and upcoming service profiles and power quality).
+
 You and your AI agent own work packages **DOC1, U1, Q3, DEMO** from `WORKBOARD.md`. Edit only their paths. Only
 the lead deploys and merges to `main`.
 

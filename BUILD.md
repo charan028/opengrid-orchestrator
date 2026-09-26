@@ -1,6 +1,8 @@
 # OpenGrid Orchestrator — Build Brief (MVP-S)
 
-Read this first. The design is fixed by the approved documents in `D:\Projects\OpenGrid\docs\orchestrator\07-delivery\`:
+Read this first, then `docs/team/NOTICES.md` (requirement changes). The design is fixed by the approved documents in
+`docs/orchestrator/07-delivery/` in this repo. The lead's workspace path `D:\Projects\OpenGrid\docs\orchestrator\` is
+the same set; the repo copy is what contributors use.
 
 - `00-invariants.md` — canonical K1–K13 and guardian checks (G-01…G-20);
 - `01-saturday-delivery-plan.md` — scope, acceptance A1–A11, rules in §7a;
@@ -36,6 +38,22 @@ ERCOT_ENERGY, ERCOT_AS, DIST_DEFERRAL, PARTNER_CAPACITY). Capacity is split per 
 agreements (commitments, product rules, priority/tiers) and market conditions (prices, forecasts). The commitment
 lock (K13) protects each committed customer. New opportunities compete only for uncommitted headroom. Every module,
 test and UI screen must handle N concurrent obligations, not one at a time.
+
+## 2a. Requirement changes, 2026-09-25 evening (read before new work)
+
+1. **Energy, continuously.** Capacity (kW) is not enough: remaining energy above reserve vs each committed delivery is
+   checked every cycle (K1/K13). A missing or stale SoC means zero discharge. The guardian projects SoC over the
+   command lease (G-01-ENERGY).
+2. **Base hardware (confirmed):** 39.2 kWh / 11 kW per unit; 20% of homes have 2 units (78.4 kWh / 20 kW); reserve
+   20%; banks are ~600 kVA feeder segments. Use these in all configs, fixtures and docs.
+3. **Service tailoring (MVP-S+):** each customer/service has a ServiceProfile (control primitive, target quantity,
+   response, tolerance, M&V, settlement). Pipeline AC mitigation, data center and arbitrage are distinct services.
+4. **Power quality (MVP-S+):** a per-customer PowerQualityEnvelope (phase, V, I, f, PF, THD), an inverter
+   imperfection model, PQ-aware dispatch, guardian PQ checks (proposed K14), per-phase telemetry, and simulator PQ
+   anomalies.
+   Spec (draft, pending owner approval): `docs/orchestrator/07-delivery/06-service-profiles-and-power-quality.md`. Do
+   not implement 3–4 before approval; design your work so it will accept a ServiceProfile later (don't hard-code
+   service behaviour).
 
 ## 3. Abnormal events (integration sims)
 
@@ -167,5 +185,8 @@ Professional, clean, maintainable code. The reviewer agents reject anything belo
 - Never touch Apache vhosts, MariaDB, mail services, `/opt/opengrid_sim`, `/var/www/html/opengrid` or
   `/etc/mosquitto` (ask the lead).
 - Remote commands: never inline double-quoted strings through ssh. `remote.ps1` sends a script file; use it.
+- **Never stop processes by pattern** (`pkill -f`, `killall`). Test workspaces run as the same `opengrid` user as the
+  production services, so a pattern kill can stop production. Start background test processes with `cmd & pid=$!`
+  and stop only that PID (`kill "$pid"`). Use test ports ≥ 18000, never the production ports 8080/8090/8091.
 - Tests first from `04-mvp-s-test-plan.md`. Any K1–K13 failure blocks.
 - When done, report: files created, tests run with results (paste the pytest summary line), open issues.

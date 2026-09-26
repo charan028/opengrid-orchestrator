@@ -1,5 +1,7 @@
 # Lane: Correctness and test depth (assignee: rpagaria2000)
 
+> **First read `docs/team/NOTICES.md`.** It lists requirement changes that override this file (latest: 2026-09-25 evening: continuous energy checks, Base hardware 39.2 kWh / 11 kW with 20% 2-unit homes, and upcoming service profiles and power quality).
+
 You and your AI agent own work packages **P1, Q1, Q2, DOC2** from `WORKBOARD.md`. Edit only their paths. Only the
 lead deploys and merges to `main`.
 

@@ -1,0 +1,36 @@
+# OpenGrid Orchestrator: integration settings template (non-secret).
+# Merge into config/orchestrator.toml. Secrets are referenced by env-variable name only.
+
+[feeds.ercot]
+username_env = "ERCOT_API_USER"
+password_env = "ERCOT_API_PASSWORD"
+subscription_key_env = "ERCOT_PUBLIC_API_KEY_PRIMARY"   # falls back to ERCOT_PUBLIC_API_KEY_SECONDARY
+budget_requests_per_min = 24                            # 80% of ERCOT's published 30/min
+products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"]
+
+[feeds.eia]
+api_key_env = "EIA_API_KEY"
+respondent = "ERCO"
+
+[feeds.nws]
+user_agent = "OpenGrid-Orchestrator (<contact email>)"
+latitude = 0.0      # <lat>
+longitude = 0.0     # <lon>
+
+[feeds.staleness]   # seconds until a series is flagged STALE
+ercot_price_fresh_s = 600
+ercot_load_fresh_s = 1800
+wind_solar_fresh_s = 10800
+nws_fresh_s = 10800
+eia_fresh_s = 10800
+
+[mqtt]
+host = "<broker host>"
+port = 1883         # 8883 when TLS is enabled
+topic_root = "og/v1"
+keepalive_s = 20
+
+[retention]         # days each record class is kept
+"feed_obs".days = 30
+"telemetry".days = 14
+"trace.feed_change".days = 90

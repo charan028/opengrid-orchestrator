@@ -1,5 +1,7 @@
 # Contributing to the OpenGrid Orchestrator
 
+> **First read `docs/team/NOTICES.md`.** It lists requirement changes that override this file (latest: 2026-09-25 evening: continuous energy checks, Base hardware 39.2 kWh / 11 kW with 20% 2-unit homes, and upcoming service profiles and power quality).
+
 This document is for people and their AI agents. The build lead (integration + deployment) owns `main`, the base
 server (192.168.5.35) and all deployments. Contributors work in branches and pull requests on Gitea.
 

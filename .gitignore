@@ -34,3 +34,8 @@ Thumbs.db
 dev/keys/
 dev/.env
 dev/secrets
+
+# No Word documents in the repository (owner decision 2026-09-25)
+*.doc
+*.docx
+~$*.docx
