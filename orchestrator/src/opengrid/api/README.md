@@ -54,6 +54,14 @@ singletons in their own processes only):
   set_contract_status}` directly. Unlike guardian/safestop, `opengrid.contracts` holds no signing key,
   so `api`'s lifespan configures its own `PgContractsRepo`/`TraceStore` pair for it (BUILD.md §1 "no
   duplicated functions" -- one write implementation, reused, not re-derived).
+- **Power quality and asset health** (`routers/pq.py`, reads in `pq_store.py`; 07-delivery/06 §6.6/§6.7,
+  WP-J): waveform summary + raw-capture index, spectrum, bank PQ (`pq_ingest.aggregation.
+  bank_measurement`), obligation PQ compliance (`core.pq.evaluate_envelope`), asset health, calibration
+  history, work orders. Two writes, both two-step propose/confirm: `waveform-capture` publishes a
+  `pq_ingest.capture.build_capture_request` message on `scada/wave/<zone>/<bank>/<hub>/request` with the
+  `og_api` MQTT credentials (as `routers/scenario.py`); `calibrate` calls `opengrid.assets.
+  AssetHealthService.request_calibration`, which writes a PENDING `og.calibration_attempt` for
+  `og-guardian` to check (G-25) and sign. Mounted by `app.py` (`pq` in `_include_routers`).
 
 ## Response shapes are pinned to what `opengrid.ui` already consumes
 
