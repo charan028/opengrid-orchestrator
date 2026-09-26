@@ -36,7 +36,7 @@ from opengrid.selector.commit import (
 from opengrid.selector.extract import extract_plan
 from opengrid.selector.model import build_mode_o_model
 from opengrid.selector.rule_fallback import rule_fallback_f2
-from opengrid.selector.solve import highs_solve
+from opengrid.selector.solve import PRICE_OF_FIRMNESS_TIME_LIMIT_S, highs_solve
 from opengrid.selector.types import (
     BankSnapshot,
     CandidateOpportunity,
@@ -92,6 +92,35 @@ def shutdown_solver_process() -> None:
         _solver_pool = None
 
 
+#: Wall-clock allowance on top of HiGHS's own time limits: model build, validation and IPC.
+SOLVER_BUDGET_MARGIN_S = 60.0
+
+
+class SolverTimeoutError(RuntimeError):
+    """The solver process overran its hard budget and was recycled; the gate is failed (K7)."""
+
+    reason_code = "R-SOLVER-TIMEOUT"
+
+
+def solver_budget_s(gate_kind: GateKind) -> float:
+    """Hard budget for one gate's solve: HiGHS's time limit, the price-of-firmness re-solve's own
+    limit, and a margin for model build/validation -- strictly above what a healthy solve can take."""
+    return (
+        solver_settings_for(gate_kind).time_limit_s + PRICE_OF_FIRMNESS_TIME_LIMIT_S + SOLVER_BUDGET_MARGIN_S
+    )
+
+
+def _kill_solver_pool() -> None:
+    """Terminate the solver worker(s) (a hung HiGHS run cannot be cancelled) and drop the pool."""
+    global _solver_pool
+    pool, _solver_pool = _solver_pool, None
+    if pool is None:
+        return
+    for process in list(getattr(pool, "_processes", {}).values()):
+        process.terminate()
+    pool.shutdown(wait=False, cancel_futures=True)
+
+
 async def run_in_solver_process[T](fn: Callable[..., T], *args: Any) -> T:
     return await asyncio.get_running_loop().run_in_executor(_get_solver_pool(), fn, *args)
 
@@ -103,11 +132,23 @@ async def solve_off_loop(
     x_hint: dict[str, float],
     q_hint: dict[str, float],
 ) -> ExtractedPlan:
-    """`solve_gate` in the solver process. If that process has died it is replaced and this solve runs in
-    a thread instead (K7: a gate is never lost to a crashed worker)."""
+    """`solve_gate` in the solver process, under a hard wall-clock budget (review #12). If that process
+    has died it is replaced and this solve runs in a thread instead (K7: a gate is never lost to a
+    crashed worker); if it overruns the budget it is killed, the pool is recycled and the gate fails
+    (`SolverTimeoutError` -> `ALR-SELECTOR-GATE-FAILED`), rather than wedging every later gate."""
     global _solver_pool
+    budget_s = solver_budget_s(gate_kind)
     try:
-        return await run_in_solver_process(solve_gate, inputs, gate_kind, horizon_start, x_hint, q_hint)
+        return await asyncio.wait_for(
+            run_in_solver_process(solve_gate, inputs, gate_kind, horizon_start, x_hint, q_hint),
+            timeout=budget_s,
+        )
+    except TimeoutError as exc:
+        logger.error(
+            "selector solve overran its budget; recycling the solver process", extra={"budget_s": budget_s}
+        )
+        _kill_solver_pool()
+        raise SolverTimeoutError(f"{gate_kind} solve exceeded {budget_s:.0f} s") from exc
     except BrokenProcessPool:
         logger.warning("selector solver process died; solving this gate in a thread")
         _solver_pool = None
@@ -409,7 +450,14 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         # across banks), and the obligation -- not the opportunity -- owns the reservation (FK).
         selected_kw = selected_kw_by_interval_key(c, result, horizon_start, INTERVAL_MINUTES)
         if selected_kw:
-            await commit_candidate(c, selected_kw, plan_id)
+            try:
+                await commit_candidate(c, selected_kw, plan_id)
+            except Exception:
+                # Review #8: one candidate's commit error (DB, optimistic lock) never aborts the rest;
+                # a half-done commit is finished or undone by og-engine's stuck-SELECTED sweep.
+                logger.exception(
+                    "commit failed for a selected candidate", extra={"obligation_id": c.obligation_id}
+                )
     rated_kw_by_bank = _rated_kw_by_bank(bank_ids) if unselected else None
     if unselected and rated_kw_by_bank is not None:
         await reject_structurally_infeasible(unselected, rated_kw_by_bank, plan_id)

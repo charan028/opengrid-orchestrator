@@ -156,6 +156,19 @@ async def test_stall_watch_adopts_alerts_from_a_previous_process() -> None:
     assert cleared == [7, 7]
 
 
+def test_settle_configures_pq_ingest_for_the_drift_sweep(monkeypatch) -> None:
+    """Live 2026-09-26: og-settle never configured opengrid.pq_ingest, so every hub's drift evaluation
+    raised _NotConfiguredError (errors=2000 per sweep, no calibration ever requested)."""
+    import opengrid.pq_ingest as pq_ingest
+    from opengrid.platform.config import Config
+    from opengrid.settle.main import configure_pq_ingest_reader
+
+    monkeypatch.setattr(pq_ingest, "_backend", None)
+    monkeypatch.setattr(pq_ingest, "_blob_store", None)
+    configure_pq_ingest_reader(object(), Config({}))  # type: ignore[arg-type]
+    assert pq_ingest._require_backend() is not None
+
+
 async def test_asset_drift_job_runs_the_assets_sweep(monkeypatch) -> None:
     import opengrid.settle.main as settle_main
     from opengrid.assets.runner import RunOnceResult

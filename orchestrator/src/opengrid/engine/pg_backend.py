@@ -12,7 +12,7 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.engine import CommandBatchRow
-from opengrid.engine.lifecycle import ClosingObligation
+from opengrid.engine.lifecycle import ClosingObligation, StuckSelected
 
 _PENDING_ADMISSION_SQL = """
 SELECT DISTINCT op.contract_id
@@ -46,6 +46,18 @@ VALUES (%(command_batch_id)s, %(cycle_id)s, %(ledger_version)s, %(submission_id)
 _NOTIFY_SQL = "SELECT pg_notify('og_command_batch', %(payload)s)"
 
 
+#: Review #8: SELECTED obligations older than `before`, and whether `ledger.reserve()` already wrote both
+#: an active reservation and a commitment for them.
+_STUCK_SELECTED_SQL = """
+SELECT o.obligation_id,
+       EXISTS (SELECT 1 FROM og.commitment c WHERE c.obligation_id = o.obligation_id)
+       AND EXISTS (SELECT 1 FROM og.reservation r
+                   WHERE r.obligation_id = o.obligation_id AND r.released_at IS NULL)
+FROM og.obligation o
+WHERE o.state = 'SELECTED' AND o.updated_at < %(before)s
+"""
+
+
 class PgEngineBackend:
     """`EngineBackend` implementation over a `psycopg_pool.AsyncConnectionPool`."""
 
@@ -69,6 +81,12 @@ class PgEngineBackend:
             await cur.execute(_DUE_FOR_CLOSE_SQL, {"now": now})
             rows = await cur.fetchall()
         return [ClosingObligation(obligation_id=row[0], any_interval_failed=bool(row[1])) for row in rows]
+
+    async def stuck_selected(self, before: datetime) -> list[StuckSelected]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_STUCK_SELECTED_SQL, {"before": before})
+            rows = await cur.fetchall()
+        return [StuckSelected(obligation_id=row[0], reserved=bool(row[1])) for row in rows]
 
     async def due_renomination_contract_ids(self, now: datetime) -> list[UUID]:
         async with self._pool.connection() as conn, conn.cursor() as cur:

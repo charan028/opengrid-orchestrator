@@ -12,6 +12,9 @@ import highspy
 from opengrid.selector.model import BuiltModel
 from opengrid.selector.types import SolverSettings, SolverStatus
 
+#: Time budget for the price-of-firmness LP re-solve, separate from the main solve's `time_limit_s`.
+PRICE_OF_FIRMNESS_TIME_LIMIT_S = 10.0
+
 
 @dataclass(frozen=True, slots=True)
 class PrimalSnapshot:
@@ -91,7 +94,12 @@ def _price_of_firmness(built: BuiltModel) -> dict[tuple[str, int], float]:
             value = values[var.index]
             highs.changeColBounds(var.index, value, value)
             highs.setContinuous(var)
+        # Its own budget (review #12): the duals are informational; a slow re-solve must never hold the
+        # gate beyond the main solve's time limit. No optimal LP in time -> no duals, not a failure.
+        highs.setOptionValue("time_limit", PRICE_OF_FIRMNESS_TIME_LIMIT_S)
         highs.run()
+        if highs.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+            return {}
 
     duals: list[float] = highs.allConstrDuals()  # type: ignore[no-untyped-call]
     totals: dict[tuple[str, int], float] = {}

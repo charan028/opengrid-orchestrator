@@ -69,9 +69,8 @@ hysteresis_usd_per_mwh = 5
 key_path = "/etc/opengrid/guardian_ed25519.key"
 verdict_timeout_ms = 300
 clock_offset_max_ms = 200
-# Two-person stop RELEASE allow-list (og-api user ids). EMPTY = no release is ever signed; the owner
-# names the operators.
-stop_release_authorised_operators = []
+# Two-person stop RELEASE allow-list (og-api user ids); named by the owner 2026-09-26 (dev accounts).
+stop_release_authorised_operators = ["og-op-a", "og-op-b"]
 
 [safestop]
 key_path = "/etc/opengrid/safestop_ed25519.key"
@@ -105,6 +104,11 @@ bind_host = "127.0.0.1"
 bind_port = 8080
 sse_heartbeat_s = 15
 csrf_allowed_hosts = ["base.tocy-net.net"]
+
+[api.roles]
+# The literal Apache accounts "operator"/"viewer" still map by name; named accounts are listed here.
+operator = ["operator", "og-op-a", "og-op-b"]
+viewer = ["viewer"]
 
 [ui]
 base_path = "/og"

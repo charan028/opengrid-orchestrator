@@ -129,6 +129,40 @@ def _alert_clears(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _open_alerts(monkeypatch):
+    """Details of ALR-ENERGY-SHORTFALL-RISK alerts 'left open by a previous engine' (default none)."""
+    details: list[dict] = []
+
+    async def _fake_open(pool, rule):
+        return list(details)
+
+    monkeypatch.setattr(gw, "open_alert_details", _fake_open)
+    return details
+
+
+async def test_an_alert_left_open_is_adopted_not_raised_again(
+    monkeypatch, _open_alerts, _alert_clears, _patch_alert_raising
+):
+    """Review #14: after a restart the first run cleared and re-raised a still-valid alert, losing its
+    ack state. An obligation whose alert is still open and still at risk is adopted: no new alert, and
+    the open one is not cleared."""
+    obligation_id = uuid4()
+    _open_alerts.append({"obligation_id": str(obligation_id)})
+    rows = [(obligation_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=None)]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    results = await gateway.run(NOW)
+
+    assert results[0].at_risk
+    assert _patch_alert_raising == []  # not raised a second time
+    ((_rule, matches),) = _alert_clears
+    assert not matches({"obligation_id": str(obligation_id)})  # still open
+
+
 async def test_the_hook_clears_its_own_energy_alerts(monkeypatch, _alert_clears):
     """Health only auto-clears its own rules, so ALR-ENERGY-SHORTFALL-RISK is cleared here: on the first
     run (alerts a previous engine left open) and whenever an obligation leaves AT_RISK -- never for an

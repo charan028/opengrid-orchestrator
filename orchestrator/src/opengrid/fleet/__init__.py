@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple, Protocol
 
+from prometheus_client import Counter
+
 from opengrid.core.models.mqtt import Ack, ScadaBankSignal, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.core.physics import (
@@ -40,6 +42,12 @@ from opengrid.platform.metrics import hubs as hubs_gauge
 from opengrid.platform.metrics import telemetry_fresh_ratio
 
 logger = logging.getLogger(__name__)
+
+fleet_rows_dropped_total = Counter(
+    "og_fleet_rows_dropped_total",
+    "Buffered fleet rows dropped after failed database writes (oldest first, bounded requeue).",
+    labelnames=("kind",),  # telemetry | ack
+)
 
 HubHealth = str  # "online" | "stale" | "offline" | "fault" -- see _classify_health
 
@@ -313,16 +321,33 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
     backend = _require_backend()
     now = now or datetime.now(UTC)
 
+    # Each buffer is taken before its write; on a failed write the rows go back in front of anything that
+    # arrived meanwhile (bounded: the oldest are dropped and counted), so a database error never silently
+    # loses telemetry/SCADA/ack evidence (review #13). The first failure is re-raised after requeueing.
+    failure: Exception | None = None
     rows, _pending_telemetry[:] = list(_pending_telemetry), []
     if rows:
-        await backend.copy_telemetry(rows)
+        try:
+            await backend.copy_telemetry(rows)
+        except Exception as exc:
+            failure = exc
+            _requeue(_pending_telemetry, rows, "telemetry")
     scada = list(_pending_scada.values())
     _pending_scada.clear()
     if scada:
-        await backend.record_scada_observations(scada)
+        try:
+            await backend.record_scada_observations(scada)
+        except Exception as exc:
+            failure = failure or exc
+            for signal in scada:  # keep a newer reading that arrived meanwhile
+                _pending_scada.setdefault(signal.bank_id, signal)
     acks, _pending_acks[:] = list(_pending_acks), []
     if acks:
-        await backend.insert_acks(acks)
+        try:
+            await backend.insert_acks(acks)
+        except Exception as exc:
+            failure = failure or exc
+            _requeue(_pending_acks, acks, "ack")
 
     states: list[HubState] = []
     health_counts: dict[str, int] = {"online": 0, "stale": 0, "offline": 0, "fault": 0}
@@ -363,7 +388,25 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
         ratio = sum(1 for f in flags if f) / len(flags) if flags else 1.0
         telemetry_fresh_ratio.labels(zone=zone).set(ratio)
 
+    if failure is not None:
+        raise failure
     return FlushStats(telemetry_rows=len(rows), hub_states=len(states))
+
+
+#: Most rows of one kind held for a retry after failed writes (~50 s of telemetry at 2,000 hubs).
+REQUEUE_MAX_ROWS = 50_000
+
+
+def _requeue(buffer: list[Any], failed: list[Any], kind: str) -> None:
+    """Put `failed` back ahead of rows buffered since, keeping at most `REQUEUE_MAX_ROWS` (newest)."""
+    merged = failed + buffer
+    dropped = max(0, len(merged) - REQUEUE_MAX_ROWS)
+    if dropped:
+        fleet_rows_dropped_total.labels(kind=kind).inc(dropped)
+        logger.error(
+            "fleet persistence backlog full; dropping oldest rows", extra={"kind": kind, "dropped": dropped}
+        )
+    buffer[:] = merged[dropped:]
 
 
 async def ingest_scada_signal(payload: dict[str, Any]) -> None:

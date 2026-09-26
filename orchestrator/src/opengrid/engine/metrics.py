@@ -14,7 +14,6 @@ them and owns the endpoint:
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import time
 from collections.abc import Callable
@@ -25,6 +24,7 @@ from prometheus_client import Gauge, Histogram, start_http_server
 
 from opengrid.platform import metrics as platform_metrics
 from opengrid.platform.config import Config
+from opengrid.platform.net import is_loopback_host
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +53,6 @@ mqtt_ingest_lag_seconds = Histogram(
 )
 
 
-def _is_loopback(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def start_metrics_server(cfg: Config, *, start: Callable[..., Any] = start_http_server) -> int | None:
     """Serve `/metrics` on `[metrics].engine_port`, bound to loopback only. A non-loopback
     `[metrics].bind_host` is refused (logged) and loopback is used. Returns the port, or `None` when no
@@ -70,7 +61,7 @@ def start_metrics_server(cfg: Config, *, start: Callable[..., Any] = start_http_
     if port is None:
         return None
     host = str(cfg.get("metrics.bind_host", LOOPBACK))
-    if not _is_loopback(host):
+    if not is_loopback_host(host):
         logger.warning(
             "og-engine metrics must bind to loopback; ignoring bind_host", extra={"bind_host": host}
         )

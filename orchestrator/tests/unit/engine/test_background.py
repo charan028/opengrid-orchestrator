@@ -309,7 +309,9 @@ async def test_bank_batches_are_proposed_concurrently_with_a_bound_and_a_failure
     assert failed == ["bank-3"]
 
 
-async def test_timed_tick_records_completion_even_when_the_tick_raises(monkeypatch) -> None:
+async def test_a_failing_tick_does_not_keep_the_heartbeat_alive(monkeypatch) -> None:
+    """Review #9: run_forever swallows tick exceptions; if a failed tick still stamped last_tick_at, an
+    engine failing every tick would keep beating and never raise ALR-PROCESS-DOWN."""
     import opengrid.engine as engine
 
     async def _boom(state):
@@ -322,4 +324,4 @@ async def test_timed_tick_records_completion_even_when_the_tick_raises(monkeypat
     state.last_tick_at = None
     with contextlib.suppress(RuntimeError):
         await engine.timed_tick(state)
-    assert state.last_tick_at is not None
+    assert state.last_tick_at is None

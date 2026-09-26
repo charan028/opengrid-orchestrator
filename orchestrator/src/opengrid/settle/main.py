@@ -23,6 +23,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -105,6 +106,19 @@ class JobRunner:
 
 
 _DEFAULT_ASSET_DRIFT_INTERVAL_S = 60.0
+
+
+def configure_pq_ingest_reader(pool: AsyncConnectionPool, cfg: Any) -> None:
+    """Wire `opengrid.pq_ingest` in og-settle for the asset drift sweep's summary reads (og-engine owns
+    ingest and flushing; this process never buffers or writes summaries)."""
+    import opengrid.pq_ingest as pq_ingest
+    from opengrid.pq_ingest.blob_store import FileBlobStore
+    from opengrid.pq_ingest.pg_backend import PgPqIngestBackend
+
+    pq_ingest.configure(
+        PgPqIngestBackend(pool),
+        FileBlobStore(str(cfg.get("pq_ingest.blob_store_dir", "/var/lib/opengrid/pq_waveform"))),
+    )
 
 
 def make_asset_drift_job(service: AssetHealthService) -> Callable[[], Awaitable[None]]:
@@ -226,6 +240,9 @@ async def _run() -> None:
         ),
     ]
     if bool(cfg.get("assets.drift_enabled", False)):
+        # The drift sweep reads measured waveform summaries through opengrid.pq_ingest (read-only here);
+        # unconfigured, every hub's evaluation raised (live 2026-09-26: errors=2000 per sweep).
+        configure_pq_ingest_reader(pool, cfg)
         jobs.append(
             (
                 "asset_drift",

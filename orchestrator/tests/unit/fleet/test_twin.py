@@ -490,3 +490,47 @@ async def test_rated_discharge_is_structural_not_live() -> None:
     assert fleet.rated_discharge_kw("bank-1") == pytest.approx(31.0)
     with pytest.raises(LookupError):
         fleet.rated_discharge_kw("bank-unknown")
+
+
+async def test_a_failed_telemetry_write_requeues_the_rows(monkeypatch) -> None:
+    """Review #13: flush took the buffer before writing and dropped it on a database error, losing
+    telemetry (K1/K3 evidence). The rows now go back ahead of newer ones and are written next time."""
+    backend = FakeFleetBackend(hubs=[_hub("h1")], banks=[_bank()])
+    await _seed(backend)
+
+    async def _telemetry(seq: int) -> None:
+        await fleet.ingest_telemetry(
+            {
+                "hub_id": "h1",
+                "bank_id": "bank-1",
+                "zone": "LZ_NORTH",
+                "ts": datetime.now(UTC).isoformat(),
+                "soc_kwh": 10.0,
+                "p_kw": -2.0,
+                "health": "online",
+                "seq": seq,
+                "epoch": 1,
+            }
+        )
+
+    await _telemetry(1)
+    original = backend.copy_telemetry
+
+    async def _fail(rows):
+        raise RuntimeError("disk stall")
+
+    backend.copy_telemetry = _fail  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await fleet.flush()
+    await _telemetry(2)
+    backend.copy_telemetry = original  # type: ignore[method-assign]
+    await fleet.flush()
+
+    assert [r.seq for r in backend.copied_rows] == [1, 2]
+
+
+def test_requeue_is_bounded_and_drops_the_oldest(monkeypatch) -> None:
+    monkeypatch.setattr(fleet, "REQUEUE_MAX_ROWS", 3)
+    buffer = [4, 5]
+    fleet._requeue(buffer, [1, 2, 3], "telemetry")
+    assert buffer == [3, 4, 5]

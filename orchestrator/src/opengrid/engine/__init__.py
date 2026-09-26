@@ -41,12 +41,13 @@ from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine import metrics as engine_metrics
-from opengrid.engine.alerts import clear_open_alerts
+from opengrid.engine.alerts import clear_open_alerts, open_alert_details
 from opengrid.engine.background import BackgroundIngest, run_periodic
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
 from opengrid.engine.gates import ALR_SELECTOR_GATE_FAILED, gate_failure_matches, run_due_gates
 from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
-from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
+from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations, resolve_stuck_selected
+from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.platform.config import Config
 from opengrid.platform.heartbeat import write_heartbeat
@@ -333,6 +334,7 @@ class _EngineState:
     phase_timer: PhaseTimer = field(default_factory=PhaseTimer)
     last_tick_at: float | None = None  # monotonic time the last tick completed (heartbeat liveness)
     flush_lag: engine_metrics.FlushLag | None = None  # og_engine_fleet_flush_lag_seconds
+    stuck_sweep: Cadence = field(default_factory=lambda: Cadence(STUCK_SWEEP_INTERVAL_S))
     escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
     pq_flush: Cadence | None = None
     gate_task: asyncio.Task[int] | None = None
@@ -346,11 +348,16 @@ async def timed_tick(state: _EngineState) -> None:
     window's p50/p99/max as an `RT_ALLOCATION` / `CYCLE_LATENCY` trace event when a report is due."""
     started = time.monotonic()
     state.phase_timer = PhaseTimer()
+    succeeded = False
     try:
         await _engine_tick(state)
+        succeeded = True
     finally:
         finished = time.monotonic()
-        state.last_tick_at = finished
+        if succeeded:
+            # Only a tick that completes keeps the heartbeat alive: an engine failing every tick must read
+            # as down (ALR-PROCESS-DOWN), not as healthy (review #9).
+            state.last_tick_at = finished
         state.latency.record((finished - started) * 1000.0, state.phase_timer.phases)
         engine_metrics.observe_tick(finished - started)
         if state.latency.report_due(finished):
@@ -441,6 +448,39 @@ async def _flush_pq_summaries(state: _EngineState) -> None:
         await pq_ingest.flush_summaries()
     except Exception:
         logger.exception("pq_ingest flush failed; retrying next interval")
+
+
+ALR_OBLIGATION_STUCK_SELECTED = "ALR-OBLIGATION-STUCK-SELECTED"
+STUCK_SWEEP_INTERVAL_S = 30.0
+
+
+async def sweep_stuck_selected(state: Any, transition: Any, now: datetime) -> list[UUID]:
+    """Review #8: resolve obligations a failed commit left in SELECTED (`resolve_stuck_selected`), alert
+    on any that cannot be resolved (capacity may be locked), and clear this sweep's alerts for obligations
+    no longer stuck. Returns the unresolved ids."""
+    _resolved, unresolved = await resolve_stuck_selected(state.lifecycle_backend, transition, now)
+    pool = state.heartbeat_pool
+    still = {str(o) for o in unresolved}
+    open_ids = {
+        str(d.get("obligation_id")) for d in await open_alert_details(pool, ALR_OBLIGATION_STUCK_SELECTED)
+    }
+    for obligation_id in still - open_ids:
+        await raise_alert(
+            pool,
+            AlertFinding(
+                rule=ALR_OBLIGATION_STUCK_SELECTED,
+                severity="critical",
+                summary=f"Obligation {obligation_id} stuck in SELECTED; could not complete or reject it",
+                condition_key=f"{ALR_OBLIGATION_STUCK_SELECTED}:{obligation_id}",
+                detail={"obligation_id": obligation_id},
+            ),
+            opened_at=now,
+        )
+    if open_ids - still:
+        await clear_open_alerts(
+            pool, ALR_OBLIGATION_STUCK_SELECTED, lambda d: str(d.get("obligation_id")) not in still
+        )
+    return unresolved
 
 
 #: Heavy background work (PQ characterization) waits this long after start-up so dispatch resumes first.
@@ -607,6 +647,13 @@ async def _engine_tick(state: _EngineState) -> None:
             await escalate_sustained_shortfalls(state, energy_results, contracts.transition_obligation)
         except Exception:
             logger.exception("shortfall escalation failed this cycle", extra={"cycle_id": cycle_id})
+
+    if state.lifecycle_backend is not None and state.stuck_sweep.due():
+        with phase("stuck_selected"):
+            try:
+                await sweep_stuck_selected(state, contracts.transition_obligation, now)
+            except Exception:
+                logger.exception("stuck-SELECTED sweep failed", extra={"cycle_id": cycle_id})
 
     with phase("gate_schedule"):
         triggers = state.gate_scheduler.due_triggers(

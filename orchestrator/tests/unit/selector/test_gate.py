@@ -82,6 +82,39 @@ async def test_the_solve_runs_in_a_separate_process_and_matches_the_in_process_r
     assert worker_pid != os.getpid()
 
 
+async def test_a_solve_that_overruns_its_budget_fails_the_gate_and_recycles_the_pool(monkeypatch):
+    """Review #12: a hung solver process had no watchdog, so it would wedge every later gate. The solve
+    now has a hard budget; on overrun the worker is killed, the pool dropped, and the gate fails."""
+    import asyncio
+
+    import pytest
+
+    from opengrid.selector import gate
+
+    killed: list[bool] = []
+
+    async def _hang(fn, *args):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(gate, "run_in_solver_process", _hang)
+    monkeypatch.setattr(gate, "solver_budget_s", lambda kind: 0.05)
+    monkeypatch.setattr(gate, "_kill_solver_pool", lambda: killed.append(True))
+    bank = make_bank("B1", 10.0, range(1))
+    inputs = simple_inputs((bank,), (zero_price_scenario(range(1)),), (), (), n_intervals=1)
+
+    with pytest.raises(gate.SolverTimeoutError):
+        await gate.solve_off_loop(inputs, "SCHEDULED_15MIN", NOW, {}, {})
+    assert killed == [True]
+
+
+def test_the_solver_budget_exceeds_every_highs_time_limit():
+    from opengrid.selector import gate
+    from opengrid.selector.types import solver_settings_for
+
+    for kind in ("SCHEDULED_15MIN", "ADMISSION", "RENOMINATION"):
+        assert gate.solver_budget_s(kind) > solver_settings_for(kind).time_limit_s + 10.0
+
+
 async def test_a_broken_solver_process_falls_back_to_a_thread(monkeypatch):
     from concurrent.futures.process import BrokenProcessPool
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -35,6 +35,21 @@ class ClosingObligation:
     any_interval_failed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class StuckSelected:
+    """An obligation left in `SELECTED` (review #8: the commit step failed after `ledger.reserve()`
+    wrote its reservation + commitment, or before). `reserved` is True when both exist."""
+
+    obligation_id: UUID
+    reserved: bool
+
+
+#: How long an obligation may sit in SELECTED before the sweep resolves it (a gate commits in seconds).
+STUCK_SELECTED_AFTER_S = 120.0
+R_COMMIT_LOCK_ENTER = "R-COMMIT-LOCK-ENTER"
+R_COMMIT_LOCK_INFEASIBLE = "R-COMMIT-LOCK-INFEASIBLE"
+
+
 class LifecycleBackend(Protocol):
     async def obligations_due_for_delivery(self, now: datetime) -> list[UUID]:
         """`COMMITTED` obligations whose `window_start <= now`."""
@@ -42,6 +57,10 @@ class LifecycleBackend(Protocol):
 
     async def obligations_due_for_close(self, now: datetime) -> list[ClosingObligation]:
         """`DELIVERING` obligations whose `window_end <= now`."""
+        ...
+
+    async def stuck_selected(self, before: datetime) -> list[StuckSelected]:
+        """`SELECTED` obligations last updated before `before` (SELECTED normally lasts milliseconds)."""
         ...
 
 
@@ -73,6 +92,34 @@ async def advance_obligations(
             counts[to_state] += 1
     counts["EXPIRED"] = len(await expire_unselected(now=now))
     return counts
+
+
+async def resolve_stuck_selected(
+    backend: LifecycleBackend,
+    transition: Transition,
+    now: datetime,
+    *,
+    older_than_s: float = STUCK_SELECTED_AFTER_S,
+) -> tuple[list[tuple[UUID, str]], list[UUID]]:
+    """Finish or undo a commit that stopped half-way (review #8): an obligation stuck in `SELECTED` with
+    its reservation and commitment written completes to `COMMITTED` (the capacity is already locked for
+    it); one without them is `REJECTED` (nothing was locked). Returns `(resolved, unresolved)`; the
+    caller alerts on unresolved ones."""
+    resolved: list[tuple[UUID, str]] = []
+    unresolved: list[UUID] = []
+    for stuck in await backend.stuck_selected(now - timedelta(seconds=older_than_s)):
+        to_state, reason = (
+            ("COMMITTED", R_COMMIT_LOCK_ENTER) if stuck.reserved else ("REJECTED", R_COMMIT_LOCK_INFEASIBLE)
+        )
+        logger.error(
+            "obligation stuck in SELECTED; resolving",
+            extra={"obligation_id": str(stuck.obligation_id), "to_state": to_state},
+        )
+        if await _apply(transition, stuck.obligation_id, to_state, reason):
+            resolved.append((stuck.obligation_id, to_state))
+        else:
+            unresolved.append(stuck.obligation_id)
+    return resolved, unresolved
 
 
 async def _apply(transition: Transition, obligation_id: UUID, to_state: str, reason_code: str | None) -> bool:

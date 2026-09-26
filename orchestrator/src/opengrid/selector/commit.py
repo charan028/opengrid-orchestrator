@@ -94,9 +94,19 @@ async def commit_candidate(
         )
         return False
 
-    await contracts.transition_obligation(
-        obligation_id, "COMMITTED", reason_code=R_COMMIT_LOCK_ENTER, payload=trace_payload
-    )
+    try:
+        await contracts.transition_obligation(
+            obligation_id, "COMMITTED", reason_code=R_COMMIT_LOCK_ENTER, payload=trace_payload
+        )
+    except Exception:
+        # Review #8: the reservation and commitment are written; the obligation stays SELECTED and
+        # og-engine's stuck-SELECTED sweep completes it to COMMITTED (alerting if it cannot). Never
+        # raised into the gate, so the remaining candidates still commit.
+        logger.exception(
+            "SELECTED -> COMMITTED failed after reserve; left for the stuck-SELECTED sweep",
+            extra={"obligation_id": str(obligation_id)},
+        )
+        return False
     await _record_opportunity_decision(candidate, "SELECTED", R_GATE_SELECT, plan_id)
     return True
 
