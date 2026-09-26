@@ -42,6 +42,61 @@
   </div>
 </section>
 
+<section class="og-panel" aria-labelledby="as-heading">
+  <div class="og-section-heading">
+    <div>
+      <p class="eyebrow">ERCOT ancillary services</p>
+      <h2 id="as-heading">AS awards &amp; deployment</h2>
+    </div>
+    <span class="status-badge status-info">held energy protected</span>
+  </div>
+  <p class="og-panel-lead">Awards stay at 0 kW until an operator deploys them. Deployment draws only against the held energy reserve; ECRS requires 1 hour and Non-Spin requires 4 hours.</p>
+  {% if as_awards %}
+  <div class="data-table-wrap">
+    <table class="data-table" aria-label="ERCOT ancillary service awards">
+      <thead><tr><th>Obligation</th><th>Product</th><th>Committed</th><th>Energy held</th><th>State</th><th>Risk</th><th>Action</th></tr></thead>
+      <tbody>
+      {% for award in as_awards %}
+        <tr>
+          <td><code>{{ award.obligation_id[:8] }}</code></td>
+          <td>{{ award.product }} · {{ award.required_hours }}h</td>
+          <td>{{ award.committed_kw or '--' }} kW</td>
+          <td>{{ '%.1f'|format(award.energy_held_kwh) if award.energy_held_kwh is not none else '--' }} / {{ '%.1f'|format(award.required_energy_kwh) if award.required_energy_kwh is not none else '--' }} kWh</td>
+          <td><span class="status-badge {{ 'status-dispatching' if award.state == 'deployed' else 'status-info' }}">{{ award.state }}</span></td>
+          <td>{% if award.at_risk %}<span class="status-badge status-caution">AT_RISK</span>{% else %}<span class="status-badge status-good">OK</span>{% endif %}</td>
+          <td>
+            {% if award.state == 'deployed' and is_operator %}
+            <form hx-post="{{ base_path }}/dispatch/as-deployments/{{ award.deployment_id }}/stop-propose" hx-target="#as-action-result" hx-swap="innerHTML">
+              <button class="btn btn-danger" type="submit">Stop deploy</button>
+            </form>
+            {% elif is_operator %}
+            <form hx-post="{{ base_path }}/dispatch/as-deployments/propose" hx-target="#as-action-result" hx-swap="innerHTML">
+              <input type="hidden" name="obligation_id" value="{{ award.obligation_id }}">
+              <input type="hidden" name="duration_minutes" value="15">
+              <input type="hidden" name="reason" value="Operator ERCOT AS deployment">
+              <button class="btn btn-primary" type="submit">Deploy</button>
+            </form>
+            {% else %}--{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty-state">No active ERCOT_AS awards are visible.</p>
+  {% endif %}
+  {% if is_operator %}
+  <form id="as-deployment-form" class="og-form-inline as-deployment-form" hx-post="{{ base_path }}/dispatch/as-deployments/propose" hx-target="#as-action-result" hx-swap="innerHTML">
+    <label>Deploy <select name="obligation_id"><option value="">all held AS awards</option>{% for award in as_awards if award.state == 'held' %}<option value="{{ award.obligation_id }}">{{ award.obligation_id[:8] }} · {{ award.product }}</option>{% endfor %}</select></label>
+    <label>Duration <input type="number" name="duration_minutes" value="15" min="1" max="240" required> min</label>
+    <label>Reason <input type="text" name="reason" value="Operator ERCOT AS deployment" maxlength="200" required></label>
+    <button class="btn btn-primary" type="submit">Propose deployment</button>
+  </form>
+  {% endif %}
+  <div id="as-action-result" role="status" aria-live="polite"></div>
+</section>
+
 <section class="og-panel" aria-labelledby="ledger-heading">
   <h2 id="ledger-heading">Ledger timeline &mdash; bank {{ ledger.bank_id }}</h2>
   <p>{{ ledger.obligation_count }} committed obligations plotted, plus free headroom.

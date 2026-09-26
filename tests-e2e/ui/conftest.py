@@ -50,6 +50,7 @@ _MAP_TILE_URL_GLOB = "**/tile.openstreetmap.org/**"
 
 SAFESTOP_PROPOSAL_ID = "11111111-1111-1111-1111-111111111111"
 COMMAND_PROPOSAL_ID = "33333333-3333-3333-3333-333333333333"
+AS_DEPLOYMENT_ID = "44444444-4444-4444-4444-444444444444"
 
 
 def live_base_url() -> str | None:
@@ -74,6 +75,7 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/fleet/hubs/hub-0001": hub_detail,
         "/og/api/fleet/hubs/hub-0002": {**hub_detail, "hub_id": "hub-0002"},
         "/og/api/dispatch/opportunities": _load("dispatch_obligations.json"),
+        "/og/api/dispatch/as-deployments": [],
         "/og/api/dispatch/plan/latest": _load("dispatch_plan.json"),
         "/og/api/ledger/BANK-0001/timeline": timeline,
         "/og/api/markets/series": _load("markets_series_price.json"),
@@ -93,6 +95,7 @@ def _post_responses() -> dict[str, Any]:
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
         "/og/api/alerts/7/ack": _load("alert_ack.json"),
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},
+        "/og/api/dispatch/as-deployments": {"deployment_id": AS_DEPLOYMENT_ID, "status": "ACTIVE"},
     }
 
 
@@ -126,8 +129,17 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
             raise ApiUnavailable(f"no fixture registered for POST {path}")
         return posts[path]
 
+    async def fake_delete_json(path: str, *, remote_user: str | None = None) -> Any:
+        if path != f"/og/api/dispatch/as-deployments/{AS_DEPLOYMENT_ID}":
+            raise ApiUnavailable(f"no fixture registered for DELETE {path}")
+        return {"deployment_id": AS_DEPLOYMENT_ID, "status": "STOPPED"}
+
     for module in _route_modules():
-        for name, fake in (("get_json", fake_get_json), ("post_json", fake_post_json)):
+        for name, fake in (
+            ("get_json", fake_get_json),
+            ("post_json", fake_post_json),
+            ("delete_json", fake_delete_json),
+        ):
             if hasattr(module, name):
                 monkeypatch.setattr(module, name, fake)
 

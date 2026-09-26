@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from opengrid.ui.routes.dispatch import (
+    as_awards_view,
     commitment_lock_events_view,
     grants_and_substitutions_view,
     ledger_timeline_view,
@@ -120,3 +121,37 @@ def test_commitment_lock_events_view_filters_lock_reason_or_supersession() -> No
     assert [e["commitment_id"] for e in events] == ["COMMIT-2"]
     assert events[0]["reason_code"] == "R-COMMIT-LOCK-L1"
     assert events[0]["supersedes"] == "COMMIT-0"
+
+
+def test_as_awards_view_joins_deployments_and_marks_energy_risk() -> None:
+    awards = [
+        {
+            "obligation_id": "AS-1",
+            "customer_id": "CUST-A",
+            "service_type": "ERCOT_AS",
+            "product": "ECRS",
+            "committed_qty_kw": 10.0,
+            "energy_held_kwh": 8.0,
+        },
+        {
+            "obligation_id": "AS-2",
+            "customer_id": "CUST-B",
+            "service_type": "ERCOT_AS",
+            "product": "NON_SPIN",
+            "committed_qty_kw": 10.0,
+        },
+        {"obligation_id": "ENERGY-1", "service_type": "ERCOT_ENERGY", "committed_qty_kw": 99.0},
+    ]
+    rows = as_awards_view(
+        awards,
+        [{"deployment_id": "DEP-1", "obligation_id": "AS-2", "end_at": "2026-09-25T19:00:00Z"}],
+        now=_NOW,
+    )
+
+    assert [row["obligation_id"] for row in rows] == ["AS-1", "AS-2"]
+    assert rows[0]["state"] == "held"
+    assert rows[0]["required_hours"] == 1
+    assert rows[0]["at_risk"] is True
+    assert rows[1]["state"] == "deployed"
+    assert rows[1]["required_energy_kwh"] == 40.0
+    assert rows[1]["deployment_id"] == "DEP-1"
