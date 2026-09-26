@@ -70,3 +70,19 @@ and its active ids would make "Reset between runs" one call.
    manual command propose/confirm returns a real guardian verdict; bank-scoped safe stop engages and
    publishes the signed retained stop; the four demo scenarios are listed and runnable from the control
    plane.
+
+## Root causes found live (2026-09-26 03:20Z) for the two blockers every demo step 5-8 depends on
+
+10. **Every automatic batch is VETOED on G-14 `TRACE_PREIMAGE_MISSING`** (owner: engine). `og.command_batch`
+    had 3,424 of 3,425 rows with `trace_pre_image_id IS NULL`; the only `RT_ALLOCATION` trace row came
+    from the API's manual-command path. `opengrid.guardian.repo` documents that the engine must write the
+    K10 pre-image (`decision_type='RT_ALLOCATION'`, payload with `command_batch_id`) before invoking the
+    guardian; `opengrid.engine`/`opengrid.allocator` never call the trace store for a batch. This, not
+    stale telemetry, is why the server showed 160/160 VETOED (qa/merge-notes.md section 13): locally all
+    200 hubs were fresh and the veto rate was still 100%.
+11. **The selector never commits because every opportunity has `value_per_mwh = NULL`** (owner: api/
+    contracts). `POST /og/api/opportunities` calls `admit()` with no value; the intake path that derives
+    it from feeds/forecast is not used by the API, and `selector.gate.load_candidates` turns NULL into
+    `0.0`, so the LP finds nothing worth selecting (plans are OPTIMAL with objective ~330 from other terms,
+    zero reservations). Also observed: the ADMISSION gate re-runs for the same three contracts every 2 s
+    because nothing ever marks an OFFERED opportunity as attached to a plan.
