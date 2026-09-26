@@ -83,6 +83,33 @@ Responses: `200`
 
 ## dispatch
 
+### `GET /og/api/dispatch/as-deployments`
+
+List As Deployments. Role: **viewer**.
+
+Responses: `200`
+
+### `POST /og/api/dispatch/as-deployments`
+
+Create As Deployment. Role: **operator**.
+
+Deploy held ERCOT_AS award(s) now: while active, the allocator discharges them up to their
+committed kW (an AS award is otherwise a 0 kW capacity hold). Traced before it takes effect (K10).
+
+Body: `obligation_id` (string | null); `duration_minutes` (integer); `reason` (string, required)
+
+Responses: `201`, `422`
+
+### `DELETE /og/api/dispatch/as-deployments/{deployment_id}`
+
+End As Deployment. Role: **operator**.
+
+End a deployment early: the award(s) return to a 0 kW capacity hold on the next cycle.
+
+Parameters: `deployment_id` (path, string, required)
+
+Responses: `200`, `422`
+
 ### `GET /og/api/dispatch/opportunities`
 
 List Opportunities. Role: **viewer**.

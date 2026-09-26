@@ -15,7 +15,7 @@ there is the full-engine matrix; §6 below is the MVP-S-only matrix.
 
 This is the test plan for the **first working increment** of the Orchestrator, not a reduced demo (review §8a #5). It
 supersedes nothing in `05-testing/*`; it is the subset that a 30-hour build can execute, chosen so that every
-zero-tolerance invariant (K1–K13) and every Saturday acceptance item (A1–A11) is proven, not asserted.
+zero-tolerance invariant (K1–K14) and every Saturday acceptance item (A1–A11) is proven, not asserted.
 
 **Conventions.** Test IDs `TS-<epic nn>-<nn>`, e.g. `TS-05-03`, unique within this document; numbering per epic is
 contiguous across §2 (property) and §3 (functional) so no ID repeats. Level tags: **U** unit, **P** property-based
@@ -36,7 +36,7 @@ trace & retention · **ES10** Operator UI.
 | Level | Proves | Runs where | Owner |
 |---|---|---|---|
 | **U** Unit | One function/algorithm in isolation (control law, LP row-builder, hash-chain link, performance-factor formula) | developer venv, every commit | module author |
-| **P** Property (Hypothesis) | An invariant (K1–K13) holds for ≥ 10³ generated cases per run (10⁴ nightly), shrinking to a minimal counterexample | developer venv + CI, every commit touching `ledger`/`selector`/`allocator`/`guardian`/`trace` | module author + reviewer |
+| **P** Property (Hypothesis) | An invariant (K1–K14) holds for ≥ 10³ generated cases per run (10⁴ nightly), shrinking to a minimal counterexample | developer venv + CI, every commit touching `ledger`/`selector`/`allocator`/`guardian`/`trace` | module author + reviewer |
 | **I** Integration | Two or more real modules over real Postgres/MQTT (test containers or the server `og-test` DB) | developer venv (docker-less: local Postgres/Mosquitto) or server `og-test` | module pair owners |
 | **E** End-to-end | The deployed 7-process stack on the server, against `agent-sim`/`grid-sim` (spec §12.3), driving A1–A11 | server `og-test`, then server live for the G5 sign-off run | WS8 QA |
 | **N** Performance | Latency, throughput, memory at 2k/10k hubs | server `og-test`, isolated window | WS8 QA |
@@ -74,24 +74,24 @@ TS-08-07/08 for the demo only.
 
 | Severity | Definition | Blocks |
 |---|---|---|
-| **S1 — blocker** | Any invariant (K1–K13) violation of any magnitude, in any environment; a guardian bypass or unsigned command reaching `sim`; data loss on trace or ledger tables; a crash of `guardian`, `ledger`/`selector`, or `safestop` | The current gate and every later gate; the run is invalid and must be re-executed after the fix, not just the failing case |
+| **S1 — blocker** | Any invariant (K1–K14) violation of any magnitude, in any environment; a guardian bypass or unsigned command reaching `sim`; data loss on trace or ledger tables; a crash of `guardian`, `ledger`/`selector`, or `safestop` | The current gate and every later gate; the run is invalid and must be re-executed after the fix, not just the failing case |
 | **S2 — major** | An acceptance item (A1–A11) fails with no workaround; a functional test tied to a Must story fails | The gate that requires that acceptance item; may be waived past G4/G5 only with a written, time-boxed risk note (delivery-plan style) |
 | **S3 — minor** | UI cosmetics, a P2/P3 test, a non-blocking usability issue, a threshold met but with a wider margin than targeted | Tracked; does not block a gate |
 
 **What blocks release.** By explicit instruction: **any invariant violation is a blocker (S1), full stop**, independent
-of how small, how rare, or how late in the schedule it is found. There is no S1 waiver for K1–K13. Everything else
+of how small, how rare, or how late in the schedule it is found. There is no S1 waiver for K1–K14. Everything else
 follows the S2/S3 rules above and the delivery plan's cut lines.
 
 ---
 
-## 2. Invariant property tests (K1–K13)
+## 2. Invariant property tests (K1–K14)
 
-**Canonical source.** K1–K13's definitions, principles and enforcement points are fixed by
+**Canonical source.** K1–K14's definitions (K14, power quality, made canonical by D-7 in `11-decision-log.md`), principles and enforcement points are fixed by
 [`00-invariants.md`](00-invariants.md); this section does not redefine them, only maps each canonical K to its
 MVP-S property test(s). An earlier draft of this document used its own, differently-numbered K1–K13 catalogue
 (drafted in parallel with `02a`/`02b` before `00-invariants.md` existed); that catalogue is retired and the mapping
 below uses the canonical IDs throughout — every test ID keeps its original number, only the K column changed where
-the old and new numbering meant different things. All thirteen are **zero-tolerance** (§1.4): the invariant monitor
+the old and new numbering meant different things. All fourteen are **zero-tolerance** (§1.4): the invariant monitor
 (a process-independent watcher subscribed to trace, ledger and MQTT, modelled on `HC-TL-05`) runs in every I/E/N/C
 run from G3 onward and fails the run on any hit.
 
@@ -103,13 +103,14 @@ run from G3 onward and fails the run on any hit.
 | K4 | Physical envelope: P/kVA/ramp limits, no synchronized fleet steps, firm-event ramp ceiling | `guardian` G-02…G-06 | TS-06-05 |
 | K5 | Grid authority: L2 instructions are hard constraints, never traded for commercial value | `allocator`, `guardian` G-15 | TS-05-14 (new) |
 | K6 | Command freshness: sequence/epoch/lease strictly increasing, stale/duplicate commands rejected | `guardian` G-13, `sim` hub | TS-03-01 |
-| K7 | Degrade, don't trip: TIMEOUT ≠ VETO ≠ STOP; hold → schedule → local autonomy, never an unplanned trip | `guardian`, `sim` hub lease | TS-03-02, TS-06-04 |
+| K7 | Degrade, don't trip: TIMEOUT ≠ VETO ≠ STOP; hold the last setpoint → local autonomy, never an unplanned trip | `guardian`, `sim` hub lease | TS-03-02, TS-06-04 |
 | K8 | Stop authority: a scoped safe stop works with `og-engine` and `og-guardian` both down; stop-only key never releases | `safestop` (independent process) | TS-06-03 |
 | K9 | One loop per quantity: exactly one integrating controller (the `DIST_DEFERRAL` PI) regulates a given physical quantity | `allocator` PI, `guardian` G-03 | TS-05-15 (new) |
 | K10 | Trace before act: no command is signed unless its decision pre-image is durably traced first | `guardian` G-14, `trace` | TS-09-09 (new) |
 | K11 | Verifiable track record: hash-chained trace, configurable retention, verifiable across pruning | `trace` | TS-09-01, TS-09-02 |
 | K12 | Time quality: guardian refuses to sign when its own clock offset from NTP exceeds its limit | `guardian` G-20 | TS-06-18 (new) |
-| K13 | **Commitment lock.** Granted kW for a committed obligation never drops below $\hat y_{o,t}$ except on an L0/L1/L2 reason code or verified infeasibility, each traced; substitution (same obligation, different hub) is allowed, switching (capacity moved to a different obligation) is not | `selector`/`ledger` (freeze), `guardian` G-19 | TS-04-01…04 |
+| K13 | **Commitment lock.** Granted kW for a committed obligation never drops below $\hat y_{o,t}$ except on an L0/L1/L2 reason code or verified infeasibility, each traced; substitution (same obligation, different hub) is allowed, switching (capacity moved to a different obligation) is not. **Best effort (D-17):** once an exception drives a delivering obligation to `SHORTFALL` it keeps receiving its maximum feasible kW (substitution first, never 0 while any is feasible), flagged `AT_RISK`, and gets its full commitment back as soon as the constraint clears. **Need basis (D-18):** a `MEASURED_FEEDBACK` (closed-loop) profile may be granted below its reserved maximum with `R-GRANT-CLOSED-LOOP` when the customer's measured need is lower; the unused reservation is never lent to another obligation, and G-19 vetoes the same reduction for a fixed profile | `selector`/`ledger` (freeze), `guardian` G-19 | TS-04-01…04, TS-04-17, TS-04-18 |
+| K14 | **Power-quality envelope (D-7).** Dispatch serving a customer keeps aggregated per-phase imbalance, voltage/frequency deviation and THD within that customer's `PowerQualityEnvelope`, at selection and continuously while delivering, with a corrective ladder before any breach stands; independently checked by the guardian (G-21 imbalance, G-22 THD, G-23 frequency/voltage deviation, G-24 ride-through and asset state; G-25 gates recalibration commands) | `allocator` PQ self-check, `guardian` G-21…G-25 | TS-06-27, TS-06-12 |
 
 **Retired-numbering cross-reference** (for anyone comparing against an earlier draft of this document): old K4
 ("guardian never edits a value") is now evidence for **K3**; old K5 ("safe-stop never releases") is **K8**; old K6
@@ -124,7 +125,7 @@ numbers as the canonical set and are unchanged.
 | ID | Title | Level | Preconditions | Hypothesis strategy / steps | Expected result (threshold) | A | K | Existing TC |
 |---|---|---|---|---|---|---|---|---|
 | TS-03-01 | Lease/epoch never regresses | P | `sim` hub with a lease/epoch counter; `guardian` epoch authority | Generate random interleavings of batches with epochs drawn from a window around the current epoch, including duplicates and out-of-order delivery, ≥ 10³ cases | A command whose epoch ≤ the hub's last-accepted epoch is always refused/ignored; the hub's accepted-epoch sequence is monotonically non-decreasing in every case | A3, A6 | K9 | — (new; nearest: `TC-FUN-108` islanding exclusion) |
-| TS-03-02 | Fail-to-local-schedule on lease expiry | P | Hub with a signed fallback schedule loaded | Randomize lease expiry time relative to in-flight commands, ≥ 500 cases | Every case: hub state after expiry equals the signed fallback profile for that clock time, never last-command-hold-forever nor an unbounded/undefined output | A6 | K7 | `TC-FUN-108` (islanding) as a related fixture |
+| TS-03-02 | Hold, then local autonomy, on lease expiry | P | Hub with an accepted lease and setpoint | Randomize lease expiry time relative to in-flight commands, ≥ 500 cases | Every case: after expiry the hub holds its last signed setpoint for the configured hold window (`lease_hold_after_expiry_s`), then falls back to local autonomy; never an unbounded/undefined output and never a hold that outlasts the window | A6 | K7 | `TC-FUN-108` (islanding) as a related fixture |
 | TS-04-01 | Commitment lock under randomized call arrivals and prices | P | ≥ 2 obligations of the same tier can be admitted; price series randomized | Generate random arrival times and price paths for a second, higher-value same-tier call while the first is `delivering`, ≥ 10³ cases via Hypothesis `stateful` rules (admit, tick, price-move) | In every case, the earlier-committed obligation's granted kW never drops below $\hat y$ unless an injected L0/L1/L2/infeasibility event accompanies the drop; 0 cases of a price-only reduction | A4, A10 | K13 | — (new; review §3.4 replay fixture) |
 | TS-04-02 | Commitment lock holds cross-tier | P | Obligations from ≥ 2 tiers | Randomize a lower-tier call's value up to and past the committed higher-tier call's value, ≥ 500 cases | The committed obligation is never reduced to serve a lower- or equal-priority new call regardless of relative price | A4, A10 | K13 | — |
 | TS-04-03 | Substitution allowed, switching forbidden | P | One committed obligation, ≥ 2 eligible hubs with spare capacity | Randomly fail/derate the serving hub(s), ≥ 500 cases | The obligation's total granted kW is maintained (or shortfall traced) by swapping hubs; the *obligation identity* receiving the kWh never changes without a reason code | A4, A10 | K13 | — |
@@ -140,6 +141,7 @@ numbers as the canonical set and are unchanged.
 | TS-06-04 | TIMEOUT, VETO and STOP are distinct | P | Guardian in each verdict state | Drive guardian into TIMEOUT (no verdict in time), VETO (fails a G-check) and STOP (safe-stop engaged), ≥ 100 cases each | TIMEOUT → hold at last good grant; VETO → refuse this batch only, engine may resubmit; STOP → 0 output, no resubmission accepted until cleared. All three verdicts are distinguishable in the trace | A3, A6, A9 | K7 | — |
 | TS-06-05 | Ramp/feeder ceilings hold under firm events | P | A firm obligation plus discretionary load on the same feeder | Randomize simultaneous firm-event starts and discretionary ramps, ≥ 500 cases | Fleet and per-feeder ramp stay within G-03/G-04/G-05 limits even when a firm event starts; firm events are pre-staged, not exempted from the *ceiling* (only from being throttled below their contracted ramp) | A2, A5, A10 | K4 | — |
 | TS-06-18 | Guardian refuses to sign on a skewed clock (new) | P | Guardian with an injectable NTP-offset test hook | Randomize clock offset across and past the configured limit, ≥ 500 cases | 100% of cycles with offset beyond the limit sign nothing (G-20 hold, not a veto or stop); 100% within limit proceed normally | A3, A10 | K12 | — (new; canonical K12 had no property/negative test) |
+| TS-06-27 | Power-quality envelope holds (K14) | P | `core.pq` envelope math and the guardian's G-21…G-24 checks | Random measurements, envelope tightness, fleet harmonic phasors and asset states, ≥ 10³ cases (`orchestrator/tests/property/test_k14_pq_envelope.py`) | A reading over any limit is always BREACH; tightening an envelope never improves the verdict; G-21…G-23 veto exactly when their own dimension breaches; G-24 never admits an excluded or under-rated hub and never gates `HOME` | A10, A13 | K14 | — |
 | TS-08-01 | No kWh billed twice | P | Meter intervals for ≥ 2 obligations sharing a hub across a day | Randomize overlapping obligation windows and interval boundaries, ≥ 10³ cases | $\sum$ billed kWh per hub-interval across all invoice lines ≤ metered kWh for that interval; recount oracle agrees within ±0.5% | A7, A8, A10 | K2 | — |
 | TS-09-01 | Trace chain verifies after pruning | P | Trace with configurable retention per event class; checkpoint anchors | Randomize retention windows and prune points, then run the verifier, ≥ 200 cases | `verify(range)` succeeds across a pruned boundary using the checkpoint anchor; a tampered pre-checkpoint byte is still detected via the anchor hash | A9 | K11 | — |
 | TS-09-02 | No command without a trace entry | P | Full stack on `og-test` | Randomize command volume/timing, ≥ 500 cases | Every guardian verdict (PASS/HOLD/VETO/STOP) and every executed command has exactly one trace entry; count of guardian verdicts = count of trace entries of that class | A3, A9, A10 | K11 | — |
@@ -153,19 +155,21 @@ Columns: ID · Title · Level · Preconditions · Steps · Expected result (thre
 Fixtures (`FX-*`) are the MVP-S-scaled equivalents defined in §7.2, reusing `05-testing/01-test-strategy.md` §4.2
 naming where the same content applies at 2,000 rather than 500/10,000 hubs.
 
-### 3.1 ES01 — Platform & data (TS-01-01…07)
+### 3.1 ES01 — Platform & data (TS-01-01…09)
 
 | ID | Title | Level | Preconditions | Steps | Expected result | A | K | Existing TC |
 |---|---|---|---|---|---|---|---|---|
-| TS-01-01 | Migrations apply cleanly on a fresh `og_test` DB | U/I | Empty Postgres 17 instance | Run migration set forward, then one rollback/forward cycle | 0 errors; schema matches the frozen data model in `02a`; `alembic`/migration tool reports clean state | A1–A11 (platform) | — | — |
+| TS-01-01 | Migrations apply cleanly on a fresh `og_test` DB | U/I | Empty Postgres 17 instance | Run the migration set forward; run it again. Migrations are forward-only (no rollback; a fix is a new migration) | 0 errors; schema matches the frozen data model in `02a`; the second run applies nothing (`og.schema_migrations` unchanged) | A1–A11 (platform) | — | — |
 | TS-01-02 | Pydantic contracts reject malformed inter-module payloads | U | Contracts package importable | Fuzz each shared model with missing/extra/wrong-typed fields | 100% of malformed payloads raise a validation error before reaching business logic | A4–A9 | — | — |
 | TS-01-03 | `LISTEN/NOTIFY` delivers internal events under load | I | Postgres with `LISTEN/NOTIFY` wired | Publish 10k events/min for 5 min | 0 dropped notifications; consumer lag < 1 s p99 | A2, A4 | — | — |
 | TS-01-04 | Telemetry partition-by-day rolls over correctly at midnight (CT) | I | Telemetry table partitioned | Advance the virtual/system clock across a day boundary while inserting | Rows land in the correct day partition; no insert failures at the boundary | A2 | — | — |
 | TS-01-05 | Nightly `pg_dump` produces a restorable backup | I | `og_test` populated | Run `pg_dump`, drop to a scratch DB, restore | Restore succeeds; row counts match; the trace chain still verifies post-restore | A11 | K11 | — |
-| TS-01-06 | Deploy script is idempotent | I | Server `og-test` | Run `deploy.sh` twice back to back | Second run is a no-op or clean redeploy; all 7 systemd units remain `active (running)` | A11 | — | — |
+| TS-01-06 | Deploy script is idempotent | I | Server `og-test` | Run `deploy.sh` twice back to back | Second run is a no-op or clean redeploy; all 10 systemd units remain `active (running)` | A11 | — | — |
 | TS-01-07 | No duplicated functions (new; static/import-graph check) | U | Full source tree importable; `og.core` package exists per `02b` §12 | Run an import-graph/lint check (e.g. an AST grep) for SoC-step, capability/envelope-limit, product-rule-rounding, Ed25519 sign/verify, and JCS+SHA-256 trace-hashing formulas defined anywhere outside `og.core`; also assert every consumer (`selector`, `allocator`, `fleet`, `guardian`, `sim`, `settle`, `trace`) imports these from `og.core` rather than reimplementing them | 0 matches for a duplicate formula outside `og.core`; the build fails if a second implementation of any `og.core`-owned function is introduced | A4–A11 (build-blocking) | — | — (new; enforces `02b` §12's ownership rule) |
+| TS-01-08 | Workspace MQTT users are confined to their workspace (D-13) | S | A workspace user `ogw_<ws>` on the shared broker | Publish and subscribe outside `ogtest/<ws>/#`, including `og/v1/#` | Every attempt outside the workspace root is refused by the broker ACL; no workspace is ever given a production MQTT credential | A11 | — | — |
+| TS-01-09 | Proxy-secret identity (D-12) | S | og-api with `OG_API_PROXY_SECRET` set | Call an endpoint with `X-Remote-User` but no, or a wrong, `X-OG-Proxy-Auth` | `401` every time; the correct secret plus a mapped identity is served with that identity's role | A10 | — | — |
 
-### 3.2 ES02 — Live feeds & forecast (TS-02-01…07)
+### 3.2 ES02 — Live feeds & forecast (TS-02-01…09)
 
 | ID | Title | Level | Preconditions | Steps | Expected result | A | K | Existing TC |
 |---|---|---|---|---|---|---|---|---|
@@ -176,8 +180,10 @@ naming where the same content applies at 2,000 rather than 500/10,000 hubs.
 | TS-02-05 | Staleness threshold triggers "no new commitments" | E | `feeds` + `selector` on `og-test` | Stub the price feed stale beyond threshold (e.g. > 2 gate intervals) | `selector` admits 0 new commitments while stale; existing commitments (K13) are unaffected; alert raised; recorded reason code | A1, A4, A6, A10 | K13 | `TC-FUN-223` (stale ledger holds allocations — related pattern, `FM-ARB-014`) |
 | TS-02-06 | Forecast quantiles (P10/P50/P90) computed and monotonic | U | `forecast` module | Feed a synthetic price series | P10 ≤ P50 ≤ P90 at every horizon step; values recompute each 15-min gate | A1, A4 | — | — |
 | TS-02-07 | Feed freshness recovers and re-enables commitments | E | Continuation of TS-02-05 | Un-stub the feed | New commitments resume within one gate after freshness restored; no backlog of "phantom" commitments from the stale window | A1, A4, A6 | K13 | — |
+| TS-02-08 | Delivery-rate economics use per-bank load-zone prices (D-10) | U/I | Banks in ≥ 2 load zones; hub and zone SPPs both present | Run a gate and a settlement over the same interval | Each bank is valued at its own load-zone SPP; hub prices are never used for delivery economics (reference only) | A4, A8 | — | — |
+| TS-02-09 | The EIA key never reaches a log (D-15) | S | `EIA_API_KEY` set; feeds logging at DEBUG | Run a poll cycle, including a failing request | The key value appears in no log line or trace payload | A1 | — | — |
 
-### 3.3 ES03 — Fleet twin & test harness (TS-03-03…08)
+### 3.3 ES03 — Fleet twin & test harness (TS-03-03…09)
 
 (TS-03-01/02 are the K6/K7 property tests, §2.1.)
 
@@ -188,9 +194,10 @@ naming where the same content applies at 2,000 rather than 500/10,000 hubs.
 | TS-03-05 | Bank aggregation matches hub sum | U/I | `fleet` bank aggregation | Randomize hub states, aggregate to bank | Bank kW/kVA = Σ member hub values within floating-point tolerance | A2 | — | — |
 | TS-03-06 | Scenario injector: partner call, price spike, feeder overload, comms loss, killed engine | I | `sim`/`grid-sim` scenario panel | Trigger each of the 6 scenario-panel events (delivery plan §4) | Each event is observable end to end (UI, trace) within 1 gate/cycle | A2–A6, A9 | — | — |
 | TS-03-07 | Lease renewal under normal operation | I | `sim` hub, `engine` up | Run 30 min normal cycle | Lease renews every cycle; no unwarranted fallback-schedule activation | A2, A3 | K6 | — |
-| TS-03-08 | Local autonomy is observable and bounded | E | Engine process killed (see §4.6) | Kill `engine`; observe hubs for 60 s | Hubs hold, then follow the signed fallback schedule (K7); no unbounded drift; recovers cleanly on engine restart | A6, A11 | K6, K7 | — |
+| TS-03-08 | Local autonomy is observable and bounded | E | Engine process killed (see §4.6) | Kill `engine`; observe hubs for 60 s | Hubs hold their last setpoint, then fall back to local autonomy (K7); no unbounded drift; recovers cleanly on engine restart | A6, A11 | K6, K7 | — |
+| TS-03-09 | Fleet topology: dual-unit homes spread 10 per bank, single-zone banks (D-9) | I | Fleet seed on a fresh DB | Seed the fleet; group hubs by bank | Every bank holds exactly 10 dual-unit (78.4 kWh / 20 kW) homes and all its hubs share one load zone | A2 | K4 | — |
 
-### 3.4 ES04 — Contracts, opportunities & commitments (TS-04-05…16)
+### 3.4 ES04 — Contracts, opportunities & commitments (TS-04-05…18)
 
 (TS-04-01…04 are the K13 property tests, §2.1.)
 
@@ -208,8 +215,10 @@ naming where the same content applies at 2,000 rather than 500/10,000 hubs.
 | TS-04-14 | Multi-day contract: re-nomination point allows reselection | I | `FX-CTR-DD`-equivalent multi-day fixture with a declared re-nomination point | Reach the re-nomination point; offer a competing call | Reselection permitted only at that point, for that contract; a competing call between points is refused per K13 | A4, A9, A10 | K13 | — |
 | TS-04-15 | Partial take respects `min_qty`/`increment` (ERCOT AS style) | I | `FX-CTR-AS`-equivalent product rule: `min_qty` 0.1 MW, `increment` 0.1 MW | Offer 0.25 MW of eligible headroom | Selector takes 0.2 MW (rounds down to the increment ≥ `min_qty`), never 0.25 MW directly, never below `min_qty` | A4, A5 | — | — |
 | TS-04-16 | Partial take respects `block`/all-or-nothing (partner style) | I | `FX-CTR-PC`-equivalent all-or-nothing block product | Offer headroom insufficient for the full block | Selector takes 0 (rejects the block), never a partial fraction of an all-or-nothing product | A4, A5 | — | — |
+| TS-04-17 | Best-effort SHORTFALL under an L2 BLOCK (D-17) | E | A committed obligation delivering from ≥ 2 banks | Inject an L2 BLOCK on the bank carrying its largest share; hold it past the SHORTFALL sustain window; then lift it | The obligation reaches `SHORTFALL` and `AT_RISK`; while blocked every cycle grants the feasible remainder (> 0, below the commitment, 0 on the blocked bank); after the lift the full commitment returns within 2 cycles and `AT_RISK` clears | A4, A5, A10 | K13 | `tests-e2e/functional/decisions` |
+| TS-04-18 | Need-basis reduction is corroborated only for a measured profile (D-18) | E | A delivering obligation; its contract's service profile switched between `PLAN` and `MEASURED_FEEDBACK` | Propose a grant below the commitment carrying `R-GRANT-CLOSED-LOOP` for each profile | G-19 vetoes the reduction for the fixed (`PLAN`) profile and does not for `MEASURED_FEEDBACK` | A4, A10 | K13 | `tests-e2e/functional/decisions` |
 
-### 3.5 ES05 — Dispatch (selector, ledger, allocator) (TS-05-04…13)
+### 3.5 ES05 — Dispatch (selector, ledger, allocator) (TS-05-04…13, TS-05-16)
 
 (TS-05-01/02 are the K1/K2 property tests; TS-05-03 tests non-anticipativity, P5, no K tag; TS-05-14/15 are the
 K5/K9 property tests, §2.1.)
@@ -226,8 +235,9 @@ K5/K9 property tests, §2.1.)
 | TS-05-11 | `ERCOT_AS` capacity hold is maintained through the delivery window | I | `FX-CTR-AS`-equivalent AS obligation committed | Run through the hold window with competing headroom pressure | Held capacity never dips below the awarded amount absent an L0–L2/infeasibility event | A5, A10 | K13 | — |
 | TS-05-12 | §7.4 AS forward release is default off | I | Fresh `og-test` config, no explicit override | Attempt to trigger a release path without enabling the flag | 0 releases occur; the release code path is unreachable with the default configuration; explicitly enabling it (test-only) is required to exercise the path at all | A4, A10 | K13 | — |
 | TS-05-13 | §7.4 AS forward release, when explicitly enabled, is audited and bounded | I | Release flag explicitly enabled for this test only | Trigger a release under a qualifying CVaR condition | Release is future-intervals-only, capped, requires a recorded confirmation, and produces a traced buyback event | A4, A9, A10 | K13 | — |
+| TS-05-16 | ERCOT_AS award is a capacity hold | I | An `ERCOT_AS` Non-Spin (4 h) or ECRS (1 h) award committed | Commit the award; observe reservations and grants through the hold window | kW and energy (the full deployment duration) are reserved above the 20% reserve floor; 0 kW discharged until an ERCOT deployment event; revenue settles as a capacity payment | A4, A5, A8 | K1, K13 | `tests-e2e/functional/decisions` |
 
-### 3.6 ES06 — Guardian & safe stop (TS-06-06…23, plus TS-06-18)
+### 3.6 ES06 — Guardian & safe stop (TS-06-06…26, plus TS-06-18)
 
 (TS-06-01/02 are the K3 property tests; TS-06-03 is the K8 property test; TS-06-04 is the K7 property test;
 TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
@@ -236,7 +246,7 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 |---|---|---|---|---|---|---|---|---|
 | TS-06-06 | G-01 reserve floor — negative test | S | Guardian live | Propose a batch breaching reserve+1% | Refused `RESERVE_FLOOR`; traced | A3, A10 | K1 | — |
 | TS-06-07a | G-02 hub power bound — negative test | S | Guardian live | Propose a batch exceeding a hub's P limit | Refused `DEVICE_LIMIT`; traced | A3, A10 | K4 | — |
-| TS-06-07b | G-21 (supplemental) service-transformer loading — negative test | S | Guardian live | Propose Σ charging > 90% of transformer kVA | Refused `HOSTING_LIMIT_IMPORT`/`_EXPORT` | A3, A10 | — (supplemental, beyond the canonical 12) | — |
+| TS-06-07b | G-27 service-transformer loading — negative test | S | Guardian live (`guardian/flow_checks.py`, lands in R2) | Propose Σ charging > 90% of transformer kVA | Refused (import/export hosting limit); traced | A3, A10 | K4 | — |
 | TS-06-08 | G-03 bank/feeder loading — negative test | S | Guardian live | Propose net loading > 95% of rating | Refused; guardian calls the same `og.core.capability.recharge_headroom()` the allocator calls, on its own inputs (no oscillation, no drift between two hand-kept-in-sync formulas) | A3, A10 | K4, K9 (independent check on the PI outer loop) | — |
 | TS-06-09 | G-04 hub/firm ramp — negative test | S | Guardian live | Propose a discretionary step > 50 MW/min fleet or > 10%/min bank | Refused `RAMP_LIMIT`; firm/ISO changes on their own pre-staged ramp still pass | A3, A5, A10 | K4 | — |
 | TS-06-10 | G-05 synchronized step/stagger — negative test | S | Guardian live | Propose > discretionary cap/30 per 2-s tick | Refused `SYNC_STEP_LIMIT` | A3, A10 | K4 | — |
@@ -245,13 +255,16 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 | TS-06-20 | G-13 sequence/epoch/lease — negative test at the guardian (new; guardian-side complement to the `sim`-hub property test TS-03-01) | S | Guardian live | Submit a batch whose epoch/seq is not strictly greater than the last accepted for that hub, or outside the current lease | Refused `STALE_EPOCH`/`STALE_SEQ`/`EXPIRED`; traced | A3, A10 | K6 | — |
 | TS-06-21 | G-14 trace pre-image present — negative test (new) | S | Guardian live, trace-write test hook that can be suppressed | Propose a batch for which the decision pre-image trace write is deliberately withheld | Guardian refuses to sign (hold); once the pre-image write succeeds, an otherwise-identical batch signs normally | A9, A10 | K10 | — (new; canonical K10 had no guardian-level negative test) |
 | TS-06-22 | G-15 L2/ISO boundary — negative test | S | Guardian live, simulated ADER telemetered range known | Propose a batch whose telemetered range exceeds ledger-free capacity under an active L2 instruction | Refused; the L2 instruction's bound is enforced, never relaxed for commercial value | A4, A5, A10 | K5 | — |
-| TS-06-12 | G-22 (supplemental) asset-state exclusion | S | A quarantined/opted-out/islanded hub in the batch | Propose a non-safe command to that hub | Only safe commands pass for that hub; others refused `QUARANTINED_ASSETS` | A2, A3, A10 | — (supplemental, beyond the canonical 12) | `TC-FUN-108` (islanded home refuses grid commands) |
-| TS-06-13 | G-23 (supplemental) command rate/duplicate — negative test | S | Guardian live | Submit 2 commands for one hub in one 2-s tick | Batch rejected, `OUT_OF_ORDER`; a repeated `submission_id` acknowledged, never re-signed | A3, A10 | — (supplemental, beyond the canonical 12) | — |
+| TS-06-12 | G-24 asset-state exclusion | S | A hub in `QUARANTINED`, `AWAITING_REPLACEMENT` or `RECOMMISSIONING` in the batch | Propose a grid-facing command to that hub | Refused `PQ_ASSET_STATE_<STATE>_EXCLUDED` (`guardian/pq_checks.py`); a `DEGRADED` hub is refused only for a PQ-sensitive obligation; `HOME` service is never gated | A2, A3, A10 | K14 | `TC-FUN-108` (islanded home refuses grid commands) |
+| TS-06-13 | G-13 command sequence / duplicate — negative test | S | Guardian live | Submit a batch whose epoch/seq is not strictly greater than the last accepted for that bank (a duplicate or replayed submission) | Refused by G-13 (`check_g13_freshness`), never re-signed; the earlier accepted batch stands | A3, A10 | K6 | — |
 | TS-06-14 | G-19 commitment lock — negative test (the new check) | S | A committed obligation; propose a batch reducing its granted kW with no reason code | Submit the batch | Guardian refuses to sign; `R-COMMIT-LOCK-*` absent ⇒ VETO; only a batch carrying a valid L0/L1/L2/infeasibility code is signed | A3, A4, A10 | K13 | — (new; this is review finding #1 closed) |
 | TS-06-15 | Scoped safe stop — fleet scope | I | Operator UI + `og-guardian` (manual command path) + `og-safestop` (independent process) | Trigger fleet-wide safe stop with two-step confirmation | All hubs commanded to 0 within the scoped ramp; retained MQTT topic set; no release without a fresh operator action | A3, A10 | K8 | — |
 | TS-06-16 | Scoped safe stop — zone/bank scope | I | Same, scoped to one zone/bank | Trigger zone-scoped stop | Only the targeted zone/bank stops; other zones continue normal dispatch and commitments (K13 unaffected outside the scope) | A3, A4, A10 | K8, K13 | — |
 | TS-06-17 | Guardian TIMEOUT holds last grant | I | Guardian process delayed/unresponsive | Delay guardian response past its deadline | Engine holds the prior grant (no new commands issued); no STOP, no VETO; recovers on guardian response | A3, A6, A10 | K7 | — |
 | TS-06-23 | `og-safestop` engages a fleet stop with `og-guardian` AND `og-engine` both killed (new; the K8 topology proof) | C | `og-safestop` up; `og-guardian` and `og-engine` both killed (see §4.6) | Trigger a fleet-scope stop via the operator path while both other processes are down | The stop still engages within the scoped ramp via `og-safestop` alone; no dependency on the killed processes is observed | A3, A10, A11 | K8 | — (new; proves the design-error fix in `02b` §1.3) |
+| TS-06-24 | Two-person safe-stop release (D-12) | E | Named operators `og-op-a`, `og-op-b` on the guardian allow-list | `og-op-a` engages (two-step) and requests the release; `og-op-a` approves it; then `og-op-b` approves | Self-approval is `403`; the second operator's approval yields a guardian-signed RELEASE relayed by `og-safestop` | A3, A10 | K8 | `tests-e2e/functional/decisions` |
+| TS-06-25 | A replayed RELEASE never lifts a newer stop | E | A released stop, then a newer ENGAGE on the same scope | Re-publish the old RELEASE on its topic and the new stop's topic | The scope stays stopped (hubs reach and stay at 0 kW); a RELEASE lifts only its own `stop_id` | A3, A10 | K8 | `tests-e2e/functional/decisions` |
+| TS-06-26 | Veto-rate escalation requests, never engages, a stop | E | Guardian live | Drive > 5% vetoes per tick on one scope for ≥ 3 ticks, then stop | The scope goes `CONSERVATIVE`; after 3 ticks `ALR-SAFE-STOP-REQUESTED` is raised with an unconfirmed stop proposal and no automatic ENGAGE; recovery clears both | A3, A6, A10 | K7 | `tests-e2e/functional/decisions` |
 
 ### 3.7 ES07 — Health & degraded modes (TS-07-01…06)
 
@@ -264,7 +277,7 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 | TS-07-05 | Cycle latency alert on RT cycle overrun | I/N | Engine under load | Inject a slow cycle (> 500 ms) | Alert raised; cycle latency metric recorded; no crash | A6, A11 | — | — |
 | TS-07-06 | Alert de-duplication and clearing | I | An active alert condition | Resolve the underlying condition | Alert clears automatically; no duplicate alert storm while the condition persists | A6 | — | — |
 
-### 3.8 ES08 — Settlement (M&V, billing, profitability) (TS-08-02…09)
+### 3.8 ES08 — Settlement (M&V, billing, profitability) (TS-08-02…10)
 
 (TS-08-01 is the K2 property test — no kWh billed twice is evidence of one-buyer holding through settlement,
 §2.1.)
@@ -279,6 +292,7 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 | TS-08-07 | LP vs rule-baseline value comparison | I | Shadow rule-selector output (TS-05-06) available | Compare LP-dispatched net margin vs rule-baseline net margin for the same window | Value-added figure computed and displayed; sign and rough magnitude consistent with a hand-checked scratch calculation | A7 | — | (waived if cut line 3 fires) |
 | TS-08-08 | Forgone-upside reporting under the lock | I | A K13 exception scenario (TS-04-06) with a documented forgone opportunity | Compute forgone upside by hand from the rejected call's value | `settle`/profitability screen reports a forgone-upside figure matching the hand computation within ±2% | A7, A10 | K13 | (waived if cut line 3 fires) |
 | TS-08-09 | Settlement excludes stale/estimated intervals from `FINAL` status | I | An interval with a data gap | Run settlement over the gap | That interval marked estimated/flagged, never `FINAL`; the K2 double-billing monitor does not flag it as a violation because it is explicitly labelled | A7, A8 | K2 | — |
+| TS-08-10 | M1 delivery charge on grid charging (D-19) | U | `config/tdsp_tariffs.toml` loaded; charging intervals in ≥ 2 TDSPs | Settle grid-drawn charging kWh | Each kWh carries its TDSP's full flat per-kWh delivery charge; solar-sourced kWh carry none | A7, A8 | — | — |
 
 ### 3.9 ES09 — Audit trace & retention (TS-09-03…08)
 
@@ -293,22 +307,120 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 | TS-09-07 | Pruning keeps checkpoint anchors | I | Continuation of TS-09-01 | Prune, then verify | Verification still succeeds using the checkpoint anchor for the pruned range | A9 | K11 | — |
 | TS-09-08 | "Why" query returns the deciding factors for a chosen/rejected call | I | A completed selection cycle | Query why obligation X was/was not committed | Response cites the actual constraint/value figures from that cycle's solve, matching the stored plan | A4, A9 | — | — |
 
-### 3.10 ES10 — Operator UI (TS-10-01…07)
+### 3.10 ES10 — Operator UI (TS-10-01…08)
 
 | ID | Title | Level | Preconditions | Steps | Expected result | A | K | Existing TC |
 |---|---|---|---|---|---|---|---|---|
-| TS-10-01 | Control room shows live feeds, fleet MW/MWh, invariant counters | I/UI | UI up against `og-test` | Load control-room screen | Values update via SSE within 2 s of a change; invariant counters at 0 in a clean run | A1, A2, A11 | K1–K13 (display) | — |
+| TS-10-01 | Control room shows live feeds, fleet MW/MWh, invariant counters | I/UI | UI up against `og-test` | Load control-room screen | Values update via SSE within 2 s of a change; invariant counters at 0 in a clean run | A1, A2, A11 | K1–K14 (display) | — |
 | TS-10-02 | Fleet monitoring/control: manual command through the guardian | I/UI | Operator role | Issue a manual command from the UI | Command flows through guardian (signed), acknowledged, visible in trace | A3, A9 | K3 | — |
 | TS-10-03 | Scoped safe stop two-step confirmation in the UI | UI | Operator role | Attempt safe stop | First click arms, second confirms; a single click never stops the fleet | A3 | K5 | — |
 | TS-10-04 | Dispatch & commitments screen shows the lock | UI | A K13 scenario running | Load the screen during TS-04-05 | Committed obligation shown `delivering` with $\hat y$; competing call shown pending/refused, not silently absorbed | A4, A9, A10 | K13 | — |
 | TS-10-05 | Markets & feeds screen shows freshness/source status | UI | `feeds` running | Load the screen; force a stale feed | Freshness badge changes state within 2 s of the underlying status change | A1, A6 | — | — |
 | TS-10-06 | Billing & audit screen: trace explorer and chain verification | UI | Trace populated | Open trace explorer, run verification | Entries browsable; verify button matches TS-09-04 result | A9 | K11 | — |
 | TS-10-07 | UI refresh under load | UI/N | 2,000 hubs live | Observe UI during a busy cycle | All 7 screens refresh within 2 s (A11 threshold) | A11 | — | — |
+| TS-10-08 | Customer API is dark by default and scoped per customer (D-11, D-12) | S | `api.customer_api.enabled` false, then true; customer identities `og-cust-*` | Call `/og/api/customer/...` in both states and across two customers | Disabled: not served. Enabled: a customer identity sees only its own contracts and data, never another customer's, and never operator routes | A10 | — | — |
 
 **Functional count:** ES01 7, ES02 7, ES03 6, ES04 12, ES05 10, ES06 18, ES07 6, ES08 8, ES09 6, ES10 7 = **87**.
 
 ---
 
+### 3.11 ES19 — Two markets, K15 territory, discharge-flow limits (next phase, TS-19-01…41)
+
+Next-phase ids, carried over unchanged from `09-optimizer-dispatcher-update.md` §7 (the source of truth for their
+formulas and fixtures). They cover the two-market model (D-20), the new territory invariant **K15** (a regulated
+obligation uses only assets inside its territory; no net reverse flow at the territory boundary) and the
+discharge-flow limits F1–F7 with guardian checks **G-26…G-33** (D-26, D-27). None of this is MVP-S scope; the
+ids are reserved here so the stories in `03` and these tests stay traceable. Kinds: P property, N negative,
+U unit, S scenario, B benchmark.
+
+Guardian numbering follows the built scheme (as in PR #24's `03-mvp-s-epics-stories.md`), not `09`'s draft: G-26 home
+meter, G-27 service transformer, G-28 feeder, G-29 substation, G-30 territory export (K15c), G-31 sustained vs
+peak, G-32 non-firm feeder ramp, G-33 market segregation (K15). The AS/firm energy hold is not a guardian check; it
+is tested at the engine/allocator (C3′ and the energy-sufficiency check).
+
+| Story | Scope | Acceptance |
+|---|---|---|
+| ES19-S01 | selector: per-bank zone price | a 4-zone fixture prices each bank at its zone; no load rows leak into prices (TS-19-01, 02) |
+| ES19-S02 | contract: market and basis | admission rejects REG obligations with out-of-territory assets (TS-19-03) |
+| ES19-S03 | selector: territory C25 | no REG reservation outside the territory; no FREE for no-access assets (TS-19-04, 05) |
+| ES19-S04 | selector: lexicographic R/F | a scarcity-spike fixture never shrinks the REG tranche below $(1-\varepsilon)z_R^*$; forgone upside reported (TS-19-06, 07) |
+| ES19-S05 | selector: charging sources, M1, solar floor | FREE grid kWh cost $\lambda+w$; AE kWh cost TOU; solar ≥ 30% or slack reported (TS-19-08, 09, 10) |
+| ES19-S06 | selector: AS hold C3′ (Frank #6) | a Non-Spin award always has $4r/\eta_d$ above the floor in every scenario (TS-19-11) |
+| ES19-S07 | selector: fixed vs need basis, best effort | the need reservation is never resold; the shortfall target stays $Q$ (TS-19-12, 13) |
+| ES19-S08 | wear rule (Frank #7) | selector expected wear = settle wear on identical kWh, to $10^{-9}$ (TS-19-14) |
+| ES19-S09 | RT: water-value threshold and hold floor | no headroom discharge below $\nu$ or below $e^{hold}$ (TS-19-15, 16) |
+| ES19-S10 | RT: territory filter | AE hubs never serve FREE without access (TS-19-17) |
+| ES19-S11 | settle: $/kW-in/out, payback | fixture month reproduces hand-computed values; §3c stack reproduced (TS-19-18, 19) |
+| ES19-S12 | F1 derating (allocator + G-02) | TS-19-20, 21, 22 |
+| ES19-S13 | F2 home export (allocator + G-26) | TS-19-23, 24, 25 |
+| ES19-S14 | F3 transformer, feeder, substation (allocator + G-27/28/29) | TS-19-26 … 30 |
+| ES19-S15 | F4 territory: market segregation (G-33) and boundary export (G-29/30) | TS-19-31, 32 |
+| ES19-S16 | F5 peak vs sustained (G-31) | TS-19-33, 34 |
+| ES19-S17 | F6 non-firm feeder/substation ramp (G-32); F7 AS/firm energy hold at the engine/allocator (C3′, energy sufficiency; not a G-check) | TS-19-35, 36, 37 |
+| ES19-S18 | checker K4_*/K15_*/K13_ENERGY_HOLD | TS-19-38, 39, 40 |
+| ES19-S19 | performance at scale | TS-19-41 |
+
+| ID | Kind | Test |
+|---|---|---|
+| TS-19-01 | U | `load_scenarios` keeps one price path per zone; banks in 4 zones get 4 different prices |
+| TS-19-02 | N | load-kind rows are never used as prices |
+| TS-19-03 | N | an AE REG contract with an Oncor bank in its eligible set is rejected `R-TERRITORY-INELIGIBLE` |
+| TS-19-04 | P | random fleets and contracts: $\bar y_{o,a,t}=0$ for $a\notin\mathcal A^{u(o)}$ |
+| TS-19-05 | P | $d^F=r=0$ for territory assets with access 0 |
+| TS-19-06 | S | P90 $650/MWh evening: the REG tranche is unchanged vs P50-only (±ε) |
+| TS-19-07 | U | the stage-F row enforces $\ge(1-\varepsilon)z^*_R$; `forgone_upside` equals the relaxed-minus-locked value |
+| TS-19-08 | U | FREE grid charging coefficient = $\lambda+w_\tau$ per TDSP; BTM PV has no $w$ |
+| TS-19-09 | U | AE charging coefficient = TOU period rate; no $w$ |
+| TS-19-10 | S | a cloudy day gives solar slack > 0, reported; the month-to-date carry restores ≥ 30% over the month |
+| TS-19-11 | P | $e_{t-1},e_t\ge\sum_kH_kr/\eta_d$ in every scenario |
+| TS-19-12 | P | need-basis: $p^{claim}$ counts $\bar y$ in full; FREE never uses it |
+| TS-19-13 | S | mid-window shortfall: the next gate keeps $Q$; delivery restored at the first feasible interval |
+| TS-19-14 | P | `wear_cost` is identical in the selector objective evaluation and settle |
+| TS-19-15 | U | S6 threshold = $\nu$ + hysteresis; $30 is not used |
+| TS-19-16 | P | S6 never takes SoC below $\max(e^{hold},e^{plan})$ unless $\lambda\ge\nu_{ramp}$ |
+| TS-19-17 | P | the allocator's eligible set for REG obligations ⊆ the territory |
+| TS-19-18 | U | $\bar c_a$ attribution and inventory valuation on a hand fixture |
+| TS-19-19 | S | the §3c single-unit stack reproduces ≈ $1,620/yr net before scarcity |
+| TS-19-20 | P | G-02: PASS ⇔ $|p|\le P_{max}(s,T)$; the allocator cap ≤ the guardian bound on identical inputs |
+| TS-19-21 | N | G-02: stale temperature → bound × 0.5; 45 °C → 0.7 |
+| TS-19-22 | S | afternoon heat: the plan lowers the 15–18 h capacity by the forecast derating |
+| TS-19-23 | P | G-26: PASS ⇔ export and import inequalities |
+| TS-19-24 | N | G-26: stale meter → export bound $X-PV^{rated}$; unknown $X$ → no export |
+| TS-19-25 | S | discharge first covers home load; only the excess is exported (sim meter) |
+| TS-19-26 | P | G-27 group verdict equals brute force; group-level PARTLY_VETOED |
+| TS-19-27 | N | G-27: midday PV reverse flow > $S_x$ vetoed; >20% stale members + increase vetoed |
+| TS-19-28 | N | G-28: two individually safe bank batches jointly reversing the feeder are vetoed |
+| TS-19-29 | N | G-28: stale feeder SCADA vetoes increases, passes relief |
+| TS-19-30 | N | G-29: POI export > limit vetoed; stale substation SCADA vetoes increases |
+| TS-19-31 | N | G-33 (market segregation): an AE hub on an Oncor obligation is vetoed; an AE hub on FREE headroom with access 0 is vetoed |
+| TS-19-32 | P | G-30 territory export with G-29 (C25(c)): Base net injection at territory boundary substations ≤ 0 in all fixtures |
+| TS-19-33 | N | G-31: a lease > $\tau^{pk}$ above continuous is vetoed; a missing budget blocks above continuous |
+| TS-19-34 | S | DC bridge uses the peak for ≤ $\tau^{pk}$, then steps down on lease expiry |
+| TS-19-35 | N | a substation asset step > $\rho_s\Delta t$ is vetoed (G-04 generalised) |
+| TS-19-36 | P | Engine/allocator (C3′, energy sufficiency): headroom discharge never erodes the AS/firm energy hold |
+| TS-19-37 | N | Engine/allocator: Non-Spin 100 kW with 350 kWh above the floor → no headroom discharge is granted |
+| TS-19-38 | U | the checker flags each seeded K4 violation class exactly once |
+| TS-19-39 | U | the checker flags K15 market and export violations |
+| TS-19-40 | U | the checker flags `K13_ENERGY_HOLD` |
+| TS-19-41 | B | 40 banks + 4 substation assets × 96 × 3: both stages ≤ 30 s p95 on the base node; 100 banks with levers ≤ 45 s |
+
+### 3.12 Decision-log coverage (D-9…D-19)
+
+`11-decision-log.md` supersedes older spec text. Each decision in this range maps to the tests that prove it:
+
+| Decision | Tests |
+|---|---|
+| D-9 dual-unit homes 10 per bank, single-zone banks | TS-03-09 |
+| D-10 per-bank load-zone pricing for delivery economics | TS-02-08, TS-19-01, TS-19-02 |
+| D-11 customer simulators and customer API, built dark | TS-10-08 |
+| D-12 test accounts og-op-a/og-op-b, og-cust-*; proxy-secret identity | TS-06-24, TS-01-09, TS-10-08 |
+| D-13 per-workspace MQTT users | TS-01-08 |
+| D-14 team membership | none (organisational, not testable) |
+| D-15 EIA key kept; never logged | TS-02-09 |
+| D-16 the base server is the permanent host | none (deployment decision; covered by the §4.6 process-kill runs on that host) |
+| D-17 best-effort SHORTFALL | TS-04-17, TS-19-13 |
+| D-18 fixed vs need basis | TS-04-18, TS-19-12 |
+| D-19 M1 delivery charge on grid charging | TS-08-10, TS-19-08 |
 ## 4. Non-functional tests
 
 | ID | Title | Level | Setup | Steps | Pass criteria | A |
@@ -317,12 +429,12 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 | TS-N-02 | RT cycle latency at 10,000 hubs (measured) | N | `og-test`, 10,000-hub `sim` | Same as above | Recorded as "measured, not met" if it exceeds 500 ms p99 (delivery-plan cut line 4); not a gate blocker at this scale | A11 |
 | TS-N-03 | UI refresh under live load | N | UI + 2,000 hubs | Measure SSE-to-render latency on all 7 screens during a busy cycle | ≤ 2 s on each screen, p95 | A11 |
 | TS-N-04 | Ingest freshness | N | `feeds` live/replay | Measure time from source publish to `feed_obs` row | Within the source's own refresh cadence + 1 poll interval; freshness badge accurate | A1 |
-| TS-N-05 | Memory per process | N | All 7 systemd units at 2,000 hubs, 1 h | Sample RSS per process every minute | Each process stable (no unbounded growth); total fits the server's ~14 GB free with headroom for Postgres/Mosquitto | A11 |
+| TS-N-05 | Memory per process | N | All 10 systemd units at 2,000 hubs, 1 h | Sample RSS per process every minute | Each process stable (no unbounded growth); total fits the server's ~14 GB free with headroom for Postgres/Mosquitto | A11 |
 | TS-N-06 | 1-hour soak | N/C | Full stack, 2,000 hubs, mixed scenario load | Run 1 h continuously with the scenario panel cycling through injected events | 0 crashes, 0 invariant hits (§2), memory stable, no unbounded queue growth | A10, A11 |
 | TS-N-07 | Postgres restart | C | Full stack up | `systemctl restart postgresql` mid-run | Engine reconnects and rebuilds state from Postgres; no invariant violation during outage or recovery; commitments (K13) intact after recovery | A11 |
 | TS-N-08 | MQTT (Mosquitto) restart | C | Full stack up | `systemctl restart mosquitto` mid-run | `sim` and engine reconnect; hubs fail to local autonomy during the outage (K6/K7) and resume on reconnect; no duplicate/lost commands beyond the replay-cache window | A11 |
 
-### 4.6 Process-kill matrix (7 systemd units)
+### 4.6 Process-kill matrix (10 systemd units: 6 orchestrator + 4 simulator)
 
 `og-safestop` is a separate row from `og-guardian` — this is the deliberate K8 fix (`02b` §1.3): an earlier draft
 colocated them in one process, which meant killing "guardian+safestop" together was the only testable case and hid
@@ -334,7 +446,10 @@ exactly the failure K8 exists to prevent. TS-C-03 and TS-C-03b are now independe
 | `og-engine` (selector+ledger+allocator+fleet twin+forecast) | Hubs hold lease then local autonomy (K6/K7); guardian idle (no new batches to sign); `og-safestop` remains fully able to engage a stop (K8, see TS-06-23); recovers state from Postgres on restart | TS-C-02 | K1, K2, K6, K7, K8, K13 |
 | `og-guardian` (alone; `og-safestop` stays up) | TIMEOUT semantics (K7): engine holds last grant, no new commands execute; `og-safestop` is unaffected and can still engage a stop with no guardian running (K8); restart resumes signing | TS-C-03 | K3, K4, K5, K7, K8 |
 | `og-safestop` (alone; `og-guardian`/`og-engine` stay up) | Normal dispatch is unaffected (K8's independence cuts both ways: the engine/guardian do not depend on `og-safestop` either); a stop attempted while it is down fails closed (visibly refused, not silently accepted) until restart; restart resumes stop-readiness immediately (no state to rebuild — `og-safestop` is stateless beyond `stop_event`/the retained MQTT topic) | TS-C-03b | K8 |
-| `og-sim` (fleet-sim+grid-sim) | MQTT telemetry stops; `fleet` twin marks all hubs stale within one detection cycle; engine holds; no false commands sent into a void; restart resumes telemetry | TS-C-04 | K6 |
+| `og-sim-fleet` | Hub telemetry and acks stop; the `fleet` twin marks hubs stale within one detection cycle and `ALR-SIM-OFFLINE` is raised (hub liveness signal); the engine holds, no commands are sent into a void; restart resumes telemetry | TS-C-04a | K6 |
+| `og-sim-scada` | SCADA bank readings and utility instructions stop; `ALR-SIM-OFFLINE` (SCADA liveness signal); the `DIST_DEFERRAL` PI loop and G-03 fail closed on a stale reading, never act on a frozen value; restart resumes readings | TS-C-04b | K4, K9 |
+| `og-sim-market` | ERCOT/EIA/NWS calls fail; feed staleness accrues exactly as TS-C-01 (breaker, degraded mode "no new commitments"); existing commitments unaffected | TS-C-04c | K13 |
+| `og-sim-control` | Anomaly injection and the scenario runner are unavailable; dispatch, guardian and safe stop are unaffected (no coupling) | TS-C-04d | — |
 | `og-settle` (settle + health evaluator + trace pruning) | M&V/billing/profitability stop advancing; health/heartbeat aggregation stops (Health screen goes stale, itself an observable symptom); no data loss, no double-counted interval on restart (K2); resumes from last processed interval | TS-C-05 | K2 |
 | `og-api` | Operators lose the console; engine/guardian/safestop/dispatch continue unaffected (no coupling); restart restores UI with correct current state | TS-C-06 | — |
 
@@ -382,21 +497,22 @@ level plus lists every K13/guardian-critical row individually, since those carry
 
 | Test ID(s) | A | K | Epic |
 |---|---|---|---|
-| TS-01-01…07 | A1, A2, A4–A9, A11 | — | ES01 |
-| TS-02-01…07 | A1, A4, A6, A10 | K13 (TS-02-05/07) | ES02 |
-| TS-03-01…08 | A2, A3, A6, A11 | K1, K6, K7 | ES03 |
-| TS-04-01…16 | A3–A5, A9, A10 | K13 (all) | ES04 |
-| TS-05-01…15 | A2–A6, A10 | K1, K2, K4, K5, K9, K13 | ES05 |
-| TS-06-01…23 | A2, A3, A4, A5, A6, A9, A10 | K1, K3, K4, K5, K6, K7, K8, K9, K10, K12, K13 | ES06 |
+| TS-01-01…09 | A1, A2, A4–A9, A11 | — | ES01 |
+| TS-02-01…09 | A1, A4, A6, A10 | K13 (TS-02-05/07) | ES02 |
+| TS-03-01…09 | A2, A3, A6, A11 | K1, K6, K7 | ES03 |
+| TS-04-01…18 | A3–A5, A9, A10 | K13 (all) | ES04 |
+| TS-05-01…16 | A2–A6, A8, A10 | K1, K2, K4, K5, K9, K13 | ES05 |
+| TS-06-01…27 | A2, A3, A4, A5, A6, A9, A10 | K1, K3, K4, K5, K6, K7, K8, K9, K10, K12, K13, K14 | ES06 |
 | TS-07-01…06 | A2, A6, A10, A11 | K6, K7, K13 | ES07 |
-| TS-08-01…09 | A7, A8, A10 | K2, K11, K13 | ES08 |
+| TS-08-01…10 | A7, A8, A10 | K2, K11, K13 | ES08 |
 | TS-09-01…09 | A3, A4, A9, A10 | K10, K11, K13 | ES09 |
-| TS-10-01…07 | A1–A4, A6, A9–A11 | K1–K13 (display only) | ES10 |
+| TS-10-01…08 | A1–A4, A6, A9–A11 | K1–K14 (display only) | ES10 |
+| TS-19-01…41 | next phase (D-20, D-26, D-27) | K4, K13, K15 | ES19 |
 | TS-N-01…08, TS-C-01…06 (incl. TS-C-03b) | A1, A10, A11 | K1, K2, K6, K7, K8, K12, K13 | cross-epic (WS8) |
 | Demo script steps 1–20 (§5) | A1–A11 (every item, in order) | K1, K3, K7, K8, K11, K13 (explicitly exercised); all others implied by the invariant-counter step 17 | cross-epic |
 
 Coverage check: every acceptance item A1–A11 has ≥ 3 test IDs and appears in the demo script; every canonical
-invariant K1–K13 now has ≥ 1 dedicated property test (§2) plus ≥ 1 functional or guardian negative test (§3, §4) —
+invariant K1–K14 now has ≥ 1 dedicated property test (§2) plus ≥ 1 functional or guardian negative test (§3, §4) —
 this closes the previous gap where K5, K9, K10 and K12 had no property test at all (added as TS-05-14, TS-05-15,
 TS-09-09 and TS-06-18 respectively); K13 (commitment lock) has the densest coverage (4 property tests, 12 functional
 tests, 1 guardian negative test, 6 demo-script steps), proportionate to it being the review's #1-ranked finding.
@@ -451,18 +567,19 @@ bank) and feeder ramp ceilings (K8). Grown to `FX-FLEET-MVPS-10K` only for the s
 ## Summary
 
 - Levels: 21 property (P), 87 functional (mix of U/I/E/S), 8 performance (N), 7 chaos (C) = **123 test cases** total.
-- Every canonical K1–K13 invariant has ≥ 1 property test and ≥ 1 functional/guardian negative test (K5, K9, K10, K12
+- Every canonical K1–K14 invariant has ≥ 1 property test and ≥ 1 functional/guardian negative test (K5, K9, K10, K12
   previously had none — closed in this pass); K13 (commitment lock) carries the heaviest coverage: 4 property, 12
   functional, 1 guardian, 6 demo-script steps.
 - Every A1–A11 acceptance item has ≥ 3 linked tests and a step in the 20-step demo script (§5).
 - Guardian negative tests cover the full canonical set — G-01…G-06, G-09, G-13, G-14, G-15, G-19 (commitment lock)
-  and G-20 (time quality) — plus three supplemental, non-canonical checks (G-21…G-23).
+  and G-20 (time quality) — plus the K14 power-quality checks G-21…G-24 and the flow-limit check G-27 (service
+  transformer).
 - Any invariant violation is an S1 blocker in any environment, with no waiver; only S2/S3 items follow the delivery
   plan's cut lines.
 - Gates G1–G5 map directly onto the delivery plan's schedule with explicit entry/exit criteria and a documented
   mutation-testing waiver at G3.
 - Non-functional coverage includes RT cycle p99 < 500 ms at 2k hubs (10k measured), UI ≤ 2 s refresh, ingest
-  freshness, per-process memory, an independent kill test for each of the 7 systemd units (including `og-safestop`
+  freshness, per-process memory, an independent kill test for each of the 10 systemd units (including `og-safestop`
   on its own, TS-C-03b) with its expected degraded behaviour, Postgres/MQTT restart, and a 1-hour soak.
 - A static "no duplicated functions" check (TS-01-07, §3.1) fails the build if a SoC/physics, limit-check, hashing
   or product-rule-rounding formula is re-implemented outside `og.core` — see `02b` §12 for the ownership rule this

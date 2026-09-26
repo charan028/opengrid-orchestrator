@@ -1,6 +1,41 @@
 {
   "components": {
     "schemas": {
+      "AsDeploymentCreate": {
+        "description": "Operator-triggered ERCOT_AS deployment (the demo's stand-in for an ERCOT deployment instruction).\n`obligation_id` omitted deploys every held ERCOT_AS award.",
+        "properties": {
+          "duration_minutes": {
+            "default": 15,
+            "maximum": 240.0,
+            "minimum": 1.0,
+            "title": "Duration Minutes",
+            "type": "integer"
+          },
+          "obligation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obligation Id"
+          },
+          "reason": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "AsDeploymentCreate",
+        "type": "object"
+      },
       "Body_ack_alert_og_alerts_ack_post": {
         "properties": {
           "alert_id": {
@@ -1140,6 +1175,120 @@
         "summary": "List Customers",
         "tags": [
           "contracts"
+        ]
+      }
+    },
+    "/og/api/dispatch/as-deployments": {
+      "get": {
+        "operationId": "list_as_deployments_og_api_dispatch_as_deployments_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List As Deployments Og Api Dispatch As Deployments Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List As Deployments",
+        "tags": [
+          "dispatch"
+        ]
+      },
+      "post": {
+        "description": "Deploy held ERCOT_AS award(s) now: while active, the allocator discharges them up to their\ncommitted kW (an AS award is otherwise a 0 kW capacity hold). Traced before it takes effect (K10).",
+        "operationId": "create_as_deployment_og_api_dispatch_as_deployments_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AsDeploymentCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create As Deployment Og Api Dispatch As Deployments Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create As Deployment",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/dispatch/as-deployments/{deployment_id}": {
+      "delete": {
+        "description": "End a deployment early: the award(s) return to a 0 kW capacity hold on the next cycle.",
+        "operationId": "end_as_deployment_og_api_dispatch_as_deployments__deployment_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deployment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deployment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response End As Deployment Og Api Dispatch As Deployments  Deployment Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "End As Deployment",
+        "tags": [
+          "dispatch"
         ]
       }
     },
@@ -2722,9 +2871,15 @@
             "name": "bank_id",
             "required": false,
             "schema": {
-              "default": "BANK-0001",
-              "title": "Bank Id",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bank Id"
             }
           }
         ],
@@ -2803,6 +2958,38 @@
                 }
               ],
               "title": "Health"
+            }
+          },
+          {
+            "in": "query",
+            "name": "safestop_scope",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Safestop Scope"
+            }
+          },
+          {
+            "in": "query",
+            "name": "safestop_scope_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Safestop Scope Id"
             }
           }
         ],
