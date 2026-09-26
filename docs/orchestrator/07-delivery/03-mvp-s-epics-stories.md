@@ -2,6 +2,8 @@
 
 Invariants: see 00-invariants.md (canonical). Status: draft for owner approval (gate G1).
 
+**Code references.** A `file:line` marked R2 (or given in a "Status at main `6470cfa`" block) is at `main` `6470cfa`. Every other `file:line` was verified at `434d230` and may have moved since.
+
 Release tag: **MVP-S**. Status: for G1 approval alongside `02a-mvp-s-spec-engine.md` and `02b-mvp-s-spec-platform.md`.
 Derived from [`01-saturday-delivery-plan.md`](01-saturday-delivery-plan.md) (scope, modules, acceptance A1–A11,
 schedule, cut lines, never-cut list) and [`../06-reviews/06-first-principles-review.md`](../06-reviews/06-first-principles-review.md)
@@ -43,9 +45,17 @@ number an earlier draft happened to use.
 | **ES08** Settlement (M&V, billing, profitability) | Interval metering, baseline, insert-only invoicing, profitability incl. forgone upside | `settle` | A7, A8 | WS6 | Partial — cut line 3 may drop baseline/forgone-upside reporting |
 | **ES09** Audit trace & retention | Hash-chained trace of every event; chain-verify; configurable retention with checkpointed pruning | `trace` | A9 | WS1 (lib) / WS8 (verify tests) | **Yes — the trace** |
 | **ES10** Operator UI | 7 screens + scenario panel over SSE | `ui` | A1–A9 (presentation of all) | WS7 | No |
+| **ES19** Two markets (regulated utility + ERCOT) | Regulated-utility capacity contracts (premium capacity, territory-bound energy) alongside the ERCOT free market; $/kW-in vs $/kW-out economics; the solar/off-peak charging mix | `selector`, `allocator`, `contracts`, `settle` (per `09-optimizer-dispatcher-update.md`, `08-market-model-two-markets.md`) | — (next-phase; not part of the original A1–A11 MVP-S demo scope) | WS4/WS6 | No |
 
-Totals: **10 epics, 51 stories** (§2). Acceptance item A11 (performance/chaos) is proven by stories across
+Totals: **11 epics, 67 stories** (§2: 52 from the original MVP-S build, ES01–ES10 — that section's own "51"
+subtotal-of-subtotals undercounts by one; a direct count of its story headers gives 52 — plus 15 added
+post-MVP-S: ES19 §2.11 and the decision-log/flow-limit stories folded into ES01/ES03/ES04/ES05/ES06/ES07, per
+`11-decision-log.md` D-4..D-27 and `09-optimizer-dispatcher-update.md`). Acceptance item A11 (performance/chaos)
+is proven by stories across
 ES03/ES05/ES06/ES07 plus WS8 test execution in the sibling test plan (`04-mvp-s-test-plan.md`), not by a UI story.
+ES19 and the flow-limit stories are **next-phase** additions (owner decisions D-20..D-27, 2026-09-26): they extend
+the schedule/dependency map of §4, which remains the record of the original Fri–Sat MVP-S build and is not
+retro-fitted with these later stories' hours.
 
 ---
 
@@ -92,8 +102,13 @@ runs without touching MariaDB or `/opt/opengrid_sim`.
   are never written to.
 - Given an unauthenticated request to `/og/`, When made, Then it is rejected by Apache basic auth before it
   reaches the app.
+- Given the owner's 2026-09-26 confirmation that 192.168.5.35 is the **permanent** host (D-16, not only the
+  MVP-S demo host), When later stories are planned, Then they target this same host/unit layout rather than a
+  future migration.
 Priority: Must · FR/story links: `FR-OPS-012` (no port conflicts on the shared host), `FR-OPS-004` · Invariants:
 — (foundational; enables K8's independent `og-safestop` unit) · Dependencies: ES01-S01, ES01-S02 · Estimate: 3 h
+Decision: D-16 · Status: **built** · Code: `deploy/apache/opengrid.conf:6` (`base.tocy-net.net`), `BUILD.md:17`
+("deployed and working on 192.168.5.35") · Test: `tests-e2e/smoke.py`
 
 **ES01-S04 — CI: unit and property tests on every push.**
 As a *platform SRE*, I want `pytest` (unit + Hypothesis property tests) running in CI on every push, gating merge,
@@ -114,7 +129,22 @@ As a *platform SRE*, I want nightly `pg_dump` plus a written, tested restore pro
 Priority: Should · FR/story links: `FR-OPS-006` (retry/dead-letter/self-recover discipline) · Invariants: K11
 (audit trace survives restore, chain still verifies) · Dependencies: ES01-S03, ES09-S01 · Estimate: 1 h
 
-**ES01 subtotal: 5 stories, 11 h.**
+**ES01-S06 — Per-workspace MQTT isolation for parallel dev workspaces.**
+As a *platform SRE*, I want each developer workspace to get its own MQTT user (`ogw_<ws>`) scoped by ACL to its
+own topic tree (`ogtest/<ws>/#` only), so parallel workspaces never receive production MQTT credentials or see
+each other's simulated traffic (decision log D-13, delegated by the lead 2026-09-26).
+- Given a new workspace is provisioned, When its MQTT user is generated, Then it can publish/subscribe only
+  under `ogtest/<ws>/#`, never the production `og/#` tree.
+- Given two workspaces run simultaneously, When either publishes telemetry, Then the other's `og-engine`/`og-sim`
+  never receives it (topic isolation, not just an ACL policy on paper).
+- Given a workspace is torn down, When its user is revoked, Then no other workspace's ACL is affected.
+Priority: Should · FR/story links: `FR-OPS-004` (externalized config), BUILD.md §5 · Invariants: — (development
+isolation; not a runtime safety invariant) · Dependencies: ES01-S02, ES01-S03 · Estimate: 2 h
+Decision: D-13 · Status: **built** · Code: `dev/scripts/gen_mosquitto_acl.py`, `deploy/mosquitto/provision_ws_users.py`,
+`deploy/mosquitto/provision_ws_users.sh`, `orchestrator/src/opengrid/platform/mqtt.py`, `tools/ws_env.sh` ·
+Test: `orchestrator/tests/unit/tools/test_ws_env.py`, `integration-sims/tests/test_workspace_config.py`
+
+**ES01 subtotal: 6 stories, 13 h.**
 
 ---
 
@@ -167,8 +197,14 @@ trained model — for price and load, so the selector has a scenario set without
 Saturday.
 - Given the forecast runs, When published, Then P10/P50/P90 exist for every hour of the next 24 h.
 - Given a degraded/stale input, When the forecast runs, Then the band widens rather than staying unchanged.
+- Given growing solar penetration (D-24: solar expansion widens the price swings), When the 24 h band is
+  published, Then it reflects a solar-driven intraday shape (a midday dip, an evening ramp) rather than only a
+  flat diurnal pattern — **gap**: today's quantile-persistence forecast has no solar/irradiance input at all.
 Priority: Must · FR/story links: `FCST-S01`, `FCST-S04`, `FR-FCST-001`, `FR-FCST-005`, `FR-FCST-008` ·
 Invariants: — · Dependencies: ES02-S01 · Estimate: 2 h
+Decision: D-24 (partial) · Status: **not built** (the duck-curve/solar-shape clause only; the base P10/P50/P90
+forecast itself is built) · Code: `orchestrator/src/opengrid/forecast/` has no solar/irradiance input (confirmed
+by grep: no `solar`/`duck`/`PVGR` hit outside `forecast/README.md`) · Test: none found
 
 **ES02 subtotal: 5 stories, 10 h.**
 
@@ -188,15 +224,28 @@ never simulates physics forward in time (`sim` does that, ES03-S03); it only sto
   interval plus processing latency.
 - Given telemetry stops arriving, When more than 3 reports are missed, Then the hub is excluded from allocation
   totals but stays visible (not silently dropped).
+- Given the hardware nameplate Base confirmed (D-5: 39.2 kWh/11 kW single-unit, 78.4 kWh/20 kW dual-unit, ~600
+  kVA banks), When the twin seeds/reports hub params, Then every hub's `e_kwh`/`p_kw` matches one of these two
+  nameplates, never an arbitrary value.
 Priority: Must · FR/story links: `TWIN-S01`, `FR-TWIN-001`, `FR-TWIN-009` · Invariants: — · Dependencies:
 ES01-S02 · Estimate: 3 h
+Decision: D-5 · Status: **built** · Code: `orchestrator/src/opengrid/fleet/seed.py:41-43` (nameplate constants),
+`integration-sims/src/ogsim/common/config.py` (`FleetConfig` defaults), `integration-sims/config/fleet.yaml` ·
+Test: `orchestrator/tests/unit/fleet/test_seed.py`, `integration-sims/tests/test_fleet_dual_unit.py:478`
+(`test_dual_unit_hub_power_and_reserve_match_config`)
 
 **ES03-S02 — Bank/zone topology: "behind asset X" queries.**
 As a *SCADA/protocol integration engineer*, I want to query exactly which homes sit behind a given bank, so
 `DIST_DEFERRAL` and the allocator can restrict allocation to the right homes.
 - Given a test bank's known enrolled homes, When queried, Then exactly those homes are returned, no others.
+- Given the seed rule Base confirmed (D-9: dual-unit homes spread 10 per bank; every bank stays single-zone),
+  When the topology is built, Then each of the 40 banks has exactly 10 dual-unit hubs and exactly one zone.
 Priority: Must · FR/story links: `TWIN-S03`, `FR-TWIN-003` · Invariants: — · Dependencies: ES03-S01 · Estimate:
 2 h
+Decision: D-9 · Status: **built** · Code: `orchestrator/src/opengrid/fleet/seed.py:191-208` (`_is_dual_unit`),
+`:218-234` (`build_topology`), `dev/seed/rebalance_dual_units.sql` · Test:
+`integration-sims/tests/test_fleet_dual_unit.py:444` (`test_dual_unit_homes_spread_10_per_bank_not_clustered_in_8_banks`),
+`:464` (`test_every_bank_has_exactly_one_zone`), `orchestrator/tests/unit/fleet/test_seed_zone_blocks.py`
 
 **ES03-S03 — Sim harness: 2,000 hubs with real SoC physics, lease and signature verification.**
 As a *platform SRE*, I want the test harness to run 2,000 simulated hubs (10,000 as a stretch) with real SoC
@@ -232,8 +281,32 @@ floor and any higher-priority reservation, so the selector never plans against f
   kW is reported as zero.
 Priority: Must · FR/story links: `TWIN-S05`, `FR-TWIN-007`, `FR-TWIN-008`, `FR-TWIN-011` · Invariants: **K1**
 (homeowner reserve) · Dependencies: ES03-S01 · Estimate: 2 h
+Decision: D-25 (confirmation only — Base confirmed the 20% floor already built here; no behaviour change) ·
+Status: **built** · Code: `orchestrator/src/opengrid/core/limits.py:30-62` (`check_reserve_floor`,
+`check_reserve_floor_over_lease` — G-01/G-01-ENERGY) · Test: `orchestrator/tests/property/test_k04_envelope.py`,
+`orchestrator/tests/unit/core/test_limits.py`
 
-**ES03 subtotal: 5 stories, 15 h.**
+**ES03-S06 — Customer-operator simulators (`ogsim/customer`), customer API, site ingest, closed-loop controllers.**
+As a *fleet reliability engineer*, I want a customer-side simulator (mirroring a real DATA_CENTER/PIPELINE_AC
+site) that ingests its own meter, publishes a measured-need signal through a customer API, and drives the
+allocator's closed-loop (`MEASURED_FEEDBACK`) path, so need-basis obligations can be demonstrated end to end
+without a real customer site (decision log D-11: "built dark").
+- Given the customer simulator is running, When it publishes a site-ingest reading, Then the obligation's
+  `setpoint_source=MEASURED_FEEDBACK` grant follows the customer's measured need, not the plan's schedule.
+- Given no operator-facing UI exists for it yet, When the simulator runs, Then it is observable only through the
+  API/trace (built dark), never exposed on the ES10 screens.
+Priority: Should · FR/story links: none existing (new capability) · Invariants: K13 (need-basis grants,
+`00-invariants.md`'s 2026-09-26 K13 additions) · Dependencies: ES03-S03, ES04-S06 · Estimate: 3 h
+Decision: D-11 · Status: **not built** — verified against the codebase, this contradicts the decision log's
+"(built dark)" label: there is no `ogsim/customer` package, no customer-facing API router, and no site-ingest
+module anywhere in the repo (grep for `customer`/`site_ingest`/`CustomerSim`/`og-cust` across
+`integration-sims/` and `orchestrator/src/` finds only the unrelated multi-customer **contract** field, e.g.
+`orchestrator/tests/unit/contracts/test_multi_customer.py`). The only trace of the concept is the
+`"CUSTOMER_API"` placeholder value in `SetpointSource` (`orchestrator/src/opengrid/core/models/pq.py:89`), and
+`contracts/admission.py:169-183` explicitly gates DATA_CENTER/PIPELINE_AC admission off "until the closed-loop
+controllers are confirmed live" — i.e. the code itself says this piece is outstanding · Test: none found
+
+**ES03 subtotal: 6 stories, 18 h.**
 
 ---
 
@@ -258,6 +331,9 @@ buyer, and current derated capacity, before it competes for anything.
 - Given a call violates its contract's terms, When submitted, Then it is rejected pre-allocation with a reason.
 - Given a feasible call for one of the five A5 services (`HOME`, `ERCOT_ENERGY`, `ERCOT_AS`, `DIST_DEFERRAL`,
   `PARTNER_CAPACITY`), When admitted, Then it enters `offered` state.
+- Given `DATA_CENTER` or the `PIPELINE_AC` variant (two service types added since MVP-S, D-7), When submitted,
+  Then admission additionally requires the activation gate open (ES04-S06); with it closed, the call is rejected
+  `R-ADMIT-REJECT` regardless of feasibility.
 Priority: Must · FR/story links: `ARB-S01`, `FR-ARB-001` · Invariants: P3 one buyer · Dependencies: ES04-S01 ·
 Estimate: 2 h
 
@@ -293,10 +369,41 @@ trace, never silently dropped.
 - Given a call is rejected at admission, When it happens, Then the reason code and inputs are traced (ES09-S01).
 - Given a committed obligation cannot be fully served, When detected, Then it is recorded as a shortfall against
   that obligation, never masked by a different call's outcome.
+- Given the obligation is best-effort SHORTFALL rather than a hard stop (D-17), When it is recorded, Then the
+  obligation's row and lifecycle state are ES05-S03's — this story only covers the reason-coded *trace* of the
+  event, not the continued-delivery behaviour (see ES05-S03 for that).
 Priority: Must · FR/story links: `ARB-S04`, `FR-ARB-006`, `FR-ARB-007` · Invariants: K13 (shortfall, not
 reallocation, is the only outcome of a lock exception) · Dependencies: ES04-S01, ES09-S02 · Estimate: 2 h
+Decision: D-17 (cross-reference; see ES05-S03 for the full best-effort behaviour) · Status: **built** ·
+Code: `orchestrator/src/opengrid/core/reasons.py` (`LOCK_REASON_BY_SHORTFALL`) · Test:
+`orchestrator/tests/unit/engine/test_escalation.py`
 
-**ES04 subtotal: 5 stories, 11 h.**
+**ES04-S06 — DATA_CENTER/PIPELINE_AC service profile: PQ envelope, activation gate, corrective-action ladder.**
+As a *Base executive*, I want the DATA_CENTER (and PIPELINE_AC-variant) need-basis service profile to carry its
+own `PowerQualityEnvelope` contract term, and its admission to stay behind an explicit activation gate until the
+customer-side closed-loop controllers are confirmed live, so a demo/data-center pilot never goes live on an
+unverified feedback path (K14, approved by the owner 2026-09-25; D-7 amendments).
+- Given `[contracts.activation].data_center` is `false` (the default), When a `DATA_CENTER` or `PIPELINE_AC`
+  opportunity is admitted, Then it is rejected `R-ADMIT-REJECT` regardless of its other terms.
+- Given the flag is `true`, When the same call is admitted, Then it proceeds through the normal
+  `02-architecture/03-decision-engine.md` §2.7 activation gate (schema validation, then static rules) like any
+  other service type.
+- Given a `DELIVERING` DATA_CENTER obligation's measured PQ breaches its envelope, When the allocator's PQ
+  monitor evaluates it, Then the corrective-action ladder runs in order (rebalance → substitute within the
+  obligation → remote recalibration where eligible → reactive/PF adjustment → exclude → `AT_RISK`) before any
+  breach is allowed to stand.
+Priority: Should · FR/story links: none existing (K14 is new since MVP-S) · Invariants: **K14** (power-quality
+envelope) · Dependencies: ES04-S02, ES06-S08 · Estimate: 3 h
+Decision: D-7 · Status: **in build** — the envelope, allocator ladder and activation gate are built and heavily
+tested, but the gate is closed by default pending ES03-S06's closed-loop controllers, so the profile cannot go
+live yet · Code: `orchestrator/src/opengrid/contracts/admission.py:58-63,67,124,169-183` (activation gate),
+`orchestrator/config/service_profiles/data_center.toml`, `orchestrator/src/opengrid/allocator/pq_eligibility.py`,
+`orchestrator/src/opengrid/allocator/pq_monitor.py`, `orchestrator/src/opengrid/core/pq/envelope.py` ·
+Test: `orchestrator/tests/unit/contracts/test_admission.py:138` (`test_admit_data_center_is_rejected_when_activation_gate_closed`),
+`:156`, `:172`, `:185`; `orchestrator/tests/unit/profiles/test_data_center_profile.py`;
+`orchestrator/tests/unit/allocator/test_pq_eligibility.py`, `test_pq_monitor.py`, `test_pq_performance.py`
+
+**ES04 subtotal: 6 stories, 14 h.**
 
 ---
 
@@ -335,6 +442,9 @@ arrives during my delivery window, so the selector cannot be re-argued mid-contr
 Priority: **Must (never-cut)** · FR/story links: new `FR-ARB-014`; narrows `FR-ARB-004`, `ARB-S02`; supersedes the
 uncommitted-headroom-only competitive scope of `ARB-S05`/`FR-ARB-010`; `FR-DE-039`/C16 raised to Must (review §5.4
 item 3) · Invariants: **K13**, P4 · Dependencies: ES05-S01, ES04-S01 · Estimate: 4 h
+Decision: D-4 (commitment lock: once committed, delivery completes; no mid-contract switching on price) ·
+Status: **built** · Code: `orchestrator/src/opengrid/core/limits.py:149-167` (`check_commitment_lock`) ·
+Test: `orchestrator/tests/property/test_k13_commitment_lock.py`, `orchestrator/tests/unit/ledger/test_ts_04_01_stateful.py`
 
 **ES05-S03 — Lock exceptions: L0 safety, L1 reserve, L2 instruction, infeasibility.**
 As an *auditor*, I want the only four events that may ever reduce a committed allocation — device safety (L0),
@@ -351,9 +461,26 @@ carry its own reason code and to produce a recorded shortfall, never a silent re
   `R-COMMIT-LOCK-INFEASIBLE` with the specific constraint that bound.
 - Given any reduction with none of these four reason codes, When the guardian evaluates the batch, Then it is
   refused (ES06-S02).
+- **(D-17, best effort after a mid-window SHORTFALL.)** Given none of L0/L1/L2/infeasibility clears and the
+  obligation is instead marked `SHORTFALL` mid-window, When the next cycles run, Then it is never treated as a
+  stop: the obligation keeps receiving its maximum feasible kW (substitution first, ES05-S04), is flagged
+  `AT_RISK` while short, and settlement bills the actual delivered energy, never the planned amount.
+- Given the constraint that caused the SHORTFALL clears, When the next cycle runs, Then the obligation's full
+  committed kW is restored at the earliest feasible interval, with no separate re-admission or re-commitment step.
+- Given a SHORTFALL persists, When any interval of the window elapses, Then dispatch never stops early for the
+  remainder of that window solely because of the shortfall (it only stops via K8 safe stop or a fresh L0-L2
+  event).
 Priority: **Must (never-cut)** · FR/story links: new `FR-ARB-014`; `SAFE-S01` (guardian independent validation
 pattern); `FR-DISP-024` (ERCOT instruction as hard L2 constraint) · Invariants: **K13**, P1, P2 · Dependencies:
 ES05-S02 · Estimate: 3 h
+Decision: D-17 · Status: **built** · Code: `orchestrator/src/opengrid/engine/escalation.py` (`ShortfallEscalator`,
+`lock_reason_for_shortfall`, `merge_signals` — sustained-signal escalation to the `SHORTFALL` lifecycle edge),
+`orchestrator/src/opengrid/allocator/cycle.py:187-256` (`best_effort_reason`) · Test:
+`orchestrator/tests/unit/engine/test_escalation.py` (`test_a_shortfall_obligation_keeps_its_feasible_remainder_and_recovers_in_one_cycle:158`,
+`test_a_short_obligation_is_flagged_at_risk_and_cleared_on_recovery:205`,
+`test_a_shortfall_obligations_partial_grant_carries_the_code_g19_corroborates:224`);
+`orchestrator/tests/unit/guardian/test_service.py:959` (`test_best_effort_shortfall_grant_is_signed_when_the_guardian_confirms_the_shortfall`),
+`:973`, `:984`
 
 **ES05-S04 — Substitution of homes within a committed obligation.**
 As a *fleet reliability engineer*, I want the allocator to substitute which homes deliver a committed obligation
@@ -403,7 +530,83 @@ Priority: Must (cut-line fallback target) · FR/story links: `PLAN-S07` (rule-ba
 port — written fresh, not copied, per review §8a decision 4), `FR-PLAN-014` · Invariants: — · Dependencies:
 ES05-S01, ES05-S06 · Estimate: 2 h
 
-**ES05 subtotal: 7 stories, 23 h.**
+**ES05-S08 — Continuous per-obligation energy sufficiency (K1/K13, energy not just power).**
+As an *auditor*, I want every COMMITTED/DELIVERING obligation checked, every allocator cycle, for whether its
+eligible hubs hold enough kWh above reserve to sustain it for the rest of its window — not only whether kW
+headroom passes this instant — so a hub that passes every power check can never quietly run dry before the
+window ends (owner decision 2026-09-25, `00-invariants.md` "K1/K13 energy").
+- Given an obligation's eligible hubs' live SoC, When the check runs, Then required kWh (remaining commitment ÷
+  η_d) is compared against available kWh above reserve, net of energy already reserved for other obligations
+  (K2).
+- Given the margin goes negative even after substitution, When detected, Then the obligation is flagged
+  `AT_RISK` and `ALR-ENERGY-SHORTFALL-RISK` fires exactly once on entry (not every cycle).
+- Given a hub's SoC is missing or stale, When the check runs, Then that hub contributes zero kWh (fail closed,
+  never an assumed value).
+- Given the risk clears, When the next cycle runs, Then the `AT_RISK` flag and alert both clear automatically.
+Priority: Must · FR/story links: none existing (new since MVP-S) · Invariants: **K1**, **K13** (energy form) ·
+Dependencies: ES05-S06, ES03-S05 · Estimate: 2 h
+Decision: D-6 · Status: **built** · Code: `orchestrator/src/opengrid/allocator/energy_sufficiency.py` · Test:
+`orchestrator/tests/unit/engine/test_energy_sufficiency_gateway.py` (12 cases, e.g.
+`test_missing_soc_flags_at_risk_and_raises_alert:263`, `test_at_risk_flag_is_set_on_entry_and_cleared_on_recovery:354`,
+`test_two_obligations_sharing_a_bank_the_other_ones_energy_is_excluded_k2:287`),
+`orchestrator/tests/unit/allocator/test_energy_sufficiency.py`
+
+**ES05-S09 — Commitment basis: FIXED (schedule) vs NEED (measured), guarded need-basis release.**
+As a *partner-program manager*, I want a commitment's delivery basis to be either FIXED (the schedule is the
+grant) or NEED (the committed kW is a reserved maximum; delivered kW follows the customer's own measured signal,
+`R-GRANT-CLOSED-LOOP`), with the guardian independently checking a need-basis release before it ever signs one,
+so a closed-loop customer (DATA_CENTER, PIPELINE_AC) is never over- or under-delivered against its true need
+while the reservation itself is still never resold (owner decision 2026-09-26, K13 additions).
+- Given a FIXED-basis obligation, When a grant is proposed below its scheduled kW with no L0-L2/infeasibility
+  reason, Then guardian G-19 refuses it exactly as any other commitment-lock violation.
+- Given a NEED-basis obligation whose service profile's `setpoint_source` is `MEASURED_FEEDBACK`, When a grant
+  below the reserved maximum is proposed with reason `R-GRANT-CLOSED-LOOP`, Then guardian G-19 signs it only
+  after independently confirming (a) the profile really is `MEASURED_FEEDBACK` and (b) the unused reservation is
+  not granted to any other obligation.
+- Given the same reduction is proposed against a FIXED-basis profile, When guardian evaluates it, Then it is
+  vetoed `NEED_BASIS_PROFILE_NOT_MEASURED_FEEDBACK` even carrying the same reason code.
+- Given delivered kW is below the reserved maximum on a NEED basis, When the invariant checker runs, Then this
+  is counted as compliant, never as a shortfall.
+Priority: Must · FR/story links: new `FR-ARB-014`-adjacent (K13 additions, `00-invariants.md`) · Invariants:
+**K13** (need basis) · Dependencies: ES05-S02, ES06-S02 · Estimate: 3 h
+Decision: D-18 · Status: **built** · Code: `orchestrator/src/opengrid/guardian/checks.py:276,295-301` (need-basis
+G-19 check), `orchestrator/src/opengrid/core/reasons.py:42` (`R_GRANT_CLOSED_LOOP`),
+`orchestrator/src/opengrid/invariants/checks.py:341-343`, `orchestrator/src/opengrid/invariants/queries.py:192-205` ·
+Test: `orchestrator/tests/unit/guardian/test_service.py:791` (`test_need_basis_grant_below_the_reserved_maximum_is_signed`),
+`:800` (`test_the_same_grant_on_a_fixed_profile_is_vetoed`), `:811`, `:821`, `:835`
+
+**ES05-S10 — Dispatcher models the maximum discharge-flow limit at every level (D-26).**
+As a *fleet reliability engineer*, I want the selector and allocator to model, not just the built-in hub P/kVA/
+ramp caps, the full discharge-flow envelope — SoC- and temperature-derated power ($P_{max}(SoC,T)$), the home
+export limit net of the home's own load, and the service-transformer, feeder and substation loading limits
+including reverse flow, plus the sustained-vs-peak distinction — so a plan is never infeasible in practice
+against a physical limit the model doesn't know exists (owner requirement, `09-optimizer-dispatcher-update.md`
+§1.9 F1-F7).
+- Given a forecast cell temperature and SoC path, When the selector builds a bank's capability row, Then its
+  discharge cap follows the piecewise-linear $f^{dis}_{SoC}(s)\cdot f^{dis}_T(T)$ curves, not a flat rating.
+- Given a bank's net home load forecast, When the selector/allocator size the export/import rows, Then
+  discharge first serves the home; only the excess is allowed to export, bounded by the interconnection limit.
+- Given a service transformer, feeder or substation shared by several banks, When a cycle's batch is sized, Then
+  the aggregate flow (including reverse/charging flow) stays within that asset's rating in both directions.
+- Given a lease requests power above the continuous rating, When sized, Then it is allowed only for ≤ the peak
+  duration and within the reported peak-power budget.
+Priority: Should (next-phase; regulated-pilot flow limits) · FR/story links: none existing (new) · Invariants:
+**K4** (physical envelope, extended) · Dependencies: ES05-S06, ES19-S02 · Estimate: 4 h
+Decision: D-26 · Status: **partly built in R2** (`main` `6470cfa`), in the real-time allocator only:
+- F1 derating: always on (`orchestrator/src/opengrid/allocator/flow_limits.py:49-68`, applied at
+  `allocator/cycle.py:123-135`).
+- F2 export cap (export side only, `flow_limits.py:78-88`) and F3 transformer, feeder and substation discharge
+  budgets (`flow_limits.py:108-182`): behind `[allocator.flow_limits].enabled = true`, but no repo seed writes
+  the limit rows (migration 0029), so nothing binds yet.
+- Not built: the selector models none of these (the first and second criteria above are unmet at the planning
+  level), there are no import/charging-direction caps, and above-continuous power is never planned (the fourth
+  criterion is met only by never using the peak).
+
+Test: `orchestrator/tests/unit/allocator/test_dispatch_extensions.py:295` (F1 uses the guardian's derating),
+`:319` (export cap serves home load first), `:335` (the cycle applies derating, export and transformer caps),
+`:351` (feeder budget split), `:363` (property: allocator cap never above the derated bound).
+
+**ES05 subtotal: 10 stories, 32 h.**
 
 ---
 
@@ -427,6 +630,9 @@ verify.
 Priority: **Must (never-cut)** · FR/story links: `SAFE-S01`, `SAFE-S02`, `FR-SAFE-001`, `FR-SAFE-002`,
 `FR-SAFE-014` · Invariants: K1, K3 (sole signer), K4 (limits/ramp), K6 (lease/epoch) · Dependencies: ES03-S03,
 ES05-S05 · Estimate: 4 h
+Decision: D-25 (confirmation only — Base confirmed the 20% discharge floor already built here as G-01; no
+behaviour change) · Status: **built** · Code: `orchestrator/src/opengrid/core/limits.py:30-62` · Test:
+`orchestrator/tests/unit/guardian/test_service.py` (G-01 cases), `orchestrator/tests/property/test_k04_envelope.py`
 
 **ES06-S02 — Guardian check G-19: refuse a batch that reduces a committed allocation without cause.**
 As an *auditor*, I want guardian to independently refuse to sign any batch that reduces an active committed
@@ -469,6 +675,12 @@ turns into an accidental fleet stop.
   of a person — never engaged automatically.
 Priority: Must · FR/story links: `SAFE-S02`, `FR-SAFE-014`, `FR-SAFE-016` · Invariants: K7 (degrade, don't trip:
 TIMEOUT ≠ VETO ≠ STOP) · Dependencies: ES06-S01, ES07-S01 · Estimate: 2 h
+Status: **built** · Code: `orchestrator/src/opengrid/guardian/escalation.py:29-32` (`Posture`
+NORMAL/CONSERVATIVE, `TransitionKind` incl. `REQUEST_SAFE_STOP`), `:142-143` (`ALR-SCOPE-CONSERVATIVE`,
+`ALR-SAFE-STOP-REQUESTED`) · Test: `orchestrator/tests/unit/guardian/test_escalation.py`
+(`test_more_than_five_percent_vetoed_makes_bank_and_zone_conservative:49`,
+`test_three_consecutive_conservative_ticks_request_a_stop_once:64`, `test_recovery_clears_and_the_count_restarts:76`,
+`test_the_guardian_escalation_path_has_no_way_to_engage_a_stop:145`)
 
 **ES06-S05 — Feeder/substation ramp ceiling for firm events.**
 As a *platform SRE*, I want a per-feeder/substation ramp ceiling enforced by guardian, independent of the fleet-
@@ -495,7 +707,98 @@ Priority: **Must (never-cut)** · FR/story links: new (review §6 finding #14, f
 **G-20**); no existing FR predates this check · Invariants: **K12** (time quality) · Dependencies: ES06-S01 ·
 Estimate: 2 h
 
-**ES06 subtotal: 6 stories, 16 h.**
+**ES06-S07 — Two-person safe-stop RELEASE: `og-op-a`/`og-op-b` Tier-2 approval.**
+As a *control-room operator*, I want a stopped scope's RELEASE to require two named operators' approval routed
+through the guardian's own signing path (Tier-2), never the safe-stop-only key, so ES06-S03's "stop-only, never
+releases" key stays true while a real release path still exists for a person to use (decision log D-12: named
+dev accounts `og-op-a`/`og-op-b`; the release mechanism itself is `02b` §8 auth plus the guardian signing path).
+- Given a stopped scope, When a release is requested, Then it is published only after a guardian-signed Tier-2
+  approval is relayed — never by the safe-stop-only key, which the relay verifies never produced it.
+- Given a release request signed by anything other than a valid guardian Tier-2 approval (forged, self-signed by
+  `og-safestop`, or missing the public key), When received, Then the relay refuses it and republishes nothing.
+- Given a valid release is relayed twice (retry), When the second copy arrives, Then it is idempotent by
+  signature — no duplicate release event.
+- Given the retention window for a released stop topic elapses, When the cleanup job runs, Then the retained
+  MQTT topic is cleared with a zero-length payload.
+Priority: **Must (never-cut, K8 companion)** · FR/story links: `SAFE-S03`-adjacent (release is the other half of
+ES06-S03's stop) · Invariants: **K8** (stop-only key still never releases; release is a *separate*, guarded path) ·
+Dependencies: ES06-S01, ES06-S03 · Estimate: 2 h
+Decision: D-12 · Status: **built** · Code: `orchestrator/config/orchestrator.toml:95`
+(`stop_release_authorised_operators = ["og-op-a", "og-op-b"]`), `:132` (`api.roles.operator`),
+`orchestrator/src/opengrid/safestop/__init__.py:66`, `orchestrator/src/opengrid/safestop/service.py:36,216` ·
+Test: `orchestrator/tests/unit/safestop/test_release_relay.py`
+(`test_a_guardian_signed_release_is_published_on_the_engage_topic_and_recorded:122`, `test_relay_is_idempotent_by_signature:136`,
+`test_anything_but_a_valid_guardian_tier2_release_is_refused:159`, `test_safestop_itself_still_never_releases:186`,
+`test_k8_property_no_altered_or_foreign_release_is_ever_relayed:235`,
+`test_released_stop_topics_are_cleared_after_the_retention_window:263`);
+`tests-e2e/functional/safety/test_ts06_guardian_and_safe_stop.py:24-25` (`OPERATOR_A`/`OPERATOR_B` = `og-op-a`/`og-op-b`)
+
+**ES06-S08 — Guardian PQ checks G-21..G-25: envelope, ride-through/asset-state, calibration safety (K14).**
+As an *auditor*, I want guardian to independently re-check every dispatch's power-quality impact — per-phase
+imbalance (G-21), THD (G-22), frequency/voltage deviation (G-23), ride-through/asset-state conformance (G-24) —
+against the customer's own envelope, and to gate any remote inverter-recalibration command on its own bounds,
+rate limit and fleet budget (G-25), so a K14 breach or an unsafe calibration command can never reach a hub even
+if the allocator's own PQ eligibility check is wrong (K14, approved by the owner 2026-09-25).
+- Given a proposed batch's modelled/measured PQ impact exceeds the tightest active envelope limit on any of
+  imbalance, THD or frequency/voltage, When guardian evaluates it, Then the matching check (G-21/G-22/G-23)
+  vetoes it — PARTLY_VETOED if only some hubs are affected.
+- Given a hub is quarantined, excluded, or (for a PQ-sensitive profile) degraded, When any non-HOME command is
+  proposed for it, Then G-24 vetoes it; HOME's own service is never gated by G-24.
+- Given a `CalibrationCommand`, When proposed, Then G-25 signs it only if its bounds are within the firmware
+  limit, its rate/lease are valid, no active PQ-sensitive grant conflicts, and the fleet-wide recalibration budget
+  is not exceeded.
+Priority: **Must (never-cut, K14)** · FR/story links: none existing (K14 is new since MVP-S) · Invariants:
+**K14** · Dependencies: ES06-S01, ES04-S06 · Estimate: 3 h
+Decision: D-7 · Status: **built** · Code: `orchestrator/src/opengrid/guardian/pq_checks.py:42-223`
+(`check_g21_phase_imbalance`, `check_g22_thd`, `check_g23_freq_voltage_deviation`, `check_g24_asset_conformance`,
+`check_g25_calibration_safety`, `check_g25_fleet_budget`, `check_g25_calibration_lease`) · Test:
+`orchestrator/tests/unit/guardian/test_pq_checks.py` (27 cases, e.g. `test_g21_phase_imbalance_positive:42`,
+`test_g24_positive_home_never_gated:150`, `test_g25_negative_active_sensitive_grant_ts18:246`);
+`orchestrator/tests/property/test_k14_pq_envelope.py:228` (`test_k14_guardian_g21_to_g23_veto_exactly_when_their_own_dimension_breaches`),
+`:250`, `:270`
+
+**ES06-S09 — Guardian independently enforces every discharge-flow limit, fails closed on missing data (D-27).**
+As an *auditor*, I want guardian to independently re-check, on its **own** reads (never the allocator's claimed
+capability), every level of the discharge-flow envelope the dispatcher models in ES05-S10 — derated
+$P_{max}(SoC,T)$, the per-home export/import limit net of load, service-transformer/feeder/substation loading in
+both directions (including reverse flow), territory (K15), and sustained-vs-peak — with any missing or stale
+input failing closed (relief always still passes), so a dispatcher bug or a stale read can never produce a
+signed command that exceeds a physical or contractual limit (owner requirement, D-27; guardian checks G-02
+(changed) and new G-26…G-33, final numbering in `00-invariants.md` "Flow limits and territory", matching
+`09-optimizer-dispatcher-update.md` §2.5-2.6).
+- Given a stale or missing SoC/temperature/BMS-limit reading, When a discharge command is evaluated, Then the
+  derated-power check (G-02) fails closed (a conservative bound, e.g. `f_T := 0.5` or stricter per config), never
+  an optimistic one.
+- Given a stale or missing home meter reading, When an export/import command is evaluated, Then G-26 fails
+  closed (assumes full-PV/no-load for the export side, full service rating for the import side) so discharge is
+  never vetoed less than the conservative case requires.
+- Given a stale service-transformer, feeder or substation SCADA reading, When a batch would *increase* the
+  magnitude of flow on that asset, Then it is vetoed; a batch that only relieves an existing violation is never
+  vetoed regardless of staleness.
+- Given a hub or asset's territory is unknown, When a command is proposed for it, Then it is vetoed rather than
+  assumed in-territory (K15 fail closed).
+Priority: Should (next-phase; regulated-pilot flow limits, pairs with ES05-S10) · FR/story links: none existing
+(new) · Invariants: **K4** (extended), **K15** (new) · Dependencies: ES06-S01, ES05-S10, ES19-S02 · Estimate: 4 h
+Decision: D-27 · Status: **built in R2** (`main` `6470cfa`) — `orchestrator/src/opengrid/guardian/flow_checks.py`
+implements G-26 (`:164`), G-27 (`:219`), G-28/G-29/G-30 on the aggregate flows (`:261`, plus `:296` for a substation
+POI), G-31 (`:88`) and G-33 (`:317`, on `market/territory.py:131`), and G-02 changed to the derated bound
+(`:133`); G-32 is `core/limits.py:360`. All are wired on the guardian's own reads in `guardian/service.py`
+(`:328`, `:383-390`, `:427`, `:452-493`, `:539-541`, `:584`; `guardian/main.py:349` wires the topology port).
+On a stale reading or an unknown limit, the aggregate check vetoes any increase and passes relief
+(`flow_checks.py:261-293`). Caveats at R2:
+- G-31's peak path is dead. The guardian reads the budget as `peak_budget_kws` (`guardian/mqtt_io.py:36`) while
+  hubs send `peak_power_budget_kws`, so every above-continuous setpoint is vetoed. This is safe, and reported.
+- G-29 and G-30 evaluate nothing until substation assets tied to a bank or regulated-zone banks exist.
+- Aggregate flows sum unsigned SCADA apparent power as import (`guardian/flow_repo.py:40-48`), so a measured
+  reverse flow is not seen.
+- `[guardian.flow].telemetry_required` is false: a flow field a hub has never reported falls back to the static
+  premise limits.
+
+The ERCOT_AS energy hold is not a guardian check; the selector and engine enforce it and `CHECK_AS_HOLD` measures
+it · Test:
+`orchestrator/tests/unit/guardian/test_flow_checks.py` (29), `orchestrator/tests/unit/guardian/test_service_flow.py` (14)
+
+**ES06 subtotal: 9 stories, 25 h.**
 
 ---
 
@@ -527,6 +830,15 @@ so a bad feed can never corrupt a fresh commitment decision (mandatory degraded-
 Priority: **Must** · FR/story links: `ING-S09`, `FR-ING-015` (staleness alarm); nearest degraded-mode FR:
 `FR-DISP-020` (scoped degraded mode) · Invariants: K13 (a stale-feed admission freeze protects the integrity of
 future commitment decisions the lock will then freeze) · Dependencies: ES02-S04, ES05-S01 · Estimate: 3 h
+Status: **partly built** · Code: `orchestrator/src/opengrid/health/model.py:22-23` (`DegradedMode` literal
+`"NO_NEW_COMMITMENTS"`) raises the mode. At `434d230` nothing acted on it. At R2 (`main` `6470cfa`) it is
+enforced:
+- the intake gate skips intake (`orchestrator/src/opengrid/engine/gates.py:51-60`, `:123-132`);
+- the selector gate withholds every new candidate, treating an unreadable mode as active
+  (`orchestrator/src/opengrid/selector/gate.py:532-602`).
+
+Contract admission and customer-API submission are not gated, and tracing of the transition was not verified.
+Test: `orchestrator/tests/unit/health/test_rules.py:186` (`test_feed_stale_yields_no_new_commitments`).
 
 **ES07-S03 — Hub health: online / stale / fault classification.**
 As a *fleet reliability engineer*, I want every hub classified online, stale (unresponsive) or fault (not
@@ -551,8 +863,32 @@ engine process.
 Priority: **Must** · FR/story links: `OPS-S05`, `FR-OPS-008`; performance basis `FR-RPT-013` (benchmark
 provenance) · Invariants: K7 (lease expiry → local autonomy, engine-down degraded mode) · Dependencies: ES05-S06,
 ES03-S03, ES07-S01 · Estimate: 3 h
+Status: **built** · Code: `orchestrator/src/opengrid/health/model.py:24` (`DegradedMode` literal
+`"HOLD_LOCAL_AUTONOMY"`) · Test: `orchestrator/tests/unit/health/test_rules.py:192` (`test_engine_down_yields_hold_local_autonomy`)
 
-**ES07 subtotal: 4 stories, 10 h.**
+**ES07-S05 — Guardian-down (HOLD) and SCADA-silent (`DIST_DEFERRAL` open loop) degraded modes.**
+As a *platform SRE*, I want the two remaining named degraded modes — guardian down/verdict-timeout (`HOLD`) and
+a `DIST_DEFERRAL` bank's SCADA going silent (`DIST_DEFERRAL_OPEN_LOOP`) — surfaced on the health screen exactly
+like the feed-stale and engine-down modes already are, so every degraded mode the system can enter is one an
+operator can see and name, not just the two most-demoed ones (`02b` §6.5 rows 3 and 5).
+- Given the guardian process is down or every verdict this cycle times out, When health evaluates the cycle,
+  Then it reports `HOLD`, distinct from `HOLD_LOCAL_AUTONOMY` (engine down) and from a plain per-process
+  heartbeat-down alert.
+- Given a `DIST_DEFERRAL` bank's simulated SCADA stops publishing, When health evaluates the bank, Then it
+  reports `DIST_DEFERRAL_OPEN_LOOP` for that bank (the PI loop falls back to an open-loop schedule, cut line 2's
+  behaviour, but now as a live-detected degraded mode rather than only a planned cut).
+- Given several degraded modes are active at once (e.g. a stale feed and a down guardian), When the health
+  screen renders, Then all active modes are shown together, never only the first one found.
+Priority: Must · FR/story links: none existing (fills a gap: `02b` §6.5 defines 5 degraded-mode rows, MVP-S's
+ES07 only told the story of 2 of them) · Invariants: K7 (degrade, don't trip), K9 (one loop per quantity — the
+PI's open-loop fallback is the "outer loop becomes feed-forward only" case) · Dependencies: ES06-S01, ES07-S01,
+ES05-S06 · Estimate: 2 h
+Status: **built** · Code: `orchestrator/src/opengrid/health/model.py:22-27` (all four `DegradedMode` values) ·
+Test: `orchestrator/tests/unit/health/test_rules.py:198` (`test_guardian_down_yields_hold`), `:204`
+(`test_degraded_modes_can_combine`); no test name matched `DIST_DEFERRAL_OPEN_LOOP` specifically by grep, so its
+direct coverage could not be fully verified — see "could not verify" in the final report
+
+**ES07 subtotal: 5 stories, 12 h.**
 
 ---
 
@@ -741,10 +1077,170 @@ ES03-S04 · Estimate: 3 h
 
 ---
 
-**Grand total: 10 epics, 51 stories, ≈ 135 estimated build hours across 7 parallel workstreams** (plan §0
-targets ~24 wall-clock hours for Phase 1–2 with ~7 concurrent workstreams; 135 person-hours ÷ ~6 effective
-parallel streams ≈ 22.5 h wall-clock, consistent with the plan's Fri 15:00–Sat 06:00 foundation-and-modules window
-before Phase 3 integration).
+### ES19 — Two markets (regulated utility + ERCOT)
+
+Goal: serve a regulated vertically-integrated utility (premium capacity, territory-bound energy) alongside the
+existing ERCOT free market, on Base-owned assets including new substation-sited batteries, with $/kW-in vs
+$/kW-out economics and a solar-plus-off-peak charging mix. Modules: `selector`, `allocator`, `contracts`,
+`settle`. Workstream: **WS4/WS6**. This epic follows owner decisions D-20..D-24 (2026-09-26) and
+[`08-market-model-two-markets.md`](08-market-model-two-markets.md); its flow-limit/territory-enforcement
+counterparts (D-26/D-27) are added to ES05/ES06 (ES05-S10, ES06-S09) rather than duplicated here. It is a
+**next-phase** epic (§4/§5's original Fri–Sat schedule and gates G1–G5 predate it; see the note in §1).
+
+**ES19-S01 — Selector and real-time pricing use each bank's own ERCOT load zone.**
+As a *market/QSE trader*, I want every bank's energy value and headroom threshold computed from its **own**
+load zone's price path, so a bank in Oncor territory is never priced off a CenterPoint or "whichever zone's row
+came last" price (Frank's review finding #5; decision log D-10, "the Houston Hub bug is fixed").
+- Given banks in 4 different load zones, When the selector's scenario set is built, Then each bank's LP rows use
+  its own zone's P10/P50/P90 path, and load-forecast (non-price) rows never leak into the price path.
+- Given a bank has no zone-specific path, When priced, Then it falls back to the documented mean-of-zones fleet
+  path, never an arbitrary single zone.
+- Given the real-time allocator prices headroom, When it reads the latest zone prices, Then it looks up the
+  bank's own zone, not one shared row for the whole fleet.
+Priority: Must · FR/story links: none existing (Frank #5 fix) · Invariants: — (economic correctness, not a
+safety invariant) · Dependencies: ES02-S01, ES05-S01 · Estimate: 2 h
+Decision: D-10 · Status: **built** · Code: `orchestrator/src/opengrid/selector/gate.py:272-314`
+(`load_scenarios`, `scenarios_from_points`), `orchestrator/src/opengrid/selector/types.py:53-69`
+(`ScenarioPrice.price_at`), `orchestrator/src/opengrid/selector/model.py:314`,
+`orchestrator/src/opengrid/selector/rule_fallback.py:119,141`, `orchestrator/src/opengrid/engine/gateways.py:142-209,336-360`
+(RT per-zone price and M1 lookup) · Test: `orchestrator/tests/unit/selector/test_zone_pricing.py:28`
+(`test_each_bank_gets_its_own_zone_and_load_rows_are_ignored`)
+
+**ES19-S02 — Regulated-utility contracts: premium capacity, territory-bound energy, REG-first priority.**
+As a *Base executive*, I want a regulated-utility contract to be admitted, planned and delivered only from
+assets inside that utility's own service territory, priced at a capacity premium ($/kW-yr) ahead of any new
+ERCOT free-market opportunity at the same gate, so the two markets never blend into one undifferentiated pool
+(D-20: two markets, one regulated with premium capacity and territory-bound energy, one free/ERCOT; D-21: first
+utility is Austin Energy or CPS Energy, home batteries are in scope for regulated contracts).
+- Given a REG(utility) obligation, When the selector reserves capacity for it, Then only assets whose
+  `territory` matches that utility are ever assigned, never an ERCOT-competitive-area or other-utility asset.
+- Given an asset sits inside a regulated utility's territory, When a FREE (ERCOT) opportunity is evaluated for
+  it, Then it is excluded unless that utility's contract explicitly grants wholesale access (default: no access).
+- Given a new REG capacity candidate and a new FREE arbitrage candidate compete at the same gate, When the
+  selector solves, Then the REG candidate's value is settled first (commitments, then new regulated capacity),
+  and FREE competes only for what's left — never the reverse.
+- Given a home battery is enrolled under a regulated contract, When eligibility is computed, Then home batteries
+  are treated as eligible regulated-capacity assets, not excluded as "substation-only".
+Priority: Should (next-phase) · FR/story links: none existing (new since MVP-S) · Invariants: **K15** (new;
+territory) · Dependencies: ES04-S01, ES05-S01 · Estimate: 4 h
+Decision: D-20, D-21 · Status: **partly built in R2** (`main` `6470cfa`); dark in production because no
+regulated-zone bank is seeded (the Austin Energy and CPS zone blocks ship `enabled: false`,
+`integration-sims/config/fleet.yaml:56-72`):
+- Built: `og.utility`, `og.contract.market`/`utility_id` and `REGULATED_CAPACITY`
+  (`orchestrator/migrations/0025_market_model.sql`); `opengrid.market` (`orchestrator/src/opengrid/market/territory.py:131`
+  `check_territory`, the one predicate); selector C25 as bank eligibility (`orchestrator/src/opengrid/selector/gate.py:489-529`)
+  and the regulated-first stage R (`selector/solve.py:140-144`); allocator territory enforcement
+  (`allocator/cycle.py:221-232`); guardian G-33 and G-30; settle regulated charging and capacity payment
+  (`orchestrator/src/opengrid/settle/__init__.py:242-269`); the `K15_TERRITORY` checker.
+- Not built: the contract-admission check (`contracts/` is unchanged; `R-TERRITORY-INELIGIBLE` is raised only by
+  the guardian).
+- The utility rows and a demo contract come only from the hand-applied `dev/seed/market_model_seed.sql`.
+
+Test: `orchestrator/tests/unit/market/test_territory.py:123` (property: regulated obligations never leave their
+territory), `orchestrator/tests/unit/market/test_model.py:63` (eligibility is territory-bound), `:72` (free-access
+flag), `orchestrator/tests/unit/selector/test_market_economics.py:182` (territory and regulated capacity in
+`prepare_obligations`), `:212` (regulated capacity selected first even when a free offer pays more).
+
+**ES19-S03 — Substation-sited battery assets (~20 MW, Base-owned) serving regulated capacity.**
+As a *Base executive*, I want a new asset class for substation-sited batteries (their own rating, SoC window,
+POI and transformer limits, ramp and wear — distinct from a home bank), sited nearest a regulated data-center or
+distribution-deferral customer, so Base's substation batteries can serve regulated capacity contracts alongside
+home batteries (D-21: "substation battery sets of about 20 MW... Base owns all batteries").
+- Given a substation asset is registered, When the selector builds its capability row, Then it uses the asset's
+  own P/E/SoC-window/POI/transformer parameters, never a home-bank default.
+- Given a DATA_CENTER contract sited at a substation, When eligible assets are chosen, Then the nearest
+  substation asset is preferred over home banks on the same feeders.
+Priority: Should (next-phase) · FR/story links: none existing (new asset class) · Invariants: **K4** (extended
+envelope, per-asset), **K14** (the substation PCS is a single inverter, no √N diversity) · Dependencies:
+ES19-S02 · Estimate: 3 h
+Decision: D-21 · Status: **partly built in R2** (`main` `6470cfa`): data, guardian and simulator only.
+- Built: `og.asset` with `asset_class` `SUBSTATION` and POI import/export limits
+  (`orchestrator/migrations/0025_market_model.sql`; `orchestrator/src/opengrid/core/models/market.py`); the guardian's
+  substation limit and POI check (G-29, `orchestrator/src/opengrid/guardian/flow_checks.py:296`); a simulator
+  substation asset (`integration-sims/config/fleet.yaml:85-90`, `enabled: false`).
+- Not built: dispatching a substation asset. The selector and engine build the market model from banks only, no
+  capability row exists for an asset, and there is no nearest-substation preference.
+- The dev seed's `sub-aen-01` (`dev/seed/market_model_seed.sql:82-94`) is PLANNED with no `bank_id`, so G-29's POI
+  check does not apply to it; the simulator's asset id (`sub-LZ_AEN-00`) differs from the seed's.
+
+Test: none found for substation dispatch.
+
+**ES19-S04 — $/kW-in vs $/kW-out economics, per contract/market/fleet, with payback and the 3-year flag.**
+As a *Base executive*, I want profitability reported as $/kW-in (charging cost, delivery charge, demand charges)
+against $/kW-out (capacity, energy and AS revenue), net $/kW-yr, and payback (simple, effective net-of-incentive,
+and discounted) against a 3-year target flag — not just the hardware capex view — so Base's "<$500/kW effective,
+~3-year payback" framing can be checked against real settled data (D-20: economics are $/kW in vs $/kW out; D-23:
+ROI planning assumptions, "<$500/kW" is a net effective investment, target payback ~3 years, §3c stack confirmed
+reasonable by the owner).
+- Given a settlement period closes for a contract, market or the whole fleet, When the profitability rollup
+  runs, Then it reports $/kW-in and $/kW-out broken into their components (energy, delivery/M1, demand, solar;
+  capacity, energy, AS, availability), not only a single net-margin number.
+- Given the same period, When payback is computed, Then it reports the simple payback, the effective payback
+  (net of incentives, e.g. an AE rebate), and the discounted multi-year payback, alongside the $7,000/11 kW
+  hardware-view figure for comparison.
+- Given payback exceeds 3 years, When shown, Then it is flagged (amber), never presented as meeting the target
+  silently.
+Priority: Should (next-phase) · FR/story links: `RPT-S06`/`FR-RPT-011` (nearest existing: ES08-S04's forgone-
+upside line is a narrower, already-built precursor at the obligation level, not this contract/market/fleet $/kW
+basis) · Invariants: — · Dependencies: ES08-S03, ES19-S01 · Estimate: 3 h
+Decision: D-20, D-23 · Status: **built in R2** (`main` `6470cfa`), with planning capex:
+- `orchestrator/src/opengrid/market/economics.py` computes $/kW-in, $/kW-out, net, and simple, effective and
+  discounted payback, NPV and the 3-year flag.
+- `market/view.py` rolls these up per contract, market and fleet.
+- `GET /og/api/profitability/per-kw` serves them (`orchestrator/src/opengrid/api/routers/profitability_kw.py:37`),
+  and the Profitability screen shows them.
+- Capex and O&M are planning attributions; there is no `og.asset_finance` table.
+
+Test: `orchestrator/tests/unit/market/test_economics.py:115` (no payback when net ≤ 0), `:151` (discounted payback
+and NPV), `orchestrator/tests/unit/market/test_view.py:26` (rollup by market and fleet).
+
+**ES19-S05 — Charging mix: ≥30% solar plus utility off-peak, M1 only in the competitive area.**
+As a *Base executive*, I want charging cost split by source and territory — at least 30% solar (soft floor,
+priced slack when short) with the rest at the regulated utility's off-peak/night rate inside its territory, and
+the full TDSP delivery charge (M1) only on grid-drawn kWh in the ERCOT competitive area — so the charging-cost
+half of $/kW-in matches Base's actual guidance (D-19: M1 is the full TDSP charge on ERCOT-competitive grid
+charging, PUCT 2026-09-01 rates in `config/tdsp_tariffs.toml`; D-22: at least 30% solar, the rest at the
+utility's night/off-peak rate; D-24: solar expansion widens the price swings, so charging should also run at the
+midday solar dip, not only overnight).
+- Given a bank in the ERCOT competitive area draws grid energy to charge, When costed, Then it carries the full
+  per-TDSP M1 charge from `tdsp_tariffs.toml`; behind-the-meter solar never carries it.
+- Given a bank inside a regulated utility's territory draws grid energy to charge, When costed, Then it uses
+  that utility's own contracted rate, never the TDSP M1 charge (M1 is ERCOT-competitive-area only).
+- Given a regulated contract's accounting period, When its solar share is checked, Then it must be ≥ 30% or the
+  shortfall is priced as slack and reported, never silently absorbed.
+- Given growing solar availability at midday, When the charging schedule is built, Then it prefers midday solar
+  charging as well as overnight, per D-24 (see ES02-S05's forecast gap note — this depends on that forecast
+  input existing).
+Priority: Should (next-phase) · FR/story links: none existing (new) · Invariants: — · Dependencies: ES19-S01,
+ES02-S05 · Estimate: 3 h
+Decision: D-19, D-22, D-24 · Status: **partly built in R2** (`main` `6470cfa`); the selector part is built:
+- the C27 soft solar floor per territory, with priced slack (`orchestrator/src/opengrid/selector/model.py:265-307`);
+- regulated grid charging only in the utility's off-peak/night periods at its rate, with no M1, and M1 on
+  grid-drawn kWh in the competitive area (`orchestrator/src/opengrid/market/charging.py`);
+- the measured solar share per interval (D-28) stored with its source (`og.plan_energy_value.solar_share`,
+  migration 0030);
+- settle's M1 (`orchestrator/src/opengrid/settle/tariffs.py`), now priced on the zone's trailing grid share of
+  charging (OL-5).
+
+Gaps: no month-to-date carry-in for the floor, and whether a floor shortfall is reported was not verified. The
+midday-charging preference depends on the forecast input of ES02-S05.
+
+Test: `orchestrator/tests/unit/selector/test_plan_hardening.py:177` (a regulated bank meets the 30% solar floor and
+charges from the grid only at night), `:111` (solar-share source priority),
+`orchestrator/tests/unit/market/test_charging.py:46` (Austin Energy night charging), `:69` (M1 on grid kWh only),
+`orchestrator/tests/unit/settle/test_tariffs.py` (M1).
+
+**ES19 subtotal: 5 stories, 15 h.**
+
+---
+
+**Grand total: 11 epics, 67 stories, ≈ 178 estimated build hours** (135 h across 7 parallel workstreams from the
+original MVP-S build — plan §0 targets ~24 wall-clock hours for Phase 1–2 with ~7 concurrent workstreams;
+135 person-hours ÷ ~6 effective parallel streams ≈ 22.5 h wall-clock, consistent with the plan's Fri
+15:00–Sat 06:00 foundation-and-modules window before Phase 3 integration — plus ≈ 43 h added post-MVP-S across
+ES01/ES03/ES04/ES05/ES06/ES07/ES19 for the decisions in `11-decision-log.md` D-4..D-27 and
+`09-optimizer-dispatcher-update.md`, which are **not** part of the original Fri–Sat schedule or gates G1–G5 in
+§4 below and carry no wall-clock claim of their own).
 
 ---
 
@@ -929,3 +1425,27 @@ covered by ≥ 1 test" check. Every row below has at least one entry; none is em
 | ES10-S04 | A1, A6 | `FR-UI-004`, `FR-OPS-001` | TS-10-05 |
 | ES10-S05 | A7 | `UI-S04`, `FR-UI-007`, `FR-UI-008` | TS-10-07 |
 | ES10-S06 | A8, A9 | `UI-S06`, `TRACE-S02`, `FR-TRACE-002`, `FR-BILL-009` | TS-10-06 |
+
+**Stories added post-MVP-S** (decision log `11-decision-log.md` D-4..D-27 and `09-optimizer-dispatcher-update.md`;
+see each story's own "Decision"/"Status"/"Code"/"Test" lines in §2 for the full evidence). None of these has a
+`04-mvp-s-test-plan.md` TS-ID yet — `04` is not edited by this pass — so "Covered by" here cites the real pytest
+file(s) that exist today, or the `TS-19-nn` id `09-optimizer-dispatcher-update.md` §7 already proposes for `04`
+to adopt, or "none found" where no test exists.
+
+| Story | A# | Existing FR/story IDs cited | Covered by (today) |
+|---|---|---|---|
+| ES01-S06 | A11 | new (D-13) | `orchestrator/tests/unit/tools/test_ws_env.py`, `integration-sims/tests/test_workspace_config.py` |
+| ES03-S06 | A2, A5 | new (D-11) | none found |
+| ES04-S06 | A4 | new (D-7, K14) | `orchestrator/tests/unit/contracts/test_admission.py`, `orchestrator/tests/unit/profiles/test_data_center_profile.py` |
+| ES05-S08 | A2, A4, A10 | new (D-6) | `orchestrator/tests/unit/engine/test_energy_sufficiency_gateway.py`, `orchestrator/tests/unit/allocator/test_energy_sufficiency.py` |
+| ES05-S09 | A4, A10 | new (D-18) | `orchestrator/tests/unit/guardian/test_service.py` (need-basis cases, lines 791-835) |
+| ES05-S10 | A4, A5, A10 | new (D-26) | `orchestrator/tests/unit/allocator/test_dispatch_extensions.py` (F1-F3, R2) |
+| ES06-S07 | A3, A10 | new (D-12) | `orchestrator/tests/unit/safestop/test_release_relay.py`, `tests-e2e/functional/safety/test_ts06_guardian_and_safe_stop.py` |
+| ES06-S08 | A3, A10 | new (D-7, K14) | `orchestrator/tests/unit/guardian/test_pq_checks.py`, `orchestrator/tests/property/test_k14_pq_envelope.py` |
+| ES06-S09 | A3, A10 | new (D-27) | `orchestrator/tests/unit/guardian/test_flow_checks.py`, `test_service_flow.py` (R2) |
+| ES07-S05 | A6 | new | `orchestrator/tests/unit/health/test_rules.py` (`HOLD` case confirmed; `DIST_DEFERRAL_OPEN_LOOP` not individually named — see report) |
+| ES19-S01 | A4, A7 | new (D-10) | `orchestrator/tests/unit/selector/test_zone_pricing.py` (`TS-19-01` proposed) |
+| ES19-S02 | A4, A5 | new (D-20, D-21) | `orchestrator/tests/unit/market/test_territory.py`, `test_model.py`, `orchestrator/tests/unit/selector/test_market_economics.py` (R2) |
+| ES19-S03 | A5 | new (D-21) | none found |
+| ES19-S04 | A7 | new (D-20, D-23) | `orchestrator/tests/unit/market/test_economics.py`, `test_view.py` (R2) |
+| ES19-S05 | A5 | new (D-19, D-22, D-24) | `orchestrator/tests/unit/selector/test_plan_hardening.py`, `orchestrator/tests/unit/market/test_charging.py`, `orchestrator/tests/unit/settle/test_tariffs.py` (R2) |

@@ -445,8 +445,11 @@ down.
 Modes (lead default, §13 Q4):
 - Every row runs in mode R, which checks the restart (§6.3) and the recovery column.
 - TS-C-01 (feeds), TS-C-02 (engine), TS-C-03 (guardian), TS-C-03b (safestop) and TS-C-04 (sims) also run in mode H.
-  TS-C-01's mode H requires the R3 selector/engine gate for NO_NEW_COMMITMENTS; until that lands, it reports that gap
-  as a known FAIL.
+  TS-C-01's mode H asserts the NO_NEW_COMMITMENTS gate. R2 (`main` `6470cfa`) built it: og-engine skips intake
+  (`o/engine/gates.py:51-60`) and the selector gate selects nothing new (`o/selector/gate.py:532-602`), so the row
+  is expected to pass. Its hold must outlast the chaos config's `[feeds.staleness] ercot_price_fresh_s`. That is
+  600 s in `test.toml:43-49`, which `chaos.toml` inherits; production uses 2,700 s since the R2 hotfix, so
+  `chaos.toml` must keep the short window.
 - TS-06-23 is mode H by definition.
 
 In an R-only row (TS-C-05, TS-C-06) the outage lasts only the restart gap: `RestartSec` plus startup,
@@ -459,7 +462,7 @@ Stop sub-steps use the operator CLI (§6.7). Stop latency is judged against the 
 
 | ID | Kill | Expected (test plan §4.6) | Assert during the outage | Assert after recovery |
 |---|---|---|---|---|
-| TS-C-01 (R, H) | `ogt-feeds` | Feeds go stale; "no new commitments" after the staleness threshold; existing commitments unaffected | Every commitment active at the kill is unchanged (K13). R: the restart gap is shorter than the staleness threshold, so degraded mode is not expected. H: the feed is held past the staleness threshold; `NO_NEW_COMMITMENTS` is active (`og.degraded_mode_state`), and 0 new `og.commitment` rows are created while it is active. That assertion requires the R3 selector/engine gate; until it lands, it is a known FAIL | Feeds fresh; no commitment created from stale data; commitments continue at the next gate |
+| TS-C-01 (R, H) | `ogt-feeds` | Feeds go stale; "no new commitments" after the staleness threshold; existing commitments unaffected | Every commitment active at the kill is unchanged (K13). R: the restart gap is shorter than the staleness threshold, so degraded mode is not expected. H: the feed is held past the staleness threshold; `NO_NEW_COMMITMENTS` is active (`og.degraded_mode_state`), and 0 new `og.commitment` rows are created while it is active. The gate is built in R2, so the assertion is expected to pass | Feeds fresh; no commitment created from stale data; commitments continue at the next gate |
 | TS-C-02 (R, H) | `ogt-engine` | Hubs hold their lease, then go to local autonomy (K6/K7); guardian idle; `og-safestop` can still engage a stop (K8); state rebuilt from Postgres | No new `og.command_batch` rows. Each leased hub's `p_kw` follows its last acked `applied_p_kw` until `expires_at` + 5 s, then local autonomy, never earlier (K7). `ALR-PROCESS-DOWN` for the engine. Stop sub-step (H only, last in the campaign): a BANK stop through the operator CLI gives an `og.stop_event` ENGAGE row, a retained stop message, and in-scope hubs at 0 within the BANK window of 30 s (K8) | New epoch = previous `max(og.lease_state.epoch) + 1` (`o/engine/pg_backend.py:38`), strictly higher (K6). No `STALE_EPOCH`/`STALE_SEQ` rejects for new-epoch batches. Commitments intact (K13); reservation sums ≤ capability (K2). Grants and acks resume within 3 cycles. The trace verifies (K11) |
 | TS-C-03 (R, H) | `ogt-guardian` | TIMEOUT semantics: the engine holds its last grant, no new commands execute; `og-safestop` unaffected | No new `og.verdict` rows. Every batch on `cmd/+/batch` verifies with the chaos guardian key, and no ack is `accepted` for a batch without a signed verdict (K3). The engine sees the guardian as unavailable (heartbeat older than 15 s, `o/engine/__init__.py:505`) and holds. Hubs follow the lease path (K7). An L2 BLOCK injected on one bank during the outage is met by that bank's hubs at the latest at lease expiry + hold, 35 s (K5; documented limitation, §13 Q6). Optional stop sub-step through the CLI, as in TS-C-02 (K8) | Signing resumes: first PASS verdict within 5 cycles. The first signed batches respect G-02 to G-06 and any active L2 instruction (K4, K5). G-20 passes (K12). No `TIMEOUT` verdict carries a signature |
 | TS-C-03b (R, H) | `ogt-safestop` | Dispatch unaffected; a stop attempted while it is down is visibly refused; readiness returns on restart | Verdict and command rates within ±10 % of baseline. A propose + confirm through the chaos API gets 503 from confirm (`o/api/routers/safestop.py:74-96`) and no ENGAGE row appears. (H only) The operator CLI still engages a BANK stop with the daemon down, within the 30 s window (K8, §6.7) | No ENGAGE row ever appears for the refused API request. The request path is Postgres NOTIFY, which is not durable, so none should. An API stop request engages again; reset afterwards |
@@ -672,11 +675,11 @@ The lead answered these on 2026-09-26. Each answer is the default until the owne
    A separate host remains optional; Appendix A gives its sizing and cost.
 4. **Modes.** *Lead default, pending owner confirmation (updated 2026-09-26):* mode R for every process; mode H also
    for og-feeds, the engine, guardian, safestop and sims. og-feeds' mode H asserts 0 new commitments while
-   NO_NEW_COMMITMENTS is active, and requires the R3 selector/engine gate. The consequence:
+   NO_NEW_COMMITMENTS is active; R2 built that gate. The consequence:
    - `og-feeds`' degraded mode ("no new commitments") is not reached in the restart gap; TS-02-05/07 cover it with a
-     stubbed stale feed. The 2026-09-26 review found that mode displayed but not enforced by the selector and intake
-     (routed for R3). The mode-H `og-feeds` kill, held past the staleness threshold, tests that enforcement end to
-     end, and fails until the R3 gate lands.
+     stubbed stale feed. The 2026-09-26 review found that mode displayed but not enforced. R2 enforces it at the
+     intake and selector gates (not at contract admission). The mode-H `og-feeds` kill, held past the chaos
+     config's 600 s window, tests that enforcement end to end.
    - For `og-settle` and `og-api`, the outage behaviour is observed only for the restart gap: settlement and health
      evaluation pause, and the console is lost.
 5. **Cadence.** *Lead default, pending owner confirmation:* nightly (the §14 timer, 00:30 to 02:45), plus on demand

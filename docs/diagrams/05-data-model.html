@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OpenGrid data model — migrations 0001-0023</title>
+<title>OpenGrid data model — migrations 0001-0032</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #0f172a; --muted: #64748b; --border: #e2e8f0;
@@ -56,27 +56,31 @@
 </head>
 <body>
   <h1>OpenGrid Orchestrator — Data Model</h1>
-  <p class="subtitle">Every table created or altered by <code>orchestrator/migrations/0001_init.sql</code> … <code>0023_pnl_delivery_charge.sql</code>, schema <code>og</code>, grouped by area — 47 tables across 11 groups. Verified against main @ 434d230. <code>0015</code> is skipped (allocated to a customer_services migration that never landed on this branch); 7 tables are new since the <code>f3b3365</code> snapshot (<code>calibration_command</code>, <code>invariant_check</code>, <code>invariant_violation</code>, <code>invariant_trace_watermark</code>, <code>scope_posture</code>, <code>as_deployment</code>, <code>degraded_mode_state</code>), plus a new <code>og.pnl.delivery_charge</code> column.</p>
+  <p class="subtitle">Every table created or altered by <code>orchestrator/migrations/0001_init.sql</code> … <code>0032_hub_units.sql</code>, schema <code>og</code>, grouped by area — 60 tables across 15 groups. Verified against main @ 6470cfa (R2). <code>0015</code> is skipped (allocated to a customer_services migration that never landed; customer services landed as <code>0026</code>). New since the 434d230 snapshot (migrations 0024–0032): 13 tables (<code>utility</code>, <code>asset</code>, <code>customer_site_meter_reading</code>, <code>corridor_current_reading</code>, <code>invoice_dispute</code>, <code>customer_obligation_request</code>, <code>trace_anchor</code>, <code>service_transformer</code>, <code>feeder_limit</code>, <code>substation_limit</code>, <code>plan_energy_value</code>, <code>plan_value</code>, <code>plan_shadow_obligation</code>), new columns on <code>contract</code> (0025), <code>hub_state</code>/<code>telemetry</code> (0027), <code>hub</code> (0029, 0032) and <code>alert</code> (0031), and the <code>invoice_line</code> insert-only trigger (0024).</p>
 
   <div class="legend">
     <div><span class="swatch" style="background:#1d4ed8"></span>primary key</div>
     <div><span class="swatch" style="background:#b45309"></span>foreign key target</div>
-    <div><span class="swatch" style="background:#94a3b8;border:1.5px dashed #64748b"></span>built + wired, but no row exists today — asset-health tables only, switched off by [assets].drift_enabled=false (PQ group — see diagram 06)</div>
+    <div><span class="swatch" style="background:#94a3b8;border:1.5px dashed #64748b"></span>built + wired, but no row is written in the shipped config — asset-health tables ([assets].drift_enabled=false), customer services ([site_ingest] / [api.customer_api] off) — see the group notes and diagram 06</div>
   </div>
 
   <nav class="toc">
     <h2>Groups</h2>
     <ul><li><a href="#g0">Contracts / products</a> <span class="count">(2)</span></li>
-<li><a href="#g1">Obligations / opportunities / plan</a> <span class="count">(5)</span></li>
-<li><a href="#g2">Ledger — reservations / grants</a> <span class="count">(2)</span></li>
-<li><a href="#g3">Commands / acks / signing</a> <span class="count">(5)</span></li>
-<li><a href="#g4">Telemetry / fleet</a> <span class="count">(5)</span></li>
-<li><a href="#g5">Feeds / forecast</a> <span class="count">(3)</span></li>
-<li><a href="#g6">Settlement / billing / P&amp;L</a> <span class="count">(4)</span></li>
-<li><a href="#g7">Trace / audit</a> <span class="count">(3)</span></li>
-<li><a href="#g8">Health / retention</a> <span class="count">(3)</span></li>
-<li><a href="#g9">PQ / service profiles / asset health</a> <span class="count">(9)</span></li>
-<li><a href="#g10">Invariants / posture / AS hold (all NEW, migrations 0014, 0019-0021)</a> <span class="count">(6)</span></li></ul>
+<li><a href="#g1">Two markets / territory (all NEW, migration 0025)</a> <span class="count">(2)</span></li>
+<li><a href="#g2">Obligations / opportunities / plan</a> <span class="count">(5)</span></li>
+<li><a href="#g3">Selector plan analytics (all NEW, migration 0030)</a> <span class="count">(3)</span></li>
+<li><a href="#g4">Ledger — reservations / grants</a> <span class="count">(2)</span></li>
+<li><a href="#g5">Commands / acks / signing</a> <span class="count">(5)</span></li>
+<li><a href="#g6">Telemetry / fleet</a> <span class="count">(5)</span></li>
+<li><a href="#g7">Distribution flow limits (all NEW, migration 0029)</a> <span class="count">(3)</span></li>
+<li><a href="#g8">Feeds / forecast</a> <span class="count">(3)</span></li>
+<li><a href="#g9">Settlement / billing / P&amp;L</a> <span class="count">(4)</span></li>
+<li><a href="#g10">Customer services (all NEW, migration 0026)</a> <span class="count">(4)</span></li>
+<li><a href="#g11">Trace / audit</a> <span class="count">(4)</span></li>
+<li><a href="#g12">Health / retention</a> <span class="count">(3)</span></li>
+<li><a href="#g13">PQ / service profiles / asset health</a> <span class="count">(9)</span></li>
+<li><a href="#g14">Invariants / posture / AS hold (all NEW, migrations 0014, 0019-0021)</a> <span class="count">(6)</span></li></ul>
   </nav>
 
   
@@ -88,10 +92,10 @@
         <tbody>
         <tr>
           <td class="tbl"><code>og.contract</code></td>
-          <td class="mig">0001</td>
+          <td class="mig">0001 (DATA_CENTER: 0013; market, utility_id, service_type list: 0025)</td>
           <td class="pk"><code>contract_id</code></td>
-          <td class="fk"><span class="muted">—</span></td>
-          <td class="purpose">One customer agreement: service_type (HOME/ERCOT_ENERGY/ERCOT_AS/DIST_DEFERRAL/PARTNER_CAPACITY), tier (L0/L1/L2/T1-T4), penalty terms, degradation_cost.</td>
+          <td class="fk">utility_id → utility (0025)</td>
+          <td class="purpose">One customer agreement: service_type (HOME/ERCOT_ENERGY/ERCOT_AS/DIST_DEFERRAL/PARTNER_CAPACITY/DATA_CENTER, and since 0025 PIPELINE_AC/REGULATED_CAPACITY/PJM_CAPACITY/MOBILE_STORAGE/LARGE_LOAD), tier (L0/L1/L2/T1-T4), penalty terms, degradation_cost. market (NEW, 0025): REGULATED | FREE, default FREE; CHECK (market = &#x27;REGULATED&#x27;) = (utility_id IS NOT NULL), and REGULATED_CAPACITY is always REGULATED.</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.product_rule</code></td>
@@ -104,7 +108,30 @@
     </section>
 
     <section class="group">
-      <h2 id="g1">Obligations / opportunities / plan <span class="count">5 tables</span></h2>
+      <h2 id="g1">Two markets / territory (all NEW, migration 0025) <span class="count">2 tables</span></h2>
+      <p class="group-desc">Decision log D-20..D-22 (08-market-model-two-markets.md §3, 09 D1/D2/D11): regulated utilities as customers, and the Base-owned assets whose territory the allocator (K15) and the guardian&#x27;s G-33 read. The migration creates no rows; dev/seed/market_model_seed.sql (applied by hand) is the only writer in the repo, and opengrid.market.config.DEFAULT_UTILITIES is the planning fallback when no og.utility row exists.</p>
+      <table>
+        <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
+        <tbody>
+        <tr>
+          <td class="tbl"><code>og.utility</code></td>
+          <td class="mig">0025 (NEW)</td>
+          <td class="pk"><code>utility_id</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">A regulated, vertically integrated utility as a customer: utility_id CHECK in (AUSTIN_ENERGY, CPS_ENERGY), territory_zones (ERCOT settlement-point codes), capacity_product, payment_basis, TOU/night charging rates, solar_cost and solar_share_floor (default 0.30), free_access_granted (K15(b): ERCOT access for territory assets). Read by guardian/flow_repo.py (G-33), invariants (territory check) and settle/pg_backend.py.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.asset</code></td>
+          <td class="mig">0025 (NEW)</td>
+          <td class="pk"><code>asset_id</code></td>
+          <td class="fk">bank_id → bank<br>utility_id → utility (NULL = ERCOT competitive area)</td>
+          <td class="purpose">A Base-owned asset: asset_class HOME_BANK (mirrors og.bank, bank_id required) or SUBSTATION (planning default 20 MW / 2 h), p_kw, e_kwh, eta_rt, floor_frac, POI import/export kVA (both required for a SUBSTATION; a missing POI limit means zero dispatch, G-29), status PLANNED/ACTIVE/RETIRED. substation_id/feeder_id are plain text, no FK. Read by guardian/flow_repo.py, engine/flow_topology.py, invariants and settle.</td>
+        </tr></tbody>
+      </table>
+    </section>
+
+    <section class="group">
+      <h2 id="g2">Obligations / opportunities / plan <span class="count">5 tables</span></h2>
       <p class="group-desc">The selector&#x27;s output: what was offered, selected, and the frozen equality that results.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
@@ -148,7 +175,37 @@
     </section>
 
     <section class="group">
-      <h2 id="g2">Ledger — reservations / grants <span class="count">2 tables</span></h2>
+      <h2 id="g3">Selector plan analytics (all NEW, migration 0030) <span class="count">3 tables</span></h2>
+      <p class="group-desc">Written by the selector only, one transaction per gate (selector/db.py insert_plan_analytics, called at selector/gate.py:925); the LP-vs-rule KPI and the stored-energy (water) value the real-time dispatcher uses.</p>
+      <table>
+        <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
+        <tbody>
+        <tr>
+          <td class="tbl"><code>og.plan_energy_value</code></td>
+          <td class="mig">0030 (NEW)</td>
+          <td class="pk"><code>(plan_id, bank_id)</code></td>
+          <td class="fk">plan_id → plan</td>
+          <td class="purpose">09 D7 stored-energy value per bank over a plan&#x27;s horizon, one array element per interval: water_value, discharge_threshold_usd_per_mwh (replaces the fixed $30/MWh, finding G9), planned_floor_kwh, hold_floor_kwh (09 §1.8 e^hold: reserve + held AS awards&#x27; full-deployment energy), solar_share + solar_share_source (TELEMETRY/ERCOT_SOLAR/ASSUMPTION, D-28). The engine reads the threshold through the selector&#x27;s in-process API (engine/wiring.py, engine/gateways.py). Pruned after 7 days (gate.py:929).</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.plan_value</code></td>
+          <td class="mig">0030 (NEW)</td>
+          <td class="pk"><code>plan_id → plan</code></td>
+          <td class="fk">plan_id → plan</td>
+          <td class="purpose">ES05-S07 / KPI-22: the LP plan&#x27;s and the rule baseline&#x27;s (F2 shadow run) expected net value on the same gate inputs, value_added, forgone_upside of the commitment lock, breakdown (jsonb). Meant for GET /og/api/profitability/lp-value (api/routers/lp_value.py:91), but og-api does not mount that router at R2 (api/app.py:130-171), so nothing reads this table yet.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.plan_shadow_obligation</code></td>
+          <td class="mig">0030 (NEW)</td>
+          <td class="pk"><code>(plan_id, obligation_id, interval_start)</code></td>
+          <td class="fk">plan_id → plan</td>
+          <td class="purpose">Per obligation-interval: lp_kw vs rule_kw, and best_competing_value_per_kwh for a committed obligation&#x27;s locked capacity. obligation_id is not a declared FK. Read by settle (fetch_rule_baseline_delivered_kwh, fetch_best_competing_value_per_kwh) via og.commitment.plan_id.</td>
+        </tr></tbody>
+      </table>
+    </section>
+
+    <section class="group">
+      <h2 id="g4">Ledger — reservations / grants <span class="count">2 tables</span></h2>
       <p class="group-desc">The single-writer capacity ledger (K2 one-buyer, K13 lock) and the allocator&#x27;s per-cycle output.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
@@ -171,7 +228,7 @@
     </section>
 
     <section class="group">
-      <h2 id="g3">Commands / acks / signing <span class="count">5 tables</span></h2>
+      <h2 id="g5">Commands / acks / signing <span class="count">5 tables</span></h2>
       <p class="group-desc">The guardian&#x27;s signed dispatch and the independent stop authority.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
@@ -215,17 +272,17 @@
     </section>
 
     <section class="group">
-      <h2 id="g4">Telemetry / fleet <span class="count">5 tables</span></h2>
+      <h2 id="g6">Telemetry / fleet <span class="count">5 tables</span></h2>
       <p class="group-desc">The fleet twin: topology plus the latest and historical hub state.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
         <tbody>
         <tr>
           <td class="tbl"><code>og.hub</code></td>
-          <td class="mig">0001</td>
+          <td class="mig">0001 (lat/lon backfill: 0027; premise limits: 0029; units: 0032)</td>
           <td class="pk"><code>hub_id</code></td>
           <td class="fk"><span class="muted">—</span></td>
-          <td class="purpose">Static per-hub battery params: bank_id, zone, e_kwh, r_kwh, p_kw, eta_c/eta_d, lat/lon.</td>
+          <td class="purpose">Static per-hub battery params: bank_id, zone, e_kwh, r_kwh, p_kw, eta_c/eta_d, lat/lon (backfilled by 0027 from the zone centre + a deterministic jitter). Premise limits (NEW, 0029; NULL = not on file, the guardian uses its [guardian.flow] default): export_limit_kw, service_kw, pv_rated_kw, peak_kw, tau_peak_s, transformer_id (names a service_transformer row, not a declared FK). units (NEW, 0032): 1 or 2, NOT NULL DEFAULT 1; trigger og.hub_units_default sets 2 on INSERT when e_kwh ≥ 70; G-02 caps |P| at min(p_kw, 11 kW one unit / 20 kW dual).</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.bank</code></td>
@@ -236,17 +293,17 @@
         </tr>
         <tr>
           <td class="tbl"><code>og.hub_state</code></td>
-          <td class="mig">0001</td>
+          <td class="mig">0001 (flow columns: 0027)</td>
           <td class="pk"><code>hub_id → hub</code></td>
           <td class="fk">hub_id → hub</td>
-          <td class="purpose">Latest snapshot: soc_kwh, p_kw, health, lease_epoch/expires_at, last_command_id, last_seen_at, fault_code. Upserted every engine tick.</td>
+          <td class="purpose">Latest snapshot: soc_kwh, p_kw, health, lease_epoch/expires_at, last_command_id, last_seen_at, fault_code. Upserted every engine tick. Flow fields (NEW, 0027, all nullable): home_load_kw, pv_kw, meter_kw, cell_temp_c, p_dis_max_kw, p_ch_max_kw, peak_power_budget_kws; written by fleet ingest (fleet/pg_backend.py), read by the fleet map (api/routers/fleet_map.py) and the solar-share estimate (core/solar_share.py).</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.telemetry</code></td>
-          <td class="mig">0001</td>
+          <td class="mig">0001 (flow columns: 0027)</td>
           <td class="pk"><code>(hub_id, ts)</code></td>
           <td class="fk"><span class="muted">—</span></td>
-          <td class="purpose">Historical time series, PARTITION BY RANGE(ts) with a telemetry_default catch-all partition: soc_kwh, p_kw, seq, epoch, health.</td>
+          <td class="purpose">Historical time series, PARTITION BY RANGE(ts) with a telemetry_default catch-all partition: soc_kwh, p_kw, seq, epoch, health, plus the same seven nullable flow columns as hub_state (NEW, 0027).</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.heartbeat</code></td>
@@ -259,7 +316,37 @@
     </section>
 
     <section class="group">
-      <h2 id="g5">Feeds / forecast <span class="count">3 tables</span></h2>
+      <h2 id="g7">Distribution flow limits (all NEW, migration 0029) <span class="count">3 tables</span></h2>
+      <p class="group-desc">Static limits the guardian&#x27;s discharge-flow checks read (09 §1.9/§2.6: G-27 service transformer, G-28 feeder, G-29 substation), cached by guardian/flow_repo.py and refreshed every refresh_s; engine/flow_topology.py and the invariants&#x27; CHECK_FLOW_LIMIT read them too. Nothing in the repo writes them (utility GIS/AMI data, loaded by an operator): with no row the guardian uses its configured default, and a substation with member assets but no row vetoes any increase.</p>
+      <table>
+        <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
+        <tbody>
+        <tr>
+          <td class="tbl"><code>og.service_transformer</code></td>
+          <td class="mig">0029 (NEW)</td>
+          <td class="pk"><code>transformer_id</code></td>
+          <td class="fk">bank_id → bank</td>
+          <td class="purpose">One service transformer: rating_kva (&gt; 0). Members are the og.hub rows whose transformer_id names it; an unmapped hub (NULL) is a group of one (G-27).</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.feeder_limit</code></td>
+          <td class="mig">0029 (NEW)</td>
+          <td class="pk"><code>feeder_id</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">Feeder thermal_kw and allowed feeder-head reverse_kw (G-28). Membership: og.bank.feeder_id.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.substation_limit</code></td>
+          <td class="mig">0029 (NEW)</td>
+          <td class="pk"><code>substation_id</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">Substation transformer rating_kva and reverse_kw (G-29). Membership: og.asset.substation_id (0025).</td>
+        </tr></tbody>
+      </table>
+    </section>
+
+    <section class="group">
+      <h2 id="g8">Feeds / forecast <span class="count">3 tables</span></h2>
       <p class="group-desc">External market/weather data and the derived price/load forecast.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
@@ -289,7 +376,7 @@
     </section>
 
     <section class="group">
-      <h2 id="g6">Settlement / billing / P&amp;L <span class="count">4 tables</span></h2>
+      <h2 id="g9">Settlement / billing / P&amp;L <span class="count">4 tables</span></h2>
       <p class="group-desc">og-settle&#x27;s M&amp;V, billing, and profitability output — sole writer.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
@@ -310,10 +397,10 @@
         </tr>
         <tr>
           <td class="tbl"><code>og.invoice_line</code></td>
-          <td class="mig">0001</td>
+          <td class="mig">0001 (insert-only trigger: 0024)</td>
           <td class="pk"><code>invoice_line_id</code></td>
           <td class="fk">contract_id → contract<br>obligation_id → obligation<br>supersedes → invoice_line</td>
-          <td class="purpose">One billable line: line_type (CAPACITY_PAYMENT/ENERGY/.../LD_PENALTY/DERATE/BUYBACK/FIXED_FEE), versioned.</td>
+          <td class="purpose">One billable line: line_type (CAPACITY_PAYMENT/ENERGY/.../LD_PENALTY/DERATE/BUYBACK/FIXED_FEE), versioned. Insert-only in the database since 0024 (ES08): statement trigger invoice_line_immutable refuses UPDATE/DELETE/TRUNCATE with SQLSTATE 42501 unless a migration runs SET LOCAL og.allow_invoice_line_mutation = &#x27;on&#x27;. A correction is a new row whose supersedes points at the original.</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.pnl</code></td>
@@ -326,7 +413,44 @@
     </section>
 
     <section class="group">
-      <h2 id="g7">Trace / audit <span class="count">3 tables</span></h2>
+      <h2 id="g10">Customer services (all NEW, migration 0026) <span class="count">4 tables</span></h2>
+      <p class="group-desc">06-service-profiles-and-power-quality.md §4.a/§4.b/§5.4. Both writers ship switched off: site/corridor readings need [site_ingest].enabled (default false, og-engine), disputes and requests need [api.customer_api].enabled (default false, routes not mounted). 0026 also adds retention rows CUSTOMER_DISPUTE and CUSTOMER_REQUEST (1825 days).</p>
+      <table>
+        <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
+        <tbody>
+        <tr>
+          <td class="tbl"><code>og.customer_site_meter_reading</code></td>
+          <td class="mig">0026 (NEW)</td>
+          <td class="pk"><code>(customer_id, site_id, ts)</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">DATA_CENTER site meter at the point of common coupling: p_kw (+ import), q_kvar, per-phase v_rms/i_rms, freq, pf, THD, quality GOOD/SUSPECT/BAD. Written in batches by opengrid.site_ingest (site_ingest/pg_backend.py); read by settle (M&amp;V), invariants and api/views_ext.py.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.corridor_current_reading</code></td>
+          <td class="mig">0026 (NEW)</td>
+          <td class="pk"><code>(customer_id, corridor_id, ts)</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">PIPELINE_AC corridor current: line_id, i_ac_a, limit_a, quality. Same writer as the site meter; read by invariants.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.invoice_dispute</code></td>
+          <td class="mig">0026 (NEW)</td>
+          <td class="pk"><code>dispute_id</code></td>
+          <td class="fk">invoice_line_id → invoice_line<br>contract_id → contract</td>
+          <td class="purpose">A customer&#x27;s dispute of one invoice line: reason and/or reason_code, status OPEN/UNDER_REVIEW/RESOLVED/REJECTED, trace_id (no FK: trace pruning). At most one live dispute per line (partial unique index). Written by opengrid.customer_api (store.py).</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.customer_obligation_request</code></td>
+          <td class="mig">0026 (NEW)</td>
+          <td class="pk"><code>request_id</code></td>
+          <td class="fk">obligation_id → obligation<br>contract_id → contract<br>renomination_point_id → renomination_point</td>
+          <td class="purpose">A customer&#x27;s CANCEL or RENOMINATE request that the K13 lock does not let the customer apply directly: requested_kw/window, penalty_terms at request time, rule_code, status PENDING_OPERATOR_REVIEW/QUEUED_FOR_RENOMINATION/ACCEPTED/REJECTED/APPLIED. One open request per (obligation, kind).</td>
+        </tr></tbody>
+      </table>
+    </section>
+
+    <section class="group">
+      <h2 id="g11">Trace / audit <span class="count">4 tables</span></h2>
       <p class="group-desc">The K10/K11 append-only, hash-chained decision record.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
@@ -351,26 +475,33 @@
           <td class="pk"><code>operator_action_id</code></td>
           <td class="fk">trace_id → trace</td>
           <td class="purpose">Audited manual action: action_kind (MANUAL_COMMAND/SAFE_STOP_ENGAGE/.../CONFIG_CHANGE), tier, approver_ref.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.trace_anchor</code></td>
+          <td class="mig">0028 (NEW)</td>
+          <td class="pk"><code>anchor_id</code></td>
+          <td class="fk">checkpoint_id → trace_checkpoint</td>
+          <td class="purpose">K11 external anchoring log: each publish of a checkpoint hash outside the database (a signed JSON file under [trace].anchor_dir plus an independent copy under anchor_secondary_dir): checkpoint_hash, primary/secondary_path, key_id, signature. Written by trace/anchoring.py publish_anchor on the invariants&#x27; 900 s cadence (run_due), which also stamps trace_checkpoint.anchor_ref; the anchor-freshness check reads MAX(published_at).</td>
         </tr></tbody>
       </table>
     </section>
 
     <section class="group">
-      <h2 id="g8">Health / retention <span class="count">3 tables</span></h2>
+      <h2 id="g12">Health / retention <span class="count">3 tables</span></h2>
       <p class="group-desc">Alerting and the configurable per-event-class retention K11 relies on.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
         <tbody>
         <tr>
           <td class="tbl"><code>og.alert</code></td>
-          <td class="mig">0001</td>
+          <td class="mig">0001 (scope_kind/scope_ref: 0031)</td>
           <td class="pk"><code>id (bigserial)</code></td>
           <td class="fk"><span class="muted">—</span></td>
-          <td class="purpose">An ALR-* finding: rule, severity, summary, detail (jsonb), opened_at/cleared_at/acked_by.</td>
+          <td class="purpose">An ALR-* finding: rule, severity, summary, detail (jsonb), opened_at/cleared_at/acked_by. scope_kind/scope_ref (NEW, 0031) are structured copies of detail&#x27;s scope keys, filled by health/queries.py raise_alert (the single og.alert writer, also used by guardian&#x27;s PgAlertPort); partial index ix_alert_scope on open alerts.</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.retention_policy</code></td>
-          <td class="mig">0001 (+ new event classes: 0010, 0011)</td>
+          <td class="mig">0001 (+ new event classes: 0010, 0011, 0026)</td>
           <td class="pk"><code>event_class</code></td>
           <td class="fk"><span class="muted">—</span></td>
           <td class="purpose">Days to keep each trace event_class / telemetry / feed_obs before pruning; operator-configurable with no code change (K11).</td>
@@ -386,8 +517,8 @@
     </section>
 
     <section class="group">
-      <h2 id="g9">PQ / service profiles / asset health <span class="count">9 tables</span></h2>
-      <p class="group-desc">MVP-S+ power-quality (9153dc2, NEW; re-verified 434d230): pq_waveform_summary/raw_index are LIVE-written (pq_ingest); calibration_command&#x27;s cmd/cal+ack/cal loop is LIVE. hub_inverter_pq.asset_state, calibration_attempt, maintenance_work_order and asset_event still never get written, but the reason changed this round: opengrid.assets.AssetHealthService now has a real caller (og-settle&#x27;s JobRunner, settle/main.py:125) that [assets].drift_enabled=false switches off -- wired, not missing a caller. Allocator PQ-eligibility (engine.pq_eligibility) is LIVE; continuous PQ monitoring (allocator/pq_monitor.py) remains a separate, unbuilt gap, 0 callers (diagram 06).</p>
+      <h2 id="g13">PQ / service profiles / asset health <span class="count">9 tables</span></h2>
+      <p class="group-desc">MVP-S+ power-quality (9153dc2; re-verified 6470cfa): pq_waveform_summary/raw_index are LIVE-written (pq_ingest); calibration_command&#x27;s cmd/cal+ack/cal loop is LIVE. hub_inverter_pq.asset_state, calibration_attempt, maintenance_work_order and asset_event are still not written in the shipped config: opengrid.assets.AssetHealthService has a real caller (og-settle&#x27;s JobRunner, settle/main.py:125, :272) that [assets].drift_enabled=false switches off. Allocator PQ-eligibility (engine.pq_eligibility) is LIVE. Continuous PQ monitoring is wired as of R2: engine/wiring.py:84-106 builds the S5.4 PqLadderExecutor (engine/pq_ladder.py, over allocator/pq_monitor.py) fed by the ClosedLoopRunner&#x27;s PCC readings, and can request a calibration through AssetHealthService, but only when [site_ingest].enabled or [allocator.closed_loop].enabled is true (both default false).</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
         <tbody>
@@ -458,7 +589,7 @@
     </section>
 
     <section class="group">
-      <h2 id="g10">Invariants / posture / AS hold (all NEW, migrations 0014, 0019-0021) <span class="count">6 tables</span></h2>
+      <h2 id="g14">Invariants / posture / AS hold (all NEW, migrations 0014, 0019-0021) <span class="count">6 tables</span></h2>
       <p class="group-desc">Measured invariant results, guardian veto-ratio posture, degraded-mode persistence, and the AS capacity-hold deployment log — landed since main @ f3b3365.</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
@@ -509,29 +640,36 @@
     </section>
 
   <div class="pq-note">
-    <strong>PQ / service profiles / asset health, updated (9153dc2, f3b3365; re-verified 434d230):</strong> <code>pq_waveform_summary</code> and
+    <strong>PQ / service profiles / asset health, updated (9153dc2, f3b3365, 434d230; re-verified 6470cfa):</strong> <code>pq_waveform_summary</code> and
     <code>pq_waveform_raw_index</code> are LIVE-written — <code>opengrid.pq_ingest</code> (package) buffers and batch-flushes summaries,
     and validates+stores raw captures in a background worker, both wired into <code>og-engine</code>'s MQTT ingest loop. Guardian's
     <code>pq_checks.py</code>/<code>pq_repo.py</code> (additive) read <code>pq_envelope</code>/<code>service_profile</code> and feed
     G-21..G-25 (diagram 02). <code>calibration_command</code> (0016) is LIVE end to end (<code>cmd/cal</code>/<code>ack/cal</code>, guardian ↔ og-engine).
-    <code>hub_inverter_pq.asset_state</code>, <code>calibration_attempt</code>, <code>maintenance_work_order</code>, <code>asset_event</code> still never get
-    written on this checkout, but the reason changed this round: <code>opengrid.assets</code>'s <code>AssetHealthService</code> now has a real
-    production caller (<code>og-settle</code>'s <code>JobRunner</code>, <code>settle/main.py:125</code>, via <code>make_asset_drift_job()</code>) — it is
-    switched off by <code>[assets].drift_enabled = false</code>, not missing a caller. Allocator PQ-aware selection is split: <code>engine.pq_eligibility</code> (admission-time filtering) is LIVE; <code>allocator/pq_monitor.py</code> (continuous post-commit monitoring) is
-    still a separate, unbuilt gap with 0 callers. Full built-vs-planned breakdown: <code>06-power-quality-flow.svg</code>.
+    <code>hub_inverter_pq.asset_state</code>, <code>calibration_attempt</code>, <code>maintenance_work_order</code>, <code>asset_event</code> are still not
+    written in the shipped config: <code>opengrid.assets</code>'s <code>AssetHealthService</code> has a real production caller
+    (<code>og-settle</code>'s <code>JobRunner</code>, <code>settle/main.py:125</code> and <code>:272</code>, via <code>make_asset_drift_job()</code>), switched off by
+    <code>[assets].drift_enabled = false</code>. Allocator PQ-aware selection: <code>engine.pq_eligibility</code> (admission-time filtering) is LIVE.
+    Continuous post-commit monitoring is wired as of R2 (6470cfa): <code>engine/wiring.py:84-106</code> builds the S5.4 <code>PqLadderExecutor</code>
+    (<code>engine/pq_ladder.py</code>, over <code>allocator/pq_monitor.py</code>) fed by the <code>ClosedLoopRunner</code>'s PCC readings, and the ladder can
+    request a calibration through <code>AssetHealthService</code>. It is built only when <code>[site_ingest].enabled</code> or
+    <code>[allocator.closed_loop].enabled</code> is true; both default to false. Built-vs-planned breakdown: <code>06-power-quality-flow.svg</code>.
   </div>
 
   <footer>
     <h2>Sources</h2>
-    <p><code>orchestrator/migrations/0001_init.sql</code> through <code>0013_service_type_data_center.sql</code> (read in full) ·
-    <code>orchestrator/src/opengrid/core/models/engine.py</code>, <code>platform.py</code>, <code>pq.py</code> (row shapes mirroring the DDL) ·
-    <code>opengrid.pq_ingest</code>, <code>guardian.pq_repo</code>, <code>assets.repo</code> (NEW — confirmed read/write call sites) ·
-    <code>docs/orchestrator/07-delivery/02a-mvp-s-spec-engine.md</code> §1 (table intent) · snapshot 434d230 (2026-09-26).</p>
+    <p><code>orchestrator/migrations/0001_init.sql</code> through <code>0032_hub_units.sql</code> (0024–0032 read in full for this revision) ·
+    <code>orchestrator/src/opengrid/core/models/engine.py</code>, <code>platform.py</code>, <code>pq.py</code>, <code>market.py</code> (row shapes mirroring the DDL) ·
+    <code>opengrid.pq_ingest</code>, <code>guardian.pq_repo</code>, <code>assets.repo</code>, <code>guardian/flow_repo.py</code>, <code>engine/flow_topology.py</code>,
+    <code>selector/db.py</code>, <code>site_ingest/pg_backend.py</code>, <code>customer_api/store.py</code>, <code>trace/anchoring.py</code>, <code>health/queries.py</code> (confirmed read/write call sites) ·
+    <code>dev/seed/market_model_seed.sql</code> (the only writer of <code>og.utility</code>/<code>og.asset</code> in the repo) ·
+    <code>docs/orchestrator/07-delivery/02a-mvp-s-spec-engine.md</code> §1 (table intent) · snapshot 6470cfa (R2, 2026-09-26).</p>
     <p>Migration numbering note: the spec (07-delivery/06 §9) calls the service-profile migration "0009" and asset-health "0010", but 0009 was already
     taken by <code>0009_obligation_energy_status.sql</code> (an earlier merge-task migration) — both PQ migrations were renumbered to 0010/0011 in the
     actual repo, as their own header comments record. Later: <code>0015</code> (customer_services) and <code>0016</code> (calibration_command) were
     both claimed concurrently by different in-flight agents; only <code>0016</code> landed. <code>0019</code>-<code>0023</code> were each renumbered at
-    least once for the same reason (their own header comments record the coordination) — the numbers on this checkout are what actually applied.</p>
+    least once for the same reason (their own header comments record the coordination) — the numbers on this checkout are what actually applied.
+    Same in this round: <code>0031_alert_scope_columns.sql</code> was first numbered 0024 and collided with <code>0024_invoice_line_immutable.sql</code>
+    (it is idempotent, so re-applying it under the new name is harmless), and customer services, first allocated 0015, landed as <code>0026</code>.</p>
   </footer>
 </body>
 </html>
