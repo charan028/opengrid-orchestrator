@@ -20,10 +20,12 @@ from fastapi.responses import HTMLResponse
 from opengrid.ui.api_client import ApiUnavailable, get_json
 from opengrid.ui.role import is_operator, role_of
 from opengrid.ui.settlement import (
+    LP_VALUE_PATH,
     PER_KW_PATH,
     SETTLEMENT_VIEW_PATH,
     filter_options,
     last_updated,
+    lp_value_view,
     per_kw_view,
     pnl_view,
 )
@@ -156,6 +158,16 @@ async def profitability_page(
             404: "The $/kW view is not available on this deployment yet.",
         }.get(exc.status_code or 0, f"The $/kW view is unavailable: {exc}")
 
+    lp_payload: Any = None
+    lp_note: str | None = None
+    try:
+        lp_payload = await get_json(LP_VALUE_PATH)
+    except ApiUnavailable as exc:
+        lp_note = {
+            403: "Operator role required for the LP value-added view.",
+            404: "The LP value-added view is not available on this deployment yet.",
+        }.get(exc.status_code or 0, f"The LP value-added view is unavailable: {exc}")
+
     filters = {"service": service, "day": day, "customer": customer, "contract": contract}
     return templates.TemplateResponse(
         request,
@@ -169,6 +181,8 @@ async def profitability_page(
             "pnl": pnl_view(view, customer=customer, contract=contract, service=service, day=day),
             "per_kw": per_kw_view(per_kw, view),
             "per_kw_note": per_kw_note,
+            "lp_value": lp_value_view(lp_payload),
+            "lp_note": lp_note,
             "last_settled_at": last_updated(view, "pnl"),
             "generated_at": now.isoformat(),
             "degraded": degraded,

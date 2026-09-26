@@ -264,3 +264,72 @@ def per_kw_view(payload: dict[str, Any] | None, view: dict[str, Any]) -> dict[st
         "target_payback_years": num(payload.get("target_payback_years")),
         "shadow_value_added": payload.get("shadow_value_added"),
     }
+
+
+LP_VALUE_PATH = "/og/api/profitability/lp-value"
+_LP_LIST_KEYS = ("items", "gates", "plans", "rows", "values")
+
+
+def _lp_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if isinstance(payload, dict):
+        for key in _LP_LIST_KEYS:
+            if isinstance(payload.get(key), list):
+                return [r for r in payload[key] if isinstance(r, dict)]
+    return []
+
+
+def lp_value_view(payload: Any) -> dict[str, Any]:
+    """`GET /og/api/profitability/lp-value`: the optimizer's value added over the rule baseline, per selector
+    gate. Shows the LATEST gate's figures and a trend; never a sum across gates (their horizons overlap, so a
+    total would count the same hours several times). `available=false` (or no rows) reads "not available yet"."""
+    rows = sorted(_lp_rows(payload), key=lambda r: str(r.get("created_at") or ""))
+    available = bool(payload.get("available", bool(rows))) if isinstance(payload, dict) else bool(rows)
+    if not available or not rows:
+        return {"available": False, "latest": None, "count": 0, "chart": None}
+    latest = rows[-1]
+    breakdown = latest.get("breakdown")
+    return {
+        "available": True,
+        "count": len(rows),
+        "latest": {
+            "plan_id": latest.get("plan_id"),
+            "created_at": latest.get("created_at"),
+            "value_added": num(latest.get("value_added")),
+            "lp_net_value": num(latest.get("lp_net_value")),
+            "rule_net_value": num(latest.get("rule_net_value")),
+            "forgone_upside": num(latest.get("forgone_upside")),
+            "breakdown": (
+                [
+                    {"label": str(k).replace("_", " "), "value": num(v)}
+                    for k, v in breakdown.items()
+                    if isinstance(v, int | float | str) and str(v).strip() not in ("", "None")
+                ]
+                if isinstance(breakdown, dict)
+                else []
+            ),
+        },
+        "chart": {
+            "xAxis": {"type": "time"},
+            "yAxis": {"type": "value", "name": "$ per gate"},
+            "legend": {},
+            "tooltip": {"trigger": "axis"},
+            "series": [
+                {
+                    "name": "Value added (LP - rule)",
+                    "type": "line",
+                    "showSymbol": True,
+                    "data": [[r.get("created_at"), num(r.get("value_added"))] for r in rows],
+                },
+                {
+                    "name": "Forgone upside (lock)",
+                    "type": "line",
+                    "showSymbol": False,
+                    "lineStyle": {"type": "dashed"},
+                    "itemStyle": {"color": "token:--muted@0.7"},
+                    "data": [[r.get("created_at"), num(r.get("forgone_upside"))] for r in rows],
+                },
+            ],
+        },
+    }

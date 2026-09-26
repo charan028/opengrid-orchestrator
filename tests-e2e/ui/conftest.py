@@ -84,6 +84,7 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/profitability/summary": _load("profitability_summary.json"),
         "/og/api/views/settlement": _load("views_settlement.json"),
         "/og/api/profitability/per-kw": _load("profitability_per_kw.json"),
+        "/og/api/profitability/lp-value": _load("profitability_lp_value.json"),
         "/og/api/work-orders": _load("pq_work_orders.json"),
         "/og/api/hubs/hub-01998/waveform": _load("pq_waveform.json"),
         "/og/api/hubs/hub-01998/spectrum": _load("pq_spectrum.json"),

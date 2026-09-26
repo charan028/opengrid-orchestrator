@@ -47,7 +47,6 @@ def test_panel_renders_for_an_operator(client: TestClient, monkeypatch: pytest.M
     _serve(monkeypatch, load_fixture("profitability_per_kw.json"))
     html = client.get("/og/profitability", headers={"X-Remote-User": "alice"}).text
     assert 'id="per-kw-table"' in html and "Free market (ERCOT competitive)" in html
-    assert "not exposed by the optimizer yet" in html
 
 
 @pytest.mark.parametrize(

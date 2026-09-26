@@ -48,6 +48,28 @@
     {% with label='Forgone upside (lock)', value='%.2f'|format(pnl.totals.forgone_upside), unit='USD', since_iso=generated_at, stale_after_s=60, severity=('caution' if pnl.totals.forgone_upside else 'neutral') %}{% include "_partials/kpi_tile.html" %}{% endwith %}
   </section>
 
+  <section class="og-panel" aria-labelledby="lp-value-heading" id="lp-value">
+    <h2 id="lp-value-heading">LP value added (latest selector gate)</h2>
+    {% if lp_value.available %}
+    {% set lv = lp_value.latest %}
+    <p class="og-card-meta">Gate {{ (lv.plan_id or '')[:8] }} &middot; <span class="stale-badge" data-since="{{ lv.created_at }}" data-stale-after="1800" title="{{ lv.created_at }}">age: unknown</span>
+      &middot; {{ lp_value.count }} gate{{ '' if lp_value.count == 1 else 's' }} in the trend. Gates overlap in time, so values are shown per gate and never summed.</p>
+    <section class="og-kpis" aria-label="Latest gate">
+      {% with label='Value added (LP - rule)', value='%.2f'|format(lv.value_added), unit='USD', severity=('good' if lv.value_added > 0 else ('caution' if lv.value_added < 0 else 'neutral')), tile_id='kpi-lp-value-added' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+      {% with label='LP net value', value='%.2f'|format(lv.lp_net_value), unit='USD' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+      {% with label='Rule baseline net', value='%.2f'|format(lv.rule_net_value), unit='USD' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+      {% with label='Forgone upside (lock)', value='%.2f'|format(lv.forgone_upside), unit='USD' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+    </section>
+    {% if lv.breakdown %}
+    <dl class="og-deflist" id="lp-value-breakdown">{% for b in lv.breakdown %}<dt>{{ b.label }}</dt><dd>{{ '%.2f'|format(b.value) }}</dd>{% endfor %}</dl>
+    {% endif %}
+    <div id="lp-value-chart" style="height: 200px;" role="img" aria-label="Line chart of value added per selector gate over time" data-empty="No gates yet."></div>
+    <script>og.chart("#lp-value-chart", {{ lp_value.chart | tojson }});</script>
+    {% else %}
+    <p class="og-empty" id="lp-value-unavailable">{{ lp_note or 'Not available yet: the optimizer has not reported its value added over the rule baseline for any gate.' }}</p>
+    {% endif %}
+  </section>
+
   <section class="og-panel" aria-labelledby="per-kw-heading" id="per-kw">
     <h2 id="per-kw-heading">Economics per kW (annualised)</h2>
     {% if per_kw %}
@@ -69,8 +91,6 @@
       {% endfor %}
       </tbody>
     </table></div>
-    <p class="og-card-meta" id="shadow-value-added">LP vs rule value added:
-      {% if per_kw.shadow_value_added is not none %}<strong>{{ per_kw.shadow_value_added }}</strong>{% else %}not exposed by the optimizer yet{% endif %}</p>
     {% else %}
     <p class="og-empty" id="per-kw-unavailable">{{ per_kw_note or 'The $/kW view is not available yet.' }}</p>
     {% endif %}
