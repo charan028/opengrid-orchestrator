@@ -1,0 +1,15 @@
+name: demo-04-tampered-command
+description: >
+  DEMO step 13 (docs/demo/README.md): a forged, unsigned setpoint batch is
+  presented to hub-00142 (bank-022, LZ_HOUSTON). The hub's verification path
+  rejects it with BAD_SIGNATURE before freshness is even checked, so the hub's
+  power on the Fleet drill-down does not move and the three invariant tiles
+  stay at 0. The check itself is instantaneous; the 60 s window only keeps
+  the anomaly visible in the control plane's active list. To end early:
+  DELETE /api/anomalies/demo-04-tampered-command:tampered_unsigned_command:0.
+steps:
+  - at_s: 0
+    type: tampered_unsigned_command
+    target: hub-00142
+    params: {}
+    duration: 60
