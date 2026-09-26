@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from opengrid.api.auth import Identity, require_operator, require_viewer
 from opengrid.api.deps import get_config, get_pool, get_proposals, get_store, get_trace_store
+from opengrid.api.pq_capture_limits import CaptureRateLimitedError, CaptureRateLimiter, get_capture_limiter
 from opengrid.api.pq_store import NO_DATA, HubLocation, PgPqStore, PqStore, measure_bank, overall_verdict
 from opengrid.api.proposals import ProposalExpiredError, ProposalStore
 from opengrid.api.schemas import ProposalAccepted
@@ -307,6 +308,7 @@ async def confirm_waveform_capture(
     publish: Annotated[CapturePublisher, Depends(get_capture_publisher)],
     api_store: Annotated[StoreProtocol, Depends(get_store)],
     trace_store: Annotated[TraceStore, Depends(get_trace_store)],
+    limiter: Annotated[CaptureRateLimiter, Depends(get_capture_limiter)],
     identity: OperatorDep,
 ) -> dict[str, Any]:
     """Step 2 of 2 (S6.4b/S6.6, TS-15a): builds a `WaveformCaptureRequest` (`build_capture_request`,
@@ -315,6 +317,14 @@ async def confirm_waveform_capture(
     the engine's ingest path and appears in `GET .../waveform`'s `raw_captures`."""
     reason = _pop_proposal_for_hub(proposals, proposal_id, _CAPTURE_PROPOSAL_KIND, hub_id)
     location = await _require_hub(store, hub_id)
+    try:  # 1 per hub per 60 s, 20 per minute fleet-wide (`api.pq_capture_limits`)
+        limiter.acquire(hub_id)
+    except CaptureRateLimitedError as exc:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"waveform capture rate limit: {exc}",
+            headers={"Retry-After": str(max(1, int(exc.retry_after_s) + 1))},
+        ) from exc
     request = build_capture_request(hub_id, "API_REQUEST", now=datetime.now(UTC))
     payload = request.model_dump(mode="json")
     validate_payload("waveform_capture_request", payload)

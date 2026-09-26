@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from opengrid.api.app import create_app
 from opengrid.api.deps import get_config, get_proposals, get_store, get_trace_store
+from opengrid.api.pq_capture_limits import CaptureRateLimiter, get_capture_limiter
 from opengrid.api.pq_store import ObligationEnvelope
 from opengrid.api.routers import pq
 from opengrid.core.models.pq import PqWaveformSummaryRow
@@ -85,6 +86,7 @@ def pq_client(
     app.dependency_overrides[pq.get_pq_store] = lambda: pq_store
     app.dependency_overrides[pq.get_asset_health_service] = asset_ports.service
     app.dependency_overrides[pq.get_capture_publisher] = lambda: publisher
+    app.dependency_overrides[get_capture_limiter] = lambda: CaptureRateLimiter()  # fresh per request: no cap
     client = TestClient(app, client=("127.0.0.1", 51234), headers=PROXY_HEADERS)
     client.event_hooks = {"request": [_echo_csrf_cookie_as_header], "response": []}
     return client
@@ -443,3 +445,20 @@ def test_create_app_mounts_the_pq_router() -> None:
         "/og/api/hubs/{hub_id}/calibrate",
     ):
         assert path in paths, path
+
+
+def test_capture_confirm_is_rate_limited_per_hub(pq_client, publisher) -> None:
+    """1 capture per hub per 60 s: a second confirmed capture on the same hub is 429, publishes nothing."""
+    limiter = CaptureRateLimiter()
+    pq_client.app.dependency_overrides[get_capture_limiter] = lambda: limiter
+    first = _propose(pq_client, "waveform-capture")
+    assert (
+        pq_client.post(
+            f"/og/api/hubs/{HUB}/waveform-capture/{first}/confirm", headers=OPERATOR_HEADERS
+        ).status_code
+        == 200
+    )
+    second = _propose(pq_client, "waveform-capture")
+    resp = pq_client.post(f"/og/api/hubs/{HUB}/waveform-capture/{second}/confirm", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 429 and int(resp.headers["Retry-After"]) >= 1
+    assert len(publisher.published) == 1
