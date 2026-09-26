@@ -128,3 +128,9 @@ def test_settlement_view_requires_a_proxy_asserted_viewer(monkeypatch: pytest.Mo
     assert client.get("/og/api/views/settlement", headers={"X-Remote-User": "viewer"}).status_code == 401
     spoof = {"X-Remote-User": "viewer", "X-OG-Proxy-Auth": "wrong"}
     assert client.get("/og/api/views/settlement", headers=spoof).status_code == 401
+
+
+def test_create_app_mounts_the_settlement_view() -> None:
+    from opengrid.api.app import create_app
+
+    assert "/og/api/views/settlement" in create_app().openapi()["paths"]
