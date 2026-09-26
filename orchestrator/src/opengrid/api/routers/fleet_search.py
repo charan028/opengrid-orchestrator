@@ -61,7 +61,7 @@ HEALTH_LABELS: dict[str, str] = {
 }
 HEALTH_STATES = {label: state for state, label in HEALTH_LABELS.items()}
 ACTIVITIES = ("delivering", "serving_home", "charging", "idle")
-#: |P| at or under this is idle; above it the sign says discharging (+) or charging (-).
+#: |P| at or under this is idle. Sign convention (interfaces/mqtt/telemetry.schema.json): +charge / -discharge.
 IDLE_KW = 0.1
 _RELEASE_PROPOSAL_KIND = "safestop-release"  # api.routers.safestop's proposal kind for a release request
 
@@ -94,9 +94,9 @@ _HEALTH_SQL = (
 )
 _LEASED = "(s.lease_expires_at IS NOT NULL AND s.lease_expires_at > now())"
 _ACTIVITY_SQL: dict[str, str] = {
-    "delivering": f"(s.p_kw > {IDLE_KW} AND {_LEASED})",
-    "serving_home": f"(s.p_kw > {IDLE_KW} AND NOT {_LEASED})",
-    "charging": f"(s.p_kw < -{IDLE_KW})",
+    "delivering": f"(s.p_kw < -{IDLE_KW} AND {_LEASED})",
+    "serving_home": f"(s.p_kw < -{IDLE_KW} AND NOT {_LEASED})",
+    "charging": f"(s.p_kw > {IDLE_KW})",
     "idle": f"(abs(coalesce(s.p_kw, 0)) <= {IDLE_KW})",
 }
 _ACTIVITY_CASE = (
@@ -712,7 +712,7 @@ def _activity(p_kw: float | None, leased: bool, health: str) -> str:
         return "fault"
     if p_kw is None or abs(p_kw) <= IDLE_KW:
         return "idle"
-    if p_kw < 0:
+    if p_kw > 0:  # +charge / -discharge
         return "charging"
     return "delivering" if leased else "serving_home"
 

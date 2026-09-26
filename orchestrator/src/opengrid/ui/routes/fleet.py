@@ -76,7 +76,7 @@ SORT_COLUMNS: dict[str, str] = {
     "bank": "Bank",
     "zone": "Zone",
     "soc": "SoC (%)",
-    "kw": "P (kW)",
+    "kw": "P (kW, +chg/\u2212dis)",
     "health": "Health",
     "age": "Telemetry age",
     "hw": "HW rev",
@@ -161,7 +161,7 @@ def bulk_risk_reasons(hubs: list[dict[str, Any]], hub_ids: list[str]) -> list[st
             for obligation in obligations:
                 label = _serving_label(obligation)
                 serving[label] = serving.get(label, 0) + 1
-        elif float(hub.get("p_kw") or hub.get("kw") or 0) > 0.1:
+        elif float(hub.get("p_kw") or hub.get("kw") or 0) < -0.1:  # +charge / -discharge
             delivering += 1
         if str(hub.get("health") or "").lower() in ("fault", "offline"):
             faulted += 1

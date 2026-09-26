@@ -16,7 +16,7 @@
     <dl class="fl-kv">
       <div><dt>Last communication</dt><dd>{{ dash(st.last_seen_at) }}
         <span class="stale-badge" data-since="{{ st.last_seen_at }}" data-stale-after="6">age: unknown</span></dd></div>
-      <div><dt>Power</dt><dd>{{ dash(st.p_kw) }} kW <span class="og-card-meta" title="+ discharging, &minus; charging">(+ out / &minus; in)</span></dd></div>
+      <div><dt>Power</dt><dd>{{ dash(st.p_kw) }} kW <span class="og-card-meta" title="+ charging, &minus; discharging">(+ charge / &minus; discharge)</span></dd></div>
       <div><dt>SoC</dt><dd>{{ dash(st.soc_pct) }} % &middot; {{ dash(st.soc_kwh) }} kWh</dd></div>
       <div><dt>Above reserve</dt><dd>{{ dash(st.above_reserve_kwh) }} kWh</dd></div>
     </dl>

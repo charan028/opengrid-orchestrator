@@ -275,7 +275,9 @@ def test_hub_detail_aggregates_and_tolerates_missing_tables(
         ]
     )
     body = search_client.get("/og/api/fleet/hubs/hub-0001/detail", headers=VIEWER_HEADERS).json()
-    assert body["status"]["health_label"] == "OK" and body["status"]["activity"] == "charging"
+    assert (
+        body["status"]["health_label"] == "OK" and body["status"]["activity"] == "serving_home"
+    )  # -2 kW = discharging, no lease
     assert body["status"]["soc_pct"] == 50.0 and body["status"]["above_reserve_kwh"] == 11.76
     assert body["telemetry"]["fields"] == {"ts": seen, "p_kw": -2.0, "cell_temp_c": 27.0}
     assert body["location"]["feeder_id"] == "F-1"
