@@ -3,17 +3,132 @@
 Self-contained SVG/HTML written for this repository, not produced by a diagramming tool: plain SVG
 elements laid out by a small throwaway script (see "How these were verified", point 4), with no external
 resources (no CDN, web fonts, remote images or externally loaded scripts; inline CSS only; system font
-stack). Verified against `main @ f3b3365` (this working copy, branch `wp/doc3-diagrams`, rebased onto
-`f3b3365` — the fourth snapshot in this diagram set's history: `7669a7c` → `fcaa2ca` → `f3b3365`).
+stack). Verified against `main @ 434d230` (this working copy, branch `wp/doc3-diagrams`, rebased onto
+`434d230` — the fifth snapshot in this diagram set's history: `7669a7c` → `fcaa2ca` → `f3b3365` →
+`daef460` → `434d230`).
 
-**These diagrams are a snapshot of `main @ f3b3365` (2026-09-26, deployed).** This round's headline: PQ
-wave 2's ingestion and guardian checks are now LIVE (`9153dc2`), and the obligation lifecycle in diagram
-03 is essentially fully driven — `R-ADMIT-REJECT`, the `R-RENOM-GATE` self-loop, and
-`FULFILLED`/`SHORTFALL → SETTLED` all now have real production callers, leaving only the `L0`/`L1`
-mid-window overrides undriven. Every one of the lead's reported commits was independently re-verified
-against this checkout's code — not the commit messages — before being drawn; see "Resolved since
-`fcaa2ca`" and "Still open" below for exactly what changed and what didn't. (The `7669a7c` → `fcaa2ca`
-delta is kept further down, under "Resolved since `7669a7c`", as history.)
+**These diagrams are a snapshot of `main @ 434d230` (2026-09-26).** This round's headline: the obligation
+lifecycle (diagram 03) is now **fully driven, zero remaining gaps** — `R-COMMIT-LOCK-OVERRIDE-L0`/`-L1`
+(the last undriven reason codes) are now computed every cycle by `allocator.cycle.classify_hub_loss()`.
+The calibration loop (`cmd/cal`/`ack/cal`) and allocator PQ eligibility are now LIVE; the asset-health
+drift sweep has a real caller but is switched off by config; a two-person guardian-signed safe-stop
+RELEASE, an ERCOT_AS capacity-hold/deployment model, and K7 scope-posture escalation all shipped. Every
+claim was re-verified in this checkout's code, not the commit messages; see "Resolved since `f3b3365`"
+and "Still open" below. (Earlier rounds' deltas are kept further down as history; the `7669a7c` pass's
+WP-H mistake — this diagram set once wrongly marked waveform sample generation absent — was corrected in
+the `f3b3365` round and is not repeated here.)
+
+## Resolved since `f3b3365` (verified at `434d230`)
+
+- **The obligation lifecycle is now fully driven — 0 remaining gaps.** `allocator/cycle.py:260`'s
+  `classify_hub_loss()` (NEW, `4913a95`) runs every cycle and attributes each bank's lost capacity to
+  `L0` (FAULT hubs, device safety), `L1` (healthy hubs held below `rated_kw` by the reserve floor), or
+  `INFEASIBLE` (stale/offline) — the largest wins, and an active `L2` allocator instruction still binds
+  first (`engine/escalation.py`'s `_PRECEDENCE`, `L0>L1>L2>INFEASIBLE`, `947c9f5`). This drives the
+  previously-undriven `R-COMMIT-LOCK-OVERRIDE-L0`/`-L1` reason codes. Diagram 03 now shows 12 of 12
+  state-machine edges LIVE; diagram 02's S2 side panel and K13 addendum updated. **Narrower caveat kept
+  below:** the code path is proven live every cycle; an `L0`/`L1` mid-window transition firing on a real
+  obligation has not separately been observed.
+- **ERCOT_AS is now a capacity hold, not a grant** (`d43da06`). `allocator/cycle.py:147-162`'s `is_as_hold`
+  path grants **0 kW** (`R-GRANT-AS-HOLD`) for an AS-committed bank until an operator deploys it; new
+  `POST`/`GET`/`DELETE /og/api/dispatch/as-deployments` (`api/routers/dispatch.py:74`) opens a
+  time-bounded deployment window that then discharges the bank up to its committed kW for that one
+  window. Diagrams 02 and 03 updated.
+- **K7 posture escalation and safe-stop request are live** (`guardian/escalation.py`). A new
+  `EscalationTracker` watches each tick's veto ratio per bank/zone; over 5% vetoed in a tick flips that
+  scope to `CONSERVATIVE` (written to the new `og.scope_posture` table, migration `0019`, alert
+  `ALR-SCOPE-CONSERVATIVE`) — `engine/gateways.py` reads the posture table and feeds `CONSERVATIVE`
+  scopes to the allocator as `LIMIT`/`BLOCK` instructions (K5), the same shape as a real L2 order. Three
+  consecutive `CONSERVATIVE` ticks raise `ALR-SAFE-STOP-REQUESTED` — this only *proposes* a stop; nothing
+  in the code engages one without an operator's own confirmation (K8). Diagrams 01 and 02 updated.
+- **Degraded modes are health/UI display, not an engine gate.** `NO_NEW_COMMITMENTS`,
+  `HOLD_LOCAL_AUTONOMY`, `HOLD` and `DIST_DEFERRAL_OPEN_LOOP` (new `og.degraded_mode_state` table,
+  migration `0021`) are computed and shown by `health`/`ui`/`api`; grep finds 0 references to any of the
+  four in `contracts` — nothing in the admission/dispatch path actually checks or enforces them. Drawn as
+  monitoring-only in diagrams 01 and 02, not as an admission gate.
+- **Two-person safe-stop RELEASE is built and signed — overturning this document's prior "not built"
+  claim** (`f27e4e3`). `guardian/stop_release.py`: operator A requests, operator B approves (`api/routers/
+  safestop.py` returns 403 if B==A); the release event is traced as a Tier-2 `og.operator_action`
+  (`SAFE_STOP_RELEASE`), then guardian-signed — every `StopEvent` this module returns is signed before
+  return (`stop_release.py:107-120`; the `unsigned` object always gets `.model_copy(update=
+  {"signature": ...})`, closing what had been an unsigned-bypass risk). Signing only fires for operators
+  named in the `[guardian].stop_release_authorised_operators` allow-list, empty by default. Test operators
+  `og-op-a`/`og-op-b` are env-overridable, not production ids. Diagrams 01, 02 and 03 updated; diagram 04
+  and this README's earlier "not built" wording removed.
+- **Per-bank load-zone pricing (D-10) exists but ships disabled.** `fleet/seed.py`'s `ZoneBlockConfig`
+  (Austin Energy `LZ_AEN` / CPS Energy `LZ_CPS` as optional extra load zones) defaults `enabled=False`
+  (`f5058af`); the base fleet topology and every table are unaffected either way. Diagrams 02 and 05
+  reference this as disabled-by-default, not built-and-off.
+- **Allocator PQ-aware selection is split: eligibility filtering is LIVE, continuous monitoring is not**
+  (`0bfac90`). `engine.pq_eligibility` (wired into `engine/__init__.py`'s periodic tasks) refreshes each
+  PQ-sensitive profile's eligible-hub set from `og.hub_inverter_pq` + live health on a
+  `PQ_ELIGIBILITY_REFRESH_S` timer; `selector/gate.py:526`'s `exceeds_pq_eligible_capacity()` refuses to
+  commit an obligation beyond that eligible capacity — a real, live admission-time control. Separately,
+  `allocator/pq_monitor.py` (continuous post-commit monitoring) still has 0 callers anywhere. Diagram 06
+  redrawn to show this split rather than one uniform "unwired" status.
+- **The calibration command loop is now fully wired end to end** (migration `0016`). `guardian/
+  mqtt_io.py:158` publishes `cmd/cal/<hub_id>`; `engine/__init__.py:1008` routes the matching
+  `ack/cal/<hub_id>` to `assets.calibration_ack.handle_calibration_ack()`; new `og.calibration_command`
+  table (migration `0016`) persists the round trip. This overturns the prior round's "0 wiring either
+  side" claim. Diagrams 01 and 06 updated.
+- **The asset-health drift sweep now has a real caller — but ships switched off.** `og-settle`'s
+  `JobRunner` (`settle/main.py:125`) does call `make_asset_drift_job()` → `assets.runner.run_once()` →
+  `AssetHealthService`, a real production call path where none existed before. It is gated by
+  `[assets].drift_enabled`, which is `false` in this checkout (`orchestrator/config/orchestrator.toml:
+  147`) — briefly `true` in an intermediate commit (`daef460`), then reverted (`b5f17a9`, "fleet-wide
+  false positives"). Correct status is **"wired, disabled by config,"** not "0 production callers" —
+  a materially different claim from the prior round's, called out separately in "Still open" below.
+  Diagram 06 updated.
+- **Solver runs in its own long-lived process** (`6503187`). `highs_solve` now runs in a
+  `ProcessPoolExecutor` (1 worker, warm-start hints passed in) instead of on `og-engine`'s own event
+  loop — model build/validate/price-of-firmness held the GIL for seconds per gate before, queuing every
+  2 s tick's `await` behind it (A11). If the solver process dies, the gate falls back to solving in a
+  thread and the pool is replaced (K7). Diagram 02's S1 updated.
+- **Banks propose to the guardian concurrently, bounded** (`9902d61`). Up to 4 banks propose at once
+  instead of serially — a full ERCOT_AS event at 07:00 spread over 24 banks meant up to 24×3 synchronous
+  K10 pre-image/batch-row/`NOTIFY` commits serialized on one tick; one bank's failed proposal is logged
+  and never blocks the rest (K7). Diagram 02's S4 updated.
+- **Heartbeat and fleet/PQ persistence moved off the 2 s tick** (`0e9969f`/`c5d8374`). Both now run as
+  their own periodic tasks — a host disk stall had made these commits take up to 10 s while heartbeat was
+  the tick's first `await` (observed 8–17 s ticks). Heartbeat is only written while the tick keeps
+  completing within 3 cycles, so a hung tick still reads as engine-down to health. New `CYCLE_LATENCY`
+  trace event (`86488e8`) times each tick broken out by phase (heartbeat, fleet_flush, pq_flush,
+  gate_schedule, lifecycle, allocator, energy_check, escalation, guardian_check, propose) plus event-loop
+  lag, over a 300-tick window. Diagram 02's S4 updated.
+- **Safety hardening** (`f726fd1`): K12's clock now reads a kernel `adjtimex` port and fails closed on
+  error rather than assuming synced; G-19 re-verifies an override claim against the guardian's *own* read
+  (an `L2` claim is checked against the guardian's own instruction view, `L0`/`L1`/`INFEASIBLE` against
+  its own capability read) instead of trusting the claimed reason alone — stale telemetry now vetoes the
+  claim instead of passing it through; G-03 bounds bank kVA loading in both directions; G-06's feeder ids
+  are read from `fleet.seed.feeder_id_for()` rather than guessed; calibration-command replay
+  (`(epoch, seq)` reuse) is rejected; K8 no longer accepts an empty payload as a valid stop event. Diagram
+  02's guardian grid and side panel updated.
+- **MQTT identity hardening.** `platform/mqtt.py:109`'s `compose_client_id()` composes every client id as
+  `<[mqtt].client_id_prefix>[-<OG_WS>]-<process>` and refuses (`MqttIdentityError`) a production-looking
+  id when a workspace is set or `general.env != "prod"`; a workspace without its own MQTT credentials is
+  refused rather than falling back to production users (`mqtt.py:139-149`). On the simulator side,
+  `ogsim/common/config.py:132`'s `resolve_topic_root()` gives `OG_MQTT_ROOT` precedence over the YAML
+  `topic_root` (mirroring the orchestrator's own config precedence), and `fleet.yaml:59` documents the
+  same precedence for the simulator's signing-key override. `orchestrator/config/test.toml:116` now sets
+  its own `blob_store_dir = "var/pq_waveform"` so test runs no longer share the production blob
+  directory. Diagram 01's MQTT panel and sources updated.
+- **Measured K1/K2 proof counters are real, not just traced.** New `og.invariant_check` /
+  `invariant_violation` / `invariant_trace_watermark` tables (migration `0014`, dedupe + resume-cursor
+  follow-up in `0017`) are written solely by `opengrid.invariants`, one row per named measured check
+  (last run, duration, violations this run, running total); `api/routers/{health,dispatch}.py` read them
+  for the measured counters the UI/API surface. Diagram 05's new invariants group; diagram 02's K-check
+  references updated.
+- **Base server reconfirmed the permanent host (D-16); deploy hardened further.** No decommission
+  wording exists anywhere in the source read for this diagram set. Postgres's data directory moved to
+  `/srv/pgdata/17/main`; backups moved to `/srv/ogbackup` (override `OG_BACKUP_DIR`); new
+  `deploy/RUNBOOK.md` and `deploy/mosquitto/provision_ws_users.{py,sh}`; `og-api` gained `api_proxy.env`;
+  `og-sim-fleet`/`og-sim-control` gained `OGSIM_ENV=prod`. Diagram 04 updated throughout.
+- **Migration renumbering note.** `0015` is genuinely absent on this branch (allocated elsewhere to an
+  in-flight `customer_services` migration by another work package that never landed here) — migrations on
+  disk run `0001`–`0014`, `0016`–`0023` (22 files, confirmed by directory listing). 7 new tables since
+  `f3b3365`: `invariant_check`, `invariant_violation`, `invariant_trace_watermark`, `scope_posture`,
+  `as_deployment`, `degraded_mode_state`, `calibration_command`; plus a new `og.pnl.delivery_charge`
+  column (`0023`). Table count 40 → 47. Diagram 05 and the Index below updated.
 
 ## Resolved since `fcaa2ca` (verified in code, `f3b3365`)
 
@@ -28,17 +143,9 @@ delta is kept further down, under "Resolved since `7669a7c`", as history.)
   (real Postgres ports) — confirmed called from `service.py`'s `_check_power_quality()`, itself already
   in the same violations list every other G-check feeds, and wired via `repo.build_pg_ports()`. Diagrams
   01, 02, 05, 06 updated.
-- **Correction: waveform sample generation ("WP-H") is on main, since `9153dc2`.** An earlier pass of
-  this diagram set marked it absent. `ogsim.fleet.wave` (a module separate from `pq.py`; its brief was
-  "call ogsim.fleet.pq's access function and don't edit it") builds real sample arrays:
-  `synthesize_raw_capture()` (`wave.py:282`) synthesizes v(t)/i(t) from S7.4's
-  sinusoid-plus-dominant-harmonics model, quantized to int16, and `build_summary_message()`
-  (`wave.py:184`) builds the periodic summary. `runtime.py`'s `FleetEngine` wires both in: a 1 %/min
-  `RotatingAuditSampler` (`wave_rotating_audit_captures()`, `runtime.py:170-186`), published every tick
-  (`runtime.py:454-455`); `__main__.py:113-123` answers an inbound `.../request` through
-  `handle_wave_capture_request()`. The earlier pass read only `ogsim.fleet.pq.inverter_state()`'s
-  docstring ("never generates samples itself") and did not grep for `wave.py`. Diagrams 01 and 06
-  corrected.
+- **Correction: waveform sample generation ("WP-H") is on main since `9153dc2`** — an earlier pass of
+  this diagram set wrongly marked it absent; `ogsim.fleet.wave.synthesize_raw_capture()` builds real
+  sample arrays and has stayed LIVE through every round since, including this one.
 - **Hub acks persisted; `obligation.at_risk` now set AND cleared; opportunity decisions recorded**
   (`01fbd38`). `fleet.flush()` writes `og.command_ack` (new migration `0012`) from the buffered MQTT
   `ack/#` stream. `EnergySufficiencyGateway` now calls the new `contracts.set_obligation_at_risk()` on
@@ -145,47 +252,56 @@ delta is kept further down, under "Resolved since `7669a7c`", as history.)
 - **Property-based tests for every invariant landed** (PR #1): `orchestrator/tests/property/` now has one
   file per invariant K1–K13 plus `test_energy_sufficiency.py` (17 files total).
 
-## Still open (re-verified at `f3b3365`)
+## Still open (re-verified at `434d230`)
 
 - **The engine cycle-latency p99 target is not proven met.** `engine.latency.CycleLatencyWindow` computes
   and traces p50/p99/max every ~5 min; the target (A11: "p99 < 500 ms at 2k hubs") is documented in the
   module's own docstring, but nothing in the code or config asserts or demonstrates it is currently met at
   that scale — the metric exists, the target does not yet have live/test proof. Diagram 02.
-- **The mid-window `SHORTFALL` escalation is not yet proven live.** `engine.escalation.ShortfallEscalator`
-  is fully coded and wired (60 s sustain, `L2`/`INFEASIBLE` reason codes) — but per the lead this has not
-  yet been observed firing on a real obligation in production. Diagram 03 (edge drawn LIVE, with this
-  caveat called out explicitly).
-- **`R-COMMIT-LOCK-OVERRIDE-L0`/`-L1` (mid-window device-safety / homeowner-reserve overrides) have 0
-  production callers.** Only the `L2`/`INFEASIBLE` sustained-signal paths and the window-end
-  `R-SHORTFALL-THRESHOLD` path reach `DELIVERING → SHORTFALL`. Diagram 03.
-- **Bank-level substitution (`allocator.substitute_hub()`) is wired but still never triggered** — unchanged
-  this round: `engine.main()` calls `allocator.configure(ledger)` at startup so it no longer raises
-  unconditionally, but grep still finds 0 production call sites for `substitute_hub()` itself. Diagram 03.
-- **The asset-health/calibration ladder is fully coded but has 0 production callers.** `opengrid.assets`
-  (new, `9153dc2`) has a complete `state_machine.py` (`OK→WATCH→DEGRADED→QUARANTINED→AWAITING_REPLACEMENT
-  →RECOMMISSIONING→OK`, fail-closed), a complete `AssetHealthService` (drift evaluation, calibration
-  request/result, quarantine, work orders, replacement, recommissioning — every transition traced), and
-  real Postgres repos — but grep finds 0 callers of `AssetHealthService` anywhere in `engine`/`guardian`/
-  `settle`/`api`. Guardian's own half (`G-25` calibration-command signing) IS wired (see "Resolved"
-  above); the gap is the missing scheduler/caller that would connect drift detection to it, not the
-  guardian. Consequently `hub_inverter_pq.asset_state`, `calibration_attempt`, `maintenance_work_order` and
-  `asset_event` all still never get written on this checkout. Diagrams 05, 06.
-- **The calibration-command MQTT wire path (`cmd/cal`/`ack/cal`) has 0 wiring, either side** — unchanged:
-  neither `opengrid` nor `ogsim` publishes/subscribes it. Diagrams 01, 06.
-- **Allocator PQ-aware selection/continuous monitoring is entirely unbuilt** — unchanged: grep for
-  `pq`/`PQ` across `opengrid.allocator` is still 0 files. This was never part of the lead's wave-2 report
-  and is called out separately so it isn't mistaken for part of it. Diagram 06.
+- **Mid-window `SHORTFALL` escalation: the code path is now proven live every cycle; firing on a real
+  obligation is not separately confirmed.** `allocator.cycle.classify_hub_loss()` runs unconditionally each
+  cycle and would attribute any lost capacity to `L0`/`L1`/`INFEASIBLE` today — this closes last round's
+  "0 production callers" gap for `R-COMMIT-LOCK-OVERRIDE-L0`/`-L1` and moves the mechanism itself to
+  "Resolved" above. What remains open is narrower: no log/trace evidence in this checkout shows an `L0` or
+  `L1` mid-window transition having actually fired against a real obligation, as opposed to the `L2`/
+  `INFEASIBLE` paths and the window-end `R-SHORTFALL-THRESHOLD` path, which are asserted separately.
+  Diagram 03 (all 12 edges drawn LIVE; this caveat is called out in the diagram's own text, not hidden).
+- **Bank-level substitution (`allocator.substitute_hub()`) is wired but still never triggered** — re-checked
+  this round, unchanged: `allocator/__init__.py:160` defines it and `engine.main()` still calls
+  `allocator.configure(ledger)` at startup, but grep finds 0 call sites for `substitute_hub(` anywhere
+  outside its own definition and the module README. Diagram 03.
+- **The asset-health drift sweep is wired but switched off by config — not "0 callers."** `og-settle`'s
+  `JobRunner` (`settle/main.py:125`) does call `make_asset_drift_job()` → `assets.runner.run_once()` →
+  `AssetHealthService` — a real caller now exists (see "Resolved" above) — but `[assets].drift_enabled =
+  false` in `orchestrator/config/orchestrator.toml:147` means the job never actually runs on this
+  checkout. It was briefly enabled in an intermediate commit (`daef460`) and reverted (`b5f17a9`,
+  "fleet-wide false positives") before `434d230`. Consequently `hub_inverter_pq.asset_state`,
+  `calibration_attempt`, `maintenance_work_order` and `asset_event` still never get written here — the
+  same observable outcome as last round, but for a different reason (a config flag, not a missing caller).
+  Diagrams 05, 06.
+- **Allocator continuous PQ monitoring is unbuilt; eligibility filtering (a related but separate
+  mechanism) is not — don't conflate the two.** `allocator/pq_monitor.py` still has 0 callers anywhere.
+  Separately, `engine.pq_eligibility` + `selector/gate.py:526`'s `exceeds_pq_eligible_capacity()` are LIVE
+  admission-time controls (see "Resolved" above) — that half moved out of "still open" this round. Diagram
+  06 draws the two halves distinctly rather than one "unbuilt" block.
+- **The customer-operator simulators (D-11) are in progress, not started.** `integration-sims/src/ogsim/
+  customer/` has 0 files on this checkout; `deploy/RUNBOOK.md` documents its systemd unit as "installed but
+  not enabled until the customer services go live." Diagrams 01 and 04 mark this in-progress, not built.
+- **The two-market direction (docs 08/09) is a prototype, not integrated code.** `docs/orchestrator/
+  07-delivery/prototypes/two_market_lp.py` exists alongside `09-optimizer-dispatcher-update.md`, but
+  nothing under `orchestrator/src` or `integration-sims/src` references it — it is not drawn as built in
+  any diagram, only noted as "in build" where the lead asked for a legend/box reference.
 
 ## Index
 
 | File | Shows | Main sources |
 |---|---|---|
-| [`01-system-architecture.svg`](01-system-architecture.svg) | The 6 orchestrator processes + 4 simulators + Postgres + Mosquitto + Apache; which process publishes/subscribes which MQTT topic family and owns which table groups; external live ERCOT/EIA/NWS vs `og-sim-market`, and the exact config key that switches between them. | `BUILD.md`, `orchestrator/config/orchestrator.toml`, `interfaces/mqtt/topics.md`, every process's `main.py`/`__init__.py`, `deploy/apache/opengrid.conf`, `dev/docker-compose.yml` |
-| [`02-dispatch-cycle.svg`](02-dispatch-cycle.svg) | The full dispatch stack as implemented: selector gate (HiGHS MILP/LP + F2 rule fallback) → real-time allocator 2 s cycle (tiers, PI loop, water-filling/substitution, price response) → ledger → engine→guardian handoff → guardian verdict (every G-check it actually runs, listed) → signed MQTT command batch → hub → ack/telemetry → settle. | `orchestrator/src/opengrid/{selector,allocator,ledger,engine,guardian,settle}/*.py`, `interfaces/mqtt/*.schema.json`, `interfaces/crypto.md`, `00-invariants.md` |
-| [`03-commitment-lifecycle.svg`](03-commitment-lifecycle.svg) | The obligation state machine exactly as coded in `state_machine.py`'s `_TRANSITIONS` table, the K13 commitment lock, substitution (hub-level vs. bank-level), and the `at_risk` flag — **each edge marked LIVE or NOT DRIVEN based on a full-repo grep for its reason code / trigger function.** | `orchestrator/src/opengrid/contracts/*.py`, `orchestrator/src/opengrid/ledger/__init__.py`, `orchestrator/src/opengrid/allocator/__init__.py`, `orchestrator/src/opengrid/engine/gateways.py` |
-| [`04-deployment.svg`](04-deployment.svg) | The base-server layout: every `systemd` unit with its venv/working directory/memory budget/ports, the Apache reverse-proxy rules, Postgres/Mosquitto, the deploy/rollback/backup flow, env-variable *names*; plus the local `docker compose` dev stack. | `deploy/README.md`, `deploy/systemd/*`, `deploy/apache/opengrid.conf`, `deploy/{cron,logrotate}/opengrid`, `dev/README.md`, `dev/docker-compose.yml`, `dev/.env.example` |
-| [`05-data-model.html`](05-data-model.html) | Every one of the 40 tables created or altered by migrations `0001`…`0013`, grouped into the 10 areas the work order asked for, with primary keys, foreign keys, one-line purpose, and which migration touched each (`0012` adds `og.command_ack`; `0013` only widens a CHECK constraint for `DATA_CENTER`, no new table). | `orchestrator/migrations/0001_init.sql` … `0013_service_type_data_center.sql` (read in full) |
-| [`06-power-quality-flow.svg`](06-power-quality-flow.svg) | The PQ pipeline the spec describes — waveform → transport → ingestion/storage → envelope checks (K14) → corrective ladder → asset health → work order → physical swap — **with every stage marked LIVE, BUILT-BUT-0-CALLERS, or PLANNED**, cross-checked against `docs/team/NOTICES.md`'s own wave 1/2/3 status. | `orchestrator/src/opengrid/pq_ingest/*.py`, `guardian/{pq_checks,pq_repo}.py`, `assets/*.py`, `core/pq/*.py`, `core/models/pq.py`, `integration-sims/src/ogsim/fleet/{pq,calibration,wave,runtime}.py`, `orchestrator/migrations/0010_service_profile.sql`, `0011_asset_health.sql`, `interfaces/mqtt/{pq_waveform_*,calibration_*,waveform_capture_request}.schema.json` |
+| [`01-system-architecture.svg`](01-system-architecture.svg) | The 6 orchestrator processes + 4 simulators (customer sim, D-11, marked in progress) + Postgres + Mosquitto + Apache; which process publishes/subscribes which MQTT topic family (incl. `cmd/cal`/`ack/cal`, NEW) and owns which table groups; external live ERCOT/EIA/NWS vs `og-sim-market`, and the exact config key that switches between them; hardened MQTT client-id/topic-root precedence. | `BUILD.md`, `orchestrator/config/orchestrator.toml`, `interfaces/mqtt/topics.md`, every process's `main.py`/`__init__.py`, `platform/mqtt.py`, `guardian/{stop_release,escalation,mqtt_io}.py`, `deploy/apache/opengrid.conf`, `dev/docker-compose.yml` |
+| [`02-dispatch-cycle.svg`](02-dispatch-cycle.svg) | The full dispatch stack as implemented: selector gate (HiGHS solver process + F2 rule fallback) → real-time allocator 2 s cycle (tiers, PI loop, water-filling/substitution, price response, K13 L0/L1/L2/INFEASIBLE attribution, ERCOT_AS capacity hold) → ledger → engine→guardian handoff (bounded-concurrent bank proposals, off-tick heartbeat/persistence, per-phase latency) → guardian verdict (every G-check it actually runs, K7 posture escalation, two-person safe-stop RELEASE) → signed MQTT command batch → hub → ack/telemetry → settle. | `orchestrator/src/opengrid/{selector,allocator,ledger,engine,guardian,settle}/*.py`, `interfaces/mqtt/*.schema.json`, `interfaces/crypto.md`, `00-invariants.md` |
+| [`03-commitment-lifecycle.svg`](03-commitment-lifecycle.svg) | The obligation state machine exactly as coded in `state_machine.py`'s `_TRANSITIONS` table, the K13 commitment lock (all of `L0`/`L1`/`L2`/`INFEASIBLE` now driven), substitution (hub-level vs. bank-level), the `at_risk` flag, and the ERCOT_AS capacity hold — **each edge marked LIVE or NOT DRIVEN based on a full-repo grep for its reason code / trigger function; 12 of 12 edges are LIVE at `434d230`.** | `orchestrator/src/opengrid/contracts/*.py`, `orchestrator/src/opengrid/ledger/__init__.py`, `orchestrator/src/opengrid/allocator/cycle.py`, `orchestrator/src/opengrid/engine/gateways.py`, `api/routers/dispatch.py` |
+| [`04-deployment.svg`](04-deployment.svg) | The base-server layout (D-16, the confirmed permanent host — no decommission wording): every `systemd` unit with its venv/working directory/memory budget/ports/env-vars, the Apache reverse-proxy rules, Postgres (`/srv/pgdata`)/Mosquitto, the deploy/rollback/backup (`/srv/ogbackup`) flow per `deploy/RUNBOOK.md`; plus the local `docker compose` dev stack. | `deploy/README.md`, `deploy/RUNBOOK.md`, `deploy/systemd/*`, `deploy/apache/opengrid.conf`, `deploy/{cron,logrotate}/opengrid`, `deploy/mosquitto/provision_ws_users.{py,sh}`, `dev/README.md`, `dev/docker-compose.yml`, `dev/.env.example` |
+| [`05-data-model.html`](05-data-model.html) | Every one of the 47 tables created or altered by migrations `0001`…`0023` (`0015` skipped, allocated elsewhere), grouped into 11 areas including a new invariants/posture/AS-hold group, with primary keys, foreign keys, one-line purpose, and which migration touched each. | `orchestrator/migrations/0001_init.sql` … `0023_pnl_delivery_charge.sql` (read in full) |
+| [`06-power-quality-flow.svg`](06-power-quality-flow.svg) | The PQ pipeline the spec describes — waveform → transport → ingestion/storage → envelope checks (K14) → corrective ladder (calibration loop now fully wired, gated off by config) → asset health → work order → physical swap, plus the allocator PQ-eligibility/monitoring split — **with every stage marked LIVE, WIRED-BUT-CONFIG-DISABLED, BUILT-BUT-0-CALLERS, or PLANNED**, cross-checked against `docs/team/NOTICES.md`'s own wave 1/2/3 status. | `orchestrator/src/opengrid/pq_ingest/*.py`, `guardian/{pq_checks,pq_repo,mqtt_io}.py`, `assets/*.py`, `allocator/{pq_eligibility,pq_monitor}.py`, `engine/pq_eligibility.py`, `settle/main.py`, `core/models/pq.py`, `integration-sims/src/ogsim/fleet/{pq,calibration,wave,runtime}.py`, `orchestrator/migrations/0010_service_profile.sql`, `0011_asset_health.sql`, `0016_calibration_command.sql`, `interfaces/mqtt/{pq_waveform_*,calibration_*,waveform_capture_request}.schema.json` |
 
 ## How these were verified
 
@@ -228,64 +344,102 @@ delta is kept further down, under "Resolved since `7669a7c`", as history.)
    `contracts.exercise_renomination_point` for the `R-RENOM-GATE` self-loop) — none failed verification,
    and the two items the lead asked to keep "still open" (cycle p99, mid-window `SHORTFALL` liveness) are
    exactly the two called out that way below, no more and no fewer.
+   This round (`f3b3365 → 434d230`, ~30 commits): every topic the lead flagged was re-derived from code,
+   not from the commit subject lines — most consequentially, two claims this document itself carried
+   forward from the prior round turned out to be stale on a fresh read: the calibration-command MQTT path
+   ("0 wiring either side") is now fully wired (`guardian/mqtt_io.py:158` → `engine/__init__.py:1008`),
+   and the asset-health drift sweep ("0 production callers") now has a real caller
+   (`settle/main.py:125`) that a config flag happens to keep switched off. Both are called out explicitly
+   as corrections above and in "Still open," not silently folded in, per the same "reviewer statements are
+   claims to verify, not facts to assume" standard applied every round.
 
 ## Planned vs. built (consolidated across all six diagrams)
 
 **Built and live** (normal operation drives it every cycle, confirmed by tracing the caller chain):
 
-- All 6 orchestrator processes (`og-feeds/engine/guardian/safestop/settle/api`) and all 4 simulators
-  (`og-sim-fleet/scada/market/control`); the config-only live-vs-simulator switch for ERCOT/EIA/NWS.
-- Selector — LP plans solve again (charge envelope + soft C15 fix, one capability read/bank; `L-DA`/`L-ID`
-  both), with F2 rule fallback — → real-time allocator (tiers, `DIST_DEFERRAL` PI, water-filling, price
-  response, hub ramp limiting) → ledger `reserve()` (K2, `og.commitment`) → the **full obligation
-  lifecycle**: `OFFERED → SELECTED → COMMITTED → DELIVERING → FULFILLED`/`SHORTFALL` (window-end
-  threshold, or mid-window after 60 s sustained `L2`/`INFEASIBLE`) `→ SETTLED`, plus `→ EXPIRED`,
+- All 6 orchestrator processes (`og-feeds/engine/guardian/safestop/settle/api`) and all 4 fleet-side
+  simulators (`og-sim-fleet/scada/market/control`); the config-only live-vs-simulator switch for
+  ERCOT/EIA/NWS; hardened MQTT client-id/topic-root/blob-dir separation between prod and test workspaces.
+- Selector — `highs_solve` now in its own long-lived solver process, LP plans solving again (charge
+  envelope + soft C15 fix, one capability read/bank; `L-DA`/`L-ID` both), with F2 rule fallback — →
+  real-time allocator (tiers, `DIST_DEFERRAL` PI, water-filling, price response, hub ramp limiting, K13's
+  `classify_hub_loss()` attributing `L0`/`L1`/`INFEASIBLE` every cycle, the ERCOT_AS capacity hold/
+  deployment window) → ledger `reserve()` (K2, `og.commitment`) → the **full obligation lifecycle, 0
+  remaining gaps**: `OFFERED → SELECTED → COMMITTED → DELIVERING → FULFILLED`/`SHORTFALL` (window-end
+  threshold, or mid-window after sustained `L0`/`L1`/`L2`/`INFEASIBLE`) `→ SETTLED`, plus `→ EXPIRED`,
   `→ REJECTED` (both admission-time capacity and selection-time infeasible), and the `DELIVERING →
-  DELIVERING` re-nomination self-loop — → engine→guardian handoff (gates run off-tick in a background
-  task; isolated per-trigger failure) → guardian signing (every check G-01, G-01-ENERGY, G-02 – G-06,
-  G-09, G-13 – G-15, G-19, G-20, **G-21 – G-25 (PQ, NEW)**) → a command-batch envelope signature separate
-  from the verdict's → signed command batch → hub → ack (now persisted as `og.command_ack`)/telemetry.
-- The K13 commitment lock's *exception* machinery (`check_commitment_lock`, guardian G-19, the allowed
-  release-reason set); hub-level substitution (unhealthy hub excluded, healthy one water-filled in) inside
-  the automatic 2 s cycle, traced; the `REPLACE_INVERTER` scenario-control action end to end.
-- **PQ wave 2 ingestion + guardian checks (NEW, `9153dc2`):** `ogsim.fleet.wave.py` **synthesizes real
+  DELIVERING` re-nomination self-loop — → engine→guardian handoff (bounded-concurrent bank proposals,
+  heartbeat/persistence off-tick, per-phase `CYCLE_LATENCY`; isolated per-trigger gate failure) → guardian
+  signing (every check G-01, G-01-ENERGY, G-02 – G-06, G-09, G-13 – G-15, G-19, G-20, G-21 – G-25 (PQ),
+  plus K7 posture escalation to `CONSERVATIVE`/`ALR-SAFE-STOP-REQUESTED`) → a command-batch envelope
+  signature separate from the verdict's → signed command batch → hub → ack (persisted as
+  `og.command_ack`)/telemetry.
+- The K13 commitment lock's *exception* machinery (`check_commitment_lock`, guardian G-19 re-verifying the
+  claim against its own read, the allowed release-reason set); hub-level substitution (unhealthy hub
+  excluded, healthy one water-filled in) inside the automatic 2 s cycle, traced; the `REPLACE_INVERTER`
+  scenario-control action end to end.
+- **Two-person guardian-signed safe-stop RELEASE (NEW, `f27e4e3`):** operator-A-requests /
+  operator-B-approves, `og.operator_action` traced, signed only for allow-listed operators — see
+  "Resolved since `f3b3365`" above. This overturns every earlier round's "not built" status for release.
+- **K7 scope-posture escalation (NEW):** `guardian/escalation.py`'s `EscalationTracker` → `og.scope_posture`
+  → `engine/gateways.py` feeding `CONSERVATIVE` scopes to the allocator as real `LIMIT`/`BLOCK`
+  instructions. Degraded modes (`NO_NEW_COMMITMENTS`/`HOLD_LOCAL_AUTONOMY`/`HOLD`/
+  `DIST_DEFERRAL_OPEN_LOOP`) are also live, but as `health`/`ui`/`api` display only — 0 references in
+  `contracts`, so they do not gate dispatch.
+- **The calibration command loop (NEW, migration `0016`):** `guardian/mqtt_io.py:158` publishes
+  `cmd/cal/<hub_id>`; `engine/__init__.py:1008` routes `ack/cal/<hub_id>` to
+  `assets.calibration_ack.handle_calibration_ack()`. **Allocator PQ-eligibility filtering (NEW,
+  `0bfac90`)** is a separate, also-live control: `engine.pq_eligibility` + `selector/gate.py:526`'s
+  `exceeds_pq_eligible_capacity()` refuse to commit beyond a profile's live-health-derived eligible
+  capacity.
+- **PQ wave 2 ingestion + guardian checks (`9153dc2`):** `ogsim.fleet.wave.py` **synthesizes real
   waveform samples** (`synthesize_raw_capture()`, S7.4's sinusoid-plus-harmonics model) and periodic
-  summaries, published every tick plus a 1 %/min rotating audit and on-demand request replies (corrected
-  in this document — see "Resolved" above); `og-engine` subscribes and batch-flushes `scada/wave/.../
-  summary`, and validates+stores `.../raw` in a background worker; ogsim's own summary gate defaults to
-  10 s. Guardian's G-21–G-25 read real Postgres state (envelope limits, measured/modelled measurement,
-  asset-state, calibration history) and feed the same violations list every other check does.
-- `obligation.at_risk` now set **and cleared** every cycle (not just alerted); `og-engine`'s durable
-  per-start epoch (K6), buffered/async SCADA + telemetry persistence, per-hub ramp-limited setpoints, and
-  cycle-latency (p50/p99) tracing; `og-settle`'s single `run_forever` loop; `og-api`'s process heartbeat;
-  per-product feed-staleness thresholds; `og-feeds`' single `run_forever` loop.
-- All 40 data-model tables (schema; `DATA_CENTER` service type added, additive); the full
-  deploy/systemd/Apache/Postgres/Mosquitto topology (unchanged since `fcaa2ca`) and the local dev
-  `docker compose` stack.
+  summaries, published every tick plus a 1 %/min rotating audit and on-demand request replies; `og-engine`
+  subscribes and batch-flushes `scada/wave/.../summary`, and validates+stores `.../raw` in a background
+  worker. Guardian's G-21–G-25 read real Postgres state and feed the same violations list every other
+  check does.
+- `obligation.at_risk` now set **and cleared** every cycle (not just alerted); measured K1/K2 proof
+  counters (`og.invariant_check`/`invariant_violation`, written solely by `opengrid.invariants`, read by
+  `api/routers/{health,dispatch}.py`); `og-engine`'s durable per-start epoch (K6), buffered/async SCADA +
+  telemetry persistence, per-hub ramp-limited setpoints, and cycle-latency (p50/p99) tracing; `og-settle`'s
+  single `run_forever` loop; `og-api`'s process heartbeat; per-product feed-staleness thresholds;
+  `og-feeds`' single `run_forever` loop; `og-engine`'s own `/metrics` (NEW, loopback-only, confirming half
+  of the prior round's "Uncertain" item).
+- All 47 data-model tables across 22 migration files (`DATA_CENTER` service type, additive; 7 brand-new
+  tables for invariants/posture/AS-hold/calibration — see "Resolved" above); the full
+  deploy/systemd/Apache/Postgres/Mosquitto topology, hardened this round (`/srv/pgdata`, `/srv/ogbackup`,
+  `deploy/RUNBOOK.md`, base confirmed the permanent host, D-16) and the local dev `docker compose` stack.
+
+**Wired but disabled by config** (a real production caller now exists; a config flag keeps it from
+running — distinct from "0 callers"):
+
+- **The asset-health drift sweep.** `og-settle`'s `JobRunner` (`settle/main.py:125`) calls
+  `make_asset_drift_job()` → `assets.runner.run_once()` → `AssetHealthService`, but
+  `[assets].drift_enabled = false` (`orchestrator/config/orchestrator.toml:147`) means it never actually
+  runs on this checkout (briefly `true` in `daef460`, reverted in `b5f17a9` for fleet-wide false
+  positives). `hub_inverter_pq.asset_state`, `calibration_attempt`, `maintenance_work_order`, `asset_event`
+  still never get written as a result (diagrams 05, 06).
 
 **Built but 0 production callers** (the logic/schema exists and is unit-tested; nothing in a live process
 calls it):
 
-- Bank-level substitution (`allocator.substitute_hub()`) — wired (`engine.main()` calls
-  `allocator.configure(ledger)` at startup) but still 0 production call sites (diagram 03).
-- **The asset-health/calibration ladder** (`opengrid.assets`, NEW `9153dc2`) — a complete, tested state
-  machine + `AssetHealthService` (drift evaluation, calibration request/result, quarantine, work orders,
-  replacement, recommissioning, every transition traced) with real Postgres repos, but 0 callers anywhere
-  in `engine`/`guardian`/`settle`/`api`. Guardian's own `G-25` signing half IS wired; the gap is the
-  missing scheduler that would connect drift detection to a build-and-sign call. `hub_inverter_pq.
-  asset_state`, `calibration_attempt`, `maintenance_work_order`, `asset_event` all still never get written
-  (diagrams 05, 06).
-- `R-COMMIT-LOCK-OVERRIDE-L0`/`-L1` (mid-window device-safety/homeowner-reserve overrides) — legal in
-  `state_machine.py`'s transition table, 0 production callers; only the `L2`/`INFEASIBLE` sustained-signal
-  paths and the window-end threshold path are driven (diagram 03).
-- The calibration-command MQTT wire path (`cmd/cal`/`ack/cal`) — 0 wiring, either side, on either
-  deployable (diagrams 01, 06). Allocator PQ-aware selection/monitoring — 0 files reference `pq`/`PQ` in
-  `opengrid.allocator` at all; never part of any wave-2 report (diagram 06).
+- Bank-level substitution (`allocator.substitute_hub()`, defined at `allocator/__init__.py:160`) — wired
+  (`engine.main()` calls `allocator.configure(ledger)` at startup) but still 0 production call sites
+  outside its own definition and the module README (diagram 03).
+- Allocator continuous PQ monitoring (`allocator/pq_monitor.py`) — 0 callers anywhere; not to be confused
+  with PQ-eligibility filtering, which is live (see "Built and live" above). Never part of any wave-2
+  report (diagram 06).
 
 **Planned, no code at all:** the corrective ladder's rebalance / reactive-PF / exclusion steps; a
 stand-alone "wave-ingestion service" process (ingestion is real, but folded into `og-engine`, not a
-separate process). (Waveform sample generation, "WP-H," was wrongly listed here in an earlier pass — it
-is in fact LIVE; see "Built and live" above and the correction note at the top.)
+separate process); the customer-operator simulators (D-11 — `integration-sims/src/ogsim/customer/` has 0
+files; its systemd unit is documented as installed but not enabled). (Waveform sample generation, "WP-H,"
+was wrongly listed here in an earlier pass — it is in fact LIVE; see "Built and live" above.)
+
+**Prototype only, not integrated:** the two-market direction (docs 08/09) — `docs/orchestrator/
+07-delivery/prototypes/two_market_lp.py` exists, but nothing under `orchestrator/src` or
+`integration-sims/src` references it. Drawn only as an "in build" legend note where asked for, never as
+built.
 
 **Not a gap (by design):** the spec's "SCED-interval LP" is explicitly folded into the allocator's
 per-cycle price response (`02a-mvp-s-spec-engine.md` §3.1) rather than run as its own 5-minute solve —
@@ -299,10 +453,12 @@ Per the work order, listed here rather than guessed at:
   `dev/scripts/gen_mosquitto_acl.py`). This topic pattern does not appear in `interfaces/mqtt/topics.md`
   and no publisher or subscriber for `scada/ctl/#` was found anywhere in `orchestrator/src` or
   `integration-sims/src`. Likely reserved/vestigial; not drawn as a live topic in diagram 01.
-- **Prometheus `/metrics` endpoints for processes other than `og-guardian`.** `platform/metrics.py`
-  defines metric objects that read as if `og-engine`/`og-feeds` should also export them, and
-  `orchestrator.toml` has a shared `[metrics].bind_host`, but `start_http_server` is only ever called
-  from `guardian/main.py` (port 9103). Diagram 04 draws only the guardian's port as confirmed.
+- **Prometheus `/metrics` for `og-feeds` (partially resolved this round).** `og-engine` is now confirmed:
+  `engine/metrics.py:56`'s `start_metrics_server()` (called from `engine/__init__.py:915`) serves
+  `/metrics` on `[metrics].engine_port`, loopback-only. `og-feeds` is still unconfirmed — grep finds 0
+  calls to `start_http_server`/`start_metrics_server` anywhere under `feeds/`, though `platform/
+  metrics.py`'s shared metric objects still read as if it should also export them. Diagram 04 now draws
+  the guardian's and engine's ports as confirmed, and still does not draw one for `og-feeds`.
 - **Exact per-environment hub/bank counts in `dev/config/fleet.dev.yaml` and `scada.dev.yaml`** — diagram
   04's "200 hubs / 8 banks (dev default)" is sourced from `dev/config/dev.toml`'s `[fleet]` section and
   `dev/docker-compose.yml`'s comments (which say these YAML files "must both change together" with it);
@@ -314,3 +470,15 @@ Per the work order, listed here rather than guessed at:
   triggered ledger primitive, between banks. Never changes an obligation's committed total.
 - **Inverter swap / replacement** — a physical hardware action (`ogsim.fleet.pq.replace_inverter`,
   `og.asset_event.event_type = INVERTER_REPLACED`). Remote **recalibration** is always tried first.
+- **Capacity hold (AS)** — an ERCOT_AS-committed bank's grant is 0 kW (`R-GRANT-AS-HOLD`) until an
+  operator opens a time-bounded deployment window, which then discharges it up to its committed kW for
+  that one window only (`og.as_deployment`). Distinct from a normal energy grant, which is never held back
+  this way.
+- **Posture / degraded mode** — two different, easily-confused concepts. *Posture* (`og.scope_posture`,
+  `NORMAL`/`CONSERVATIVE`) is guardian-computed per bank/zone from veto ratio and actively **feeds the
+  allocator** real dispatch instructions (K7). A *degraded mode* (`og.degraded_mode_state`) is
+  health/UI-computed and **display-only** — it is not read anywhere in `contracts` and does not gate
+  dispatch.
+- **Safe-stop RELEASE** — the two-person, guardian-signed act of lifting an engaged stop (`guardian/
+  stop_release.py`), distinct from *requesting* a stop (any operator, K8) or `ALR-SAFE-STOP-REQUESTED`
+  (the guardian merely proposing one after sustained `CONSERVATIVE` posture — never self-engaging it).

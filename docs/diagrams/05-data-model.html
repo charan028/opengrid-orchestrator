@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OpenGrid data model — migrations 0001-0013</title>
+<title>OpenGrid data model — migrations 0001-0023</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #0f172a; --muted: #64748b; --border: #e2e8f0;
@@ -56,12 +56,12 @@
 </head>
 <body>
   <h1>OpenGrid Orchestrator — Data Model</h1>
-  <p class="subtitle">Every table created or altered by <code>orchestrator/migrations/0001_init.sql</code> … <code>0013_service_type_data_center.sql</code>, schema <code>og</code>, grouped by area — 40 tables across 10 groups. Verified against main @ f3b3365 (0012 adds <code>og.command_ack</code>; 0013 only widens <code>og.contract.service_type</code>'s CHECK to add DATA_CENTER, no new table).</p>
+  <p class="subtitle">Every table created or altered by <code>orchestrator/migrations/0001_init.sql</code> … <code>0023_pnl_delivery_charge.sql</code>, schema <code>og</code>, grouped by area — 47 tables across 11 groups. Verified against main @ 434d230. <code>0015</code> is skipped (allocated to a customer_services migration that never landed on this branch); 7 tables are new since the <code>f3b3365</code> snapshot (<code>calibration_command</code>, <code>invariant_check</code>, <code>invariant_violation</code>, <code>invariant_trace_watermark</code>, <code>scope_posture</code>, <code>as_deployment</code>, <code>degraded_mode_state</code>), plus a new <code>og.pnl.delivery_charge</code> column.</p>
 
   <div class="legend">
     <div><span class="swatch" style="background:#1d4ed8"></span>primary key</div>
     <div><span class="swatch" style="background:#b45309"></span>foreign key target</div>
-    <div><span class="swatch" style="background:#94a3b8;border:1.5px dashed #64748b"></span>built (service exists), 0 production callers write it yet (PQ group only — see diagram 06)</div>
+    <div><span class="swatch" style="background:#94a3b8;border:1.5px dashed #64748b"></span>built + wired, but no row exists today — asset-health tables only, switched off by [assets].drift_enabled=false (PQ group — see diagram 06)</div>
   </div>
 
   <nav class="toc">
@@ -75,7 +75,8 @@
 <li><a href="#g6">Settlement / billing / P&amp;L</a> <span class="count">(4)</span></li>
 <li><a href="#g7">Trace / audit</a> <span class="count">(3)</span></li>
 <li><a href="#g8">Health / retention</a> <span class="count">(3)</span></li>
-<li><a href="#g9">PQ / service profiles / asset health</a> <span class="count">(8)</span></li></ul>
+<li><a href="#g9">PQ / service profiles / asset health</a> <span class="count">(9)</span></li>
+<li><a href="#g10">Invariants / posture / AS hold (all NEW, migrations 0014, 0019-0021)</a> <span class="count">(6)</span></li></ul>
   </nav>
 
   
@@ -316,10 +317,10 @@
         </tr>
         <tr>
           <td class="tbl"><code>og.pnl</code></td>
-          <td class="mig">0001 (version+superseded_by: 0006; FK deferrable: 0007)</td>
+          <td class="mig">0001 (v.+superseded_by: 0006; FK deferrable: 0007; delivery_charge: 0023)</td>
           <td class="pk"><code>pnl_id</code></td>
           <td class="fk">obligation_id → obligation<br>superseded_by → pnl</td>
-          <td class="purpose">Revenue minus energy/degradation cost minus penalty per obligation-interval, plus rule_baseline_value/forgone_upside for the LP-vs-F2 KPI.</td>
+          <td class="purpose">Revenue minus energy/degradation/penalty/delivery_charge (NEW, 0023: TDSP M1 term) per obligation-interval, plus rule_baseline_value/forgone_upside for the LP-vs-F2 KPI.</td>
         </tr></tbody>
       </table>
     </section>
@@ -385,8 +386,8 @@
     </section>
 
     <section class="group">
-      <h2 id="g9">PQ / service profiles / asset health <span class="count">8 tables</span></h2>
-      <p class="group-desc">MVP-S+ power-quality (9153dc2, NEW): pq_waveform_summary/raw_index are now LIVE-written (pq_ingest); hub_inverter_pq.asset_state, calibration_attempt, maintenance_work_order and asset_event have a complete opengrid.assets service ready to write them, but 0 production callers drive it yet -- allocator PQ-awareness remains a separate, unbuilt gap (diagram 06).</p>
+      <h2 id="g9">PQ / service profiles / asset health <span class="count">9 tables</span></h2>
+      <p class="group-desc">MVP-S+ power-quality (9153dc2, NEW; re-verified 434d230): pq_waveform_summary/raw_index are LIVE-written (pq_ingest); calibration_command&#x27;s cmd/cal+ack/cal loop is LIVE. hub_inverter_pq.asset_state, calibration_attempt, maintenance_work_order and asset_event still never get written, but the reason changed this round: opengrid.assets.AssetHealthService now has a real caller (og-settle&#x27;s JobRunner, settle/main.py:125) that [assets].drift_enabled=false switches off -- wired, not missing a caller. Allocator PQ-eligibility (engine.pq_eligibility) is LIVE; continuous PQ monitoring (allocator/pq_monitor.py) remains a separate, unbuilt gap, 0 callers (diagram 06).</p>
       <table>
         <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
         <tbody>
@@ -409,7 +410,7 @@
           <td class="mig">0010 (asset_state columns: 0011)</td>
           <td class="pk"><code>hub_id → hub</code></td>
           <td class="fk">hub_id → hub</td>
-          <td class="purpose">Per-hub inverter characterization: freq/voltage offsets, THD, dominant_harmonics, quality_score, asset_state (OK/WATCH/.../RECOMMISSIONING).</td>
+          <td class="purpose">Per-hub inverter characterization: freq/voltage offsets, THD, dominant_harmonics, quality_score, asset_state (OK/WATCH/.../RECOMMISSIONING). asset_state is wired (AssetHealthService via og-settle) but stays &#x27;OK&#x27; today: drift_enabled=false.</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.pq_waveform_summary</code></td>
@@ -430,35 +431,94 @@
           <td class="mig">0011</td>
           <td class="pk"><code>calibration_id</code></td>
           <td class="fk">hub_id → hub<br>command_batch_id → command_batch</td>
-          <td class="purpose">One remote-recalibration try: reference/measured/correction offsets, outcome (PENDING/IMPROVED/CORRECTED/NO_CHANGE/WORSE_ROLLED_BACK/FAILED_NO_ACK).</td>
+          <td class="purpose">One remote-recalibration try: reference/measured/correction offsets, outcome (PENDING/IMPROVED/CORRECTED/NO_CHANGE/WORSE_ROLLED_BACK/FAILED_NO_ACK). AssetHealthService.request_calibration() would write this row; drift_enabled=false means it never runs today.</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.maintenance_work_order</code></td>
           <td class="mig">0011</td>
           <td class="pk"><code>work_order_id</code></td>
           <td class="fk">hub_id → hub</td>
-          <td class="purpose">A physical-inverter-swap work order: severity, evidence (jsonb), status (OPEN/IN_PROGRESS/CLOSED/CANCELLED).</td>
+          <td class="purpose">A physical-inverter-swap work order: severity, evidence (jsonb), status (OPEN/IN_PROGRESS/CLOSED/CANCELLED). open_work_order() is wired (stage 5, diagram 06) but drift_enabled=false means no row exists yet.</td>
         </tr>
         <tr>
           <td class="tbl"><code>og.asset_event</code></td>
           <td class="mig">0011</td>
           <td class="pk"><code>asset_event_id</code></td>
           <td class="fk">hub_id → hub<br>work_order_id → maintenance_work_order</td>
-          <td class="purpose">STATE_TRANSITION / INVERTER_REPLACED / RECOMMISSIONED event: old/new serial+firmware, reason_code.</td>
+          <td class="purpose">STATE_TRANSITION / INVERTER_REPLACED / RECOMMISSIONED event: old/new serial+firmware, reason_code. Same story: wired via AssetHealthService, 0 rows today because drift_enabled=false.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.calibration_command</code></td>
+          <td class="mig">0016 (NEW)</td>
+          <td class="pk"><code>calibration_id → calibration_attempt</code></td>
+          <td class="fk">calibration_id → calibration_attempt<br>hub_id → hub</td>
+          <td class="purpose">Guardian&#x27;s atomic claim + sign of one calibration_attempt (G-25): status (RESERVED/SIGNED/REFUSED), (hub_id,epoch,seq) UNIQUE (replay-proof), ack_consumed_at. LIVE (cmd/cal + ack/cal wired).</td>
+        </tr></tbody>
+      </table>
+    </section>
+
+    <section class="group">
+      <h2 id="g10">Invariants / posture / AS hold (all NEW, migrations 0014, 0019-0021) <span class="count">6 tables</span></h2>
+      <p class="group-desc">Measured invariant results, guardian veto-ratio posture, degraded-mode persistence, and the AS capacity-hold deployment log — landed since main @ f3b3365.</p>
+      <table>
+        <thead><tr><th>Table</th><th>Migration</th><th>Primary key</th><th>Foreign keys</th><th>Purpose</th></tr></thead>
+        <tbody>
+        <tr>
+          <td class="tbl"><code>og.invariant_check</code></td>
+          <td class="mig">0014 (NEW)</td>
+          <td class="pk"><code>check_name</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">One row per named measured check (K1/K2/K13/orphan/trace-verify): last run, duration, violations this run, running total, resume watermark. opengrid.invariants is the sole writer; api/routers/{health,dispatch}.py read it for the measured counters.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.invariant_violation</code></td>
+          <td class="mig">0014 (NEW; dedupe_key: 0017)</td>
+          <td class="pk"><code>id (bigserial)</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">Append-only violation log: check_name, detected_at, scope, detail. dedupe_key (NEW, 0017) upserts a still-true condition onto the SAME row instead of re-appending every scan (one over-sale was recounted ~120x/hour before this fix).</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.invariant_trace_watermark</code></td>
+          <td class="mig">0017 (NEW)</td>
+          <td class="pk"><code>stream_id</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">K11 trace-chain verification&#x27;s per-stream resume cursor (next_from_seq), replacing a single jsonb blob so streams are discoverable incrementally.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.scope_posture</code></td>
+          <td class="mig">0019 (NEW)</td>
+          <td class="pk"><code>(scope_kind, scope_ref)</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">K7 escalation (guardian.escalation.EscalationTracker): NORMAL/CONSERVATIVE per bank/zone from the tick&#x27;s veto ratio; og-engine reads this and honours CONSERVATIVE with reduced/zero new dispatch there (engine/gateways.py).</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.as_deployment</code></td>
+          <td class="mig">0020 (NEW)</td>
+          <td class="pk"><code>deployment_id</code></td>
+          <td class="fk">obligation_id → obligation (nullable)</td>
+          <td class="purpose">ERCOT_AS capacity-hold deployment window (NPRR1282): an award discharges up to committed_kw only while a row&#x27;s [start_at,end_at) covers now; NULL obligation_id deploys every AS award. Written by POST /og/api/dispatch/as-deployments.</td>
+        </tr>
+        <tr>
+          <td class="tbl"><code>og.degraded_mode_state</code></td>
+          <td class="mig">0021 (NEW)</td>
+          <td class="pk"><code>mode</code></td>
+          <td class="fk"><span class="muted">—</span></td>
+          <td class="purpose">Persists opengrid.health&#x27;s current degraded-mode set (NO_NEW_COMMITMENTS/HOLD_LOCAL_AUTONOMY/HOLD/DIST_DEFERRAL_OPEN_LOOP) so GET /og/api/health and the UI banner can read a real value — previously computed every cycle but never persisted.</td>
         </tr></tbody>
       </table>
     </section>
 
   <div class="pq-note">
-    <strong>PQ / service profiles / asset health, updated (9153dc2, f3b3365):</strong> <code>pq_waveform_summary</code> and
-    <code>pq_waveform_raw_index</code> are now LIVE-written — <code>opengrid.pq_ingest</code> (new package) buffers and batch-flushes summaries,
+    <strong>PQ / service profiles / asset health, updated (9153dc2, f3b3365; re-verified 434d230):</strong> <code>pq_waveform_summary</code> and
+    <code>pq_waveform_raw_index</code> are LIVE-written — <code>opengrid.pq_ingest</code> (package) buffers and batch-flushes summaries,
     and validates+stores raw captures in a background worker, both wired into <code>og-engine</code>'s MQTT ingest loop. Guardian's
-    <code>pq_checks.py</code>/<code>pq_repo.py</code> (new, additive) now read <code>pq_envelope</code>/<code>service_profile</code> and feed
-    G-21..G-25 (diagram 02). Still not written by anything in production: <code>hub_inverter_pq.asset_state</code>,
-    <code>calibration_attempt</code>, <code>maintenance_work_order</code>, <code>asset_event</code> — <code>opengrid.assets</code> (new package)
-    has a complete, tested <code>AssetHealthService</code> that would write all four, but grep finds zero production callers of it anywhere
-    (engine/guardian/settle/api). Allocator PQ-aware selection/monitoring remains a separate, entirely unbuilt gap.
-    Full built-vs-planned breakdown: <code>06-power-quality-flow.svg</code>.
+    <code>pq_checks.py</code>/<code>pq_repo.py</code> (additive) read <code>pq_envelope</code>/<code>service_profile</code> and feed
+    G-21..G-25 (diagram 02). <code>calibration_command</code> (0016) is LIVE end to end (<code>cmd/cal</code>/<code>ack/cal</code>, guardian ↔ og-engine).
+    <code>hub_inverter_pq.asset_state</code>, <code>calibration_attempt</code>, <code>maintenance_work_order</code>, <code>asset_event</code> still never get
+    written on this checkout, but the reason changed this round: <code>opengrid.assets</code>'s <code>AssetHealthService</code> now has a real
+    production caller (<code>og-settle</code>'s <code>JobRunner</code>, <code>settle/main.py:125</code>, via <code>make_asset_drift_job()</code>) — it is
+    switched off by <code>[assets].drift_enabled = false</code>, not missing a caller. Allocator PQ-aware selection is split: <code>engine.pq_eligibility</code> (admission-time filtering) is LIVE; <code>allocator/pq_monitor.py</code> (continuous post-commit monitoring) is
+    still a separate, unbuilt gap with 0 callers. Full built-vs-planned breakdown: <code>06-power-quality-flow.svg</code>.
   </div>
 
   <footer>
@@ -466,10 +526,12 @@
     <p><code>orchestrator/migrations/0001_init.sql</code> through <code>0013_service_type_data_center.sql</code> (read in full) ·
     <code>orchestrator/src/opengrid/core/models/engine.py</code>, <code>platform.py</code>, <code>pq.py</code> (row shapes mirroring the DDL) ·
     <code>opengrid.pq_ingest</code>, <code>guardian.pq_repo</code>, <code>assets.repo</code> (NEW — confirmed read/write call sites) ·
-    <code>docs/orchestrator/07-delivery/02a-mvp-s-spec-engine.md</code> §1 (table intent) · snapshot f3b3365 (2026-09-26).</p>
+    <code>docs/orchestrator/07-delivery/02a-mvp-s-spec-engine.md</code> §1 (table intent) · snapshot 434d230 (2026-09-26).</p>
     <p>Migration numbering note: the spec (07-delivery/06 §9) calls the service-profile migration "0009" and asset-health "0010", but 0009 was already
     taken by <code>0009_obligation_energy_status.sql</code> (an earlier merge-task migration) — both PQ migrations were renumbered to 0010/0011 in the
-    actual repo, as their own header comments record.</p>
+    actual repo, as their own header comments record. Later: <code>0015</code> (customer_services) and <code>0016</code> (calibration_command) were
+    both claimed concurrently by different in-flight agents; only <code>0016</code> landed. <code>0019</code>-<code>0023</code> were each renumbered at
+    least once for the same reason (their own header comments record the coordination) — the numbers on this checkout are what actually applied.</p>
   </footer>
 </body>
 </html>
