@@ -1,7 +1,8 @@
 #!/bin/bash
 # deploy/scripts/backup.sh
 #
-# Nightly pg_dump of the `og` database to /var/lib/opengrid/backups with 7-day rotation.
+# Nightly pg_dump of the `og` database to /srv/ogbackup (its own LV, 2026-09-26; override with
+# OG_BACKUP_DIR) with 7-day rotation. The directory must be writable by the opengrid user.
 # Run as the opengrid user (via /etc/cron.d/opengrid), which already owns/can write
 # /var/lib/opengrid; no root needed for the dump itself. og_test and the per-workspace
 # og_t_* databases are never backed up (disposable, see BUILD.md §5).
@@ -10,7 +11,7 @@
 # caller) — this script never prints it.
 set -euo pipefail
 
-BACKUP_DIR=/var/lib/opengrid/backups
+BACKUP_DIR="${OG_BACKUP_DIR:-/srv/ogbackup}"
 KEEP_DAYS=7
 DB=og
 DB_USER=opengrid
