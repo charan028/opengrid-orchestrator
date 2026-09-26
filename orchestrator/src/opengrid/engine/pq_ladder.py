@@ -101,9 +101,7 @@ def calibration_requester(service: Any, *, lease_ttl_s: float = 30.0) -> Request
             hub_id,
             reference=reference,
             bounds=DEFAULT_FIRMWARE_CALIBRATION_BOUNDS,
-            epoch=1,
-            seq=int(now.timestamp()),
-            now=now,
+            now=now,  # no epoch/seq: the guardian assigns them on og.calibration_command when it signs (#30)
             lease_ttl_s=lease_ttl_s,
         )
         return candidate is not None
