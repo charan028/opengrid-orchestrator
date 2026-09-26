@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
@@ -64,11 +63,6 @@ def test_energy_guardian_still_signs_a_discharge_whose_projection_stays_above_re
     assert evaluate(_world(*case), SIGNER).outcome == "PASS"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a stale or faulted hub SoC must mean zero discharge (NOTICES #1), but the guardian never reads "
-    "HubSnapshot.health and signs on the last SoC it saw",
-)
 @example(health="stale", setpoint_kw=-5.0)
 @given(st.sampled_from(["stale", "fault"]), _discharge_kw)
 def test_energy_a_stale_or_faulted_soc_means_zero_discharge(health, setpoint_kw):

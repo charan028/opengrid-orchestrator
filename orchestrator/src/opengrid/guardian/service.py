@@ -169,6 +169,11 @@ class GuardianService:
             if hub is None:
                 violations.append(CheckOutcome("G-01", False, "HUB_UNKNOWN", item.hub_id))
                 continue
+            if hub.health != "online" and item.p_kw_setpoint < 0:
+                # K1 (NOTICES #1): a stale or faulted SoC means zero discharge -- never sign on the
+                # last reading the guardian happened to see.
+                violations.append(CheckOutcome("G-01", False, "HUB_SOC_NOT_LIVE", item.hub_id))
+                continue
 
             g01 = checks.check_g01_reserve(
                 item, hub.params, hub.soc_kwh, margin_pct=self.config.reserve_margin_pct
