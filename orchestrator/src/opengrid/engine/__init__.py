@@ -35,6 +35,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
+from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
 from opengrid.platform.config import Config
@@ -159,7 +160,24 @@ def build_command_batch_row(
     )
 
 
-def _distribute_hub_items(bank_id: str, grants: list[Grant], *, fleet_module: Any) -> list[dict[str, object]]:
+#: Fraction of the hub's G-04 ramp bound the engine uses per cycle, so a setpoint built from the twin's
+#: telemetry stays inside the guardian's bound computed from its own (slightly different) telemetry.
+RAMP_SAFETY_FACTOR = 0.9
+
+
+def _ramped_setpoint_kw(hub: Any, target_kw: float, cycle_interval_s: float | None) -> float:
+    """K4/G-04: move from the hub's measured power toward `target_kw` by at most one cycle's ramp. The
+    obligation's grant is unchanged (G-19 compares the grant); only the per-hub command ramps."""
+    prev_kw = getattr(hub, "p_kw", None)
+    ramp_kw_per_s = getattr(hub, "ramp_kw_per_s", 0.0)
+    if cycle_interval_s is None or prev_kw is None or ramp_kw_per_s <= 0:
+        return target_kw
+    return apply_ramp_limit(prev_kw, target_kw, cycle_interval_s, ramp_kw_per_s * RAMP_SAFETY_FACTOR)
+
+
+def _distribute_hub_items(
+    bank_id: str, grants: list[Grant], *, fleet_module: Any, cycle_interval_s: float | None = None
+) -> list[dict[str, object]]:
     """S8 command build (02a S1.10: "per-hub detail ... derivable from the command log referenced by
     command_batch_id"): distribute each bank-level `Grant`'s kW across the bank's currently-online hubs,
     proportional to each hub's `free_discharge_kw` share -- the per-hub `ProposedItem` list guardian's
@@ -188,10 +206,12 @@ def _distribute_hub_items(bank_id: str, grants: list[Grant], *, fleet_module: An
             items.append(
                 {
                     "hub_id": hub.hub_id,
-                    "p_kw_setpoint": -share_kw,
+                    "p_kw_setpoint": _ramped_setpoint_kw(hub, -share_kw, cycle_interval_s),
                     "reason_code": reason_code,
                     "obligation_id": str(grant.obligation_id) if grant.obligation_id else None,
-                    "obligation_granted_kw": str(grant.granted_kw) if grant.obligation_id else None,
+                    # This hub's share of the grant: guardian G-19 sums the shares per obligation.
+                    # (The whole grant on every item claimed it once per hub -- 50x on a 50-hub bank.)
+                    "obligation_granted_kw": str(share_kw) if grant.obligation_id else None,
                 }
             )
     return items
@@ -210,6 +230,7 @@ async def propose_batch_to_guardian(
     seq: int,
     now: datetime,
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
+    cycle_interval_s: float | None = None,
 ) -> UUID | None:
     """Build this bank's command-batch summary, durably write its `RT_ALLOCATION` decision pre-image to
     the trace FIRST (K10), then persist `og.command_batch` (carrying that SAME trace row's id as
@@ -225,7 +246,9 @@ async def propose_batch_to_guardian(
     command_batch_id = uuid4()
     issued_at = now
     expires_at = now + timedelta(seconds=lease_ttl_s)
-    items = _distribute_hub_items(bank_id, grants, fleet_module=fleet_module)
+    items = _distribute_hub_items(
+        bank_id, grants, fleet_module=fleet_module, cycle_interval_s=cycle_interval_s
+    )
     trace_payload = {
         "command_batch_id": str(command_batch_id),
         "bank_id": bank_id,
@@ -389,6 +412,7 @@ async def _engine_tick(state: _EngineState) -> None:
             seq=state.cycle_seq,
             now=now,
             lease_ttl_s=state.lease_ttl_s,
+            cycle_interval_s=state.cycle_interval_s,
         )
 
 

@@ -410,3 +410,49 @@ async def test_tracing_failure_never_crashes_verdict_path(fakes, guardian_config
 
     verdict = await service.evaluate_and_sign(batch)
     assert verdict.outcome == "PASS"  # tracing the verdict failed, but signing itself must still succeed
+
+
+async def test_discharge_on_an_overloaded_bank_is_not_vetoed_by_g03(fakes, guardian_config, signing_seed):
+    """Regression (live 2026-09-26): G-03 vetoed every discharge batch because the bank's SCADA load
+    already exceeded its rating, although discharging adds no load (it relieves the bank). G-03 bounds
+    the load a batch ADDS."""
+    proposal = make_proposal(p_kw_setpoint=-3.0)
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.banks.banks[proposal.bank_id] = make_bank_snapshot(bank_load_kva=3000.0, kva_rating=600.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert "G-03" not in verdict.vetoed_rule_ids
+
+
+async def test_charging_an_overloaded_bank_is_still_vetoed_by_g03(fakes, guardian_config, signing_seed):
+    proposal = make_proposal(p_kw_setpoint=3.0)
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.hubs.hubs[proposal.items[0].hub_id] = make_hub_snapshot(prev_p_kw=0.0, p_kw=11.0)
+    fakes.banks.banks[proposal.bank_id] = make_bank_snapshot(bank_load_kva=3000.0, kva_rating=600.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert "G-03" in verdict.vetoed_rule_ids
+
+
+async def test_veto_trace_records_each_violation_reason(fakes, guardian_config, signing_seed):
+    """A veto must be explainable from the trace alone (live 2026-09-26: only rule ids were traced)."""
+    proposal = make_proposal(p_kw_setpoint=3.0)
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.hubs.hubs[proposal.items[0].hub_id] = make_hub_snapshot(prev_p_kw=0.0, p_kw=11.0)
+    fakes.banks.banks[proposal.bank_id] = make_bank_snapshot(bank_load_kva=3000.0, kva_rating=600.0)
+
+    await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(make_batch_row(proposal))
+
+    (_batch_id, payload) = fakes.trace.appended[-1]
+    assert {
+        "rule_id": "G-03",
+        "reason": "BANK_KVA_LIMIT",
+        "hub_id": BANK_ID,
+        "obligation_id": None,
+    } in payload["violations"]

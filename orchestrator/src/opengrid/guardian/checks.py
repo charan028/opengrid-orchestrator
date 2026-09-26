@@ -187,8 +187,9 @@ def check_g20_clock_quality(offset_ms: float, max_offset_ms: float) -> CheckOutc
 
 
 def obligation_totals(items: list[ProposedItem]) -> dict[str, Decimal]:
-    """Sum `obligation_granted_kw` per obligation across a batch's items -- the batch's claimed grant
-    per obligation, which G-19 compares against guardian's own independently-read frozen/prior kw."""
+    """Sum `obligation_granted_kw` per obligation across a batch's items -- each item carries its hub's
+    share of the obligation's grant, so the sum is the batch's claimed grant per obligation, which G-19
+    compares against guardian's own independently-read frozen/prior kw."""
     totals: dict[str, Decimal] = {}
     for item in items:
         if item.obligation_id is None or item.obligation_granted_kw is None:

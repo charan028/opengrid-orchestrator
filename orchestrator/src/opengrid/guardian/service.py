@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 from opengrid.core.crypto import sha256_hex_of_json, sign_payload
 from opengrid.core.models.engine import CommandBatchRow, Verdict, VerdictOutcome
 from opengrid.core.models.mqtt import CommandBatch
+from opengrid.core.physics import hub_ramp_kw_per_s
 from opengrid.guardian import checks
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
@@ -33,6 +34,25 @@ logger = logging.getLogger(__name__)
 
 _MAX_CYCLE_HISTORY = 64  # bound the in-memory ramp accumulators; MVP-S runs a 2s cycle, never GC-free
 _ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04"})
+
+
+#: Cap on violations recorded per verdict trace row (a 50-hub batch can fail one item rule per hub).
+_MAX_TRACED_VIOLATIONS = 20
+
+
+def _violation_summary(violations: list[CheckOutcome]) -> list[dict[str, str | None]]:
+    """Distinct `(rule, reason)` violations, first example hub/obligation for each, capped."""
+    seen: dict[tuple[str, str | None], dict[str, str | None]] = {}
+    for v in violations:
+        key = (v.rule_id, v.reason)
+        if key not in seen:
+            seen[key] = {
+                "rule_id": v.rule_id,
+                "reason": v.reason,
+                "hub_id": v.hub_id,
+                "obligation_id": v.obligation_id,
+            }
+    return list(seen.values())[:_MAX_TRACED_VIOLATIONS]
 
 
 def _iso_z(dt: datetime) -> str:
@@ -78,7 +98,9 @@ class GuardianService:
 
         outcome = self._classify(violations)
         rule_ids = sorted({v.rule_id for v in violations})
-        return await self._finalize(batch, verdict_id, started, outcome=outcome, vetoed_rule_ids=rule_ids)
+        return await self._finalize(
+            batch, verdict_id, started, outcome=outcome, vetoed_rule_ids=rule_ids, violations=violations
+        )
 
     async def _run_checks(self, batch: CommandBatchRow) -> list[CheckOutcome]:
         violations: list[CheckOutcome] = []
@@ -162,10 +184,9 @@ class GuardianService:
             if not g02.ok:
                 violations.append(g02)
 
-            ramp_kw_per_s = hub.params.ramp_kw_per_s
-            if ramp_kw_per_s is None:  # 02a S6.1 default: firm ramp Kc/3 per minute
-                ramp_kw_per_s = hub.params.p_kw / 3.0 / 60.0
-            g04 = checks.check_g04_hub_ramp(item, hub.prev_p_kw, self.config.cycle_interval_s, ramp_kw_per_s)
+            g04 = checks.check_g04_hub_ramp(
+                item, hub.prev_p_kw, self.config.cycle_interval_s, hub_ramp_kw_per_s(hub.params)
+            )
             if not g04.ok:
                 violations.append(g04)
 
@@ -175,7 +196,10 @@ class GuardianService:
         bank = await self.ports.banks.snapshot(proposal.bank_id)
         if bank is None:
             violations.append(CheckOutcome("G-03", False, "BANK_UNKNOWN", proposal.bank_id))
-        else:
+        elif additional_charge_kw > 0:
+            # G-03 bounds the load a batch ADDS to the bank. A batch that adds none (discharge, or less
+            # charging) cannot worsen loading; vetoing it on an already-overloaded bank (live
+            # 2026-09-26: SCADA 3,000 kVA on 600 kVA banks) would block the very relief it provides.
             g03 = checks.check_g03_bank_kva(
                 proposal.bank_id,
                 additional_charge_kw,
@@ -276,6 +300,7 @@ class GuardianService:
         *,
         outcome: VerdictOutcome,
         vetoed_rule_ids: list[str],
+        violations: list[CheckOutcome] | None = None,
     ) -> Verdict:
         latency_ms = max(int((self.monotonic_fn() - started) * 1000), 0)
         inputs_hash = self._inputs_hash(batch)
@@ -306,7 +331,7 @@ class GuardianService:
         guardian_verdicts_total.labels(
             outcome={"PASS": "signed", "TIMEOUT": "timeout"}.get(outcome, "vetoed")
         ).inc()
-        await self._trace_verdict(verdict)
+        await self._trace_verdict(verdict, violations or [])
         return verdict
 
     def sign_command_batch(self, batch: CommandBatch) -> CommandBatch:
@@ -328,11 +353,14 @@ class GuardianService:
             }
         )
 
-    async def _trace_verdict(self, verdict: Verdict) -> None:
-        """Best-effort audit trace of the verdict itself (GUARDIAN_VERDICT, 02a S8.1). Never raises --
-        the signing decision is already final; a tracing hiccup here must not undo it (K7)."""
+    async def _trace_verdict(self, verdict: Verdict, violations: list[CheckOutcome]) -> None:
+        """Best-effort audit trace of the verdict itself (GUARDIAN_VERDICT, 02a S8.1), including each
+        distinct violation (rule, reason, hub/obligation) so a veto is explainable from the trace alone.
+        Never raises -- the signing decision is already final; a tracing hiccup must not undo it (K7)."""
+        payload = verdict.model_dump(mode="json")
+        payload["violations"] = _violation_summary(violations)
         try:
-            await self.ports.trace.append_verdict(verdict.command_batch_id, verdict.model_dump(mode="json"))
+            await self.ports.trace.append_verdict(verdict.command_batch_id, payload)
         except Exception:
             logger.exception(
                 "failed to trace guardian verdict", extra={"command_batch_id": str(verdict.command_batch_id)}

@@ -31,6 +31,7 @@ from opengrid.core.physics import (
     HubParams,
     bank_capability,
     hub_capability,
+    hub_ramp_kw_per_s,
     recharge_headroom,
 )
 from opengrid.core.timeutil import is_stale
@@ -72,6 +73,10 @@ class HubCapabilitySnapshot(NamedTuple):
     reserve_kwh: float | None = None
     e_kwh: float | None = None
     eta_d: float = DEFAULT_ETA_D
+    # Measured power now (+charge/-discharge; `None` when excluded) and the hub's G-04 ramp bound, so
+    # the engine can ramp each per-hub setpoint from where the hub actually is (K4).
+    p_kw: float | None = None
+    ramp_kw_per_s: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,11 +493,13 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
         soc_kwh: float | None = None
         reserve_kwh: float | None = None
         e_kwh: float | None = None
+        p_kw: float | None = None
         if classification == "online":
             free_discharge_kw, _charge_kw = hub_capability(runtime.soc_kwh, runtime.params)
             soc_kwh = runtime.soc_kwh
             reserve_kwh = runtime.params.r_kwh
             e_kwh = runtime.params.e_kwh
+            p_kw = runtime.p_kw
         snapshots.append(
             HubCapabilitySnapshot(
                 hub_id=hub_id,
@@ -504,6 +511,8 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
                 reserve_kwh=reserve_kwh,
                 e_kwh=e_kwh,
                 eta_d=runtime.params.eta_d,
+                p_kw=p_kw,
+                ramp_kw_per_s=hub_ramp_kw_per_s(runtime.params),
             )
         )
     return snapshots

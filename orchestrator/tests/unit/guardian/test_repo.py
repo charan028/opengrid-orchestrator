@@ -295,3 +295,12 @@ def test_pg_hub_state_port_removed():
     """GUARD-02/04: there is no Postgres-backed HubStatePort in repo.py to default to -- guardian's hub
     read must always be its own MQTT telemetry (opengrid.guardian.mqtt_io.MqttHubStatePort)."""
     assert not hasattr(repo, "PgHubStatePort")
+
+
+def test_g19_active_obligations_are_scoped_to_the_current_interval_on_this_bank():
+    """Regression (live 2026-09-26): every commitment with ANY reservation on the bank (including
+    deliveries hours later) was treated as omitted from the batch at 0 kW, so G-19 vetoed every batch.
+    Only reservations covering now count, with this bank's reserved kW as the frozen amount."""
+    sql = repo._ACTIVE_OBLIGATIONS_FOR_BANK_SQL
+    assert "r.interval_start <= now() AND r.interval_end > now()" in sql
+    assert "SUM(r.amount)" in sql

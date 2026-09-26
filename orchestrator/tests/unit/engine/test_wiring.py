@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
+
 from opengrid import engine
 from opengrid.core.models.engine import CommandBatchRow, Grant
 
@@ -275,6 +277,43 @@ async def test_propose_batch_to_guardian_writes_trace_preimage_before_insert_and
     inserted = backend.inserted_batches[0]
     assert inserted.trace_pre_image_id is not None
     assert inserted.command_batch_id == batch_id
+
+
+@dataclass
+class RampingHubCap:
+    hub_id: str
+    bank_id: str
+    free_discharge_kw: float
+    p_kw: float | None
+    ramp_kw_per_s: float
+    health: str = "online"
+
+
+def test_hub_setpoints_ramp_from_measured_power_but_keep_the_obligation_grant() -> None:
+    """Regression (live 2026-09-26): full setpoints were proposed in one 2 s step from 0 kW, so G-04
+    (hub ramp, 02a S6.1 firm Kc/3 per minute) vetoed every batch. Each hub item now moves at most one
+    cycle's ramp (with a safety margin) from its measured power; the obligation's bank-level grant is
+    unchanged, so G-19 still compares the full grant against the commitment."""
+    fleet_module = FakeFleetModule(
+        {"b1": [RampingHubCap("h1", "b1", 10.0, p_kw=0.0, ramp_kw_per_s=0.1)]}  # type: ignore[list-item]
+    )
+    (item,) = engine._distribute_hub_items(
+        "b1", [_grant(kw="10")], fleet_module=fleet_module, cycle_interval_s=2.0
+    )
+
+    assert item["p_kw_setpoint"] == pytest.approx(-0.1 * 2.0 * engine.RAMP_SAFETY_FACTOR)
+    assert float(item["obligation_granted_kw"]) == pytest.approx(10.0)  # the hub's share of the grant
+
+
+def test_hub_setpoint_is_the_full_share_once_ramped_up() -> None:
+    fleet_module = FakeFleetModule(
+        {"b1": [RampingHubCap("h1", "b1", 10.0, p_kw=-9.9, ramp_kw_per_s=0.1)]}  # type: ignore[list-item]
+    )
+    (item,) = engine._distribute_hub_items(
+        "b1", [_grant(kw="10")], fleet_module=fleet_module, cycle_interval_s=2.0
+    )
+
+    assert item["p_kw_setpoint"] == pytest.approx(-10.0)
 
 
 # --- guardian-hold degraded mode (02b S6.5) --------------------------------------------------------

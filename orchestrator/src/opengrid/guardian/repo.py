@@ -58,11 +58,19 @@ ORDER BY interval_start DESC LIMIT 1
 # GUARD-01/K13: guardian's own, independent enumeration of every obligation with an ACTIVE commitment
 # against this bank -- read-only from og.reservation/og.commitment, never from the proposed batch's own
 # item list, so a batch cannot evade G-19 by omitting an obligation or relabelling it obligation_id=None.
+#
+# Scoped to reservations covering NOW on this bank, with this bank's reserved kW as the frozen amount: a
+# batch is one bank for one cycle, so obligations reserved for later intervals (or on other banks) are
+# not part of it. Unscoped, every future commitment on the bank counted as "omitted, 0 kW" and G-19
+# vetoed every batch (live 2026-09-26).
 _ACTIVE_OBLIGATIONS_FOR_BANK_SQL = """
-SELECT DISTINCT c.obligation_id, c.committed_kw
+SELECT r.obligation_id, SUM(r.amount) AS frozen_kw
 FROM og.reservation r
 JOIN og.commitment c ON c.obligation_id = r.obligation_id AND c.supersedes IS NULL
-WHERE r.bank_id::text = %(bank_id)s AND r.released_at IS NULL
+    AND c.interval_start = r.interval_start
+WHERE r.bank_id = %(bank_id)s AND r.released_at IS NULL
+  AND r.interval_start <= now() AND r.interval_end > now()
+GROUP BY r.obligation_id
 """
 
 _PRIOR_GRANT_SQL = """
