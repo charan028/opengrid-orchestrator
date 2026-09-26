@@ -46,13 +46,100 @@
    * @param {object} option
    * @returns {import("echarts").ECharts}
    */
+  /** Read a CSS custom property from :root, optionally as an rgba with the given alpha. */
+  og.token = function token(name, alpha) {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    if (alpha === undefined || !/^#[0-9a-f]{6}$/i.test(raw)) {
+      return raw;
+    }
+    const n = parseInt(raw.slice(1), 16);
+    return "rgba(" + (n >> 16) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + alpha + ")";
+  };
+
+  /**
+   * One ECharts theme built from the live tokens (registered once per data-theme): smooth 2px lines
+   * with no symbols, hidden axis lines, soft dashed grid lines, muted axis labels, a panel-coloured
+   * tooltip card. Every chart on every screen inherits it, so screens only pass data.
+   */
+  og.chartTheme = function chartTheme() {
+    const name = "og-" + (document.documentElement.getAttribute("data-theme") || "dark");
+    if (!og._themes) {
+      og._themes = {};
+    }
+    if (!og._themes[name]) {
+      const muted = og.token("--muted");
+      const grid = og.token("--border", 0.6);
+      const axisCommon = {
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: { color: muted, fontSize: 11, fontFamily: "Inter, system-ui, sans-serif" },
+        splitLine: { show: true, lineStyle: { color: grid, type: [4, 6] } },
+        nameTextStyle: { color: muted, fontSize: 11 },
+      };
+      window.echarts.registerTheme(name, {
+        color: [
+          og.token("--accent"), og.token("--series-ercot-energy"), og.token("--series-ercot-as"),
+          og.token("--series-dist-deferral"), og.token("--series-large-load"), og.token("--series-pipeline-ac"),
+          og.token("--series-partner-capacity"), og.token("--series-pjm-capacity"),
+        ],
+        backgroundColor: "transparent",
+        textStyle: { color: muted, fontFamily: "Inter, system-ui, sans-serif" },
+        legend: { textStyle: { color: muted, fontSize: 11 }, itemWidth: 10, itemHeight: 10, icon: "circle" },
+        tooltip: {
+          backgroundColor: og.token("--panel"),
+          borderColor: og.token("--border"),
+          borderWidth: 1,
+          padding: [8, 12],
+          textStyle: { color: og.token("--text"), fontSize: 12 },
+          extraCssText: "border-radius: 10px; box-shadow: 0 12px 32px -16px rgba(0,0,0,.6);",
+        },
+        categoryAxis: Object.assign({}, axisCommon, { splitLine: { show: false } }),
+        valueAxis: axisCommon,
+        timeAxis: axisCommon,
+        line: { smooth: 0.35, symbol: "none", lineStyle: { width: 2 } },
+        bar: { itemStyle: { borderRadius: [4, 4, 0, 0] } },
+      });
+      og._themes[name] = true;
+    }
+    return name;
+  };
+
   og.chart = function chart(el, option) {
     const node = typeof el === "string" ? document.querySelector(el) : el;
     if (!node) {
       throw new Error("og.chart: element not found: " + el);
     }
     const existing = window.echarts.getInstanceByDom(node);
-    const instance = existing || window.echarts.init(node);
+    const instance = existing || window.echarts.init(node, og.chartTheme());
+    // A single line series gets a soft area fill under it (reference: one accent line over a dark
+    // card); multi-line charts stay clean so the zones remain distinguishable.
+    // Screens may reference tokens as "token:--name" or "token:--name@0.2" in any colour slot; resolve
+    // them here so python view code never carries a hex that belongs to og.css.
+    (function resolveTokens(node) {
+      if (Array.isArray(node)) { node.forEach(resolveTokens); return; }
+      if (!node || typeof node !== "object") { return; }
+      Object.keys(node).forEach(function (key) {
+        const v = node[key];
+        if (typeof v === "string" && v.indexOf("token:") === 0) {
+          const parts = v.slice(6).split("@");
+          node[key] = og.token(parts[0], parts[1] !== undefined ? parseFloat(parts[1]) : undefined);
+        } else {
+          resolveTokens(v);
+        }
+      });
+    })(option);
+    const lines = (option.series || []).filter(function (s) { return s.type === "line"; });
+    if (lines.length === 1 && !lines[0].areaStyle) {
+      lines[0].areaStyle = {
+        color: {
+          type: "linear", x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [
+            { offset: 0, color: og.token("--accent", 0.28) },
+            { offset: 1, color: og.token("--accent", 0) },
+          ],
+        },
+      };
+    }
     instance.setOption(option, true);
     // A chart initialised from an inline <script> mid-parse (markets_series_fragment.html) measures its
     // container before the surrounding grid has laid out its columns, so the canvas came out row-wide
