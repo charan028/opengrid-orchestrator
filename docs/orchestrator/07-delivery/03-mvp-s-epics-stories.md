@@ -2,6 +2,8 @@
 
 Invariants: see 00-invariants.md (canonical). Status: draft for owner approval (gate G1).
 
+**Code references.** A `file:line` marked R2 (or given in a "Status at main `6470cfa`" block) is at `main` `6470cfa`. Every other `file:line` was verified at `434d230` and may have moved since.
+
 Release tag: **MVP-S**. Status: for G1 approval alongside `02a-mvp-s-spec-engine.md` and `02b-mvp-s-spec-platform.md`.
 Derived from [`01-saturday-delivery-plan.md`](01-saturday-delivery-plan.md) (scope, modules, acceptance A1–A11,
 schedule, cut lines, never-cut list) and [`../06-reviews/06-first-principles-review.md`](../06-reviews/06-first-principles-review.md)
@@ -590,11 +592,19 @@ against a physical limit the model doesn't know exists (owner requirement, `09-o
   duration and within the reported peak-power budget.
 Priority: Should (next-phase; regulated-pilot flow limits) · FR/story links: none existing (new) · Invariants:
 **K4** (physical envelope, extended) · Dependencies: ES05-S06, ES19-S02 · Estimate: 4 h
-Decision: D-26 · Status: **not built** — verified: `orchestrator/src/opengrid/core/limits.py` defines only
-G-01..G-06 (reserve, hub power at a flat rating, bank kVA, hub/fleet/feeder ramp); there is no SoC/temperature
-derating function, no home-export/meter function, and no transformer/feeder/substation aggregate-flow function
-anywhere in `orchestrator/src/opengrid/` (grep for `P_max|p_dis_max|derat|cell_temp|reverse_flow` outside
-`09-optimizer-dispatcher-update.md` finds nothing in code) · Test: none found
+Decision: D-26 · Status: **partly built in R2** (`main` `6470cfa`), in the real-time allocator only:
+- F1 derating: always on (`orchestrator/src/opengrid/allocator/flow_limits.py:49-68`, applied at
+  `allocator/cycle.py:123-135`).
+- F2 export cap (export side only, `flow_limits.py:78-88`) and F3 transformer, feeder and substation discharge
+  budgets (`flow_limits.py:108-182`): behind `[allocator.flow_limits].enabled = true`, but no repo seed writes
+  the limit rows (migration 0029), so nothing binds yet.
+- Not built: the selector models none of these (the first and second criteria above are unmet at the planning
+  level), there are no import/charging-direction caps, and above-continuous power is never planned (the fourth
+  criterion is met only by never using the peak).
+
+Test: `orchestrator/tests/unit/allocator/test_dispatch_extensions.py:295` (F1 uses the guardian's derating),
+`:319` (export cap serves home load first), `:335` (the cycle applies derating, export and transformer caps),
+`:351` (feeder budget split), `:363` (property: allocator cap never above the derated bound).
 
 **ES05 subtotal: 10 stories, 32 h.**
 
@@ -769,12 +779,24 @@ signed command that exceeds a physical or contractual limit (owner requirement, 
   assumed in-territory (K15 fail closed).
 Priority: Should (next-phase; regulated-pilot flow limits, pairs with ES05-S10) · FR/story links: none existing
 (new) · Invariants: **K4** (extended), **K15** (new) · Dependencies: ES06-S01, ES05-S10, ES19-S02 · Estimate: 4 h
-Decision: D-27 · Status: **not built** — verified: `orchestrator/src/opengrid/guardian/checks.py` and
-`core/limits.py` implement only G-01..G-06, G-09/G-13/G-14/G-15/G-19/G-20 plus the PQ checks G-21..G-25 (ES06-S08);
-there is no G-26 (home meter), G-27 (service transformer), G-28 (feeder thermal/reverse), G-29 (substation POI),
-G-30 (territory export), G-31 (sustained vs peak), G-32 (feeder ramp for non-firm steps) or G-33 (K15 market
-segregation) check anywhere in the guardian package. (The ERCOT_AS energy hold is not a guardian check; the
-selector and engine enforce it.) · Test: none found
+Decision: D-27 · Status: **built in R2** (`main` `6470cfa`) — `orchestrator/src/opengrid/guardian/flow_checks.py`
+implements G-26 (`:164`), G-27 (`:219`), G-28/G-29/G-30 on the aggregate flows (`:261`, plus `:296` for a substation
+POI), G-31 (`:88`) and G-33 (`:317`, on `market/territory.py:131`), and G-02 changed to the derated bound
+(`:133`); G-32 is `core/limits.py:360`. All are wired on the guardian's own reads in `guardian/service.py`
+(`:328`, `:383-390`, `:427`, `:452-493`, `:539-541`, `:584`; `guardian/main.py:349` wires the topology port).
+On a stale reading or an unknown limit, the aggregate check vetoes any increase and passes relief
+(`flow_checks.py:261-293`). Caveats at R2:
+- G-31's peak path is dead. The guardian reads the budget as `peak_budget_kws` (`guardian/mqtt_io.py:36`) while
+  hubs send `peak_power_budget_kws`, so every above-continuous setpoint is vetoed. This is safe, and reported.
+- G-29 and G-30 evaluate nothing until substation assets tied to a bank or regulated-zone banks exist.
+- Aggregate flows sum unsigned SCADA apparent power as import (`guardian/flow_repo.py:40-48`), so a measured
+  reverse flow is not seen.
+- `[guardian.flow].telemetry_required` is false: a flow field a hub has never reported falls back to the static
+  premise limits.
+
+The ERCOT_AS energy hold is not a guardian check; the selector and engine enforce it and `CHECK_AS_HOLD` measures
+it · Test:
+`orchestrator/tests/unit/guardian/test_flow_checks.py` (29), `orchestrator/tests/unit/guardian/test_service_flow.py` (14)
 
 **ES06 subtotal: 9 stories, 25 h.**
 
@@ -808,8 +830,15 @@ so a bad feed can never corrupt a fresh commitment decision (mandatory degraded-
 Priority: **Must** · FR/story links: `ING-S09`, `FR-ING-015` (staleness alarm); nearest degraded-mode FR:
 `FR-DISP-020` (scoped degraded mode) · Invariants: K13 (a stale-feed admission freeze protects the integrity of
 future commitment decisions the lock will then freeze) · Dependencies: ES02-S04, ES05-S01 · Estimate: 3 h
-Status: **built** · Code: `orchestrator/src/opengrid/health/model.py:22-23` (`DegradedMode` literal
-`"NO_NEW_COMMITMENTS"`) · Test: `orchestrator/tests/unit/health/test_rules.py:186` (`test_feed_stale_yields_no_new_commitments`)
+Status: **partly built** · Code: `orchestrator/src/opengrid/health/model.py:22-23` (`DegradedMode` literal
+`"NO_NEW_COMMITMENTS"`) raises the mode. At `434d230` nothing acted on it. At R2 (`main` `6470cfa`) it is
+enforced:
+- the intake gate skips intake (`orchestrator/src/opengrid/engine/gates.py:51-60`, `:123-132`);
+- the selector gate withholds every new candidate, treating an unreadable mode as active
+  (`orchestrator/src/opengrid/selector/gate.py:532-602`).
+
+Contract admission and customer-API submission are not gated, and tracing of the transition was not verified.
+Test: `orchestrator/tests/unit/health/test_rules.py:186` (`test_feed_stale_yields_no_new_commitments`).
 
 **ES07-S03 — Hub health: online / stale / fault classification.**
 As a *fleet reliability engineer*, I want every hub classified online, stale (unresponsive) or fault (not
@@ -1094,17 +1123,23 @@ utility is Austin Energy or CPS Energy, home batteries are in scope for regulate
   are treated as eligible regulated-capacity assets, not excluded as "substation-only".
 Priority: Should (next-phase) · FR/story links: none existing (new since MVP-S) · Invariants: **K15** (new;
 territory) · Dependencies: ES04-S01, ES05-S01 · Estimate: 4 h
-Decision: D-20, D-21 · Status: **in build** — only data-model scaffolding exists, not the enforcement path:
-`territory`/`free_access` fields are defined but unused by any admission or selector logic, and no
-territory-lookup function exists despite being referenced · Code:
-`orchestrator/src/opengrid/allocator/models.py:75-81` (`territory: str | None`, `free_access: bool`, comment
-citing `opengrid.market.territory_of_zone` — **that module does not exist**, confirmed by `Glob
-orchestrator/src/opengrid/market/**` returning no files), `orchestrator/src/opengrid/core/models/engine.py:29`
-(`territory_id: UUID | None` on the contract-like model, likewise unread by admission). No `og.territory`
-migration, no `R-TERRITORY-INELIGIBLE` reason code, and no REG/FREE lexicographic staging in
-`selector/model.py` were found · Test: none found (grep for `territory` across `orchestrator/tests/` matches
-only two settlement test files discussing the *charging-tariff* regulated/unregulated distinction, not
-territory-bound eligibility or priority)
+Decision: D-20, D-21 · Status: **partly built in R2** (`main` `6470cfa`); dark in production because no
+regulated-zone bank is seeded (the Austin Energy and CPS zone blocks ship `enabled: false`,
+`integration-sims/config/fleet.yaml:56-72`):
+- Built: `og.utility`, `og.contract.market`/`utility_id` and `REGULATED_CAPACITY`
+  (`orchestrator/migrations/0025_market_model.sql`); `opengrid.market` (`orchestrator/src/opengrid/market/territory.py:131`
+  `check_territory`, the one predicate); selector C25 as bank eligibility (`orchestrator/src/opengrid/selector/gate.py:489-529`)
+  and the regulated-first stage R (`selector/solve.py:140-144`); allocator territory enforcement
+  (`allocator/cycle.py:221-232`); guardian G-33 and G-30; settle regulated charging and capacity payment
+  (`orchestrator/src/opengrid/settle/__init__.py:242-269`); the `K15_TERRITORY` checker.
+- Not built: the contract-admission check (`contracts/` is unchanged; `R-TERRITORY-INELIGIBLE` is raised only by
+  the guardian).
+- The utility rows and a demo contract come only from the hand-applied `dev/seed/market_model_seed.sql`.
+
+Test: `orchestrator/tests/unit/market/test_territory.py:123` (property: regulated obligations never leave their
+territory), `orchestrator/tests/unit/market/test_model.py:63` (eligibility is territory-bound), `:72` (free-access
+flag), `orchestrator/tests/unit/selector/test_market_economics.py:182` (territory and regulated capacity in
+`prepare_obligations`), `:212` (regulated capacity selected first even when a free offer pays more).
 
 **ES19-S03 — Substation-sited battery assets (~20 MW, Base-owned) serving regulated capacity.**
 As a *Base executive*, I want a new asset class for substation-sited batteries (their own rating, SoC window,
@@ -1118,11 +1153,17 @@ home batteries (D-21: "substation battery sets of about 20 MW... Base owns all b
 Priority: Should (next-phase) · FR/story links: none existing (new asset class) · Invariants: **K4** (extended
 envelope, per-asset), **K14** (the substation PCS is a single inverter, no √N diversity) · Dependencies:
 ES19-S02 · Estimate: 3 h
-Decision: D-21 · Status: **not built** — verified: no migration or model defines an `asset_class`/
-`SUBSTATION_BESS` value anywhere (`git grep`-equivalent search of `orchestrator/migrations/` for
-`substation|SUBSTATION_BESS|asset_class` returns no files); `og.asset`/`og.substation` tables from
-`09-optimizer-dispatcher-update.md`'s proposed migration 0020 do not exist yet (the repo's actual migration 0020
-is `0020_as_capacity_hold.sql`, an unrelated AS-hold feature) · Test: none found
+Decision: D-21 · Status: **partly built in R2** (`main` `6470cfa`): data, guardian and simulator only.
+- Built: `og.asset` with `asset_class` `SUBSTATION` and POI import/export limits
+  (`orchestrator/migrations/0025_market_model.sql`; `orchestrator/src/opengrid/core/models/market.py`); the guardian's
+  substation limit and POI check (G-29, `orchestrator/src/opengrid/guardian/flow_checks.py:296`); a simulator
+  substation asset (`integration-sims/config/fleet.yaml:85-90`, `enabled: false`).
+- Not built: dispatching a substation asset. The selector and engine build the market model from banks only, no
+  capability row exists for an asset, and there is no nearest-substation preference.
+- The dev seed's `sub-aen-01` (`dev/seed/market_model_seed.sql:82-94`) is PLANNED with no `bank_id`, so G-29's POI
+  check does not apply to it; the simulator's asset id (`sub-LZ_AEN-00`) differs from the seed's.
+
+Test: none found for substation dispatch.
 
 **ES19-S04 — $/kW-in vs $/kW-out economics, per contract/market/fleet, with payback and the 3-year flag.**
 As a *Base executive*, I want profitability reported as $/kW-in (charging cost, delivery charge, demand charges)
@@ -1142,10 +1183,16 @@ reasonable by the owner).
 Priority: Should (next-phase) · FR/story links: `RPT-S06`/`FR-RPT-011` (nearest existing: ES08-S04's forgone-
 upside line is a narrower, already-built precursor at the obligation level, not this contract/market/fleet $/kW
 basis) · Invariants: — · Dependencies: ES08-S03, ES19-S01 · Estimate: 3 h
-Decision: D-20, D-23 · Status: **not built** — verified: `orchestrator/src/opengrid/settle/profitability.py`
-computes per-obligation `compute_revenue`/`compute_degradation_cost`/`compute_forgone_upside` (built, and already
-covered by ES08-S03/S04) but has no $/kW basis, no `econ_rollup`/payback/NPV function, and no capex/incentive
-model; no `og.econ_rollup` or `og.asset_finance` table exists in `orchestrator/migrations/` · Test: none found
+Decision: D-20, D-23 · Status: **built in R2** (`main` `6470cfa`), with planning capex:
+- `orchestrator/src/opengrid/market/economics.py` computes $/kW-in, $/kW-out, net, and simple, effective and
+  discounted payback, NPV and the 3-year flag.
+- `market/view.py` rolls these up per contract, market and fleet.
+- `GET /og/api/profitability/per-kw` serves them (`orchestrator/src/opengrid/api/routers/profitability_kw.py:37`),
+  and the Profitability screen shows them.
+- Capex and O&M are planning attributions; there is no `og.asset_finance` table.
+
+Test: `orchestrator/tests/unit/market/test_economics.py:115` (no payback when net ≤ 0), `:151` (discounted payback
+and NPV), `orchestrator/tests/unit/market/test_view.py:26` (rollup by market and fleet).
 
 **ES19-S05 — Charging mix: ≥30% solar plus utility off-peak, M1 only in the competitive area.**
 As a *Base executive*, I want charging cost split by source and territory — at least 30% solar (soft floor,
@@ -1166,15 +1213,22 @@ midday solar dip, not only overnight).
   input existing).
 Priority: Should (next-phase) · FR/story links: none existing (new) · Invariants: — · Dependencies: ES19-S01,
 ES02-S05 · Estimate: 3 h
-Decision: D-19, D-22, D-24 · Status: **in build** — the M1/TDSP half (D-19) is built; the solar-floor and
-utility-off-peak-rate half (D-22) is not · Code: `orchestrator/config/tdsp_tariffs.toml`,
-`orchestrator/src/opengrid/settle/tariffs.py:88-108` (`resolve_tariff`, `m1_delivery_charge`),
-`orchestrator/src/opengrid/engine/gateways.py:164-192` (`M1_USD_PER_MWH_BY_ZONE`,
-`headroom_threshold_usd_per_mwh`) — built; no `solar_share_floor`, no AE/CPS utility TOU tariff table, and no
-solar-charging-preference logic were found anywhere in `orchestrator/src/` — not built · Test:
-`orchestrator/tests/unit/settle/test_tariffs.py:29` (`test_oncor_tariff_is_6_0295_cents_per_kwh`), `:36`
-(`test_m1_charge_oncor_hand_computed`), `:52` (`test_no_tariff_for_a_regulated_or_unmapped_zone_charges_nothing`)
-— covers the built M1 half only; none found for the solar-floor/utility-rate half
+Decision: D-19, D-22, D-24 · Status: **partly built in R2** (`main` `6470cfa`); the selector part is built:
+- the C27 soft solar floor per territory, with priced slack (`orchestrator/src/opengrid/selector/model.py:265-307`);
+- regulated grid charging only in the utility's off-peak/night periods at its rate, with no M1, and M1 on
+  grid-drawn kWh in the competitive area (`orchestrator/src/opengrid/market/charging.py`);
+- the measured solar share per interval (D-28) stored with its source (`og.plan_energy_value.solar_share`,
+  migration 0030);
+- settle's M1 (`orchestrator/src/opengrid/settle/tariffs.py`), now priced on the zone's trailing grid share of
+  charging (OL-5).
+
+Gaps: no month-to-date carry-in for the floor, and whether a floor shortfall is reported was not verified. The
+midday-charging preference depends on the forecast input of ES02-S05.
+
+Test: `orchestrator/tests/unit/selector/test_plan_hardening.py:177` (a regulated bank meets the 30% solar floor and
+charges from the grid only at night), `:111` (solar-share source priority),
+`orchestrator/tests/unit/market/test_charging.py:46` (Austin Energy night charging), `:69` (M1 on grid kWh only),
+`orchestrator/tests/unit/settle/test_tariffs.py` (M1).
 
 **ES19 subtotal: 5 stories, 15 h.**
 
@@ -1385,13 +1439,13 @@ to adopt, or "none found" where no test exists.
 | ES04-S06 | A4 | new (D-7, K14) | `orchestrator/tests/unit/contracts/test_admission.py`, `orchestrator/tests/unit/profiles/test_data_center_profile.py` |
 | ES05-S08 | A2, A4, A10 | new (D-6) | `orchestrator/tests/unit/engine/test_energy_sufficiency_gateway.py`, `orchestrator/tests/unit/allocator/test_energy_sufficiency.py` |
 | ES05-S09 | A4, A10 | new (D-18) | `orchestrator/tests/unit/guardian/test_service.py` (need-basis cases, lines 791-835) |
-| ES05-S10 | A4, A5, A10 | new (D-26) | none found |
+| ES05-S10 | A4, A5, A10 | new (D-26) | `orchestrator/tests/unit/allocator/test_dispatch_extensions.py` (F1-F3, R2) |
 | ES06-S07 | A3, A10 | new (D-12) | `orchestrator/tests/unit/safestop/test_release_relay.py`, `tests-e2e/functional/safety/test_ts06_guardian_and_safe_stop.py` |
 | ES06-S08 | A3, A10 | new (D-7, K14) | `orchestrator/tests/unit/guardian/test_pq_checks.py`, `orchestrator/tests/property/test_k14_pq_envelope.py` |
-| ES06-S09 | A3, A10 | new (D-27) | none found |
+| ES06-S09 | A3, A10 | new (D-27) | `orchestrator/tests/unit/guardian/test_flow_checks.py`, `test_service_flow.py` (R2) |
 | ES07-S05 | A6 | new | `orchestrator/tests/unit/health/test_rules.py` (`HOLD` case confirmed; `DIST_DEFERRAL_OPEN_LOOP` not individually named — see report) |
 | ES19-S01 | A4, A7 | new (D-10) | `orchestrator/tests/unit/selector/test_zone_pricing.py` (`TS-19-01` proposed) |
-| ES19-S02 | A4, A5 | new (D-20, D-21) | none found (`TS-19-02..05` proposed) |
+| ES19-S02 | A4, A5 | new (D-20, D-21) | `orchestrator/tests/unit/market/test_territory.py`, `test_model.py`, `orchestrator/tests/unit/selector/test_market_economics.py` (R2) |
 | ES19-S03 | A5 | new (D-21) | none found |
-| ES19-S04 | A7 | new (D-20, D-23) | none found (`TS-19-18/19` proposed) |
-| ES19-S05 | A5 | new (D-19, D-22, D-24) | `orchestrator/tests/unit/settle/test_tariffs.py` (M1/D-19 half only; `TS-19-08..10` proposed for the rest) |
+| ES19-S04 | A7 | new (D-20, D-23) | `orchestrator/tests/unit/market/test_economics.py`, `test_view.py` (R2) |
+| ES19-S05 | A5 | new (D-19, D-22, D-24) | `orchestrator/tests/unit/selector/test_plan_hardening.py`, `orchestrator/tests/unit/market/test_charging.py`, `orchestrator/tests/unit/settle/test_tariffs.py` (R2) |

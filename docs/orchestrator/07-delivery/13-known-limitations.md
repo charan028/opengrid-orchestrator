@@ -1,7 +1,8 @@
 # Known limitations (hand-over)
 
 Status: hand-over document, written against branch `wp/docs-lane` at `main` commit `434d230`
-(`434d2301a99d6643dce6c9e9a6d29fd76f374d15`). Audience: a technical, finance-literate owner and the next
+(`434d2301a99d6643dce6c9e9a6d29fd76f374d15`); what changed at R2 (`main` `6470cfa`) is in "Changes at R2" below
+the method note, and the Summary marks those items. Audience: a technical, finance-literate owner and the next
 engineering team.
 
 Purpose: an honest inventory of everything that is **built but dark** (present in the code, gated by a config flag,
@@ -20,14 +21,40 @@ finding depends on server-side state this checkout cannot see (for example wheth
 
 ---
 
+## Changes at R2 (`main` `6470cfa`)
+
+The sections below this one describe `434d230`. This table records what changed for each item at R2, on the same
+rules (static reads of the `6470cfa` checkout; nothing was run). Items not listed here were not re-verified.
+
+| # | Status at R2 | Evidence (R2 line numbers) |
+|---|---|---|
+| BD-1 | **Still dark.** The zone blocks stay `enabled: false`, and `[fleet].zones` still lists the four ERCOT zones. The territory code now exists (selector C25, allocator, guardian G-33/G-30), so enabling a block would apply the K15 rules. | `integration-sims/config/fleet.yaml:56-72`, `integration-sims/config/scada.yaml:17-25`, `orchestrator/config/orchestrator.toml:105` |
+| BD-2 | **Changed.** The allocator's PQ-eligibility filter runs in the real-time cycle. The S5.4 ladder and continuous monitor are wired, but are built only when `[site_ingest].enabled` or `[allocator.closed_loop].enabled` is true, and both ship false. | `orchestrator/src/opengrid/allocator/cycle.py:461-470`, `orchestrator/src/opengrid/engine/wiring.py:84-106`, `orchestrator.toml:128-130`, `:206-208` |
+| BD-3b | **Built, dark.** The customer API is mounted only when `[api.customer_api].enabled`, which ships false. Site ingest sits behind `[site_ingest].enabled = false`. The `og-sim-customer` unit is not in `ogsim.target`. Migration 0026 creates the four customer-services tables. | `orchestrator/src/opengrid/api/app.py:177-190`, `orchestrator.toml:202-204`, `orchestrator/src/opengrid/engine/__init__.py:976-980`, `deploy/systemd/ogsim.target`, `orchestrator/migrations/0026_customer_services.sql` |
+| NB-9 | **Partly built.** Every 900 s the invariants runner writes the chain head to two directories (`[trace].anchor_dir`, `anchor_secondary_dir`; default relative `var/anchors*`), logs each publish in `og.trace_anchor` (migration 0028), and checks anchor freshness. The shipped config sets neither directory nor a signing key, so anchors are unsigned and on the same host, not off-node. | `orchestrator/src/opengrid/invariants/__init__.py:121-122`, `:171-175`, `orchestrator/src/opengrid/trace/anchoring.py:34-35`, `:44-59` (`load_anchor_key`: no key, unsigned), `:100-160`, `orchestrator.toml:145-147` |
+| NB-10 | **Partly built.** The guardian vetoes a gross synchronized step (G-05). There is still no signed per-hub start jitter. | `orchestrator/src/opengrid/core/limits.py:370-378`, `orchestrator/src/opengrid/guardian/service.py:360-368` |
+| NB-12 | **Mostly built.** Built: the market model (migration 0025), territory (selector C25, allocator, G-33/G-30), the regulated-first stage R, C3′/C27, the allocator flow limits and guardian G-26…G-33, and the $/kW economics. Not built: substation-asset dispatch, flow rows in the selector, the contract-admission territory check, and part of the K15 checker. Per-item status: `00-invariants.md` K4/K15 and `10-traceability-matrix.md`. | `00-invariants.md` (K4 extended, K15) |
+| OL-2 | **Partly run on the local dev stack** (PR #35, code at `434d230`). 2,000 hubs passed (allocator cycle p99 82-96 ms). The 10,000-hub run did not produce a result on that host: the fleet simulator saturated one core, and og-engine's MQTT ingest stopped after a keepalive timeout and never reconnected. That defect was routed for R3 and is still present at `6470cfa`. | `orchestrator/src/opengrid/engine/__init__.py:1195` (`_mqtt_ingest_loop`, no reconnect) |
+| OL-5 | **Fixed with a proxy.** M1 = delivered kWh / (η_c·η_d) × the zone's trailing 24 h grid share of charging × the TDSP volumetric rate. | `orchestrator/src/opengrid/settle/__init__.py:270-292`, `orchestrator/src/opengrid/settle/tariffs.py:101-127` |
+| DM-1 | **Unchanged.** The R2 change to `stop.py` is the ramp tracker only. | `integration-sims/src/ogsim/fleet/stop.py:113-114` |
+| DM-2 | **Structurally resolved.** Migration 0026 (not 0015) creates both tables, and `opengrid.site_ingest` exists, so the import succeeds. Readings arrive only when `[site_ingest].enabled`, which ships false. | `orchestrator/migrations/0026_customer_services.sql`, `orchestrator/src/opengrid/invariants/queries.py:359-365` |
+| Degraded modes | **`NO_NEW_COMMITMENTS` is enforced** at the intake gate and the selector gate (an unreadable mode counts as active). It is not checked at contract admission or at customer-API submission. `DIST_DEFERRAL_OPEN_LOOP` is never set: the only caller never passes the SCADA-silent argument. | `orchestrator/src/opengrid/engine/gates.py:51-60`, `:123-132`, `orchestrator/src/opengrid/selector/gate.py:532-602`, `orchestrator/src/opengrid/health/__init__.py:364`, `orchestrator/src/opengrid/health/rules.py:96` |
+| R2-1 (new) | **G-31's peak path is dead.** The guardian reads the peak budget as `peak_budget_kws`; hubs send `peak_power_budget_kws`. Every above-continuous setpoint is vetoed. This is safe, and reported to the lead. | `orchestrator/src/opengrid/guardian/mqtt_io.py:36`, `orchestrator/src/opengrid/core/models/mqtt.py:44`, `core/limits.py:283-284` |
+| R2-2 (new) | **Reverse flow is not measured.** The guardian's aggregate flows sum unsigned SCADA apparent power as import, so a bank that is already exporting reads as importing. | `orchestrator/src/opengrid/guardian/flow_repo.py:40-48`, `integration-sims/src/ogsim/scada/aggregation.py:37-41` |
+| R2-3 (new) | **`CHECK_AS_HOLD` has a narrower scope than the spec.** It measures only active deployment windows, never a held, undeployed award. It requires the full product duration mid-deployment and does not net out other obligations on the same banks. Reported to the lead. | `orchestrator/src/opengrid/invariants/queries.py:460`, `:471`, `orchestrator/src/opengrid/invariants/checks.py:547` |
+| R2-4 (new) | **The AS deployment cap is per contract.** A deployment is capped by the longest product duration on the award's contract, not the award's own product. | `orchestrator/src/opengrid/api/store.py:729-740` |
+| R2-5 (new) | **Flow limits bind only where data exists.** No repo seed writes `og.service_transformer`, `og.feeder_limit`, `og.substation_limit`, the `og.hub` premise columns (migration 0029), or a HOME_BANK `og.asset` row. The allocator's F2/F3 caps have nothing to apply, and the guardian uses its static defaults. Server database contents were not checked. | `orchestrator/src/opengrid/guardian/config.py:106-116` |
+
+---
+
 ## Summary
 
 | # | Item | Category | Reason | External dependency | Owner decision needed |
 |---|---|---|---|---|---|
 | BD-1 | Zone blocks for Austin Energy / CPS Energy (`LZ_AEN`, `LZ_CPS`) | dark | `enabled: false` in two sim config files | Utility territory polygons, tariffs, substation asset data | Yes |
-| BD-2 | Allocator-level PQ hub-eligibility filter + continuous PQ monitor (WP-D) | dark | not called anywhere in the allocator's real-time cycle | None (internal wiring) | No |
+| BD-2 | Allocator-level PQ hub-eligibility filter + continuous PQ monitor (WP-D) | dark (R2: filter wired; ladder/monitor gated by config) | not called anywhere in the allocator's real-time cycle | None (internal wiring) | No |
 | BD-3a | DATA_CENTER / PIPELINE_AC closed-loop admission gate | dark | `[contracts.activation].data_center = false` | Closed-loop controller validation against real/simulated hardware | Yes |
-| BD-3b | Customer-operator simulators, customer API, site ingest (decision D-11) | mostly **not built**, despite the decision log's label (see body) | no module/package exists in this checkout; only an auth-role scaffold and ops placeholders do | Product scope decision | Yes |
+| BD-3b | Customer-operator simulators, customer API, site ingest (decision D-11) | mostly **not built**, despite the decision log's label (see body); **R2: built, dark** | no module/package exists in this checkout; only an auth-role scaffold and ops placeholders do | Product scope decision | Yes |
 | BD-4 | Ledger K13 `release()` / `reduce()` / `substitute_hub()` call path | dark | no production caller; the one gateway method it would use is independently documented as broken | None (internal wiring) | No |
 | BD-5 | AS forward release (`R-AS-RELEASE` / `as_release_enabled`) | dark | feature flag, default off, and only half-wired to config even if flipped | An audited sign-off process (spec S7.4) | Yes |
 | BD-6 | Asset-health drift sweep | dark | `assets.drift_enabled = false`, switched off after a false-positive incident | Base warranty/BMS drift data to retune thresholds | Yes |
@@ -39,17 +66,17 @@ finding depends on server-side state this checkout cannot see (for example wheth
 | NB-6 | PJM | not built | UI has a reserved chart colour only | PJM market membership/agreement | Yes |
 | NB-7 | Mobile app | not built | — | Product scope decision | Yes |
 | NB-8 | Large loads (`LARGE_LOAD`) | not built | UI has a reserved chart colour only | Customer segment / site engineering data | Yes |
-| NB-9 | K11 external anchoring | not built | the local hash-chain journal is built; the off-node anchor is not | An anchoring service (time-stamp authority / write-once store) | Yes |
-| NB-10 | K4 stagger (signed per-hub start jitter) | not built | the fleet ramp cap is built; the jitter/desync half is not | None (engineering only) | Yes (safety-relevant) |
+| NB-9 | K11 external anchoring | not built (R2: partly built, on-host and unsigned) | the local hash-chain journal is built; the off-node anchor is not | An anchoring service (time-stamp authority / write-once store) | Yes |
+| NB-10 | K4 stagger (signed per-hub start jitter) | not built (R2: guardian vetoes synchronized steps; no jitter) | the fleet ramp cap is built; the jitter/desync half is not | None (engineering only) | Yes (safety-relevant) |
 | NB-11 | Automated chaos tests (CI-scheduled, passing) | partially built | the runner/framework exists; most rows fail against a real system today | None (engineering + tracked product gaps) | No |
-| NB-12 | Two-market direction pieces (territory, flow limits, substation assets, lexicographic solver) | not built | design/scoping spec plus a standalone prototype only; no production code changed | Utility contract terms, GIS data, Base asset data (18 open questions) | Yes |
+| NB-12 | Two-market direction pieces (territory, flow limits, substation assets, lexicographic solver) | not built (R2: mostly built) | design/scoping spec plus a standalone prototype only; no production code changed | Utility contract terms, GIS data, Base asset data (18 open questions) | Yes |
 | OL-1 | Single host (`192.168.5.35`) | operational | decided permanent (D-16) | — | No — already decided |
-| OL-2 | Scale test (10,000 hubs) | operational | plan written, never run | — | No |
+| OL-2 | Scale test (10,000 hubs) | operational | plan written; R2: 2k passed on the local dev stack, 10k not yet run on the server | — | No |
 | OL-3 | Simulator-only data sources (fleet telemetry, SCADA) | operational | ERCOT/EIA/NWS feeds are real; fleet and SCADA are simulated | Real hardware fleet, utility SCADA access | Yes |
 | OL-4 | API identity trust (`X-Remote-User` / proxy secret, D-12) | operational | verified built and fail-closed | — | No |
-| OL-5 | M1 delivery charge (D-19) settles at $0 | operational | grid-charged kWh attribution not built; a constant 0 is used | — | No (fix in progress for R3) |
+| OL-5 | M1 delivery charge (D-19) settles at $0 | operational (R2: fixed with a grid-share proxy) | grid-charged kWh attribution not built; a constant 0 is used | — | No |
 | DM-1 | Hub stop-release `issued_at` backstop is scope-wide | dormant | unreachable while the guardian releases a whole scope at once | — | No |
-| DM-2 | Need-basis K13 check reads migration-0015 tables | dormant | gated behind the absent `opengrid.site_ingest` package | Customer-services package + migration 0015 | No |
+| DM-2 | Need-basis K13 check reads migration-0015 tables | dormant (R2: tables exist via 0026; data gated by config) | gated behind the absent `opengrid.site_ingest` package | Customer-services package + migration 0015 | No |
 
 ---
 
@@ -469,7 +496,7 @@ document. A standalone prototype backs the formulation: `prototypes/two_market_l
 already-found gaps in the code as built (`G1`–`G11`, e.g. "every bank is priced at the LZ_WEST price"
 regardless of its real zone, `selector/gate.py:257-273`; "every bank is eligible for every obligation, so there is
 no locality or territory," `selector/gate.py:299,337`) and defines eleven work packages (`WP-2M-01`…`WP-2M-11`,
-§7) — territory/`K15`, substation battery assets, the AS energy hold (`C3′`, `G-32`), the lexicographic
+§7) — territory/`K15`, substation battery assets, the AS energy hold (`C3′`; not a guardian check), the lexicographic
 regulated-then-free objective, seven families of maximum-discharge-flow limits (`F1`–`F7`, most rows of its own
 "not enforced anywhere" table, §1.9), and the `$/kW-in vs $/kW-out` economic reporting — none of which exist in
 `orchestrator/src` yet (the spec's own §0.2 findings table is the authoritative "what's built vs not" breakdown

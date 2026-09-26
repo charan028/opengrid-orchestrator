@@ -3,6 +3,8 @@
 This is the single source of truth for invariant IDs. Every MVP-S document (02a, 02b, 03, 04) and every test uses
 these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-first-principles-review.md` §1.
 
+**Code references.** A `file:line` marked R2 (or given in a "Status at main `6470cfa`" block) is at `main` `6470cfa`. Every other `file:line` was verified at `434d230` and may have moved since.
+
 | ID | Invariant | Principle | Enforced at (primary → independent check) | Fail-safe | Proven by |
 |---|---|---|---|---|---|
 | **K1** | **Homeowner reserve.** A hub's SoC is never driven below its backup reserve by any command (L1, hard, never priced) | P2 | selector/allocator constraint → guardian G-01 → hub firmware (sim) | Hold; the hub refuses discharge below reserve | Property test; live counter "reserve breaches = 0" |
@@ -63,21 +65,46 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
     unless the utility has confirmed bidirectional settings;
   - (d) substation-asset POI import/export and substation-transformer limits;
   - (e) hub, asset, fleet and feeder ramps, with no synchronized fleet steps (unchanged from the original K4 above).
-  - **Built today:** (e) is unchanged and enforced (`orchestrator/src/opengrid/core/limits.py:94-138`
-    `check_hub_ramp`/`check_fleet_ramp_cap`/`check_feeder_ramp_ceiling`, guardian G-04/G-05/G-06); (a)'s flat rated
-    power and energy-over-lease caps are enforced (`orchestrator/src/opengrid/core/limits.py:65-72`
-    `check_hub_power`, `orchestrator/src/opengrid/core/physics.py:63-104`
-    `hub_sustainable_discharge_kw`/`hub_sustainable_charge_kw`), but the SoC/temperature derating curve itself is
-    not; aggregate bank kVA (part of (c)) is enforced (`core/limits.py:75-91` `check_bank_kva`, guardian G-03).
-  - **Specified, not built:** the SoC/temperature derating curve; per-home meter export/import (b); per-service-
-    transformer and feeder/substation thermal loading and reverse-flow limits (c, beyond the existing ramp
-    ceiling); substation-asset POI/transformer limits (d) — there is no substation asset class in code (no
-    `SUBSTATION_BESS`, no substation `og.asset` table). The data-model groundwork for (a)-(d) exists as inert
-    fields only: `HubSnapshot.cell_temp_c`/`p_dis_max_kw`/`meter_kw`/`export_limit_kw`/`xfmr_id`
-    (`orchestrator/src/opengrid/allocator/models.py:53-57`) and `BankSnapshot.feeder_id`/`substation_id`
-    (`orchestrator/src/opengrid/allocator/models.py:75-76`) are carried but read by no check function yet. See
-    `09-optimizer-dispatcher-update.md` §1.9 (families F1-F7) and §2.6 (guardian checks G-02 (changed) and
-    G-26…G-33; final numbering in "Flow limits and territory" below) for the full target design (not edited here).
+  - **Status at main `6470cfa` (R2), per family:**
+    - (a) **Built in the real-time dispatcher and the guardian; not in the selector.** The allocator derates
+      every cycle, always on (`orchestrator/src/opengrid/allocator/flow_limits.py:49-68` `derated_discharge_kw`,
+      `cap_hub` `:94-105`, applied at `orchestrator/src/opengrid/allocator/cycle.py:123-135`), on the shared curve
+      `orchestrator/src/opengrid/core/limits.py:175-207`; an unknown cell temperature derates to 0.5
+      (`core/limits.py:126`). The per-unit cap reads `og.hub.units` (migration 0032, `core/limits.py:77-90`). The
+      guardian re-checks with G-02 (changed, `orchestrator/src/opengrid/guardian/flow_checks.py:133`) and G-31
+      (`flow_checks.py:88`). The allocator never plans above continuous power. **Known defect:** the guardian reads
+      the peak budget under the wrong field name (`guardian/mqtt_io.py:36` `peak_budget_kws`; the wire field is
+      `peak_power_budget_kws`, `orchestrator/src/opengrid/core/models/mqtt.py:44`), so G-31 vetoes every
+      above-continuous setpoint (`core/limits.py:283-284`): safe, but the peak allowance cannot be used.
+    - (b) **Guardian built; allocator partial.** G-26 checks both sides, net of home load
+      (`flow_checks.py:164`), with static defaults of 20 kW export and 48 kW service when a premise has no row
+      (`orchestrator/src/opengrid/guardian/config.py:106-107`). The allocator caps export only
+      (`allocator/flow_limits.py:78-88`), behind `[allocator.flow_limits].enabled = true`
+      (`orchestrator/config/orchestrator.toml:124-126`), and no repo seed sets `og.hub.export_limit_kw`, so it has
+      nothing to apply yet.
+    - (c) **Guardian built; allocator built, without data.** G-27 checks each service transformer over all its
+      members (`flow_checks.py:219`); a hub with no transformer is a group of one at
+      `[guardian.flow].unmapped_xfmr_kva_per_home = 25` (`orchestrator.toml:143`). G-28 checks feeder thermal
+      and reverse flow (`flow_checks.py:261`) with defaults of 10 MW × 0.95 thermal and 3 MW reverse
+      (`guardian/config.py:113-116`). The allocator's transformer and feeder budgets (`allocator/flow_limits.py:108-182`)
+      need `og.service_transformer`/`og.feeder_limit` rows (migration 0029), which no repo seed writes. Bank kVA
+      (G-03) is unchanged.
+    - (d) **Guardian built, idle.** G-29 (substation limit, and a substation asset's POI, `flow_checks.py:296`)
+      evaluates nothing in the shipped topology: no `og.asset` row has a `bank_id`. No code dispatches a
+      substation asset (ES19-S03).
+    - (e) **Guardian built; dispatcher per hub only.** G-04, G-05 (fleet cap, plus a new gross synchronized-step
+      check, `core/limits.py:370-378`, `guardian/service.py:360-368`), G-06 and the new G-32 (non-firm feeder
+      ramp, `core/limits.py:360`). The engine ramps each hub (`orchestrator/src/opengrid/engine/__init__.py:195-207`);
+      there is no fleet or feeder ramp shaping and no signed start jitter.
+    - **Reverse flow is not measured.** The guardian's aggregate flow is the sum of each bank's latest SCADA
+      `APPARENT_POWER_KVA`, taken as import-positive (`orchestrator/src/opengrid/guardian/flow_repo.py:40-48`).
+      Apparent power has no sign (the simulator publishes |kW|/pf,
+      `integration-sims/src/ogsim/scada/aggregation.py:37-41`), so a bank that is already exporting reads as
+      importing, and G-28/G-29/G-30 see reverse flow only through the batch's own change.
+    - Checker: `FLOW_LIMIT` measures home meter, derate, transformer, feeder and substation after the fact
+      (`orchestrator/src/opengrid/invariants/queries.py:497-565`, `invariants/checks.py:564-624`); the spec's
+      `K4_*` counters are not built.
+    - Target design: `09-optimizer-dispatcher-update.md` §1.9 (families F1-F7) and §2.6.
 - **K15 — territory (new) (D-20, D-21, D-27).** Three parts (`09-optimizer-dispatcher-update.md` §6, quoted here):
   - A REG(u) obligation is reserved, granted and delivered only by assets inside utility $u$'s service territory.
   - An asset inside a regulated territory takes FREE (ERCOT) opportunities only if $u$'s contract grants wholesale
@@ -87,17 +114,28 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
   - Principle P2. Enforced at (target): contracts admission → selector C25 → allocator eligibility → guardian
     G-33 (market segregation) + G-30 (territory export) → settle tariff attribution. Fail-safe (target): VETO the
     item; a shortfall is recorded against the same obligation (K13 best effort, above).
-  - **Specified, not built.** No stage of the chain exists in code: `orchestrator/src/opengrid/contracts/admission.py`
-    has no market/territory check; `orchestrator/src/opengrid/selector/model.py` and `selector/gate.py` have no C25
-    rows; the guardian's built check set stops at G-20 (`orchestrator/src/opengrid/guardian/checks.py:1-2` lists
-    G-01…G-20; there is no G-30/G-33 anywhere in `guardian/checks.py` or `guardian/service.py`). The data-model
-    groundwork is in place but inert: `BankSnapshot.territory`/`free_access`
-    (`orchestrator/src/opengrid/allocator/models.py:74-81`) are carried fields nothing yet populates or reads (the
-    comment there names `opengrid.market.territory_of_zone`, a module that does not exist in this repo); the config
-    surface `orchestrator/config/tdsp_tariffs.toml:65-103` (`[zone_territory]`) documents AE/CPS/LCRA/RAYBN
-    territory by ERCOT settlement zone but says of itself "no selector/allocator/guardian code reads this table
-    yet." Proven by: none yet (target: a property test over random fleet/contract mixes, plus the `K15_*` checker
-    counters described in `09-optimizer-dispatcher-update.md` §6).
+  - **Status at main `6470cfa` (R2): partly built.**
+    - Contract admission: **not built** (`orchestrator/src/opengrid/contracts/` is unchanged since `434d230`;
+      `R_TERRITORY_INELIGIBLE`, `orchestrator/src/opengrid/core/reasons.py:88`, is raised only by the guardian).
+    - Selector C25: **built** as bank-eligibility narrowing, not as LP rows
+      (`orchestrator/src/opengrid/selector/gate.py:489-529`, called in `run_gate` at `:951-966`); FREE headroom in
+      a territory at `selector/model.py:226-227`; the regulated-first stage R at `selector/solve.py:140-144`.
+    - Allocator: **built, on** (`allocator/cycle.py:221-232`, `:412-416`; `[allocator].enforce_territory = true`,
+      `orchestrator.toml:119-120`). A blocked obligation gets a 0 kW grant and a shortfall with the reason.
+    - Guardian: G-33 **built, always wired** (`flow_checks.py:317` on `orchestrator/src/opengrid/market/territory.py:131`,
+      the one predicate; `guardian/service.py:584`). The guardian refuses to start without `[zone_territory]`
+      (`guardian/flow_repo.py:270-274`). G-19 accepts a territory reduction only when its own check agrees
+      (`guardian/service.py:1011`, `:1065`). G-30 is built but idle: no Austin Energy or CPS bank is seeded (and
+      see "Reverse flow is not measured" under K4).
+    - Settle: **built** for a REGULATED contract, TOU charging and the capacity payment
+      (`orchestrator/src/opengrid/settle/__init__.py:242-269`), keyed on the contract's market, not the asset's
+      territory.
+    - Checker: **partly built.** One `K15_TERRITORY` check over regulated, non-headroom grants
+      (`invariants/queries.py:409-441`, `invariants/checks.py:656-688`), counter `og_territory_violations_total`;
+      part (b) and the `K15_TERRITORY_MARKET`/`K15_TERRITORY_EXPORT`/`K15_CHARGING_TARIFF` counters are not built.
+    - Proven by: property tests `orchestrator/tests/unit/market/test_territory.py:122-130`,
+      `orchestrator/tests/unit/allocator/test_dispatch_extensions.py:440-452` and
+      `orchestrator/tests/unit/guardian/test_flow_checks.py:389`.
 
 **Additions (2026-09-25):**
 
@@ -129,22 +167,35 @@ non-default-envelope grant on the target hub)** — G-21..G-25 defined in `06-se
 **Flow limits and territory (D-26, D-27; K4 extended, K15).** The final guardian numbering (lead, 2026-09-26)
 matches `09-optimizer-dispatcher-update.md` §2.5/§2.6 as renumbered:
 
-| Check | Limit |
-|---|---|
-| G-26 | Home meter: export and import at the meter, net of home load |
-| G-27 | Service transformer |
-| G-28 | Feeder thermal and reverse flow |
-| G-29 | Substation POI / transformer |
-| G-30 | Territory export (K15c) |
-| G-31 | Sustained vs peak |
-| G-32 | Feeder ramp for non-firm steps |
-| G-33 | K15 market segregation |
+| Check | Limit | Built in R2 (`main` `6470cfa`): check | Wired in `guardian/service.py` |
+|---|---|---|---|
+| G-26 | Home meter: export and import at the meter, net of home load | `orchestrator/src/opengrid/guardian/flow_checks.py:164` `check_g26_home_meter` | `:328`, per item |
+| G-27 | Service transformer | `flow_checks.py:219` `check_g27_transformer` | `:539-541`, over all members of each transformer |
+| G-28 | Feeder thermal and reverse flow | `flow_checks.py:261` `check_aggregate_flow` on the feeder's flow | `:452-457`, `:477` |
+| G-29 | Substation POI / transformer | `flow_checks.py:261` on the substation's flow; `flow_checks.py:296` `check_g29_poi` for a substation asset | `:458-463`, `:489-493` |
+| G-30 | Territory export (K15c) | `flow_checks.py:261` on the territory boundary flow | `:464-469` |
+| G-31 | Sustained vs peak | `flow_checks.py:88` `check_g31_peak` | `:427`, per item |
+| G-32 | Feeder ramp for non-firm steps | `orchestrator/src/opengrid/core/limits.py:360` `check_feeder_ramp` | `:383-390` |
+| G-33 | K15 market segregation | `flow_checks.py:317` `check_g33_territory`, on `market/territory.py:131` `check_territory` (the one predicate) | `:584`, per item |
 
-- **Status at main `434d230`:** none of G-26…G-33 is in the guardian yet. `guardian/checks.py` and
-  `guardian/pq_checks.py` stop at G-25. The ids are fixed so the implementations land on them and nothing else
-  reuses them.
+- **Status at main `6470cfa` (R2): built.** All eight run on the guardian's own reads (its topology, territory and
+  telemetry ports; `guardian/main.py:349` wires `PgGridTopologyPort`), next to G-01…G-25. Item-level rules are
+  listed at `guardian/service.py:66`. Tests: `orchestrator/tests/unit/guardian/test_flow_checks.py` (29) and
+  `test_service_flow.py` (14). No feature flag gates them. Caveats, all under K4 above: G-31's peak path is
+  dead (the field-name defect), G-29/G-30 are idle without substation or regulated-zone data, reverse flow is
+  seen only through the batch's own change, and `[guardian.flow].telemetry_required` is false, so a flow field
+  a hub has never reported falls back to the static premise limits (`guardian/config.py:101`).
 - **The ERCOT_AS energy hold is not a guardian check.** Two built pieces enforce it:
-  - the selector's C3′ floor (`orchestrator/src/opengrid/selector/model.py:296`);
-  - the engine's S6 hold floor (`orchestrator/src/opengrid/engine/gateways.py:124-127`).
+  - the selector's C3′ floor (`orchestrator/src/opengrid/selector/model.py:345`);
+  - the engine's S6 hold floor (`orchestrator/src/opengrid/engine/gateways.py:139`).
 
-  The invariants check `CHECK_AS_HOLD` is to measure it; it is not on main at `434d230`.
+  The invariants check `CHECK_AS_HOLD` measures it (built in R2, `orchestrator/src/opengrid/invariants/__init__.py:489-508`,
+  `invariants/checks.py:527-561`, `invariants/queries.py:444-477`), with a narrower scope than the spec:
+  - it runs only while an `og.as_deployment` window is active (`queries.py:471`), so an award that is held and
+    not deployed is never measured;
+  - it compares the energy held with the product's full duration (`checks.py:547`), even part-way through a
+    deployment;
+  - it sums the deliverable energy of every hub on the award's reserved banks (`queries.py:460`, `:469`) without
+    netting out other obligations on those banks.
+
+  The mismatch has been reported to the lead for routing.

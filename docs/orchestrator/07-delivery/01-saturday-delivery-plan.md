@@ -47,7 +47,7 @@ and the local clients in `src/opengrid/`.
 
 | # | Change | Source | Where specified |
 |---|---|---|---|
-| RC-1 | **Commitment lock** covers ENERGY as well as capacity: remaining energy vs the committed delivery is checked **continuously** (every cycle); a missing or stale SoC means zero discharge | User | `00-invariants.md` K1/K13 notes; energy-sufficiency work in progress |
+| RC-1 | **Commitment lock** covers ENERGY as well as capacity: remaining energy vs the committed delivery is checked **continuously** (every cycle); a missing or stale SoC means zero discharge | User | `00-invariants.md` K1/K13 notes; energy sufficiency built (D-6, ES05-S08) |
 | RC-2 | **Base hardware:** 39.2 kWh usable / 11 kW per battery unit; **20% of homes have 2 units (78.4 kWh / 20 kW)**; reserve 20%; banks are **~600 kVA feeder segments** (40 × 50 homes) | User (confirmed with Base) | `02b` §4.2, fleet config |
 | RC-3 | **Service tailoring:** each customer/service gets a first-class **ServiceProfile** (control primitive, target quantity, response, tolerance, M&V, settlement). Pipeline AC mitigation, data center and arbitrage are distinct services | User | `06-service-profiles-and-power-quality.md` (draft) |
 | RC-4 | **Power quality:** per-customer **PowerQualityEnvelope** (phase, voltage, current, frequency, PF, THD); an inverter imperfection model (frequency/amplitude offset, harmonics, phase error) and how it aggregates; PQ-aware dispatch; guardian PQ checks; per-phase telemetry; simulator PQ anomalies | User | `06-service-profiles-and-power-quality.md` (draft); proposed invariant K14 |
