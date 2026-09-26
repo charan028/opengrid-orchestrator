@@ -3,6 +3,11 @@
 One `FleetState` holds every hub's physics/command/anomaly state as numpy
 arrays (not per-hub Python objects), so a 2,000-10,000 hub tick is a
 handful of array ops instead of a Python loop (02b §4.1/§5.1).
+
+Dual-unit rule (must match ogsim.fleet.state / opengrid.fleet.seed exactly): hub index i
+(hub-{i:05d}) is dual-unit iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share),
+which selects exactly floor(hub_count * dual_unit_share) hubs, deterministically and evenly
+spread across i in range(hub_count).
 """
 
 from __future__ import annotations
@@ -56,6 +61,13 @@ class FleetState:
         return self.hub_index.get(hub_id)
 
 
+def _dual_unit_mask(hub_count: int, dual_unit_share: float) -> np.ndarray:
+    """Vectorized form of the dual-unit rule documented in this module's docstring: hub index i is
+    dual-unit iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share)."""
+    i = np.arange(hub_count)
+    return np.floor((i + 1) * dual_unit_share) > np.floor(i * dual_unit_share)
+
+
 def build_fleet_state(config: FleetConfig, rng: np.random.Generator) -> FleetState:
     """Allocates a `FleetState` for `config.hub_count` hubs distributed
     evenly across `config.bank_count` banks and `config.zones` (02b §4.1)."""
@@ -65,8 +77,10 @@ def build_fleet_state(config: FleetConfig, rng: np.random.Generator) -> FleetSta
     zones = [config.zones[i % len(config.zones)] for i in range(n)]
 
     soc_frac = rng.uniform(0.4, 0.9, size=n)
-    e_kwh = np.full(n, config.e_kwh_default)
+    dual_unit = _dual_unit_mask(n, config.dual_unit_share)
+    e_kwh = np.where(dual_unit, config.e_kwh_dual_unit, config.e_kwh_default)
     r_kwh = e_kwh * config.reserve_frac_default
+    p_kw_limit = np.where(dual_unit, config.p_kw_dual_unit, config.p_kw_default)
     soc_kwh = np.clip(soc_frac * e_kwh, r_kwh, e_kwh)
 
     state = FleetState(
@@ -76,7 +90,7 @@ def build_fleet_state(config: FleetConfig, rng: np.random.Generator) -> FleetSta
         soc_kwh=soc_kwh,
         e_kwh=e_kwh,
         r_kwh=r_kwh,
-        p_kw_limit=np.full(n, config.p_kw_default),
+        p_kw_limit=p_kw_limit,
         eta_c=np.full(n, config.eta_c),
         eta_d=np.full(n, config.eta_d),
         self_discharge_kwh_per_h=np.full(n, config.self_discharge_kwh_per_h),

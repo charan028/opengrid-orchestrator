@@ -1,0 +1,72 @@
+# OpenGrid CI gate: runs on every PR to main and every push to a work-package branch.
+# Executes on the dedicated, sandboxed `opengrid-host` runner on calisto (host mode, user og-ci).
+# Checkout is done with plain git against the local Gitea (no Node-based actions needed).
+name: check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ["wp/**"]
+
+concurrency:
+  group: check-${{ gitea.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: opengrid-host
+    timeout-minutes: 30
+    env:
+      PIP_CACHE_DIR: /var/lib/og-ci/pip-cache
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout (local Gitea, job token)
+        run: |
+          set -euo pipefail
+          rm -rf src && mkdir src && cd src
+          git init -q
+          git fetch -q --depth=1 \
+            "http://oauth2:${{ secrets.GITHUB_TOKEN }}@127.0.0.1:3000/${{ gitea.repository }}.git" \
+            "${{ gitea.sha }}"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+
+      - name: Python environment
+        run: |
+          set -euo pipefail
+          cd src
+          python3.13 -m venv .venv
+          . .venv/bin/activate
+          pip install -q -e "./orchestrator[dev]" 2>/dev/null || pip install -q -e ./orchestrator
+          pip install -q -e "./integration-sims[dev]" 2>/dev/null || pip install -q -e ./integration-sims
+          pip install -q ruff mypy pytest pytest-asyncio pytest-cov hypothesis types-PyYAML types-jsonschema
+
+      - name: Orchestrator gate (lint, format, types, no-duplication, unit tests + coverage)
+        run: |
+          set -euo pipefail
+          cd src/orchestrator
+          . ../.venv/bin/activate
+          ruff check src tests tools
+          ruff format --check src tests tools
+          mypy src
+          python tools/dupcheck.py
+          python -m pytest tests/unit -q -p no:cacheprovider
+
+      - name: Integration simulators (lint, types, tests)
+        run: |
+          set -euo pipefail
+          cd src/integration-sims
+          . ../.venv/bin/activate
+          ruff check src tests
+          ruff format --check src tests
+          mypy src
+          python -m pytest -q -p no:cacheprovider
+
+      - name: Property tests (if present)
+        run: |
+          set -euo pipefail
+          cd src/orchestrator
+          . ../.venv/bin/activate
+          if [ -d tests/property ]; then python -m pytest tests/property -q -p no:cacheprovider; else echo "no property tests yet"; fi

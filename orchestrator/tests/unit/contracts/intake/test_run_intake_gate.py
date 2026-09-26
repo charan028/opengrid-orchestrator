@@ -115,6 +115,14 @@ async def test_intake_is_idempotent_across_repeated_gates(repo: FakeContractsRep
     assert len(repo.opportunities) == total_after_first
 
 
+def test_default_energy_series_key_is_a_load_zone_not_a_hub_code() -> None:
+    """Regression (`qa/merge-notes.md` S15): the default was `"HB_HOUSTON"`, a hub code that
+    `feeds.ercot` never returns under `settlementPointType=LZ` (`forecast/README.md`'s canonical
+    series-key table) -- so `og.feed_obs`/`forecast.scenarios()` only ever carry `LZ_*` keys and the
+    energy intake gate silently produced zero opportunities. Guards against reintroducing a hub code."""
+    assert intake.DEFAULT_ENERGY_SERIES_KEY.startswith("LZ_")
+
+
 async def test_intake_never_overlaps_a_committed_obligation(repo: FakeContractsRepo) -> None:
     contracts_by_role = await _seed_five_customers(repo)
     energy_contract = contracts_by_role["energy"]

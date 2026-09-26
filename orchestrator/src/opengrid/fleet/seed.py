@@ -20,6 +20,7 @@ actually runs.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,16 @@ from opengrid.platform.config import Config
 
 _DEFAULT_ZONES: tuple[str, ...] = ("LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST")
 
+# Dual-unit homes (confirmed by Base, 2026-09-25): see `build_topology`'s docstring for the
+# deterministic hub-selection rule shared word-for-word with `ogsim.fleet.state`.
+_DUAL_UNIT_SHARE_DEFAULT: float = 0.2
+_E_KWH_DUAL_UNIT_DEFAULT: float = 78.4
+_P_KW_DUAL_UNIT_DEFAULT: float = 20.0
+
+# Bank rating models a feeder segment (~50 homes), not a single distribution transformer
+# (confirmed by Base, 2026-09-25).
+_BANK_KVA_RATING_DEFAULT: float = 600.0
+
 
 @dataclass(frozen=True, slots=True)
 class SimFleetTopologyConfig:
@@ -43,12 +54,22 @@ class SimFleetTopologyConfig:
     hub_count: int = 2000
     bank_count: int = 40
     zones: tuple[str, ...] = _DEFAULT_ZONES
-    e_kwh_default: float = 13.5
+    # Base Power home battery, usable kWh (confirmed by Base, 2026-09-25).
+    e_kwh_default: float = 39.2
     reserve_frac_default: float = 0.20
-    p_kw_default: float = 5.0
+    # Base Power inverter, kW per battery unit (confirmed by Base, 2026-09-25).
+    p_kw_default: float = 11.0
+    # Share of homes with two battery units instead of one (confirmed by Base, 2026-09-25); see
+    # `build_topology`'s docstring for the deterministic hub-selection rule.
+    dual_unit_share: float = _DUAL_UNIT_SHARE_DEFAULT
+    # Dual-unit home usable kWh (confirmed by Base, 2026-09-25).
+    e_kwh_dual_unit: float = _E_KWH_DUAL_UNIT_DEFAULT
+    # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
+    p_kw_dual_unit: float = _P_KW_DUAL_UNIT_DEFAULT
     eta_c: float = 0.9487
     eta_d: float = 0.9487
-    bank_kva_rating_default: float = 75.0
+    # Feeder segment (~50 homes), not a single distribution transformer.
+    bank_kva_rating_default: float = _BANK_KVA_RATING_DEFAULT
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -96,11 +117,12 @@ def load_sim_fleet_topology_config(cfg: Config | None = None) -> SimFleetTopolog
         e_kwh_default=float(raw.get("e_kwh_default", defaults.e_kwh_default)),
         reserve_frac_default=float(raw.get("reserve_frac_default", defaults.reserve_frac_default)),
         p_kw_default=float(raw.get("p_kw_default", defaults.p_kw_default)),
+        dual_unit_share=float(raw.get("dual_unit_share", defaults.dual_unit_share)),
+        e_kwh_dual_unit=float(raw.get("e_kwh_dual_unit", defaults.e_kwh_dual_unit)),
+        p_kw_dual_unit=float(raw.get("p_kw_dual_unit", defaults.p_kw_dual_unit)),
         eta_c=float(raw.get("eta_c", defaults.eta_c)),
         eta_d=float(raw.get("eta_d", defaults.eta_d)),
-        bank_kva_rating_default=float(
-            raw.get("bank_kva_rating_default", defaults.bank_kva_rating_default)
-        ),
+        bank_kva_rating_default=float(raw.get("bank_kva_rating_default", defaults.bank_kva_rating_default)),
     )
 
 
@@ -110,13 +132,21 @@ class Topology:
     banks: tuple[Bank, ...]
 
 
+def _is_dual_unit(index: int, dual_unit_share: float) -> bool:
+    """Dual-unit rule (must match ogsim.fleet.state exactly): hub index i (hub-{i:05d}) is dual-unit
+    iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share), which selects exactly
+    floor(hub_count * dual_unit_share) hubs, deterministically and evenly spread across i in
+    range(hub_count)."""
+    return math.floor((index + 1) * dual_unit_share) > math.floor(index * dual_unit_share)
+
+
 def build_topology(config: SimFleetTopologyConfig) -> Topology:
     """Pure (no I/O): reproduces `ogsim.fleet.state.build_fleet_state`'s id/grouping scheme exactly --
     `hub-{i:05d}` for `i` in `range(hub_count)`, `bank-{i % bank_count:03d}`, zone `zones[i % len(zones)]`
-    -- so every id this generates is one the simulator will actually publish telemetry for.
+    -- so every id this generates is one the simulator will actually publish telemetry for. Dual-unit
+    hub selection uses `_is_dual_unit`, identical to `ogsim.fleet.state`'s vectorized rule.
     """
     n_zones = len(config.zones)
-    r_kwh = config.e_kwh_default * config.reserve_frac_default
 
     hub_zone_by_bank: dict[str, dict[str, int]] = {}
     hubs = []
@@ -124,14 +154,18 @@ def build_topology(config: SimFleetTopologyConfig) -> Topology:
         hub_id = f"hub-{i:05d}"
         bank_id = f"bank-{i % config.bank_count:03d}"
         zone = config.zones[i % n_zones]
+        dual_unit = _is_dual_unit(i, config.dual_unit_share)
+        e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default
+        p_kw = config.p_kw_dual_unit if dual_unit else config.p_kw_default
+        r_kwh = e_kwh * config.reserve_frac_default
         hubs.append(
             Hub(
                 hub_id=hub_id,
                 bank_id=bank_id,
                 zone=zone,
-                e_kwh=config.e_kwh_default,
+                e_kwh=e_kwh,
                 r_kwh=r_kwh,
-                p_kw=config.p_kw_default,
+                p_kw=p_kw,
                 eta_c=config.eta_c,
                 eta_d=config.eta_d,
             )

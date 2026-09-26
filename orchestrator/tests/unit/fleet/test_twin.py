@@ -22,6 +22,7 @@ class FakeFleetBackend:
     states: list[HubState] = field(default_factory=list)
     upserted: list[HubState] = field(default_factory=list)
     copied_rows: list[fleet.TelemetryRow] = field(default_factory=list)
+    recorded_scada: list = field(default_factory=list)
 
     async def load_hubs(self) -> list[Hub]:
         return self.hubs
@@ -37,6 +38,9 @@ class FakeFleetBackend:
 
     async def copy_telemetry(self, rows: list[fleet.TelemetryRow]) -> None:
         self.copied_rows.extend(rows)
+
+    async def record_scada_observation(self, signal) -> None:
+        self.recorded_scada.append(signal)
 
 
 def _cfg(**overrides: float) -> Config:
@@ -248,6 +252,10 @@ async def test_ingest_scada_signal_bounds_charge_headroom() -> None:
     )
     cap = await fleet.capability("bank-1", now)
     assert cap.max_charge_kw == pytest.approx(10.0)  # 50 kVA rating - 40 kVA load
+    # Dispatch-live pass: must also persist to the backend (og.feed_obs) so guardian/health -- separate
+    # processes -- can read the same reading independently of this process's in-memory cache.
+    assert len(backend.recorded_scada) == 1
+    assert backend.recorded_scada[0].bank_id == "bank-1"
 
 
 async def test_utility_block_instruction_zeroes_capability() -> None:

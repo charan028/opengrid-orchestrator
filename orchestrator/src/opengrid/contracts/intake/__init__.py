@@ -69,10 +69,20 @@ __all__ = [
     "run_intake_gate",
 ]
 
-#: ERCOT settlement-point/hub the demo contracts' energy price is read against. A real deployment
-#: would key this per contract (`Contract.territory_id`/`profile_ref`) -- MVP-S has one ERCOT_ENERGY
-#: demo contract, so one configured series is enough; documented rather than hidden (BUILD.md S5a).
-DEFAULT_ENERGY_SERIES_KEY = "HB_HOUSTON"
+#: ERCOT settlement-point/load-zone the demo contracts' energy price is read against. A real
+#: deployment would key this per contract (`Contract.territory_id`/`profile_ref`) -- MVP-S has one
+#: ERCOT_ENERGY demo contract, so one configured series is enough; documented rather than hidden
+#: (BUILD.md S5a).
+#:
+#: Must be a **load-zone** code (`[fleet].zones`, e.g. `LZ_HOUSTON`), never a hub code: `feeds.ercot`
+#: queries `np6-905-cd` with `settlementPointType=LZ` (`forecast/README.md`'s canonical series-key
+#: table), so `og.feed_obs.series`/`opengrid.forecast`'s `price_series` only ever carry `LZ_*` keys.
+#: This was previously `"HB_HOUSTON"`, a hub code that never matches a real `feed_obs` row or a
+#: `forecast.scenarios()` P50 point under that `settlementPointType`, which silently made every
+#: `ERCOT_ENERGY`/`ERCOT_AS`-adjacent intake gate return `charge_price is None` and generate zero
+#: opportunities despite live ERCOT prices flowing into `feed_obs` -- the exact class of bug
+#: `forecast/service.py`'s own `DEFAULT_PRICE_SERIES` docstring already fixed once for that module.
+DEFAULT_ENERGY_SERIES_KEY = "LZ_HOUSTON"
 
 
 class ForecastScenariosFn(Protocol):
@@ -336,8 +346,11 @@ async def _intake_deferral(
             window_start=candidate.window_start,
             window_end=candidate.window_end,
             requested_kw=candidate.requested_kw,
-            value_per_mwh=None,
-            rationale={"basis": "delivery_calendar_peak_window"},
+            value_per_mwh=candidate.value_per_mwh,
+            rationale={
+                "basis": "delivery_calendar_peak_window",
+                "capacity_payment_usd_per_mwh": str(candidate.value_per_mwh),
+            },
         )
         if opportunity is not None:
             created.append(opportunity)

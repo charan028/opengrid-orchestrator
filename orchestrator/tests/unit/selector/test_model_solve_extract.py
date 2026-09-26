@@ -84,6 +84,49 @@ def test_ts_04_semi_continuous_snaps_to_increment():
     assert ok, violations
 
 
+def test_zero_value_firm_candidate_with_degradation_cost_is_never_selected():
+    """Regression, real-shaped (`qa/merge-notes.md` S15): before the intake fix, a DIST_DEFERRAL
+    opportunity was admitted with `value_per_mwh=None` -> persisted as null -> read back by
+    `selector.gate.load_candidates` as `0.0`. This model's objective coefficient for a candidate is
+    `value_per_mwh/1000 - degradation_cost_per_kwh` (`model.py`'s objective section); with a real
+    demo-shaped degradation cost (0.03 $/kWh, `0002_seed_demo.sql`) and zero value, that coefficient is
+    strictly negative, so the *correct* optimum -- given that flawed input -- is `x_o=0` no matter how
+    much free capacity is available. This was never a solver bug: 94 `OPTIMAL` solves that all
+    correctly refused a candidate whose only recorded value was zero. Locks in that this is still true
+    (so nobody "fixes" it by special-casing the model), and that a real positive value flips the
+    decision -- the actual fix belongs in intake (`contracts/intake/deferral.py`'s
+    `DEFAULT_DEFERRAL_VALUE_USD_PER_MWH`), not here."""
+    bank = make_bank("B1", 500.0, range(1))
+    scenario = zero_price_scenario(range(1))
+    unpriced = semi_continuous_candidate(
+        "deferral-o1", 500.0, 1.0, 1.0, 0.0, (0,), ("B1",), degradation_cost_per_kwh=0.03
+    )
+    inputs = simple_inputs((bank,), (scenario,), (), (unpriced,), n_intervals=1)
+
+    built = build_mode_o_model(inputs)
+    outcome = highs_solve(built, FAST_SETTINGS)
+    plan = extract_plan(built, outcome, "L-ID")
+
+    assert outcome.status == "OPTIMAL"
+    assert plan.selected_q.get("deferral-o1", 0.0) == 0.0
+
+    # The real fix: intake records a real capacity-payment value (e.g. $120/MWh), which clears the
+    # degradation cost and flips the optimum to fully select the candidate.
+    priced = semi_continuous_candidate(
+        "deferral-o1", 500.0, 1.0, 1.0, 120.0, (0,), ("B1",), degradation_cost_per_kwh=0.03
+    )
+    inputs_priced = simple_inputs((bank,), (scenario,), (), (priced,), n_intervals=1)
+    built_priced = build_mode_o_model(inputs_priced)
+    outcome_priced = highs_solve(built_priced, FAST_SETTINGS)
+    plan_priced = extract_plan(built_priced, outcome_priced, "L-ID")
+
+    assert outcome_priced.status == "OPTIMAL"
+    assert plan_priced.selected_q["deferral-o1"] == 500.0
+
+    ok, violations = validate_plan(inputs_priced, plan_priced)
+    assert ok, violations
+
+
 def test_c16_non_anticipativity_is_structural():
     """C16: `x_o`/`q_o`/`ybar_{o,b,t}` are declared exactly once per (o,b,t), never per scenario --
     the model has no way to make a different first-stage choice depending on which of P10/P50/P90

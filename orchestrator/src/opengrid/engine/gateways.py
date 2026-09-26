@@ -229,9 +229,7 @@ class EngineLedgerGateway:
         version = await ledger.ledger_version()
         records = [
             GrantRecord(
-                grant_id=uuid5(
-                    NAMESPACE_URL, f"{cycle_id}:{g.bank_id}:{g.obligation_id}:{g.is_headroom}"
-                ),
+                grant_id=uuid5(NAMESPACE_URL, f"{cycle_id}:{g.bank_id}:{g.obligation_id}:{g.is_headroom}"),
                 cycle_id=cycle_id,
                 bank_id=g.bank_id,
                 granted_kw=Decimal(str(round(g.granted_kw, 3))),

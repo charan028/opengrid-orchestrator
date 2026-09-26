@@ -16,13 +16,23 @@ lease_ttl_s: 30.0
 lease_hold_after_expiry_s: 5.0
 stop_ramp_s: 4.0
 
-e_kwh_default: 13.5
+e_kwh_default: 39.2  # Base Power home battery, usable kWh (confirmed by Base, 2026-09-25).
 reserve_frac_default: 0.20
-p_kw_default: 5.0
+p_kw_default: 11.0  # Base Power inverter, kW per battery unit (confirmed by Base, 2026-09-25); 2-unit homes = 20 kW
 eta_c: 0.9487
 eta_d: 0.9487
 self_discharge_kwh_per_h: 0.0005
-bank_kva_rating_default: 75.0
+# feeder segment (~50 homes), not a single distribution transformer.
+bank_kva_rating_default: 600.0
+
+# Dual-unit homes (confirmed by Base, 2026-09-25): a share of homes have TWO battery units instead
+# of one. Dual-unit rule (must match ogsim.fleet.state / opengrid.fleet.seed exactly): hub index i
+# (hub-{i:05d}) is dual-unit iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share),
+# which selects exactly floor(hub_count * dual_unit_share) hubs, deterministically and evenly
+# spread across i in range(hub_count).
+dual_unit_share: 0.2
+e_kwh_dual_unit: 78.4  # Dual-unit home usable kWh (2 Base Power battery units).
+p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
 
 guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
 # Local/dev override (hex or base64 32-byte Ed25519 public key), takes

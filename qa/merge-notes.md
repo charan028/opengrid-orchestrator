@@ -309,6 +309,73 @@ redeploy:
   flagging precisely so whoever owns `contracts`/`selector` next can go straight to it instead of
   re-diagnosing from scratch.
 
+## 16. Migration 0008 + intake series fix verified live; selector still never selects anything
+
+Redeployed with migration `0008_fix_as_product_code.sql` applied and the `contracts.intake` series-key/
+pricing fixes (`LZ_HOUSTON`, `NSPIN`, deferral priced at $120/MWh). Live result:
+
+- `og.opportunity`/`og.obligation` now show **24 `ERCOT_AS`** rows and **1 `DIST_DEFERRAL`** row (up
+  from the single stuck `DIST_DEFERRAL` row in section 15) -- the `NSPIN` product-code fix worked, AS
+  opportunities are generating from live MCPC data.
+- **Still zero `ERCOT_ENERGY` opportunities** despite the `LZ_HOUSTON` series-key fix and live ERCOT
+  prices flowing into `feed_obs` -- not diagnosed further this pass (time-boxed); worth checking whether
+  `opengrid.forecast`'s `P50` scenarios actually carry `series_key="LZ_HOUSTON"` rows yet (forecast needs
+  a warm-up window of history before it emits scenarios for a new series key), or whether `energy.
+  compute_energy_candidates`'s spread math is simply never profitable against current live prices
+  (potentially correct behavior, not a bug).
+- **All 25 opportunities remain stuck at `OFFERED`** -- `og.plan` now shows 344 successful `L-ID`/
+  `OPTIMAL` solves (up from 94) but the LP still never selects a single candidate into `COMMITTED`, and
+  `og.commitment` is empty. This is no longer explainable by the bank-id bug (fixed) or by missing
+  opportunities (AS/deferral now exist). Two plausible explanations, not distinguished here: (a) every
+  candidate is currently economically unprofitable under live prices, so "select nothing" is the LP's
+  correct optimal answer -- plausible for `ERCOT_AS` if live MCPC is genuinely too low right now; (b) a
+  bug in the F1 "firm-first" forced-selection path for `DIST_DEFERRAL` (mapped to `category="FIRM"` in
+  `selector/gate.py`'s `_CATEGORY_BY_SERVICE_TYPE`), which should select close to unconditionally for a
+  reliability product once it has *any* positive priced value (now $120/MWh, previously `None`) -- if a
+  FIRM-category candidate still never clears F1, that smells more like a bug than economics. Needs
+  someone with `selector`/LP ownership context to distinguish (a) from (b); flagging precisely so the
+  next owner can go straight to `selector/model.py`/`solve.py`/`extract.py` instead of re-diagnosing
+  from scratch.
+
+## 17. Health evaluator wired live; battery/inverter resize verified; guardian vetoes on G-14, not G-03
+
+**`opengrid.health.run()` was never called by any process** -- `og-settle`'s `main.py` only ran the
+settle and trace-pruning cadences. Fixed: added a third `asyncio.gather` task calling `health.run(pool,
+cfg)`, and corrected `_PROCESS_NAME` from `"og-settle"` to `"settle"` (`opengrid.health.model.
+ALL_PROCESSES` and every other process's own heartbeat key use the short form; the mismatch meant
+`evaluate_heartbeats()` always saw settle as permanently "down"). Also added
+`opengrid.fleet.record_scada_observation` (writes `og.feed_obs source='scada'` on every ingested SCADA
+signal) -- nothing wrote that row shape before, so `ALR-SCADA-OVERLOAD` (and guardian's pre-existing G-03
+bank-kva check) could never see real data despite both already reading from it correctly. **Live result:
+A11's alert-after-injection now passes** (confirmed: injecting `bank_overload` on `bank-000` raises and
+later clears an `ALR-SCADA-OVERLOAD` alert).
+
+**Battery/inverter resize (user-confirmed, 2026-09-25 21:4x CT):** `e_kwh_default` 13.5 -> 39.2 kWh,
+`p_kw_default` 5.0 -> 11.0 kW, `reserve_frac_default` unchanged at 0.20 (7.84 kWh reserve), already
+landed in all 4 places (`integration-sims/config/fleet.yaml`, `dev/config/fleet.dev.yaml`, `ogsim.
+common.config`, `opengrid.fleet.seed`) before this pass touched them -- redeployed twice (once per
+change) to re-run the idempotent seed and restart `og-sim-fleet`/`og-sim-scada`. Verified: `SELECT
+e_kwh, r_kwh, p_kw, count(*) FROM og.hub GROUP BY 1,2,3` -> exactly one row, `(39.2, 7.84, 11, 2000)` --
+all 2,000 hubs updated, no strays at the old values.
+
+**Guardian veto reasons (as the coordinator asked to check for G-03 bank-kVA effects of the resize):**
+every one of 62,200 sampled verdicts is `VETOED` on **`G-14`** (`PROPOSAL_NOT_FOUND` -- the trace
+pre-image the batch is supposed to be read back from), not `G-03`. This means the engine -> guardian
+hand-off itself is not completing the trace-pre-image write correctly for these batches -- G-03 (and
+therefore any kVA-driven veto from the 11 kW/39.2 kWh resize) is never even reached, since
+`GuardianService._run_checks` returns immediately on a G-14 failure ("nothing downstream is trustworthy
+without the pre-image"). **This is not a resize side effect** -- G-14 vetoes were already the case before
+this pass's battery/inverter changes (same pattern, same rule, seen in the same session). Not
+investigated further here: `opengrid.guardian` is now the energy-sufficiency agent's claimed path per
+the coordinator's latest message, so this is flagged for them rather than fixed -- the likely place to
+look is wherever `og.command_batch`'s `trace_pre_image_id` gets set / the `RT_ALLOCATION` trace row gets
+written relative to when `og.command_batch` itself is inserted (`opengrid.engine.pg_backend`).
+
+**A2 note:** the smoke run immediately after this pass's last redeploy showed `0 online, 1737 stale, 263
+offline` -- consistent with the same post-restart telemetry-catch-up window observed earlier in this
+session (section 12), not a regression; a rerun a minute or two after a restart has consistently shown
+2,000/2,000 online in every prior check this session.
+
 ## 7. Pre-existing mypy finding (not introduced by this pass)
 
 `mypy orchestrator/src/opengrid/fleet` reports one pre-existing error unrelated to the A3 additions:

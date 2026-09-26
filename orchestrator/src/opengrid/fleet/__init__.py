@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 from opengrid.core.models.mqtt import ScadaBankSignal, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.platform import Bank, Hub, HubState
@@ -87,6 +87,15 @@ class FleetBackend(Protocol):
     async def upsert_hub_states(self, states: list[HubState]) -> None: ...
 
     async def copy_telemetry(self, rows: list[TelemetryRow]) -> None: ...
+
+    async def record_scada_observation(self, signal: ScadaBankSignal) -> None:
+        """Persists one SCADA bank reading to `og.feed_obs` (source='scada') -- the ONLY writer of that
+        row shape (dispatch-live pass: this was previously missing entirely, so `og.feed_obs
+        WHERE source='scada'` -- which both `opengrid.guardian.repo.PgBankStatePort`'s G-03 bank-kva
+        check and `opengrid.health`'s `ALR-SCADA-OVERLOAD` alert already read from -- never had a row to
+        find, no matter how fresh the in-process `bank_scada_signal()` cache was, since those are
+        separate processes)."""
+        ...
 
 
 @dataclass(slots=True)
@@ -297,12 +306,15 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
         # twin-internal (and capability-exclusion) distinction only; persist it as "stale" so the stored
         # row still round-trips through the fixed row model. In-memory classification above (and
         # capability()'s exclusion set) keeps the finer-grained offline distinction.
+        persisted_health: Literal["online", "stale", "fault"] = (
+            classification if classification != "offline" else "stale"  # type: ignore[assignment]
+        )
         states.append(
             HubState(
                 hub_id=runtime.hub_id,
                 soc_kwh=runtime.soc_kwh,
                 p_kw=runtime.p_kw,
-                health=classification if classification != "offline" else "stale",
+                health=persisted_health,
                 lease_epoch=runtime.lease_epoch,
                 lease_expires_at=runtime.lease_expires_at,
                 last_command_id=runtime.last_command_id,
@@ -326,9 +338,15 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
 async def ingest_scada_signal(payload: dict[str, Any]) -> None:
     """Store the latest simulated-utility SCADA bank reading (02b S6.2 `<root>/scada/<bank_id>`),
     quality flag included, for the allocator's `DIST_DEFERRAL` PI loop and `capability()`'s charge
-    headroom to read. `fleet` stores/aggregates only -- it never runs the PI loop itself (02b S12)."""
+    headroom to read. `fleet` stores/aggregates only -- it never runs the PI loop itself (02b S12).
+
+    Also persists the reading to `og.feed_obs` (`record_scada_observation`) so `og-guardian`'s G-03
+    check and `og-settle`'s `ALR-SCADA-OVERLOAD` health alert -- both separate processes from `og-engine`,
+    which is the only one that ever receives this MQTT message -- can read it independently (dispatch-
+    live pass: this cross-process gap meant neither could ever see a SCADA reading at all)."""
     signal = ScadaBankSignal.model_validate(payload)
     _bank_scada[signal.bank_id] = signal
+    await _require_backend().record_scada_observation(signal)
 
 
 def bank_scada_signal(bank_id: str) -> ScadaBankSignal | None:

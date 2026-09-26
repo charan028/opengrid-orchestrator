@@ -201,9 +201,7 @@ class PgLeaseStatePort:
         undo an already-finalized signing decision (K7) -- logged, not raised."""
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(
-                    _LEASE_STATE_UPSERT_SQL, {"bank_id": bank_id, "epoch": epoch, "seq": seq}
-                )
+                await cur.execute(_LEASE_STATE_UPSERT_SQL, {"bank_id": bank_id, "epoch": epoch, "seq": seq})
                 await conn.commit()
         except Exception:
             logger.exception(

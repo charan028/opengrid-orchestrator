@@ -29,3 +29,8 @@ anomalies.jsonl
 Thumbs.db
 .idea/
 .vscode/
+
+# Dev stack (WP D0) -- generated secrets/keys, never commit
+dev/keys/
+dev/.env
+dev/secrets

@@ -16,6 +16,16 @@ import yaml
 
 DEFAULT_ZONES: tuple[str, ...] = ("LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST")
 
+# Dual-unit homes (confirmed by Base, 2026-09-25): see FleetConfig's docstring for the
+# deterministic hub-selection rule shared word-for-word with opengrid.fleet.seed.
+DUAL_UNIT_SHARE_DEFAULT: float = 0.2
+E_KWH_DUAL_UNIT_DEFAULT: float = 78.4
+P_KW_DUAL_UNIT_DEFAULT: float = 20.0
+
+# Bank rating models a feeder segment (~50 homes), not a single distribution transformer
+# (confirmed by Base, 2026-09-25).
+BANK_KVA_RATING_DEFAULT: float = 600.0
+
 
 def load_yaml_file(path: str) -> dict[str, Any]:
     """Loads a YAML mapping from `path`; returns {} if absent or empty."""
@@ -48,7 +58,13 @@ def mqtt_settings_from_env(raw: dict[str, Any]) -> MqttSettings:
 
 @dataclass(frozen=True)
 class FleetConfig:
-    """Fleet sim config (02b §4 hub/bank physics, §5 sim harness)."""
+    """Fleet sim config (02b §4 hub/bank physics, §5 sim harness).
+
+    Dual-unit rule (must match ogsim.fleet.state / opengrid.fleet.seed exactly): hub index i
+    (hub-{i:05d}) is dual-unit iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share),
+    which selects exactly floor(hub_count * dual_unit_share) hubs, deterministically and evenly
+    spread across i in range(hub_count).
+    """
 
     mqtt: MqttSettings
     hub_count: int = 2000
@@ -58,13 +74,23 @@ class FleetConfig:
     lease_ttl_s: float = 30.0
     lease_hold_after_expiry_s: float = 5.0
     stop_ramp_s: float = 4.0
-    e_kwh_default: float = 13.5
+    # Base Power home battery, usable kWh (confirmed by Base, 2026-09-25).
+    e_kwh_default: float = 39.2
     reserve_frac_default: float = 0.20
-    p_kw_default: float = 5.0
+    # Base Power inverter, kW per battery unit (confirmed by Base, 2026-09-25).
+    p_kw_default: float = 11.0
+    # Share of homes with two battery units instead of one (confirmed by Base, 2026-09-25); see
+    # class docstring for the deterministic hub-selection rule.
+    dual_unit_share: float = DUAL_UNIT_SHARE_DEFAULT
+    # Dual-unit home usable kWh (confirmed by Base, 2026-09-25).
+    e_kwh_dual_unit: float = E_KWH_DUAL_UNIT_DEFAULT
+    # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
+    p_kw_dual_unit: float = P_KW_DUAL_UNIT_DEFAULT
     eta_c: float = 0.9487
     eta_d: float = 0.9487
     self_discharge_kwh_per_h: float = 0.0005
-    bank_kva_rating_default: float = 75.0
+    # Feeder segment (~50 homes), not a single distribution transformer.
+    bank_kva_rating_default: float = BANK_KVA_RATING_DEFAULT
     guardian_public_key_path: str = "/etc/opengrid/guardian_ed25519.pub"
     guardian_public_key_path_dev: str = ""
     safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
@@ -99,6 +125,9 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         e_kwh_default=float(raw.get("e_kwh_default", defaults.e_kwh_default)),
         reserve_frac_default=float(raw.get("reserve_frac_default", defaults.reserve_frac_default)),
         p_kw_default=float(raw.get("p_kw_default", defaults.p_kw_default)),
+        dual_unit_share=float(raw.get("dual_unit_share", defaults.dual_unit_share)),
+        e_kwh_dual_unit=float(raw.get("e_kwh_dual_unit", defaults.e_kwh_dual_unit)),
+        p_kw_dual_unit=float(raw.get("p_kw_dual_unit", defaults.p_kw_dual_unit)),
         eta_c=float(raw.get("eta_c", defaults.eta_c)),
         eta_d=float(raw.get("eta_d", defaults.eta_d)),
         self_discharge_kwh_per_h=float(
@@ -120,7 +149,8 @@ class ScadaConfig:
     bank_count: int = 40
     zones: tuple[str, ...] = DEFAULT_ZONES
     publish_interval_s: float = 2.0
-    bank_kva_rating_default: float = 75.0
+    # Feeder segment (~50 homes), not a single distribution transformer.
+    bank_kva_rating_default: float = BANK_KVA_RATING_DEFAULT
     overload_consecutive_samples: int = 3
     history_tsv_path: str = "/var/lib/opengrid/import/mariadb_history_signals.tsv"
     base_load_kw_default: float = 200.0

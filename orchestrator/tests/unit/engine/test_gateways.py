@@ -46,6 +46,9 @@ class FakeFleetBackend:
     async def copy_telemetry(self, rows):
         pass
 
+    async def record_scada_observation(self, signal):
+        pass
+
 
 class FakeCursor:
     def __init__(self, responses: list) -> None:

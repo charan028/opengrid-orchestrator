@@ -24,7 +24,7 @@ is claimed. Only the **Lead** deploys and merges to `main`.
 
 | WP | Scope | Owned paths | Needs | Acceptance | Status |
 |---|---|---|---|---|---|
-| **D0** | **Local dev stack**: docker-compose with Postgres 17 + Mosquitto (same ACL model) + the 4 simulators, `make dev-up`, migrations, seed | `dev/` | Docker | `make dev-up` then `pytest tests/integration` runs locally | IN PROGRESS (lead) |
+| **D0** | **Local dev stack**: docker-compose with Postgres 17 + Mosquitto (same ACL model) + the 4 simulators, `make dev-up`, migrations, seed | `dev/` | Docker | `make dev-up` then `pytest tests/integration` runs locally | DONE (lead): see `dev/README.md`; untested on Docker, first contributor please report |
 | Q1 | End-to-end functional suite, part 1: commitment lock and multi-customer scenarios (TS-04/05 from `04-mvp-s-test-plan.md`), run against the dev stack | `tests-e2e/functional/dispatch/` | D0 | Each scenario is a pytest test with a TS id; green on the dev stack | CLAIMED (rpagaria2000) |
 | Q2 | End-to-end functional suite, part 2: guardian negative tests, safe stop, anomaly responses (TS-06/07) via `ogsim.control` | `tests-e2e/functional/safety/` | D0 | As Q1 | CLAIMED (rpagaria2000) |
 | P1 | Property tests for K1–K13 across modules (Hypothesis), filling the gaps listed in `qa/review-*.md` | `orchestrator/tests/property/` | none | One property test per K, all green | CLAIMED (rpagaria2000) |

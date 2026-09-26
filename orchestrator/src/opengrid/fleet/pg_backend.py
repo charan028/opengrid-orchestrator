@@ -10,8 +10,23 @@ from typing import Any
 from psycopg import sql
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.models.mqtt import ScadaBankSignal
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.fleet import TelemetryRow
+
+_INSERT_SCADA_FEED_OBS_SQL = """
+INSERT INTO og.feed_obs (source, product, series, ts, value, unit, quality)
+VALUES ('scada', %(bank_id)s, %(series)s, %(ts)s, %(value)s, %(unit)s, %(quality)s)
+ON CONFLICT (source, product, series, ts) DO NOTHING
+"""
+
+_SCADA_QUALITY_TO_FEED_OBS: dict[str, str] = {
+    "good": "GOOD",
+    "stale": "STALE",
+    "missing": "STALE",
+    "out_of_range": "ESTIMATED",
+    "comm_fail": "STALE",
+}
 
 _LOAD_HUBS_SQL = "SELECT hub_id, bank_id, zone, e_kwh, r_kwh, p_kw, eta_c, eta_d, lat, lon FROM og.hub"
 _LOAD_BANKS_SQL = "SELECT bank_id, zone, kva_rating, reserve_kva, feeder_id FROM og.bank"
@@ -138,3 +153,19 @@ class PgFleetBackend:
                 await copy.write_row(
                     (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health)
                 )
+
+    async def record_scada_observation(self, signal: ScadaBankSignal) -> None:
+        quality = _SCADA_QUALITY_TO_FEED_OBS.get(signal.quality, "ESTIMATED")
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _INSERT_SCADA_FEED_OBS_SQL,
+                {
+                    "bank_id": signal.bank_id,
+                    "series": signal.signal,
+                    "ts": signal.ts,
+                    "value": signal.value,
+                    "unit": signal.unit,
+                    "quality": quality,
+                },
+            )
+            await conn.commit()

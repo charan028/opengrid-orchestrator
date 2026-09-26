@@ -1,0 +1,46 @@
+# dev/config/fleet.dev.yaml -- WP D0 dev-stack override of integration-sims/config/fleet.yaml
+# (owned by the `sims` role -- not edited here). Same physics constants, scaled to
+# hub_count 200 / bank_count 8 so `ogsim.fleet` runs comfortably on a laptop (BUILD.md WP D0
+# item 1: "fleet at 200 hubs by default for laptops"). Mounted into the `sim-fleet` container
+# at /app/dev/config/fleet.dev.yaml and selected via OGSIM_FLEET_CONFIG; also read by the
+# `migrate` container's `python -m opengrid.fleet.seed` step (via OG_FLEET_SIM_CONFIG) so the
+# seeded og.hub/og.bank rows use the exact same 200/8 id scheme the simulator publishes
+# telemetry for (see orchestrator/src/opengrid/fleet/seed.py's module docstring).
+#
+# Deliberately no `mqtt:` key here: ogsim.common.config.mqtt_settings_from_env() only falls
+# back to OG_MQTT_HOST/OG_MQTT_PORT/OG_MQTT_ROOT/OG_MQTT_SIM_PASSWORD when the YAML omits the
+# corresponding key -- an explicit `host: 127.0.0.1` here would silently override the
+# `mosquitto` service-name host docker-compose.yml sets via env, and the sim would never reach
+# the broker.
+
+hub_count: 200
+bank_count: 8
+zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
+
+telemetry_interval_s: 2.0
+lease_ttl_s: 30.0
+lease_hold_after_expiry_s: 5.0
+stop_ramp_s: 4.0
+
+e_kwh_default: 39.2  # Base Power home battery, usable kWh (confirmed by Base, 2026-09-25).
+reserve_frac_default: 0.20
+p_kw_default: 11.0  # Base Power inverter, kW per battery unit (confirmed by Base, 2026-09-25); 2-unit homes = 20 kW
+eta_c: 0.9487
+eta_d: 0.9487
+self_discharge_kwh_per_h: 0.0005
+# feeder segment (~50 homes), not a single distribution transformer.
+bank_kva_rating_default: 600.0
+
+# Dual-unit homes (confirmed by Base, 2026-09-25): see integration-sims/config/fleet.yaml for the
+# full deterministic selection rule (must stay word-for-word identical between the two products).
+dual_unit_share: 0.2
+e_kwh_dual_unit: 78.4  # Dual-unit home usable kWh (2 Base Power battery units).
+p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
+
+# The dev override paths win over the plain paths (FleetConfig.public_key_path()/
+# safestop_key_path()) -- dev/scripts/gen-keys.* writes the matching .pub files here, and
+# docker-compose.yml bind-mounts dev/keys/ into the sim-fleet container at /app/dev/keys/.
+guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
+guardian_public_key_path_dev: /app/dev/keys/guardian-dev.pub
+safestop_public_key_path: /etc/opengrid/safestop_ed25519.pub
+safestop_public_key_path_dev: /app/dev/keys/safestop-dev.pub
