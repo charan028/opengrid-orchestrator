@@ -74,11 +74,13 @@ def test_ledger_timeline_view_builds_stacked_series_plus_headroom() -> None:
     assert view["bank_id"] == "BANK-0001"
     series_names = {s["name"] for s in view["chart_option"]["series"]}
     # OBL-1099's reservation is released and must be excluded from the ledger.
-    assert series_names == {"OBL-1002", "OBL-1003", "free headroom"}
+    assert series_names == {"OBL-1002", "OBL-1003", "uncommitted capacity (kW)"}
     assert view["obligation_count"] == 2
     intervals = view["chart_option"]["xAxis"]["data"]
     assert intervals == ["2026-09-25T18:00:00+00:00", "2026-09-25T18:15:00+00:00"]
-    headroom_series = next(s for s in view["chart_option"]["series"] if s["name"] == "free headroom")
+    headroom_series = next(
+        s for s in view["chart_option"]["series"] if s["name"] == "uncommitted capacity (kW)"
+    )
     # First interval: 40 + 8 = 48 committed of 500 kW bank capacity.
     assert headroom_series["data"][0] == 452.0
 

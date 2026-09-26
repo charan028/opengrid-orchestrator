@@ -56,7 +56,10 @@ def test_dispatch_opens_on_a_real_bank(monkeypatch: pytest.MonkeyPatch) -> None:
     app = FastAPI()
     app.include_router(ui.build_router(), prefix="/og")
     assert TestClient(app).get("/og/dispatch").status_code == 200
-    assert ledger_paths == ["/og/api/ledger/bank-000/timeline"]
+    # aggregate-first (CR #19): the default fleet view sums every real bank's timeline, and the grants /
+    # lock-event tables read the first bank in scope -- never a fabricated "bank-01"-style id
+    assert set(ledger_paths) == {"/og/api/ledger/bank-000/timeline", "/og/api/ledger/bank-001/timeline"}
+    assert ledger_paths[-1] == "/og/api/ledger/bank-000/timeline"
 
 
 def test_format_age_is_human() -> None:

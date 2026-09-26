@@ -37,7 +37,7 @@ def test_control_room_renders_with_nav_and_kpis(
         ("Fleet", "/og/fleet"),
         ("Dispatch", "/og/dispatch"),
         ("Markets", "/og/markets"),
-        ("Health", "/og/health"),
+        ("System Health", "/og/health"),
         ("Profitability", "/og/profitability"),
         ("Billing &amp; audit", "/og/billing"),
     ]:

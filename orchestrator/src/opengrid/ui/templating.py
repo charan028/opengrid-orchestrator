@@ -35,7 +35,7 @@ NAV_SCREENS: tuple[dict[str, str], ...] = (
     {"label": "Fleet", "path": f"{BASE_PATH}/fleet", "icon": "battery"},
     {"label": "Dispatch", "path": f"{BASE_PATH}/dispatch", "icon": "branch"},
     {"label": "Markets", "path": f"{BASE_PATH}/markets", "icon": "trend"},
-    {"label": "Health", "path": f"{BASE_PATH}/health", "icon": "pulse"},
+    {"label": "System Health", "path": f"{BASE_PATH}/health", "icon": "pulse"},
     {"label": "Profitability", "path": f"{BASE_PATH}/profitability", "icon": "dollar"},
     {"label": "Billing & audit", "path": f"{BASE_PATH}/billing", "icon": "scroll"},
 )
