@@ -21,11 +21,3 @@ python -m pytest tests-e2e/pq -q
 
 `conftest.py` puts this checkout's `orchestrator/src` and `integration-sims/src` first on `sys.path`, so no
 `PYTHONPATH` is needed.
-
-## Known failure (xfail, strict)
-
-- **`bank_measurement()` reports `thd_current_pct` as the mean of per-hub THD_I**, not the §3.2(b) vector sum that
-  §6.5 step 3 and TS-15b require. On a diverse (cancellation-regime) bank the mean overstates the bank THD_I by
-  about an order of magnitude. `test_ts_15b_bank_measurement_thd_current_is_the_vector_sum` records this; it will
-  XPASS (and fail, being strict) once the aggregation calls `opengrid.core.pq.bank_thd_current_pct`, and the marker
-  should then be removed.
