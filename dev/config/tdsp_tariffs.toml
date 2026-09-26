@@ -1,0 +1,111 @@
+# dev/config/tdsp_tariffs.toml -- dev-stack copy of orchestrator/config/tdsp_tariffs.toml (owned by
+# the `settle`/architect role; not edited here, only mirrored). opengrid.settle.tariffs.
+# resolve_tdsp_tariffs_path() looks for a `tdsp_tariffs.toml` sibling of whatever OG_CONFIG points at
+# (dev/config/docker.toml for the orchestrator compose profile, dev/config/dev.toml for a host-run
+# og-settle) -- without a copy here, og-settle logs "could not load tdsp_tariffs.toml: M1 delivery
+# charge disabled this run" (FileNotFoundError) every retention cycle and settles delivery_charge as
+# 0 unconditionally. Content below is an exact copy as of 2026-09-26; re-sync if the original changes.
+#
+# Residential TDU (TDSP) delivery charges, versioned and effective-dated (FR-ING-175, M1 delivery charge).
+# Source: PUCT "Residential TDU Delivery Charges Per Month", as of 2026-09-01 (owner-supplied screenshot),
+# cross-checked against the TDSP retail delivery tariffs the owner supplied on 2026-09-26: CenterPoint Houston
+# Electric, AEP Texas (eff. 2026-08-28), Oncor, TNMP (20251229).
+# Rates update about every March 1 and September 1. Add a new [[tariff]] block per change; never edit old blocks.
+#
+# Owner decisions 2026-09-26:
+#   - Charged per kWh DRAWN FROM THE GRID (charging energy); a flat per-kWh rate.
+#   - Assume the FULL delivery charge applies to battery charging energy. Behind-the-meter batteries on a shared
+#     retail meter do not qualify as Wholesale Storage Load; there is no ADER exemption.
+#   - Serving the home's own load avoids it; exports do not recover it.
+# Not yet wired into the selector objective or settle P&L. That is M1 implementation work.
+
+[[tariff]]
+tdsp = "ONCOR"
+effective_from = "2026-09-01"
+volumetric_usd_per_kwh = 0.060295
+customer_charge_usd_per_month = 1.48
+metering_charge_usd_per_month = 2.58
+load_zones = ["LZ_NORTH", "LZ_WEST"]  # approximate: DFW (North), plus parts of West
+
+[[tariff]]
+tdsp = "CENTERPOINT"
+effective_from = "2026-09-01"
+volumetric_usd_per_kwh = 0.064130
+customer_charge_usd_per_month = 2.11
+metering_charge_usd_per_month = 2.79
+load_zones = ["LZ_HOUSTON"]
+
+[[tariff]]
+tdsp = "AEP_CENTRAL"
+effective_from = "2026-09-01"
+volumetric_usd_per_kwh = 0.058  # PUCT summary. Reconstructed from the tariff riders: 0.057824 (see tdsp-tariffs-2026-09.md)
+customer_charge_usd_per_month = 1.27
+metering_charge_usd_per_month = 1.97
+load_zones = ["LZ_SOUTH"]
+
+[[tariff]]
+tdsp = "AEP_NORTH"
+effective_from = "2026-09-01"
+volumetric_usd_per_kwh = 0.057  # PUCT summary. Reconstructed: 0.056677 (Central-only riders NDC/SRC/ADFITC excluded)
+customer_charge_usd_per_month = 1.27
+metering_charge_usd_per_month = 1.97
+load_zones = ["LZ_WEST"]
+
+[[tariff]]
+tdsp = "TNMP"
+effective_from = "2026-09-01"
+volumetric_usd_per_kwh = 0.074022
+customer_charge_usd_per_month = 1.13
+metering_charge_usd_per_month = 6.72
+load_zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_WEST"]  # non-contiguous territory; needs a per-site TDSP attribute
+
+# Default TDSP per load zone, for simulated banks that have no explicit TDSP. Real sites carry their TDSP (ESI ID).
+# LZ_AEN/LZ_CPS (see [zone_territory] below) are deliberately absent here: `settle.tariffs.tdsp_for_zone`
+# returns `None` for a zone with no entry, and `m1_delivery_charge` prices `None` at $0 -- exactly the
+# "never inside a regulated utility's own territory" rule this module's docstring already states, with
+# no code change needed. Never add LZ_AEN/LZ_CPS to this table.
+[zone_default_tdsp]
+LZ_NORTH = "ONCOR"
+LZ_HOUSTON = "CENTERPOINT"
+LZ_SOUTH = "AEP_CENTRAL"
+LZ_WEST = "AEP_NORTH"
+
+# Regulated-utility territory per load zone (build phase, 2026-09-26: market-model-two-markets.md S3a/
+# S3c -- "a regulated contract is served only by assets inside that utility's service territory"). Data
+# only today: no selector/allocator/guardian code reads this table yet (those modules are the live-path
+# agent's, per BUILD.md ownership) -- this is the config surface for that wiring, not the wiring itself.
+#
+# `market`: REGULATED (vertically integrated, outside ERCOT retail choice) or FREE (ERCOT competitive
+# area, already the implicit default for every zone not listed here). `delivery_charge`: "NONE" marks a
+# zone whose charging cost is entirely inside the utility contract's own terms (never a separate TDSP
+# line -- see `[zone_default_tdsp]`'s comment above and `settle/tariffs.py`'s module docstring), as
+# opposed to "M1" for the ERCOT competitive zones above.
+#
+# Territory boundaries are approximate pending GIS-sourced service-territory polygons (research in
+# progress: `integrations/regulated-utilities-austin-cps-2026-09.md`) -- LZ_AEN/LZ_CPS are ERCOT
+# settlement-point codes standing in for "assets inside this utility's territory", not literal ERCOT
+# load-zone boundaries (Austin Energy and CPS Energy are both islands within the ERCOT footprint, not
+# whole load zones).
+[zone_territory]
+LZ_AEN = { utility = "AUSTIN_ENERGY", market = "REGULATED", delivery_charge = "NONE" }
+LZ_CPS = { utility = "CPS_ENERGY", market = "REGULATED", delivery_charge = "NONE" }
+
+# LZ_LCRA and LZ_RAYBN (build phase, 2026-09-26: FLEET-SIM reassignment) are FREE-market ERCOT zones --
+# confirmed present in live ERCOT NP6-905-CD results (2026-09-26 probe, FLEET-SIM build report) -- so
+# they belong here for `delivery_charge` documentation only, NOT in `[zone_default_tdsp]` above (that
+# table is only ever a competitively-filed TDSP tariff to charge against). Assumptions, to confirm:
+#   - LZ_LCRA (Lower Colorado River Authority): LCRA is itself a transmission AND distribution utility
+#     in its service area, not a retail customer of one of the four TDSPs above, so there is no separate
+#     competitive TDSP delivery tariff to apply -- $0 M1, same mechanism as a regulated zone even though
+#     LCRA is not vertically-integrated-retail like Austin/CPS (`market = "FREE"`, not "REGULATED": LCRA
+#     wholesale customers still transact in the ERCOT free market, unlike Austin/CPS's utility-as-
+#     customer regulated contracts).
+#   - LZ_RAYBN (Rayburn Country Electric Cooperative): a member-owned distribution cooperative, exempt
+#     from PUCT's competitive retail TDSP tariff filing requirement -- there is no filed
+#     `volumetric_usd_per_kwh` for it to add as a `[[tariff]]` block, so $0 M1 here too, documented as
+#     "non-competitive" rather than "regulated territory."
+# Both assumptions need confirmation from the owner/Base before they inform real settlement; until then
+# `[zone_default_tdsp]` has no entry for either (so `m1_delivery_charge` already prices $0, no code
+# change needed), and this table records WHY, distinctly from the Austin/CPS regulated-market reason.
+LZ_LCRA = { utility = "LCRA", market = "FREE", delivery_charge = "NONE" }  # LCRA is itself the TDSP
+LZ_RAYBN = { utility = "RAYBURN_COUNTRY_EC", market = "FREE", delivery_charge = "NONE" }  # co-op, non-competitive

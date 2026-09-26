@@ -1,0 +1,25 @@
+# dev/docker-compose.scale.yml -- scale-run override (docs/orchestrator/07-delivery/12-scale-test-plan.md),
+# dev stack only. OG_SCALE_PRESET=2k|10k (default 10k) picks dev/config/fleet.<preset>.dev.yaml and
+# dev/config/scada.<preset>.dev.yaml for the fleet simulator, the SCADA simulator and the migrate
+# container's seed step, so all three agree on the hub/bank ids.
+#
+# Run it as its own compose project, so the scale database and broker state never mix with the normal
+# dev stack's volumes (stop the dev stack first: both use the same host ports):
+#
+#   docker compose -f docker-compose.yml stop
+#   $env:OG_SCALE_PRESET = "10k"
+#   docker compose -p ogscale -f docker-compose.yml -f docker-compose.scale.yml --profile orchestrator up -d --build
+#   ...measure (README, "Scale runs")...
+#   docker compose -p ogscale -f docker-compose.yml -f docker-compose.scale.yml --profile orchestrator down -v
+#   docker compose -f docker-compose.yml --profile orchestrator up -d
+
+services:
+  migrate:
+    environment:
+      OG_FLEET_SIM_CONFIG: /app/dev/config/fleet.${OG_SCALE_PRESET:-10k}.dev.yaml
+  sim-fleet:
+    environment:
+      OGSIM_FLEET_CONFIG: /app/dev/config/fleet.${OG_SCALE_PRESET:-10k}.dev.yaml
+  sim-scada:
+    environment:
+      OGSIM_SCADA_CONFIG: /app/dev/config/scada.${OG_SCALE_PRESET:-10k}.dev.yaml

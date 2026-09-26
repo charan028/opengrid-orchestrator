@@ -11,8 +11,15 @@ set -eu
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 KEYS_DIR="$REPO_ROOT/dev/keys"
-PYTHON="$REPO_ROOT/.venv/bin/python"
-[ -x "$PYTHON" ] || PYTHON=python3
+# A git worktree checkout has no .venv of its own; set OPENGRID_VENV_PYTHON to a venv shared
+# across worktrees (e.g. the main checkout's .venv) when this worktree has none (see
+# gen-keys.ps1's matching comment for the failure this avoids).
+if [ -n "${OPENGRID_VENV_PYTHON:-}" ] && [ -x "${OPENGRID_VENV_PYTHON:-}" ]; then
+    PYTHON="$OPENGRID_VENV_PYTHON"
+else
+    PYTHON="$REPO_ROOT/.venv/bin/python"
+    [ -x "$PYTHON" ] || PYTHON=python3
+fi
 export PYTHONPATH="$REPO_ROOT/orchestrator/src${PYTHONPATH:+:$PYTHONPATH}"
 
 FORCE=0

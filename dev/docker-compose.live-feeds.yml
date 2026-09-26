@@ -1,0 +1,27 @@
+# dev/docker-compose.live-feeds.yml -- og-feeds on the LIVE ERCOT, EIA and NWS APIs (owner decision 2026-09-26).
+#
+# Everything else in the dev stack is unchanged (its own Postgres, broker and simulators). og-feeds reads
+# dev/config/docker.live-feeds.toml (production's [feeds.*] endpoints, a 6 req/min ERCOT budget) and the live
+# credentials from dev/keys/api_keys.env. The owner places that file by hand from
+# docs/orchestrator/07-delivery/integrations/api_keys.env.example (single-quoted values); dev/keys/ is
+# git-ignored. Nothing in this repo reads, prints or copies it. OG_LIVE_KEYS_FILE overrides the path (e.g. a file the
+# owner keeps outside the checkout).
+#
+# ERCOT's key is shared with the base server, so run live feeds only while a test needs them:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.live-feeds.yml --profile orchestrator up -d og-feeds
+#   ...test...
+#   docker compose -f docker-compose.yml --profile orchestrator stop og-feeds    # or back to the simulator:
+#   docker compose -f docker-compose.yml --profile orchestrator up -d --force-recreate og-feeds
+#
+# Market-anomaly demo steps need og-feeds on the simulator (plain docker-compose.yml), not this override.
+
+services:
+  og-feeds:
+    environment:
+      OG_CONFIG: /app/dev/config/docker.live-feeds.toml
+    env_file:
+      - path: ./secrets
+        required: false
+      - path: ${OG_LIVE_KEYS_FILE:-./keys/api_keys.env}
+        required: true
