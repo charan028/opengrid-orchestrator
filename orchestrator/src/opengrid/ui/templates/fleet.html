@@ -2,12 +2,12 @@
 {% block title %}Fleet -- OpenGrid Orchestrator{% endblock %}
 {% block header_title %}Fleet monitoring & control{% endblock %}
 {% block header_actions %}
-<span class="stale-badge" id="fleet-updated" data-stale="false">live</span>
+<span class="stale-badge" id="fleet-updated" role="status" data-stale="false">live</span>
 {% endblock %}
 
 {% block content %}
 <section class="og-panel" aria-label="Filters">
-  <form method="get" action="{{ base_path }}/fleet" class="og-grid" style="grid-template-columns: repeat(4, auto);">
+  <form method="get" action="{{ base_path }}/fleet" class="og-form">
     <label>Zone
       <input type="text" name="zone" value="{{ filters.zone or '' }}">
     </label>
@@ -29,9 +29,9 @@
 {% if is_operator %}
 <section class="og-panel" aria-label="Fleet-wide safe stop">
   <h2>Scoped safe stop</h2>
-  <p class="stale-badge">Stops new dispatch for the chosen scope. Never force-discharges below reserve.
+  <p>Stops new dispatch for the chosen scope. Never force-discharges below reserve.
     Requires a two-step confirmation: propose, then confirm the exact summary the API returns.</p>
-  <form id="safestop-propose-form" class="og-grid" style="grid-template-columns: repeat(4, auto);"
+  <form id="safestop-propose-form" class="og-form"
         hx-post="{{ base_path }}/fleet/safestop/propose" hx-target="#safestop-propose-result" hx-swap="innerHTML">
     <label>Scope
       <select name="scope">
@@ -51,20 +51,23 @@
 
 <section class="og-panel" aria-label="Bank / hub table">
   <h2>Hubs</h2>
+  <p>Every home battery in the fleet with its charge, power and telemetry age. Click a row for its lease and last command.</p>
   <p>Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match the current filter', row_id_key='hub_id' %}
+  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match this filter. Clear the zone, bank or health filter to see the fleet.', row_id_key='hub_id' %}
     {% include "_partials/data_table.html" %}
   {% endwith %}
 </section>
 
 <section class="og-panel" id="hub-drilldown-container" aria-label="Hub detail" aria-live="polite">
-  <p class="stale-badge">Select a hub row to see its drill-down (SoC, P, health, lease, last command, telemetry).</p>
+  <h2>Hub detail</h2>
+  <p class="og-empty">Select a hub row above to see its drill-down: SoC, power, health, lease, last command and telemetry.</p>
 </section>
 
 {% if is_operator %}
 <section class="og-panel" aria-label="Manual command">
   <h2>Manual command</h2>
-  <form id="manual-command-form" class="og-grid" style="grid-template-columns: repeat(5, auto);"
+  <p>Set one hub's power directly. Two steps, and the guardian can still veto it; the result carries a trace id.</p>
+  <form id="manual-command-form" class="og-form"
         hx-post="{{ base_path }}/fleet/command/propose" hx-target="#command-propose-result" hx-swap="innerHTML">
     <label>Bank id <input type="text" name="bank_id"></label>
     <label>Hub id <input type="text" name="hub_id"></label>

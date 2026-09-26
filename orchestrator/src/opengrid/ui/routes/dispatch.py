@@ -44,6 +44,58 @@ _PIPELINE_LABELS: dict[str, str] = {
 }
 
 
+def _f(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def decision_line(row: dict[str, Any]) -> str:
+    """One sentence saying why a card sits in its column, from the numbers the selector weighed:
+    the offer's value ($/MWh) against the contract's degradation cost ($/kWh -> shown per MWh), the
+    promised kW and the window. This is the board's answer to "what is the optimizer doing?"."""
+    state = row.get("state")
+    value = _f(row.get("value_per_mwh"))
+    degradation = _f(row.get("degradation_cost"))
+    degradation_mwh = degradation * 1000.0 if degradation is not None else None
+    kw = _f(row.get("committed_qty_kw")) or _f(row.get("requested_kw")) or 0.0
+    hours = None
+    try:
+        start = datetime.fromisoformat(str(row["window_start"]))
+        end = datetime.fromisoformat(str(row["window_end"]))
+        hours = max((end - start).total_seconds() / 3600.0, 0.0)
+    except (KeyError, TypeError, ValueError):
+        pass
+    if state == "SELECTED":
+        if value is not None and degradation_mwh is not None:
+            margin = (value - degradation_mwh) / 1000.0 * kw * (hours or 0.0)
+            return (
+                f"Selected: {value:.0f} $/MWh clears {degradation_mwh:.0f} $/MWh degradation, "
+                f"est. margin ${margin:,.0f} for the window"
+            )
+        return "Selected by the optimizer, capacity reserved on the ledger"
+    if state in ("COMMITTED", "DELIVERING"):
+        return "Locked: this promise is kept even if a better price appears (K13)"
+    if state == "FULFILLED":
+        return "Delivered and verified"
+    if state == "SHORTFALL":
+        return "Delivered short; penalty applies"
+    if state == "EXPIRED":
+        return "Window started before a gate could commit it"
+    if state == "OFFERED":
+        if value is None:
+            return "Awaiting the next gate; no price on this offer yet"
+        if degradation_mwh is not None and value < degradation_mwh:
+            return (
+                f"Declined so far: {value:.2f} $/MWh does not cover {degradation_mwh:.0f} $/MWh degradation"
+            )
+        if row.get("decided_at"):
+            return f"Evaluated at {value:.0f} $/MWh; waiting for headroom at the next gate"
+        return f"Offered at {value:.0f} $/MWh; awaiting the next quarter-hour gate"
+    return ""
+
+
 def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
     """Group obligation rows into Kanban columns by state, across all customers concurrently (BUILD.md
     S2). FULFILLED and SHORTFALL share a terminal column so an operator sees each committed obligation's
@@ -70,6 +122,7 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
                 "energy_margin_kwh": row.get("energy_margin_kwh"),
                 "time_to_depletion_min": row.get("time_to_depletion_min"),
                 "raw_state": state,
+                "decision": decision_line(row),
             }
         )
     shown = sum(len(items) for items in columns.values())
@@ -112,7 +165,7 @@ def ledger_timeline_view(
     intervals = sorted(by_interval)
     series: list[dict[str, Any]] = [
         {
-            "name": obligation_id,
+            "name": obligation_id[:8],  # short id, as on the pipeline cards; the tooltip keeps the series
             "type": "line",
             "stack": "ledger",
             "areaStyle": {},

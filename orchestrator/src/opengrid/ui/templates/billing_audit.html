@@ -3,7 +3,7 @@
 {% block header_title %}Billing & audit{% endblock %}
 
 {% block header_actions %}
-<form method="get" action="{{ base_path }}/billing" aria-label="Filter billing and audit" style="display:flex; gap:6px; align-items:center;">
+<form method="get" action="{{ base_path }}/billing" aria-label="Filter billing and audit" class="og-toolbar">
   <label for="class">Trace class</label>
   <input type="text" id="class" name="class" value="{{ class_ or '' }}">
   <label for="from">From</label>
@@ -17,9 +17,10 @@
 
 {% block content %}
 <section class="og-panel" aria-labelledby="invoice-heading">
+  <p class="og-panel-lead">What each buyer is billed, the measurement behind it, and a tamper-evident record of every decision that led there.</p>
   <h2 id="invoice-heading">Invoice lines ({{ invoices.row_count }}, total {{ "%.2f"|format(invoices.total_amount) }} USD)</h2>
   <p>{% with since_iso=generated_at, stale_after_s=300 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  {% with columns=[{"key": "invoice_line_id", "label": "Line"}, {"key": "contract_id", "label": "Contract"}, {"key": "obligation_id", "label": "Obligation"}, {"key": "period_start", "label": "Period start"}, {"key": "period_end", "label": "Period end"}, {"key": "line_type", "label": "Type"}, {"key": "quantity", "label": "Qty", "numeric": true}, {"key": "rate", "label": "Rate", "numeric": true}, {"key": "amount", "label": "Amount", "numeric": true}, {"key": "status", "label": "Status"}], rows=invoices.rows, empty_message='No invoice lines for this filter' %}
+  {% with columns=[{"key": "invoice_line_id", "label": "Line"}, {"key": "contract_id", "label": "Contract"}, {"key": "obligation_id", "label": "Obligation"}, {"key": "period_start", "label": "Period start"}, {"key": "period_end", "label": "Period end"}, {"key": "line_type", "label": "Type"}, {"key": "quantity", "label": "Qty", "numeric": true}, {"key": "rate", "label": "Rate", "numeric": true}, {"key": "amount", "label": "Amount", "numeric": true}, {"key": "status", "label": "Status"}], rows=invoices.rows, empty_message='No invoice lines yet. Settlement bills each delivered interval once measurement and verification pass.' %}
     {% include "_partials/data_table.html" %}
   {% endwith %}
 </section>
@@ -27,7 +28,7 @@
 <section class="og-panel" aria-labelledby="mnv-heading">
   <h2 id="mnv-heading">M&amp;V performance</h2>
   {% if mnv.avg_compliance_pct is not none %}
-  <section class="og-grid">
+  <section class="og-kpis">
     {% with label='Average compliance', value='%.1f'|format(mnv.avg_compliance_pct), unit='%', since_iso=generated_at, stale_after_s=300 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
     {% with label='Pass rate', value='%.1f'|format(mnv.pass_rate_pct), unit='%', since_iso=generated_at, stale_after_s=300, severity=('good' if mnv.pass_rate_pct == 100 else 'caution') %}{% include "_partials/kpi_tile.html" %}{% endwith %}
   </section>
@@ -38,11 +39,12 @@
 
 <section class="og-panel" aria-labelledby="trace-heading">
   <h2 id="trace-heading">Trace explorer</h2>
+  <p>Every decision the system made, hash-chained. Run chain verify to prove nothing was altered after the fact.</p>
   {% with columns=[{"key": "trace_id", "label": "Trace"}, {"key": "decision_type", "label": "Decision"}, {"key": "event_class", "label": "Class"}, {"key": "stream_id", "label": "Stream"}, {"key": "seq", "label": "Seq", "numeric": true}, {"key": "reason_codes_joined", "label": "Reason codes"}], rows=trace_events, empty_message='No trace events for this filter' %}
     {% include "_partials/data_table.html" %}
   {% endwith %}
 
-  <form hx-post="{{ base_path }}/billing/trace/verify?class={{ class_ or '' }}&amp;from={{ from_ or '' }}&amp;to={{ to or '' }}" hx-target="#verify-result" hx-swap="outerHTML">
+  <form class="og-form-inline" hx-post="{{ base_path }}/billing/trace/verify?class={{ class_ or '' }}&amp;from={{ from_ or '' }}&amp;to={{ to or '' }}" hx-target="#verify-result" hx-swap="outerHTML">
     <button class="btn btn-primary" type="submit">Run chain verify</button>
   </form>
   <div id="verify-result" role="status"></div>

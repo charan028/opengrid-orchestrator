@@ -87,6 +87,7 @@ def lp_vs_baseline_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 {
                     "name": "Rule baseline",
                     "type": "bar",
+                    "itemStyle": {"color": "token:--muted@0.55"},
                     "data": [_num(row["rule_baseline_value"]) for row in with_baseline],
                 },
             ],

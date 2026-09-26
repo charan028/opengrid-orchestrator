@@ -2,7 +2,7 @@
      result: dict|None (SafestopConfirmResult: proposal_id/scope/scope_id/engaged/trace_id) on success
      status_code: int|None (the API's status code on failure: 503 timeout, 410/404 expired/unknown)
      message: str|None (failure detail) #}
-<div id="safestop-confirm-result" role="status">
+<div id="safestop-confirm-result" role="{{ 'status' if (result and result.engaged) else 'alert' }}">
   {% if result and result.engaged %}
   <p>{% with status='critical', label='ENGAGED' %}{% include "_partials/status_badge.html" %}{% endwith %}
     Safe stop engaged for {{ result.scope }}{% if result.scope_id %}/{{ result.scope_id }}{% endif %}.

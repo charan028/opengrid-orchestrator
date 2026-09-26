@@ -54,6 +54,13 @@ class ApiUnavailable(Exception):  # noqa: N818 -- shared symbol name; ui-b's scr
     re-parsing the exception message."""
 
     def __init__(self, message: str, *, status_code: int | None = None, detail: Any = None) -> None:
+        if status_code == 401:
+            # Seen live: the console opened on og-api's own port (8080) instead of through Apache or the
+            # dev proxy, so no X-Remote-User reached the UI and every first-paint call was refused.
+            message += (
+                " -- no identity reached the console; open it through Apache (production) or the dev"
+                " proxy (http://127.0.0.1:8088/og/), not on og-api's port directly"
+            )
         super().__init__(message)
         self.status_code = status_code
         self.detail = detail

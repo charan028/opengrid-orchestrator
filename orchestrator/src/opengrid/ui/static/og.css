@@ -1,18 +1,23 @@
-/* opengrid.ui design tokens + base layout (BUILD.md UI brief; palette/tokens from
+/* opengrid.ui design tokens + base layout (BUILD.md UI brief; severity + 7-series categorical palette from
    docs/orchestrator/04-ui/01-ui-ux-specification.md S5). Owner: ui-a.
-   Dark is the default/primary theme (control room); [data-theme="light"] mirrors every token. */
+   Visual world: "calm console" -- layered near-black surfaces, one cool accent, Inter with tabular numerals,
+   drawn icons, roomy operate-mode density. Dark is the default/primary theme (control room); the
+   light theme block below mirrors every token for daytime/print use. (Keep the literal light selector
+   out of this comment: tests-e2e/ui/contrast.py parses the first match as the light block.) */
 
 :root,
 [data-theme="dark"] {
-  --bg: #0b0e14;
-  --panel: #131722;
-  --panel-2: #1a1f2e;
-  --border: #262c3d;
-  --text: #e6e9f0;
-  --muted: #8b92a8;
-  --accent: #f59e4c; /* the one warm accent: primary series, primary action, active nav, links */
-  --kicker: #f59e4c; /* = --accent; kept literal for tests-e2e/ui/contrast.py's parser */
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 32px -20px rgba(0, 0, 0, 0.7);
+  --bg: #0a0c10;
+  --panel: #12151b;
+  --panel-2: #191d25;
+  --border: #262b36;
+  --text: #e8ebf1;
+  --muted: #98a1b3;
+  --accent: #7cc4ff; /* the one accent: primary action, active nav, links, primary series (= spec kicker) */
+  --kicker: #7cc4ff; /* = --accent; kept literal for tests-e2e/ui/contrast.py's parser */
+  --accent-ink: #0a0c10; /* text on a solid accent fill */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 40px -24px rgba(0, 0, 0, 0.8);
+  --shadow-pop: 0 4px 12px -4px rgba(0, 0, 0, 0.6), 0 32px 80px -32px rgba(0, 0, 0, 0.9);
 
   --status-good: #1baf7a;
   --status-info: #7cc4ff;
@@ -20,7 +25,7 @@
   /* #ee6160, not #e34948: the 13px .btn-danger/.btn-safestop text has to clear WCAG AA 4.5:1 on
      --panel-2 and on the safe-stop fill (tests-e2e/ui/test_a11y.py) */
   --status-critical: #ee6160;
-  --status-neutral: #8b92a8;
+  --status-neutral: #98a1b3;
 
   /* 7-series customer-type categorical palette, fixed order everywhere (UI-UX spec S5.2) */
   --series-ercot-energy: #3987e5;
@@ -32,28 +37,37 @@
   --series-pjm-capacity: #008300;
 
   --focus-ring: #7cc4ff;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --glow: 10%;
+  --edge: rgba(255, 255, 255, 0.045); /* top-edge catch-light on layered surfaces */
   color-scheme: dark;
 }
 
 [data-theme="light"] {
-  --bg: #f4f6fb;
+  --bg: #f4f6fa;
   --panel: #ffffff;
-  --panel-2: #eef1f8;
-  --border: #d7dce6;
-  --text: #171a21;
+  --panel-2: #eef1f6;
+  --border: #dde2ea;
+  --text: #14171d;
   --muted: #5b6172;
-  --accent: #a34a06; /* 5.2:1 on --panel-2, 5.9:1 on --panel */
-  --kicker: #a34a06;
-  --shadow: 0 1px 2px rgba(23, 26, 33, 0.06), 0 12px 32px -22px rgba(23, 26, 33, 0.25);
+  --accent: #1a5fc4; /* 5.3:1 on --panel-2, 6.5:1 on --panel */
+  --kicker: #1a5fc4;
+  --accent-ink: #ffffff;
+  --shadow: 0 1px 2px rgba(20, 23, 29, 0.05), 0 16px 40px -28px rgba(20, 23, 29, 0.25);
+  --shadow-pop: 0 4px 12px -4px rgba(20, 23, 29, 0.12), 0 32px 80px -32px rgba(20, 23, 29, 0.35);
 
   --status-good: #147a52;
   --status-info: #1861c7;
-  --status-caution: #986600;
+  --status-caution: #8f5f00; /* 4.9:1 on --panel-2 (#986600 was 4.38) */
   --status-critical: #ab2e2d;
   --status-neutral: #5b6172;
 
-  /* without this the dark ring (#7cc4ff) is inherited: ~1.7:1 on the light surfaces (WCAG 1.4.11) */
-  --focus-ring: #1861c7;
+  /* without this the dark ring is inherited: ~1.7:1 on the light surfaces (WCAG 1.4.11) */
+  --focus-ring: #1a5fc4;
+  --glow: 7%;
+  --edge: rgba(255, 255, 255, 0.9);
   color-scheme: light;
 }
 
@@ -65,23 +79,42 @@ html,
 body {
   margin: 0;
   padding: 0;
-  height: 100%;
+  min-height: 100%;
   background: var(--bg);
   color: var(--text);
   font-family:
+    "Geist",
     "Inter",
     system-ui,
     -apple-system,
     "Segoe UI",
     Roboto,
     sans-serif;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   font-feature-settings: "cv11", "ss01", "tnum";
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* browser surfaces carry the palette too: selection, caret, scrollbars */
+/* one soft accent glow behind the canvas gives the near-black ground depth without a texture */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 520px at 12% -12%, color-mix(in srgb, var(--accent) var(--glow), transparent), transparent 65%),
+    radial-gradient(800px 400px at 100% 110%, color-mix(in srgb, var(--accent) 4%, transparent), transparent 60%);
+}
+
+.og-shell {
+  position: relative;
+  z-index: 1;
+}
+
+/* browser surfaces carry the palette too: selection, caret, scrollbars, underlines */
 ::selection {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
   color: var(--text);
@@ -92,33 +125,39 @@ html {
   scrollbar-color: var(--border) transparent;
 }
 
-input,
-select,
-textarea {
-  font: inherit;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  min-height: 32px;
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 12px;
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
-label > input,
-label > select {
-  color: var(--text);
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 a {
   color: var(--kicker);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+p {
+  margin: 0 0 12px;
+}
+
+pre {
+  font-size: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  overflow: auto;
 }
 
 /* keyboard operability: a visible focus ring on every interactive element (WCAG AA) */
@@ -131,9 +170,33 @@ select:focus-visible,
   outline-offset: 2px;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --- icons (authored inline SVG, one stroke weight everywhere) -------------------------------- */
+
+.og-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* --- app shell ------------------------------------------------------------------------------- */
+
 .og-shell {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 236px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -142,29 +205,50 @@ select:focus-visible,
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 16px 0;
+  padding: 18px 12px 14px;
   position: sticky;
   top: 0;
   height: 100vh;
+  gap: 18px;
 }
 
 .og-nav-brand {
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  padding: 4px 20px 20px;
-  font-size: 15px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  padding: 2px 8px;
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  color: var(--text);
 }
 
-.og-nav-brand::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.og-nav-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--accent-ink);
+  display: grid;
+  place-items: center;
+  flex: none;
+  box-shadow: 0 6px 16px -8px color-mix(in srgb, var(--accent) 80%, transparent);
+}
+
+.og-nav-mark .og-icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.25;
+  fill: currentColor;
+  stroke: none;
+}
+
+.og-nav-brand small {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0;
 }
 
 .og-nav ul {
@@ -172,16 +256,25 @@ select:focus-visible,
   margin: 0;
   padding: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .og-nav li a {
-  display: block;
-  margin: 2px 10px;
-  padding: 8px 12px;
-  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
   color: var(--muted);
+  font-weight: 500;
   text-decoration: none;
-  transition: background 120ms ease-out, color 120ms ease-out;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+
+.og-nav li a .og-icon {
+  opacity: 0.85;
 }
 
 .og-nav li a:hover {
@@ -190,84 +283,178 @@ select:focus-visible,
 }
 
 .og-nav li a.active {
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--text);
   font-weight: 600;
-  box-shadow: inset 1px 0 0 var(--accent);
+}
+
+.og-nav li a.active .og-icon {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.og-nav-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
 }
 
 .og-nav-role {
-  margin: 0 10px;
-  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
   color: var(--muted);
-  font-size: 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  font-size: 11px;
 }
 
-.og-nav-role:hover {
-  color: var(--text);
+.og-nav-role[data-role="operator"] .og-icon {
+  color: var(--status-good);
+}
+
+.og-theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+
+.og-theme-toggle:hover {
   background: var(--panel-2);
+  color: var(--text);
+}
+
+.og-theme-toggle .og-icon-sun,
+[data-theme="light"] .og-theme-toggle .og-icon-moon {
+  display: none;
+}
+
+[data-theme="light"] .og-theme-toggle .og-icon-sun {
+  display: block;
 }
 
 .og-main {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .og-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 28px;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 16px 32px;
   border-bottom: 1px solid var(--border);
-  background: transparent;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .og-header h1 {
   font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 650;
+  letter-spacing: -0.015em;
   margin: 0;
+  text-wrap: balance;
 }
 
 .og-header-actions {
   display: flex;
-  gap: 8px;
+  gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .og-content {
-  padding: 24px 28px 40px;
+  padding: 28px 32px 56px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
+  max-width: 1600px;
+  width: 100%;
 }
+
+/* the one authored moment: sections settle into place on first paint (spec S5.7: <= 200 ms) */
+@keyframes og-settle {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* First paint only (og.js adds `og-settled` once the page has landed) so sections the 30 s self-polling
+   screens swap in later do not replay it. `backwards`, not `both`: a still-filling transform animation
+   would make every section the containing block for its own fixed confirm-dialog backdrop. */
+html:not(.og-settled) .og-content > * {
+  animation: og-settle 180ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+.og-content > :nth-child(2) { animation-delay: 30ms; }
+.og-content > :nth-child(3) { animation-delay: 60ms; }
+.og-content > :nth-child(4) { animation-delay: 90ms; }
+.og-content > :nth-child(5) { animation-delay: 120ms; }
+.og-content > :nth-child(n + 6) { animation-delay: 150ms; }
 
 .og-degraded-banner {
-  background: color-mix(in srgb, var(--status-caution) 20%, var(--panel));
-  border: 1px solid var(--status-caution);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: color-mix(in srgb, var(--status-caution) 14%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--status-caution) 45%, var(--border));
   color: var(--text);
   padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
 }
 
-/* --- panels / grid ---------------------------------------------------------------------------- */
+.og-degraded-banner::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-caution);
+  flex: none;
+}
+
+/* --- panels / grids -------------------------------------------------------------------------- */
 
 .og-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.og-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
 }
 
 /* Grid items default to min-width:auto, so a canvas measured too wide would widen its column and
    overflow the row; let tiles shrink and clip anything that still overhangs. */
-.og-grid > * {
+.og-grid > *,
+.og-kpis > * {
   min-width: 0;
   overflow: hidden;
 }
@@ -275,59 +462,286 @@ select:focus-visible,
 .og-panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px 20px;
-  box-shadow: var(--shadow);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  box-shadow: var(--shadow), inset 0 1px 0 var(--edge);
+}
+
+/* the self-polling screens wrap their sections in one element; carry the section rhythm through it */
+.og-content > [id$="-poll-wrapper"] {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .og-panel h2 {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
-  letter-spacing: -0.005em;
+  letter-spacing: -0.01em;
   color: var(--text);
-  margin: 0 0 12px;
+  margin: 0 0 14px;
+  text-wrap: balance;
 }
 
 .og-panel > p:first-of-type,
 .og-card-meta {
   color: var(--muted);
+  font-size: 13px;
 }
 
-/* --- kpi tile ---------------------------------------------------------------------------------- */
+.og-panel > p:first-of-type {
+  margin: -8px 0 16px;
+}
+
+.og-panel > dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 20px;
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.og-panel > dl dt {
+  color: var(--muted);
+}
+
+.og-panel > dl dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.og-empty {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 22px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  margin: 0;
+}
+
+/* --- forms ----------------------------------------------------------------------------------- */
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 11px;
+  min-height: 36px;
+  transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
+}
+
+input::placeholder {
+  color: color-mix(in srgb, var(--muted) 80%, transparent);
+}
+
+input:hover,
+select:hover {
+  border-color: color-mix(in srgb, var(--muted) 45%, var(--border));
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* a label wrapping its control stacks: caption above, field below */
+label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+label > input,
+label > select {
+  width: 100%;
+  color: var(--text);
+  font-weight: 400;
+}
+
+/* a form laid out as a row of fields with the action aligned to their baseline */
+.og-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 14px 16px;
+  align-items: end;
+}
+
+.og-form > .btn {
+  justify-self: start;
+  min-height: 36px;
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+}
+
+.og-form > .btn-safestop {
+  white-space: nowrap;
+  grid-column: span 2;
+}
+
+.og-form-inline {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.og-form-inline label {
+  flex: 1 1 140px;
+}
+
+/* header toolbars: caption beside control, single line */
+.og-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.og-toolbar label {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.og-toolbar input,
+.og-toolbar select {
+  min-height: 34px;
+  padding-block: 5px;
+}
+
+/* --- buttons --------------------------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  min-height: 34px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 160ms var(--ease), border-color 160ms var(--ease), transform 160ms var(--ease), box-shadow 160ms var(--ease);
+}
+
+.btn:hover {
+  border-color: color-mix(in srgb, var(--muted) 45%, var(--border));
+  background: color-mix(in srgb, var(--panel-2) 80%, var(--text) 4%);
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  box-shadow: 0 6px 16px -10px color-mix(in srgb, var(--accent) 90%, transparent);
+}
+
+.btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, white);
+  border-color: color-mix(in srgb, var(--accent) 88%, white);
+}
+
+.btn-danger {
+  border-color: color-mix(in srgb, var(--status-critical) 60%, var(--border));
+  color: var(--status-critical);
+  font-weight: 600;
+  background: transparent;
+}
+
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--status-critical) 10%, transparent);
+  border-color: var(--status-critical);
+}
+
+/* the scoped safe-stop control must be visually distinct and hard to hit by accident */
+.btn-safestop {
+  border: 2px solid var(--status-critical);
+  background: color-mix(in srgb, var(--status-critical) 12%, var(--panel));
+  color: var(--status-critical);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 9px 18px;
+}
+
+.btn-safestop:hover {
+  background: color-mix(in srgb, var(--status-critical) 18%, var(--panel));
+  border-color: var(--status-critical);
+}
+
+/* --- kpi tile -------------------------------------------------------------------------------- */
 
 .kpi-tile {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 16px 18px 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  box-shadow: var(--shadow);
+  gap: 8px;
+  box-shadow: var(--shadow), inset 0 1px 0 var(--edge);
 }
 
 .og-panel .kpi-tile {
   box-shadow: none;
   background: var(--panel-2);
+  border-color: transparent;
+  padding: 12px 14px 10px;
+  margin-bottom: 12px;
 }
 
 .kpi-label {
   font-size: 12px;
+  font-weight: 500;
   color: var(--muted);
 }
 
 .kpi-value {
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 600;
   letter-spacing: -0.02em;
-  line-height: 1.15;
+  line-height: 1.1;
   font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .kpi-unit {
   font-size: 12px;
   color: var(--muted);
-  margin-left: 6px;
   font-weight: 500;
   letter-spacing: 0;
 }
@@ -344,23 +758,36 @@ select:focus-visible,
   color: var(--status-good);
 }
 
+.kpi-tile > .stale-badge {
+  margin-top: auto;
+}
+
 /* --- status badge (colour + icon + text -- never colour alone) ------------------------------- */
 
 .status-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 8px;
+  padding: 2px 8px 2px 7px;
   border-radius: 999px;
   font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+  line-height: 18px;
   border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.status-badge .og-icon {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.5;
 }
 
 .status-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   display: inline-block;
 }
@@ -370,7 +797,7 @@ select:focus-visible,
 .status-ok,
 .status-closed {
   color: var(--status-good);
-  border-color: var(--status-good);
+  background: color-mix(in srgb, var(--status-good) 12%, transparent);
 }
 .status-online .status-dot,
 .status-good .status-dot,
@@ -382,7 +809,7 @@ select:focus-visible,
 .status-info,
 .status-dispatching {
   color: var(--status-info);
-  border-color: var(--status-info);
+  background: color-mix(in srgb, var(--status-info) 12%, transparent);
 }
 .status-info .status-dot,
 .status-dispatching .status-dot {
@@ -394,7 +821,7 @@ select:focus-visible,
 .status-caution,
 .status-degraded {
   color: var(--status-caution);
-  border-color: var(--status-caution);
+  background: color-mix(in srgb, var(--status-caution) 12%, transparent);
 }
 .status-stale .status-dot,
 .status-warning .status-dot,
@@ -408,7 +835,7 @@ select:focus-visible,
 .status-critical,
 .status-breach {
   color: var(--status-critical);
-  border-color: var(--status-critical);
+  background: color-mix(in srgb, var(--status-critical) 12%, transparent);
 }
 .status-offline .status-dot,
 .status-fault .status-dot,
@@ -420,7 +847,7 @@ select:focus-visible,
 .status-neutral,
 .status-unknown {
   color: var(--status-neutral);
-  border-color: var(--status-neutral);
+  background: color-mix(in srgb, var(--status-neutral) 12%, transparent);
 }
 .status-neutral .status-dot,
 .status-unknown .status-dot {
@@ -430,9 +857,23 @@ select:focus-visible,
 /* --- stale badge (data age -- every value on screen must show its age) ------------------------ */
 
 .stale-badge {
-  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stale-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-good);
+  flex: none;
 }
 
 .stale-badge[data-stale="true"] {
@@ -440,12 +881,34 @@ select:focus-visible,
   font-weight: 600;
 }
 
-/* --- data table ---------------------------------------------------------------------------------*/
+.stale-badge[data-stale="true"]::before {
+  background: var(--status-caution);
+}
+
+.stale-badge[data-stale="true"]::after {
+  content: "\00b7\00a0stale";
+  font-weight: 500;
+}
+
+.og-header-actions > .stale-badge {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+/* --- data table ------------------------------------------------------------------------------ */
+
+.og-table-wrap {
+  overflow-x: auto;
+  margin: 0 -6px;
+  padding: 0 6px;
+}
 
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .data-table thead th {
@@ -454,12 +917,13 @@ select:focus-visible,
   background: var(--panel);
   text-transform: uppercase;
   font-size: 11px;
-  letter-spacing: 0.04em;
-  font-weight: 500;
+  letter-spacing: 0.05em;
+  font-weight: 600;
   color: var(--muted);
   text-align: left;
-  padding: 8px 12px 10px;
+  padding: 6px 12px 10px;
   border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
 
 .data-table th.num,
@@ -469,15 +933,16 @@ select:focus-visible,
 }
 
 .data-table td {
-  padding: 9px 12px;
+  padding: 10px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  vertical-align: middle;
 }
 
 .data-table tbody tr:last-child td {
   border-bottom: 0;
 }
 
-.data-table tbody tr:hover {
+.data-table tbody tr:hover td {
   background: color-mix(in srgb, var(--panel-2) 70%, transparent);
 }
 
@@ -488,66 +953,272 @@ select:focus-visible,
 .data-table tbody tr.clickable-row:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
+  border-radius: var(--radius-sm);
 }
 
 .data-table td.empty {
   text-align: center;
   color: var(--muted);
-  padding: 20px;
+  padding: 28px 16px;
 }
 
-/* --- buttons ------------------------------------------------------------------------------------*/
+.data-table td.empty::before {
+  content: "";
+  display: block;
+  width: 28px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--border);
+  margin: 0 auto 10px;
+}
 
-.btn {
-  font: inherit;
-  font-weight: 500;
-  padding: 7px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
+/* --- story strip + promises (Control room) ------------------------------------------------------ */
+
+.og-story {
+  padding: 4px 2px 0;
+}
+
+.og-story > p {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  color: var(--muted);
+  text-wrap: balance;
+}
+
+.og-story > p strong {
   color: var(--text);
-  cursor: pointer;
-  transition: filter 120ms ease-out, transform 120ms ease-out;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
-.btn:hover {
-  filter: brightness(1.08);
+.og-story strong.is-good {
+  color: var(--status-good);
 }
 
-.btn:active {
-  transform: translateY(1px);
+.og-story strong.is-critical {
+  color: var(--status-critical);
 }
 
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.og-story-why {
+  margin-top: 6px !important;
+  font-size: 13px !important;
+  max-width: 72ch;
 }
 
-.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--bg);
+.og-promises .og-kpis > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.og-promises .kpi-value {
+  font-size: 32px;
+}
+
+.og-promise-why {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.og-panel-lead {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 12px;
+  max-width: 80ch;
+}
+
+.og-decision {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+/* --- hub health strip (Health screen): headline total + segmented state strip + legend ----------- */
+
+.hub-health {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 4px;
+}
+
+.hub-health-total {
+  font-size: 13px;
+  color: var(--muted);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hub-health-n {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-health-bar {
+  display: flex;
+  gap: 2px; /* surface gap between fills */
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+
+.hub-health-seg {
+  flex: 0 1 auto;
+  min-width: 4px;
+}
+
+.hub-health-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 13px;
+}
+
+.hub-health-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-health-legend li.is-zero {
+  color: var(--muted);
+}
+
+.hub-health-legend b {
   font-weight: 600;
 }
 
-.btn-danger {
-  border-color: var(--status-critical);
-  color: var(--status-critical);
-  font-weight: 600;
+.hub-health-legend small {
+  font-size: 11px;
+  color: var(--muted);
 }
 
-/* the scoped safe-stop control must be visually distinct and hard to hit by accident */
-.btn-safestop {
-  border: 2px solid var(--status-critical);
-  background: color-mix(in srgb, var(--status-critical) 12%, var(--panel));
-  color: var(--status-critical);
-  font-weight: 700;
+.hub-health .tone-good .status-dot,
+.hub-health .hub-health-seg.tone-good {
+  background: var(--status-good);
+}
+
+.hub-health .tone-caution .status-dot,
+.hub-health .hub-health-seg.tone-caution {
+  background: var(--status-caution);
+}
+
+.hub-health .tone-neutral .status-dot,
+.hub-health .hub-health-seg.tone-neutral {
+  background: var(--status-neutral);
+}
+
+.hub-health .tone-critical .status-dot,
+.hub-health .hub-health-seg.tone-critical {
+  background: var(--status-critical);
+}
+
+/* --- kanban (Dispatch pipeline) ---------------------------------------------------------------- */
+
+.og-kanban {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.og-kanban-column {
+  background: var(--panel-2);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  min-height: 120px;
+  max-height: 560px; /* a busy column scrolls inside itself instead of stretching the whole board */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.og-kanban-column h3 {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-2);
+}
+
+.og-kanban-column h3 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 10px 18px;
+  color: var(--muted);
+  margin: 0 0 4px;
+  padding: 0 2px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
-/* --- confirm dialog (two-step confirmation) ------------------------------------------------------*/
+.og-kanban-column h3 span {
+  font-variant-numeric: tabular-nums;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  min-width: 22px;
+  padding: 0 7px;
+  text-align: center;
+  line-height: 18px;
+  color: var(--text);
+}
+
+.og-kanban-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-shadow: var(--shadow);
+}
+
+.og-kanban-card:hover {
+  border-color: color-mix(in srgb, var(--muted) 45%, var(--border));
+}
+
+.og-kanban-card > :first-child {
+  font-weight: 600;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.og-kanban-card.og-at-risk {
+  border-color: color-mix(in srgb, var(--status-caution) 60%, var(--border));
+  background: color-mix(in srgb, var(--status-caution) 6%, var(--panel));
+}
+
+.og-kanban-column > .og-card-meta {
+  text-align: center;
+  padding: 14px 0;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  margin: 0;
+}
+
+/* --- confirm dialog (two-step confirmation) -------------------------------------------------- */
 
 [x-cloak] {
   display: none !important;
@@ -556,65 +1227,292 @@ select:focus-visible,
 .confirm-dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(4, 6, 10, 0.6);
-  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
+  padding: 16px;
 }
 
 .confirm-dialog {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 22px 24px;
-  max-width: 440px;
-  width: 90%;
-  box-shadow: 0 24px 64px -24px rgba(0, 0, 0, 0.8);
+  border-radius: 16px;
+  padding: 24px 26px 22px;
+  max-width: 460px;
+  width: 100%;
+  box-shadow: var(--shadow-pop);
+  animation: og-settle 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .confirm-dialog h2 {
-  margin-top: 0;
-  font-size: 15px;
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.confirm-dialog > p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.confirm-dialog-countdown {
+  font-variant-numeric: tabular-nums;
+  color: var(--text) !important;
 }
 
 .confirm-dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 20px;
 }
 
-/* --- map ------------------------------------------------------------------------------------------*/
+/* --- result fragments (propose/confirm/ack/verify) -------------------------------------------- */
+
+[role="status"] > p {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+
+/* --- map ------------------------------------------------------------------------------------- */
 
 .og-map {
   height: 420px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
+  background: var(--panel-2);
 }
 
-/* --- responsive: 1280px desktop and tablet (BUILD.md UI brief) ------------------------------------*/
+[data-theme="dark"] .leaflet-tile-pane,
+:root:not([data-theme="light"]) .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) saturate(0.55) brightness(0.9) contrast(0.95);
+}
+
+.leaflet-control-zoom a {
+  background: var(--panel) !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+
+.og-zone-label {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  color: var(--text) !important;
+  font: 600 12px/1 "Geist", "Inter", system-ui, sans-serif !important;
+  letter-spacing: 0.01em;
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--bg) 80%, transparent);
+  pointer-events: none;
+}
+
+.og-zone-label::before {
+  display: none;
+}
+
+.og-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: 500 11px/1.4 "Geist", "Inter", system-ui, sans-serif;
+  box-shadow: var(--shadow);
+}
+
+.og-map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.og-map-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.og-map-legend-note {
+  color: var(--muted);
+  flex-basis: 100%;
+}
+
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--panel) !important;
+  color: var(--text) !important;
+  box-shadow: var(--shadow-pop) !important;
+}
+
+.leaflet-popup-content {
+  font: 13px/1.5 "Geist", "Inter", system-ui, sans-serif;
+  margin: 10px 14px !important;
+}
+
+.leaflet-control-attribution {
+  background: color-mix(in srgb, var(--panel) 85%, transparent) !important;
+  color: var(--muted) !important;
+  font-size: 10px !important;
+}
+
+/* --- responsive: 1280px desktop, tablet and phone (BUILD.md UI brief) --------------------------- */
+
+@media (min-width: 901px) {
+  #markets-poll-wrapper .og-grid > :nth-child(5) {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 1100px) {
+  .og-kanban {
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  }
+}
 
 @media (max-width: 900px) {
   .og-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .og-nav {
-    position: static;
+    min-width: 0;
+    position: sticky;
+    top: 0;
+    z-index: 30;
     height: auto;
     flex-direction: row;
-    overflow-x: auto;
-    padding: 8px;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .og-nav-brand > span:not(.og-nav-mark) {
+    display: none;
   }
 
   .og-nav ul {
-    display: flex;
-    flex: none;
+    flex-direction: row;
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    gap: 2px;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .og-nav ul::-webkit-scrollbar {
+    display: none;
+  }
+
+  .og-nav ul {
+    padding-right: 8px;
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+
+  .og-content > [id$="-poll-wrapper"] {
+    gap: 14px;
+  }
+
+  .og-nav li a {
+    padding: 7px 10px;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+
+  .og-nav-foot {
+    flex-direction: row;
+    border-top: 0;
+    padding-top: 0;
   }
 
   .og-nav-role {
     display: none;
+  }
+
+  .og-theme-toggle span {
+    display: none;
+  }
+
+  .og-theme-toggle {
+    padding: 7px;
+  }
+
+  .og-header {
+    position: static;
+    padding: 14px 16px;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: transparent;
+  }
+
+  .og-header h1 {
+    font-size: 18px;
+  }
+
+  .og-content {
+    padding: 16px 16px 40px;
+    gap: 14px;
+  }
+
+  .og-panel {
+    padding: 16px;
+  }
+
+  .og-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .og-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .og-kanban {
+    grid-template-columns: 1fr;
+  }
+
+  .og-map {
+    height: 300px;
+  }
+
+  .og-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .og-form > .btn {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+
+  .og-toolbar {
+    width: 100%;
+  }
+
+  .og-toolbar label {
+    flex: 1 1 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .og-toolbar > label + input,
+  .og-toolbar > label + select {
+    flex: 1 1 100%;
+    min-width: 0;
   }
 }

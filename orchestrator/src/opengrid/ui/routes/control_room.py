@@ -9,6 +9,7 @@ alerts (with an acknowledge action, mirroring the Health screen's). Server-rende
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -16,6 +17,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
+from opengrid.ui.render import render_status_badge
 from opengrid.ui.role import is_operator, role_of
 from opengrid.ui.routes.health import ack_message
 from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
@@ -55,6 +57,13 @@ async def control_room(request: Request) -> HTMLResponse:
     except ApiUnavailable as exc:
         logger.warning("control room: market ticker series unavailable: %s", exc)
 
+    story = None
+    try:
+        raw_obl = await get_json("/og/api/dispatch/opportunities")
+        story = story_view(health, raw_obl if isinstance(raw_obl, list) else [])
+    except ApiUnavailable as exc:
+        logger.warning("control room: obligations unavailable for the headline: %s", exc)
+
     return templates.TemplateResponse(
         request,
         "control_room.html",
@@ -62,11 +71,52 @@ async def control_room(request: Request) -> HTMLResponse:
             "role": role_of(request),
             "is_operator": is_operator(request),
             "health": health,
+            "story": story,
+            "alert_rows": [_alert_row(entry) for entry in health.get("alerts", []) or []],
             "hubs": hubs,
             "ticker": series_chart_view(ticker_rows, series_key="price"),
             "degraded": degraded,
         },
     )
+
+
+def story_view(health: dict[str, Any], obligations: list[dict[str, Any]]) -> dict[str, Any]:
+    """The control room's one-line answer to "what is the fleet doing right now": hubs online, what is
+    promised to whom and when, and whether any promise was broken today. Everything else on the screen
+    is evidence for this sentence."""
+    counts = health.get("hub_health_counts") or {}
+    live = [o for o in obligations if o.get("state") in ("SELECTED", "COMMITTED", "DELIVERING")]
+    promised_kw = 0.0
+    for o in live:
+        with contextlib.suppress(TypeError, ValueError):
+            promised_kw += float(o.get("committed_qty_kw") or 0)
+    next_window = min((str(o.get("window_start")) for o in live if o.get("window_start")), default=None)
+    buyers = len({o.get("contract_id") for o in live})
+    broken = (
+        int(health.get("reserve_breaches") or 0)
+        + int(health.get("double_sold_kwh") or 0)
+        + int(health.get("commitment_switches") or 0)
+    )
+    return {
+        "hubs_online": int(counts.get("online") or 0),
+        "hubs_total": sum(int(v or 0) for v in counts.values()),
+        "live_obligations": len(live),
+        "buyers": buyers,
+        "promised_kw": promised_kw,
+        "next_window": next_window[11:16] if next_window and len(next_window) >= 16 else next_window,
+        "delivering": sum(1 for o in live if o.get("state") == "DELIVERING"),
+        "promises_broken": broken,
+    }
+
+
+def _alert_row(entry: dict[str, Any]) -> dict[str, Any]:
+    """Same shape as the Health screen's alert rows: the severity is a badge, not raw text."""
+    return {
+        "id": entry.get("id", "-"),
+        "severity_badge": render_status_badge(str(entry.get("severity", "unknown"))),
+        "summary": entry.get("summary", "-"),
+        "opened_at": entry.get("opened_at", "-"),
+    }
 
 
 @router.post("/alerts/ack", response_class=HTMLResponse)

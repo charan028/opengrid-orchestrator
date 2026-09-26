@@ -62,21 +62,23 @@
        x-show="open"
        x-cloak
        x-on:keydown.escape.window="if (open) { close(); }"
+       x-on:keydown.tab.window="if (open) { $event.preventDefault(); (document.activeElement === $refs.cancelBtn ? $refs.confirmBtn : $refs.cancelBtn).focus(); }"
        role="presentation">
     <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="{{ dialog_id }}-title">
       <h2 id="{{ dialog_id }}-title">{{ title }}</h2>
       <p>{{ summary }}</p>
       {% if expires_in_s is defined and expires_in_s is not none %}
-      <p class="confirm-dialog-countdown" role="status">
+      <p class="confirm-dialog-countdown">
         Expires in <span x-text="remaining"></span>s
-        <template x-if="remaining <= 0"><strong> -- proposal expired, propose again</strong></template>
       </p>
+      <p role="status"><template x-if="remaining <= 0"><strong>Proposal expired, propose again.</strong></template></p>
       {% endif %}
       <div class="confirm-dialog-actions">
         <button type="button" class="btn" x-ref="cancelBtn" :disabled="busy" x-on:click="close()">
           Cancel
         </button>
         <button type="button"
+                x-ref="confirmBtn"
                 class="btn {{ 'btn-safestop' if variant == 'safestop' else 'btn-danger' }}"
                 :disabled="busy || (remaining !== null && remaining <= 0)"
                 hx-post="{{ confirm_url }}"

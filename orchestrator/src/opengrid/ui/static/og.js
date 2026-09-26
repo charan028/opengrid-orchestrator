@@ -69,10 +69,16 @@
     if (!og._themes[name]) {
       const muted = og.token("--muted");
       const grid = og.token("--border", 0.6);
+      // ISO instants ("2026-09-25T17:45:00+00:00") are shown as HH:MM on the axis; the tooltip keeps the
+      // full value. `hideOverlap` drops labels that would collide instead of clipping them.
+      const isoTime = /^\d{4}-\d\d-\d\dT\d\d:\d\d/;
       const axisCommon = {
         axisLine: { show: false },
         axisTick: { show: false },
-        axisLabel: { color: muted, fontSize: 11, fontFamily: "Inter, system-ui, sans-serif" },
+        axisLabel: {
+          color: muted, fontSize: 11, fontFamily: "Geist, Inter, system-ui, sans-serif", hideOverlap: true,
+          formatter: function (v) { return isoTime.test(String(v)) ? String(v).slice(11, 16) : v; },
+        },
         splitLine: { show: true, lineStyle: { color: grid, type: [4, 6] } },
         nameTextStyle: { color: muted, fontSize: 11 },
       };
@@ -83,7 +89,7 @@
           og.token("--series-partner-capacity"), og.token("--series-pjm-capacity"),
         ],
         backgroundColor: "transparent",
-        textStyle: { color: muted, fontFamily: "Inter, system-ui, sans-serif" },
+        textStyle: { color: muted, fontFamily: "Geist, Inter, system-ui, sans-serif" },
         legend: { textStyle: { color: muted, fontSize: 11 }, itemWidth: 10, itemHeight: 10, icon: "circle" },
         tooltip: {
           backgroundColor: og.token("--panel"),
@@ -97,7 +103,7 @@
         valueAxis: axisCommon,
         timeAxis: axisCommon,
         line: { smooth: 0.35, symbol: "none", lineStyle: { width: 2 } },
-        bar: { itemStyle: { borderRadius: [4, 4, 0, 0] } },
+        bar: { barMaxWidth: 56, itemStyle: { borderRadius: [4, 4, 0, 0] } },
       });
       og._themes[name] = true;
     }
@@ -128,6 +134,23 @@
         }
       });
     })(option);
+    // An empty chart says so instead of drawing a bare axis frame and a stray legend.
+    const hasData = (option.series || []).some(function (s) { return (s.data || []).length > 0; });
+    if (!hasData) {
+      option.legend = { show: false };
+      option.xAxis = { show: false };
+      option.yAxis = { show: false };
+      option.title = {
+        text: node.dataset.empty || "No data yet", left: "center", top: "middle",
+        textStyle: { color: og.token("--muted"), fontSize: 13, fontWeight: 400, width: Math.max(node.clientWidth - 48, 200), overflow: "break" },
+      };
+    } else if (!option.grid) {
+      option.grid = { containLabel: true, left: 8, right: 12, top: 28, bottom: 8 };
+    }
+    // Respect the OS reduced-motion preference for canvas animation too (CSS cannot reach it).
+    if (og.reducedMotion()) {
+      option.animation = false;
+    }
     const lines = (option.series || []).filter(function (s) { return s.type === "line"; });
     if (lines.length === 1 && !lines[0].areaStyle) {
       lines[0].areaStyle = {
@@ -151,6 +174,11 @@
       instance.resize();
     });
     return instance;
+  };
+
+  /** True when the viewer asked the OS for reduced motion. */
+  og.reducedMotion = function reducedMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   };
 
   /** Format an age in seconds as a short human string, e.g. "3s", "2m", "1h". */
@@ -232,5 +260,10 @@
 
   document.addEventListener("DOMContentLoaded", function () {
     og.initStaleBadges();
+    // The settle-in animation is a first-paint moment only: once the page has landed, mark the
+    // document so sections swapped in later (the 30 s self-polling screens) appear without replaying it.
+    window.setTimeout(function () {
+      document.documentElement.classList.add("og-settled");
+    }, 600);
   });
 })();

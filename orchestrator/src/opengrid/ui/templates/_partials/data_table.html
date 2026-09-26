@@ -2,6 +2,7 @@
    rows: [dict], empty_message: str|None, row_id_key: str|None (adds data-row-id + a clickable-row class
    for drill-down rows, e.g. the Fleet hub table). Sticky header, numeric right-align, units in the header
    (UI-UX spec S5.8). #}
+<div class="og-table-wrap">
 <table class="data-table">
   <thead>
     <tr>
@@ -28,3 +29,4 @@
     {% endfor %}
   </tbody>
 </table>
+</div>

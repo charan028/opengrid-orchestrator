@@ -6,7 +6,7 @@
   <title>{% block title %}OpenGrid Orchestrator{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="{{ base_path }}/static/og.css">
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@1.9.12/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@1.9.12/dist/ext/sse.js"></script>
@@ -17,23 +17,54 @@
   <script src="{{ base_path }}/static/og.js"></script>
 </head>
 <body hx-ext="sse" hx-headers='{"{{ csrf_header_name }}": "{{ csrf_token }}"}'>
+  {# one drawn icon set (Lucide outlines), referenced by id so every nav item / badge shares one stroke #}
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+    <symbol id="i-dashboard" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1.5"/><rect width="7" height="5" x="14" y="3" rx="1.5"/><rect width="7" height="9" x="14" y="12" rx="1.5"/><rect width="7" height="5" x="3" y="16" rx="1.5"/></symbol>
+    <symbol id="i-battery" viewBox="0 0 24 24"><path d="M15 7h1a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-2"/><path d="M6 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="m11 7-3 5h4l-3 5"/><path d="M22 11v2"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+    <symbol id="i-trend" viewBox="0 0 24 24"><path d="m22 7-8.5 8.5-5-5L2 17"/><path d="M16 7h6v6"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="M3.22 12H9.5l.5-1 2 4.5 2-7 1.5 3.5h5.27"/></symbol>
+    <symbol id="i-dollar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></symbol>
+    <symbol id="i-scroll" viewBox="0 0 24 24"><path d="M8 21h12a2 2 0 0 0 2-2v-2H10v2a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v3h4"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M15 8h-5"/><path d="M15 12h-5"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-octagon" viewBox="0 0 24 24"><path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  </svg>
   <div class="og-shell">
     <nav class="og-nav" aria-label="Screens">
-      <div class="og-nav-brand">OpenGrid</div>
+      <div class="og-nav-brand">
+        <span class="og-nav-mark" aria-hidden="true"><svg class="og-icon"><use href="#i-zap"/></svg></span>
+        <span>OpenGrid <small>Orchestrator</small></span>
+      </div>
       <ul>
         {% for item in nav_screens %}
         <li>
           <a href="{{ item.path }}"
              class="{{ 'active' if request.url.path == item.path else '' }}"
              {% if request.url.path == item.path %}aria-current="page"{% endif %}>
+            <svg class="og-icon" aria-hidden="true"><use href="#i-{{ item.icon }}"/></svg>
             {{ item.label }}
           </a>
         </li>
         {% endfor %}
       </ul>
-      <button type="button" class="og-nav-role" onclick="og.toggleTheme()" aria-label="Toggle light/dark theme">
-        Role: {{ role|default('viewer') }} &middot; theme
-      </button>
+      <div class="og-nav-foot">
+        <span class="og-nav-role" data-role="{{ role|default('viewer') }}">
+          <svg class="og-icon" aria-hidden="true"><use href="#i-{{ 'shield' if role|default('viewer') == 'operator' else 'eye' }}"/></svg>
+          Role: {{ role|default('viewer') }}
+        </span>
+        <button type="button" class="og-theme-toggle" onclick="og.toggleTheme()" aria-label="Switch theme">
+          <svg class="og-icon og-icon-sun" aria-hidden="true"><use href="#i-sun"/></svg>
+          <svg class="og-icon og-icon-moon" aria-hidden="true"><use href="#i-moon"/></svg>
+          <span>Switch theme</span>
+        </button>
+      </div>
     </nav>
     <div class="og-main">
       <header class="og-header">
@@ -42,7 +73,7 @@
       </header>
       <main class="og-content">
         {% if degraded %}
-        <div class="og-degraded-banner" role="status">Degraded: {{ degraded }}</div>
+        <div class="og-degraded-banner" role="alert">Degraded: {{ degraded }}</div>
         {% endif %}
         {% block content %}{% endblock %}
       </main>
