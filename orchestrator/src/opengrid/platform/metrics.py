@@ -72,6 +72,38 @@ guardian_clock_offset_ms = Gauge(
     "Guardian's own NTP clock offset in milliseconds (K12/G-20).",
 )
 
+# --- opengrid.invariants (independent, measured K1/K2/K13 proofs; 00-invariants.md) ---------------
+# `reserve_breaches_total`/`double_sold_kwh_total` above are the two counters 02b S6.6 already names;
+# `opengrid.invariants` is their only writer (they were never incremented before -- see that package's
+# README). The rest are new: K13 has no dedicated counter in 02b S6.6 yet, and the orphan/health-of-the-
+# checker gauges make the checker's own measurement visible instead of a black box.
+lock_violations_total = Counter(
+    "og_lock_violations_total",
+    "Commitment-lock violations found by opengrid.invariants (K13). Must stay 0 (A10).",
+)
+orphan_reservations = Gauge(
+    "og_orphan_reservations",
+    "Active reservations with no matching active commitment, as of the last invariants run.",
+)
+orphan_commitments = Gauge(
+    "og_orphan_commitments",
+    "Active commitment rows left on a REJECTED/EXPIRED obligation, as of the last invariants run.",
+)
+trace_verify_failures_total = Counter(
+    "og_trace_verify_failures_total",
+    "Scheduled trace-chain verification failures found by opengrid.invariants (K11).",
+)
+invariant_check_last_run_timestamp_seconds = Gauge(
+    "og_invariant_check_last_run_timestamp_seconds",
+    "Unix time of the last completed run of each opengrid.invariants check.",
+    labelnames=("check",),
+)
+invariant_check_duration_seconds = Histogram(
+    "og_invariant_check_duration_seconds",
+    "Wall time of one opengrid.invariants check run, per check.",
+    labelnames=("check",),
+)
+
 # --- cross-process -------------------------------------------------------------------------------
 process_up = Gauge(
     "og_process_up",

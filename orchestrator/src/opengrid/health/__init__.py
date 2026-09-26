@@ -90,6 +90,15 @@ def configure(pool: AsyncConnectionPool, cfg: Config) -> None:
     _scrape_timeout_s = cfg.get("health.metrics_scrape_timeout_s", 2.0)
     _staleness_cfg = cfg.get("feeds.staleness", {})
 
+    # opengrid.invariants (K1/K2/K13 + orphan bookkeeping + K11 trace verification) has no process
+    # entry point of its own -- it piggybacks on og-settle's existing health cadence instead. Local
+    # import: breaks the import cycle (invariants.trace_verify reads opengrid.health.queries/model),
+    # and keeps this package's only touch on `health` to these two lines (BUILD.md task brief: "keep
+    # your edit to a small hook").
+    from opengrid import invariants
+
+    invariants.configure(pool, cfg)
+
 
 def _require_pool() -> AsyncConnectionPool:
     if _pool is None:
@@ -305,6 +314,12 @@ async def evaluate_once() -> HealthSnapshot:
 
     await evaluate_hub_health()
     await evaluate_alerts()
+
+    # opengrid.invariants' own hook: it gates its actual check cadence internally (Cadence, independent
+    # of health's ~5s loop), so calling it every cycle here does not mean it runs every cycle.
+    from opengrid import invariants
+
+    await invariants.run_due()
 
     heartbeats = await queries.fetch_heartbeats(pool)
     processes = classify_all_processes(

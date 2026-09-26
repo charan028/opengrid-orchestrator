@@ -11,10 +11,12 @@ process name (not a list), `feeds`/`alerts` are full lists (not just counts), an
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from psycopg_pool import AsyncConnectionPool
 from sse_starlette.sse import EventSourceResponse
 
 from opengrid.api.auth import Identity, require_loopback_health_probe, require_operator, require_viewer
@@ -22,16 +24,40 @@ from opengrid.api.deps import get_config, get_store
 from opengrid.api.sse import sse_response
 from opengrid.api.store import HealthSnapshot, StoreProtocol
 from opengrid.core.models.platform import Alert
+from opengrid.invariants import InvariantsSummary, read_summary
 from opengrid.platform.config import Config
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 
-# A10's three invariant counters have no dedicated running-total table yet (guardian/ledger own the
-# checks that would feed one -- `og_reserve_breaches_total`/`og_double_sold_kwh_total` on `/metrics`,
-# 02b S6.6). Reporting 0 here is the correct value for a healthy run (the acceptance bar *is* "reads
-# 0"), not a placeholder standing in for a missing feature; once a real counter table exists, this
-# becomes a plain read of it.
-_ZERO_INVARIANT_COUNTERS = {"reserve_breaches": 0, "double_sold_kwh": 0, "commitment_switches": 0}
+# `commitment_switches` has no measuring check yet (out of opengrid.invariants' scope -- K1/K2/K13 +
+# orphan bookkeeping + K11 only, per its task brief); 0 stays the correct value for a healthy run until
+# one exists. `reserve_breaches`/`double_sold_kwh` below come from `opengrid.invariants.read_summary`
+# (`og.invariant_check`, populated by that package's periodic K1/K2 checks) -- a measurement, not this
+# constant.
+_UNMEASURED_INVARIANT_COUNTERS = {"commitment_switches": 0}
+
+_UNAVAILABLE_INVARIANTS_SUMMARY = InvariantsSummary.unavailable()
+
+
+def _get_optional_pool(request: Request) -> AsyncConnectionPool | None:
+    """Like `opengrid.api.deps.get_pool`, but tolerant of `app.state.pool` never having been set: this
+    router's own unit test suite overrides every OTHER dependency and never runs the real app lifespan
+    (`opengrid.api.app._lifespan`) that would set it. A missing pool degrades this endpoint's invariant
+    counters to "not yet measured" (`_UNAVAILABLE_INVARIANTS_SUMMARY`) rather than failing the whole
+    health payload over an unrelated dependency (K7: degrade, don't trip)."""
+    return getattr(request.app.state, "pool", None)
+
+
+async def _invariants_summary(pool: AsyncConnectionPool | None) -> InvariantsSummary:
+    if pool is None:
+        return _UNAVAILABLE_INVARIANTS_SUMMARY
+    try:
+        return await read_summary(pool)
+    except Exception:
+        logger.warning("opengrid.invariants summary read failed", exc_info=True)
+        return _UNAVAILABLE_INVARIANTS_SUMMARY
 
 
 def _feed_payload(f: Any) -> dict[str, Any]:
@@ -45,12 +71,13 @@ def _feed_payload(f: Any) -> dict[str, Any]:
     }
 
 
-async def _health_payload(store: StoreProtocol) -> dict[str, Any]:
+async def _health_payload(store: StoreProtocol, pool: AsyncConnectionPool | None) -> dict[str, Any]:
     snapshot: HealthSnapshot = await store.health_snapshot(heartbeat_miss_threshold_s=15.0)
     hubs = await store.list_hubs(zone=None, bank_id=None, health=None, limit=2000, offset=0)
     fleet_mw = sum(h["p_kw"] for h in hubs) / 1000.0
     active_commitments = await store.count_active_commitments()
     net_margin_usd = await _todays_net_margin(store)
+    invariants = await _invariants_summary(pool)
     return {
         "status": "ok",
         "as_of": datetime.now(UTC).isoformat(),
@@ -65,7 +92,13 @@ async def _health_payload(store: StoreProtocol) -> dict[str, Any]:
         "fleet_mwh": None,  # not yet tracked -- `settle` owns real delivered-MWh accounting (02a S7)
         "active_commitments": active_commitments,
         "net_margin_usd": net_margin_usd,
-        **_ZERO_INVARIANT_COUNTERS,
+        "reserve_breaches": invariants.reserve_breaches,
+        "double_sold_kwh": invariants.double_sold_kwh,
+        "lock_violations": invariants.lock_violations,
+        "orphan_reservations": invariants.orphan_reservations,
+        "orphan_commitments": invariants.orphan_commitments,
+        "invariants_checked_at": invariants.as_of.isoformat() if invariants.as_of else None,
+        **_UNMEASURED_INVARIANT_COUNTERS,
     }
 
 
@@ -80,11 +113,14 @@ async def _todays_net_margin(store: StoreProtocol) -> float | None:
 
 
 @router.get("/og/api/health", dependencies=[Depends(require_loopback_health_probe)])
-async def get_health(store: Annotated[StoreProtocol, Depends(get_store)]) -> dict[str, Any]:
+async def get_health(
+    store: Annotated[StoreProtocol, Depends(get_store)],
+    pool: Annotated[AsyncConnectionPool | None, Depends(_get_optional_pool)],
+) -> dict[str, Any]:
     """Aggregated health for the deploy poll (`deploy/scripts/deploy.sh`, loopback, no auth header),
     the operator/viewer Health screen, and the Control room's first paint (both reached through
     Apache, also loopback by the time they hit this process -- see `opengrid.api.auth`)."""
-    return await _health_payload(store)
+    return await _health_payload(store, pool)
 
 
 @router.get("/og/api/stream/health")
@@ -93,9 +129,13 @@ async def stream_health(
     store: Annotated[StoreProtocol, Depends(get_store)],
     cfg: Annotated[Config, Depends(get_config)],
     _identity: Annotated[Identity, Depends(require_viewer)],
+    # Trailing + defaulted (unlike every other dependency here): `tests/unit/api/test_sse.py` calls this
+    # coroutine directly (bypassing FastAPI's dependency injection) with only `store`/`cfg`/`_identity`
+    # given by keyword, so `pool` needs a real Python default to remain callable that way.
+    pool: Annotated[AsyncConnectionPool | None, Depends(_get_optional_pool)] = None,
 ) -> EventSourceResponse:
     async def fetch() -> dict[str, Any]:
-        return await _health_payload(store)
+        return await _health_payload(store, pool)
 
     return sse_response(request, interval_s=2.0, heartbeat_s=cfg.get("api.sse_heartbeat_s", 15), fetch=fetch)
 
