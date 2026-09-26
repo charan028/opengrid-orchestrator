@@ -14,6 +14,31 @@ The role is derived from the identity alone (`[api.roles]`, below); no client-su
 | `viewer` | Every `GET` and SSE endpoint | The Apache account named `viewer`, or a name in `[api.roles.viewer]` |
 | `operator` | Everything a viewer can, plus every write | The Apache account named `operator`, or a name in `[api.roles.operator]` |
 
+### Calling the API without Apache (scripts, tests, the dev stack)
+
+A client that talks to og-api directly (the dev stack's `:8080`, a test harness, an integration script) must
+send what Apache would:
+
+```
+X-Remote-User: <identity>            # e.g. operator, viewer, og-op-a
+X-OG-Proxy-Auth: <OG_API_PROXY_SECRET>
+```
+
+`OG_API_PROXY_SECRET` is an environment variable of the og-api process (on the dev stack, a line in the gitignored
+`dev/secrets`). Never put its value in code, tests or logs; read it from the environment. Without it every
+request is `401`, including a correct `X-Remote-User`.
+
+**Named operators.** A two-person safe-stop release (below) needs two *different* operator identities, both on
+the guardian's allow-list, so the plain `operator` account is not enough. Map named accounts in config:
+
+```toml
+[api.roles]
+operator = ["og-op-a", "og-op-b"]
+
+[guardian]
+stop_release_authorised_operators = ["og-op-a", "og-op-b"]
+```
+
 Every endpoint needs the header except `GET /og/api/health`, which is the deploy-time liveness probe. It ignores the
 header and accepts only connections that originate from loopback.
 
@@ -82,8 +107,15 @@ POST /og/api/safestop/release/{proposal_id}/approve     -> 200 released, 202 sti
 - The approver must not be the requester (`403`).
 - Approval writes one `og.operator_action` (`SAFE_STOP_RELEASE`, tier `TIER2`) recording both operators. The guardian
   checks it (allow-list, distinct operators, age, scope still engaged) before signing, and `og-safestop` relays it.
-- `202` from approve means the guardian has not released yet. It may refuse, for example on an empty allow-list, and
-  the API never fakes a release.
+- `202` from approve means the guardian has not released yet. It may refuse, and the API never fakes a release.
+  Refusals are logged by og-guardian with a reason, e.g. `NO_AUTHORISED_OPERATORS_CONFIGURED`,
+  `OPERATOR_NOT_AUTHORISED`, `APPROVAL_STALE` (approved more than 5 minutes after the request), or
+  `CLOCK_OFFSET_EXCEEDED` (its own clock check, G-20). Request and approve again once the cause has cleared.
+- The approval must reach og-safestop as a guardian-signed event, so og-safestop needs the guardian's public key
+  (`[safestop] guardian_public_key_path`); without it the signed RELEASE is refused
+  (`GUARDIAN_PUBLIC_KEY_NOT_CONFIGURED`) and the stop stays engaged.
+- A RELEASE lifts only the stop it names (`stop_id`). Hubs track stops individually, so a replayed or reordered
+  old RELEASE never lifts a newer stop on the same scope (K8).
 
 ## Server-sent event streams
 

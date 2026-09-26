@@ -7,7 +7,8 @@ The REST and SSE API served by `og-api` (`opengrid.api`, port 8080 on loopback, 
 |---|---|
 | [reference.md](reference.md) | Every `/og/api/*` endpoint: role, parameters, body fields, response codes. Generated. |
 | [openapi.json](openapi.json) | The raw OpenAPI 3 document. Generated. |
-| [auth-and-actions.md](auth-and-actions.md) | Roles, CSRF, the two-step confirmation flows, SSE streams, error codes |
+| [auth-and-actions.md](auth-and-actions.md) | Identity (proxy secret, named operators), roles, CSRF, the two-step and two-person flows, SSE streams, error codes |
+| [scenarios.md](scenarios.md) | The operator scenario route: request shape, anomaly types, and how it differs from the simulator control plane |
 | [integration-howto.md](integration-howto.md) | Switching between live ERCOT/EIA/NWS and the market simulator, the ERCOT token flow |
 
 ## Regenerating the reference
