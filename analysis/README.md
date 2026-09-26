@@ -50,7 +50,7 @@ python -m venv .venv
 .venv\Scripts\activate            (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 
-# Price history: about 15 MB of downloads per year, 20 to 40 minutes in total
+# Price history: about 15 MB of downloads per year, about 10 to 20 minutes in total
 python price_history/fetch.py     # downloads 13061 + 13060 for 2021-2026 into price_history/data/
 python price_history/arb.py       # home-battery LP for every zone-day
 python price_history/years.py     # -> results/prices_years_2021_2026.csv
@@ -65,6 +65,7 @@ python capture_rate/pre_rtcb.py --start 2025-07-01 --end 2025-08-31   # run afte
 Notes:
 - `run.py --days 30` uses the newest 30 operating days on ERCOT's site, so the window moves forward 1 day each day. The committed result covers June 29 to July 28, 2026 (the newest 30 on Sep 26, 2026).
 - Downloads and intermediate files go to `capture_rate/downloads/` and `price_history/data/`, which are git-ignored. Set `OPENGRID_PRICE_DATA` to keep the price data somewhere else.
+- Verified on Sep 26, 2026: a clean run of the 5 price-history commands, from fresh ERCOT downloads, reproduced all 6 committed `price_history/results/*.csv` files byte for byte. A rerun of `run.py` and `pre_rtcb.py` on sample days (2026-07-28, 2025-07-11) matched the committed per-battery rows exactly.
 - `capture_rate/output/summer2025_capture_by_battery_day.csv.gz` is the 2025 detail, gzipped to keep the repo small. pandas reads it directly: `pd.read_csv("...csv.gz")`.
 
 ## Datasets and provenance

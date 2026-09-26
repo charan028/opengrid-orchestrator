@@ -65,13 +65,21 @@ def read_year(report_id, year, xlsx_dir=None):
         src = io.BytesIO(z.read(z.namelist()[0]))
     sheets = pd.read_excel(src, sheet_name=None, dtype=str)
     df = pd.concat([s for s in sheets.values() if len(s)], ignore_index=True)
-    return df.dropna(how="all")
+    # Some yearly files carry a stray metadata row (e.g. the 2021 real-time file, sheet Oct, holds a publish
+    # timestamp with no hour and no price). Keep only rows with an hour and a price.
+    n0 = len(df)
+    df = df.dropna(subset=[df.columns[1], df.columns[-1]])
+    if len(df) < n0:
+        print(f"  {report_id} {year}: dropped {n0 - len(df)} row(s) with no hour or price", flush=True)
+    col = df.columns[0]
+    df[col] = pd.to_datetime(df[col], format="%m/%d/%Y")
+    return df
 
 
 def tidy_rt(r):
     r.columns = RT_COLS
     r["price"] = r.price.astype(float)
-    r["date"] = pd.to_datetime(r.date, format="%m/%d/%Y")
+    r["date"] = pd.to_datetime(r.date)
     r["hour"] = r.hour.astype(int)
     r["interval"] = r.interval.astype(int)
     r["repn"] = (r.rep == "Y").astype(int)  # order within a day: hour, then repeated hour (DST), then interval
@@ -83,7 +91,7 @@ def tidy_rt(r):
 def tidy_da(d):
     d.columns = DA_COLS
     d["price"] = d.price.astype(float)
-    d["date"] = pd.to_datetime(d.date, format="%m/%d/%Y")
+    d["date"] = pd.to_datetime(d.date)
     d["hour"] = d.he.str[:2].astype(int)
     d["repn"] = (d.rep == "Y").astype(int)
     d = d.sort_values(["sp", "date", "hour", "repn"])
@@ -105,6 +113,10 @@ def main():
         da.append(read_year(13060, y, a.xlsx_dir))
     r = tidy_rt(pd.concat(rt, ignore_index=True))
     d = tidy_da(pd.concat(da, ignore_index=True))
+    n = r.groupby(["sp", "type", "date"]).size()
+    odd = n[~n.isin([92, 96, 100])]  # 92 and 100 are the DST days
+    if len(odd):
+        print(f"  warning: {len(odd)} point-days without 92, 96 or 100 intervals, e.g. {odd.head(3).to_dict()}")
     r.to_pickle(os.path.join(DATA, "rt_tidy.pkl"))
     d.to_pickle(os.path.join(DATA, "da_tidy.pkl"))
     print(f"real-time rows {len(r):,} ({r.date.min().date()} to {r.date.max().date()}); day-ahead rows {len(d):,}")
