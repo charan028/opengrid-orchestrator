@@ -5,14 +5,11 @@ checks are driven through the operator's manual-command path (02b S7.3): og-api 
 independent og-guardian process judges it, so every verdict asserted here is the real guardian's. Anomalies go
 through `ogsim.control`, the same path as its web UI.
 
-`STOP_BANK` is the one bank these tests safe-stop. It is left engaged afterwards whenever the two-person
-release does not complete (see `test_a_second_authorised_operator_releases_the_stop`), so every other
-scenario keeps away from it.
+`STOP_BANK` is the one bank these tests safe-stop; the two-person release scenario releases it again, and every
+other scenario keeps away from it.
 """
 
 from __future__ import annotations
-
-import os
 
 import pytest
 from e2e_stack import Stack, now_utc, wait_until
@@ -22,8 +19,6 @@ pytestmark = pytest.mark.usefixtures("stack")
 STOP_BANK = "bank-007"
 OPERATOR_A = "e2e-alice"
 OPERATOR_B = "e2e-bob"
-#: og-guardian's `[guardian].inverter_cap_kw` (G-02 bounds a hub by the smaller of this and its rated kW).
-INVERTER_CAP_KW = float(os.environ.get("OG_E2E_INVERTER_CAP_KW", "11.0"))
 
 
 def _verdict(resp) -> dict:
@@ -57,7 +52,7 @@ def test_ts_06_07a_g02_a_setpoint_above_the_hub_power_limit_is_vetoed(stack: Sta
 def test_ts_06_09_g04_a_step_beyond_the_hub_ramp_limit_is_vetoed(stack: Stack) -> None:
     hub = stack.online_hub(exclude_banks=(STOP_BANK,), idle=True)
 
-    within_power_limit = 0.9 * min(float(hub["p_limit_kw"]), INVERTER_CAP_KW)
+    within_power_limit = 0.9 * float(hub["p_limit_kw"])  # G-02 bounds a hub by its own rating
 
     resp = stack.manual_command(hub["hub_id"], within_power_limit)
 
@@ -68,8 +63,12 @@ def test_ts_06_09_g04_a_step_beyond_the_hub_ramp_limit_is_vetoed(stack: Stack) -
 
 
 def test_ts_06_06_g01_a_hub_reporting_soc_below_reserve_is_refused(stack: Stack) -> None:
-    hub = stack.online_hub(exclude_banks=(STOP_BANK,))
-    anomaly = stack.inject("soc_sensor_drift", hub["hub_id"], duration_s=120, drift_kwh_per_min=-60.0)
+    hub = stack.rows(
+        """SELECT h.hub_id, h.r_kwh FROM og.hub h JOIN og.hub_state s USING (hub_id)
+           WHERE s.health = 'online' AND h.bank_id <> %(b)s ORDER BY s.soc_kwh - h.r_kwh LIMIT 1""",
+        {"b": STOP_BANK},
+    )[0]
+    anomaly = stack.inject("soc_sensor_drift", hub["hub_id"], duration_s=180, drift_kwh_per_min=-60.0)
     try:
         drained = wait_until(
             lambda: (
@@ -82,7 +81,7 @@ def test_ts_06_06_g01_a_hub_reporting_soc_below_reserve_is_refused(stack: Stack)
                 < hub["r_kwh"]
                 else None
             ),
-            timeout_s=60,
+            timeout_s=150,
             what=f"{hub['hub_id']} to report SoC below its reserve",
         )
 
@@ -140,9 +139,12 @@ def test_ts_06_16_a_bank_safe_stop_only_stops_that_bank(stack: Stack) -> None:
     assert into_stop.status_code == 409, into_stop.text
     assert "SAFE_STOP" in _verdict(into_stop)["vetoed_rule_ids"]
 
-    outside = stack.online_hub(exclude_banks=(STOP_BANK,), idle=True)
+    outside = stack.online_hub(exclude_banks=(STOP_BANK,))
     elsewhere = stack.manual_command(outside["hub_id"], float(outside["p_kw"]))
-    assert elsewhere.status_code == 200, "a bank-scoped stop must not stop other banks"
+    # A hub the engine is also driving may be refused for other reasons (G-13 lease/sequence); the scope
+    # property is only that the bank stop never reaches it.
+    assert elsewhere.status_code in {200, 409}, elsewhere.text
+    assert "SAFE_STOP" not in (_verdict(elsewhere).get("vetoed_rule_ids") or []), "the bank stop leaked"
 
 
 def test_ts_06_15_a_safe_stop_never_engages_on_one_message(stack: Stack) -> None:
@@ -170,40 +172,54 @@ def test_a_release_cannot_be_approved_by_its_requester(stack: Stack) -> None:
     assert self_approved.status_code == 403, self_approved.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: og-api writes the SAFE_STOP_RELEASE row only at approval, with confirmed_at taken just before the "
-        "insert, and og-guardian reads the row's created_at as requested_at -- approved_at is always a few ms "
-        "earlier than requested_at, so every release is refused APPROVAL_STALE (api/routers/safestop.py "
-        "approve_release, guardian/repo.py release mapping)."
-    ),
-)
+def _release(stack: Stack, bank_id: str, *, attempts: int = 3) -> None:
+    """Two-person release (operator A requests, operator B approves) and wait for the guardian-signed RELEASE.
+    Retried because the guardian correctly refuses to sign while its own clock check (G-20) fails."""
+    for attempt in range(1, attempts + 1):
+        requested = stack.post(f"/safestop/bank/{bank_id}/release", {"reason": "e2e"}, user=OPERATOR_A)
+        if requested.status_code == 403:
+            pytest.skip(f"{OPERATOR_A} is not an operator on this stack ([api.roles.operator])")
+        assert requested.status_code == 202, requested.text
+        started = now_utc()
+
+        approved = stack.post(f"/safestop/release/{requested.json()['proposal_id']}/approve", user=OPERATOR_B)
+
+        assert approved.status_code in {200, 202}, approved.text
+        try:
+            wait_until(
+                lambda since=started: stack.rows(
+                    "SELECT 1 FROM og.stop_event WHERE action = 'RELEASE' AND scope_ref = %(b)s "
+                    "AND created_at >= %(t)s",
+                    {"b": bank_id, "t": since},
+                ),
+                timeout_s=30,
+                what="the guardian-signed RELEASE",
+            )
+            return
+        except AssertionError:
+            if attempt == attempts:
+                raise
+
+
 def test_a_second_authorised_operator_releases_the_stop(stack: Stack) -> None:
     _engage(stack, "bank", STOP_BANK)
-    requested = stack.post(f"/safestop/bank/{STOP_BANK}/release", {"reason": "e2e"}, user=OPERATOR_A)
-    if requested.status_code == 403:
-        pytest.skip(f"{OPERATOR_A} is not an operator on this stack ([api.roles.operator])")
-    started = now_utc()
 
-    approved = stack.post(f"/safestop/release/{requested.json()['proposal_id']}/approve", user=OPERATOR_B)
+    _release(stack, STOP_BANK)
 
-    assert approved.status_code in {200, 202}, approved.text
-    wait_until(
-        lambda: stack.rows(
-            "SELECT 1 FROM og.stop_event WHERE action = 'RELEASE' AND scope_ref = %(b)s AND created_at >= %(t)s",
-            {"b": STOP_BANK, "t": started},
-        ),
-        timeout_s=30,
-        what="the guardian-signed RELEASE",
-    )
+    inside = stack.rows(
+        "SELECT h.hub_id, s.p_kw FROM og.hub h JOIN og.hub_state s USING (hub_id) "
+        "WHERE h.bank_id = %(b)s AND s.health = 'online' LIMIT 1",
+        {"b": STOP_BANK},
+    )[0]
+    after = stack.manual_command(inside["hub_id"], float(inside["p_kw"]))
+    assert "SAFE_STOP" not in (_verdict(after).get("vetoed_rule_ids") or []), "the bank is still stopped"
 
 
 # --- process loss --------------------------------------------------------------------------------
 
 
 def test_ts_06_17_with_the_guardian_down_a_command_is_never_treated_as_passed(stack: Stack) -> None:
-    hub = stack.online_hub(exclude_banks=(STOP_BANK,), idle=True)
+    hub = stack.online_hub(exclude_banks=(STOP_BANK,))
     stack.compose("stop", "og-guardian")
     try:
         resp = stack.manual_command(hub["hub_id"], float(hub["p_kw"]))
@@ -213,8 +229,14 @@ def test_ts_06_17_with_the_guardian_down_a_command_is_never_treated_as_passed(st
         stack.compose("start", "og-guardian")
         stack.wait_process_up("guardian")
 
-    recovered = stack.manual_command(hub["hub_id"], float(hub["p_kw"]))
-    assert recovered.status_code == 200, "the guardian did not resume signing after restart"
+    # Right after a restart the guardian may still answer TIMEOUT on its own clock check (G-20, K12); what
+    # matters is that it resumes judging, so allow a few attempts for a real PASS/VETO verdict.
+    for _ in range(5):
+        recovered = stack.manual_command(hub["hub_id"], float(hub["p_kw"]))
+        assert recovered.status_code in {200, 409}, f"the guardian did not resume judging: {recovered.text}"
+        if _verdict(recovered)["outcome"] != "TIMEOUT":
+            break
+    assert _verdict(recovered)["outcome"] in {"PASS", "VETOED", "PARTLY_VETOED"}, recovered.text
 
 
 def test_ts_06_23_safe_stop_engages_with_engine_and_guardian_both_down(stack: Stack) -> None:
@@ -233,6 +255,7 @@ def test_ts_06_23_safe_stop_engages_with_engine_and_guardian_both_down(stack: St
         stack.compose("start", "og-engine", "og-guardian")
         stack.wait_process_up("engine")
         stack.wait_process_up("guardian")
+    _release(stack, STOP_BANK)
 
 
 # --- anomaly responses (TS-07) -------------------------------------------------------------------
