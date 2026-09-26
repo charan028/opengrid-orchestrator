@@ -70,6 +70,16 @@ async def window(series: str, t0: datetime, t1: datetime) -> list[FeedObs]:
     return await _require_store().window(series, t0, t1)
 
 
+def _new_http_client() -> httpx.AsyncClient:
+    """The single `httpx.AsyncClient` shared by ERCOT/EIA/NWS. `follow_redirects=True` (httpx's default
+    is `False`) because `request_with_retry` treats any status under 400 -- including a 3xx -- as
+    success and returns it as-is: an unfollowed redirect would then hand a client an empty/HTML
+    redirect body instead of JSON, which `response.json()` can't parse (an unhandled `JSONDecodeError`,
+    the same crash-loop shape as the `updated`/`skyCover` live defects, just from api.weather.gov or
+    ERCOT/EIA issuing a redirect instead of a malformed payload)."""
+    return httpx.AsyncClient(follow_redirects=True)
+
+
 def _build_scheduler(
     cfg: Config, store: FeedStore, http_client: httpx.AsyncClient, trace: TraceStore | None
 ) -> FeedsScheduler:
@@ -163,7 +173,7 @@ async def run_feeds_process(cfg: Config, *, extra_tick: Callable[[], Awaitable[N
         )
 
     try:
-        async with httpx.AsyncClient() as http_client:
+        async with _new_http_client() as http_client:
             scheduler = _build_scheduler(cfg, store, http_client, trace_store)
 
             async def _tick() -> None:

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from opengrid.feeds import _tick_with_heartbeat
+from opengrid.feeds import _new_http_client, _tick_with_heartbeat
 
 
 class _BoomError(Exception):
@@ -77,3 +77,13 @@ async def test_extra_tick_optional() -> None:
         return None
 
     await _tick_with_heartbeat(run_cycle, write_hb, None)  # must not raise with no extra_tick
+
+
+async def test_shared_http_client_follows_redirects() -> None:
+    """`request_with_retry` treats any status under 400 -- including a 3xx -- as success and returns it
+    as-is (it only branches on `NON_RETRYABLE_STATUS`/`RETRYABLE_STATUS`, both >= 400). Without
+    `follow_redirects=True` on the client, a redirect from ERCOT/EIA/NWS would hand a caller a
+    redirect's (empty/HTML) body instead of JSON -- an unhandled `JSONDecodeError`, not a clean
+    `FeedHttpError`. httpx defaults `follow_redirects` to `False`, so this must be set explicitly."""
+    async with _new_http_client() as client:
+        assert client.follow_redirects is True

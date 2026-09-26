@@ -261,6 +261,52 @@ def test_rotating_audit_sampler_zero_pct_never_due() -> None:
     assert sampler.due_hub_ids(["hub-00000"], now=0.0) == []
 
 
+def _ticks_per_minute(telemetry_interval_s: float) -> list[float]:
+    """Simulates one minute's worth of `run_fleet` tick timestamps at the given cadence."""
+    n = int(60.0 / telemetry_interval_s)
+    return [i * telemetry_interval_s for i in range(n)]
+
+
+def test_rotating_audit_sampler_does_not_repeat_a_hub_within_the_same_minute() -> None:
+    """Regression (post-deploy defect: raw captures at ~400/min against the ~20/min cap
+    at 2,000 hubs). `ogsim.fleet.runtime.run_fleet` calls `due_hub_ids` every telemetry
+    tick (2 s default => 30 ticks/min), not once a minute -- before the fix, the same
+    ~1% of hubs was re-emitted on every one of those 30 ticks because `due_hub_ids`'s
+    hash result only depends on `(hub_id, minute_bucket)`, not on whether it was already
+    reported this bucket."""
+    sampler = RotatingAuditSampler(sample_pct_per_min=1.0)
+    hub_ids = [f"hub-{i:05d}" for i in range(2000)]
+
+    emitted: list[str] = []
+    for now in _ticks_per_minute(telemetry_interval_s=2.0):
+        emitted.extend(sampler.due_hub_ids(hub_ids, now=now))
+
+    # Each due hub must appear exactly once across the whole minute, however many ticks
+    # touched that minute bucket.
+    assert len(emitted) == len(set(emitted))
+
+
+@pytest.mark.parametrize("hub_count", [2000, 10_000])
+def test_rotating_audit_capture_rate_per_minute_at_scale(hub_count: int) -> None:
+    """S6.4b's cap: at most ~1% of the fleet per minute, independent of telemetry
+    cadence. Ticks a full simulated minute at the real 2 s default cadence and asserts
+    the TOTAL captures emitted that minute (not per-tick) stays within generous slack of
+    1% of the fleet -- this is the exact rate the lead's defect report measured against
+    the live fleet (~400/min observed vs. ~20/min expected at 2,000 hubs)."""
+    sampler = RotatingAuditSampler(sample_pct_per_min=1.0)
+    hub_ids = [f"hub-{i:05d}" for i in range(hub_count)]
+
+    emitted: set[str] = set()
+    for now in _ticks_per_minute(telemetry_interval_s=2.0):
+        emitted.update(sampler.due_hub_ids(hub_ids, now=now))
+
+    expected = hub_count * 0.01
+    assert len(emitted) <= expected * 3  # generous slack, hash-based sample
+    # The old (buggy) behaviour would have emitted up to 30x this per minute (one full
+    # pass per tick) -- assert we are nowhere near that to guard against a regression.
+    assert len(emitted) < expected * 10
+
+
 def test_rotating_audit_sampler_rotates_over_minutes() -> None:
     sampler = RotatingAuditSampler(sample_pct_per_min=1.0)
     hub_ids = [f"hub-{i:05d}" for i in range(2_000)]

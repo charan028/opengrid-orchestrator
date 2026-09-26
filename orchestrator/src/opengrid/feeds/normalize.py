@@ -395,8 +395,18 @@ NWS_PRODUCT = "nws-hourly"
 
 
 def nws_forecast_to_feed_obs(payload: dict[str, object], *, recorded_at: datetime) -> list[FeedObs]:
-    """NWS hourly forecast (02b S2.4): the nearest (first) period's temperature, dewpoint, and sky
-    cover, as three series under one product."""
+    """NWS hourly forecast (02b S2.4): the nearest (first) period's temperature and dewpoint, plus sky
+    cover *when the response actually reports it*.
+
+    Live defect: `properties.periods[].skyCover` was required, but a live `/gridpoints/{office}/{x},{y}
+    /forecast/hourly` response (confirmed against grid EWX/156,91) never carries that field at all --
+    it only appears on the raw `/gridpoints/{office}/{x},{y}` time-series product, a different payload
+    shape entirely (a `{values: [{validTime, value}, ...]}` series, not a plain number on a period).
+    Requiring it made every real response fail as `FeedDataError`, so og-feeds' NWS feed never recorded
+    a single success. Temperature and dewpoint (which this endpoint does document) are still returned
+    every time; `sky_cover` is only added when the field is present, so a future response that does
+    include it is still captured (K7: degrade, don't trip -- one missing optional field must not drop
+    the whole observation)."""
     properties = payload.get("properties")
     if not isinstance(properties, dict) or not isinstance(properties.get("periods"), list):
         raise FeedDataError("NWS response missing properties.periods")
@@ -409,11 +419,10 @@ def nws_forecast_to_feed_obs(payload: dict[str, object], *, recorded_at: datetim
         ts = _parse_utc(str(period["startTime"]))
         temp_f = float(period["temperature"])
         dewpoint_c = float(period["dewpoint"]["value"])
-        sky_cover_pct = float(period["skyCover"])
     except (KeyError, TypeError, ValueError) as exc:
         raise FeedDataError(f"NWS period malformed: {period!r}") from exc
 
-    return [
+    obs = [
         FeedObs(
             source=SOURCE_NWS,
             product=NWS_PRODUCT,
@@ -434,14 +443,19 @@ def nws_forecast_to_feed_obs(payload: dict[str, object], *, recorded_at: datetim
             quality="GOOD",
             recorded_at=recorded_at,
         ),
-        FeedObs(
-            source=SOURCE_NWS,
-            product=NWS_PRODUCT,
-            series="sky_cover",
-            ts=ts,
-            value=sky_cover_pct,
-            unit="pct",
-            quality="GOOD",
-            recorded_at=recorded_at,
-        ),
     ]
+    sky_cover = period.get("skyCover")
+    if isinstance(sky_cover, int | float) and not isinstance(sky_cover, bool):
+        obs.append(
+            FeedObs(
+                source=SOURCE_NWS,
+                product=NWS_PRODUCT,
+                series="sky_cover",
+                ts=ts,
+                value=float(sky_cover),
+                unit="pct",
+                quality="GOOD",
+                recorded_at=recorded_at,
+            )
+        )
+    return obs

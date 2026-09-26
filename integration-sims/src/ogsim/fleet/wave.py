@@ -338,12 +338,27 @@ def synthesize_raw_capture(
 class RotatingAuditSampler:
     """S6.4b trigger policy item (iii): a low-rate rotating audit sample (default
     1%/minute, round-robin by `hub_id` hash) so every hub is periodically spot-checked
-    without sustaining full-fleet raw bandwidth. Deterministic and stateless across
-    ticks (hashes `(hub_id, minute_bucket)`), so it needs no persisted "who's turn is
-    it" state and is exactly reproducible for a given seed/clock."""
+    without sustaining full-fleet raw bandwidth. `due_hub_ids(hub_ids, now)` is a pure
+    function of `(hub_id, minute_bucket)` -- deterministic and reproducible for a given
+    seed/clock -- but the CALLER (`ogsim.fleet.runtime.run_fleet`'s tick loop) invokes it
+    every telemetry tick (`config.telemetry_interval_s`, 2 s by default), not once a
+    minute.
+
+    **Bug fixed (post-deploy defect report, live 2026-09-26+N): a hub's `frac < threshold`
+    result does not change while `minute_bucket` stays the same, so with no memory of
+    "already emitted this bucket" the SAME ~1% of hubs was re-flagged due on every one of
+    the ~30 ticks inside a 60 s window -- roughly 30x the intended rate (measured ~400/min
+    against a ~20/min target at 2,000 hubs, S6.4b's "1% of the fleet per minute" cap).**
+    This class now tracks the minute bucket it last emitted each hub for and skips a hub
+    already emitted in the CURRENT bucket, so the total emitted per rolling minute stays at
+    the intended ~1% of the fleet no matter how many times per minute the caller ticks.
+    The underlying hash-based selection is unchanged (still exactly reproducible for a
+    given seed/clock); only the "have I already told the caller about this one this
+    minute" bookkeeping is new state."""
 
     def __init__(self, sample_pct_per_min: float) -> None:
         self.sample_pct_per_min = sample_pct_per_min
+        self._last_emitted_bucket: dict[str, int] = {}
 
     def due_hub_ids(self, hub_ids: list[str], now: float) -> list[str]:
         if self.sample_pct_per_min <= 0.0:
@@ -352,10 +367,13 @@ class RotatingAuditSampler:
         minute_bucket = int(now // 60.0)
         due = []
         for hub_id in hub_ids:
+            if self._last_emitted_bucket.get(hub_id) == minute_bucket:
+                continue  # already sampled this hub in this minute bucket (fix above)
             digest = hashlib.sha256(f"{hub_id}:{minute_bucket}".encode()).digest()
             frac = int.from_bytes(digest[:4], "big") / 2**32
             if frac < threshold:
                 due.append(hub_id)
+                self._last_emitted_bucket[hub_id] = minute_bucket
         return due
 
 

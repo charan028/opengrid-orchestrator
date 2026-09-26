@@ -42,7 +42,7 @@ from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine.background import BackgroundIngest
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
 from opengrid.engine.gates import run_due_gates
-from opengrid.engine.latency import CycleLatencyWindow
+from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
 from opengrid.health.queries import raise_alert
 from opengrid.platform.config import Config
@@ -325,6 +325,7 @@ class _EngineState:
     # was VETOED on G-13 (live 2026-09-26).
     epoch: int = 1
     latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
+    phase_timer: PhaseTimer = field(default_factory=PhaseTimer)
     escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
     pq_flush: Cadence | None = None
     gate_task: asyncio.Task[int] | None = None
@@ -337,11 +338,12 @@ async def timed_tick(state: _EngineState) -> None:
     """One engine tick, timed into `state.latency` (A11) whether it succeeds or raises; publishes the
     window's p50/p99/max as an `RT_ALLOCATION` / `CYCLE_LATENCY` trace event when a report is due."""
     started = time.monotonic()
+    state.phase_timer = PhaseTimer()
     try:
         await _engine_tick(state)
     finally:
         finished = time.monotonic()
-        state.latency.record((finished - started) * 1000.0)
+        state.latency.record((finished - started) * 1000.0, state.phase_timer.phases)
         if state.latency.report_due(finished):
             summary = state.latency.summary()
             logger.info("engine cycle latency", extra=summary)
@@ -445,65 +447,78 @@ async def _engine_tick(state: _EngineState) -> None:
     state.cycle_seq += 1
     cycle_id = f"{int(now.timestamp())}-{state.cycle_seq}"
 
-    await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
-    await fleet.flush(now=now)
-    await _flush_pq_summaries(state)
+    phase = state.phase_timer.phase
+    with phase("heartbeat"):
+        await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
+    with phase("fleet_flush"):
+        await fleet.flush(now=now)
+    with phase("pq_flush"):
+        await _flush_pq_summaries(state)
 
-    triggers = state.gate_scheduler.due_triggers(
-        now,
-        pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
-        due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
-    )
-    # A failed gate is traced + alerted inside run_due_gates (K7/K13).
-    start_gates_in_background(
-        state,
-        triggers,
-        lambda batch: run_due_gates(
-            batch,
-            now=now,
-            run_intake=intake.run_intake_gate,
-            run_gate=selector.run_gate,
-            trace=state.trace,
-            raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
-            on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
-                contract_id, plan_id, now
+    with phase("gate_schedule"):
+        triggers = state.gate_scheduler.due_triggers(
+            now,
+            pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
+            due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
+        )
+        # A failed gate is traced + alerted inside run_due_gates (K7/K13).
+        start_gates_in_background(
+            state,
+            triggers,
+            lambda batch: run_due_gates(
+                batch,
+                now=now,
+                run_intake=intake.run_intake_gate,
+                run_gate=selector.run_gate,
+                trace=state.trace,
+                raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
+                on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
+                    contract_id, plan_id, now
+                ),
             ),
-        ),
-    )
+        )
 
     if state.lifecycle_backend is not None:
-        try:
-            await advance_obligations(
-                state.lifecycle_backend, contracts.transition_obligation, contracts.expire_unselected, now
-            )
-        except Exception:
-            logger.exception("obligation lifecycle step failed", extra={"cycle_id": cycle_id})
+        with phase("lifecycle"):
+            try:
+                await advance_obligations(
+                    state.lifecycle_backend, contracts.transition_obligation, contracts.expire_unselected, now
+                )
+            except Exception:
+                logger.exception("obligation lifecycle step failed", extra={"cycle_id": cycle_id})
 
-    grants = await allocator.run_cycle(
-        cycle_id,
-        fleet=state.fleet_gateway,
-        ledger=state.ledger_gateway,
-        scada_gateway=state.scada_gateway,
-        schedule_gateway=state.schedule_gateway,
-        now=now,
-    )
+    with phase("allocator"):
+        grants = await allocator.run_cycle(
+            cycle_id,
+            fleet=state.fleet_gateway,
+            ledger=state.ledger_gateway,
+            scada_gateway=state.scada_gateway,
+            schedule_gateway=state.schedule_gateway,
+            now=now,
+        )
 
     # K1 (user requirement: energy above reserve checked continuously, EVERY cycle, not just power
     # headroom): independent of the S1-S7 power-capability path above. Degrade, don't trip (K7) -- a
     # failure here must never block the allocator's own grant/guardian handoff this cycle.
     energy_results: list[EnergySufficiencyResult] = []
     if state.energy_sufficiency_gateway is not None:
+        with phase("energy_check"):
+            try:
+                energy_results = await state.energy_sufficiency_gateway.run(now)
+            except Exception:
+                logger.exception("energy-sufficiency check failed this cycle", extra={"cycle_id": cycle_id})
+    with phase("escalation"):
         try:
-            energy_results = await state.energy_sufficiency_gateway.run(now)
+            await escalate_sustained_shortfalls(state, energy_results, contracts.transition_obligation)
         except Exception:
-            logger.exception("energy-sufficiency check failed this cycle", extra={"cycle_id": cycle_id})
-    try:
-        await escalate_sustained_shortfalls(state, energy_results, contracts.transition_obligation)
-    except Exception:
-        logger.exception("shortfall escalation failed this cycle", extra={"cycle_id": cycle_id})
-    if not await guardian_is_available(
-        state.backend, now=now, miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold
-    ):
+            logger.exception("shortfall escalation failed this cycle", extra={"cycle_id": cycle_id})
+    with phase("guardian_check"):
+        available = await guardian_is_available(
+            state.backend,
+            now=now,
+            miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold,
+        )
+    if not available:
         logger.warning(
             "guardian unavailable this cycle -- holding, no new batches proposed",
             extra={"cycle_id": cycle_id},
@@ -513,21 +528,22 @@ async def _engine_tick(state: _EngineState) -> None:
     grants_by_bank: dict[str, list[Grant]] = {}
     for grant in grants:
         grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
-    for bank_id, bank_grants in grants_by_bank.items():
-        await propose_batch_to_guardian(
-            backend=state.backend,
-            trace=state.trace,
-            fleet_module=fleet,
-            cycle_id=cycle_id,
-            bank_id=bank_id,
-            grants=bank_grants,
-            ledger_version=max((g.ledger_version for g in bank_grants), default=0),
-            epoch=state.epoch,
-            seq=state.cycle_seq,
-            now=now,
-            lease_ttl_s=state.lease_ttl_s,
-            cycle_interval_s=state.cycle_interval_s,
-        )
+    with phase("propose"):
+        for bank_id, bank_grants in grants_by_bank.items():
+            await propose_batch_to_guardian(
+                backend=state.backend,
+                trace=state.trace,
+                fleet_module=fleet,
+                cycle_id=cycle_id,
+                bank_id=bank_id,
+                grants=bank_grants,
+                ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+                epoch=state.epoch,
+                seq=state.cycle_seq,
+                now=now,
+                lease_ttl_s=state.lease_ttl_s,
+                cycle_interval_s=state.cycle_interval_s,
+            )
 
 
 async def main(cfg: Config) -> None:
@@ -653,6 +669,7 @@ async def main(cfg: Config) -> None:
             lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
             epoch=await backend.next_epoch(),
             pq_flush=Cadence(float(cfg.get("pq_ingest.flush_interval_s", pq_mod.DEFAULT_FLUSH_INTERVAL_S))),
+            latency=CycleLatencyWindow(lag_probe=LoopLagProbe()),
         )
         logger.info("engine epoch", extra={"epoch": state.epoch})
 
@@ -664,12 +681,14 @@ async def main(cfg: Config) -> None:
             raw_task = asyncio.create_task(raw_worker.run())
             ingest_task = asyncio.create_task(_mqtt_ingest_loop(client, cfg, raw_worker))
             ingest_task.add_done_callback(_log_ingest_exit)
+            lag_probe = state.latency.lag_probe
+            lag_task = asyncio.create_task(lag_probe.run()) if lag_probe is not None else raw_task
             try:
                 await run_forever(
                     lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
-                for task in (ingest_task, raw_task):
+                for task in {ingest_task, raw_task, lag_task}:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
