@@ -54,6 +54,12 @@
     const existing = window.echarts.getInstanceByDom(node);
     const instance = existing || window.echarts.init(node);
     instance.setOption(option, true);
+    // A chart initialised from an inline <script> mid-parse (markets_series_fragment.html) measures its
+    // container before the surrounding grid has laid out its columns, so the canvas came out row-wide
+    // and drew over the neighbouring tiles (seen live, U1). Re-measure once layout has settled.
+    window.requestAnimationFrame(function () {
+      instance.resize();
+    });
     window.addEventListener("resize", function () {
       instance.resize();
     });
