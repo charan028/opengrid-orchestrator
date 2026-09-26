@@ -293,6 +293,12 @@ select:focus-visible,
   opacity: 1;
 }
 
+.og-nav-tools {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .og-nav-foot {
   display: flex;
   flex-direction: column;
