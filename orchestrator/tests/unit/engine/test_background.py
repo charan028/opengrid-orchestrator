@@ -172,6 +172,35 @@ async def test_heartbeat_is_written_only_while_the_tick_keeps_completing(monkeyp
     assert beats == ["engine", "engine"]
 
 
+async def test_bank_batches_are_proposed_concurrently_with_a_bound_and_a_failure_is_isolated() -> None:
+    """A11: at 07:00 ERCOT_AS spreads over up to 24 banks; proposing each bank's batch (K10 trace
+    pre-image, batch row, NOTIFY -- three synchronous commits) one bank after another would put 24 x 3
+    commits on the tick. Banks are independent trace streams, so their batches go out concurrently; the
+    per-bank order (pre-image first) is unchanged, and one bank's failure no longer skips the rest."""
+    from opengrid.engine import propose_all_banks
+
+    in_flight = 0
+    peak = 0
+    done: list[str] = []
+
+    async def _propose(bank_id: str, grants: list[str]) -> None:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        if bank_id == "bank-3":
+            raise RuntimeError("insert failed")
+        done.append(bank_id)
+
+    by_bank = {f"bank-{i}": [f"g{i}"] for i in range(10)}
+    failed = await propose_all_banks(by_bank, _propose, concurrency=4)
+
+    assert peak == 4
+    assert sorted(done) == sorted(b for b in by_bank if b != "bank-3")
+    assert failed == ["bank-3"]
+
+
 async def test_timed_tick_records_completion_even_when_the_tick_raises(monkeypatch) -> None:
     import opengrid.engine as engine
 

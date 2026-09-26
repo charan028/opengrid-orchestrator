@@ -435,6 +435,37 @@ async def _flush_pq_summaries(state: _EngineState) -> None:
         logger.exception("pq_ingest flush failed; retrying next interval")
 
 
+PROPOSE_CONCURRENCY = 4  # bank batches in flight at once; leaves pool connections for ingest/persistence
+
+
+async def propose_all_banks[G](
+    grants_by_bank: dict[str, list[G]],
+    propose: Callable[[str, list[G]], Coroutine[Any, Any, None]],
+    *,
+    concurrency: int,
+) -> list[str]:
+    """Propose every bank's batch, up to `concurrency` banks at once. Each bank is its own trace stream,
+    so batches are independent; within a bank `propose_batch_to_guardian` keeps K10's order (pre-image,
+    then batch row, then NOTIFY). A bank whose proposal fails is logged and returned; the others still go
+    out this cycle (K7)."""
+    gate = asyncio.Semaphore(concurrency)
+
+    async def _one(bank_id: str, bank_grants: list[G]) -> None:
+        async with gate:
+            await propose(bank_id, bank_grants)
+
+    bank_ids = list(grants_by_bank)
+    results = await asyncio.gather(*(_one(b, grants_by_bank[b]) for b in bank_ids), return_exceptions=True)
+    failed: list[str] = []
+    for bank_id, result in zip(bank_ids, results, strict=True):
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            logger.error("command batch proposal failed", exc_info=result, extra={"bank_id": bank_id})
+            failed.append(bank_id)
+    return failed
+
+
 async def beat_if_ticking(state: Any, *, monotonic_now: float | None = None) -> bool:
     """Write og-engine's heartbeat, run by `run_periodic` beside the dispatch tick -- but only while that
     tick keeps completing (within 3 cycles), so a hung tick still reads as "engine down" to health. The
@@ -554,22 +585,25 @@ async def _engine_tick(state: _EngineState) -> None:
     grants_by_bank: dict[str, list[Grant]] = {}
     for grant in grants:
         grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
+
+    async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
+        await propose_batch_to_guardian(
+            backend=state.backend,
+            trace=state.trace,
+            fleet_module=fleet,
+            cycle_id=cycle_id,
+            bank_id=bank_id,
+            grants=bank_grants,
+            ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+            epoch=state.epoch,
+            seq=state.cycle_seq,
+            now=now,
+            lease_ttl_s=state.lease_ttl_s,
+            cycle_interval_s=state.cycle_interval_s,
+        )
+
     with phase("propose"):
-        for bank_id, bank_grants in grants_by_bank.items():
-            await propose_batch_to_guardian(
-                backend=state.backend,
-                trace=state.trace,
-                fleet_module=fleet,
-                cycle_id=cycle_id,
-                bank_id=bank_id,
-                grants=bank_grants,
-                ledger_version=max((g.ledger_version for g in bank_grants), default=0),
-                epoch=state.epoch,
-                seq=state.cycle_seq,
-                now=now,
-                lease_ttl_s=state.lease_ttl_s,
-                cycle_interval_s=state.cycle_interval_s,
-            )
+        await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
 
 
 async def main(cfg: Config) -> None:
