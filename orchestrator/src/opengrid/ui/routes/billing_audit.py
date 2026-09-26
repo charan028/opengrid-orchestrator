@@ -58,10 +58,16 @@ def api_date(value: str | None, default: datetime) -> str:
 def export_period(from_: str | None, to: str | None, *, now: datetime | None = None) -> tuple[str, str]:
     """The CSV export's `from`/`to` as plain ISO dates, which `GET .../invoice-lines` requires (a blank
     field or a `datetime-local` value is a 422): blank defaults to the first of the current month and
-    today, in ERCOT local time; a datetime is cut to its date."""
+    TOMORROW, in ERCOT local time; a datetime is cut to its date.
+
+    Why tomorrow: the API keeps lines with `period_end <= to`, and a date compares as midnight, so
+    `to = today` would drop today's lines. Day-boundary edge: the default is the Chicago date, while the
+    API compares the stored period dates as given (settle writes them as dates), so between 19:00 and
+    24:00 CT (already the next UTC day) a line dated by UTC may fall one day later -- the +1 day margin
+    covers that too."""
     today = (now or datetime.now(UTC)).astimezone(_MARKET_TZ).date()
     start = (from_ or "").strip()[:10] or today.replace(day=1).isoformat()
-    end = (to or "").strip()[:10] or today.isoformat()
+    end = (to or "").strip()[:10] or (today + timedelta(days=1)).isoformat()
     return start, end
 
 

@@ -130,7 +130,10 @@ def test_as_award_product_comes_from_the_contract() -> None:
 # 6 -------------------------------------------------------------------------------------------------
 def test_export_period_defaults_and_cuts_datetimes() -> None:
     now = datetime(2026, 9, 27, 3, 0, tzinfo=UTC)  # 22:00 on Sep 26 in Chicago
-    assert export_period(None, None, now=now) == ("2026-09-01", "2026-09-26")
+    # `to` defaults to tomorrow (Chicago): the API keeps period_end <= to, so today's lines are included
+    assert export_period(None, None, now=now) == ("2026-09-01", "2026-09-27")
+    month_end = datetime(2026, 10, 1, 4, 0, tzinfo=UTC)  # 23:00 on Sep 30 in Chicago
+    assert export_period(None, None, now=month_end) == ("2026-09-01", "2026-10-01")
     assert export_period("2026-09-20T10:00", "2026-09-25T18:30", now=now) == ("2026-09-20", "2026-09-25")
 
 
