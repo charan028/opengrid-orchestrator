@@ -130,7 +130,9 @@ def test_es08_truncate_of_invoice_line_is_rejected(conn: psycopg.Connection) -> 
         pytest.raises(psycopg.errors.InsufficientPrivilege, match="TRUNCATE"),
         conn.transaction(),
     ):
-        cur.execute("TRUNCATE og.invoice_line")
+        # og.invoice_dispute references invoice_line, so a bare TRUNCATE fails on the FK before any
+        # trigger; name both tables so the statement reaches, and is refused by, the ES08 trigger.
+        cur.execute("TRUNCATE og.invoice_line, og.invoice_dispute")
 
 
 def test_es08_correcting_insert_with_supersedes_is_still_allowed(conn: psycopg.Connection) -> None:
