@@ -7,7 +7,7 @@ name = "opengrid"
 version = "0.1.0"
 description = "OpenGrid Orchestrator (MVP-S) -- the live app: engine, guardian, safestop, settle, feeds, api."
 requires-python = ">=3.13"
-readme = "../README.md"
+readme = "README.md"
 license = { text = "Proprietary" }
 
 dependencies = [

@@ -16,6 +16,8 @@ htmlcov/
 *.env
 !*.env.example
 secrets*
+!orchestrator/src/opengrid/feeds/secrets.py
+!dev/secrets.example
 *.key
 *.pem
 config.txt
