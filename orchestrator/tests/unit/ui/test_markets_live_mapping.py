@@ -72,3 +72,21 @@ def test_markets_page_asks_the_forecast_for_a_zone(monkeypatch: pytest.MonkeyPat
     assert TestClient(app).get("/og/markets").status_code == 200
     assert seen == {"series_key": markets._FORECAST_ZONE, "kind": "price"}
     assert seen["series_key"].startswith("LZ_")
+
+
+def test_control_room_seeds_the_ticker_from_the_price_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    import opengrid.ui.routes.control_room as control_room
+
+    async def fake_get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
+        if path == "/og/api/markets/series":
+            assert params == markets._SERIES_QUERY["price"]
+            return [
+                {"ts": "2026-09-26T03:00:00Z", "series": "LZ_NORTH", "value": 41.5, "unit": "usd_per_mwh"}
+            ]
+        return {"items": []} if path.endswith("/hubs") else {"as_of": "2026-09-26T03:00:00Z", "alerts": []}
+
+    monkeypatch.setattr(control_room, "get_json", fake_get_json)
+    app = FastAPI()
+    app.include_router(ui.build_router(), prefix="/og")
+    body = TestClient(app).get("/og/").text
+    assert "41.5" in body and 'data-since="2026-09-26T03:00:00Z"' in body

@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse
 
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.role import is_operator, role_of
+from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
 from opengrid.ui.templating import templates
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,16 @@ async def control_room(request: Request) -> HTMLResponse:
         logger.warning("control room: /og/api/fleet/hubs unavailable: %s", exc)
         degraded = degraded or str(exc)
 
+    # First paint of the market ticker from the same wholesale-price series the Markets screen plots
+    # (found live: the control-room stream carries no price series, so the ticker stayed empty forever).
+    # A missing series is logged and leaves the ticker empty; it never degrades the whole screen.
+    ticker_rows: list[dict[str, Any]] = []
+    try:
+        raw_ticker = await get_json("/og/api/markets/series", params=_SERIES_QUERY["price"])
+        ticker_rows = raw_ticker if isinstance(raw_ticker, list) else []
+    except ApiUnavailable as exc:
+        logger.warning("control room: market ticker series unavailable: %s", exc)
+
     return templates.TemplateResponse(
         request,
         "control_room.html",
@@ -51,6 +62,7 @@ async def control_room(request: Request) -> HTMLResponse:
             "is_operator": is_operator(request),
             "health": health,
             "hubs": hubs,
+            "ticker": series_chart_view(ticker_rows, series_key="price"),
             "degraded": degraded,
         },
     )

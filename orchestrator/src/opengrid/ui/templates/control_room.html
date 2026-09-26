@@ -41,7 +41,7 @@
   <div class="og-panel" aria-label="ERCOT price, load, wind, solar">
     <h2>Market ticker</h2>
     <div id="market-ticker-chart" style="height: 220px;"></div>
-    <div class="stale-badge" data-since="{{ health.as_of|default('') }}" data-stale-after="600">age: unknown</div>
+    <div class="stale-badge" data-since="{{ ticker.latest_ts or '' }}" data-stale-after="1800">age: unknown</div>
   </div>
   <div class="og-panel" aria-label="Open alerts">
     <h2>Open alerts</h2>
@@ -72,13 +72,7 @@
       L.circleMarker([h.lat, h.lon], { radius: 4, color: color }).addTo(map).bindPopup(h.hub_id);
     });
 
-    og.chart("#market-ticker-chart", {
-      grid: { left: 40, right: 10, top: 10, bottom: 20 },
-      xAxis: { type: "category", data: [] },
-      yAxis: { type: "value", name: "usd/mwh" },
-      series: [{ type: "line", data: [], showSymbol: false, lineStyle: { width: 2 } }],
-    });
-
+    og.chart("#market-ticker-chart", {{ ticker.chart_option | tojson }});
     function setKpiValue(tileId, value) {
       var tile = document.getElementById(tileId);
       if (!tile) { return; }
