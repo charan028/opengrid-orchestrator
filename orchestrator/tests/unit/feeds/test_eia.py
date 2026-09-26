@@ -49,3 +49,21 @@ async def test_hourly_demand_propagates_http_error(monkeypatch: pytest.MonkeyPat
     client = _client(httpx.MockTransport(handler))
     with pytest.raises(FeedHttpError):
         await client.hourly_demand(recorded_at=RECORDED_AT)
+
+
+async def test_hourly_demand_error_never_leaks_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EIA is the one feed source whose secret travels in the request URL as a query parameter (ERCOT
+    sends its token/subscription key as headers instead) -- a failure must never surface the raw key in
+    `scheduler`'s `logger.warning("EIA fallback poll failed", extra={"error": str(exc)})` (BUILD.md S6
+    "never print, log or commit secret values"). `hourly_demand` wraps the key in a `Secret` and masks
+    it out of any `FeedHttpError` it re-raises, mirroring `ErcotClient`'s pattern, as a backstop against
+    that message ever coming to include the query string it's built from."""
+    monkeypatch.setenv("TEST_EIA_KEY", "super-secret-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)  # non-retryable: raises immediately, no real backoff sleep in the test
+
+    client = _client(httpx.MockTransport(handler))
+    with pytest.raises(FeedHttpError) as exc_info:
+        await client.hourly_demand(recorded_at=RECORDED_AT)
+    assert "super-secret-key" not in str(exc_info.value)

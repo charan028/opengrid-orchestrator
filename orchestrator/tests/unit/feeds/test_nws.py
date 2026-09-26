@@ -4,6 +4,7 @@ If-Modified-Since, and the 304 Not Modified path."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 import httpx
 import pytest
@@ -102,3 +103,52 @@ async def test_hourly_forecast_error_status_raises() -> None:
     client = _client(httpx.MockTransport(handler))
     with pytest.raises(FeedHttpError):
         await client.hourly_forecast(GridPoint(office="EWX", x=156, y=91), recorded_at=RECORDED_AT)
+
+
+async def test_hourly_forecast_missing_updated_falls_back_to_generated_at() -> None:
+    """Live defect: a real api.weather.gov response was observed without `properties.updated`, which
+    raised `KeyError: 'updated'` on every poll -- the exception then skipped `next_poll_at`'s update in
+    the scheduler, so og-feeds retried every 5s (its tick interval) instead of waiting the full hour,
+    hammering NWS. `generatedAt` (also NWS-documented) must be used instead when `updated` is absent."""
+    payload = {
+        "properties": {
+            "generatedAt": "2026-09-26T17:30:00+00:00",
+            "periods": FORECAST_PAYLOAD["properties"]["periods"],
+        }
+    }
+    seen_headers: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(dict(request.headers))
+        return httpx.Response(200, json=payload)
+
+    client = _client(httpx.MockTransport(handler))
+    grid_point = GridPoint(office="EWX", x=156, y=91)
+
+    rows = await client.hourly_forecast(grid_point, recorded_at=RECORDED_AT)
+    assert rows is not None
+
+    await client.hourly_forecast(grid_point, recorded_at=RECORDED_AT)
+    assert parsedate_to_datetime(seen_headers[1]["if-modified-since"]) == datetime(
+        2026, 9, 26, 17, 30, tzinfo=UTC
+    )
+
+
+async def test_hourly_forecast_missing_updated_and_generated_at_falls_back_to_recorded_at() -> None:
+    """Neither documented timestamp present: fall back to the caller's fetch time rather than crash --
+    `If-Modified-Since` then degrades to "at least as often as we poll", never to a dropped cycle."""
+    payload = {"properties": {"periods": FORECAST_PAYLOAD["properties"]["periods"]}}
+    seen_headers: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(dict(request.headers))
+        return httpx.Response(200, json=payload)
+
+    client = _client(httpx.MockTransport(handler))
+    grid_point = GridPoint(office="EWX", x=156, y=91)
+
+    rows = await client.hourly_forecast(grid_point, recorded_at=RECORDED_AT)
+    assert rows is not None
+
+    await client.hourly_forecast(grid_point, recorded_at=RECORDED_AT)
+    assert parsedate_to_datetime(seen_headers[1]["if-modified-since"]) == RECORDED_AT

@@ -69,6 +69,22 @@ class NwsClient:
             raise FeedHttpError(response.status_code, f"NWS hourly forecast -> {response.status_code}")
 
         payload = response.json()
-        updated_str = payload["properties"]["updated"]
-        self._last_updated = datetime.fromisoformat(updated_str)
+        self._last_updated = self._response_last_updated(payload, fallback=recorded_at)
         return nws_forecast_to_feed_obs(payload, recorded_at=recorded_at)
+
+    @staticmethod
+    def _response_last_updated(payload: dict[str, object], *, fallback: datetime) -> datetime:
+        """`properties.updated` is NWS's own documented field, but live responses have been observed
+        without it -- this crashed every poll with `KeyError: 'updated'` (og-feeds live defect: the
+        exception propagated out of the scheduler's tick before `next_poll_at` advanced, so the next
+        tick retried immediately instead of waiting the full hour, hammering api.weather.gov every 5s).
+        Fall back to `properties.generatedAt` (also NWS-documented, the forecast generation time), then
+        to the caller's fetch time -- `If-Modified-Since` degrades to "at least as often as we poll" but
+        never crashes the cycle."""
+        properties = payload.get("properties")
+        if isinstance(properties, dict):
+            for key in ("updated", "generatedAt"):
+                value = properties.get(key)
+                if isinstance(value, str):
+                    return datetime.fromisoformat(value)
+        return fallback

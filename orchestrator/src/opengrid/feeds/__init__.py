@@ -15,6 +15,7 @@ ruling)."""
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import httpx
@@ -109,13 +110,39 @@ def _build_scheduler(
     )
 
 
-async def run_feeds_process(cfg: Config) -> None:
+async def _tick_with_heartbeat(
+    run_cycle: Callable[[], Awaitable[None]],
+    write_hb: Callable[[], Awaitable[None]],
+    extra_tick: Callable[[], Awaitable[None]] | None,
+) -> None:
+    """One `og-feeds` tick: run the scheduler cycle, then *always* write the heartbeat -- `finally`,
+    not sequential, so a `run_cycle()` exception can't also skip it (live defect: og-feeds' heartbeat
+    was never written because every cycle's NWS poll raised `KeyError` before reaching the write, and
+    `run_forever` logs-and-continues on a bad tick rather than stopping the process, so this silently
+    starved `health`'s heartbeat check on every single cycle, not just the failing one). `extra_tick`
+    (forecast's recompute cadence, folded in by `feeds/main.py`) only runs after a clean cycle."""
+    try:
+        await run_cycle()
+    finally:
+        await write_hb()
+    if extra_tick is not None:
+        await extra_tick()
+
+
+async def run_feeds_process(cfg: Config, *, extra_tick: Callable[[], Awaitable[None]] | None = None) -> None:
     """Entry point for `python -m opengrid.feeds.main`: scheduler loop polling ERCOT/EIA/NWS per
     `[feeds.*]` config, writing `feed_obs`/`feed_status`, and tracing feed-quality changes/key
-    rotations (`event_class="FEED_CHANGE"`). Driving `opengrid.forecast`'s recompute cadence (02b
-    S1.2: "forecast runs inside feeds' cycle") is `feeds/main.py`'s job, not this function's -- this
-    stays scoped to feeds' own sources so it has no dependency on the separately-owned `forecast`
-    package (BUILD.md S1 no-duplication ruling)."""
+    rotations (`event_class="FEED_CHANGE"`).
+
+    `extra_tick`, when given, runs after each cycle's heartbeat write, on the same `run_forever` loop
+    -- this is how `feeds/main.py` folds `opengrid.forecast`'s recompute cadence (02b S1.2: "forecast
+    runs inside feeds' cycle") into feeds' own tick instead of running a second, independent
+    `run_forever` loop in this process. Two such loops each call `asyncio.loop.add_signal_handler` for
+    SIGTERM/SIGINT, and asyncio allows only one handler per signal -- the second registration silently
+    replaced the first's, so one of the two loops never saw the shutdown request at all (live defect:
+    og-feeds ignored SIGTERM and was SIGKILLed by systemd after 90s). A single `run_forever` loop means
+    a single shutdown path. This function still has no import-time dependency on the separately-owned
+    `forecast` package (BUILD.md S1 no-duplication ruling); `extra_tick` is an opaque callable."""
     global _store
     pool = await make_pool(cfg)
     staleness_cfg = cfg.get("feeds.staleness", {})
@@ -140,8 +167,9 @@ async def run_feeds_process(cfg: Config) -> None:
             scheduler = _build_scheduler(cfg, store, http_client, trace_store)
 
             async def _tick() -> None:
-                await scheduler.run_cycle()
-                await write_heartbeat(pool, PROCESS_NAME)
+                await _tick_with_heartbeat(
+                    scheduler.run_cycle, lambda: write_heartbeat(pool, PROCESS_NAME), extra_tick
+                )
 
             await run_forever(_tick, interval_s=SCHEDULER_TICK_INTERVAL_S, process_name=PROCESS_NAME)
     finally:
