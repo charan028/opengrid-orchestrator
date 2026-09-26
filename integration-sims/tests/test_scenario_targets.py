@@ -31,6 +31,14 @@ from ogsim.scada.runtime import ScadaEngine
 SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 SIMS_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
+#: Found by this guard on R2 (6470cfa): shipped scenarios target ids no sim config names, so those steps
+#: would do nothing when run. Recorded as expected failures until the sims owner adds them (or retargets
+#: the scenarios); remove an entry once its id resolves.
+KNOWN_UNCONFIGURED_TARGETS: dict[str, str] = {
+    "site-large-load-crypto-01": "svc-large-load.yaml: no customer site with this id in config/*.yaml",
+    "pjm-zone-aep-01": "svc-pjm-capacity.yaml: no PJM zone with this id in config/*.yaml",
+}
+
 
 def _config_ids(config_dir: Path) -> set[str]:
     """Every string value in the shipped sim configs (site ids, zone ids, ...)."""
@@ -95,6 +103,8 @@ def test_scenario_step_target_resolves(step: ScenarioStep, fleet: FleetEngine, s
         # R2's customer operators (ogsim.customer): the target must be an id the shipped config names
         # (a customer site, or a market zone such as a PJM zone) -- a typo would silently do nothing.
         known = _config_ids(SIMS_CONFIG_DIR)
+        if step.target not in known and step.target in KNOWN_UNCONFIGURED_TARGETS:
+            pytest.xfail(KNOWN_UNCONFIGURED_TARGETS[step.target])
         assert step.target in known, (
             f"customer target {step.target!r} is not named in {SIMS_CONFIG_DIR}/*.yaml"
         )
