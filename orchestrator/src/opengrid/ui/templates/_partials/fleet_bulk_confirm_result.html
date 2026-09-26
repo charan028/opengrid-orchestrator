@@ -1,0 +1,41 @@
+{# fleet_bulk_confirm_result.html -- bulk manual-command confirm HTMX fragment (CR #19 item 2), for the
+   API's `POST /og/api/fleet/commands/bulk/{id}/confirm`:
+     result.status == "AWAITING_SECOND_CONFIRM": the API recorded the first confirm of a flagged selection;
+       offer the second confirm (a separate, explicit click) naming the API's reasons (api_reasons).
+     result.status == "EXECUTED": per-hub guardian outcomes (outcome_counts, results[]); 200 even when
+       some hubs were vetoed.
+     status_code: 503 timeout, 410/404 expired or unknown; message: failure detail. #}
+<div id="bulk-confirm-result" role="{{ 'status' if (result and result.status in ('AWAITING_SECOND_CONFIRM', 'EXECUTED')) else 'alert' }}">
+  {% if result and result.status == "AWAITING_SECOND_CONFIRM" %}
+  <p>{% with status='caution', label='SECOND CONFIRM' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    First confirmation recorded ({{ result.confirmations_received|default(1) }} of {{ result.confirmations_required|default(2) }}).
+    The API needs a second, separate confirmation because {{ api_reasons|join('; ') if api_reasons else 'it flagged this selection as high risk' }}.</p>
+  <button class="btn btn-danger" type="button" id="bulk-second-confirm"
+          hx-post="{{ second_confirm_url }}" hx-target="#bulk-confirm-result" hx-swap="outerHTML">
+    Confirm again and send to the selection
+  </button>
+  {% elif result and result.status == "EXECUTED" %}
+  {% set counts = result.outcome_counts or {} %}
+  {% set passed = counts.get('PASS', 0) %}
+  {% set all_passed = passed == result.hub_count %}
+  <p>{% with status=('ok' if all_passed else 'caution'), label=('PASS' if all_passed else 'PARTIAL') %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ passed }} of {{ result.hub_count }} hub{{ '' if result.hub_count == 1 else 's' }} passed the guardian{% for code, n in counts.items() if code != 'PASS' %}; {{ n }} {{ code }}{% endfor %}.
+    Trace {{ result.trace_id|default('-') }}.</p>
+  {% set failed = (result.results or [])|rejectattr('outcome', 'equalto', 'PASS')|list %}
+  {% if failed %}
+  <ul class="og-bulk-failures">
+    {% for r in failed[:20] %}<li>{{ r.hub_id }}: {{ r.outcome }}{% if r.vetoed_rule_ids %} ({{ r.vetoed_rule_ids|join(', ') }}){% endif %}</li>{% endfor %}
+    {% if failed|length > 20 %}<li>and {{ failed|length - 20 }} more</li>{% endif %}
+  </ul>
+  {% endif %}
+  {% elif status_code == 503 %}
+  <p>{% with status='warning', label='TIMEOUT' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    No guardian verdict within the poll window. {{ message }}</p>
+  {% elif status_code in (410, 404) %}
+  <p>{% with status='caution', label='EXPIRED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The proposal expired or is unknown -- select the hubs and propose again. {{ message }}</p>
+  {% else %}
+  <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message|default('the command could not be confirmed') }}</p>
+  {% endif %}
+</div>

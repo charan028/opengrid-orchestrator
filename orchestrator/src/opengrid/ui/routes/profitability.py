@@ -11,7 +11,7 @@ JSON fixtures, no HTTP or DB involved.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
@@ -19,6 +19,16 @@ from fastapi.responses import HTMLResponse
 
 from opengrid.ui.api_client import ApiUnavailable, get_json
 from opengrid.ui.role import is_operator, role_of
+from opengrid.ui.settlement import (
+    LP_VALUE_PATH,
+    PER_KW_PATH,
+    SETTLEMENT_VIEW_PATH,
+    filter_options,
+    last_updated,
+    lp_value_view,
+    per_kw_view,
+    pnl_view,
+)
 from opengrid.ui.templating import templates
 
 logger = logging.getLogger(__name__)
@@ -110,32 +120,70 @@ async def profitability_page(
     request: Request,
     service: str | None = Query(default=None),
     day: str | None = Query(default=None),
+    customer: str | None = Query(default=None),
+    contract: str | None = Query(default=None),
 ) -> HTMLResponse:
-    """Profitability screen (`/og/profitability`, viewer role read-only, 30 s poll per 02b S8)."""
+    """Profitability screen (`/og/profitability`, viewer role read-only, 30 s poll per 02b S8). Rows,
+    labels and supersession come from the shared settlement view (`opengrid.ui.settlement`), the same
+    payload Billing & audit reads, so both screens name a contract identically."""
     now = datetime.now(tz=UTC)
-    params = {k: v for k, v in {"service": service, "day": day}.items() if v}
+    params: dict[str, str] = {}
+    if day:
+        try:
+            picked = date.fromisoformat(day)
+        except ValueError:
+            day = None
+        else:  # a market-local day spans two UTC dates; the rows are cut to the local day below
+            params = {
+                "from": (picked - timedelta(days=1)).isoformat(),
+                "to": (picked + timedelta(days=1)).isoformat(),
+            }
     degraded: str | None = None
-    rows: list[dict[str, Any]] = []
-
+    view: dict[str, Any] = {}
     try:
-        summary = await get_json("/og/api/profitability/summary", params=params)
-        rows = summary.get("rows", summary) if isinstance(summary, dict) else summary or []
+        raw = await get_json(SETTLEMENT_VIEW_PATH, params=params)
+        view = raw if isinstance(raw, dict) else {}
     except ApiUnavailable as exc:
-        logger.warning("profitability: /og/api/profitability/summary unavailable: %s", exc)
+        logger.warning("profitability: %s unavailable: %s", SETTLEMENT_VIEW_PATH, exc)
         degraded = str(exc)
 
-    rows = rows if isinstance(rows, list) else []
+    per_kw: dict[str, Any] | None = None
+    per_kw_note: str | None = None
+    try:
+        raw_kw = await get_json(PER_KW_PATH)
+        per_kw = raw_kw if isinstance(raw_kw, dict) else None
+    except ApiUnavailable as exc:
+        per_kw_note = {
+            403: "Operator role required for the $/kW view.",
+            404: "The $/kW view is not available on this deployment yet.",
+        }.get(exc.status_code or 0, f"The $/kW view is unavailable: {exc}")
+
+    lp_payload: Any = None
+    lp_note: str | None = None
+    try:
+        lp_payload = await get_json(LP_VALUE_PATH)
+    except ApiUnavailable as exc:
+        lp_note = {
+            403: "Operator role required for the LP value-added view.",
+            404: "The LP value-added view is not available on this deployment yet.",
+        }.get(exc.status_code or 0, f"The LP value-added view is unavailable: {exc}")
+
+    filters = {"service": service, "day": day, "customer": customer, "contract": contract}
     return templates.TemplateResponse(
         request,
         "profitability.html",
         {
             "role": role_of(request),
             "is_operator": is_operator(request),
-            "service": service,
-            "day": day,
-            "table": profitability_table_view(rows),
-            "lp_vs_baseline": lp_vs_baseline_view(rows),
-            "forgone_upside": forgone_upside_view(rows),
+            **filters,
+            "filters": filters,
+            "options": filter_options(view),
+            "pnl": pnl_view(view, customer=customer, contract=contract, service=service, day=day),
+            "per_kw": per_kw_view(per_kw, view),
+            "per_kw_note": per_kw_note,
+            "lp_value": lp_value_view(lp_payload),
+            "lp_note": lp_note,
+            "last_settled_at": last_updated(view, "pnl"),
             "generated_at": now.isoformat(),
             "degraded": degraded,
         },

@@ -30,7 +30,11 @@ router = APIRouter(prefix="/fleet")
 
 _SAFESTOP_PROPOSE_PATH = "/og/api/safestop"
 _COMMAND_PROPOSE_PATH = "/og/api/fleet/command"
+_BULK_COMMAND_PATH = "/og/api/fleet/commands/bulk"
+_MAP_PATH = "/og/api/fleet/map"
 _HUB_STALE_AFTER_S = 10.0
+#: The API holds the approval open up to 10 s waiting for the guardian (api `routers.safestop`).
+_RELEASE_APPROVE_TIMEOUT_S = 15.0
 _SAFESTOP_SCOPES = ("fleet", "zone", "bank")
 
 
@@ -60,6 +64,122 @@ def _age_s(ts: str | None) -> float | None:
     except ValueError:
         return None
     return (datetime.now(UTC) - to_utc(parsed)).total_seconds()
+
+
+def map_hub(hub: dict[str, Any]) -> dict[str, Any]:
+    """The compact hub shape `static/og-map.js` draws. Mirrors `GET /og/api/fleet/map`'s documented
+    fields (CR #19) so the map needs no change when that endpoint lands: until it does, `lat`/`lon` are
+    absent and the module scatters the hub inside its real load zone, and `activity` is derived from
+    health and the sign of `p_kw`."""
+    return {
+        "hub_id": hub.get("hub_id"),
+        "bank_id": hub.get("bank_id"),
+        "zone": hub.get("zone"),
+        "health": hub.get("health"),
+        "activity": hub.get("activity"),
+        "kw": hub.get("kw", hub.get("p_kw")),
+        "soc_kwh": hub.get("soc_kwh"),
+        "soc_pct": hub.get("soc_pct"),
+        "lat": hub.get("lat"),
+        "lon": hub.get("lon"),
+        "serving_obligations": hub.get("serving_obligations") or [],
+        "can_serve_services": hub.get("can_serve_services") or [],
+    }
+
+
+def _serving_label(obligation: dict[str, Any]) -> str:
+    """ "DATA_CENTER c6" -- the service and who it is for, the way CR #19 words the warning."""
+    service = str(obligation.get("service_type") or "an obligation")
+    customer = obligation.get("customer_id") or obligation.get("obligation_id")
+    return f"{service} {str(customer)[:8]}" if customer else service
+
+
+def bulk_risk_reasons(hubs: list[dict[str, Any]], hub_ids: list[str]) -> list[str]:
+    """Why a bulk manual command over `hub_ids` needs the second confirmation (CR #19 item 2): any
+    selected hub that is serving a customer, or that is in a critical/failure state. Returns one plain
+    sentence per group, e.g. `3 hubs serving DATA_CENTER c6`; an empty list means the ordinary two-step
+    confirm is enough. The API's own `requires_double_confirm` is honoured on top of this -- this is the
+    console's independent read of the same rule, so the operator sees the reason even before proposing."""
+    selected = set(hub_ids)
+    chosen = [h for h in hubs if h.get("hub_id") in selected]
+    serving: dict[str, int] = {}
+    faulted = 0
+    delivering = 0
+    for hub in chosen:
+        obligations = hub.get("serving_obligations") or []
+        if obligations:
+            for obligation in obligations:
+                label = _serving_label(obligation)
+                serving[label] = serving.get(label, 0) + 1
+        elif float(hub.get("p_kw") or hub.get("kw") or 0) > 0.1:
+            delivering += 1
+        if str(hub.get("health") or "").lower() in ("fault", "offline"):
+            faulted += 1
+    reasons = [
+        f"{count} hub{'' if count == 1 else 's'} serving {label}"
+        for label, count in sorted(serving.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    if delivering:
+        reasons.append(f"{delivering} hub{'' if delivering == 1 else 's'} currently delivering power")
+    if faulted:
+        reasons.append(f"{faulted} hub{'' if faulted == 1 else 's'} in a fault or offline state")
+    return reasons
+
+
+def map_hubs_from(payload: Any) -> list[dict[str, Any]]:
+    """Hubs of a `GET /og/api/fleet/map` body (`{"hubs": [...], "activity_counts", ...}`), in the compact
+    shape the map draws; `[]` for anything else (the caller then draws from the hub list)."""
+    items = payload.get("hubs", payload.get("items")) if isinstance(payload, dict) else payload
+    return [map_hub(h) for h in items if isinstance(h, dict)] if isinstance(items, list) else []
+
+
+#: `POST /og/api/fleet/commands/bulk` double-confirm reason codes (api `routers.fleet_bulk`), in words.
+_BULK_REASON_TEXT: dict[str, str] = {
+    "SERVES_COMMITTED_OBLIGATION": "serving a committed obligation",
+    "HUB_FAULT": "in a fault state",
+    "CRITICAL_ALERT": "under a critical alert",
+    "AT_OR_BELOW_RESERVE": "at or below its backup reserve",
+}
+
+
+def api_double_confirm_reasons(body: dict[str, Any] | None) -> list[str]:
+    """The API's own double-confirm reasons (`double_confirm_reasons`, per hub) as plain sentences, e.g.
+    `1 hub serving a committed obligation (ERCOT_ENERGY)`. These are authoritative; the console's
+    `bulk_risk_reasons` is only OR-ed on top, never used in their place."""
+    counts: dict[str, int] = {}
+    services: dict[str, set[str]] = {}
+    for entry in (body or {}).get("double_confirm_reasons") or []:
+        for code in entry.get("reasons") or []:
+            counts[code] = counts.get(code, 0) + 1
+            if code == "SERVES_COMMITTED_OBLIGATION":
+                for obligation in entry.get("obligations") or []:
+                    if obligation.get("service_type"):
+                        services.setdefault(code, set()).add(str(obligation["service_type"]))
+    out = []
+    for code, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        detail = f" ({', '.join(sorted(services[code]))})" if code in services else ""
+        out.append(f"{n} hub{'' if n == 1 else 's'} {_BULK_REASON_TEXT.get(code, code)}{detail}")
+    return out
+
+
+def api_error_result(exc: ApiUnavailable) -> dict[str, Any] | None:
+    """The result carried by an API error body. FastAPI wraps `HTTPException(409, detail=result)` as
+    `{"detail": result}`, so a guardian veto arrives nested; unwrap it so the fragment renders the veto
+    (VETOED / PARTLY_VETOED and its rule ids) instead of a generic failure."""
+    detail = exc.detail
+    if isinstance(detail, dict) and isinstance(detail.get("detail"), dict):
+        return dict(detail["detail"])
+    return detail if isinstance(detail, dict) and ("outcome" in detail or "status" in detail) else None
+
+
+def parse_hub_ids(raw: str | None) -> list[str]:
+    """The selection posted by the Fleet map/table: comma-separated hub ids, de-duplicated, order kept."""
+    seen: dict[str, None] = {}
+    for part in (raw or "").split(","):
+        hub_id = part.strip()
+        if hub_id:
+            seen.setdefault(hub_id, None)
+    return list(seen)
 
 
 def _to_table_row(hub: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +245,18 @@ async def fleet_screen(
         logger.warning("fleet screen: /og/api/fleet/hubs unavailable: %s", exc)
         degraded = str(exc)
 
+    # The richer map payload (coordinates, activity, obligations) when it exists; the hub list otherwise.
+    # Its absence is not a degraded screen -- the map draws from the hub list either way (CR #19).
+    map_hubs = [map_hub(h) for h in hubs]
+    try:
+        from_map = map_hubs_from(await get_json(_MAP_PATH, params=params))
+        if from_map:
+            map_hubs = from_map
+    except ApiUnavailable as exc:
+        logger.info(
+            "fleet screen: %s not serving yet (%s); drawing the map from the hub list", _MAP_PATH, exc
+        )
+
     return templates.TemplateResponse(
         request,
         "fleet.html",
@@ -132,6 +264,7 @@ async def fleet_screen(
             "role": role_of(request),
             "is_operator": is_operator(request),
             "table_rows": [_to_table_row(h) for h in hubs],
+            "map_hubs": map_hubs,
             "filters": {"zone": zone, "bank": bank, "health": health},
             "safestop_prefill": safestop_prefill(safestop_scope, safestop_scope_id),
             "degraded": degraded,
@@ -268,8 +401,13 @@ async def approve_release(request: Request, proposal_id: str) -> HTMLResponse:
     assumes the stop was released."""
     _require_operator(request)
     try:
+        # 200 released / 202 pending (both parsed; the fragment renders RELEASED or PENDING). The API polls
+        # up to 10 s for the guardian's signed release, so this call waits longer than the default.
         result = await post_json(
-            f"{_SAFESTOP_PROPOSE_PATH}/release/{proposal_id}/approve", {}, remote_user=remote_user(request)
+            f"{_SAFESTOP_PROPOSE_PATH}/release/{proposal_id}/approve",
+            {},
+            remote_user=remote_user(request),
+            timeout_s=_RELEASE_APPROVE_TIMEOUT_S,
         )
     except ApiUnavailable as exc:
         logger.warning("safestop release approve failed: %s", exc)
@@ -322,6 +460,91 @@ async def propose_command(
     )
 
 
+@router.post("/command/bulk/propose", response_class=HTMLResponse)
+async def propose_bulk_command(
+    request: Request,
+    hub_ids: str = Form(default=""),
+    p_kw_setpoint: float = Form(...),
+    reason: str = Form(...),
+) -> HTMLResponse:
+    """Step 1 of 2 for a selection (CR #19 item 2): relays the selected hubs, setpoint and reason to
+    `POST /og/api/fleet/commands/bulk` and renders the real proposal as an already-open confirm dialog.
+    When any selected hub is serving a customer or is in a fault/offline state -- this module's own
+    `bulk_risk_reasons`, or the API's `requires_double_confirm` -- the dialog demands a second,
+    explicit acknowledgement naming the reason before its confirm button will act. The guardian still
+    evaluates and signs every command at confirm time; nothing here bypasses it."""
+    _require_operator(request)
+    selected = parse_hub_ids(hub_ids)
+    if not selected:
+        return templates.TemplateResponse(
+            request,
+            "_partials/propose_error.html",
+            {"message": "select at least one hub on the map or in the table first"},
+        )
+    hubs: list[dict[str, Any]] = []
+    try:
+        raw = await get_json("/og/api/fleet/hubs")
+        hubs = raw.get("items", []) if isinstance(raw, dict) else []
+    except ApiUnavailable as exc:
+        logger.info("bulk propose: hub list unavailable for the risk check (%s)", exc)
+    reasons = bulk_risk_reasons(hubs, selected)
+    payload = {"hub_ids": selected, "p_kw_setpoint": p_kw_setpoint, "reason": reason}
+    try:
+        proposal = await post_json(_BULK_COMMAND_PATH, payload, remote_user=remote_user(request))
+    except ApiUnavailable as exc:
+        logger.warning("fleet bulk command propose failed: %s", exc)
+        return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": str(exc)})
+    api_reasons = api_double_confirm_reasons(proposal)
+    double = bool(proposal.get("requires_double_confirm")) or bool(reasons)
+    context = _confirm_dialog_context(
+        dialog_id=f"bulk-confirm-{proposal['proposal_id']}",
+        title=f"Confirm command for {len(selected)} hub" + ("" if len(selected) == 1 else "s"),
+        proposal=proposal,
+        confirm_url=f"{BASE_PATH}/fleet/command/bulk/{proposal['proposal_id']}/confirm",
+        confirm_label="Send to selection",
+        variant="danger",
+        target="#bulk-confirm-result",
+    )
+    if double:
+        combined = api_reasons + [r for r in reasons if r not in api_reasons]
+        context["acknowledge"] = "I understand this overrides what these hubs are doing now: " + "; ".join(
+            combined or ["the API flagged this selection as high risk"]
+        )
+    return templates.TemplateResponse(request, "_partials/confirm_dialog.html", context)
+
+
+@router.post("/command/bulk/{proposal_id}/confirm", response_class=HTMLResponse)
+async def confirm_bulk_command(request: Request, proposal_id: str) -> HTMLResponse:
+    """Step 2 (and 3) for a selection: relays the confirmation. When the API flagged the selection it
+    records the first confirm and answers `AWAITING_SECOND_CONFIRM`; the fragment then offers a second,
+    separate confirm naming the API's reasons -- never sent automatically. The executing confirm returns
+    per-hub guardian outcomes (`status=EXECUTED`, `outcome_counts`, `results`)."""
+    _require_operator(request)
+    try:
+        result = await post_json(
+            f"{_BULK_COMMAND_PATH}/{proposal_id}/confirm", {}, remote_user=remote_user(request)
+        )
+    except ApiUnavailable as exc:
+        logger.warning("fleet bulk command confirm failed: %s", exc)
+        result = api_error_result(exc)
+        return templates.TemplateResponse(
+            request,
+            "_partials/fleet_bulk_confirm_result.html",
+            {"result": result, "status_code": exc.status_code, "message": str(exc)},
+        )
+    return templates.TemplateResponse(
+        request,
+        "_partials/fleet_bulk_confirm_result.html",
+        {
+            "result": result,
+            "status_code": status.HTTP_200_OK,
+            "message": None,
+            "api_reasons": api_double_confirm_reasons(result if isinstance(result, dict) else None),
+            "second_confirm_url": f"{BASE_PATH}/fleet/command/bulk/{proposal_id}/confirm",
+        },
+    )
+
+
 @router.post("/command/{proposal_id}/confirm", response_class=HTMLResponse)
 async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
     """Step 2 of 2: relays the confirmation to `POST /og/api/fleet/command/{proposal_id}/confirm` and
@@ -335,7 +558,7 @@ async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
         )
     except ApiUnavailable as exc:
         logger.warning("fleet command confirm failed: %s", exc)
-        result = exc.detail if isinstance(exc.detail, dict) else None
+        result = api_error_result(exc)
         return templates.TemplateResponse(
             request,
             "_partials/fleet_command_confirm_result.html",

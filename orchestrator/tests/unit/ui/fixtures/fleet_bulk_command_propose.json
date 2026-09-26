@@ -1,0 +1,14 @@
+{
+  "proposal_id": "55555555-5555-5555-5555-555555555555",
+  "hub_ids": [
+    "hub-0001",
+    "hub-0002"
+  ],
+  "summary": "Set 2 hubs to 5.0 kW (load test)",
+  "requires_double_confirm": true,
+  "risk_reasons": [
+    "1 hub serving DIST_DEFERRAL c6",
+    "1 hub in a fault or offline state"
+  ],
+  "expires_in_s": 30
+}

@@ -17,16 +17,17 @@ passes these through when present and degrades to `None` when absent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from opengrid.ui.api_client import ApiUnavailable, get_json
-from opengrid.ui.role import is_operator, role_of
-from opengrid.ui.templating import templates
+from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json
+from opengrid.ui.role import is_operator, remote_user, role_of
+from opengrid.ui.templating import BASE_PATH, templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dispatch")
@@ -158,11 +159,24 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
     }
 
 
+LedgerLevel = Literal["fleet", "zone", "bank", "hub"]
+UNCOMMITTED_SERIES = "uncommitted capacity (kW)"
+_HUBS_PER_BANK_DEFAULT = 50
+
+
 def ledger_timeline_view(
-    bank_id: str, reservations: list[dict[str, Any]], bank_capacity_kw: float, *, now: datetime
+    bank_id: str,
+    reservations: list[dict[str, Any]],
+    bank_capacity_kw: float,
+    *,
+    now: datetime,
+    obligation_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Stacked-area ECharts option: one series per obligation's committed y-hat plus a headroom series
-    for uncommitted capacity, per bank (02b S8 screen 3 ledger timeline)."""
+    """Stacked-area ECharts option for one ledger scope: one series per obligation's committed kW plus
+    the capacity nobody has bought yet (02b S8 screen 3; CR #19 item 3: the legend names each series by
+    service and short id and calls the remainder "uncommitted capacity", never "free headroom").
+    `reservations` may span several banks (fleet/zone scopes): amounts for the same obligation and
+    interval are summed, so the chart is the aggregate the scope asks for."""
     by_interval: dict[str, dict[str, float]] = {}
     obligation_ids: list[str] = []
     for reservation in reservations:
@@ -171,29 +185,31 @@ def ledger_timeline_view(
         obligation_id = reservation["obligation_id"]
         if obligation_id not in obligation_ids:
             obligation_ids.append(obligation_id)
-        by_interval.setdefault(reservation["interval_start"], {})[obligation_id] = float(
-            reservation["amount"]
-        )
+        bucket = by_interval.setdefault(reservation["interval_start"], {})
+        bucket[obligation_id] = bucket.get(obligation_id, 0.0) + float(reservation["amount"])
     intervals = sorted(by_interval)
+    labels = obligation_labels or {}
     series: list[dict[str, Any]] = [
         {
-            "name": obligation_id[:8],  # short id, as on the pipeline cards; the tooltip keeps the series
+            "name": labels.get(obligation_id) or obligation_id[:8],
             "type": "line",
             "stack": "ledger",
             "areaStyle": {},
             "showSymbol": False,
-            "data": [by_interval[interval].get(obligation_id, 0.0) for interval in intervals],
+            "data": [round(by_interval[interval].get(obligation_id, 0.0), 3) for interval in intervals],
         }
         for obligation_id in obligation_ids
     ]
     committed_totals = [sum(by_interval[interval].values()) for interval in intervals]
-    headroom = [max(bank_capacity_kw - total, 0.0) for total in committed_totals]
+    headroom = [round(max(bank_capacity_kw - total, 0.0), 3) for total in committed_totals]
     series.append(
         {
-            "name": "free headroom",
+            "name": UNCOMMITTED_SERIES,
             "type": "line",
             "stack": "ledger",
-            "areaStyle": {},
+            "areaStyle": {"opacity": 0.35},
+            "lineStyle": {"type": "dashed"},
+            "itemStyle": {"color": "token:--muted@0.55"},
             "showSymbol": False,
             "data": headroom,
         }
@@ -204,12 +220,196 @@ def ledger_timeline_view(
             "xAxis": {"type": "category", "data": intervals},
             "yAxis": {"type": "value", "name": "kW"},
             "series": series,
-            "legend": {},
-            "tooltip": {"trigger": "axis"},
+            "legend": {"data": [s["name"] for s in series], "top": 0},
+            "tooltip": {"trigger": "axis", "valueFormatter": "token:kw"},
+            "grid": {"containLabel": True, "left": 8, "right": 12, "top": 44, "bottom": 8},
         },
         "obligation_count": len(obligation_ids),
+        "capacity_kw": round(bank_capacity_kw, 3),
         "generated_at": now.isoformat(),
     }
+
+
+def ledger_api_view(payload: dict[str, Any], title: str, *, now: datetime) -> dict[str, Any] | None:
+    """`GET /og/api/dispatch/ledger` (`{level, id, now, timeline[{t, capacity_kw, committed_kw,
+    uncommitted_capacity_kw, over_committed_kw, committed_by_service, unallocated_committed_kw}], ...}`)
+    as the same stacked chart: committed kW per service, the capacity nobody has bought yet, and any
+    over-commitment in its own red series. `None` when the body has no timeline."""
+    timeline = payload.get("timeline")
+    if not isinstance(timeline, list):
+        return None
+    xs = [_minutes(b.get("t")) for b in timeline]
+    services = sorted({s for b in timeline for s in (b.get("committed_by_service") or {})})
+
+    def col(key: str) -> list[float]:
+        return [round(float(b.get(key) or 0.0), 3) for b in timeline]
+
+    series: list[dict[str, Any]] = [
+        {
+            "name": service,
+            "type": "line",
+            "stack": "ledger",
+            "areaStyle": {},
+            "showSymbol": False,
+            "data": [
+                round(float((b.get("committed_by_service") or {}).get(service) or 0.0), 3) for b in timeline
+            ],
+        }
+        for service in services
+    ]
+    if any(col("unallocated_committed_kw")):
+        series.append(
+            {
+                "name": "Committed, not yet on a segment",
+                "type": "line",
+                "stack": "ledger",
+                "areaStyle": {},
+                "showSymbol": False,
+                "data": col("unallocated_committed_kw"),
+            }
+        )
+    series.append(
+        {
+            "name": UNCOMMITTED_SERIES,
+            "type": "line",
+            "stack": "ledger",
+            "areaStyle": {"opacity": 0.35},
+            "lineStyle": {"type": "dashed"},
+            "itemStyle": {"color": "token:--muted@0.55"},
+            "showSymbol": False,
+            "data": col("uncommitted_capacity_kw"),
+        }
+    )
+    if any(col("over_committed_kw")):
+        series.append(
+            {
+                "name": "Over-committed",
+                "type": "line",
+                "showSymbol": False,
+                "itemStyle": {"color": "token:--status-critical"},
+                "data": col("over_committed_kw"),
+            }
+        )
+    current = payload.get("now") or (timeline[-1] if timeline else {})
+    return {
+        "bank_id": title,
+        "chart_option": {
+            "xAxis": {"type": "category", "data": xs},
+            "yAxis": {"type": "value", "name": "kW"},
+            "series": series,
+            "legend": {"data": [s["name"] for s in series], "top": 0},
+            "tooltip": {"trigger": "axis", "valueFormatter": "token:kw"},
+            "grid": {"containLabel": True, "left": 8, "right": 12, "top": 44, "bottom": 8},
+        },
+        "obligation_count": len(services),
+        "series_noun": "service",
+        "capacity_kw": round(float(current.get("capacity_kw") or 0.0), 3),
+        "hub_count": payload.get("hub_count"),
+        "available_hub_count": payload.get("available_hub_count"),
+        "notes": payload.get("notes") or [],
+        "generated_at": now.isoformat(),
+    }
+
+
+def obligation_labels(obligations: list[dict[str, Any]]) -> dict[str, str]:
+    """`obligation_id -> "ERCOT_AS 8937a346"` for the ledger legend, from the pipeline rows."""
+    out: dict[str, str] = {}
+    for row in obligations:
+        oid = str(row.get("obligation_id") or "")
+        if oid:
+            out[oid] = f"{row.get('service_type') or 'obligation'} {oid[:8]}"
+    return out
+
+
+def ledger_scope(level: str | None, scope_id: str | None, hubs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Resolve the aggregate-first ledger scope (CR #19 item 3: fleet -> zone -> bank -> hub) to the set
+    of banks it covers, plus breadcrumb and caption data. A bank is a feeder segment aggregating its
+    hubs (the seeded fleet: 50 homes per 600 kVA segment), never a single hub, and the caption says so."""
+    banks: dict[str, dict[str, Any]] = {}
+    for h in hubs:
+        b = str(h.get("bank_id") or "")
+        if not b:
+            continue
+        entry = banks.setdefault(b, {"bank_id": b, "zone": str(h.get("zone") or ""), "hubs": 0})
+        entry["hubs"] += 1
+    zones = sorted({b["zone"] for b in banks.values() if b["zone"]})
+    lvl: str = level if level in ("fleet", "zone", "bank", "hub") else "fleet"
+    sid = (scope_id or "").strip()
+    hub_bank: str | None = None
+    if lvl == "hub":
+        match = next((h for h in hubs if str(h.get("hub_id")) == sid), None)
+        hub_bank = str(match.get("bank_id")) if match else None
+        if hub_bank is None:
+            lvl = "fleet"
+    if lvl == "zone" and sid not in zones:
+        lvl = "fleet"
+    if lvl == "bank" and sid not in banks:
+        lvl = "fleet"
+    if lvl == "fleet":
+        covered = sorted(banks)
+    elif lvl == "zone":
+        covered = sorted(b for b, e in banks.items() if e["zone"] == sid)
+    elif lvl == "bank":
+        covered = [sid]
+    else:
+        covered = [hub_bank or ""]
+    zone_of_bank = (
+        banks.get(covered[0], {}).get("zone") if lvl in ("bank", "hub") and covered else None
+    ) or ""
+    crumbs = [{"label": "Fleet", "level": "fleet", "id": ""}]
+    if lvl in ("zone", "bank", "hub"):
+        z = sid if lvl == "zone" else zone_of_bank
+        if z:
+            crumbs.append({"label": z, "level": "zone", "id": z})
+    if lvl in ("bank", "hub"):
+        crumbs.append({"label": covered[0], "level": "bank", "id": covered[0]})
+    if lvl == "hub":
+        crumbs.append({"label": sid, "level": "hub", "id": sid})
+    hubs_in_scope = sum(banks[b]["hubs"] for b in covered if b in banks)
+    if lvl == "fleet":
+        title = f"fleet ({len(covered)} feeder segments, {hubs_in_scope} homes)"
+    elif lvl == "zone":
+        title = f"{sid} ({len(covered)} feeder segments, {hubs_in_scope} homes)"
+    elif lvl == "bank":
+        title = f"{sid} (feeder segment of {hubs_in_scope or _HUBS_PER_BANK_DEFAULT} homes)"
+    else:
+        title = f"{sid} on {covered[0]} (the ledger is kept per feeder segment)"
+    return {
+        "level": lvl,
+        "id": sid if lvl != "fleet" else "",
+        "banks": covered,
+        "zones": zones,
+        "all_banks": sorted(banks),
+        "crumbs": crumbs,
+        "title": title,
+        "hubs_in_scope": hubs_in_scope,
+    }
+
+
+async def _aggregate_timeline(banks: list[str]) -> tuple[list[dict[str, Any]], float, list[str]]:
+    """Sum the per-bank ledger timelines of `banks`: reservations concatenated (the view sums same
+    obligation/interval amounts), capacity summed. Returns (reservations, capacity_kw, failed_banks).
+    ponytail: N calls to the per-bank endpoint until `GET /og/api/dispatch/ledger?level=` lands."""
+
+    async def one(bank: str) -> tuple[str, dict[str, Any] | None]:
+        try:
+            body = await get_json(f"/og/api/ledger/{bank}/timeline")
+            return bank, body if isinstance(body, dict) else None
+        except ApiUnavailable as exc:
+            logger.warning("dispatch: /og/api/ledger/%s/timeline unavailable: %s", bank, exc)
+            return bank, None
+
+    results = await asyncio.gather(*(one(b) for b in banks))
+    reservations: list[dict[str, Any]] = []
+    capacity = 0.0
+    failed: list[str] = []
+    for bank, body in results:
+        if body is None:
+            failed.append(bank)
+            continue
+        reservations.extend(body.get("reservations", []))
+        capacity += float(body.get("bank_capacity_kw", 0.0))
+    return reservations, capacity, failed
 
 
 def _minutes(value: Any) -> str:
@@ -318,11 +518,190 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
     return events
 
 
+#: NPRR1282 stored-energy duration per AS product (hours of full deployment the award must be able to hold).
+_AS_HOLD_HOURS: dict[str, int] = {"ECRS": 1, "NSPIN": 4, "NON_SPIN": 4, "NONSPIN": 4}
+
+
+def contract_products(contracts: Any) -> dict[str, str]:
+    """`contract_id -> variant` from `GET /og/api/contracts` (the AS product lives on the contract)."""
+    rows = contracts if isinstance(contracts, list) else []
+    return {
+        str(c["contract_id"]): str(c["variant"])
+        for c in rows
+        if isinstance(c, dict) and c.get("contract_id") and c.get("variant")
+    }
+
+
+def as_awards_view(
+    opportunities: list[dict[str, Any]],
+    deployments: list[dict[str, Any]],
+    *,
+    now: datetime,
+    product_by_contract: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Join ERCOT_AS awards with the active deployment records for the operator panel.
+
+    Awards are held until a deployment exists.  The API owns the authoritative award and deployment
+    state; this view only joins the two read models and preserves optional energy-risk fields when the
+    allocator supplies them.
+    """
+    active_by_obligation = {
+        str(row.get("obligation_id")): row for row in deployments if row.get("obligation_id") is not None
+    }
+    all_deployment = next((row for row in deployments if row.get("obligation_id") is None), None)
+    rows: list[dict[str, Any]] = []
+    for award in opportunities:
+        if award.get("service_type") != "ERCOT_AS":
+            continue
+        obligation_id = str(award.get("obligation_id") or "")
+        deployment = active_by_obligation.get(obligation_id) or all_deployment
+        state = "deployed" if deployment else "held"
+        # Obligation rows carry no product: it is the contract's variant (ECRS, NSPIN, ...), looked up from
+        # GET /og/api/contracts. An unknown product shows as such rather than defaulting to Non-Spin's 4 h.
+        product = str(
+            award.get("product")
+            or award.get("variant")
+            or (product_by_contract or {}).get(str(award.get("contract_id") or ""))
+            or ""
+        ).upper()
+        required_hours: int | None = _AS_HOLD_HOURS.get(product)
+        energy_held = _f(award.get("energy_held_kwh"))
+        required_energy = _f(award.get("required_energy_kwh"))
+        if required_energy is None:
+            committed_kw = _f(award.get("committed_qty_kw")) or _f(award.get("requested_kw")) or 0.0
+            required_energy = committed_kw * required_hours if required_hours is not None else None
+        at_risk = bool(award.get("at_risk", False))
+        if energy_held is not None and required_energy is not None:
+            at_risk = at_risk or energy_held < required_energy
+        rows.append(
+            {
+                "obligation_id": obligation_id,
+                "customer_id": award.get("customer_id") or award.get("contract_id"),
+                "product": product or "ERCOT_AS",
+                "committed_kw": award.get("committed_qty_kw", award.get("requested_kw")),
+                "energy_held_kwh": energy_held,
+                "required_energy_kwh": required_energy,
+                "required_hours": required_hours,
+                "at_risk": at_risk,
+                "state": state,
+                "deployment_id": str(deployment["deployment_id"]) if deployment else None,
+                "deployment_end": deployment.get("end_at") if deployment else None,
+            }
+        )
+    return rows
+
+
+def _require_operator(request: Request) -> None:
+    if not is_operator(request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="operator role required")
+
+
+def _action_result(request: Request, *, message: str, ok: bool = False) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "_partials/as_deployment_result.html",
+        {"message": message, "ok": ok},
+    )
+
+
+@router.post("/as-deployments/propose", response_class=HTMLResponse)
+async def propose_as_deployment(
+    request: Request,
+    obligation_id: str = Form(default=""),
+    duration_minutes: int = Form(default=15),
+    reason: str = Form(...),
+) -> HTMLResponse:
+    """Step 1: render the exact AS deployment summary without changing system state."""
+    _require_operator(request)
+    if not 1 <= duration_minutes <= 240:
+        return _action_result(request, message="Duration must be between 1 and 240 minutes.")
+    return templates.TemplateResponse(
+        request,
+        "_partials/as_deployment_confirm.html",
+        {
+            "obligation_id": obligation_id,
+            "duration_minutes": duration_minutes,
+            "reason": reason,
+            "confirm_url": f"{BASE_PATH}/dispatch/as-deployments/confirm",
+            "summary": (
+                f"Deploy {obligation_id or 'all held ERCOT_AS awards'} for {duration_minutes} minutes "
+                f"({reason})"
+            ),
+        },
+    )
+
+
+@router.post("/as-deployments/confirm", response_class=HTMLResponse)
+async def confirm_as_deployment(
+    request: Request,
+    obligation_id: str = Form(default=""),
+    duration_minutes: int = Form(...),
+    reason: str = Form(...),
+) -> HTMLResponse:
+    """Step 2: create the deployment through the existing operator API."""
+    _require_operator(request)
+    try:
+        result = await post_json(
+            "/og/api/dispatch/as-deployments",
+            {
+                "obligation_id": obligation_id or None,
+                "duration_minutes": duration_minutes,
+                "reason": reason,
+            },
+            remote_user=remote_user(request),
+        )
+    except ApiUnavailable as exc:
+        return _action_result(request, message=str(exc))
+    return _action_result(
+        request,
+        message=f"Deployment {result.get('deployment_id', 'accepted')} is active.",
+        ok=True,
+    )
+
+
+@router.post("/as-deployments/{deployment_id}/stop-propose", response_class=HTMLResponse)
+async def propose_stop_as_deployment(request: Request, deployment_id: str) -> HTMLResponse:
+    _require_operator(request)
+    return templates.TemplateResponse(
+        request,
+        "_partials/as_deployment_confirm.html",
+        {
+            "obligation_id": "",
+            "duration_minutes": "",
+            "reason": "",
+            "deployment_id": deployment_id,
+            "confirm_url": f"{BASE_PATH}/dispatch/as-deployments/{deployment_id}/stop-confirm",
+            "summary": f"Stop active ERCOT_AS deployment {deployment_id} early",
+            "stop": True,
+        },
+    )
+
+
+@router.post("/as-deployments/{deployment_id}/stop-confirm", response_class=HTMLResponse)
+async def confirm_stop_as_deployment(request: Request, deployment_id: str) -> HTMLResponse:
+    _require_operator(request)
+    try:
+        await delete_json(
+            f"/og/api/dispatch/as-deployments/{deployment_id}", remote_user=remote_user(request)
+        )
+    except ApiUnavailable as exc:
+        return _action_result(request, message=str(exc))
+    return _action_result(request, message=f"Deployment {deployment_id} stopped.", ok=True)
+
+
 @router.get("", response_class=HTMLResponse)
-async def dispatch_page(request: Request, bank_id: str | None = Query(default=None)) -> HTMLResponse:
-    """Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S)."""
+async def dispatch_page(
+    request: Request,
+    bank_id: str | None = Query(default=None),
+    level: str | None = Query(default=None),
+    id: str | None = Query(default=None),
+) -> HTMLResponse:
+    """Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S). The ledger panel
+    is aggregate-first (CR #19 item 3): `?level=fleet|zone|bank|hub&id=` selects the scope, default
+    fleet; the legacy `?bank_id=` still opens a bank."""
     now = datetime.now(tz=UTC)
-    bank_id = bank_id or await _default_bank_id()
+    if bank_id and not level:
+        level, id = "bank", bank_id
     degraded: str | None = None
     obligations: list[dict[str, Any]] = []
     plan: dict[str, Any] | None = None
@@ -330,6 +709,17 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
     grants: list[dict[str, Any]] = []
     bank_capacity_kw = 0.0
     commitments: list[dict[str, Any]] = []
+    deployments: list[dict[str, Any]] = []
+    hubs: list[dict[str, Any]] = []
+    try:
+        raw_hubs = await get_json("/og/api/fleet/hubs")
+        hubs = raw_hubs.get("items", []) if isinstance(raw_hubs, dict) else raw_hubs or []
+    except ApiUnavailable as exc:
+        logger.warning("dispatch: /og/api/fleet/hubs unavailable: %s", exc)
+    scope = ledger_scope(level, id, hubs)
+    if not scope["banks"] or scope["banks"] == [""]:
+        scope["banks"] = [bank_id or await _default_bank_id()]
+    bank_id = scope["banks"][0]
 
     try:
         raw = await get_json("/og/api/dispatch/opportunities")
@@ -344,16 +734,50 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
         logger.warning("dispatch: /og/api/dispatch/plan/latest unavailable: %s", exc)
         degraded = degraded or str(exc)
 
+    # Aggregate ledger: the CR #19 endpoint when it exists, else the per-bank timelines summed.
+    aggregate_loaded = False
+    ledger_payload: dict[str, Any] | None = None
+    try:
+        ledger_params = {"level": scope["level"], **({"id": scope["id"]} if scope["id"] else {})}
+        agg = await get_json("/og/api/dispatch/ledger", params=ledger_params)
+        if isinstance(agg, dict) and isinstance(agg.get("timeline"), list):
+            ledger_payload = agg
+            aggregate_loaded = True
+        elif isinstance(agg, dict) and "reservations" in agg:
+            reservations = agg.get("reservations", [])
+            bank_capacity_kw = float(agg.get("capacity_kw") or agg.get("bank_capacity_kw") or 0.0)
+            aggregate_loaded = True
+    except ApiUnavailable as exc:
+        if exc.status_code not in (404, 405):
+            logger.info("dispatch: aggregate ledger endpoint not available yet: %s", exc)
+    if not aggregate_loaded:
+        reservations, bank_capacity_kw, failed = await _aggregate_timeline(scope["banks"])
+        if failed and len(failed) == len(scope["banks"]):
+            degraded = degraded or "GET /og/api/ledger/<bank>/timeline failed for every bank in scope"
+        scope["banks_unavailable"] = failed
+
+    # Grants and lock events stay per bank (the first bank in scope): they list rows, not a curve.
+    try:
+        raw_deployments = await get_json("/og/api/dispatch/as-deployments")
+        deployments = raw_deployments if isinstance(raw_deployments, list) else []
+    except ApiUnavailable as exc:
+        logger.warning("dispatch: AS deployment API unavailable: %s", exc)
+        degraded = degraded or str(exc)
+
     try:
         timeline = await get_json(f"/og/api/ledger/{bank_id}/timeline")
         if isinstance(timeline, dict):
-            reservations = timeline.get("reservations", [])
             grants = timeline.get("grants", [])
-            bank_capacity_kw = float(timeline.get("bank_capacity_kw", 0.0))
             commitments = timeline.get("commitments", [])
     except ApiUnavailable as exc:
         logger.warning("dispatch: /og/api/ledger/%s/timeline unavailable: %s", bank_id, exc)
         degraded = degraded or str(exc)
+
+    products: dict[str, str] = {}
+    try:
+        products = contract_products(await get_json("/og/api/contracts"))
+    except ApiUnavailable as exc:
+        logger.info("dispatch: contracts unavailable for AS product names: %s", exc)
 
     return templates.TemplateResponse(
         request,
@@ -362,11 +786,26 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
             "role": role_of(request),
             "is_operator": is_operator(request),
             "bank_id": bank_id,
+            "scope": scope,
             "pipeline": pipeline_view(obligations if isinstance(obligations, list) else [], now=now),
             "plan": plan_view(plan if isinstance(plan, dict) else None),
-            "ledger": ledger_timeline_view(bank_id, reservations, bank_capacity_kw, now=now),
+            "ledger": (ledger_api_view(ledger_payload, scope["title"], now=now) if ledger_payload else None)
+            or ledger_timeline_view(
+                scope["title"],
+                reservations,
+                bank_capacity_kw,
+                now=now,
+                obligation_labels=obligation_labels(obligations if isinstance(obligations, list) else []),
+            ),
             "grants": grants_and_substitutions_view(grants),
             "lock_events": commitment_lock_events_view(commitments),
+            "as_awards": as_awards_view(
+                obligations if isinstance(obligations, list) else [],
+                deployments,
+                now=now,
+                product_by_contract=products,
+            ),
+            "as_deployments": deployments,
             "degraded": degraded,
         },
     )

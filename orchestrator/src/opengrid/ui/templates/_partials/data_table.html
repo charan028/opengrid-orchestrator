@@ -6,6 +6,7 @@
 <table class="data-table">
   <thead>
     <tr>
+      {% if select_key %}<th class="sel" scope="col"><span class="og-sr-only">Select</span></th>{% endif %}
       {% for c in columns %}
       <th class="{{ 'num' if c.numeric else '' }}" scope="col">{{ c.label }}</th>
       {% endfor %}
@@ -14,6 +15,10 @@
   <tbody>
     {% for row in rows %}
     <tr {% if row_id_key %}class="clickable-row" data-row-id="{{ row[row_id_key] }}" tabindex="0"{% endif %}>
+      {% if select_key %}
+      <td class="sel"><input type="checkbox" class="og-row-select" value="{{ row[select_key] }}"
+                             aria-label="Select {{ row[select_key] }}"></td>
+      {% endif %}
       {% for c in columns %}
       <td class="{{ 'num' if c.numeric else '' }}">
         {%- if c.key in row -%}
@@ -24,7 +29,7 @@
     </tr>
     {% else %}
     <tr>
-      <td class="empty" colspan="{{ columns|length }}">{{ empty_message|default('No data') }}</td>
+      <td class="empty" colspan="{{ columns|length + (1 if select_key else 0) }}">{{ empty_message|default('No data') }}</td>
     </tr>
     {% endfor %}
   </tbody>

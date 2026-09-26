@@ -156,6 +156,10 @@ def _include_routers(app: FastAPI) -> None:
     ):
         app.include_router(router_module.router)
 
+    from opengrid.api import views_settlement  # ui-owned read-only settlement view (Profitability, Billing)
+
+    app.include_router(views_settlement.router)
+
 
 _DEFAULT_UI_BASE_PATH = "/og"
 

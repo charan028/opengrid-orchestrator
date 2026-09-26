@@ -1,0 +1,11 @@
+{
+  "proposal_id": "55555555-5555-5555-5555-555555555555",
+  "outcome": "PASS",
+  "accepted": [
+    "hub-0001",
+    "hub-0002"
+  ],
+  "rejected": [],
+  "vetoed_rule_ids": [],
+  "trace_id": "trace-bulk-0001"
+}

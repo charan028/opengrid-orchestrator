@@ -25,7 +25,8 @@
 <span x-data="{
         open: {{ 'true' if open_default|default(false) else 'false' }},
         busy: false,
-        remaining: {{ expires_in_s|default('null') }},
+        acked: {{ 'false' if acknowledge else 'true' }},
+        remaining: {{ expires_in_s if expires_in_s is number else 'null' }},
         returnTo: null,
         show() {
           this.returnTo = document.activeElement;
@@ -73,6 +74,15 @@
       </p>
       <p role="status"><template x-if="remaining <= 0"><strong>Proposal expired, propose again.</strong></template></p>
       {% endif %}
+      {% if acknowledge %}
+      {# CR #19 item 2: a command that overrides hubs which are serving a customer, or are in a fault
+         state, takes a second explicit acknowledgement that names the reason -- the confirm button
+         does nothing until this is ticked. #}
+      <label class="confirm-dialog-ack">
+        <input type="checkbox" x-model="acked" aria-label="Acknowledge the risk of this command">
+        <span>{{ acknowledge }}</span>
+      </label>
+      {% endif %}
       <div class="confirm-dialog-actions">
         <button type="button" class="btn" x-ref="cancelBtn" :disabled="busy" x-on:click="close()">
           Cancel
@@ -80,7 +90,7 @@
         <button type="button"
                 x-ref="confirmBtn"
                 class="btn {{ 'btn-safestop' if variant == 'safestop' else 'btn-danger' }}"
-                :disabled="busy || (remaining !== null && remaining <= 0)"
+                :disabled="busy || !acked || (remaining !== null && remaining <= 0)"
                 hx-post="{{ confirm_url }}"
                 hx-target="{{ target|default('#confirm-result') }}"
                 hx-swap="outerHTML"

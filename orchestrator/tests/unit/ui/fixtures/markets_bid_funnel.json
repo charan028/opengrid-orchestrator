@@ -1,0 +1,54 @@
+{
+  "from": "2026-09-25T18:10:00+00:00",
+  "to": "2026-09-26T18:10:00+00:00",
+  "products": [
+    {
+      "product": "energy",
+      "available": 48,
+      "submitted": 30,
+      "awarded": 21,
+      "rejected": 9,
+      "rejection_reasons": [
+        {"reason": "PRICE_ABOVE_CLEARING", "count": 6},
+        {"reason": "TELEMETRY_GAP", "count": 3}
+      ]
+    },
+    {
+      "product": "RRS",
+      "available": 20,
+      "submitted": 15,
+      "awarded": 9,
+      "rejected": 6,
+      "rejection_reasons": [
+        {"reason": "PRICE_ABOVE_CLEARING", "count": 4},
+        {"reason": "LATE_SUBMISSION", "count": 2}
+      ]
+    },
+    {
+      "product": "ECRS",
+      "available": 16,
+      "submitted": 6,
+      "awarded": 3,
+      "rejected": 3,
+      "rejection_reasons": [
+        {"reason": "INSUFFICIENT_CAPACITY", "count": 2},
+        {"reason": "TELEMETRY_GAP", "count": 1}
+      ]
+    },
+    {
+      "product": "NSPIN",
+      "available": 24,
+      "submitted": 18,
+      "awarded": 11,
+      "rejected": 7,
+      "rejection_reasons": [
+        {"reason": "PRICE_ABOVE_CLEARING", "count": 5},
+        {"reason": "INSUFFICIENT_CAPACITY", "count": 2}
+      ]
+    }
+  ],
+  "by_hour": [
+    {"hour": "2026-09-26T14:00:00+00:00", "available": 4, "submitted": 3, "awarded": 2, "rejected": 1},
+    {"hour": "2026-09-26T15:00:00+00:00", "available": 5, "submitted": 4, "awarded": 3, "rejected": 1}
+  ]
+}
