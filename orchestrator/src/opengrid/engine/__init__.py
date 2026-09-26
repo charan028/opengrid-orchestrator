@@ -417,7 +417,14 @@ async def escalate_sustained_shortfalls(
     no substitute) or energy infeasibility after substitution (`opengrid.engine.escalation`). An
     obligation not yet delivering is skipped (the state machine refuses the edge). Returns what escalated."""
     allocator_shortfalls = getattr(state.ledger_gateway, "last_shortfalls", [])
-    infeasible = [r.obligation_id for r in energy_results if r.at_risk and r.margin_kwh < 0]
+    # An undeployed ERCOT_AS hold short of its energy hold is AT_RISK (the energy check flags it), never
+    # escalated to SHORTFALL: it is not delivering anything short.
+    as_holds: set[str] = getattr(state.energy_sufficiency_gateway, "as_hold_ids", set()) or set()
+    infeasible = [
+        r.obligation_id
+        for r in energy_results
+        if r.at_risk and r.margin_kwh < 0 and r.obligation_id not in as_holds
+    ]
     signals = merge_signals(allocator_shortfalls, infeasible)
     await flag_short_obligations(state, signals)
     escalated: list[tuple[str, str]] = []

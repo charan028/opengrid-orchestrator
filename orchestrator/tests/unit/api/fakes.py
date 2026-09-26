@@ -66,6 +66,7 @@ class FakeStore:
     notifications: list[dict[str, Any]] = field(default_factory=list)
     _pending_stop_proposals: dict[str, tuple[str, str]] = field(default_factory=dict, init=False)
     stop_events: dict[tuple[str, str], tuple[str, datetime]] = field(default_factory=dict)
+    as_deployments: dict[UUID, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.alerts = [
@@ -411,6 +412,35 @@ class FakeStore:
             }
         )
         return action_id
+
+    async def insert_as_deployment(self, *, obligation_id, start_at, end_at, requested_by, reason) -> UUID:
+        deployment_id = uuid4()
+        self.as_deployments[deployment_id] = {
+            "deployment_id": deployment_id,
+            "obligation_id": obligation_id,
+            "start_at": start_at,
+            "end_at": end_at,
+            "source": "OPERATOR",
+            "requested_by": requested_by,
+            "reason": reason,
+            "cancelled": False,
+        }
+        return deployment_id
+
+    async def list_active_as_deployments(self) -> list[dict[str, Any]]:
+        now = datetime.now(UTC)
+        return [
+            {k: v for k, v in d.items() if k != "cancelled"}
+            for d in self.as_deployments.values()
+            if not d["cancelled"] and d["end_at"] > now
+        ]
+
+    async def cancel_as_deployment(self, deployment_id) -> bool:
+        d = self.as_deployments.get(deployment_id)
+        if d is None or d["cancelled"] or d["end_at"] <= datetime.now(UTC):
+            return False
+        d["cancelled"] = True
+        return True
 
 
 class FakeTraceBackend:

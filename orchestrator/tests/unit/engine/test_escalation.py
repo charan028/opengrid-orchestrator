@@ -134,6 +134,27 @@ async def test_engine_applies_the_edge_and_skips_an_obligation_not_yet_deliverin
     assert escalated == [(OBL, "R-COMMIT-LOCK-INFEASIBLE")]
 
 
+async def test_an_undeployed_as_hold_short_of_energy_is_never_escalated_to_shortfall() -> None:
+    """An ERCOT_AS capacity hold whose energy hold is short is AT_RISK (the energy check flags it), not a
+    SHORTFALL: it is not delivering anything short. A deployed award escalates like any delivery."""
+    calls: list[tuple[str, str, str]] = []
+
+    async def _transition(obligation_id, to_state, *, reason_code, payload=None):
+        calls.append((str(obligation_id), to_state, reason_code))
+
+    state = types.SimpleNamespace(
+        ledger_gateway=types.SimpleNamespace(last_shortfalls=[]),
+        escalator=ShortfallEscalator(sustain_cycles=1),
+        short_flagged=set(),
+        energy_sufficiency_gateway=types.SimpleNamespace(as_hold_ids={OBL}, _at_risk={OBL}),
+    )
+    escalated = await escalate_sustained_shortfalls(
+        state, [_energy(OBL, -5.0), _energy(OTHER, -1.0)], _transition
+    )
+
+    assert escalated == [(OTHER, "R-COMMIT-LOCK-INFEASIBLE")]
+
+
 def test_a_shortfall_obligation_keeps_its_feasible_remainder_and_recovers_in_one_cycle() -> None:
     """Owner decision 2026-09-26: a mid-window SHORTFALL never stops dispatch. While an L2 LIMIT caps the
     bank the obligation gets the feasible remainder (not 0); once the constraint lifts, the next cycle

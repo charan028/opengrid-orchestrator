@@ -185,6 +185,20 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
     # `core.physics`'s constants, never re-derived. No linear-coefficient helper exists in `core` for
     # this step today -- see the module's final-report note on adding one so `allocator`/`guardian`
     # can share it too instead of each inlining the same affine form.
+    # ERCOT_AS capacity holds (NPRR1282): their ybar locks bank kW (the capacity rows above) but does NOT
+    # drain SoC; instead the bank keeps kW x hold_h / eta_d above its reserve floor while held.
+    hold_h_by_id = inputs.energy_hold_hours()
+    committed_ids = {co.obligation_id for co in inputs.committed}
+    drain_by_bt: dict[tuple[str, int], list[highspy.highs_var]] = {}
+    hold_by_bt: dict[tuple[str, int], list[tuple[highspy.highs_var, float, bool]]] = {}
+    for (obligation_id, bank_id, t), var in ybar_vars.items():
+        hold_h = hold_h_by_id.get(obligation_id, 0.0)
+        if hold_h > 0:
+            hold_by_bt.setdefault((bank_id, t), []).append((var, hold_h, obligation_id in committed_ids))
+        else:
+            drain_by_bt.setdefault((bank_id, t), []).append(var)
+    hold_slack_vars: list[tuple[str, highspy.highs_var]] = []
+
     soc_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
     charge_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
     soc_balance_rows: dict[tuple[str, int, str], highspy.highs_cons] = {}
@@ -209,10 +223,27 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                 charge_vars[bank.bank_id, t, scenario.scenario] = charge
                 discharge_total = highs.qsum(
                     [
-                        *consumers_by_bt.get((bank.bank_id, t), []),
+                        *drain_by_bt.get((bank.bank_id, t), []),
                         h_vars[bank.bank_id, t, scenario.scenario],
                     ]
                 )
+                holds = hold_by_bt.get((bank.bank_id, t), [])
+                if holds:
+                    # Energy hold: SoC at the start of t covers every held award's full deployment. A
+                    # COMMITTED hold the bank cannot cover is a priced slack (never infeasible: the award
+                    # is already locked, K13); a CANDIDATE hold is hard, so it is only selected where the
+                    # energy exists.
+                    committed_hold_cap_kwh = sum(
+                        hold_h / bank.eta_d * _bank_cap_at(bank.bank_id, t)
+                        for _var, hold_h, is_committed in holds
+                        if is_committed
+                    )
+                    slack = highs.addVariable(lb=0.0, ub=committed_hold_cap_kwh)
+                    hold_slack_vars.append((scenario.scenario, slack))
+                    required = highs.qsum([(hold_h / bank.eta_d) * var for var, hold_h, _c in holds])
+                    highs.addConstr(
+                        soc_vars[bank.bank_id, t, scenario.scenario] + slack >= bank.reserve_kwh + required
+                    )
                 next_e = highs.addVariable(lb=bank.reserve_kwh, ub=bank.capacity_kwh)
                 soc_vars[bank.bank_id, t + 1, scenario.scenario] = next_e
                 soc_balance_rows[bank.bank_id, t, scenario.scenario] = highs.addConstr(
@@ -281,6 +312,10 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     obj_terms.append(-scenario.probability * dt_h * (price / 1000.0) * charge)
 
     probability_by_scenario: dict[str, float] = {s.scenario: s.probability for s in inputs.scenarios}
+    for scenario_name, slack in hold_slack_vars:
+        obj_terms.append(
+            -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH * slack
+        )
     for (_bank_id, scenario_name), shortfall in terminal_shortfall_vars.items():
         obj_terms.append(
             -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH * shortfall

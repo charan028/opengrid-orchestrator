@@ -65,6 +65,20 @@ _CATEGORY_BY_SERVICE_TYPE: dict[str, Literal["FIRM", "AS", "MARKET"]] = {
     "ERCOT_ENERGY": "MARKET",
 }
 
+#: Full-deployment duration for an ERCOT_AS award whose product rule has none (ECRS 1 h, the shortest).
+DEFAULT_AS_HOLD_MINUTES = 60.0
+
+
+def as_energy_hold_h(service_type: object, duration_minutes: object) -> float:
+    """Energy-hold hours for the selector's SoC model: an ERCOT_AS award is a capacity hold that must be
+    deployable for its product's full duration (Non-Spin 4 h, ECRS 1 h, NPRR1282); 0 for every other
+    service (those discharge their profile)."""
+    if service_type != "ERCOT_AS":
+        return 0.0
+    minutes = float(str(duration_minutes)) if duration_minutes else DEFAULT_AS_HOLD_MINUTES
+    return minutes / 60.0
+
+
 # Simple warm-start memory: previous gate's selection, shifted one interval by the caller if needed
 # (02a S3.7 "previous plan shifted one interval"). Kept in-process only -- a restart just solves cold.
 _last_hint_x: dict[str, float] = {}
@@ -281,6 +295,7 @@ async def load_committed(
     reduction -- see `types.CommittedObligation`); a future refinement can narrow this per obligation
     once `contracts`/`ledger` expose an eligibility query."""
     frozen = await db.load_frozen_commitments(horizon_start.isoformat(), horizon_end.isoformat())
+    as_minutes = await db.load_as_hold_minutes([str(o) for o in frozen])
     n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
     interval_index_by_iso = {
         (horizon_start + timedelta(minutes=INTERVAL_MINUTES * t)).isoformat(): t for t in range(n_intervals)
@@ -298,6 +313,11 @@ async def load_committed(
                     obligation_id=str(obligation_id),
                     eligible_bank_ids=bank_ids,
                     committed_kw_by_interval=by_index,
+                    energy_hold_h=(
+                        as_energy_hold_h("ERCOT_AS", as_minutes[str(obligation_id)])
+                        if str(obligation_id) in as_minutes
+                        else 0.0
+                    ),
                 )
             )
     return tuple(result)
@@ -345,6 +365,7 @@ async def load_candidates(
                 tier=row["tier"] or "T4",
                 category=_CATEGORY_BY_SERVICE_TYPE.get(row["service_type"], "MARKET"),
                 service_type=str(row["service_type"] or ""),
+                energy_hold_h=as_energy_hold_h(row["service_type"], row.get("duration_minutes")),
             )
         )
     return tuple(candidates)

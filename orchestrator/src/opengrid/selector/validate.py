@@ -85,6 +85,7 @@ def _check_soc_dynamics(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
     from the plan's own reported allocations/headroom/charge, independent of `model.py`'s highspy rows
     (02a S3.8's "re-derives the constraints from raw numbers")."""
     violations = []
+    held = set(inputs.energy_hold_hours())  # ERCOT_AS holds lock energy, they do not drain it
     for bank in inputs.banks:
         if not bank.models_soc:
             continue
@@ -105,8 +106,8 @@ def _check_soc_dynamics(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
                     )
                 discharge_total = sum(
                     kw
-                    for (_oid, b, ti), kw in plan.bank_interval_allocation.items()
-                    if b == bank.bank_id and ti == t
+                    for (oid, b, ti), kw in plan.bank_interval_allocation.items()
+                    if b == bank.bank_id and ti == t and oid not in held
                 ) + plan.headroom_schedule.get((bank.bank_id, t, scenario), 0.0)
                 charge = plan.charge_by_bank_interval_scenario.get((bank.bank_id, t, scenario), 0.0)
                 dt_h = inputs.interval_hours

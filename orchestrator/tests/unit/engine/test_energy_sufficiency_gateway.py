@@ -366,3 +366,51 @@ async def test_at_risk_flag_is_set_on_entry_and_cleared_on_recovery(monkeypatch,
     await gateway.run(NOW + timedelta(seconds=4))
 
     assert _flags == [(str(obligation_id), True), (str(obligation_id), False)]
+
+
+@pytest.mark.parametrize(("duration_minutes", "at_risk"), [(240, True), (60, False)])
+async def test_an_as_award_must_hold_energy_for_its_full_deployment(
+    monkeypatch, _patch_alert_raising, duration_minutes, at_risk
+):
+    """Frank #6 / NPRR1282 energy hold: an ERCOT_AS award needs committed_kw x duration of deliverable
+    energy (kW x duration / eta_d stored) above the reserve floor, whatever is left of its window. 5 kW
+    Non-Spin (4 h) needs 20 kWh; one hub at 20 kWh SoC (7.84 reserve) can deliver ~11.5 kWh -> AT_RISK. The
+    same award as ECRS (1 h, 5 kWh) is covered."""
+    obligation_id = uuid4()
+    # (obligation, bank, remaining-window kWh, draw end, customer, service, hold kW, duration, deployed)
+    rows = [
+        (
+            obligation_id,
+            "bank-01",
+            1.25,
+            NOW + timedelta(minutes=15),
+            uuid4(),
+            "ERCOT_AS",
+            5.0,
+            duration_minutes,
+            False,
+        )
+    ]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=20.0)]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    (result,) = await gateway.run(NOW)
+
+    assert result.required_kwh == pytest.approx(5.0 * duration_minutes / 60)
+    assert result.at_risk is at_risk
+    assert gateway.as_hold_ids == {str(obligation_id)}  # undeployed: AT_RISK only, never escalated
+
+
+async def test_a_deployed_as_award_is_not_a_hold(monkeypatch, _patch_alert_raising):
+    obligation_id = uuid4()
+    rows = [
+        (obligation_id, "bank-01", 1.25, NOW + timedelta(minutes=15), uuid4(), "ERCOT_AS", 5.0, 240, True)
+    ]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=39.2)]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+    await gateway.run(NOW)
+    assert gateway.as_hold_ids == set()

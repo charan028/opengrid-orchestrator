@@ -31,10 +31,22 @@ _FROZEN_COMMITMENTS_SQL = """
 
 _BANK_IDS_SQL = "SELECT bank_id FROM og.bank ORDER BY bank_id"
 
+# ERCOT_AS obligations among the given ids, with their product's full-deployment duration: these are
+# capacity holds (energy locked above reserve, no drain) in the selector's SoC model.
+_AS_HOLD_MINUTES_SQL = """
+    SELECT o.obligation_id, MAX(pr.duration_minutes)
+    FROM og.obligation o
+    LEFT JOIN og.product_rule pr ON pr.contract_id = o.contract_id
+    WHERE o.service_type = 'ERCOT_AS' AND o.obligation_id = ANY(%(ids)s::uuid[])
+    GROUP BY o.obligation_id
+"""
+
 _OFFERED_OPPORTUNITIES_SQL = """
     SELECT o.opportunity_id, ob.obligation_id, o.contract_id, o.window_start, o.window_end,
            o.requested_kw, o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
-           pr.variable_kind, pr.min_qty_kw, pr.increment_kw
+           pr.variable_kind, pr.min_qty_kw, pr.increment_kw,
+           COALESCE(pr.duration_minutes, (SELECT MAX(p2.duration_minutes) FROM og.product_rule p2
+                                          WHERE p2.contract_id = o.contract_id)) AS duration_minutes
     FROM og.opportunity o
     JOIN og.contract c ON c.contract_id = o.contract_id
     JOIN og.obligation ob ON ob.opportunity_id = o.opportunity_id
@@ -83,6 +95,17 @@ async def load_frozen_commitments(horizon_start: str, horizon_end: str) -> dict[
     for obligation_id, interval_start, committed_kw in rows:
         frozen[obligation_id][_interval_key(interval_start)] = committed_kw
     return dict(frozen)
+
+
+async def load_as_hold_minutes(obligation_ids: list[str]) -> dict[str, float | None]:
+    """Read-only: `obligation_id -> product duration_minutes` for the ERCOT_AS obligations among
+    `obligation_ids` (None when the contract has no product rule)."""
+    if not obligation_ids:
+        return {}
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_AS_HOLD_MINUTES_SQL, {"ids": obligation_ids})
+        return {str(row[0]): (float(row[1]) if row[1] is not None else None) async for row in cur}
 
 
 async def load_bank_ids_rows() -> list[str]:
