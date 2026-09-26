@@ -113,7 +113,7 @@ def test_where_binds_every_filter_value() -> None:
         q="hub-00_",
     )
     w = where_clause(flt, TH)
-    assert "h.zone = ANY(%s)" in w.text and "h.bank_id = %s" in w.text and "ILIKE %s" in w.text
+    assert "h.zone = ANY(%s)" in w.text and "h.bank_id = %s" in w.text and "lower(h.hub_id) LIKE %s" in w.text
     assert ["LZ_NORTH", "LZ_WEST"] in w.params and "bank-07" in w.params and ["online", "fault"] in w.params
     assert "hub-00\\_%" in w.params  # LIKE metacharacters in the search text are escaped
     assert w.text.count("%s") == len(w.params)
@@ -122,7 +122,7 @@ def test_where_binds_every_filter_value() -> None:
 
 def test_search_is_a_prefix_match() -> None:
     q = search_query("hub", "HUB-1", limit=20)
-    assert "ILIKE %s" in q.text and q.params == ["HUB-1%", 20]
+    assert "lower(h.hub_id) LIKE %s" in q.text and q.params == ["hub-1%", 20]
     assert "og.bank" in search_query("zone", "", limit=5).text
 
 
@@ -279,8 +279,29 @@ def test_hub_detail_aggregates_and_tolerates_missing_tables(
     assert body["status"]["soc_pct"] == 50.0 and body["status"]["above_reserve_kwh"] == 11.76
     assert body["telemetry"]["fields"] == {"ts": seen, "p_kw": -2.0, "cell_temp_c": 27.0}
     assert body["location"]["feeder_id"] == "F-1"
-    assert body["asset"]["install_date"] is None
+    assert body["asset"]["installed_at"] is None and body["asset"]["device_info"] == {}
 
 
 def test_hub_detail_404(search_client: TestClient) -> None:
     assert search_client.get("/og/api/fleet/hubs/nope/detail", headers=VIEWER_HEADERS).status_code == 404
+
+
+def test_hw_fw_filters_are_guarded_reads_and_bound() -> None:
+    w = where_clause(HubFilter(hw=("C1",), fw=("4.2.1", "4.3.0"), fw_not="4.3.0"), TH)
+    assert "(to_jsonb(h.*) ->> 'hardware_revision') = ANY(%s)" in w.text
+    assert "(to_jsonb(h.*) ->> 'firmware_version') IS DISTINCT FROM %s" in w.text
+    assert ["C1"] in w.params and ["4.2.1", "4.3.0"] in w.params and "4.3.0" in w.params
+    assert not HubFilter(fw_not="x").empty
+    q = page_query(HubFilter(), TH, sort="fw", descending=True, cursor=None, limit=25)
+    assert "AS firmware_version" in q.text and "ORDER BY sort_value DESC" in q.text
+
+
+def test_search_firmware_lists_distinct_versions(
+    search_client: TestClient, rows_store: RecordingStore
+) -> None:
+    assert "DISTINCT (to_jsonb(h.*) ->> 'firmware_version')" in search_query("firmware", "4", limit=5).text
+    rows_store.answers.append([{"id": "4.2.1"}, {"id": "4.3.0"}])
+    body = search_client.get("/og/api/fleet/search?kind=firmware&q=4", headers=VIEWER_HEADERS).json()
+    assert body["items"] == [{"id": "4.2.1"}, {"id": "4.3.0"}]
+    ok = search_client.get("/og/api/fleet/table?hw=C1&fw=4.2.1&fw_not=4.3.0&sort=hw", headers=VIEWER_HEADERS)
+    assert ok.status_code == 200, ok.text

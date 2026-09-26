@@ -1,0 +1,92 @@
+{# fleet_charge_card.html -- D-30 grid-charging schedule (R3.1). Params: charge_windows ({tz, groups:
+   {SCOPE_KIND: [{scope_kind, scope_ref, windows, updated_by, updated_at}]}} or None when the API is
+   absent), charge_scopes, is_operator. Operators edit (two-step save); viewers read. #}
+<section class="og-panel" aria-labelledby="charge-heading" id="charge-schedule">
+  <h2 id="charge-heading">Charging schedule</h2>
+  <p>Solar charging is always allowed; these windows limit charging from the grid. The most specific scope wins:
+    Fleet &lt; Provider &lt; Zone &lt; Substation &lt; Feeder &lt; Bank &lt; Hub.</p>
+  {% if charge_windows is none %}
+  <p class="og-card-meta" id="charge-unavailable">Charging schedule &mdash; available after R3.1 (the charge-windows API is not deployed yet).</p>
+  {% else %}
+  <div class="fl-cards">
+    <div class="fl-card" aria-label="Current schedule">
+      <h3>Windows ({{ charge_windows.tz }})</h3>
+      <ul class="fl-cw-tree" id="charge-list">
+        {% for kind, label in charge_scopes if kind in charge_windows.groups %}
+        <li><span class="kpi-label">{{ label }}</span>
+          <ul>
+            {% for item in charge_windows.groups[kind] %}
+            <li class="fl-cw-row" data-scope="{{ item.scope_kind }}:{{ item.scope_ref }}">
+              <strong>{{ 'All hubs' if item.scope_ref == '*' else item.scope_ref }}</strong>
+              {{ (item.windows or [])|join(', ') or 'no grid charging' }}
+              <span class="og-card-meta">&middot; changed by {{ item.updated_by or '—' }}{% if item.updated_at %} {% with since_iso=item.updated_at, stale_after_s=31536000 %}{% include "_partials/stale_badge.html" %}{% endwith %}{% endif %}</span>
+              {% if is_operator and item.scope_kind != 'FLEET' %}
+              <button type="button" class="btn btn-sm" hx-post="{{ base_path }}/fleet/charge-windows/remove"
+                      hx-vals='{"scope_kind": "{{ item.scope_kind }}", "scope_ref": "{{ item.scope_ref }}"}'
+                      hx-include="#cw-reason" hx-target="#charge-propose-result" hx-swap="innerHTML"
+                      aria-label="Remove override {{ item.scope_kind }} {{ item.scope_ref }}">Remove</button>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+        </li>
+        {% endfor %}
+      </ul>
+      <form class="fl-form fl-form-2" id="charge-effective-form" hx-get="{{ base_path }}/fleet/charge-windows/effective"
+            hx-target="#charge-effective" hx-swap="outerHTML">
+        <div class="fl-field">
+          <label for="cw-preview-hub">Preview effective schedule for hub</label>
+          <div class="fl-combo">
+            <input id="cw-preview-hub" type="text" name="hub_id" autocomplete="off" role="combobox" aria-expanded="false"
+                   aria-autocomplete="list" aria-controls="cw-preview-hub-list" data-combobox="hub">
+            <ul class="fl-listbox" id="cw-preview-hub-list" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <button class="btn fl-submit" type="submit">Preview</button>
+      </form>
+      <div id="charge-effective"></div>
+    </div>
+    {% if is_operator %}
+    <div class="fl-card" aria-label="Edit schedule">
+      <h3>Set windows for a scope</h3>
+      <p class="fl-instr">Pick a scope, set up to 4 windows (they may wrap past midnight), give a reason. Two steps: review, then save.</p>
+      <form id="charge-edit-form" class="fl-form" novalidate
+            hx-post="{{ base_path }}/fleet/charge-windows/propose" hx-target="#charge-propose-result" hx-swap="innerHTML">
+        <div class="fl-field">
+          <label for="cw-scope">Scope</label>
+          <select id="cw-scope" name="scope_kind">
+            {% for kind, label in charge_scopes %}<option value="{{ kind }}">{{ label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="fl-field">
+          <label for="cw-scope-ref">Scope id</label>
+          <div class="fl-combo">
+            <input id="cw-scope-ref" type="text" name="scope_ref" autocomplete="off" role="combobox" aria-expanded="false"
+                   aria-autocomplete="list" aria-controls="cw-scope-ref-list" aria-describedby="cw-scope-ref-hint">
+            <ul class="fl-listbox" id="cw-scope-ref-list" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <div class="fl-cw-windows" id="cw-windows">
+          <div class="fl-cw-window">
+            <input type="time" name="start" value="22:00" aria-label="Window 1 start" required>
+            <span aria-hidden="true">&ndash;</span>
+            <input type="time" name="end" value="06:00" aria-label="Window 1 end" required>
+            <button type="button" class="btn btn-sm fl-cw-del" aria-label="Remove window 1">&times;</button>
+          </div>
+        </div>
+        <button type="button" class="btn btn-sm" id="cw-add">Add window</button>
+        <div class="fl-field">
+          <label for="cw-reason">Reason</label>
+          <input id="cw-reason" type="text" name="reason" required>
+        </div>
+        <button class="btn btn-primary fl-submit" type="submit">Review change (step 1 of 2)</button>
+        <p class="fl-hint" id="cw-scope-ref-hint">The Fleet default applies to every hub without an override.</p>
+        <p class="fl-hint fl-why" aria-live="polite"></p>
+      </form>
+      <div id="charge-propose-result" role="status"></div>
+      <div id="charge-confirm-result" role="status"></div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>

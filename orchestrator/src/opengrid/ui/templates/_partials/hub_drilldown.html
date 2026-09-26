@@ -27,6 +27,9 @@
     </div>
     {% endif %}
     {% if st.fault_code %}<p class="og-degraded-banner">Fault: {{ st.fault_code }}</p>{% endif %}
+    {% if target %}<p class="fl-target" id="drawer-target">Operator target {{ target.p_kw_target }} kW until {{ target.expires_at }} (by {{ target.proposer or '—' }}: {{ target.reason or 'no reason' }})</p>{% endif %}
+    <p class="og-card-meta" id="drawer-charge-window">Grid charging:
+      {% if charge_window and charge_window.windows is defined %}{{ (charge_window.windows or [])|join(', ') or 'not allowed' }} ({{ charge_window.tz or 'America/Chicago' }}) &middot; from {{ charge_window.source.scope_kind if charge_window.source else '?' }}{% if charge_window.source and charge_window.source.scope_ref not in (none, '*') %}:{{ charge_window.source.scope_ref }}{% endif %}{% else %}not available yet{% endif %}</p>
   </section>
   <section class="fl-dsec" aria-label="Last message">
     <h3>Last message</h3>
@@ -61,10 +64,12 @@
   </section>
   <section class="fl-dsec" aria-label="Asset">
     <h3>Asset</h3>
-    <p class="og-card-meta">{% if detail.asset.device_info %}Reported by battery &middot; {{ detail.asset.device_info_at or 'time not recorded' }}{% else %}From records{% endif %}</p>
+    {% set di = detail.asset.device_info or {} %}
+    <p class="fl-hwfw" id="drawer-hwfw"><span>HW rev <strong>{{ di.hardware_revision or '—' }}</strong></span> <span>FW <strong>{{ di.firmware_version or '—' }}</strong></span></p>
+    <p class="og-card-meta">{% if di %}Reported by battery &middot; {{ detail.asset.device_info_at or 'time not recorded' }}{% else %}From records{% endif %}</p>
     <dl class="fl-kv">
-      {% for k, v in (detail.asset.device_info or {}).items() %}<div><dt>{{ k|replace('_', ' ')|capitalize }}</dt><dd>{{ v }}</dd></div>{% endfor %}
-      <div><dt>Installed</dt><dd>{{ detail.asset.install_date or 'not recorded' }}</dd></div>
+      {% for k, v in di.items() if k not in ('hardware_revision', 'firmware_version') %}<div><dt>{{ k|replace('_', ' ')|capitalize }}</dt><dd>{{ v }}</dd></div>{% endfor %}
+      <div><dt>Installed</dt><dd>{{ detail.asset.installed_at or 'not recorded' }}</dd></div>
       <div><dt>Last serviced</dt><dd>{{ detail.asset.last_serviced_at or 'not recorded' }}</dd></div>
       <div><dt>Units</dt><dd>{{ dash(detail.asset.units) }}</dd></div>
       <div><dt>Rated</dt><dd>{{ dash(detail.asset.rated_p_kw) }} kW / {{ dash(detail.asset.rated_e_kwh) }} kWh</dd></div>

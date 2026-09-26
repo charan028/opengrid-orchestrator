@@ -1,0 +1,13 @@
+{# fleet_target_cancel_result.html -- result of `POST /og/api/fleet/manual-targets/{trace}/cancel`. #}
+<div class="fl-ramp-done" role="{{ 'status' if result else 'alert' }}">
+  {% if result %}
+  <p>{% with status='ok', label='CANCELLED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Target cancelled for {{ (result.hub_ids or [])|length }} hub(s); they return to normal dispatch. Trace {{ result.trace_id|default('-') }}.</p>
+  {% elif status_code == 404 %}
+  <p>{% with status='caution', label='ENDED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    This target no longer controls any hub (it expired or was replaced).</p>
+  {% else %}
+  <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message|default('the target could not be cancelled') }}</p>
+  {% endif %}
+</div>
