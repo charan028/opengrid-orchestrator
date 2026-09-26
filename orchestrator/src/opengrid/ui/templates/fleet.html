@@ -94,12 +94,12 @@
       });
     });
 
-    // Live updates (02b S7.2): the fleet stream emits `{"hubs": [{hub_id, health, soc_kwh, p_kw}, ...]}`
-    // roughly once a second -- refresh the matching table row's numeric cells in place rather than
-    // re-fetching the whole screen. The stream payload has no bank_id/zone/last_seen_at, so those
-    // columns (and the age badge, which needs a fresh timestamp the API doesn't send here) stay as of
-    // first paint until the operator reloads or re-filters.
-    og.sse("{{ base_path }}/api/stream/fleet", function (data) {
+    // Live updates (02b S7.2). `opengrid.api` serves no `/api/stream/fleet` (404 on the live stack, U1), so
+    // the `live` badge follows the health stream (~2 s, same cadence). If a frame ever carries
+    // `{"hubs": [{hub_id, soc_kwh, p_kw}, ...]}` the matching rows' numeric cells refresh in place; until
+    // the api owner adds that payload (tests-e2e/ui/NEEDS_FROM_OTHER_OWNERS.md) the table stays as of
+    // first paint and the operator reloads or re-filters.
+    og.sse("{{ base_path }}/api/stream/health", function (data) {
       document.getElementById("fleet-updated").textContent = "live";
       document.getElementById("fleet-updated").dataset.stale = "false";
       if (!data || !Array.isArray(data.hubs)) {

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 VIEWER = "viewer"
 OPERATOR = "operator"
 _ROLE_HEADER = "x-og-role"
+_REMOTE_USER_HEADER = "x-remote-user"
 _KNOWN_ROLES = (VIEWER, OPERATOR)
 
 
@@ -26,7 +27,14 @@ def role_of(request: Request) -> str:
     of the known role names is logged (BUILD.md code-review round item 5) and treated as `"viewer"` --
     Apache is trusted to only ever forward a known role, so an unrecognized value is worth a warning even
     though the request still degrades safely rather than failing closed."""
-    raw = request.headers.get(_ROLE_HEADER, VIEWER).strip().lower()
+    role_header = request.headers.get(_ROLE_HEADER)
+    if role_header is None:
+        # Nothing in the deploy sets X-OG-Role (deploy/apache/opengrid.conf only sets X-Remote-User), so
+        # fall back to the identity the same way `opengrid.api.auth.role_for_identity` does for its
+        # zero-config case: the account literally named `operator` is the operator, anyone else views.
+        user = request.headers.get(_REMOTE_USER_HEADER, "").strip().lower()
+        return OPERATOR if user == OPERATOR else VIEWER
+    raw = role_header.strip().lower()
     if raw in _KNOWN_ROLES:
         return raw
     logger.warning("unknown %s header value=%r; defaulting to %s", _ROLE_HEADER, raw, VIEWER)

@@ -25,7 +25,7 @@ prerequisite; fabricating an age from `seq` alone would be misleading.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query, Request, Response
@@ -42,6 +42,14 @@ router = APIRouter(prefix="/billing")
 _INVOICE_LINES_PATH = "/og/api/billing/invoice-lines"
 _TRACE_EVENTS_PATH = "/og/api/trace/events"
 _TRACE_VERIFY_PATH = "/og/api/trace/verify"
+_DEFAULT_PERIOD_DAYS = 30
+
+
+def api_date(value: str | None, default: datetime) -> str:
+    """`GET /og/api/billing/invoice-lines` requires `from`/`to` as ISO dates (422 otherwise, found on the
+    first live run): default a blank filter to `default`, and cut a `datetime-local` form value
+    (`2026-09-25T10:00`) down to its date part."""
+    return (value or default.isoformat())[:10]
 
 
 def invoice_table_view(lines: list[dict[str, Any]]) -> dict[str, Any]:
@@ -141,7 +149,10 @@ async def billing_page(
 ) -> HTMLResponse:
     """Billing & audit screen (`/og/billing`, viewer role read-only, on-demand per 02b S8)."""
     now = datetime.now(tz=UTC)
-    invoice_params = {k: v for k, v in {"from": from_, "to": to}.items() if v}
+    invoice_params = {
+        "from": api_date(from_, now - timedelta(days=_DEFAULT_PERIOD_DAYS)),
+        "to": api_date(to, now + timedelta(days=1)),
+    }
     trace_params = {k: v for k, v in {"class": class_, "from": from_, "to": to}.items() if v}
     degraded: str | None = None
     lines: list[dict[str, Any]] = []
