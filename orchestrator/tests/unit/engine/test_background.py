@@ -63,6 +63,45 @@ async def test_raw_capture_handler_validates_off_loop_and_drops_invalid(monkeypa
     assert ingested == []
 
 
+def test_the_tick_dispatches_before_gates_energy_and_escalation() -> None:
+    """K13 finding (restart gaps): a restarted engine must resume grants for DELIVERING obligations on
+    its first cycle before any other work -- the guardian hand-off comes before the energy check,
+    escalation and gate scheduling, and a held guardian no longer skips gate scheduling."""
+    import inspect
+
+    import opengrid.engine as engine
+
+    src = inspect.getsource(engine._engine_tick)
+    order = [
+        src.index('phase("lifecycle")'),
+        src.index('phase("allocator")'),
+        src.index('phase("propose")'),
+        src.index('phase("energy_check")'),
+        src.index('phase("escalation")'),
+        src.index('phase("gate_schedule")'),
+    ]
+    assert order == sorted(order)
+    assert "return" not in src[src.index('phase("guardian_check")') : src.index('phase("gate_schedule")')]
+
+
+async def test_periodic_job_can_wait_before_its_first_run() -> None:
+    from opengrid.engine.background import run_periodic
+
+    events: list[str] = []
+
+    async def _job() -> None:
+        events.append("run")
+
+    async def _sleep(seconds: float) -> None:
+        events.append(f"sleep {seconds}")
+        if len(events) >= 3:
+            raise asyncio.CancelledError
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await run_periodic("t", 5.0, _job, clock=lambda: 0.0, sleep=_sleep, initial_delay_s=120.0)
+    assert events == ["sleep 120.0", "run", "sleep 5.0"]
+
+
 async def test_characterization_pass_covers_every_hub_in_the_twin(monkeypatch) -> None:
     import opengrid.fleet as fleet
     import opengrid.pq_ingest as pq_ingest

@@ -363,6 +363,66 @@ async def test_expired_utility_instruction_no_longer_applies() -> None:
     assert cap.max_discharge_kw > 0.0
 
 
+async def test_ogsim_lift_message_unblocks_a_previously_blocked_bank() -> None:
+    """Read-only regression for the ogsim wave-2/blocker-3 fix (`ogsim.scada.anomalies`/
+    `runtime.py`): ending a `utility_instruction` anomaly now republishes the SAME kind with
+    `expires_at` set to its own `issued_at` (already in the past on arrival) instead of the
+    old hardcoded `None` ("never expires"). This feeds that EXACT message shape --
+    `ScadaEngine._instruction_message`'s output for `pending["lift"] = True`, reproduced here
+    without importing `ogsim` (BUILD.md S1: opengrid and ogsim share only `interfaces/`) --
+    into `fleet.ingest_utility_instruction` and confirms `fleet.capability`
+    (`_active_utility_limit_kw`'s consumer) reports the bank unblocked afterward, exactly as
+    it already does for the hand-crafted `test_expired_utility_instruction_no_longer_applies`
+    case above -- this test additionally asserts the BLOCK was actually active first, so it
+    proves a lift, not merely that a pre-expired instruction is ignorable."""
+    now = datetime.now(UTC)
+    hub = _hub("h1", p_kw=10.0)
+    backend = FakeFleetBackend(
+        hubs=[hub],
+        banks=[_bank(kva_rating=1000.0)],
+        states=[HubState(hub_id="h1", soc_kwh=10.0, p_kw=0.0, last_seen_at=now)],
+    )
+    await _seed(backend)
+
+    # 1. The anomaly starts: ogsim publishes a BLOCK with expires_at=None ("never expires" --
+    #    ogsim.scada.runtime.ScadaEngine._instruction_message's shape before a lift).
+    await fleet.ingest_utility_instruction(
+        {
+            "instruction_id": "00000000-0000-7000-8000-000000000004",
+            "bank_id": "bank-1",
+            "kind": "BLOCK",
+            "issued_at": (now - timedelta(seconds=5)).isoformat(),
+            "expires_at": None,
+            "issued_by": "SCENARIO_ANOMALY",
+        }
+    )
+    blocked = await fleet.capability("bank-1", now)
+    assert blocked.max_discharge_kw == 0.0
+    assert blocked.max_charge_kw == 0.0
+
+    # 2. The anomaly ends (natural expiry or manual cancel): ogsim's fix republishes the SAME
+    #    kind with expires_at == issued_at (already past) -- the "lift" message shape. Backed
+    #    off by 1s from `now` (not exactly `now`) so the comparison is robust regardless of
+    #    how much wall-clock time elapses between here and fleet.capability()'s own
+    #    datetime.now(UTC) call below.
+    lift_issued_at = (now - timedelta(seconds=1)).isoformat()
+    await fleet.ingest_utility_instruction(
+        {
+            "instruction_id": "00000000-0000-7000-8000-000000000005",
+            "bank_id": "bank-1",
+            "kind": "BLOCK",
+            "limit_kw": None,
+            "issued_at": lift_issued_at,
+            "expires_at": lift_issued_at,
+            "issued_by": "SCENARIO_ANOMALY",
+        }
+    )
+
+    unblocked = await fleet.capability("bank-1", now)
+    assert unblocked.max_discharge_kw > 0.0
+    assert unblocked.max_charge_kw > 0.0
+
+
 # --- restart recovery ------------------------------------------------------------------------------
 
 

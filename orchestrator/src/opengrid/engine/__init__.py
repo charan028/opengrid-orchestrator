@@ -443,6 +443,9 @@ async def _flush_pq_summaries(state: _EngineState) -> None:
         logger.exception("pq_ingest flush failed; retrying next interval")
 
 
+#: Heavy background work (PQ characterization) waits this long after start-up so dispatch resumes first.
+STARTUP_QUIET_S = 120.0
+
 PROPOSE_CONCURRENCY = 4  # bank batches in flight at once; leaves pool connections for ingest/persistence
 
 
@@ -531,34 +534,10 @@ async def _engine_tick(state: _EngineState) -> None:
     # periodic task (`persist_fleet_state`): nothing in this tick reads it back -- dispatch uses the
     # in-memory twin and the guardian its own MQTT view -- and it was ~700 ms of the tick's p99 (A11).
     # The heartbeat is its own task too (`beat_if_ticking`), gated on this tick completing.
+    # Dispatch first (rule: a restarted engine resumes grants for DELIVERING obligations on its FIRST
+    # cycle, before any other work): lifecycle -> allocator -> guardian hand-off, then the K1 energy
+    # check, mid-window escalation and gate scheduling, none of which changes this cycle's grants.
     phase = state.phase_timer.phase
-
-    with phase("gate_schedule"):
-        triggers = state.gate_scheduler.due_triggers(
-            now,
-            pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
-            due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
-        )
-        # A failed gate is traced + alerted inside run_due_gates (K7/K13).
-        start_gates_in_background(
-            state,
-            triggers,
-            lambda batch: run_due_gates(
-                batch,
-                now=now,
-                run_intake=intake.run_intake_gate,
-                run_gate=selector.run_gate,
-                trace=state.trace,
-                raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
-                on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
-                    contract_id, plan_id, now
-                ),
-                observe_duration=engine_metrics.observe_gate,
-                clear_failure=lambda kind, scope: clear_open_alerts(
-                    state.heartbeat_pool, ALR_SELECTOR_GATE_FAILED, gate_failure_matches(kind, scope)
-                ),
-            ),
-        )
 
     if state.lifecycle_backend is not None:
         with phase("lifecycle"):
@@ -579,9 +558,43 @@ async def _engine_tick(state: _EngineState) -> None:
             now=now,
         )
 
+    with phase("guardian_check"):
+        available = await guardian_is_available(
+            state.backend,
+            now=now,
+            miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold,
+        )
+    if available:
+        grants_by_bank: dict[str, list[Grant]] = {}
+        for grant in grants:
+            grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
+
+        async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
+            await propose_batch_to_guardian(
+                backend=state.backend,
+                trace=state.trace,
+                fleet_module=fleet,
+                cycle_id=cycle_id,
+                bank_id=bank_id,
+                grants=bank_grants,
+                ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+                epoch=state.epoch,
+                seq=state.cycle_seq,
+                now=now,
+                lease_ttl_s=state.lease_ttl_s,
+                cycle_interval_s=state.cycle_interval_s,
+            )
+
+        with phase("propose"):
+            await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+    else:
+        logger.warning(
+            "guardian unavailable this cycle -- holding, no new batches proposed",
+            extra={"cycle_id": cycle_id},
+        )
+
     # K1 (user requirement: energy above reserve checked continuously, EVERY cycle, not just power
-    # headroom): independent of the S1-S7 power-capability path above. Degrade, don't trip (K7) -- a
-    # failure here must never block the allocator's own grant/guardian handoff this cycle.
+    # headroom): independent of the S1-S7 power-capability path above. Degrade, don't trip (K7).
     energy_results: list[EnergySufficiencyResult] = []
     if state.energy_sufficiency_gateway is not None:
         with phase("energy_check"):
@@ -594,41 +607,33 @@ async def _engine_tick(state: _EngineState) -> None:
             await escalate_sustained_shortfalls(state, energy_results, contracts.transition_obligation)
         except Exception:
             logger.exception("shortfall escalation failed this cycle", extra={"cycle_id": cycle_id})
-    with phase("guardian_check"):
-        available = await guardian_is_available(
-            state.backend,
-            now=now,
-            miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold,
-        )
-    if not available:
-        logger.warning(
-            "guardian unavailable this cycle -- holding, no new batches proposed",
-            extra={"cycle_id": cycle_id},
-        )
-        return
 
-    grants_by_bank: dict[str, list[Grant]] = {}
-    for grant in grants:
-        grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
-
-    async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
-        await propose_batch_to_guardian(
-            backend=state.backend,
-            trace=state.trace,
-            fleet_module=fleet,
-            cycle_id=cycle_id,
-            bank_id=bank_id,
-            grants=bank_grants,
-            ledger_version=max((g.ledger_version for g in bank_grants), default=0),
-            epoch=state.epoch,
-            seq=state.cycle_seq,
-            now=now,
-            lease_ttl_s=state.lease_ttl_s,
-            cycle_interval_s=state.cycle_interval_s,
+    with phase("gate_schedule"):
+        triggers = state.gate_scheduler.due_triggers(
+            now,
+            pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
+            due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
         )
-
-    with phase("propose"):
-        await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+        # A failed gate is traced + alerted inside run_due_gates (K7/K13); gates run in the background.
+        start_gates_in_background(
+            state,
+            triggers,
+            lambda batch: run_due_gates(
+                batch,
+                now=now,
+                run_intake=intake.run_intake_gate,
+                run_gate=selector.run_gate,
+                trace=state.trace,
+                raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
+                on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
+                    contract_id, plan_id, now
+                ),
+                observe_duration=engine_metrics.observe_gate,
+                clear_failure=lambda kind, scope: clear_open_alerts(
+                    state.heartbeat_pool, ALR_SELECTOR_GATE_FAILED, gate_failure_matches(kind, scope)
+                ),
+            ),
+        )
 
 
 async def main(cfg: Config) -> None:
@@ -797,6 +802,7 @@ async def main(cfg: Config) -> None:
                         )
                     ),
                     characterize_hubs,
+                    initial_delay_s=STARTUP_QUIET_S,
                 )
             )
             heartbeat_task = asyncio.create_task(

@@ -68,9 +68,13 @@ async def run_periodic(
     *,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+    initial_delay_s: float = 0.0,
 ) -> None:
     """Run `job` every `interval_s` as its own task (never inside the 2 s dispatch tick) until cancelled.
-    A failed run is logged and the next run still happens (K7)."""
+    A failed run is logged and the next run still happens (K7). `initial_delay_s` keeps a heavy job off
+    process start-up, when dispatch must resume first."""
+    if initial_delay_s > 0:
+        await sleep(initial_delay_s)
     while True:
         started = clock()
         try:
