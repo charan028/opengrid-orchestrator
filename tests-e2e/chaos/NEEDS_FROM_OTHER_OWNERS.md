@@ -90,3 +90,8 @@ correctly. The tooling asserts the *specified* behaviour (BUILD.md, 02b S6.4/S6.
   10-12 (feeds: NWS parser, hotfix branch `hotfix/feeds-nws-updatetime` rebased on this main; ERCOT ROPC
   credentials; EIA fallback latency), and the G-14 pre-image veto (qa/merge-notes.md section 17 confirms
   it; docs/demo/NEEDS_FROM_OTHER_OWNERS.md item 10 names the cause).
+13. **`ALR-FEED-STALE` fires for every feed with "stale for over 15s"** (owner: health, seen live on main
+    c5eda88 within a minute of start-up): the evaluator is comparing `feed_status.last_value_at` against
+    the 15 s heartbeat window instead of each product's `[feeds.staleness]` threshold (600 s for prices,
+    hours for day-ahead products). Combined with item 6 in tests-e2e/ui/NEEDS_FROM_OTHER_OWNERS.md
+    (`last_value_at` is a data timestamp), the rule is wrong in both directions.
