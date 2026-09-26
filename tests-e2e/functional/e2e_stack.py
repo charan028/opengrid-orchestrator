@@ -16,6 +16,8 @@ Configuration (all optional; the defaults match `dev/docker-compose.yml` and rea
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -27,6 +29,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import psycopg
+import pytest
 from psycopg.rows import dict_row
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -264,6 +267,90 @@ class Stack:
             timeout_s=timeout_s,
             what=f"a gate decision on opportunity {offer.opportunity_id}",
         )
+
+    def light_window(
+        self, intervals: int, *, max_committed_kw: float, first_offset: int = 1
+    ) -> tuple[datetime, datetime]:
+        """The earliest run of `intervals` intervals whose total live commitments stay at or under
+        `max_committed_kw` -- for scenarios that need a delivery window soon, when `free_window` would be
+        hours away because earlier runs left small commitments in every nearer interval."""
+        base = quarter(0)
+        load = {
+            row["interval_start"]: float(row["kw"])
+            for row in self.rows(
+                """SELECT c.interval_start, sum(c.committed_kw) AS kw FROM og.commitment c
+                   WHERE c.interval_start >= %(a)s
+                     AND NOT EXISTS (SELECT 1 FROM og.commitment n WHERE n.supersedes = c.commitment_id)
+                   GROUP BY 1""",
+                {"a": base},
+            )
+        }
+        for offset in range(first_offset, 88 - intervals):
+            window = [base + INTERVAL * (offset + i) for i in range(intervals)]
+            if all(load.get(start, 0.0) <= max_committed_kw for start in window):
+                return window[0], window[-1] + INTERVAL
+        raise AssertionError(f"no {intervals} intervals with <= {max_committed_kw} kW committed")
+
+    def compose(self, *args: str) -> None:
+        """Run `docker compose` against the dev stack (process-kill scenarios). Skips when docker is absent."""
+        docker = shutil.which("docker")
+        if docker is None:
+            pytest.skip("docker CLI not available for a process-kill scenario")
+        compose_file = str(REPO_ROOT / "dev" / "docker-compose.yml")
+        subprocess.run(  # noqa: S603 -- fixed argv, resolved docker binary, test-authored service names only
+            [docker, "compose", "-f", compose_file, "--profile", "orchestrator", *args],
+            check=True,
+            capture_output=True,
+            timeout=180,
+        )
+
+    def heartbeat_age_s(self, process: str) -> float | None:
+        found = self.rows(
+            "SELECT extract(epoch FROM now() - ts) AS age FROM og.heartbeat WHERE process = %(p)s",
+            {"p": process},
+        )
+        return float(found[0]["age"]) if found else None
+
+    def wait_process_up(self, process: str, *, timeout_s: float = 90.0) -> None:
+        wait_until(
+            lambda: (age := self.heartbeat_age_s(process)) is not None and age < 5.0,
+            timeout_s=timeout_s,
+            what=f"a fresh {process} heartbeat",
+        )
+
+    def manual_command(self, hub_id: str, p_kw: float, *, user: str = "operator") -> httpx.Response:
+        """Operator manual setpoint, both steps (02b S7.3): the confirm answer carries the guardian's verdict."""
+        proposed = self.post(
+            "/fleet/command", {"hub_id": hub_id, "p_kw_setpoint": p_kw, "reason": "e2e"}, user=user
+        )
+        assert proposed.status_code == 202, proposed.text
+        return self.post(f"/fleet/command/{proposed.json()['proposal_id']}/confirm", user=user)
+
+    def online_hub(self, *, exclude_banks: tuple[str, ...] = (), idle: bool = False) -> dict[str, Any]:
+        """An online hub (params + live state), outside `exclude_banks`, optionally one currently at 0 kW."""
+        found = self.rows(
+            """SELECT h.hub_id, h.bank_id, h.p_kw AS p_limit_kw, h.e_kwh, h.r_kwh, s.soc_kwh, s.p_kw
+               FROM og.hub h JOIN og.hub_state s USING (hub_id)
+               WHERE s.health = 'online' AND NOT (h.bank_id = ANY(%(x)s))
+                 AND (NOT %(idle)s OR s.p_kw = 0)
+               ORDER BY s.soc_kwh DESC LIMIT 1""",
+            {"x": list(exclude_banks), "idle": idle},
+        )
+        assert found, "no online hub available"
+        return found[0]
+
+    def inject(self, anomaly: str, target: str, *, duration_s: float = 60.0, **params: Any) -> str:
+        """Inject a simulator anomaly through `ogsim.control` (the same path as its web UI); returns its id."""
+        resp = self.control(
+            "POST",
+            "/api/inject",
+            {"type": anomaly, "target": target, "params": params, "duration": duration_s},
+        )
+        assert resp.status_code == 200, resp.text
+        return str(resp.json()["anomaly"]["id"])
+
+    def clear_anomaly(self, anomaly_id: str) -> None:
+        self.control("DELETE", f"/api/anomalies/{anomaly_id}")
 
     def free_window(
         self, intervals: int, *, first_offset: int = 3, last_offset: int = 88
