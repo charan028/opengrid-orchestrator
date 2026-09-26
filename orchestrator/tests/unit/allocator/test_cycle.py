@@ -101,7 +101,10 @@ def test_ts_05_51_k13_substitution_on_hub_loss_keeps_full_delivery() -> None:
     assert result.shortfalls == ()
 
 
-def _rated_hub(hub_id: str, kw: float, *, health: str = "OK", soc_kwh: float = 1_000_000.0) -> HubSnapshot:
+def _rated_hub(
+    hub_id: str, kw: float, *, health: str = "OK", soc_kwh: float = 1_000_000.0, rated_kw: float | None = 50.0
+) -> HubSnapshot:
+    """`rated_kw=None`: an aggregate test hub above any real home's 20 kW, exempt from the F1 unit cap."""
     return HubSnapshot(
         hub_id=hub_id,
         bank_id="b1",
@@ -110,7 +113,8 @@ def _rated_hub(hub_id: str, kw: float, *, health: str = "OK", soc_kwh: float = 1
         soc_kwh=soc_kwh if health == "OK" else None,
         reserve_kwh=0.0 if health == "OK" else None,
         e_kwh=1_000_000.0,
-        rated_kw=50.0,
+        rated_kw=rated_kw,
+        cell_temp_c=25.0,  # a known, mild cell temperature: no F1 temperature derating in these tests
     )
 
 
@@ -118,7 +122,7 @@ def test_ts_04_08_l0_device_fault_reduction_carries_override_l0() -> None:
     """K13/ES05-S03: a device-safety exclusion (FAULT hub) that leaves the committed kW undeliverable is
     reported R-COMMIT-LOCK-OVERRIDE-L0, and the reduced grant carries that reason (G-19 accepts it)."""
     fleet = FleetState(
-        hubs=(_rated_hub("h1", 0.0, health="FAULT"), _rated_hub("h2", 50.0)),
+        hubs=(_rated_hub("h1", 0.0, health="FAULT"), _rated_hub("h2", 50.0, rated_kw=None)),
         banks=(_bank("b1", 50.0),),
     )
     ledger = LedgerView(calls=(_call("o1", "b1", "T1", 80.0, "PARTNER_CAPACITY", ("h2",)),))
@@ -151,7 +155,7 @@ def test_ts_04_09_l1_reserve_floor_reduction_carries_override_l1() -> None:
 
 def test_a_stale_hub_loss_stays_infeasible_and_a_full_grant_keeps_its_normal_reason() -> None:
     fleet = FleetState(
-        hubs=(_rated_hub("h1", 0.0, health="STALE"), _rated_hub("h2", 50.0)),
+        hubs=(_rated_hub("h1", 0.0, health="STALE"), _rated_hub("h2", 50.0, rated_kw=None)),
         banks=(_bank("b1", 50.0),),
     )
     short = LedgerView(calls=(_call("o1", "b1", "T1", 80.0, "PARTNER_CAPACITY", ("h2",)),))
@@ -218,7 +222,9 @@ def test_ts_05_55_dist_deferral_pi_folds_into_the_committed_grant() -> None:
 def test_ts_05_56_no_flapping_across_consecutive_cycles_within_dwell() -> None:
     fleet = FleetState(hubs=(_hub("h1", "b1", 50.0),), banks=(_bank("b1", 100.0),))
     ledger = LedgerView(calls=())
-    schedule = Schedule(prices=(PriceSignal(bank_id="b1", price_usd_per_mwh=100.0),))
+    schedule = Schedule(
+        prices=(PriceSignal(bank_id="b1", price_usd_per_mwh=100.0, threshold_usd_per_mwh=30.0),)
+    )
     dwell_states: dict = {}
     r1 = cycle(_T0, fleet, ledger, schedule, {}, (), dwell_states=dwell_states)
     assert r1.grants[0].granted_kw == 100.0
@@ -226,7 +232,9 @@ def test_ts_05_56_no_flapping_across_consecutive_cycles_within_dwell() -> None:
     # Price crashes on the very next 2 s tick; dwell keeps the schedule ON.
     from datetime import timedelta
 
-    schedule_low = Schedule(prices=(PriceSignal(bank_id="b1", price_usd_per_mwh=0.0),))
+    schedule_low = Schedule(
+        prices=(PriceSignal(bank_id="b1", price_usd_per_mwh=0.0, threshold_usd_per_mwh=30.0),)
+    )
     r2 = cycle(_T0 + timedelta(seconds=2), fleet, ledger, schedule_low, {}, (), dwell_states=dwell_states)
     assert r2.grants[0].granted_kw == 100.0
 

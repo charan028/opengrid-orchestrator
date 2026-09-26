@@ -1007,7 +1007,7 @@ async def test_default_guardian_signs_a_dual_unit_home_at_its_20_kw_rating(
     wire_default_passing_scenario(fakes, proposal)
     hub = make_hub_snapshot(soc_kwh=60.0, prev_p_kw=-20.0, p_kw=20.0)
     fakes.hubs.hubs[proposal.items[0].hub_id] = replace(
-        hub, params=replace(hub.params, e_kwh=78.4, r_kwh=15.68)
+        hub, params=replace(hub.params, e_kwh=78.4, r_kwh=15.68, units=2)
     )
     fakes.banks.banks[BANK_ID] = make_bank_snapshot(bank_load_kva=100.0, kva_rating=600.0)
 
@@ -1016,6 +1016,24 @@ async def test_default_guardian_signs_a_dual_unit_home_at_its_20_kw_rating(
     )
 
     assert "G-02" not in verdict.vetoed_rule_ids and verdict.outcome == "PASS"
+
+
+async def test_default_guardian_vetoes_a_mis_seeded_single_unit_home_at_20_kw(
+    fakes, guardian_config, signing_seed
+):
+    """Review fix (G-02 dead per-unit cap): p_kw mis-seeded at 20 kW on a single-unit home is vetoed."""
+    proposal = make_proposal(p_kw_setpoint=-20.0)
+    wire_default_passing_scenario(fakes, proposal)
+    hub = make_hub_snapshot(soc_kwh=30.0, prev_p_kw=-20.0, p_kw=20.0)
+    fakes.hubs.hubs[proposal.items[0].hub_id] = replace(hub, params=replace(hub.params, units=1))
+    fakes.banks.banks[BANK_ID] = make_bank_snapshot(bank_load_kva=100.0, kva_rating=600.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert verdict.outcome in ("VETOED", "PARTLY_VETOED") and "G-02" in verdict.vetoed_rule_ids
+    assert verdict.signature is None
 
 
 # --- TS-06-16: ZONE-scope safe stop ----------------------------------------------------------------------
@@ -1071,6 +1089,43 @@ async def test_clock_hold_raises_alr_clock_quality_once_and_clears_on_recovery(
     await service.evaluate_and_sign(make_batch_row(proposal))
     await service.evaluate_and_sign(make_batch_row(proposal))
     assert alerts.calls == [("raise", "ALR-CLOCK-QUALITY", "critical"), ("clear", "ALR-CLOCK-QUALITY")]
+
+
+async def test_a_failed_verdict_trace_is_counted_and_alerted_and_the_verdict_stands(
+    fakes, guardian_config, signing_seed
+):
+    """K11/K7: `_trace_verdict`'s False return is no longer ignored -- a metric and a warning alert -- but
+    the control flow is unchanged: the verdict is still signed and returned."""
+    from opengrid.guardian.service import guardian_trace_verdict_failures_total
+
+    from .conftest import FailingTrace
+
+    alerts = _Alerts()
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.trace = FailingTrace()
+    fakes.proposals.add(proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+    service.ports = replace(fakes.as_ports(), alerts=alerts)
+    before = guardian_trace_verdict_failures_total._value.get()
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.outcome == "PASS" and verdict.signature is not None
+    assert guardian_trace_verdict_failures_total._value.get() == before + 1
+    assert alerts.calls == [("raise", "ALR-TRACE-VERDICT-WRITE-FAILED", "warning")]
+
+
+async def test_a_written_verdict_trace_raises_no_alert(fakes, guardian_config, signing_seed):
+    alerts = _Alerts()
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+    service.ports = replace(fakes.as_ports(), alerts=alerts)
+
+    await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert alerts.calls == []
 
 
 async def test_batch_outcome_counts_only_explicit_vetoes(fakes, guardian_config, signing_seed):

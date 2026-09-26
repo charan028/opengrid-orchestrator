@@ -1,0 +1,83 @@
+{
+  "count": 5,
+  "consuming_count": 1,
+  "sites": [
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000c6",
+      "site_id": "site-dc-01",
+      "name": "Data center (demo)",
+      "service_type": "DATA_CENTER",
+      "contract_services": [
+        "DATA_CENTER"
+      ],
+      "lat": 32.948,
+      "lon": -96.729,
+      "coord_source": "placeholder",
+      "kw": 2400.0,
+      "consuming": true,
+      "reading_ts": "2026-09-26T19:35:13.869496+00:00",
+      "reading_quality": "GOOD",
+      "has_active_contract": true
+    },
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000c7",
+      "site_id": "corridor-pipe-01",
+      "name": "Pipeline AC corridor (demo)",
+      "service_type": "PIPELINE_AC",
+      "contract_services": [],
+      "lat": 29.905,
+      "lon": -96.876,
+      "coord_source": "placeholder",
+      "kw": null,
+      "consuming": false,
+      "reading_ts": null,
+      "reading_quality": null,
+      "has_active_contract": false
+    },
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000c9",
+      "site_id": "site-warehouse-01",
+      "name": "Mobile storage warehouse (demo)",
+      "service_type": "MOBILE_STORAGE",
+      "contract_services": [],
+      "lat": 29.801,
+      "lon": -95.302,
+      "coord_source": "placeholder",
+      "kw": null,
+      "consuming": false,
+      "reading_ts": null,
+      "reading_quality": null,
+      "has_active_contract": false
+    },
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000ca",
+      "site_id": "large-load-crypto-01",
+      "name": "Large flexible load (demo)",
+      "service_type": "LARGE_LOAD",
+      "contract_services": [],
+      "lat": 30.655,
+      "lon": -97.001,
+      "coord_source": "placeholder",
+      "kw": null,
+      "consuming": false,
+      "reading_ts": null,
+      "reading_quality": null,
+      "has_active_contract": false
+    },
+    {
+      "customer_id": "cust-x",
+      "site_id": "site-unknown",
+      "name": "site-unknown",
+      "service_type": null,
+      "contract_services": [],
+      "lat": null,
+      "lon": null,
+      "coord_source": "unlocated",
+      "kw": -10.0,
+      "consuming": false,
+      "reading_ts": "2026-09-26T19:35:13.869496+00:00",
+      "reading_quality": "GOOD",
+      "has_active_contract": false
+    }
+  ]
+}

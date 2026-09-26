@@ -67,6 +67,8 @@ class FakeStore:
     _pending_stop_proposals: dict[str, tuple[str, str]] = field(default_factory=dict, init=False)
     stop_events: dict[tuple[str, str], tuple[str, datetime]] = field(default_factory=dict)
     as_deployments: dict[UUID, dict[str, Any]] = field(default_factory=dict)
+    #: obligation_id -> {service_type, state, duration_minutes} for `get_as_award`.
+    as_awards: dict[UUID, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.alerts = [
@@ -426,6 +428,9 @@ class FakeStore:
             "cancelled": False,
         }
         return deployment_id
+
+    async def get_as_award(self, obligation_id) -> dict[str, Any] | None:
+        return self.as_awards.get(obligation_id)
 
     async def list_active_as_deployments(self) -> list[dict[str, Any]]:
         now = datetime.now(UTC)

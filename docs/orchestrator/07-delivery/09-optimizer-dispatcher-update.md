@@ -30,13 +30,13 @@ Read first: `06-reviews/06-first-principles-review.md` (P1–P8, §5.1 canonical
 | D3 | Priority REG vs FREE | **Lexicographic, two stages** at every selector gate: stage R (commitments, then new regulated capacity), then stage F (net value on the residual). There is no premium weight | P4, P5, P7; review §5.4-1 |
 | D4 | Charging sources | $g=g^{sol}+g^{grid}$. The solar share is at least 30% per regulated contract and accounting period. It is a **soft floor** (priced slack, reported), limited by the forecast solar availability | P7 |
 | D5 | Delivery charge (M1) | M1 applies **only** to kWh drawn from the grid in the ERCOT competitive area (TDSP, flat per kWh, `tdsp_tariffs.toml`). It does not apply in AE/CPS territory, where the utility's own charging terms carry every adder, or to behind-the-meter PV surplus | P7 |
-| D6 | AS energy hold (Frank #6) | While an award is held, keep $e\ge\sum_kH_kr/\eta_d$ above the 20% floor: $H_{NSPIN}=4$ h and $H_{ECRS}=1$ h (NPRR1282, 2025-12-05). This goes into the ONE floor C3 and is checked by the guardian (new G-32) | P1, P4 |
+| D6 | AS energy hold (Frank #6) | While an award is held, keep $e\ge\sum_kH_kr/\eta_d$ above the 20% floor: $H_{NSPIN}=4$ h and $H_{ECRS}=1$ h (NPRR1282, 2025-12-05). This goes into the ONE floor C3, is enforced by the selector and the engine (S6 hold floor), and is measured by the invariants checker (`CHECK_AS_HOLD`). It is **not** a guardian check | P1, P4 |
 | D7 | Evening ramp | There is **no separate hard hold**. The value emerges from duck-curve scenarios. The plan publishes a water value $\nu_{a,t}$ and a hold floor. RT spends headroom energy below the plan only when $\lambda^{RT}\ge\nu+$ hysteresis. This replaces the fixed $30/MWh threshold | P7 (no rule duplicating a price) |
 | D8 | Wear (Frank #7) | **Wear is charged on AC kWh actually discharged, at the asset-class rate, for every purpose.** It is never charged on capacity held, on reservations, or on charging. One function (`core.economics.wear_cost`) is used by both the selector and settle | P1, P7, P8 |
 | D9 | Commitment basis | FIXED: $y=\bar y$ (schedule). NEED: $\bar y$ is a reserved maximum. It is locked in power, and its energy hold is $\bar y\,h^{need}$. Delivery $y\le\bar y$ follows the need scenario | P4 |
 | D10 | Best effort after a shortfall | The target stays $Q$ and is never reduced. The shortfall slack is priced at $\beta_o$ from the first short interval. Recovery charging for the obligation's assets is allowed in otherwise-barred windows | P4 (K13 addition) |
 | D11 | Substation assets | A new asset class `SUBSTATION_BESS` has its own SoC, PCS rating, POI and transformer limits, ramp and wear. The default is **20 MW / 2 h (40 MWh)**, RTE 0.88 and a 20% floor, with 4 h as a sensitivity | P1 |
-| D12 | Flow limits | Seven families (F1–F7, §1.9) at the selector, SCED, RT and PI layers, each re-checked by the guardian on its own reads (G-02 changed, G-26…G-32 new). K4 is extended | P1, P2 |
+| D12 | Flow limits | Seven families (F1–F7, §1.9) at the selector, SCED, RT and PI layers, each re-checked by the guardian on its own reads (G-02 changed, G-26…G-32 new; G-33 territory), except F7 (the energy hold), which the selector and engine enforce and the invariants checker measures. K4 is extended | P1, P2 |
 | D13 | No wash trades | There is no charging inside the delivery window of a REG obligation the asset serves (C7(b) generalised). Delivery is measured net at the meter or POI (prototype finding, §9) | P7, P8 |
 
 ### 0.2 Findings in the code as built (relevant gaps; file:line)
@@ -276,7 +276,7 @@ throughput curve (OQ-15).
   - the **planned floor** $e^{plan}_{a,t}=\min_\omega e^*_{a,t,\omega}$ (the non-anticipative part);
   - the **water value** $\nu_{a,t}=\sum_\omega|\text{dual C1}|$.
 - **RT (S6).** Headroom is discharged only if $\lambda^{RT}_{z(a)}\ge\nu_{a,t}+\theta^{hyst}$, and only down to $e^{plan}$. Going below
-  $e^{plan}$ needs $\lambda^{RT}\ge\nu_{a,t^{ramp}}$, the ramp-hour water value. It never goes below $e^{hold}$ (guardian G-32). This
+  $e^{plan}$ needs $\lambda^{RT}\ge\nu_{a,t^{ramp}}$, the ramp-hour water value. It never goes below $e^{hold}$ (engine S6; measured by `CHECK_AS_HOLD`). This
   replaces the fixed $30/MWh threshold (G9).
 - **Prototype evidence (§9).** The water value of an Oncor bank is about $82/MWh at 03:00, because night charging costs
   $\lambda$ plus the $60/MWh M1 charge. The 2 h substation asset's water value rises to $171/MWh inside the REG window.
@@ -398,10 +398,10 @@ $\le\tau^{pk}$ and within the hub's reported peak budget $B_i$ (kW·s).
 | F1 | **G-02 changed** | Base BMS datasheet, hub telemetry `cell_temp_c` and `p_dis_max_kw` (new), NWS | TS-19-20, 21, 22 |
 | F2 | **G-26 new** | Base install records (interconnection agreement per premise), telemetry `meter_kw`/`pv_kw` (new) | TS-19-23, 24, 25 |
 | F3 | G-03 (built) · **G-27 transformer** · **G-28 feeder** · **G-29 substation** | Utility GIS/AMI (transformer to meter), feeder and substation SCADA, interconnection agreements | TS-19-26 … 30 |
-| F4 | **G-30 new** + G-29 | Territory polygons (§3), contract market | TS-19-31, 32 |
+| F4 | **G-30 new** (territory export) + **G-33 new** (market segregation, §11.6) | Territory polygons (§3), contract market | TS-19-31, 32 |
 | F5 | **G-31 new** | Base (inverter datasheet), telemetry `peak_budget_kws` (new) | TS-19-33, 34 |
-| F6 | G-04/05/06 changed | Asset registry, utility agreement | TS-19-35 |
-| F7 | **G-32 new** | Ledger (AS awards, reservations), telemetry SoC | TS-19-36, 37 |
+| F6 | G-04/05/06 changed; **G-32 new** (feeder ramp, non-firm steps) | Asset registry, utility agreement | TS-19-35 |
+| F7 | **none** (not a guardian check): selector C3′ + engine S6; checker `CHECK_AS_HOLD` | Ledger (AS awards, reservations), telemetry SoC | TS-19-36, 37 |
 
 ---
 
@@ -458,28 +458,34 @@ at RT prices, with commitments as parameters (review §5.2).
 ### 2.5 Guardian: new and changed rules (summary)
 
 **Numbering.** `00-invariants.md` fixes G-21…G-25 for K14. `02a` §6.1's "supplemental" G-21…G-31 table already
-collided with those numbers and was never built (`guardian/checks.py` has G-01…G-25 only). This spec assigns **G-26…G-32**
-canonically and asks `02a` §6.1 to retire its supplemental table (§10).
+collided with those numbers and was never built (`guardian/checks.py` has G-01…G-25 only). This spec assigns **G-26…G-33**
+canonically, **as built by SAFETY on 2026-09-26** (`guardian/flow_checks.py`), and asks `02a` §6.1 to retire its
+supplemental table (§10).
 
 | ID | Rule | Kind | Invariant |
 |---|---|---|---|
 | G-01 | Floor generalised to asset classes (substation floor fraction per asset) | item | K1 |
 | **G-02 (changed)** | Derated power $P_{max}(SoC,T)$, charge and discharge; continuous rating (the peak is only via G-31) | item | K4 |
 | G-03 | Bank kVA (built); generalised to the substation-asset transformer | batch | K4 |
-| G-04/05/06 | Per-asset ramp; the feeder ramp also for non-firm steps; the substation asset has its own G-05 budget | item/batch | K4 |
-| G-09 | Unchanged (ledger version). The hold is checked separately by G-32 | batch | K2 |
+| G-04/05/06 | Per-asset ramp; the substation asset has its own G-05 budget (the non-firm feeder ramp is G-32) | item/batch | K4 |
+| G-09 | Unchanged (ledger version) | batch | K2 |
 | G-19 | Also covers need-basis REG, and FREE grants never using REG-reserved kW | obligation | K13 |
 | **G-26** | Home meter export and import limit, net of home load | item | K4 |
-| **G-27** | Service-transformer loading, both directions | group | K4 |
+| **G-27** | Service-transformer loading, both directions | item (every item under the offending transformer) | K4 |
 | **G-28** | Feeder thermal and feeder-head reverse flow | batch | K4 |
-| **G-29** | Substation asset POI and substation-transformer limit, both directions | batch | K4, K15 |
-| **G-30** | Territory: market segregation per item (and the boundary via G-29) | item | K15 |
+| **G-29** | Substation asset POI and substation-transformer limit, both directions | batch | K4 |
+| **G-30** | Territory export: no net reverse flow out of a regulated territory (its boundary substations) | batch | K15 (c) |
 | **G-31** | Sustained vs peak over the lease | item | K4 |
-| **G-32** | Energy hold (AS $H_k$, firm owed, need basis) against headroom discharge over the lease | item (headroom items) | K13 (energy) |
+| **G-32** | Feeder ramp for **non-firm** steps (G-06 covers firm events only) | batch | K4 (e) |
+| **G-33** | K15 market segregation: `market.check_territory` per item (§11.6) | item | K15 (a, b) |
 
-`guardian/service.py:47` `_ITEM_LEVEL_RULES` gains G-26, G-30, G-31 and G-32. A new **group-level** class (G-27) vetoes every
-item of the batch that sits under the offending transformer; the verdict is PARTLY_VETOED if other items remain (a change
-to `_verdict_outcome`, `guardian/service.py:764-769`).
+**The AS energy hold (Frank #6, D6, F7) is NOT a guardian check.** It is enforced by the selector (C3′) and the
+engine/allocator (S6 hold floor), and measured post hoc by the invariants checker (`CHECK_AS_HOLD`). Earlier
+drafts of this spec called it "G-32"; that number is now the non-firm feeder ramp.
+
+`guardian/service.py` `_ITEM_LEVEL_RULES` (as built) holds G-01, G-01-ENERGY, G-02, G-04, G-24, G-26, G-27, G-31 and
+G-33. A G-27 violation vetoes every item of the batch under the offending transformer; the verdict is PARTLY_VETOED if
+other items remain.
 
 ### 2.6 Guardian flow-limit checks in detail (owner clarification: independent reads, fail closed)
 
@@ -496,7 +502,7 @@ The rules below apply to every check in this section.
 - **Relief always passes.** A batch that reduces the magnitude of an already-violated flow is never vetoed, as G-03 does at
   `guardian/checks.py:94-97`.
 
-The seven checks follow. For each: the inequality, the guardian's own data, the fail-closed rule, the veto semantics, and
+The checks follow (G-33 is in §11.6). For each: the inequality, the guardian's own data, the fail-closed rule, the veto semantics, and
 the tests.
 
 **G-02 (changed): derated power (F1).**
@@ -559,30 +565,31 @@ the tests.
 - **Negative tests:** two banks whose individually safe batches jointly reverse the feeder head are vetoed; stale SCADA
   vetoes increases and passes relief.
 
-**G-29 (new): substation asset POI and substation transformer (F3, F4).**
+**G-29 (new): substation asset POI and substation transformer (F3).**
 
 - **Inequality:**
   POI: $-P^{POI,exp}_s\le p^{cmd}_s\le P^{POI,imp}_s$ and $|p^{cmd}_s|\le P^{cont}_s$ (or G-31).
   Transformer: $-R^{rev}_\sigma\le L^G_\sigma+\sum_{\text{this cycle on }\sigma}\Delta p\le\rho S^{xf}_\sigma$.
-  $R^{rev}_\sigma=0$ for $\sigma\in\Sigma^u$ (K15).
+  The territory boundary ($R^{rev}_\sigma=0$ for $\sigma\in\Sigma^u$) is G-30.
 - **Own data:** substation meter/SCADA (own port); `og.asset` POI and ratings; `og.substation`.
 - **Fail closed:** stale substation SCADA vetoes increases; a missing POI row means zero dispatch.
 - **Veto:** batch-level, VETOED.
 - **Property test:** random asset and bank batches on one $\sigma$; the bound holds.
-- **Negative tests:** a 20 MW discharge at 15 MW substation load in a territory is vetoed; stale SCADA vetoes.
+- **Negative tests:** a POI export above its limit is vetoed; stale SCADA vetoes increases.
 
-**G-30 (new): territory market segregation (F4).**
+**G-30 (new): territory export, no reverse flow out of a regulated territory (F4, K15 c).**
 
-- **Inequality:**
-  For item $i$ granted to $o$: $m(o)=\mathrm{REG}(u)\Rightarrow terr(i)=u$.
-  Headroom or $m(o)=\mathrm{FREE}\Rightarrow terr(i)\in\{C\}\cup\{u:\varphi^{acc}_u=1\}$.
-  The boundary part is G-29.
-- **Own data:** `og.hub.territory_id` / `og.asset.territory_id`; `og.contract.market`, read independently.
-- **Fail closed:** an unknown territory or market is a veto.
-- **Veto:** item-level, PARTLY_VETOED.
-- **Property test:** random fleet and contract mixes give zero cross-territory grants signed.
-- **Negative tests:** an AE hub granted to an Oncor-area obligation is vetoed; an AE hub on FREE headroom with access off is
-  vetoed.
+- **Inequality:** for the regulated territory $u$ of the batch's bank, the Base net injection across $u$'s boundary
+  substations stays within native load: $L^G_{u}+\sum_{\text{this cycle, banks and assets in }u}\Delta p\ \ge\ 0$ with
+  $R^{rev}=0$ (C25 c). Competitive-area banks are not checked by G-30.
+- **Own data:** the territory's aggregate flow from the guardian's own topology/SCADA port (`territory_flow`, all banks
+  whose zone maps to $u$ in `[zone_territory]`); the per-cycle accumulator across bank batches.
+- **Fail closed:** stale or missing territory flow vetoes any batch that increases discharge in the territory; relief passes.
+- **Veto:** batch-level, VETOED.
+- **Property test (TS-19-32):** Base net injection at territory boundary substations is ≤ 0 in all fixtures.
+- **Negative tests:** a 20 MW discharge at 15 MW territory load is vetoed; stale territory SCADA vetoes increases.
+
+Market segregation per item (K15 a/b) is **G-33**, specified in §11.6.
 
 **G-31 (new): sustained vs peak (F5).**
 
@@ -595,18 +602,23 @@ the tests.
 - **Property test:** random budget and TTL combinations.
 - **Negative tests:** a 30 s lease above continuous with $\tau^{pk}=10$ s is vetoed.
 
-**G-32 (new): energy hold (F7, Frank #6).**
+**G-32 (new): feeder ramp for non-firm steps (F6).**
 
-- **Inequality:** for each asset $a$ in the batch,
-  $\sum_{i\in a}(SoC^G_i-\text{floor}_i)-\sum_{i\in a,\ \text{headroom}}|p^{cmd}_i|\,TTL/\eta_d\ \ge\ e^{hold,G}_{a,t}$,
-  where $e^{hold,G}=\sum_kH_kR^{AS}_{a,k,t}/\eta_d+\sum_oR^{owed}_{o,a,t}/\eta_d$.
-- **Own data:** the ledger (AS awards and reservations), read by the guardian, **not the plan**; telemetry SoC.
-- **Fail closed:** stale hubs count 0 kWh. A missing award row is the award as recorded in `og.reservation`; if that is
-  unreadable, the verdict is TIMEOUT (hold).
-- **Veto:** item-level on headroom items only. Items of the obligation owning the hold are exempt; a deployment consumes its
-  own hold.
-- **Property test:** random awards and SoC; the headroom never erodes the hold.
-- **Negative tests:** a Non-Spin award of 100 kW with 350 kWh above the floor vetoes any headroom discharge.
+- **Inequality:** $|\sum_{\text{banks on }f,\ \text{this step}}\Delta p|\le$ the feeder's ramp ceiling pro rata, using the
+  **non-firm** cap (`non_firm_ramp_cap_kw_per_min`, default 10 MW/min) for market, AS and headroom steps
+  (`core.limits.check_feeder_ramp`). G-06 keeps firm events. A single 20 MW asset alone can exceed the fleet's non-firm
+  cap on its own feeder, which is why this is a separate check.
+- **Own data:** the batch setpoints against the guardian's last signed setpoints per hub; `og.bank.feeder_id`; the
+  per-cycle feeder accumulator (as G-06).
+- **Fail closed:** a bank with no feeder is checked as a feeder of one bank.
+- **Veto:** batch-level, VETOED, reason `R-FEEDER-RAMP-NON-FIRM`.
+- **Negative tests:** a non-firm step above the cap on one feeder is vetoed; the same step as a firm event passes G-32 and
+  is judged by G-06.
+
+**The AS energy hold (F7, Frank #6, D6) is not a guardian check.** The hold
+$e\ge\sum_kH_kr/\eta_d$ (plus firm energy owed and need-basis energy) is enforced by the selector (C3′) and by the
+engine/allocator (S6 discharges headroom only down to $e^{hold}$). The invariants checker measures it post hoc as
+`CHECK_AS_HOLD` (TS-19-36/37 run against the allocator and the checker, not the guardian).
 
 **Hub telemetry additions** (interface schema change, additive): `meter_kw`, `pv_kw`, `cell_temp_c`, `p_dis_max_kw`,
 `p_ch_max_kw`, `peak_budget_kws`. The guardian consumes them through its own hub-state port. The sim publishes them from its
@@ -760,7 +772,7 @@ The fallback remains F1 → F2 → F3 (`03` §6.9).
 | K5 | A utility's operating instruction in its territory is L2 (hard). The utility's capacity *dispatch call* under a REG contract is a T1 contract call, not L2 |
 | K6–K8, K10–K12 | Unchanged. K7: a substation asset's lease expiry falls back to its own local schedule. Above-continuous leases are ≤ $\tau^{pk}$ (F5) |
 | K9 | New loops: the substation POI limiter (PI, one per substation quantity); the feeder limiter is a clamp (no integrator). The DC fast loop stays P-only |
-| K13 | The energy form is extended: the AS hold $H_k$ (Frank #6) and need-basis energy go into C3′ and G-32. The lock applies across markets. Best effort per D10 |
+| K13 | The energy form is extended: the AS hold $H_k$ (Frank #6) and need-basis energy go into C3′ and the engine S6 hold floor, measured by the checker (`CHECK_AS_HOLD`); it is not a guardian check. The lock applies across markets. Best effort per D10 |
 | K14 | The substation PCS is a single inverter ($N=1$, no √N diversity, `06` §3.2). Its envelope is checked on its own characterisation |
 | **K15 (new)** | **Territory** (text below) |
 
@@ -775,7 +787,7 @@ and territory boundary, charge and discharge flows stay within their limits in *
 - (d) substation asset POI import/export and substation-transformer limits;
 - (e) hub, asset, fleet and feeder ramps, with no synchronized steps.
 
-Enforced at selector (C5′, F2/F3 rows) → allocator (per-hub, group, feeder and substation caps) → guardian G-02/03/04/05/06/26/27/28/29/31
+Enforced at selector (C5′, F2/F3 rows) → allocator (per-hub, group, feeder and substation caps) → guardian G-02/03/04/05/06/26/27/28/29/30/31/32
 → hub firmware (BMS current limits, UL 1741 SB export limiter). Fail-safe: VETO; re-solve without the vetoed items.
 
 **K15 — territory (new).** Three parts:
@@ -785,7 +797,7 @@ Enforced at selector (C5′, F2/F3 rows) → allocator (per-hub, group, feeder a
 - Base's net injection at every boundary substation of $u$ stays ≤ 0 (energy is consumed inside the territory). Charging is
   priced and settled under the asset's own territory tariff.
 
-Principle P2. Enforced at contracts admission → selector C25 → allocator eligibility → guardian G-30 (+ G-29) → settle
+Principle P2. Enforced at contracts admission → selector C25 → allocator eligibility → guardian G-33 (market segregation) + G-30 (territory export) → settle
 tariff attribution. Fail-safe: VETO the item; a shortfall is recorded against the same obligation (K13 best effort).
 Proven by a property test over random fleet and contract mixes, and by the checker counters.
 
@@ -823,7 +835,7 @@ validate.
 | WP-2M-04 contracts | contracts | market, basis, REG terms, access flag, solar floor; admission territory check `R-TERRITORY-INELIGIBLE` | 03 |
 | WP-2M-05 selector v2 | selector | §2.1: C3′ with $r$, C5′, C7(b)′, C12′/″, C25, C27, C28, F2/F3 rows, lexicographic solve, validator, plan outputs ($\nu$, $e^{hold}$, $e^{plan}$) | 01–04 |
 | WP-2M-06 allocator | allocator | §2.3/§2.4: territory filter, derated and export caps, transformer group caps, feeder and substation budgets, water-value S6 and hold floor, charging by source, substation setpoint, POI PI, peak leases | 02, 03, 05 (plan outputs) |
-| WP-2M-07 guardian | guardian (security validates) | G-02 change, G-26…G-32, group-level veto semantics, own-read ports (telemetry fields, feeder and substation SCADA, territory tables) | 02, 03 |
+| WP-2M-07 guardian | guardian (security validates) | G-02 change, G-26…G-33 (as built; no AS-hold check), group-level veto semantics, own-read ports (telemetry fields, feeder and substation SCADA, territory tables) | 02, 03 |
 | WP-2M-08 settle economics | settle | charge ledger, stored-energy cost attribution (fixes G4), wear unification (fixes G3), headroom P&L, econ rollup, payback | 02, 04 |
 | WP-2M-09 invariants checker | invariants (QA) | §6 check names | 03, 07 |
 | WP-2M-10 sims | sims (independent, not orchestrator) | AE-territory banks on LZ_AEN; a substation asset sim (20 MW/2 h); telemetry fields from the household model; per-hub temperature; transformer groups; feeder and substation SCADA; duck-curve price replay | parallel from day 1 |
@@ -835,10 +847,10 @@ independently.
 **Minimal viable for the regulated pilot (MVP-R, AE, home batteries):**
 
 - WP-01 (zone pricing), and D8 (the wear rule) in the selector and settle;
-- K15 end to end: C25 in the selector, the allocator filter, G-30, `K15_*` checks and the admission check;
+- K15 end to end: C25 in the selector, the allocator filter, G-33 and G-30, `K15_*` checks and the admission check;
 - REG contract, fixed basis, AE TOU charging (no M1) and M1 on FREE charging; the soft solar floor with availability from
   NWS plus ERCOT PV;
-- C3′ with AS variables and G-32 (Frank #6). Existing `ERCOT_AS` needs it regardless;
+- C3′ with AS variables, the engine S6 hold floor and the checker's `CHECK_AS_HOLD` (Frank #6). Existing `ERCOT_AS` needs it regardless;
 - lexicographic stages R and F; the RT water-value threshold and hold floor;
 - flow limits for homes: F1 (G-02 change), F2 (G-26), F3 transformer (G-27 with clip-to-safe defaults where mapping is
   missing), F3 feeder (G-28), F5 (G-31, trivial while peak = continuous), and the `K4_*` checker measurements;
@@ -867,9 +879,9 @@ voltage-correlation transformer inference; AE ERCOT access if granted (OQ-5).
 | ES19-S12 | F1 derating (allocator + G-02) | TS-19-20, 21, 22 |
 | ES19-S13 | F2 home export (allocator + G-26) | TS-19-23, 24, 25 |
 | ES19-S14 | F3 transformer, feeder, substation (allocator + G-27/28/29) | TS-19-26 … 30 |
-| ES19-S15 | F4 territory boundary (G-29/30) | TS-19-31, 32 |
+| ES19-S15 | F4 territory boundary and segregation (G-30/G-33) | TS-19-31, 32 |
 | ES19-S16 | F5 peak vs sustained (G-31) | TS-19-33, 34 |
-| ES19-S17 | F6 substation ramp; F7 hold (G-32) | TS-19-35, 36, 37 |
+| ES19-S17 | F6 substation and non-firm feeder ramp (G-04, G-32); F7 hold (selector, engine, `CHECK_AS_HOLD`) | TS-19-35, 36, 37 |
 | ES19-S18 | checker K4_*/K15_*/K13_ENERGY_HOLD | TS-19-38, 39, 40 |
 | ES19-S19 | performance at scale | TS-19-41 |
 
@@ -907,13 +919,13 @@ voltage-correlation transformer inference; AE ERCOT access if granted (OQ-5).
 | TS-19-28 | N | G-28: two individually safe bank batches jointly reversing the feeder are vetoed |
 | TS-19-29 | N | G-28: stale feeder SCADA vetoes increases, passes relief |
 | TS-19-30 | N | G-29: POI export > limit vetoed; stale substation SCADA vetoes increases |
-| TS-19-31 | N | G-30: an AE hub on an Oncor obligation is vetoed; an AE hub on FREE headroom with access 0 is vetoed |
-| TS-19-32 | P | G-29/C25(c): Base net injection at territory boundary substations ≤ 0 in all fixtures |
+| TS-19-31 | N | G-33: an AE hub on an Oncor obligation is vetoed; an AE hub on FREE headroom with access 0 is vetoed |
+| TS-19-32 | P | G-30/C25(c): Base net injection at territory boundary substations ≤ 0 in all fixtures |
 | TS-19-33 | N | G-31: a lease > $\tau^{pk}$ above continuous is vetoed; a missing budget blocks above continuous |
 | TS-19-34 | S | DC bridge uses the peak for ≤ $\tau^{pk}$, then steps down on lease expiry |
 | TS-19-35 | N | a substation asset step > $\rho_s\Delta t$ is vetoed (G-04 generalised) |
-| TS-19-36 | P | G-32: headroom never erodes the AS/firm hold |
-| TS-19-37 | N | G-32: Non-Spin 100 kW with 350 kWh above the floor → any headroom discharge is vetoed |
+| TS-19-36 | P | allocator S6 + `CHECK_AS_HOLD`: headroom never erodes the AS/firm hold |
+| TS-19-37 | N | Non-Spin 100 kW with 350 kWh above the floor: the allocator grants no headroom discharge, and a seeded violation is flagged by `CHECK_AS_HOLD` |
 | TS-19-38 | U | the checker flags each seeded K4 violation class exactly once |
 | TS-19-39 | U | the checker flags K15 market and export violations |
 | TS-19-40 | U | the checker flags `K13_ENERGY_HOLD` |
@@ -1000,8 +1012,8 @@ Run it with:
 
 | Document | Change |
 |---|---|
-| `00-invariants.md` | K4 extended text (§6); K13 energy: AS hold $H_k$ and need-basis energy; **K15 territory**; guardian numbering G-26…G-32 canonical; retire `02a`'s supplemental G-21…G-31 |
-| `02a-mvp-s-spec-engine.md` | §3.2 sets and parameters (assets, markets, $w$, $v^E$ per zone); §3.3 C3′/C5′/C7(b)′/C12′/C25–C28; §3.4 lexicographic objective, wear rule; §3.7 two-stage solve times; §5.1 S2/S4/S6 changes (water value, holds, flow caps, territory); §6.1 guardian table (G-02 change, G-26…G-32; remove the supplemental table); §7.4 profitability → §4 of this spec |
+| `00-invariants.md` | K4 extended text (§6); K13 energy: AS hold $H_k$ and need-basis energy; **K15 territory**; guardian numbering G-26…G-33 canonical as built (the AS hold is not a guardian check); retire `02a`'s supplemental G-21…G-31 |
+| `02a-mvp-s-spec-engine.md` | §3.2 sets and parameters (assets, markets, $w$, $v^E$ per zone); §3.3 C3′/C5′/C7(b)′/C12′/C25–C28; §3.4 lexicographic objective, wear rule; §3.7 two-stage solve times; §5.1 S2/S4/S6 changes (water value, holds, flow caps, territory); §6.1 guardian table (G-02 change, G-26…G-33; remove the supplemental table); §7.4 profitability → §4 of this spec |
 | `02-architecture/03-decision-engine.md` | §6.2–§6.6 market dimension and constraints; §6.3 derating, export and ratings parameters; §8.10 flow limits F1–F7; §10.6 settlement economics; §12.4 KPIs ($/kW-in/out, payback, forgone upside from REG priority) |
 | `06-service-profiles-and-power-quality.md` | DATA_CENTER need basis on substation assets and locality; substation PCS PQ ($N=1$); peak-rating use in the DC fast loop |
 | `08-market-model-two-markets.md` | §3b formulas → §4 here; §3c: add the wear-rate conflict and the prototype results; OQ-5 (ERCOT access) as the key question |
@@ -1009,3 +1021,215 @@ Run it with:
 | `05-integrations-guide.md` | NP4-190-CD per zone incl. LZ_AEN/LZ_CPS; NWS gridpoint `skyCover`; AE GIS layer; CPS GIS request; utility SCADA points for feeders and substations |
 | `integrations/tdsp-tariffs-2026-09.md` | State that M1 applies only in the competitive area and to grid-drawn kWh (D5) |
 | `interfaces/` telemetry schema, `02b` §4/§12 | New hub telemetry fields; `AssetSnapshot`; horizon capability with temperature; the `core` owners for the tariff, wear and derating functions |
+
+---
+
+## 11. Market model as built (2026-09-26)
+
+Owner: MARKET-MODEL. This section records what was built for the two-market model, the interfaces the
+selector, allocator, guardian, settle and invariants checker call, the K15 text for `00-invariants.md`, and
+the profitability route. It supersedes the migration plan in §7 for the market and asset tables: the
+numbers 0019–0022 listed there were taken by other work, and the market model landed as **migration 0025**.
+
+### 11.1 Scope and files
+
+| Item | Where |
+|---|---|
+| Migration (additive) | `orchestrator/migrations/0025_market_model.sql` |
+| Row shapes and vocabulary | `orchestrator/src/opengrid/core/models/market.py` (`Market`, `UtilityId`, `Territory`, `AssetClass`, `Utility`, `Asset`); `core/models/engine.py` (`Contract.market`, `Contract.utility_id`, `ServiceType`) |
+| Market package | `orchestrator/src/opengrid/market/`: `territory.py` (market membership, K15 predicate), `config.py` (utility planning terms, `[zone_territory]` loader), `charging.py` (regulated charging cost, TOU periods, blend), `free_charging.py` (ERCOT charging cost with M1), `capacity.py` (regulated capacity payment), `economics.py` ($/kW economics), `model.py` (`MarketModel` read API), `view.py` (profitability payload), `pg_backend.py` (settled-data read side, the only I/O module) |
+| Dev seed (applied by hand, not by migration) | `dev/seed/market_model_seed.sql` |
+| Tests | `orchestrator/tests/unit/market/` (unit and property); `orchestrator/tests/integration/test_market_model_db.py` (server) |
+
+### 11.2 Data model (migration 0025)
+
+| Object | Content |
+|---|---|
+| `og.utility` | `utility_id` (AUSTIN_ENERGY, CPS_ENERGY), name, `territory_zones` (text[]), `capacity_product`, `payment_basis` (USD_PER_KW_MONTH or USD_PER_KW_YEAR), `capacity_price_usd_per_kw`, `charging_tariff_kind` (TOU_OFF_PEAK or NIGHT_RATE), off-, mid- and on-peak rates, `charging_adder_usd_per_kwh`, `solar_cost_usd_per_kwh` (default 0.040), `solar_share_floor` (default 0.30), `free_access_granted` (default false, K15 b), `tariff_ref`, `source_note` |
+| `og.contract.market` | REGULATED or FREE, NOT NULL, default FREE. Every existing contract becomes FREE |
+| `og.contract.utility_id` | FK to `og.utility`. CHECK: set if and only if `market = 'REGULATED'` |
+| `og.contract.service_type` | 0025 owns the full CHECK list: HOME, ERCOT_ENERGY, ERCOT_AS, DIST_DEFERRAL, PARTNER_CAPACITY, DATA_CENTER, PIPELINE_AC, **REGULATED_CAPACITY**, **PJM_CAPACITY**, **MOBILE_STORAGE**, **LARGE_LOAD**. It mirrors `core.models.engine.ServiceType`. A second CHECK makes REGULATED_CAPACITY imply `market = 'REGULATED'` |
+| `og.asset` | `asset_id`, `asset_class` (HOME_BANK or SUBSTATION), `bank_id` (FK `og.bank`), `feeder_id`, `substation_id`, `zone`, `utility_id` (territory; NULL is the ERCOT competitive area), `p_kw`, `e_kwh`, `eta_rt`, `floor_frac` (default 0.20), `poi_import_kva`, `poi_export_kva`, `capex_usd`, `status` (PLANNED, ACTIVE, RETIRED). CHECKs: a HOME_BANK names its bank; a SUBSTATION names a bank or a feeder **and** both POI limits |
+
+The planning defaults for a substation set are **20 MW / 2 h (40 MWh)**, RTE 0.88, a 20% floor, POI 20 MW
+in both directions and $1,000/kW. The 4 h option is `e_kwh = 80000` at $1,500/kW.
+
+**Territory resolution.** An asset's territory is its explicit `utility_id` if set; otherwise its zone decides
+through `[zone_territory]` in `config/tdsp_tariffs.toml` (LZ_AEN is AUSTIN_ENERGY, LZ_CPS is CPS_ENERGY, any
+other `LZ_*` is ERCOT_COMPETITIVE). An explicit utility that contradicts a regulated zone, an unknown zone or an
+unknown bank resolves to **unknown**, which is never eligible.
+
+### 11.3 Read API (`opengrid.market`)
+
+Pure unless stated otherwise. The guardian imports `opengrid.market.territory` directly.
+`market.capacity`, `market.charging`, `market.territory` and `market.economics` never import
+`opengrid.settle`, so settle can import them without an import cycle.
+
+```python
+# opengrid.market.territory
+@dataclass(frozen=True) class MarketRef: market: Market; utility_id: UtilityId | None  # REGULATED needs a utility; FREE never has one
+FREE: MarketRef
+def market_of(*, market: str | None, utility_id: str | None, service_type: str | None = None) -> MarketRef
+    # NULL market is FREE; REGULATED_CAPACITY must be REGULATED; any inconsistency raises MarketModelError
+def market_of_contract(contract: Contract) -> MarketRef
+def territory_of_zone(zone: str | None, zone_territory: Mapping[str, UtilityId]) -> Territory | None
+def utility_of_territory(territory: str | None) -> UtilityId | None
+def check_territory(ref: MarketRef | None, asset_territory: Territory | str | None, *, free_access: bool = False) -> str | None
+    # None = allowed; else R-TERRITORY-OUTSIDE | R-TERRITORY-NO-FREE-ACCESS | R-TERRITORY-UNKNOWN
+
+# opengrid.market.model
+def load_market_model(*, banks: Iterable[tuple[str, str]], assets: Sequence[Asset] = (),
+                      utilities: Sequence[Utility] | None = None, config_path: str | Path | None = None) -> MarketModel
+    # config_path is the OG_CONFIG path; tdsp_tariffs.toml is read from its directory
+class MarketModel:
+    def territory_of_bank(self, bank_id: str) -> Territory | None
+    def territory_of_asset(self, asset_id: str) -> Territory | None
+    def territory_bank_ids(self, utility_id: UtilityId) -> frozenset[str]
+    def territory_asset_ids(self, utility_id: UtilityId) -> frozenset[str]
+    def free_access(self, territory: Territory | None) -> bool
+    def bank_eligible(self, bank_id: str, ref: MarketRef) -> bool
+    def eligible_bank_ids(self, ref: MarketRef) -> frozenset[str]     # C25 a/b; FREE also covers headroom
+    def eligible_asset_ids(self, ref: MarketRef) -> frozenset[str]
+    def utility(self, utility_id: UtilityId) -> Utility
+    def charging_cost(self, zone: str, interval: datetime, *, wholesale_usd_per_kwh: Decimal | None = None,
+                      solar_share: Decimal | None = None) -> ChargingCost
+
+# opengrid.market.charging / free_charging
+def tou_period(utility: Utility, interval_start: datetime) -> TouPeriod
+def blend(solar_share: Decimal, solar_usd_per_kwh: Decimal, grid_all_in_usd_per_kwh: Decimal) -> Decimal
+def regulated_charging_cost(utility: Utility, zone: str, interval_start: datetime, *, solar_share: Decimal | None = None) -> ChargingCost
+def free_charging_cost(zone: str, *, wholesale_usd_per_kwh: Decimal, tdsp_tariff: TdspTariff | None,
+                       solar_share: Decimal = 0, solar_usd_per_kwh: Decimal | None = None) -> ChargingCost
+
+# opengrid.market.capacity
+def regulated_capacity_payment(*, committed_kw: Decimal, price_usd_per_kw: Decimal, basis: CapacityPaymentBasis,
+                               hours: Decimal, performance_factor: Decimal = 1) -> Decimal
+
+# opengrid.market.economics / view
+def unit_economics(inputs: UnitEconomicsInputs) -> KwEconomics
+def period_kw_economics(totals: PeriodTotals) -> KwEconomics
+def rollup(scopes: Sequence[PeriodTotals], *, scope_kind: ScopeKind, scope_ref: str, market: Market | None) -> PeriodTotals
+def stored_energy_avg_cost(*, charging_cost_usd, discharged_kwh, eta_d, energy_start_kwh, energy_end_kwh) -> Decimal | None
+def illustrative_home_unit() -> KwEconomics
+def profitability_per_kw(scopes: Sequence[PeriodTotals]) -> PerKwSummary
+
+# opengrid.market.pg_backend (I/O)
+async def fetch_contract_totals(pool: AsyncConnectionPool, start: datetime, end: datetime) -> list[PeriodTotals]
+```
+
+`ChargingCost` fields: `zone`, `market`, `utility_id`, `period` (OFF_PEAK, MID_PEAK, ON_PEAK, NIGHT, DAY or
+WHOLESALE), `solar_share`, `solar_usd_per_kwh`, `grid_energy_usd_per_kwh` and `delivery_usd_per_kwh` (both per
+grid kWh), `blended_usd_per_kwh` (per kWh charged), `tariff_ref`.
+
+**Use by layer.**
+
+- **Selector.** Build one `MarketModel` per gate. $\mathcal A_o$ = `eligible_bank_ids(market_of(...))`
+  intersected with contract locality (C25 a/b). $c^{ch}_{a,t}$ = `charging_cost(zone(a), t, wholesale_usd_per_kwh=λ).grid_all_in_usd_per_kwh`
+  and $c^{sol}$ = `.solar_usd_per_kwh`. Stage R values new REG capacity with `regulated_capacity_payment(hours=|T|Δ)`.
+- **Allocator.** Pass `check_territory(call.market_ref, territory, free_access=...)` per (obligation, bank) and
+  `check_territory(FREE, ...)` for headroom (S2.3 "Eligibility").
+- **Guardian.** G-33 (§11.6) calls `check_territory` on its own reads.
+- **Settle.** Imports `regulated_capacity_payment` and `regulated_charging_cost` / `blend` instead of keeping
+  its own copies; uses `stored_energy_avg_cost` for the G4 attribution.
+
+### 11.4 Charging cost and economics
+
+**Charging cost per kWh charged:** $c_{in}=s\,c_{sol}+(1-s)(c_{grid}+w)$.
+
+| Market | $s$ | $c_{sol}$ | $c_{grid}$ | $w$ (M1) |
+|---|---|---|---|---|
+| REGULATED (AE, CPS) | the utility's floor, 0.30 by default; a larger share is costed as given (soft floor, D4) | `og.utility.solar_cost_usd_per_kwh`, 4.0 ¢ | the utility tariff for the period plus adders. AE TOU pilot: weekdays 22:00–07:00 and all weekend off-peak at 2.677 ¢; 15:00–18:00 on-peak at 8.442 ¢; otherwise mid-peak at 4.118 ¢. CPS: the night rate, a 5.026 ¢ placeholder (OQ-6). A period without a published rate is priced at the next higher known rate, never a cheaper one | 0 |
+| FREE (ERCOT) | 0 by default (the floor is a regulated-contract term) | behind-the-meter PV at its forgone export credit, by default λ | λ for the zone (the caller passes it) | the zone TDSP's volumetric charge, via `settle.tariffs` (single owner of M1). An unmapped zone is 0 and flagged in `tariff_ref` |
+
+**Capacity payment:** committed kW × annual price × hours / 8760 × PF. A $/kW-month price is multiplied by 12 first.
+PF is clamped to [0, 1].
+
+**$/kW economics** follow §4 exactly: `PeriodTotals` (charging energy, delivery, demand; capacity, energy and
+other revenue; penalty and buyback; wear, O&M, capex, incentives; kW basis; hours) gives
+in/out/net $/kW-yr, simple, effective and discounted payback, NPV5 and NPV15, and the 3-year flag.
+Market and fleet rows are `rollup`s of their contract scopes.
+
+**08 §3c reproduced** (`illustrative_home_unit()`, test TS-19-19):
+
+| Item | Computed |
+|---|---|
+| Capacity, $75/kW-yr × 11 kW | $825.00 |
+| Charging, 3.0739 ¢ × 39.2 kWh × 300 | −$361.49 |
+| Energy out, 35.28 kWh × 12.88 ¢ × 300 | +$1,363.22 |
+| Degradation and O&M, 3% of $7,000 | −$210.00 |
+| **Net** | **$1,616.73/yr** (§3c: ≈ 1,620) |
+| $/kW-in, $/kW-out, net $/kW-yr | $32.86, $198.93, $146.98 |
+| Capex per kW (hardware view) | $636.36 |
+| **Payback** | **4.33 years** before scarcity upside (3-year flag: not met). Adding ~$720/yr of headroom/DR revenue reaches 3.0 years, matching §3c |
+
+### 11.5 K15 invariant text (for the lead to copy into `00-invariants.md`)
+
+> **K15 — Territory.** Every contract belongs to exactly one market: REGULATED(u) for a regulated utility u
+> (Austin Energy, CPS Energy) or FREE (ERCOT). (a) A REGULATED(u) obligation is reserved, granted and delivered
+> only by assets inside u's service territory. (b) An asset inside a regulated territory takes FREE (ERCOT)
+> opportunities, including uncommitted headroom, only if u's contract grants wholesale access (default: no).
+> (c) Base's net injection at every boundary substation of u stays ≤ 0. (d) Charging is priced and settled under
+> the asset's own territory tariff: the utility's charging terms inside u (no TDSP delivery charge), the ERCOT
+> zone price plus the TDSP delivery charge (M1) outside. An unknown territory or market is never eligible.
+>
+> *Principle P2. Enforced at:* contract admission (`R-TERRITORY-INELIGIBLE`) → selector C25 → allocator
+> eligibility (`market.check_territory`) → guardian **G-33** (market segregation, item level) and **G-30**
+> (territory export: no net reverse flow out of u's boundary substations) → settle tariff attribution. *Fail-safe:* VETO the item; a shortfall is recorded against the
+> same obligation (K13 best effort). *Proven by* the property test over random fleet and contract mixes
+> (TS-19-04, `tests/unit/market/test_territory.py`) and the checker counters `K15_TERRITORY_MARKET` and
+> `K15_TERRITORY_EXPORT`.
+
+### 11.6 Guardian G-33 (SAFETY)
+
+G-33 is the canonical ID for market segregation. Territory export (no reverse flow out of a regulated
+territory, K15 c) is G-30, as built.
+
+- **Rule:** for each batch item $i$ on hub $h$ in bank $b$: `check_territory(ref, territory(b), free_access=access(territory(b)))`
+  must return `None`. `ref` = `market_of(...)` of the obligation's contract; a headroom item (no obligation) uses `FREE`.
+- **Own reads:** `og.contract.market`, `og.contract.utility_id`, `og.contract.service_type` via
+  `og.obligation.contract_id`; `og.hub.bank_id` → `og.bank.zone` (or `og.asset.utility_id` for a substation
+  asset); `[zone_territory]` via `market.config.load_zone_territory`; `og.utility.free_access_granted`. It never
+  uses the allocator's eligibility list.
+- **Fail closed:** a missing obligation or contract, an inconsistent market (`MarketModelError`), an unknown bank
+  or zone, or a territory string that is not one of AUSTIN_ENERGY, CPS_ENERGY or ERCOT_COMPETITIVE all give
+  `R-TERRITORY-UNKNOWN` → veto.
+- **Veto:** item level (in `_ITEM_LEVEL_RULES`); the verdict is PARTLY_VETOED when other items remain. The
+  vetoed item carries the reason code from `check_territory`.
+- **Tests:** an AE hub granted to an Oncor-area obligation → `R-TERRITORY-OUTSIDE`; an AE hub on headroom with
+  access off → `R-TERRITORY-NO-FREE-ACCESS`; the same with access on → PASS; an unknown zone → `R-TERRITORY-UNKNOWN`;
+  property: random fleets and contract mixes give zero signed cross-territory items.
+- **Status 2026-09-26:** built by SAFETY in `guardian/flow_checks.py` (`check_g33_territory`), calling
+  `market.check_territory`.
+
+### 11.7 Invariants checker measurements (INVARIANTS)
+
+| Check | Violation when | Data | Severity |
+|---|---|---|---|
+| `K15_TERRITORY_MARKET` | any `og.grant` with `granted_kw > 0` whose (obligation → contract) `market_of` and (grant bank → zone → territory) give a non-None `check_territory(...)`. Headroom grants (`is_headroom`, no obligation) are checked as `FREE` | `og.grant`, `og.obligation`, `og.contract`, `og.bank`, `og.utility.free_access_granted`, `[zone_territory]` | critical |
+| `K15_TERRITORY_EXPORT` | for a boundary substation of territory u: the Base-attributable net injection in an interval is > 0 (sum of territory-bank grants discharging minus charging, against the substation SCADA) | SCADA + grants (needs 0027/0029 flow tables) | critical; **later** (no boundary-substation SCADA yet) |
+| `K15_CHARGING_TARIFF` | a settled charging interval in a regulated territory carries a non-zero M1 delivery charge, or a FREE one carries a utility tariff reference | `og.pnl.delivery_charge` joined to the obligation's reservation zone | warning |
+
+Count one violation per (grant_id, check) and dedupe as migration 0017 does. The reason code recorded is the
+`check_territory` result. The checker reuses `market.check_territory` and `market.territory_of_zone`: it never
+re-derives the predicate. The check-name domain in `og.invariant_violation` must be widened by INVARIANTS'
+own migration.
+
+### 11.8 Profitability route (for the lead or MERGE)
+
+`GET /og/api/profitability/per-kw?start=<ISO8601>&end=<ISO8601>` (operator auth, read-only; default: the
+current settlement month in America/Chicago).
+
+1. `scopes = await opengrid.market.pg_backend.fetch_contract_totals(pool, start, end)`
+2. `return opengrid.market.view.profitability_per_kw(scopes).model_dump(mode="json")`
+
+The response is `PerKwSummary`: `method_version`, `period_hours`, `hardware_view_usd_per_kw` (636.36),
+`target_payback_years` (3), `contracts[]`, `markets{REGULATED, FREE}`, `fleet`, `illustrative_home_unit`
+(the §3c reference). Each is a `KwEconomics`: kW basis, annualised $-in and $-out with their components,
+`in_usd_per_kw_yr`, `out_usd_per_kw_yr`, `net_usd_per_kw_yr`, capex per kW, effective investment per kW,
+simple, effective and discounted payback, `npv_5y_usd`, `npv_15y_usd`, `meets_target` (amber when false) and
+`notes`. Decimals serialise as strings. A 400 is returned when `end <= start`.
+
+**Limits until settle's §4 tables exist.** Capex is a PLANNING attribution (kW basis × $7,000/11 kW) and O&M is 3%
+of capex per year, both flagged in each row's `notes`. Revenue is split into capacity (REGULATED_CAPACITY,
+DIST_DEFERRAL, PARTNER_CAPACITY, ERCOT_AS, DATA_CENTER, PJM_CAPACITY) or energy by service type. FREE headroom
+P&L is not yet in the view (no `og.headroom_pnl`).

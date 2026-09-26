@@ -28,7 +28,18 @@ subscription_key_secondary_env = "ERCOT_PUBLIC_API_KEY_SECONDARY"
 username_env = "ERCOT_API_USER"
 password_env = "ERCOT_API_PASSWORD"
 budget_requests_per_min = 24
-products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"]
+products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd", "np4-745-cd"]
+# D-28 solar share: NP4-745-CD, Solar Power Production - Hourly Averaged Actual and Forecasted Values by
+# Geographical Region (/np4-745-cd/spp_hrly_actual_fcast_geo, hourly). Endpoint verified against ERCOT's
+# product page; per-region field names (gen<Region>/STPPF<Region>) UNCONFIRMED against a live response.
+# System-wide solar (actual + STPPF forecast) is NP4-737-CD above. Set false to stop polling NP4-745-CD
+# without a deploy (it shares the ERCOT breaker with price/load). Freshness: wind_solar_fresh_s.
+solar_by_region_enabled = true
+
+# Solar share of load (opengrid.feeds.solar_share): which ERCOT solar region(s) cover a load weather zone.
+# ERCOT's solar regions and load weather zones are different partitions, so only zones listed here get a
+# zonal share ("total" = system-wide always works). Empty until the mapping is agreed with the lead.
+[feeds.ercot.solar_share_zones]
 
 [feeds.eia]
 base_url = "https://api.eia.gov/v2"
@@ -43,7 +54,15 @@ grid_point = "EWX/156,91"
 [feeds.staleness]
 ercot_price_fresh_s = 600
 ercot_price_lgv_s = 900
-ercot_load_fresh_s = 1800
+# NP6-345-CD (actual system load by weather zone) polls hourly (feeds.scheduler.POLL_INTERVAL_S);
+# 1800s (30 min) was tighter than that poll interval itself, so `last_value_at` would routinely read
+# STALE in the back half of every hour even when ERCOT and the poll are both behaving normally (live
+# incident: raised NO_NEW_COMMITMENTS on a feed a live probe confirmed was healthy -- 200 OK, correctly
+# parsed, no breaker/auth errors; ERCOT itself just hadn't posted a newer hour yet at probe time,
+# genuinely a ~13h gap on ERCOT's side that this threshold fix does not paper over). 7200s (2x the poll
+# interval, matching ercot_price_fresh_s's ~2x-of-its-5-min-poll ratio) absorbs one missed/delayed post
+# without false-flagging every routine hour, while still catching a real multi-hour gap like this one.
+ercot_load_fresh_s = 7200
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800
@@ -63,6 +82,13 @@ data_center = false
 horizon_hours = 24
 resolution_min = 15
 quantiles = [0.10, 0.50, 0.90]
+# D-24: solar-driven intraday price shape, per load zone. price_series/load_series default to
+# [fleet].zones (the 4 dispatchable zones) when unset -- listed explicitly here to also forecast the
+# 4 market-only ERCOT load zones OpenGrid has no hubs in yet (no dispatch impact, market intelligence
+# only). load_series is summed via [forecast].weather_zones_by_load_zone (approximate for the two
+# regulated-municipal zones, LZ_AEN/LZ_CPS, and for LZ_LCRA/LZ_RAYBN below -- see forecast/service.py).
+price_series = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST", "LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"]
+load_series = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST", "LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"]
 
 [fleet]
 # NOTE: hub_count/banks/telemetry_interval_s/lease_ttl_s here are descriptive only -- no orchestrator
@@ -86,6 +112,18 @@ banks_per_feeder = 5
 cycle_interval_s = 2
 dwell_s = 300
 hysteresis_usd_per_mwh = 5
+# K15 territory rule: regulated-zone banks never serve ERCOT products (DISPATCH, R2).
+enforce_territory = true
+# Battery wear cost ($/kWh throughput) for the dispatch objective (core.economics.wear_cost).
+wear_usd_per_kwh = 0.03
+
+[allocator.flow_limits]
+# Transformer/feeder discharge flow limits in the allocator (mirrors guardian G-26..G-33).
+enabled = true
+
+[allocator.closed_loop]
+# DATA_CENTER / PIPELINE_AC closed-loop controllers: off until customer go-live.
+enabled = false
 
 [guardian]
 key_path = "/etc/opengrid/guardian_ed25519.key"
@@ -94,8 +132,21 @@ clock_offset_max_ms = 200
 # Two-person stop RELEASE allow-list (og-api user ids); named by the owner 2026-09-26 (dev accounts).
 stop_release_authorised_operators = ["og-op-a", "og-op-b"]
 
+[guardian.flow]
+# G-27 per-home transformer share for hubs with no transformer mapping yet: 25 kVA keeps G-27 from binding
+# until real mappings exist (the 5 kVA default vetoes most discharge). G-28 feeder defaults stay in code
+# (thermal 10 MW x 0.95 = 9.5 MW, reverse 3 MW).
+unmapped_xfmr_kva_per_home = 25
+
+[trace]
+# K11 journal: every process constructing a PgTraceBackend journals here (opengrid-writable).
+journal_path = "/var/lib/opengrid/trace_journal.jsonl"
+
 [safestop]
 key_path = "/etc/opengrid/safestop_ed25519.key"
+# confirm_window_s (default 30) is og-safestop's PROPOSE->CONFIRM window; og-api's safe-stop proposal uses it.
+# RESERVED, currently unused: no code reads ramp_*_s; the hub simulator ramps every scope to 0 kW over its
+# own stop_ramp_s (4.0 s, integration-sims fleet config).
 ramp_bank_s = 30
 ramp_zone_s = 60
 ramp_fleet_s = 120
@@ -131,6 +182,26 @@ csrf_allowed_hosts = ["base.tocy-net.net"]
 # The literal Apache accounts "operator"/"viewer" still map by name; named accounts are listed here.
 operator = ["operator", "og-op-a", "og-op-b"]
 viewer = ["viewer"]
+
+[api.roles.customer]
+# Apache account -> the customer_id it acts for (customer API; inert until [api.customer_api].enabled).
+# ercot/dist/partner are the 0002-seeded customers; dc/pipe come from dev/seed/customer_services_seed.sql.
+"og-cust-ercot" = "00000000-0000-7000-8000-000000000c02"
+"og-cust-dist" = "00000000-0000-7000-8000-000000000c04"
+"og-cust-partner" = "00000000-0000-7000-8000-000000000c05"
+"og-cust-dc" = "00000000-0000-7000-8000-0000000000c6"
+"og-cust-pipe" = "00000000-0000-7000-8000-0000000000c7"
+"og-cust-pjm" = "00000000-0000-7000-8000-0000000000c8"
+"og-cust-mobile" = "00000000-0000-7000-8000-0000000000c9"
+"og-cust-largeld" = "00000000-0000-7000-8000-0000000000ca"
+
+[api.customer_api]
+# Ships dark: the customer routes are mounted only when true (go-live step 3, after owner confirmation).
+enabled = false
+
+[site_ingest]
+# Customer site-meter / corridor-current ingest (og/v1/site/#, og/v1/corridor/#); off until go-live.
+enabled = false
 
 [ui]
 base_path = "/og"

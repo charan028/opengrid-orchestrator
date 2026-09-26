@@ -14,11 +14,13 @@ from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
 
+from opengrid.core.models.market import Utility, UtilityId
 from opengrid.settle.models import (
     InvoiceLineDraft,
     ObligationSettlementContext,
     PowerSample,
     QualityFlag,
+    ZoneChargeEnergy,
 )
 
 
@@ -99,20 +101,45 @@ class SettleBackend(Protocol):
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
     ) -> Decimal | None:
         """D-18 need-basis settlement: the customer's measured need for this interval (migration
-        0015's `og.customer_site_meter_reading`, average import `p_kw` over the interval x its
+        0026's `og.customer_site_meter_reading`, average import `p_kw` over the interval x its
         duration), or `None` if there is no reading -- never called unless `ObligationSettlementContext
         .is_need_basis` is `True` (`performance.is_need_basis_compliant` treats `None` as compliant by
         default, so a missing reading never manufactures a penalty)."""
         ...
 
-    async def fetch_grid_charged_kwh(
+    async def fetch_zone_charge_energy(
+        self, zone: str, window_start: datetime, window_end: datetime
+    ) -> ZoneChargeEnergy:
+        """09 D5's M1 fleet-level proxy: every hub in `zone`'s charging over `[window_start, window_end)`
+        from `og.telemetry`, split into total and grid-drawn (beyond the home's PV surplus). Only ever
+        called for a zone that resolves to a TDSP (never a regulated zone). `settle()` turns its
+        `grid_share` into the obligation-interval's grid-charged kWh
+        (`tariffs.grid_charged_kwh_for_delivery`)."""
+        ...
+
+    async def fetch_shortfall_risk_open(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
-    ) -> Decimal:
-        """09 D5's M1 delivery charge: kWh actually drawn from the grid to charge this
-        obligation's bank(s) this interval -- never behind-the-meter solar. MVP-S has no
-        per-obligation charging-interval attribution yet (the same documented gap
-        `opengrid.settle.pg_backend.charging_cost_from_proxy` notes): `PgSettleBackend` returns `0`
-        until that attribution exists, logged rather than silent (BUILD.md S5a)."""
+    ) -> bool:
+        """Whether an `ALR-ENERGY-SHORTFALL-RISK` alert for this obligation was open at any time during the
+        interval (opened before its end, not cleared before its start)."""
+        ...
+
+    async def fetch_pjm_emergency_rate(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal | None:
+        """`opengrid.settle.services_extra.pjm_non_performance_charge`'s `non_performance_rate_per_kwh`
+        when this interval falls inside a declared PJM emergency performance hour for this
+        obligation, else `None` (not an emergency hour -- the ordinary capacity payment applies with
+        no extra charge). MVP-S has no live PJM emergency-hour declaration feed yet (PJM stays
+        simulated, per the owner's 2026-09-26 decision) -- `PgSettleBackend` returns `None` until one
+        exists, logged rather than silently assuming an emergency hour never happened."""
+        ...
+
+    async def fetch_utility(self, utility_id: UtilityId) -> Utility | None:
+        """The regulated utility's terms (`og.utility`, migration 0025), or `None` if no row exists
+        for it yet -- `opengrid.settle.__init__` then falls back to `opengrid.market.config.
+        DEFAULT_UTILITIES`'s planning values (the same fallback `opengrid.market` itself documents),
+        never a guess of its own."""
         ...
 
     async def fetch_active_meter_interval(

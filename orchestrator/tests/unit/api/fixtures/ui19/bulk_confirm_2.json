@@ -1,0 +1,29 @@
+{
+  "proposal_id": "fc038bc1-ac6d-4c90-b30e-845fbb777d63",
+  "status": "EXECUTED",
+  "hub_count": 3,
+  "outcome_counts": {
+    "PASS": 3
+  },
+  "results": [
+    {
+      "hub_id": "hub-00000",
+      "outcome": "PASS",
+      "vetoed_rule_ids": [],
+      "trace_id": "38fdf456-d5b5-4e50-a877-d82b5f138b84"
+    },
+    {
+      "hub_id": "hub-00003",
+      "outcome": "PASS",
+      "vetoed_rule_ids": [],
+      "trace_id": "0f52d1db-3de9-4de0-b257-1db77f9c3f07"
+    },
+    {
+      "hub_id": "hub-00005",
+      "outcome": "PASS",
+      "vetoed_rule_ids": [],
+      "trace_id": "0591cad7-1776-402c-a7f3-bdcd756b7e82"
+    }
+  ],
+  "trace_id": "a813df3a-2e73-4acd-ae42-982d31c677f0"
+}

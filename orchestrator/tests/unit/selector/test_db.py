@@ -88,6 +88,131 @@ async def test_load_bank_ids_rows_returns_real_format_ids_from_a_fake_pool(monke
     assert bank_ids == ["bank-000", "bank-001", "bank-039"]
 
 
+def test_market_columns_are_read_without_requiring_migration_0025():
+    """The contract's market/utility come through `to_jsonb(c) ->> ...`, so the selector's queries keep
+    working on a database where MARKET-MODEL's 0025 columns do not exist yet (NULL -> FREE)."""
+    for sql in (db._OFFERED_OPPORTUNITIES_SQL, db._OBLIGATION_TERMS_SQL):
+        assert "to_jsonb(c) ->> 'market'" in sql
+        assert "to_jsonb(c) ->> 'utility_id'" in sql
+        assert "c.market" not in sql
+
+
+def test_hold_floor_query_and_retention_prune_shape():
+    assert "hold_floor_kwh[" in db._HOLD_FLOORS_SQL and "1 + floor(" in db._HOLD_FLOORS_SQL
+    assert "ORDER BY bank_id, created_at DESC" in db._HOLD_FLOORS_SQL
+    assert "DELETE FROM og.plan_energy_value" in db._PRUNE_ENERGY_VALUE_SQL
+    assert "created_at < now() - make_interval(days => %(days)s)" in db._PRUNE_ENERGY_VALUE_SQL
+    assert db.ENERGY_VALUE_RETENTION_DAYS == 7
+
+
+def test_energy_value_threshold_query_indexes_the_array_at_the_requested_time():
+    sql = db._ENERGY_VALUE_THRESHOLDS_SQL
+    assert "discharge_threshold_usd_per_mwh[" in sql and "1 + floor(" in sql  # Postgres arrays are 1-based
+    assert "horizon_start <= %(at)s AND horizon_end > %(at)s" in sql
+    assert "ORDER BY bank_id, created_at DESC" in sql  # newest plan wins
+
+
+async def test_insert_plan_analytics_writes_the_three_tables_in_one_transaction(monkeypatch):
+    executed: list[tuple[str, object]] = []
+
+    class _Cursor:
+        async def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        async def executemany(self, sql, rows):
+            executed.append((sql, list(rows)))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Tx:
+        async def __aenter__(self):
+            executed.append(("BEGIN", None))
+
+        async def __aexit__(self, *exc):
+            executed.append(("COMMIT", None))
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def transaction(self):
+            return _Tx()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Pool:
+        def connection(self):
+            return _Conn()
+
+    async def _pool():
+        return _Pool()
+
+    monkeypatch.setattr(db, "get_pool", _pool)
+
+    await db.insert_plan_analytics({"plan_id": 1}, [{"row": 1}], [{"row": 2}])
+
+    assert executed[0] == ("BEGIN", None) and executed[-1] == ("COMMIT", None)
+    tables = [sql for sql, _ in executed[1:-1]]
+    assert "og.plan_value" in tables[0]
+    assert "og.plan_shadow_obligation" in tables[1]
+    assert "og.plan_energy_value" in tables[2]
+
+
+async def test_load_unfit_price_series_returns_the_flagged_zones(monkeypatch):
+    seen: dict[str, object] = {}
+
+    class _Cursor:
+        async def execute(self, sql, params=None):
+            seen["sql"], seen["params"] = sql, params
+
+        def __aiter__(self):
+            return self._rows()
+
+        async def _rows(self):
+            for row in (("LZ_WEST",), ("LZ_AEN",)):
+                yield row
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Pool:
+        def connection(self):
+            return _Conn()
+
+    async def _pool():
+        return _Pool()
+
+    monkeypatch.setattr(db, "get_pool", _pool)
+    start = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
+
+    unfit = await db.load_unfit_price_series(start, start + timedelta(hours=24))
+
+    assert unfit == frozenset({"LZ_WEST", "LZ_AEN"})
+    assert "firm_fitness = 'NOT_FOR_FIRM'" in str(seen["sql"]) and "kind = 'price'" in str(seen["sql"])
+
+
 async def test_load_frozen_commitments_shapes_rows_by_obligation_and_interval(monkeypatch):
     obligation_id = uuid4()
     t0 = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)

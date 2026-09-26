@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from hypothesis import example, given
+from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
+from opengrid.core.limits import derated_power_bounds_kw
 from opengrid.core.physics import hub_sustainable_discharge_kw
 from opengrid.guardian.ports import ProposedItem
 
@@ -38,7 +39,11 @@ def _leases_crossing_reserve(draw: st.DrawFn) -> tuple[float, float, float]:
 
 @st.composite
 def _leases_within_the_margin(draw: st.DrawFn) -> tuple[float, float, float]:
+    """Within the energy margin AND within P_max(SoC) (G-02 derating, 09 S1.9: 0.3 x P at the floor)."""
     soc_kwh, setpoint_kw = draw(_soc_kwh), draw(_discharge_kw)
+    derated_kw = derated_power_bounds_kw(BASE_HUB, soc_kwh, None, unknown_temp_factor=1.0).discharge_kw
+    assume(derated_kw >= 0.5)
+    setpoint_kw = max(setpoint_kw, -derated_kw)
     drain_to_floor_s = _seconds_to_drain_kwh(soc_kwh - FLOOR_KWH, setpoint_kw)
     return soc_kwh, setpoint_kw, drain_to_floor_s * draw(st.floats(min_value=0.05, max_value=0.9))
 

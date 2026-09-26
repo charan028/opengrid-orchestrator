@@ -1,0 +1,41 @@
+{
+  "_note": "Customer site positions for GET /og/api/customers/map until the customer seed carries coordinates. Ids match integration-sims/config/customer.yaml and dev/seed/customer_services_seed.sql. Every position here is a PLACEHOLDER chosen for the map, not a real customer address.",
+  "sites": [
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000c6",
+      "site_id": "site-dc-01",
+      "name": "Data center (demo)",
+      "service_type": "DATA_CENTER",
+      "lat": 32.948,
+      "lon": -96.729,
+      "placeholder": true
+    },
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000c7",
+      "site_id": "corridor-pipe-01",
+      "name": "Pipeline AC corridor (demo)",
+      "service_type": "PIPELINE_AC",
+      "lat": 29.905,
+      "lon": -96.876,
+      "placeholder": true
+    },
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000c9",
+      "site_id": "site-warehouse-01",
+      "name": "Mobile storage warehouse (demo)",
+      "service_type": "MOBILE_STORAGE",
+      "lat": 29.801,
+      "lon": -95.302,
+      "placeholder": true
+    },
+    {
+      "customer_id": "00000000-0000-7000-8000-0000000000ca",
+      "site_id": "large-load-crypto-01",
+      "name": "Large flexible load (demo)",
+      "service_type": "LARGE_LOAD",
+      "lat": 30.655,
+      "lon": -97.001,
+      "placeholder": true
+    }
+  ]
+}

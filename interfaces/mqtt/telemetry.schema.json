@@ -17,6 +17,61 @@
     "seq": { "type": "integer", "minimum": 0 },
     "epoch": { "type": "integer", "minimum": 0 },
     "fault_code": { "type": ["string", "null"] },
+    "home_load_kw": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Discharge-flow limits (09-optimizer-dispatcher-update.md S1.9 F2/G11). Home electrical load before PV, kW, >= 0. Optional and additive."
+    },
+    "pv_kw": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "PV generation at the hub, kW, >= 0 (S1.9 F2). Optional and additive."
+    },
+    "meter_kw": {
+      "type": ["number", "null"],
+      "description": "Site meter net power, kW, + = import (S1.9 F2's M_i = L_net + p_kw). Optional and additive."
+    },
+    "cell_temp_c": {
+      "type": ["number", "null"],
+      "description": "Battery cell temperature, degrees C (S1.9 F1 derating input). Optional and additive."
+    },
+    "p_dis_max_kw": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "The battery's own SoC/temperature-derated maximum discharge power, kW (S1.9 F1). Optional and additive."
+    },
+    "p_ch_max_kw": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "The battery's own SoC/temperature-derated maximum charge power, kW (S1.9 F1). Optional and additive."
+    },
+    "peak_power_budget_kws": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Above-continuous peak-power budget B_i, kW*s (S1.9 F5). 0 while peak == continuous (OQ-10). Optional and additive."
+    },
+    "lat": {
+      "type": "number",
+      "minimum": -90,
+      "maximum": 90,
+      "description": "Deterministic hub latitude, degrees (owner UI request, 2026-09-26). Optional and additive."
+    },
+    "lon": {
+      "type": "number",
+      "minimum": -180,
+      "maximum": 180,
+      "description": "Deterministic hub longitude, degrees (owner UI request, 2026-09-26). Optional and additive."
+    },
+    "charge_pv_kw": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Charging power sourced from on-site solar (owner decision D-28, 2026-09-26). >= 0; 0 when not charging. Optional and additive."
+    },
+    "charge_grid_kw": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Charging power sourced from the grid (owner decision D-28, 2026-09-26). >= 0; 0 when not charging; charge_pv_kw + charge_grid_kw is the hub's total charging power. Optional and additive."
+    },
     "pq": {
       "description": "Per-phase electrical quality (06-service-profiles-and-power-quality.md S6.1). Optional and additive: existing consumers that ignore unknown fields keep working unchanged.",
       "type": ["object", "null"],

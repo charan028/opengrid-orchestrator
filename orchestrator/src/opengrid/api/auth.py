@@ -29,6 +29,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 
 from opengrid.api.deps import get_config
+from opengrid.authz.enforce import policy_engine_for
 from opengrid.platform.config import Config
 
 logger = logging.getLogger(__name__)
@@ -116,17 +117,29 @@ async def current_identity(request: Request, cfg: Annotated[Config, Depends(get_
     return Identity(user, role)
 
 
-async def require_viewer(identity: Annotated[Identity, Depends(current_identity)]) -> Identity:
+async def require_viewer(
+    identity: Annotated[Identity, Depends(current_identity)], cfg: Annotated[Config, Depends(get_config)]
+) -> Identity:
     """`viewer` can read every GET/SSE endpoint (02b S7); `operator` implies `viewer` access too. A
-    `customer` is refused: fleet-wide reads would expose other customers' data."""
-    if identity.role is Role.CUSTOMER:
+    `customer` is refused: fleet-wide reads would expose other customers' data.
+
+    The allow/deny call itself is delegated to `opengrid.authz`'s `PolicyEngine` (`config/authz.toml`'s
+    `api.read` rule) rather than re-implemented here -- the one additive wiring point BUILD.md's authz
+    ownership calls for. The outcome is unchanged: `viewer`/`operator` pass, `customer` still gets 403.
+    """
+    decision = policy_engine_for(cfg).decide(role=identity.role.value, action="api.read")
+    if decision.deny:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="operator or viewer role required")
     return identity
 
 
-async def require_operator(identity: Annotated[Identity, Depends(current_identity)]) -> Identity:
-    """Only `operator` may call a mutating endpoint (02b S7)."""
-    if identity.role is not Role.OPERATOR:
+async def require_operator(
+    identity: Annotated[Identity, Depends(current_identity)], cfg: Annotated[Config, Depends(get_config)]
+) -> Identity:
+    """Only `operator` may call a mutating endpoint (02b S7). Routed through the same `PolicyEngine`
+    (`api.write`) as `require_viewer` above; behaviour is unchanged."""
+    decision = policy_engine_for(cfg).decide(role=identity.role.value, action="api.write")
+    if decision.deny:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="operator role required")
     return identity
 

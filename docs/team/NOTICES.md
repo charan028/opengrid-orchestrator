@@ -5,6 +5,43 @@ change requirements or conventions and override older instructions in lane files
 
 ---
 
+## 2026-09-26: Python package policy and installs on the base server
+
+**Policy (owner, 2026-09-26).** An agent that needs a new Python package asks the live-path agent, the
+only installer on the server. Before installing, the live-path agent checks that the package is on PyPI and
+actively maintained, has an OSI-permissive licence (MIT, BSD or Apache; no GPL/AGPL in-process), and is
+pinned in the relevant `pyproject.toml`. Packages are installed from downloaded wheels (`pip download
+--only-binary=:all:`, then `pip install --no-index --find-links`), and each install is logged here with its
+version and size. Optional protocol libraries must be imported lazily, so the test suite collects without
+them.
+
+**Installed 2026-09-26, into `/opt/opengrid/venv` and `/opt/ogsim/venv`:**
+
+| Package | Version | Wheel size | Requested by |
+|---|---|---|---|
+| pyjwt | 2.15.0 | 33,680 B | PLATFORM (OIDC identity) |
+| defusedxml | 0.7.1 | 25,604 B | INTEGRATIONS (ERCOT MMS, IEEE 2030.5) |
+| lxml | 6.1.3 | 5,232,385 B | INTEGRATIONS (ERCOT MMS signing) |
+| types-defusedxml | 0.7.0.20260504 | 13,467 B | INTEGRATIONS (mypy stubs) |
+
+Also already present (checked, not reinstalled): `python-multipart` 0.0.32 in both venvs (now declared in
+`orchestrator/pyproject.toml`; the UI's `Form(...)` routes need it).
+
+Installed 2026-09-26 16:10, into `/opt/opengrid/venv` only, for AI-COPILOT (#26/#31): `anthropic` 1.8.0
+(official SDK, MIT; wheel 1,348,276 B) and its new dependencies `docstring_parser` 0.18.0, `httpcore2`
+2.13.1 (83,423 B), `httpx2` 2.13.1 (95,597 B), `jiter` 0.17.0 (344,990 B), `sniffio` 1.3.1 (10,235 B),
+`truststore` 0.10.4 (18,660 B). The owner's key lives only in `/etc/opengrid/ai_agent.env`.
+
+Not installed: `dnp3py` (pending INTEGRATIONS' request and the checks above; `scada_dnp3` must import it
+lazily).
+
+**Known gap, accepted (R2):** `[trace].journal_path` (the K11 trace journal) is wired in engine, guardian,
+settle, feeds and invariants. og-api writes its few operator-action trace rows through its own
+`opengrid.api.trace_backend.PgTraceBackend`, which has no journal support, so og-api's trace rows are not
+journaled. Low risk (a handful of rows per operator action); the api owner may add journal support later.
+
+---
+
 ## 2026-09-25 (late): progress report and power-quality spec approved
 
 **1. Live status (release `20260925224517`, `main` @ `15aa223`).**

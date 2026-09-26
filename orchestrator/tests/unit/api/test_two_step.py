@@ -126,14 +126,30 @@ def test_safestop_release_request_is_step_one_of_two(client, fake_store) -> None
     assert fake_store.operator_actions == []
 
 
-def test_safestop_confirm_expired_is_410(client, fake_proposals) -> None:
+def test_safestop_proposal_window_is_og_safestops_confirm_window(client, fake_proposals, fake_store) -> None:
+    """Workstation finding (2026-09-26): the API advertised and kept a safe-stop proposal for 60 s, but
+    og-safestop's ConfirmationBroker expires it at `[safestop].confirm_window_s` = 30 s -- confirming at
+    40 s got a 503 and the stop was NOT engaged. The API now uses the broker's window and refuses a
+    confirm past it with 409 "propose again" (nothing is notified to og-safestop)."""
     propose = client.post(
         "/og/api/safestop",
         headers=OPERATOR_HEADERS,
         json={"scope": "fleet", "scope_id": None, "reason": "drill"},
     )
+    assert propose.json()["expires_in_s"] == 30.0
     proposal_id = propose.json()["proposal_id"]
     stored = fake_proposals._proposals[UUID(proposal_id)]
-    stored.created_at -= 120.0
+    stored.created_at -= 40.0
+    notified_before = len(fake_store.notifications)
     resp = client.post(f"/og/api/safestop/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
-    assert resp.status_code == 410
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "proposal expired, propose again"
+    assert len(fake_store.notifications) == notified_before  # no CONFIRM sent for an expired proposal
+
+
+def test_the_release_request_keeps_the_60_s_window(client, fake_proposals) -> None:
+    resp = client.post(
+        "/og/api/safestop/bank/bank-01/release", headers=OPERATOR_HEADERS, json={"reason": "clear"}
+    )
+    assert resp.json()["expires_in_s"] == 60.0
+    assert fake_proposals._proposals[UUID(resp.json()["proposal_id"])].ttl_s == 60.0

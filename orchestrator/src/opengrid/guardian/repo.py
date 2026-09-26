@@ -43,6 +43,7 @@ from opengrid.guardian.ports import (
     BankSnapshot,
     ClockPort,
     EngagedStop,
+    GridTopologyPort,
     GuardianPorts,
     HubSnapshot,
     HubStatePort,
@@ -54,6 +55,7 @@ from opengrid.guardian.ports import (
     SafeStopScope,
     StopReleasePort,
     StopScopeKind,
+    TerritoryPort,
 )
 from opengrid.guardian.pq_repo import (
     PgCalibrationHistoryPort,
@@ -72,9 +74,13 @@ logger = logging.getLogger(__name__)
 
 _BANK_SNAPSHOT_SQL = "SELECT kva_rating, reserve_kva, feeder_id FROM og.bank WHERE bank_id = %(bank_id)s"
 
+#: G-03's bank loading: the latest GOOD SCADA reading only. A reading the fleet ingest marked ESTIMATED or
+#: STALE (`fleet.pg_backend`'s quality mapping: stale, missing, out of range, comm fail) is ignored, so a
+#: bank whose recent readings are all bad carries the last good one's age -- stale, vetoed -- never a bad
+#: value (often 0 kVA) taken at face value.
 _BANK_LOAD_SQL = """
 SELECT value, extract(epoch FROM now() - ts) FROM og.feed_obs
-WHERE source = 'scada' AND product = %(bank_id)s AND series = 'APPARENT_POWER_KVA'
+WHERE source = 'scada' AND product = %(bank_id)s AND series = 'APPARENT_POWER_KVA' AND quality = 'GOOD'
 ORDER BY ts DESC LIMIT 1
 """
 
@@ -119,25 +125,25 @@ ORDER BY seq DESC LIMIT 1
 """
 
 
-_ALL_HUB_PARAMS_SQL = "SELECT hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d FROM og.hub"
+_ALL_HUB_PARAMS_SQL = "SELECT hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d, units FROM og.hub"
 
 
 async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
     """Seed `MqttHubStatePort` with every hub's static physical params (`og.hub`, config data -- not a
     live signal, so reading it from Postgres does not compromise the telemetry independence guardian
     otherwise keeps via MQTT). `soc_kwh`/`prev_p_kw` start at 0 and `health="stale"` until the first
-    telemetry message for that hub arrives."""
+    telemetry message for that hub arrives. `units` (migration 0032) feeds G-02's per-unit cap."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(_ALL_HUB_PARAMS_SQL)
         rows = await cur.fetchall()
     return {
         hub_id: HubSnapshot(
-            params=HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d),
+            params=HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d, units=units),
             soc_kwh=0.0,
             prev_p_kw=0.0,
             health="stale",
         )
-        for hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d in rows
+        for hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d, units in rows
     }
 
 
@@ -970,6 +976,8 @@ def build_pg_ports(
     stop_release: StopReleasePort | None = None,
     alerts: AlertPort | None = None,
     zones_by_bank: dict[str, str] | None = None,
+    topology: GridTopologyPort | None = None,
+    territory: TerritoryPort | None = None,
 ) -> tuple[GuardianPorts, PgLeaseStatePort]:
     """Convenience wiring for `main.py`: constructs every Postgres-backed port plus the durable lease
     tracker (returned separately so `main.py` can `await record_accepted(...)` after a PASS verdict).
@@ -999,6 +1007,8 @@ def build_pg_ports(
         alerts=alerts,
         service_profiles=PgServiceProfilePort(pool),
         as_awards=PgAsAwardPort(pool),
+        topology=topology,
+        territory=territory,
         pq=PqPorts(
             envelopes=PgPqEnvelopeStatePort(pool),
             measurements=PgPqMeasurementPort(pool),

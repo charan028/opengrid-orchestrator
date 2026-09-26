@@ -12,6 +12,8 @@ from opengrid.core.limits import (
     check_one_buyer,
     check_reserve_floor,
     check_reserve_floor_over_lease,
+    continuous_power_kw,
+    unit_rating_kw,
 )
 from opengrid.core.physics import BankParams, HubParams, project_soc_over_lease_kwh
 
@@ -36,18 +38,43 @@ def test_hub_power_limit():
 
 def test_dual_unit_home_is_capped_at_its_own_rating_not_one_inverter():
     """Regression: min(inverter_cap_kw=11, p_kw) capped the 20 kW dual-unit homes at 11 kW."""
-    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0)
-    single = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0)
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0, units=2)
+    single = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0, units=1)
     assert check_hub_power(20.0, dual, inverter_cap_kw=11.0).ok
     assert check_hub_power(-20.0, dual, inverter_cap_kw=11.0).ok
     assert not check_hub_power(21.0, dual, inverter_cap_kw=11.0).ok
     assert not check_hub_power(11.5, single, inverter_cap_kw=11.0).ok
 
 
-def test_per_unit_cap_binds_times_a_known_unit_count():
+def test_dual_unit_rating_is_20_kw_not_twice_the_per_unit_cap():
+    """Base battery specs: 78.4 kWh / 20 kW per dual-unit home -- a p_kw seeded above 20 does not lift it to 22."""
     dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=24.0, units=2)
-    assert check_hub_power(22.0, dual, inverter_cap_kw=11.0).ok
-    assert not check_hub_power(22.5, dual, inverter_cap_kw=11.0).ok
+    assert check_hub_power(20.0, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(20.5, dual, inverter_cap_kw=11.0).ok
+    assert not check_hub_power(22.0, dual, inverter_cap_kw=11.0).ok
+
+
+def test_mis_seeded_p_kw_on_a_single_unit_home_is_vetoed():
+    """Review fix (G-02 dead cap): a single-unit home mis-seeded at p_kw=20 is still held to 11 kW."""
+    mis_seeded = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=20.0, units=1)
+    result = check_hub_power(20.0, mis_seeded)
+    assert not result.ok and result.reason == reasons.R_HUB_POWER_LIMIT
+    assert check_hub_power(11.0, mis_seeded).ok
+
+
+def test_unknown_unit_count_fails_closed_to_one_unit():
+    """No unit count (a caller that does not pass `units`): assume ONE unit, cap = min(p_kw, 11 kW)."""
+    unknown = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0)
+    assert not check_hub_power(20.0, unknown).ok
+    assert check_hub_power(11.0, unknown).ok
+    assert continuous_power_kw(HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=5.0)) == 5.0  # p_kw below the cap binds
+
+
+def test_out_of_range_unit_count_fails_closed_to_one_unit():
+    assert unit_rating_kw(3) == 11.0
+    assert unit_rating_kw(0) == 11.0
+    assert unit_rating_kw(2) == 20.0
+    assert unit_rating_kw(2, inverter_cap_kw=9.0) == 18.0  # a tighter per-unit cap still binds
 
 
 def test_bank_kva_limit():

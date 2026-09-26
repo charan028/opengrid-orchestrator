@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from opengrid.core.models.engine import ServiceType
+from opengrid.core.models.market import Market, Utility, UtilityId
 from opengrid.core.tracehash import ChainRecord
 from opengrid.settle.backend import (
     ExistingInvoiceLineRow,
@@ -26,6 +27,7 @@ from opengrid.settle.models import (
     PenaltyParams,
     PowerSample,
     QualityFlag,
+    ZoneChargeEnergy,
 )
 from opengrid.trace.store import TraceStore
 
@@ -39,7 +41,9 @@ class FakeObligationSetup:
     rule_baseline_delivered_kwh: Decimal | None = None
     best_competing_value_per_kwh: Decimal | None = None
     measured_need_kwh: Decimal | None = None
-    grid_charged_kwh: Decimal = Decimal("0")
+    shortfall_risk_open: bool = False
+    utility: Utility | None = None
+    pjm_emergency_rate: Decimal | None = None
 
 
 @dataclass
@@ -54,6 +58,10 @@ class FakeSettleBackend:
     performance_rows: dict[tuple[UUID, datetime], tuple[Decimal | None, bool]] = field(default_factory=dict)
     pending: list[tuple[UUID, datetime, datetime]] = field(default_factory=list)
     settleable: list[UUID] = field(default_factory=list)
+    #: per-zone charging over any window (M1's grid share); an absent zone charged nothing
+    zone_charge: dict[str, ZoneChargeEnergy] = field(default_factory=dict)
+    zone_charge_calls: list[tuple[str, datetime, datetime]] = field(default_factory=list)
+    pnl_delivery_charge: dict[tuple[UUID, datetime], Decimal] = field(default_factory=dict)
 
     insert_meter_interval_calls: int = 0
     insert_invoice_line_calls: int = 0
@@ -163,6 +171,7 @@ class FakeSettleBackend:
     ) -> UUID:
         self.insert_pnl_calls += 1
         self.pnl_insert_log.append((obligation_id, interval_start))
+        self.pnl_delivery_charge[(obligation_id, interval_start)] = delivery_charge
         new_id = uuid4()
         self.pnl_rows[(obligation_id, interval_start)] = ExistingPnl(
             pnl_id=new_id, net_value=net_value, version=version
@@ -184,10 +193,27 @@ class FakeSettleBackend:
     ) -> Decimal | None:
         return self.obligations[obligation_id].measured_need_kwh
 
-    async def fetch_grid_charged_kwh(
+    async def fetch_zone_charge_energy(
+        self, zone: str, window_start: datetime, window_end: datetime
+    ) -> ZoneChargeEnergy:
+        self.zone_charge_calls.append((zone, window_start, window_end))
+        return self.zone_charge.get(zone, ZoneChargeEnergy(Decimal("0"), Decimal("0")))
+
+    async def fetch_shortfall_risk_open(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
-    ) -> Decimal:
-        return self.obligations[obligation_id].grid_charged_kwh
+    ) -> bool:
+        return self.obligations[obligation_id].shortfall_risk_open
+
+    async def fetch_pjm_emergency_rate(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal | None:
+        return self.obligations[obligation_id].pjm_emergency_rate
+
+    async def fetch_utility(self, utility_id: UtilityId) -> Utility | None:
+        for setup in self.obligations.values():
+            if setup.context.utility_id == utility_id and setup.utility is not None:
+                return setup.utility
+        return None
 
     async def fetch_invoice_lines_for_period(
         self, contract_id: UUID, period_start: date, period_end: date
@@ -216,6 +242,7 @@ class FakeTraceRow:
     prev_hash: str | None
     hash: str
     created_at: datetime
+    reason_codes: list[str] | None = None
 
 
 @dataclass
@@ -248,7 +275,15 @@ class FakeTraceBackend:
         rows = self.streams.setdefault(stream_id, [])
         rows.append(
             FakeTraceRow(
-                trace_id, seq, decision_type, event_class, payload, prev_hash, record_hash, created_at
+                trace_id,
+                seq,
+                decision_type,
+                event_class,
+                payload,
+                prev_hash,
+                record_hash,
+                created_at,
+                reason_codes=list(reason_codes) if reason_codes else None,
             )
         )
         self.preimages.add(trace_id)
@@ -299,6 +334,8 @@ def make_context(
     period_end: date = date(2026, 9, 26),
     is_need_basis: bool = False,
     zone: str | None = None,
+    market: Market = "FREE",
+    utility_id: UtilityId | None = None,
 ) -> ObligationSettlementContext:
     return ObligationSettlementContext(
         obligation_id=obligation_id or uuid4(),
@@ -315,6 +352,8 @@ def make_context(
         period_end=period_end,
         is_need_basis=is_need_basis,
         zone=zone,
+        market=market,
+        utility_id=utility_id,
     )
 
 

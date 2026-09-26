@@ -188,6 +188,20 @@ def test_health_payload_has_degraded_modes_field(client) -> None:
     assert body["degraded_modes"] == []
 
 
+def test_health_payload_alerts_have_scope_fields(client) -> None:
+    """R2 item 1: `og.alert.scope_kind`/`scope_ref` (migration 0024) must be present on every alert in
+    the payload -- `None` here since this suite's `app.state.pool` is never set, so `_merge_alert_scopes`
+    degrades (K7) rather than crashing; the real round trip is `tests/unit/health/test_queries.py`'s job."""
+    resp = client.get("/og/api/health")
+    body = resp.json()
+    assert body["alerts"], "fixture must seed at least one alert for this to be meaningful"
+    for alert in body["alerts"]:
+        assert "scope_kind" in alert
+        assert "scope_ref" in alert
+        assert alert["scope_kind"] is None
+        assert alert["scope_ref"] is None
+
+
 def test_opportunity_creation_surfaces_not_implemented_as_503(client) -> None:
     """`FakeContractsRepo` (this suite's test double, `contracts_fake.py`) does not model
     `create_opportunity_and_obligation` -- the API must surface that as a clear 503, not a bare 500

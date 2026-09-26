@@ -3,6 +3,8 @@ bad plan even when it never touched `model.py`/`solve.py` (defense-in-depth)."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from opengrid.selector.types import ExtractedPlan
 from opengrid.selector.validate import validate_plan
 from unit.selector.factories import binary_candidate, committed, make_bank, simple_inputs, zero_price_scenario
@@ -54,6 +56,33 @@ def test_k2_one_buyer_violation_is_caught():
     ok, violations = validate_plan(_base_inputs(), bad)
     assert not ok
     assert any("K2" in v for v in violations)
+
+
+def test_soc_recurrence_tolerates_mip_residuals_but_not_real_errors():
+    """HiGHS accepts MIP rows with residuals up to 1e-6 each and the C1 recurrence accumulates them, so a
+    SoC a few 1e-5 kWh off the re-derived balance is a valid plan (the flaky property test), while a real
+    energy error (10 Wh) is still caught."""
+    bank = replace(
+        make_bank("B1", 10.0, range(2)), capacity_kwh=10.0, initial_soc_kwh=5.0, self_discharge_kwh_per_h=0.0
+    )
+    inputs = simple_inputs((bank,), (zero_price_scenario(range(2)),), (), (), n_intervals=2)
+    base = {
+        "selected_x": {},
+        "bank_interval_allocation": {},
+        "committed_profile": {},
+        "headroom_schedule": {("B1", 0, "P50"): 4.0, ("B1", 1, "P50"): 0.0},  # 1 kWh AC out in interval 0
+    }
+    expected_end = 5.0 - 0.25 / bank.eta_d * 4.0
+
+    ok, violations = validate_plan(
+        inputs, _plan(**base, soc_by_bank_interval_scenario={("B1", 1, "P50"): expected_end + 3e-5})
+    )
+    assert ok, violations
+    ok, violations = validate_plan(
+        inputs, _plan(**base, soc_by_bank_interval_scenario={("B1", 1, "P50"): expected_end + 1e-2})
+    )
+    assert not ok
+    assert any("C1" in v for v in violations)
 
 
 def test_product_rule_mismatch_is_caught():

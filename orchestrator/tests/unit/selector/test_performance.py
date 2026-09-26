@@ -83,6 +83,9 @@ def test_kpi_40_banks_96_intervals_3_scenarios_solves_under_30s():
     print(message)
     assert wall_elapsed_s < 30.0, message
     assert outcome.status in ("OPTIMAL", "TIME_LIMIT_GAP"), message
+    # 09 D7: the stored-energy value is published at fleet scale too. Regression: HiGHS's `time_limit`
+    # is cumulative per instance, so a slow main solve left the dual re-solve no time and no values.
+    assert len(outcome.stored_energy_value) == N_BANKS * N_INTERVALS, message
 
     plan = extract_plan(built, outcome, "L-DA")
     assert plan.solver_time_ms >= 0

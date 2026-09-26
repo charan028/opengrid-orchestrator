@@ -104,6 +104,29 @@ k13_restore_lag_total = Counter(
     "K13 commitments not restored to their full committed kW within 2 grant cycles of a cleared "
     "SHORTFALL (owner decision 2026-09-26). See opengrid.invariants.checks.find_restore_lag_violations.",
 )
+territory_violations_total = Counter(
+    "og_territory_violations_total",
+    "K15: a REGULATED obligation delivered from a bank/zone outside its utility's territory_zones "
+    "(00-invariants.md S2.6/S6, migration 0025's market model). See "
+    "opengrid.invariants.checks.find_territory_violations.",
+)
+as_hold_violations_total = Counter(
+    "og_as_hold_violations_total",
+    "An active AS deployment's held energy fell below what sustaining its committed kW for the "
+    "product's full duration would require (migration 0020). See "
+    "opengrid.invariants.checks.find_as_hold_violations.",
+)
+flow_limit_violations_total = Counter(
+    "og_flow_limit_violations_total",
+    "A substation asset's net power exceeded its own POI import/export limit (migration 0025). See "
+    "opengrid.invariants.checks.find_flow_limit_violations.",
+)
+anchor_freshness_violations_total = Counter(
+    "og_anchor_freshness_violations_total",
+    "K11 external anchoring: the trace chain's head hash was not published outside the database "
+    "recently enough, or has never been published at all. See "
+    "opengrid.invariants.checks.find_anchor_staleness_violation.",
+)
 invariant_check_last_run_timestamp_seconds = Gauge(
     "og_invariant_check_last_run_timestamp_seconds",
     "Unix time of the last completed run of each opengrid.invariants check.",

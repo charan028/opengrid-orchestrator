@@ -10,13 +10,18 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
 from opengrid.core.crypto import verify_payload
 from opengrid.core.models.mqtt import StopEvent
-from opengrid.safestop.backend import ReleaseHousekeepingBackend, StopEventBackend, StopPublisher
+from opengrid.safestop.backend import (
+    InitiatorKind,
+    ReleaseHousekeepingBackend,
+    StopEventBackend,
+    StopPublisher,
+)
 from opengrid.safestop.events import Scope, build_engage_event, stop_topic_suffix, wire_stop_topic_suffix
 from opengrid.safestop.keys import StopSigningKey
 
@@ -59,13 +64,25 @@ class SafestopService:
     #: The guardian's Ed25519 public key (32 raw bytes). None: no RELEASE is ever relayed (fail closed).
     guardian_public_key: bytes | None = None
 
-    async def engage(self, scope: Scope, scope_ref: str, reason: str, initiator_ref: str) -> None:
+    async def engage(
+        self,
+        scope: Scope,
+        scope_ref: str,
+        reason: str,
+        initiator_ref: str,
+        *,
+        initiator_kind: InitiatorKind = "SAFESTOP_AUTHORITY",
+    ) -> UUID:
         """Sign (stop-only key) and broadcast a retained ENGAGE stop for `scope`/`scope_ref` (02a S6.5).
 
         Order matters for K10 (no signed/broadcast action without a durable pre-image): trace first,
         then persist the `stop_event` row, then publish MQTT last -- a crash before the MQTT publish
         still leaves an auditable, unambiguous record that the ENGAGE was decided, and the retained
         publish is safely retried (StopEvent is idempotent by `stop_id`).
+
+        `initiator_kind` is the `og.stop_event.initiator_kind` column: the API path keeps the default
+        `SAFESTOP_AUTHORITY`; the host CLI records `OPERATOR` and the L2 intake `UTILITY`. Returns the
+        new `stop_id` (the last segment of the retained topic).
         """
         stop_id = uuid4()
         event = build_engage_event(
@@ -92,7 +109,7 @@ class SafestopService:
             scope_kind=_SCOPE_TO_KIND[scope],  # type: ignore[arg-type]
             scope_ref=scope_ref or "FLEET",
             action="ENGAGE",
-            initiator_kind="SAFESTOP_AUTHORITY",
+            initiator_kind=initiator_kind,
             initiator_ref=initiator_ref,
             reason=reason,
             approver_ref=None,
@@ -105,6 +122,7 @@ class SafestopService:
             "safe stop engaged",
             extra={"scope": scope, "scope_ref": scope_ref, "stop_id": str(stop_id)},
         )
+        return stop_id
 
     async def relay_guardian_release(self, event: dict[str, Any]) -> bool:
         """K8 / crypto.md S2.3: publish a RELEASE the GUARDIAN signed after Tier-2 approval. This process

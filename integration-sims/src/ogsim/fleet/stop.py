@@ -171,13 +171,49 @@ class StopRegistry:
 
 
 def ramp_toward_zero(current_p_kw: float, dt_s: float, ramp_time_s: float, p_kw_limit: float) -> float:
-    """Ramps a commanded setpoint toward 0 over `ramp_time_s`, never
-    overshooting past 0. `p_kw_limit` bounds the per-tick step for a hub
-    that was already at/near its max so ramp_time_s is respected even at
-    a coarse tick rate."""
+    """One ramp STEP from `current_p_kw` toward 0 over `ramp_time_s`, never overshooting past 0.
+    `p_kw_limit` bounds the per-tick step for a hub that was already at/near its max so ramp_time_s is
+    respected even at a coarse tick rate. Pure/stateless: the CALLER (`StopRampTracker`) is responsible
+    for feeding back the PREVIOUS step's result as `current_p_kw` on the next tick -- calling this with
+    the same starting value every tick (e.g. the hub's unchanged commanded setpoint) makes the ramp
+    take one step and then stop, which was exactly the live bug fixed 2026-09-26 (FLEET-SIM/R3): the
+    ramp never accumulated because `ogsim.fleet.runtime.FleetEngine.tick` rebuilt its input from
+    `state.p_kw_commanded` (never itself decremented) on every tick instead of from the previous tick's
+    ramped-down output."""
     if ramp_time_s <= 0 or current_p_kw == 0.0:
         return 0.0
     max_step = p_kw_limit * (dt_s / ramp_time_s)
     if current_p_kw > 0:
         return max(0.0, current_p_kw - max_step)
     return min(0.0, current_p_kw + max_step)
+
+
+@dataclass
+class StopRampTracker:
+    """Per-hub ramp-to-zero state, PERSISTED across ticks (live bug fix, 2026-09-26, FLEET-SIM/R3).
+
+    While a hub's scope is stopped, its ramp target starts from the hub's actual last output
+    (`p_kw_applied`, not the still-full commanded setpoint) the FIRST tick it is observed stopped, and
+    from then on continues from its OWN previous step -- so an 11 kW hub commanded at 9 kW reaches 0
+    within `stop_ramp_s` regardless of tick rate, instead of sitting at one ramp step forever. Cleared
+    the instant a hub is no longer stopped (a verified RELEASE, per K8), so normal command following
+    resumes immediately and a later ENGAGE starts a fresh ramp from whatever the hub is doing then --
+    never from a stale partially-ramped value left over from a previous stop.
+    """
+
+    _ramped_p_kw: dict[str, float] = field(default_factory=dict)
+
+    def step(
+        self, hub_id: str, *, actual_p_kw: float, dt_s: float, ramp_time_s: float, p_kw_limit: float
+    ) -> float:
+        """Call only while `hub_id`'s scope IS stopped. Returns this tick's ramped setpoint (kW) and
+        remembers it for the next tick."""
+        current = self._ramped_p_kw.get(hub_id, actual_p_kw)
+        stepped = ramp_toward_zero(current, dt_s, ramp_time_s, p_kw_limit)
+        self._ramped_p_kw[hub_id] = stepped
+        return stepped
+
+    def clear(self, hub_id: str) -> None:
+        """Call every tick a hub's scope is NOT stopped (covers both "never stopped" and "just
+        released") -- a no-op if there is nothing to clear."""
+        self._ramped_p_kw.pop(hub_id, None)

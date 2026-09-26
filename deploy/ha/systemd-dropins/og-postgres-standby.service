@@ -1,0 +1,33 @@
+# deploy/ha/systemd-dropins/og-postgres-standby.service
+#
+# A SECOND postgres instance on the same host, running the hot standby that
+# deploy/ha/pg_standby_setup.sh creates. Install as
+# /etc/systemd/system/og-postgres-standby.service (NOT enabled/started by anything in this repo --
+# the owner or lead does that by hand after reviewing deploy/ha/FAILOVER.md).
+#
+# Adjust ExecStart's --pgdata to match whatever --standby-data-dir was passed to pg_standby_setup.sh.
+# Uses the same postgres binary as the primary (Debian/Ubuntu package layout assumed --
+# /usr/lib/postgresql/<version>/bin/postgres; check `pg_config --bindir` if unsure).
+
+[Unit]
+Description=OpenGrid Postgres hot standby (single-host HA)
+After=network.target
+# Deliberately NOT `Requires=postgresql.service` / `After=postgresql.service` on the PRIMARY unit:
+# the standby's whole purpose is to survive independently of the primary process, on its own data
+# directory and (ideally) its own disk.
+
+[Service]
+Type=notify
+User=postgres
+Group=postgres
+Environment=PGDATA=/mnt/standby-disk/pgdata_standby
+ExecStart=/usr/lib/postgresql/16/bin/postgres -D ${PGDATA}
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutSec=300
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -161,9 +161,13 @@ class FakeBankMembers:
 
     def __init__(self) -> None:
         self.members: dict[str, list[HubSnapshot]] = {}
+        self.hub_ids: dict[str, list[str]] = {}  # per-hub reads (PQ evidence) go through FakeHubs
 
     async def member_snapshots(self, bank_id: str) -> list[HubSnapshot]:
         return list(self.members.get(bank_id, []))
+
+    async def member_hub_ids(self, bank_id: str) -> list[str]:
+        return list(self.hub_ids.get(bank_id, []))
 
 
 @dataclass

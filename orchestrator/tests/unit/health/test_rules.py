@@ -20,10 +20,13 @@ from opengrid.health.rules import (
     evaluate_feed_alert,
     evaluate_guardian_timeout_alert,
     evaluate_hub_offline_ratio_alert,
+    evaluate_limit_proximity_alert,
+    evaluate_meter_export_limit_alert,
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
     evaluate_scada_overload_alert,
     evaluate_sim_offline_alert,
+    evaluate_temperature_limit_alert,
     is_fallback_feed_needed,
 )
 from opengrid.platform.config import Config
@@ -351,6 +354,136 @@ def test_scada_overload_alert_critical_matches_default_anomaly_injection() -> No
     finding = evaluate_scada_overload_alert("bank-000", 75.0 * 1.20 + 0.1, 75.0, thresholds=THRESHOLDS)
     assert finding is not None
     assert finding.severity == "critical"
+
+
+# --- structured scope_kind/scope_ref (R2 item 1, migration 0024) ------------------------------------
+
+
+def test_alert_rules_carry_structured_scope_in_detail() -> None:
+    """`opengrid.health.queries.raise_alert` (the single `og.alert` writer, also used by guardian's
+    `PgAlertPort`) reads `scope_kind`/`scope_ref` straight out of `AlertFinding.detail` -- every scoped
+    health rule must set them (unscoped/system-wide rules, e.g. ALR-RESERVE-BREACH, correctly omit them)."""
+    feed_status = FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=None)
+    feed_finding = evaluate_feed_alert(feed_status, now=NOW, thresholds=THRESHOLDS, staleness_threshold_s=60)
+    assert feed_finding is not None
+    assert feed_finding.detail["scope_kind"] == "FEED"
+    assert feed_finding.detail["scope_ref"] == "ERCOT:np6-905-cd"
+
+    process_finding = evaluate_process_down_alert(ProcessHealth("engine", "down", NOW))
+    assert process_finding is not None
+    assert process_finding.detail["scope_kind"] == "PROCESS"
+    assert process_finding.detail["scope_ref"] == "engine"
+
+    zone_finding = evaluate_hub_offline_ratio_alert(
+        "LZ_NORTH", HubHealthCounts(offline=1), thresholds=THRESHOLDS
+    )
+    assert zone_finding is not None
+    assert zone_finding.detail["scope_kind"] == "ZONE"
+    assert zone_finding.detail["scope_ref"] == "LZ_NORTH"
+
+    scada_finding = evaluate_scada_overload_alert("bank-000", 80.0, 75.0, thresholds=THRESHOLDS)
+    assert scada_finding is not None
+    assert scada_finding.detail["scope_kind"] == "BANK"
+    assert scada_finding.detail["scope_ref"] == "bank-000"
+
+    energy_finding = evaluate_energy_shortfall_risk_alert(
+        obligation_id="OBL-1", customer_id="CUST-A", margin_kwh=-3.5, time_to_depletion_h=0.75
+    )
+    assert energy_finding.detail["scope_kind"] == "OBLIGATION"
+    assert energy_finding.detail["scope_ref"] == "OBL-1"
+
+    reserve_finding = evaluate_reserve_breach_alert(1)
+    assert reserve_finding is not None
+    assert "scope_kind" not in reserve_finding.detail  # system-wide -- no scope
+
+
+# --- sustained limit proximity (R2 item 3, prepared ahead of FLEET-SIM telemetry) --------------------
+
+
+def test_limit_proximity_alert_none_below_warn_ratio() -> None:
+    assert (
+        evaluate_limit_proximity_alert(
+            rule="ALR-METER-EXPORT-LIMIT",
+            scope_kind="HUB",
+            scope_ref="hub-001",
+            value=8.0,
+            limit=11.0,
+            unit="kW",
+            consecutive_cycles=5,
+            warn_ratio=0.90,
+            required_consecutive_cycles=3,
+        )
+        is None
+    )
+
+
+def test_limit_proximity_alert_none_until_sustained() -> None:
+    """A single cycle at/above the ratio is a spike, not sustained -- must not alert yet."""
+    assert (
+        evaluate_limit_proximity_alert(
+            rule="ALR-METER-EXPORT-LIMIT",
+            scope_kind="HUB",
+            scope_ref="hub-001",
+            value=10.5,
+            limit=11.0,
+            unit="kW",
+            consecutive_cycles=1,
+            warn_ratio=0.90,
+            required_consecutive_cycles=3,
+        )
+        is None
+    )
+
+
+def test_limit_proximity_alert_fires_when_sustained() -> None:
+    finding = evaluate_limit_proximity_alert(
+        rule="ALR-METER-EXPORT-LIMIT",
+        scope_kind="HUB",
+        scope_ref="hub-001",
+        value=10.5,
+        limit=11.0,
+        unit="kW",
+        consecutive_cycles=3,
+        warn_ratio=0.90,
+        required_consecutive_cycles=3,
+    )
+    assert finding is not None
+    assert finding.rule == "ALR-METER-EXPORT-LIMIT"
+    assert finding.severity == "warning"
+    assert finding.condition_key == "ALR-METER-EXPORT-LIMIT:hub-001"
+    assert finding.detail["scope_kind"] == "HUB"
+    assert finding.detail["scope_ref"] == "hub-001"
+
+
+def test_limit_proximity_alert_none_when_no_reading_yet() -> None:
+    assert (
+        evaluate_limit_proximity_alert(
+            rule="ALR-METER-EXPORT-LIMIT",
+            scope_kind="HUB",
+            scope_ref="hub-001",
+            value=None,
+            limit=11.0,
+            unit="kW",
+            consecutive_cycles=5,
+            warn_ratio=0.90,
+            required_consecutive_cycles=3,
+        )
+        is None
+    )
+
+
+def test_meter_export_limit_alert_wrapper() -> None:
+    finding = evaluate_meter_export_limit_alert("hub-001", 10.5, 11.0, 3, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-METER-EXPORT-LIMIT"
+
+
+def test_temperature_limit_alert_wrapper() -> None:
+    finding = evaluate_temperature_limit_alert("hub-001", 58.0, 60.0, 3, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-TEMPERATURE-LIMIT"
+    assert finding.detail["value"] == 58.0
+    assert finding.detail["limit"] == 60.0
 
 
 # --- EIA fallback-feed suppression (defect fix) -----------------------------------------------------

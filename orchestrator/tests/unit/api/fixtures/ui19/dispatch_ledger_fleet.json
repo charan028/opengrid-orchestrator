@@ -1,0 +1,125 @@
+{
+  "level": "fleet",
+  "id": null,
+  "from": "2026-09-26T17:35:15.638181+00:00",
+  "to": "2026-09-27T19:35:15.638181+00:00",
+  "bucket_minutes": 60,
+  "hub_count": 2000,
+  "available_hub_count": 1945,
+  "labels": {
+    "uncommitted_capacity_kw": "Uncommitted capacity"
+  },
+  "basis": "bank",
+  "notes": [],
+  "now": {
+    "t": "2026-09-26T19:35:15.638181+00:00",
+    "capacity_kw": 21395.0,
+    "reserved_kw": 40.0,
+    "committed_kw": 40.0,
+    "uncommitted_capacity_kw": 21355.0,
+    "over_committed_kw": 0.0,
+    "committed_by_service": {
+      "ERCOT_ENERGY": 40.0
+    },
+    "unallocated_committed_kw": 0.0
+  },
+  "timeline": [
+    {
+      "t": "2026-09-26T17:35:15.638181+00:00",
+      "capacity_kw": 21395.0,
+      "reserved_kw": 0,
+      "committed_kw": 0.0,
+      "uncommitted_capacity_kw": 21395.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {},
+      "unallocated_committed_kw": 0.0
+    },
+    {
+      "t": "2026-09-26T18:35:15.638181+00:00",
+      "capacity_kw": 21395.0,
+      "reserved_kw": 40.0,
+      "committed_kw": 40.0,
+      "uncommitted_capacity_kw": 21355.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {
+        "ERCOT_ENERGY": 40.0
+      },
+      "unallocated_committed_kw": 0.0
+    },
+    {
+      "t": "2026-09-26T19:35:15.638181+00:00",
+      "capacity_kw": 21395.0,
+      "reserved_kw": 40.0,
+      "committed_kw": 40.0,
+      "uncommitted_capacity_kw": 21355.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {
+        "ERCOT_ENERGY": 40.0
+      },
+      "unallocated_committed_kw": 0.0
+    },
+    {
+      "t": "2026-09-26T20:35:15.638181+00:00",
+      "capacity_kw": 21395.0,
+      "reserved_kw": 0,
+      "committed_kw": 0.0,
+      "uncommitted_capacity_kw": 21395.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {},
+      "unallocated_committed_kw": 0.0
+    }
+  ],
+  "children": [
+    {
+      "level": "zone",
+      "id": "LZ_HOUSTON",
+      "hub_count": 500,
+      "t": "2026-09-26T19:35:15.638181+00:00",
+      "capacity_kw": 5500.0,
+      "reserved_kw": 0.0,
+      "committed_kw": 0.0,
+      "uncommitted_capacity_kw": 5500.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {}
+    },
+    {
+      "level": "zone",
+      "id": "LZ_NORTH",
+      "hub_count": 500,
+      "t": "2026-09-26T19:35:15.638181+00:00",
+      "capacity_kw": 4950.0,
+      "reserved_kw": 40.0,
+      "committed_kw": 40.0,
+      "uncommitted_capacity_kw": 4910.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {
+        "ERCOT_ENERGY": 40.0
+      }
+    },
+    {
+      "level": "zone",
+      "id": "LZ_SOUTH",
+      "hub_count": 500,
+      "t": "2026-09-26T19:35:15.638181+00:00",
+      "capacity_kw": 5500.0,
+      "reserved_kw": 0.0,
+      "committed_kw": 0.0,
+      "uncommitted_capacity_kw": 5500.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {}
+    },
+    {
+      "level": "zone",
+      "id": "LZ_WEST",
+      "hub_count": 500,
+      "t": "2026-09-26T19:35:15.638181+00:00",
+      "capacity_kw": 5445.0,
+      "reserved_kw": 0.0,
+      "committed_kw": 0.0,
+      "uncommitted_capacity_kw": 5445.0,
+      "over_committed_kw": 0.0,
+      "committed_by_service": {}
+    }
+  ],
+  "_sample_note": "timeline trimmed to 4 buckets"
+}

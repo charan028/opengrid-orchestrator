@@ -121,10 +121,28 @@ Approve answers 200 when the guardian's signed RELEASE lands, 202 while pending.
 operator, the same person twice, a stale approval, or an active utility ESTOP/BLOCK on the scope.
 Authorised operators: `[guardian].stop_release_authorised_operators` in `orchestrator.toml`.
 
+### Operator accounts for the two-person release
+
+`deploy/scripts/install.sh` creates an Apache account for every operator in
+`[guardian].stop_release_authorised_operators` (today the D-12 test accounts `og-op-a`/`og-op-b`), with
+generated passwords appended to `/root/opengrid-ui-credentials.txt` (0600, never printed). Before real
+operation, replace them with real per-person accounts and keep three places in sync:
+
+1. `/etc/opengrid/htpasswd`: `htpasswd -B /etc/opengrid/htpasswd <person>` (and `htpasswd -D` the test
+   accounts);
+2. `orchestrator.toml`: `[guardian].stop_release_authorised_operators` (who may request/approve a release)
+   and `[api.roles].operator` (who may use operator routes);
+3. `deploy/apache/opengrid.conf`: the `Require user` line of the `/og/` block.
+
+Then deploy (the guardian and og-api read the config at start) and `apache2ctl configtest && systemctl
+reload apache2`. Two different people are always required: the guardian refuses a release approved by its
+requester.
+
 ## ERCOT AS deployment (demo trigger)
 
-An ERCOT_AS award is a 0 kW capacity hold until deployed. To deploy (operator):
-`POST /og/api/dispatch/as-deployments {"duration_minutes": 15, "reason": "...", "obligation_id": <optional>}`;
+An ERCOT_AS award is a 0 kW capacity hold until deployed. To deploy one award (operator):
+`POST /og/api/dispatch/as-deployments {"obligation_id": "<id>", "duration_minutes": 15, "reason": "..."}`
+(duration capped by the award's product: ECRS 60 min, Non-Spin 240; fleet-wide deployment is refused);
 end early with `DELETE /og/api/dispatch/as-deployments/{deployment_id}`; list with GET.
 
 ## Useful checks

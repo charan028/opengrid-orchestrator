@@ -113,9 +113,17 @@ async def fetch_reservation_aggregates(
     return [(r[0], r[1], r[2], float(r[3])) for r in rows]
 
 
+_HUB_UNITS_COLUMN_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'og' AND table_name = 'hub' AND column_name = 'units'
+    )
+"""
+
+
 async def fetch_bank_capability_inputs(
     pool: AsyncConnectionPool,
-) -> list[tuple[str, float, float, float, float, float, float, float, float, str]]:
+) -> list[tuple[str, float, float, float, float, float, float, float, float, str, int | None]]:
     """K2's capability inputs (adversarial-review fix): one row per hub, everything
     `checks.compute_bank_capabilities_kw` needs to reproduce the ledger's own admission-time capability
     formula (`opengrid.core.physics.hub_capability`/`bank_capability`) from persisted state, instead of
@@ -127,16 +135,22 @@ async def fetch_bank_capability_inputs(
     grow with reservation/obligation volume the way the rest of this package's fetches are bounded by a
     rolling window; a fleet's hub count is its own separate, comparatively static scale.
 
-    `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health)` per hub.
-    """
-    sql = """
-        SELECT h.bank_id, b.kva_rating, b.reserve_kva, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d,
-               hs.soc_kwh, hs.health
-        FROM og.hub h
-        JOIN og.bank b ON b.bank_id = h.bank_id
-        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+    `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health, units)` per hub.
+    `units` is `og.hub.units` (migration 0032) -- the unit count `hub_capability`'s G-02 per-unit cap needs.
+    Schema-guarded: on a database without that column yet, `units` is `None` for every hub and the cap
+    fails closed to one unit (`opengrid.core.limits.unit_rating_kw`), never to the seeded `p_kw`.
     """
     async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_HUB_UNITS_COLUMN_SQL)
+        exists_row = await cur.fetchone()
+        units_expr = "h.units" if exists_row is not None and exists_row[0] else "NULL::smallint"
+        sql = f"""
+            SELECT h.bank_id, b.kva_rating, b.reserve_kva, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d,
+                   hs.soc_kwh, hs.health, {units_expr}
+            FROM og.hub h
+            JOIN og.bank b ON b.bank_id = h.bank_id
+            JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+        """  # noqa: S608 -- units_expr is one of two literal column expressions, never user input
         await cur.execute(sql)
         rows = await cur.fetchall()
     return [
@@ -151,6 +165,7 @@ async def fetch_bank_capability_inputs(
             float(r[7]),
             float(r[8]),
             r[9],
+            int(r[10]) if r[10] is not None else None,
         )
         for r in rows
     ]
@@ -386,6 +401,168 @@ async def fetch_measured_need_sample(
         limit=float(reading_row[1]),
         quality=reading_row[2],
     )
+
+
+# --- K15: territory ------------------------------------------------------------------------------
+
+
+async def fetch_territory_candidates(
+    pool: AsyncConnectionPool, *, since: datetime, now: datetime, limit: int = _DEFAULT_BATCH_LIMIT
+) -> tuple[list[tuple[str, str, str, str, str, tuple[str, ...], datetime]], datetime | None]:
+    """K15 (00-invariants.md S2.6/S6, migration 0025's market model): every real (non-headroom) grant
+    since the watermark whose obligation belongs to a REGULATED contract, joined to the delivering bank's
+    zone and that contract's utility's `territory_zones`. Bounded by the `created_at` cursor plus `limit`,
+    same incremental-cursor shape as K13's `fetch_lock_commitment_candidates` -- not a scan of the whole
+    `og.grant` table. `invariants.checks.find_territory_violations` decides which rows are actually out
+    of territory; this function only enumerates REGULATED-market candidates (a FREE-market obligation has
+    no `utility_id` at all and is excluded by the join, never reaching Python).
+
+    Returns `(rows, new_watermark)`; `new_watermark` is the latest `created_at` seen, or `None` if
+    nothing new arrived.
+    """
+    sql = """
+        SELECT g.grant_id, g.obligation_id, g.bank_id, b.zone, u.utility_id, u.territory_zones, g.created_at
+        FROM og.grant g
+        JOIN og.obligation o ON o.obligation_id = g.obligation_id
+        JOIN og.contract c ON c.contract_id = o.contract_id
+        JOIN og.utility u ON u.utility_id = c.utility_id
+        JOIN og.bank b ON b.bank_id = g.bank_id
+        WHERE c.market = 'REGULATED'
+          AND g.is_headroom = false
+          AND g.created_at > %(since)s AND g.created_at <= %(now)s
+        ORDER BY g.created_at
+        LIMIT %(limit)s
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql, {"since": since, "now": now, "limit": limit})
+        rows = await cur.fetchall()
+    typed = [(str(r[0]), str(r[1]), str(r[2]), r[3], r[4], tuple(r[5] or ()), r[6]) for r in rows]
+    new_watermark = typed[-1][6] if typed else None
+    return typed, new_watermark
+
+
+async def fetch_as_hold_candidates(
+    pool: AsyncConnectionPool, *, now: datetime
+) -> list[tuple[str, str, float, int, float]]:
+    """AS capacity hold (migration 0020): every currently-active `og.as_deployment` window, joined to its
+    obligation's active commitment (the interval covering `now`), the product's `duration_minutes`
+    (`og.opportunity.product_rule_id` -> `og.product_rule`), and the deliverable energy
+    (`opengrid.core.physics.hub_available_energy_kwh`'s formula, summed in SQL) held across every bank
+    reserved for that obligation's active interval. Bounded by the partial index on `og.as_deployment`'s
+    `cancelled_at IS NULL` window plus one active commitment/reservation per obligation -- the number of
+    simultaneously-active AS deployments, not fleet or trace volume.
+
+    Returns `(deployment_id, obligation_id, committed_kw, duration_minutes, held_kwh)`; `checks.
+    find_as_hold_violations` decides which fall short.
+    """
+    sql = """
+        SELECT d.deployment_id::text, o.obligation_id::text, c.committed_kw::float8, pr.duration_minutes,
+               COALESCE(SUM(GREATEST(hs.soc_kwh - h.r_kwh, 0) * h.eta_d), 0)::float8 AS held_kwh
+        FROM og.as_deployment d
+        JOIN og.obligation o ON o.obligation_id = d.obligation_id
+        JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
+        JOIN og.product_rule pr ON pr.product_rule_id = op.product_rule_id
+        JOIN og.commitment c ON c.obligation_id = o.obligation_id AND c.supersedes IS NULL
+            AND c.interval_start <= %(now)s AND c.interval_end > %(now)s
+        JOIN og.reservation r ON r.obligation_id = o.obligation_id AND r.released_at IS NULL
+            AND r.interval_start = c.interval_start
+        JOIN og.hub h ON h.bank_id = r.bank_id
+        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+        WHERE d.cancelled_at IS NULL AND d.start_at <= %(now)s AND d.end_at > %(now)s
+        GROUP BY d.deployment_id, o.obligation_id, c.committed_kw, pr.duration_minutes
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql, {"now": now})
+        rows = await cur.fetchall()
+    return [(r[0], r[1], float(r[2]), int(r[3]), float(r[4])) for r in rows]
+
+
+# --- K11 external anchoring: freshness verification ---------------------------------------------------
+
+
+async def fetch_latest_anchor_published_at(pool: AsyncConnectionPool) -> datetime | None:
+    """K11 external anchoring verification: when the last `og.trace_anchor` row (`opengrid.trace.
+    anchoring.publish_anchor`) was recorded, or `None` if anchoring has never run yet on this database.
+    A single `MAX()` over an index-backed column -- bounded regardless of how many anchors have ever
+    been published."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT MAX(published_at) FROM og.trace_anchor")
+        row = await cur.fetchone()
+    return row[0] if row is not None else None
+
+
+# --- Discharge-flow limit (POI import/export) --------------------------------------------------------
+
+
+async def fetch_flow_limit_candidates(
+    pool: AsyncConnectionPool,
+) -> list[tuple[str, str, float, float | None, float | None]]:
+    """Discharge-flow limit (migrations 0027's per-hub telemetry, 0029's premise/transformer/feeder/
+    substation limit tables; 09-optimizer-dispatcher-update.md G-26..G-29/G-31): every measured net power
+    at every level the guardian itself enforces against, aggregated in SQL. Five `UNION ALL` branches, one
+    per scope kind (see `checks.find_flow_limit_violations`'s docstring for what each measures against).
+    Every branch's `WHERE`/`JOIN` only includes rows that actually HAVE the relevant limit configured (a
+    hub/bank/transformer/feeder/substation with no row in the 0029 tables, or no 0027 telemetry reported
+    yet, contributes no row at all here -- never a `None`-vs-`None` no-op) -- schema-adaptive per the task
+    brief's "skip cleanly where data is absent".
+
+    Bounded by fleet/premise-table size (hub count, transformer/feeder/substation count), all small and
+    static like `fetch_bank_capability_inputs`'s own bound -- never a rolling window over trace/reservation
+    volume. Returns `(scope_kind, scope_id, net_kw, forward_limit_kw, reverse_limit_kw)`; `checks.
+    find_flow_limit_violations` decides which exceed their limit.
+    """
+    sql = """
+        SELECT 'home_meter', h.hub_id, hs.meter_kw, NULL::float8, h.export_limit_kw
+        FROM og.hub h
+        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+        WHERE h.export_limit_kw IS NOT NULL AND hs.meter_kw IS NOT NULL
+
+        UNION ALL
+
+        SELECT 'hub_discharge_derate', h.hub_id, hs.p_kw, NULL::float8, hs.p_dis_max_kw
+        FROM og.hub h
+        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+        WHERE hs.p_dis_max_kw IS NOT NULL
+
+        UNION ALL
+
+        SELECT 'transformer', st.transformer_id, SUM(hs.p_kw)::float8, st.rating_kva, st.rating_kva
+        FROM og.service_transformer st
+        JOIN og.hub h ON h.transformer_id = st.transformer_id
+        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+        GROUP BY st.transformer_id, st.rating_kva
+
+        UNION ALL
+
+        SELECT 'feeder', fl.feeder_id, SUM(hs.p_kw)::float8, fl.thermal_kw, fl.reverse_kw
+        FROM og.feeder_limit fl
+        JOIN og.bank b ON b.feeder_id = fl.feeder_id
+        JOIN og.hub h ON h.bank_id = b.bank_id
+        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+        GROUP BY fl.feeder_id, fl.thermal_kw, fl.reverse_kw
+
+        UNION ALL
+
+        SELECT 'substation', sl.substation_id, SUM(hs.p_kw)::float8, sl.rating_kva, sl.reverse_kw
+        FROM og.substation_limit sl
+        JOIN og.asset a ON a.substation_id = sl.substation_id
+        JOIN og.hub h ON h.bank_id = a.bank_id
+        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+        GROUP BY sl.substation_id, sl.rating_kva, sl.reverse_kw
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql)
+        rows = await cur.fetchall()
+    return [
+        (
+            r[0],
+            r[1],
+            float(r[2]),
+            float(r[3]) if r[3] is not None else None,
+            float(r[4]) if r[4] is not None else None,
+        )
+        for r in rows
+    ]
 
 
 async def fetch_orphan_reservations(
@@ -632,6 +809,7 @@ async def read_summary(pool: AsyncConnectionPool) -> InvariantsSummary:
         CHECK_K13_LOCK_VIOLATION,
         CHECK_K13_OUTAGE_GAP,
         CHECK_K13_RESTORE_LAG,
+        CHECK_K15_TERRITORY,
         CHECK_ORPHAN_COMMITMENT,
         CHECK_ORPHAN_RESERVATION,
     )
@@ -650,5 +828,6 @@ async def read_summary(pool: AsyncConnectionPool) -> InvariantsSummary:
         restore_lag=int(totals.get(CHECK_K13_RESTORE_LAG, 0)),
         orphan_reservations=last_counts.get(CHECK_ORPHAN_RESERVATION, 0),
         orphan_commitments=last_counts.get(CHECK_ORPHAN_COMMITMENT, 0),
+        territory_violations=int(totals.get(CHECK_K15_TERRITORY, 0)),
         as_of=min(run_ats) if run_ats else None,
     )

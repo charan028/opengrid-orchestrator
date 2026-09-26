@@ -20,12 +20,18 @@ from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from opengrid.allocator import reasons
-from opengrid.allocator.cycle import cycle
-from opengrid.allocator.gateways import FleetGateway, LedgerGateway, ScadaGateway, ScheduleGateway
-from opengrid.allocator.models import CycleResult, DwellState, PiState, ProposedGrant, Schedule
+from opengrid.allocator.cycle import DEFAULT_LEASE_TTL_S, cycle
+from opengrid.allocator.gateways import (
+    CycleExtrasGateway,
+    FleetGateway,
+    LedgerGateway,
+    ScadaGateway,
+    ScheduleGateway,
+)
+from opengrid.allocator.models import CycleExtras, CycleResult, DwellState, PiState, ProposedGrant, Schedule
 from opengrid.core.models.engine import Grant
 
-__all__ = ["configure", "cycle", "run_cycle", "substitute_hub"]
+__all__ = ["configure", "cycle", "hub_allocations", "run_cycle", "substitute_hub"]
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,15 @@ GATEWAY_TIMEOUT_S = 2.0
 # timeout (K7) rather than proposing a batch built from partial/stale inputs.
 _last_grants: list[Grant] = []
 
+#: The last cycle's per-hub realization of PQ-sensitive obligations, `(obligation_id, bank_id) ->
+#: {hub_id: kW}`: the engine builds those obligations' hub items from it (only PQ-eligible hubs deliver).
+_last_hub_allocations: dict[tuple[str, str], dict[str, float]] = {}
+
+
+def hub_allocations() -> dict[tuple[str, str], dict[str, float]]:
+    """The last cycle's per-hub allocations of PQ-sensitive obligations (a copy)."""
+    return {key: dict(per_hub) for key, per_hub in _last_hub_allocations.items()}
+
 
 async def _with_gateway_timeout[T](awaitable: Awaitable[T], *, gateway_name: str) -> T:
     """Bound one gateway call to `GATEWAY_TIMEOUT_S`, re-raising as `TimeoutError` with the gateway's
@@ -63,7 +78,9 @@ async def run_cycle(
     ledger: LedgerGateway | None = None,
     scada_gateway: ScadaGateway | None = None,
     schedule_gateway: ScheduleGateway | None = None,
+    extras_gateway: CycleExtrasGateway | None = None,
     now: datetime | None = None,
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
 ) -> list[Grant]:
     """One S1-S7 allocation cycle (02a S5.1-S5.2): builds this cycle's `grant` rows for every bank,
     honoring frozen commitments (K13), reserve/P/kVA/ramp limits (K1/K4), and the one-loop-per-quantity
@@ -109,6 +126,13 @@ async def run_cycle(
             if schedule_gateway is not None
             else ()
         )
+        extras = (
+            await _with_gateway_timeout(
+                extras_gateway.extras(fleet_state, ledger_view, t), gateway_name="extras.extras"
+            )
+            if extras_gateway is not None
+            else CycleExtras()
+        )
     except TimeoutError as exc:
         # K7 "degrade, don't trip": hold the last cycle's signed-off grants rather than propose a
         # fresh batch built from a stalled/partial read of this cycle's inputs.
@@ -128,7 +152,22 @@ async def run_cycle(
         cycle_id=cycle_id,
         pi_states=_pi_states,
         dwell_states=_dwell_states,
+        closed_loop_caps=extras.closed_loop_caps,
+        pq=extras.pq,
+        enforce_territory=extras.enforce_territory,
+        flow_limits=extras.flow_limits,
+        lease_ttl_s=lease_ttl_s,
     )
+    _last_hub_allocations.clear()
+    _last_hub_allocations.update(
+        {(a.obligation_id, a.bank_id): dict(a.per_hub_kw) for a in result.hub_allocations}
+    )
+    if extras_gateway is not None:
+        # Controller reconciliation, the PQ ladder and their traces; never costs the cycle (K7).
+        try:
+            await extras_gateway.observe(result, ledger_view, t)
+        except Exception:
+            logger.exception("cycle extras observe failed", extra={"cycle_id": cycle_id})
 
     await ledger.persist_grants(cycle_id, list(result.grants))
     try:

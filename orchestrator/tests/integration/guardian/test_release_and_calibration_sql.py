@@ -96,3 +96,33 @@ async def test_scope_posture_and_zone_queries_run(pool):
         await cur.execute("DELETE FROM og.scope_posture WHERE scope_ref = 'it-guard-bank'")
         await conn.commit()
     assert isinstance(await repo.load_zones_by_bank(pool), dict)
+
+
+async def test_flow_topology_and_territory_queries_run(pool):
+    """Migration 0029 applies and the G-26..G-33 adapters' queries run against the real schema."""
+    import math
+    from uuid import uuid4
+
+    from opengrid.guardian import flow_repo
+    from opengrid.guardian.config import GuardianConfig
+
+    zones = {"LZ_AEN": "AUSTIN_ENERGY", "LZ_CPS": "CPS_ENERGY"}
+    topology = flow_repo.PgGridTopologyPort(pool, GuardianConfig(key_path=""), zones)
+    assert await topology.hub_site("no-such-hub") is None
+    assert await topology.transformer("no-such-xfmr") is None
+    feeder = await topology.feeder_flow("no-such-feeder")
+    assert feeder is not None and feeder.flow_kw is None and math.isinf(feeder.age_s)
+    assert await topology.substation_flow("no-such-bank") is None
+    assert await topology.territory_flow("no-such-bank") is None
+    assert await topology.poi_limit("no-such-bank") is None
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT bank_id FROM og.bank LIMIT 1")
+        row = await cur.fetchone()
+    if row is not None:
+        await topology.substation_flow(row[0])
+        await topology.territory_flow(row[0])
+
+    territory = flow_repo.PgTerritoryPort(pool, zones)
+    assert await territory.obligation_market(uuid4()) is None
+    assert await territory.free_access("AUSTIN_ENERGY") in (True, False)
+    assert await territory.hub_zone("no-such-hub") is None

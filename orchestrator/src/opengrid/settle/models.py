@@ -14,6 +14,7 @@ from typing import Literal
 from uuid import UUID
 
 from opengrid.core.models.engine import ServiceType
+from opengrid.core.models.market import Market, UtilityId
 
 QualityFlag = Literal["GOOD", "ESTIMATED", "DISPUTED"]
 MeterSource = Literal["DIRECT_HUB_METER", "AMI_INTERVAL", "SCADA_OUTCOME", "ESTIMATED"]
@@ -75,6 +76,26 @@ class PnlBreakdown:
 
 
 @dataclass(frozen=True, slots=True)
+class ZoneChargeEnergy:
+    """A load zone's hub charging over a window, from `og.telemetry` (09 D5's M1 fleet-level proxy):
+    the summed charging power of every sample (`p_kw > 0`, charging-positive) and the part of it drawn
+    from the GRID -- charging beyond the home's PV surplus (`pv_kw - home_load_kw`, migration 0027; a
+    NULL PV reading is no PV). Sums over the same samples, so their ratio is the zone's grid share of
+    charging energy whatever the telemetry cadence."""
+
+    charge_kw_sum: Decimal
+    grid_charge_kw_sum: Decimal
+
+    @property
+    def grid_share(self) -> Decimal:
+        """Grid-drawn fraction of charging energy in [0, 1]; 1 (the owner's full-M1 assumption) when the
+        zone did not charge at all in the window."""
+        if self.charge_kw_sum <= 0:
+            return Decimal("1")
+        return min(max(self.grid_charge_kw_sum / self.charge_kw_sum, Decimal("0")), Decimal("1"))
+
+
+@dataclass(frozen=True, slots=True)
 class InvoiceLineDraft:
     """A candidate `og.invoice_line` row before insert-only versioning is resolved (02a S7.3)."""
 
@@ -129,3 +150,11 @@ class ObligationSettlementContext:
     #: `opengrid.settle.tariffs.tdsp_for_zone`), or `None` when it cannot be determined -- `None`
     #: resolves to no TDSP, so M1 settles as 0 rather than guessing.
     zone: str | None = None
+    #: 08/09 two-market model (`opengrid.core.models.market`, migration 0025): `REGULATED` (a
+    #: vertically integrated utility) or `FREE` (ERCOT competitive area). Drives which charging-cost
+    #: model and which delivery-charge rule applies in `opengrid.settle.__init__` -- M1
+    #: (`opengrid.settle.tariffs`) for FREE, the utility's own terms
+    #: (`opengrid.market.charging.regulated_charging_cost`) for REGULATED.
+    market: Market = "FREE"
+    #: The contract's utility, set iff `market == "REGULATED"` (a DB CHECK enforces it on `og.contract`).
+    utility_id: UtilityId | None = None
