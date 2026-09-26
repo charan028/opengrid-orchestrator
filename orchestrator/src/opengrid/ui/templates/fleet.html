@@ -9,10 +9,10 @@
 <section class="og-panel" aria-label="Filters">
   <form method="get" action="{{ base_path }}/fleet" class="og-grid" style="grid-template-columns: repeat(4, auto);">
     <label>Zone
-      <input type="text" name="zone" value="{{ filters.zone|default('') }}">
+      <input type="text" name="zone" value="{{ filters.zone or '' }}">
     </label>
     <label>Bank
-      <input type="text" name="bank" value="{{ filters.bank|default('') }}">
+      <input type="text" name="bank" value="{{ filters.bank or '' }}">
     </label>
     <label>Health
       <select name="health">
