@@ -138,6 +138,14 @@ class FakeContractsRepo:
     async def unselected_offered_before(self, cutoff: datetime) -> list[Opportunity]:
         return [o for o in self.opportunities.values() if o.state == "OFFERED" and o.window_start <= cutoff]
 
+    async def find_opportunity_by_window(
+        self, contract_id: UUID, window_start: datetime, window_end: datetime
+    ) -> Opportunity | None:
+        for o in self.opportunities.values():
+            if o.contract_id == contract_id and o.window_start == window_start and o.window_end == window_end:
+                return o
+        return None
+
     # -- renomination_point ---------------------------------------------------------------------
 
     async def due_renomination_points(self, as_of: datetime) -> list[RenominationPoint]:

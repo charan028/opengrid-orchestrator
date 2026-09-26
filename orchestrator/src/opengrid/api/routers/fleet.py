@@ -47,6 +47,18 @@ async def list_hubs(
     return {"items": hubs}
 
 
+@router.get("/summary")
+async def fleet_summary(
+    store: Annotated[StoreProtocol, Depends(get_store)],
+    _identity: Annotated[Identity, Depends(require_viewer)],
+) -> dict[str, int]:
+    """`{"total", "online", "stale", "offline"}` counts over the whole registered fleet (task item
+    A2: `GET /hubs` paginates at 200/page, so a smoke test counting "how many of ~2,000 hubs are
+    online" needs either this O(1) summary or to page through every `/hubs` response -- this is the
+    former; see `StoreProtocol.hub_health_summary`)."""
+    return await store.hub_health_summary()
+
+
 @router.get("/hubs/{hub_id}")
 async def get_hub(
     hub_id: str,

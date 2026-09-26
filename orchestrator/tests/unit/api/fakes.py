@@ -207,6 +207,9 @@ class FakeStore:
     async def count_active_commitments(self) -> int:
         return 1
 
+    async def hub_health_summary(self) -> dict[str, int]:
+        return {"total": 1, "online": 1, "stale": 0, "offline": 0}
+
     async def latest_plan(self) -> Plan | None:
         return Plan(
             plan_id=uuid4(),

@@ -197,6 +197,7 @@ async def _engine_tick(state: _EngineState) -> None:
     per call -- running several concurrently would only let the last-registered one see SIGTERM.
     """
     from opengrid import allocator, contracts, fleet, selector
+    from opengrid.contracts import intake
 
     now = datetime.now(UTC)
     state.cycle_seq += 1
@@ -214,6 +215,18 @@ async def _engine_tick(state: _EngineState) -> None:
         logger.info(
             "running gate", extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
         )
+        # opengrid.contracts.intake (BUILD.md intake task): generate this gate's OFFERED opportunities
+        # from live feeds/forecast/contract terms *before* the selector runs, so run_gate always has
+        # this gate's candidates rather than relying on demo seed data (qa/merge-notes.md's "zero
+        # opportunity/obligation rows" finding). Degrade, don't trip: a feed/forecast hiccup here must
+        # never block the selector gate itself.
+        try:
+            await intake.run_intake_gate(trigger.gate_kind, trigger.contract_scope, now=now)
+        except Exception:
+            logger.exception(
+                "intake failed ahead of gate -- running the gate anyway with whatever candidates exist",
+                extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope},
+            )
         await selector.run_gate(trigger.gate_kind, trigger.contract_scope)
 
     grants = await allocator.run_cycle(
@@ -297,6 +310,25 @@ async def main(cfg: Config) -> None:
                 FleetCapabilityProvider(),
                 grant_backend=PgGrantBackend(pool),
             )
+        )
+
+        # opengrid.contracts.intake (BUILD.md intake task): wired here, in this same og-engine process,
+        # for the identical reason forecast/ledger are wired here rather than in og-feeds -- _engine_tick
+        # calls intake.run_intake_gate() ahead of every selector.run_gate() call, on this process's own
+        # pool/trace store. `opengrid.forecast.scenarios` is already configured above; passed through
+        # directly rather than re-imported at call time (BUILD.md S1 no-duplication).
+        from opengrid.contracts.intake import configure as configure_intake
+        from opengrid.contracts.intake.pg_ports import PgMarketDataPort
+        from opengrid.contracts.pg_repo import PgContractsRepo
+        from opengrid.forecast import scenarios as forecast_scenarios
+        from opengrid.trace import TraceStore
+        from opengrid.trace.pg_backend import PgTraceBackend
+
+        configure_intake(
+            PgContractsRepo(pool),
+            TraceStore(PgTraceBackend(pool)),
+            PgMarketDataPort(pool),
+            forecast_scenarios=forecast_scenarios,
         )
 
         backend = PgEngineBackend(pool)

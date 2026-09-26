@@ -90,8 +90,11 @@ def _cli(argv: list[str]) -> int:
 
     Generates a fresh stop-only Ed25519 keypair, writes the private seed to `--key-out` (mode 0600,
     matching `[safestop].key_path`) and the public key (hex) to `--pubkey-out` for the integration
-    simulators' verification config. The seed is also printed once to stdout as a fallback for the
-    env-var loading path (`secrets.env` -> `OG_SAFESTOP_SIGNING_SEED`) -- never logged again after this.
+    simulators' verification config. The seed is never printed by default (qa/security-review.md F-05:
+    stdout is easy to capture inadvertently -- shell/terminal scrollback, a CI or deploy log, `script`/
+    tmux logging) -- pass `--print-seed` to opt into the old behavior for the one legitimate case
+    (bootstrapping `OG_SAFESTOP_SIGNING_SEED` in `secrets.env` instead of using `--key-out`'s file),
+    matching `opengrid.guardian.keys.keygen`'s existing never-print-by-default behavior.
     """
     parser = argparse.ArgumentParser(prog="python -m opengrid.safestop.keys")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -99,6 +102,13 @@ def _cli(argv: list[str]) -> int:
     keygen.add_argument("--key-id", required=True, help="e.g. safestop-2026a")
     keygen.add_argument("--key-out", required=True, type=Path, help="file to write the private seed to")
     keygen.add_argument("--pubkey-out", required=True, type=Path, help="file to write the public key hex to")
+    keygen.add_argument(
+        "--print-seed",
+        action="store_true",
+        help="print the raw seed hex to stdout (only for bootstrapping OG_SAFESTOP_SIGNING_SEED; "
+        "the private key file is already the durable, permissioned artifact -- avoid this flag "
+        "outside that one case)",
+    )
     args = parser.parse_args(argv)
 
     seed, pub = generate_keypair()
@@ -123,9 +133,11 @@ def _cli(argv: list[str]) -> int:
     print(f"public_key_hex={pub.hex()}")
     print(f"private key written to {args.key_out} (mode 0600)")
     print(f"public key written to {args.pubkey_out}")
-    print(
-        f"seed_hex={seed.hex()}  # only if using {DEFAULT_SEED_ENV_VAR} instead of key_path -- do not log again"
-    )
+    if args.print_seed:
+        print(
+            f"seed_hex={seed.hex()}  # only if using {DEFAULT_SEED_ENV_VAR} instead of key_path -- "
+            "do not log again"
+        )
     return 0
 
 

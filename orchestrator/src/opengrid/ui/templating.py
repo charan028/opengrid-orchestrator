@@ -8,12 +8,26 @@ their fixed paths (BUILD.md UI brief / 02b S8), always relative to `BASE_PATH` (
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
 BASE_PATH = "/og"
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+# Must match `opengrid.api.csrf.HEADER_NAME` exactly. Not imported directly: `opengrid.api` mounts
+# `opengrid.ui` (api -> ui), so importing back from `opengrid.ui` -> `opengrid.api.csrf` would invert
+# that dependency direction (BUILD.md S5a) for the sake of one string constant.
+CSRF_HEADER_NAME = "X-CSRF-Token"
+
+
+def _csrf_context(request: Request) -> dict[str, Any]:
+    """Exposes the current request's CSRF token (`opengrid.api.csrf.CSRFMiddleware`) to every template
+    render without every UI route handler having to pass it explicitly (qa/security-review.md F-03)."""
+    return {"csrf_token": getattr(request.state, "csrf_token", ""), "csrf_header_name": CSRF_HEADER_NAME}
+
 
 NAV_SCREENS: tuple[dict[str, str], ...] = (
     {"label": "Control room", "path": f"{BASE_PATH}/"},
@@ -25,6 +39,6 @@ NAV_SCREENS: tuple[dict[str, str], ...] = (
     {"label": "Billing & audit", "path": f"{BASE_PATH}/billing"},
 )
 
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[_csrf_context])
 templates.env.globals["nav_screens"] = NAV_SCREENS
 templates.env.globals["base_path"] = BASE_PATH

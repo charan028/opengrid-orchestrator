@@ -12,6 +12,7 @@ from importlib import import_module
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from opengrid.api.csrf import CSRFMiddleware
 from opengrid.api.proposals import ProposalStore
 from opengrid.api.store import PgStore
 from opengrid.api.trace_backend import PgTraceBackend
@@ -167,6 +168,23 @@ def _mount_ui(app: FastAPI) -> None:
         logger.info("opengrid.ui.build_router() not implemented yet; API-only mode")
 
 
+def _install_csrf_protection(app: FastAPI) -> None:
+    """Wires `opengrid.api.csrf.CSRFMiddleware` (qa/security-review.md F-03) over every route this
+    process serves. `[api].csrf_allowed_hosts` lets the production host join the always-allowed loopback
+    set without a code change; defensively defaults to the deployed host if config can't load yet (same
+    tolerance pattern as `_mount_ui`'s base_path resolution, for the same reason -- API unit tests call
+    `create_app()` with no `OG_CONFIG` set)."""
+    try:
+        cfg = load_config()
+        configured = cfg.get("api.csrf_allowed_hosts", ["base.tocy-net.net"])
+        cookie_secure = bool(cfg.get("api.csrf_cookie_secure", True))
+    except ConfigError:
+        configured = ["base.tocy-net.net"]
+        cookie_secure = False  # no OG_CONFIG -> unit tests running over TestClient's plain-http default
+    allowed_hosts = frozenset(str(h) for h in configured)
+    app.add_middleware(CSRFMiddleware, allowed_hosts=allowed_hosts, cookie_secure=cookie_secure)
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI application: mounts `opengrid.ui` routes, the REST endpoints of 02b S7.1, and
     the SSE streams of 02b S7.2. Binds to `[api].bind_host`/`bind_port` (loopback only, S9.3)."""
@@ -180,6 +198,7 @@ def create_app() -> FastAPI:
     _install_exception_handlers(app)
     _include_routers(app)
     _mount_ui(app)
+    _install_csrf_protection(app)
 
     @app.exception_handler(LookupError)
     async def _not_found(_request: Request, exc: LookupError) -> JSONResponse:

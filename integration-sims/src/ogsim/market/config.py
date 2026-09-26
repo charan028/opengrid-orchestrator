@@ -3,7 +3,7 @@ never needs to import orchestrator config (K: no shared code with `opengrid`).
 
 Env vars (all optional, sensible defaults for local/dev use):
 
-  OGSIM_MARKET_HOST                default 0.0.0.0
+  OGSIM_MARKET_HOST                default 127.0.0.1 (loopback only; never expose unauthenticated on the LAN)
   OGSIM_MARKET_PORT                default 8090
   OGSIM_MARKET_DATA_MODE           "replay" | "synthetic" (default "synthetic")
   OGSIM_MARKET_SEED                int, default 1234 (synthetic mode)
@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_INTEGRATION_SIMS_DIR = Path(__file__).resolve().parents[3]
+# Loopback by default: the simulator has no authentication of its own; Apache (auth) fronts it.
+DEFAULT_BIND_HOST = "127.0.0.1"
 CONFIG_DIR_ENV_VAR = "OGSIM_CONFIG_DIR"
 MARKET_ENV_FILENAME = "market.env"
 
@@ -80,7 +82,7 @@ def _split_users(raw: str) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class MarketConfig:
-    host: str = field(default_factory=lambda: os.environ.get("OGSIM_MARKET_HOST", "0.0.0.0"))
+    host: str = field(default_factory=lambda: os.environ.get("OGSIM_MARKET_HOST", DEFAULT_BIND_HOST))
     port: int = field(default_factory=lambda: int(os.environ.get("OGSIM_MARKET_PORT", "8090")))
     data_mode: str = field(default_factory=lambda: os.environ.get("OGSIM_MARKET_DATA_MODE", "synthetic"))
     seed: int = field(default_factory=lambda: int(os.environ.get("OGSIM_MARKET_SEED", "1234")))
@@ -114,7 +116,7 @@ def load_config() -> MarketConfig:
     `<OGSIM_CONFIG_DIR>/market.env` for anything not set in the environment."""
     file_values = _load_env_file(config_dir() / MARKET_ENV_FILENAME)
     return MarketConfig(
-        host=_env("OGSIM_MARKET_HOST", "0.0.0.0", file_values),
+        host=_env("OGSIM_MARKET_HOST", DEFAULT_BIND_HOST, file_values),
         port=int(_env("OGSIM_MARKET_PORT", "8090", file_values)),
         data_mode=_env("OGSIM_MARKET_DATA_MODE", "synthetic", file_values),
         seed=int(_env("OGSIM_MARKET_SEED", "1234", file_values)),

@@ -261,6 +261,54 @@ exactly as intended -- this is the guardian doing its job correctly, not a guard
 further guardian-side change needed -- worth re-running `tests-e2e/smoke.py` first after that fix, before
 assuming any of A6/A8 need more work.
 
+## 14. Security-review fixes landed (this pass, qa/security-review.md)
+
+- **F-03 (CSRF):** `opengrid.api.csrf.CSRFMiddleware` (double-submit cookie + Origin/Referer allowlist),
+  wired over the whole app in `api/app.py::_install_csrf_protection`. `base.html`'s `<body>` now carries
+  `hx-headers` so every HTMX request across all 7 screens echoes the token automatically -- no per-screen
+  template edits needed beyond that one line. `[api].csrf_allowed_hosts` (orchestrator.toml) lists the
+  production host; loopback is always allowed (tests, health checks, `tools/remote.ps1`). Non-browser API
+  callers that never fetched a GET (no cookie, no Origin header) are let through -- they are not the
+  browser-ambient-credential threat this defends against; a forged cross-site *browser* request is
+  blocked by `SameSite=Strict` withholding the cookie plus the Origin allowlist.
+- **F-05 (safestop seed print):** `opengrid.safestop.keys keygen` no longer prints `seed_hex=` by
+  default; added `--print-seed` to opt in for the one legitimate bootstrap case, matching
+  `opengrid.guardian.keys.keygen`'s existing behavior.
+- **F-04 (Mosquitto ACL):** removed `pattern readwrite ogtest/#` from `/etc/mosquitto/opengrid.acl`
+  (server-side only, not tracked in this repo); confirmed via `systemctl status` that all 10 `og-*`/
+  `og-sim-*` units stayed `active running` (no reconnect failures) after `systemctl restart mosquitto`.
+  `deploy/README.md` now documents that `tools/remote.ps1` server-side test runs need this pattern
+  temporarily re-added until a dedicated test-only Mosquitto user exists (not created this pass --
+  needs a new password provisioned, which is a credential step, not a config edit).
+- **F-02 (`.bak.*` files):** left in place per this task's explicit instruction ("the user will do
+  that").
+- **F-01 (0.0.0.0 binds)** was already fixed and live-patched by the coordinator before this pass
+  (commit landed in the synced tree); redeployed as part of this pass's release.
+
+## 15. Intake wiring verified live; one real gap found (not merge's path)
+
+`opengrid.contracts.intake` is correctly wired into `_engine_tick` ahead of `selector.run_gate`
+(`opengrid.engine.__init__`, already present in the synced tree) and `opengrid.ledger.configure()`/
+`opengrid.forecast` are both configured at `og-engine` startup. Live verification after this pass's
+redeploy:
+
+- **A1/A2 now PASS live**: 537 fresh ERCOT `feed_obs` rows; fleet summary reports 2,000/2,000 hubs
+  online (the earlier `og-sim-fleet` "burst then silence" issue, section 12, did not recur after this
+  redeploy -- possibly resolved by the coordinator's bind-to-loopback hotfix restart, possibly just
+  transient; worth continued monitoring rather than assuming permanently fixed).
+- **A4 now PASS live**: 43,000 `og.grant` rows (mostly headroom grants against real, fresh capacity).
+- **A4/A5/A6/A8 still FAIL**, but the root cause has moved: `og.opportunity`/`og.obligation` show
+  exactly **one** row total, `DIST_DEFERRAL`/`OFFERED`, permanently stuck -- `og.plan` shows 94
+  `L-ID`/`OPTIMAL` solves (the selector's LP runs fine, no crash, no LookupError -- the bank-id fix
+  worked) but never selects this candidate into `COMMITTED`. Separately, intake does not appear to be
+  generating any `ERCOT_ENERGY`/`ERCOT_AS` opportunities at all despite live ERCOT prices flowing into
+  `feed_obs` -- likely `MarketDataPort.latest_energy_price_usd_per_mwh`/`latest_as_mcpc_usd_per_mwh` (or
+  `forecast_scenarios`'s `P50`/`series_key="HB_HOUSTON"` filter in `intake/__init__.py::_intake_energy`)
+  not matching the real feed's actual series/product keys. Not investigated further here: this is
+  intake/selector logic outside merge's owned paths, and time-boxed given everything else in this pass;
+  flagging precisely so whoever owns `contracts`/`selector` next can go straight to it instead of
+  re-diagnosing from scratch.
+
 ## 7. Pre-existing mypy finding (not introduced by this pass)
 
 `mypy orchestrator/src/opengrid/fleet` reports one pre-existing error unrelated to the A3 additions:

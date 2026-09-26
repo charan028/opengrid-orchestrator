@@ -119,6 +119,28 @@ Randomly generated on install; **never printed or committed**. Location only:
 Regenerate a single user's password with `htpasswd -B /etc/opengrid/htpasswd <user>` (root only;
 update the credentials file by hand afterwards).
 
+## MQTT ACL (production vs. test workspaces)
+
+`/etc/mosquitto/opengrid.acl` grants each `og_*` user only its own least-privilege topic set on the
+production root `og/v1/...`. It does **not** grant blanket access to the test root `ogtest/<ws>/...`
+that `tools/remote.ps1`'s per-workspace test runs use (qa/security-review.md F-04: the earlier blanket
+`pattern readwrite ogtest/#` applied to every authenticated user unconditionally, including `og_api`,
+which should be read-only, and was a residual open surface once this stopped being a pure dev/test
+deployment).
+
+**Running `tools/remote.ps1`-based server tests therefore needs the test root re-enabled first.** Two
+ways to do this, in order of preference:
+
+1. Add a dedicated test-only Mosquitto user (e.g. `og_test`) scoped to `pattern readwrite ogtest/#`
+   via its own ACL block, and point the test workspace's MQTT auth at that user instead of the
+   production `og_*` accounts. Not done as part of this pass (needs a new Mosquitto password to be
+   generated and distributed to `tools/remote.ps1`/`secrets.env`, which is a credential-provisioning
+   step, not a config edit) -- left for whoever next needs `ogtest/#` access to do properly.
+2. **Temporary manual toggle** (what to do until (1) exists): re-add `pattern readwrite ogtest/#` as
+   the first line of `/etc/mosquitto/opengrid.acl`, `systemctl restart mosquitto`, run the test
+   workspace, then remove that line and restart `mosquitto` again. Never leave it in place outside an
+   active test session.
+
 ## Resource budgets
 
 See the table above for `MemoryMax`/`MemoryHigh` per unit (`02b-mvp-s-spec-platform.md` §9.3/§11

@@ -124,11 +124,34 @@ def test_cli_keygen_in_process(tmp_path: Path, capsys: pytest.CaptureFixture[str
     bytes.fromhex(pubkey_text)  # raises ValueError if not valid hex
     out = capsys.readouterr().out
     assert "key_id=safestop-2026a" in out
-    assert "seed_hex=" in out
+    # qa/security-review.md F-05: the seed is never printed unless --print-seed is passed explicitly.
+    assert "seed_hex=" not in out
 
     # the file written by keygen loads back correctly
     loaded = load_signing_key_from_file("safestop-2026a", key_out)
     assert loaded.public_key_hex() in pubkey_out.read_text(encoding="utf-8")
+
+
+def test_cli_keygen_print_seed_opt_in(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    key_out = tmp_path / "safestop.key"
+    pubkey_out = tmp_path / "safestop-pub.txt"
+
+    rc = _cli(
+        [
+            "keygen",
+            "--key-id",
+            "safestop-2026a",
+            "--key-out",
+            str(key_out),
+            "--pubkey-out",
+            str(pubkey_out),
+            "--print-seed",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "seed_hex=" in out
 
 
 def test_keygen_cli_writes_private_and_public_key_files(tmp_path: Path):

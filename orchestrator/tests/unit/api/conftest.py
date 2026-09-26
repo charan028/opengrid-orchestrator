@@ -24,6 +24,26 @@ OPERATOR_HEADERS = {"X-Remote-User": "operator"}
 VIEWER_HEADERS = {"X-Remote-User": "viewer"}
 
 
+def _echo_csrf_cookie_as_header(request: object) -> None:
+    """Test-only stand-in for what a real browser + `hx-headers` on `<body>` does (`base.html`,
+    qa/security-review.md F-03): once `opengrid.api.csrf.CSRFMiddleware` has set the `og_csrf` cookie on
+    a prior response, httpx auto-attaches it to this request's `Cookie` header before this hook runs --
+    echo that same value into the `X-CSRF-Token` header so every existing test's mutating call is a
+    same-origin, correctly-credentialed request rather than the exact shape CSRF protection exists to
+    reject. Tests that specifically exercise CSRF rejection (`test_csrf.py`) build their own bare
+    `TestClient` without this hook."""
+    from opengrid.api.csrf import COOKIE_NAME, HEADER_NAME
+
+    if request.method.upper() not in ("POST", "PUT", "PATCH", "DELETE"):
+        return
+    cookie_header = request.headers.get("cookie", "")
+    for part in cookie_header.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == COOKIE_NAME and value:
+            request.headers[HEADER_NAME] = value
+            return
+
+
 @pytest.fixture
 def fake_store() -> FakeStore:
     return FakeStore()
@@ -72,7 +92,9 @@ def client(fake_store, fake_trace_store, fake_proposals, fake_config) -> TestCli
     app.dependency_overrides[get_trace_store] = lambda: fake_trace_store
     app.dependency_overrides[get_proposals] = lambda: fake_proposals
     app.dependency_overrides[get_config] = lambda: fake_config
-    return TestClient(app, client=("127.0.0.1", 51234))
+    test_client = TestClient(app, client=("127.0.0.1", 51234))
+    test_client.event_hooks = {"request": [_echo_csrf_cookie_as_header], "response": []}
+    return test_client
 
 
 @pytest.fixture

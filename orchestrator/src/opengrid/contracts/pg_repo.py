@@ -373,6 +373,21 @@ class PgContractsRepo:
             )
             return [_opportunity_from_row(r) for r in await cur.fetchall()]
 
+    async def find_opportunity_by_window(
+        self, contract_id: UUID, window_start: datetime, window_end: datetime
+    ) -> Opportunity | None:
+        async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                SELECT * FROM og.opportunity
+                WHERE contract_id = %s AND window_start = %s AND window_end = %s
+                LIMIT 1
+                """,
+                (contract_id, window_start, window_end),
+            )
+            row = await cur.fetchone()
+            return _opportunity_from_row(row) if row else None
+
     # -- renomination_point -------------------------------------------------------------------------
 
     async def due_renomination_points(self, as_of: datetime) -> list[RenominationPoint]:

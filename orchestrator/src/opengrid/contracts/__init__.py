@@ -48,6 +48,7 @@ __all__ = [
     "RenominationError",
     "active_obligations",
     "admit",
+    "admit_priced",
     "configure",
     "create_contract",
     "create_product_rule",
@@ -102,6 +103,30 @@ async def admit(
     with a `reason_code` if structurally infeasible (02a S2.1's `[*] -> OFFERED` / `-> REJECTED`)."""
     return await _admission.admit(
         _require_repo(), _require_trace(), contract_id, window_start, window_end, requested_kw
+    )
+
+
+async def admit_priced(
+    contract_id: UUID,
+    window_start: datetime,
+    window_end: datetime,
+    requested_kw: Decimal,
+    *,
+    value_per_mwh: Decimal | None = None,
+    scenario_basis: str = "P50",
+) -> Opportunity:
+    """`admit()` plus recording the feed/forecast-derived `value_per_mwh`/`scenario_basis` a caller
+    priced the opportunity at. Used by `opengrid.contracts.intake` (02a S1-S3); additional surface
+    over the fixed `admit()` signature, not a replacement for it."""
+    return await _admission.admit_priced(
+        _require_repo(),
+        _require_trace(),
+        contract_id,
+        window_start,
+        window_end,
+        requested_kw,
+        value_per_mwh=value_per_mwh,
+        scenario_basis=scenario_basis,
     )
 
 

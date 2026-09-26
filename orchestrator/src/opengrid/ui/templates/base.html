@@ -13,7 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="{{ base_path }}/static/og.js"></script>
 </head>
-<body hx-ext="sse">
+<body hx-ext="sse" hx-headers='{"{{ csrf_header_name }}": "{{ csrf_token }}"}'>
   <div class="og-shell">
     <nav class="og-nav" aria-label="Screens">
       <div class="og-nav-brand">OpenGrid</div>

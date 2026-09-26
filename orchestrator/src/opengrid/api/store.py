@@ -129,6 +129,18 @@ class StoreProtocol(Protocol):
         `COMMITTED` value (that's an `Obligation` state, 02a S1.5)."""
         ...
 
+    async def hub_health_summary(self) -> dict[str, int]:
+        """`{"total", "online", "stale", "offline"}` counts over the whole registered fleet (`og.hub`),
+        not a `limit`/`offset` page of it -- `GET /og/api/fleet/hubs` caps at 200 rows/page
+        (`routers/fleet.py::list_hubs`'s `limit: int = Query(default=200, le=2000)`), so a smoke test
+        or dashboard counting "how many of the ~2,000 hubs are online" by paging `/hubs` either
+        under-counts at the default page size or has to page through all of them; this is the O(1)
+        query for that count instead (task item A2). `og.hub_state.health` only ever records
+        `online`/`stale`/`fault` for a hub that has reported telemetry at least once
+        (`opengrid.core.models.platform.HubState.health`); a hub with no `hub_state` row yet is folded
+        into `offline` here alongside `fault`, since neither has ever demonstrated it is reachable."""
+        ...
+
     async def latest_plan(self) -> Plan | None: ...
 
     async def ledger_timeline(self, bank_id: str) -> list[Reservation]: ...
@@ -369,6 +381,17 @@ class PgStore:
             "SELECT count(*) AS n FROM og.obligation WHERE state IN ('COMMITTED', 'DELIVERING')"
         )
         return int(rows[0]["n"]) if rows else 0
+
+    async def hub_health_summary(self) -> dict[str, int]:
+        total_rows = await self._fetch("SELECT count(*) AS n FROM og.hub")
+        total = int(total_rows[0]["n"]) if total_rows else 0
+        health_rows = await self._fetch("SELECT health, count(*) AS n FROM og.hub_state GROUP BY health")
+        by_health = {row["health"]: int(row["n"]) for row in health_rows}
+        online = by_health.get("online", 0)
+        stale = by_health.get("stale", 0)
+        # "fault" and "never reported" both fold into "offline" (StoreProtocol.hub_health_summary docstring).
+        offline = max(total - online - stale, 0)
+        return {"total": total, "online": online, "stale": stale, "offline": offline}
 
     async def latest_plan(self) -> Plan | None:
         rows = await self._fetch(

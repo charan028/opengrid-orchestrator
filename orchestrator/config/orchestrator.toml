@@ -99,6 +99,7 @@ hub_offline_s = 30
 bind_host = "127.0.0.1"
 bind_port = 8080
 sse_heartbeat_s = 15
+csrf_allowed_hosts = ["base.tocy-net.net"]
 
 [ui]
 base_path = "/og"

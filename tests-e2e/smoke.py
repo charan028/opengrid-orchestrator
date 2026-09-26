@@ -108,19 +108,20 @@ def check_live_feeds(results: Results) -> None:
 
 
 def check_hubs_online(results: Results, auth: tuple[str, str] | None) -> None:
-    status_code, body = _get(f"{API_BASE}/fleet/hubs", auth=auth)
+    status_code, body = _get(f"{API_BASE}/fleet/summary", auth=auth)
     if status_code != 200:
-        results.record("A2 fleet twin 2000 hubs", False, f"GET /fleet/hubs -> {status_code}")
+        results.record("A2 fleet twin 2000 hubs", False, f"GET /fleet/summary -> {status_code}")
         return
     try:
-        items = json.loads(body).get("items", [])
+        summary = json.loads(body)
     except json.JSONDecodeError:
-        items = []
-    online = sum(1 for h in items if h.get("health") == "online")
+        summary = {}
+    total = summary.get("total", 0)
+    online = summary.get("online", 0)
     results.record(
         "A2 fleet twin 2000 hubs online",
-        len(items) >= 2000 and online >= 1900,
-        f"{len(items)} hubs total, {online} online",
+        total >= 2000 and online >= 1900,
+        f"{total} hubs total, {online} online (stale={summary.get('stale')}, offline={summary.get('offline')})",
     )
 
 

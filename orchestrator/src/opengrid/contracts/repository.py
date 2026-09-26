@@ -93,6 +93,18 @@ class ContractsRepo(Protocol):
         `OFFERED -> EXPIRED`)."""
         ...
 
+    async def find_opportunity_by_window(
+        self, contract_id: UUID, window_start: datetime, window_end: datetime
+    ) -> Opportunity | None:
+        """The opportunity (any state) already admitted for this contract/window, or `None`.
+
+        `opengrid.contracts.intake` calls this before `admit()` at every gate so re-running intake
+        against the same contract/interval never creates a duplicate opportunity (its idempotency
+        requirement) -- MVP-S contracts carry at most one saleable product per contract (02a S1.3), so
+        `(contract_id, window_start, window_end)` alone is a sufficient dedupe key without a product
+        code column."""
+        ...
+
     # -- re-nomination points (02a S1.7, ES04-S04) -----------------------------------------------
     async def due_renomination_points(self, as_of: datetime) -> list[RenominationPoint]: ...
 

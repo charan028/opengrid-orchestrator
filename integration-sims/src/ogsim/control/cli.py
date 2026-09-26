@@ -39,6 +39,9 @@ from ogsim.control.injector import Injector, UnknownAnomalyTypeError
 from ogsim.control.scenarios import Scenario, load_scenario, run_scenario
 
 DEFAULT_CONTROL_URL = "http://127.0.0.1:8091"
+# Loopback by default: the control plane has no authentication of its own; Apache (auth) fronts it.
+DEFAULT_BIND_HOST = "127.0.0.1"
+CONTROL_HOST_ENV_VAR = "OGSIM_CONTROL_HOST"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve_p = sub.add_parser("serve", help="Run the REST API + web UI (default port 8091)")
-    serve_p.add_argument("--host", default="0.0.0.0")
+    serve_p.add_argument("--host", default=os.environ.get(CONTROL_HOST_ENV_VAR, DEFAULT_BIND_HOST))
     serve_p.add_argument("--port", type=int, default=8091)
 
     inject_p = sub.add_parser("inject", help="Inject one anomaly (REST by default)")

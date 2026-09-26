@@ -31,9 +31,14 @@ def _admission_stream(contract_id: UUID) -> str:
     return f"admission-{contract_id}"
 
 
-def _rounding_rule(rule: ProductRule | None) -> RoundingRule:
+def rounding_rule_for(rule: ProductRule | None) -> RoundingRule:
     """`None` (e.g. `HOME`, which has no market product per the seed data) means unconstrained --
-    modeled as a zero min_qty/increment CONTINUOUS rule so `round_quantity` is a no-op cap."""
+    modeled as a zero min_qty/increment CONTINUOUS rule so `round_quantity` is a no-op cap.
+
+    Public (not `_`-prefixed): `opengrid.contracts.intake`'s candidate generators
+    (`ancillary.py`/`deferral.py`) build the same `opengrid.core.products.ProductRule` shape from a
+    contract's product rule to size their candidates before ever calling `admit_priced` -- sharing
+    this conversion rather than re-deriving it (BUILD.md S1 no-duplication)."""
     if rule is None:
         return RoundingRule(min_qty_kw=Decimal(0), increment_kw=Decimal(0), block=False)
     return RoundingRule(min_qty_kw=rule.min_qty_kw, increment_kw=rule.increment_kw, block=rule.block)
@@ -84,6 +89,26 @@ async def admit(
     `reason_code` and traces the rejection on failure. Never touches any other obligation --
     admission only ever competes for uncommitted headroom later, at a selector gate (BUILD.md S2).
     """
+    return await admit_priced(repo, trace, contract_id, window_start, window_end, requested_kw)
+
+
+async def admit_priced(
+    repo: ContractsRepo,
+    trace: TraceStore,
+    contract_id: UUID,
+    window_start: datetime,
+    window_end: datetime,
+    requested_kw: Decimal,
+    *,
+    value_per_mwh: Decimal | None = None,
+    scenario_basis: str = "P50",
+) -> Opportunity:
+    """Same admission-time feasibility/eligibility check as `admit()`, additionally recording the
+    market value (`$/MWh`) and scenario basis a caller priced the opportunity at (02a S1.4's
+    `opportunity.value_per_mwh`/`scenario_basis` columns). `admit()` is the fixed public signature
+    (INTERFACES.md) and delegates here with `value_per_mwh=None`; `opengrid.contracts.intake` -- the
+    only caller that has a live feed/forecast-derived price to record -- calls this directly instead
+    (BUILD.md S1: sharing this one code path, not re-deriving admission feasibility, per no-duplication)."""
     if window_end <= window_start:
         await _reject(trace, contract_id, window_start, window_end, requested_kw, "R-ADMIT-INVALID-WINDOW")
         raise AdmissionError("R-ADMIT-INVALID-WINDOW")
@@ -101,7 +126,7 @@ async def admit(
 
     rules = await repo.get_product_rules(contract_id)
     rule = _select_product_rule(rules)
-    rounding_rule = _rounding_rule(rule)
+    rounding_rule = rounding_rule_for(rule)
 
     if not is_feasible(requested_kw, rounding_rule, requested_kw):
         await _reject(
@@ -119,6 +144,8 @@ async def admit(
         window_start=window_start,
         window_end=window_end,
         requested_kw=admitted_kw,
+        value_per_mwh=value_per_mwh,
+        scenario_basis=scenario_basis,  # type: ignore[arg-type]
         state="OFFERED",
         admitted_at=now,
     )
@@ -144,6 +171,7 @@ async def admit(
             "contract_id": str(contract_id),
             "requested_kw": str(requested_kw),
             "admitted_kw": str(admitted_kw),
+            "value_per_mwh": str(value_per_mwh) if value_per_mwh is not None else None,
         },
         None,
     )
