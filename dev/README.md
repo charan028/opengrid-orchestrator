@@ -25,6 +25,20 @@ The first real run found dev/-only bugs, all fixed here:
 - `gen-keys.*` fell back to a bare `python` in a worktree without its own `.venv`
   (`OPENGRID_VENV_PYTHON` now points it at a shared one).
 
+**On R2 (`main` `6470cfa`, checked 2026-09-26 17:40 CT)** the stack upgrades in place: `migrate` applies 0024-0032
+to a 434d230-era database and re-seeds. Three dev/-only fixes are needed for R2:
+
+- og-api's authz policy otherwise resolves next to `OG_CONFIG` (`dev/config/authz.toml`, which does not exist).
+  A missing policy fails every viewer or operator route, so compose sets `OG_AUTHZ_POLICY` to
+  `orchestrator/config/authz.toml`. Set it too when running og-api from a shell (below).
+- The regional solar feed (NP4-745-CD) is polled whatever `products` lists. The market simulator has no such
+  endpoint (404), and the product's stale `og.feed_status` row sets NO_NEW_COMMITMENTS fleet-wide, so the
+  sim-fed configs set `solar_by_region_enabled = false`. Switching it off does not clear a row already
+  written: `DELETE FROM og.feed_status WHERE source = 'ERCOT' AND product = 'np4-745-cd'`.
+- Feed windows are base's (price 2,700 s, load 172,800 s). The simulator stamps prices at the 15-min interval
+  start and load hourly. With R2 enforcing NO_NEW_COMMITMENTS, shorter windows would drop the stack into that
+  mode for part of every interval.
+
 The static checks made before any Docker run are kept at the end.
 
 ## What's in the stack
@@ -101,7 +115,7 @@ From your IDE or venv, against the stack above:
 
 ```bash
 cd orchestrator
-OG_CONFIG=../dev/config/dev.toml python -m opengrid.api.main      # http://127.0.0.1:8080/og/
+OG_AUTHZ_POLICY=../orchestrator/config/authz.toml OG_CONFIG=../dev/config/dev.toml python -m opengrid.api.main   # :8080/og/
 OG_CONFIG=../dev/config/dev.toml python -m opengrid.engine.main
 OG_CONFIG=../dev/config/dev.toml python -m opengrid.guardian.main
 OG_CONFIG=../dev/config/dev.toml python -m opengrid.safestop.main

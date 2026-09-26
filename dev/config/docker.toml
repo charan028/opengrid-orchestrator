@@ -37,6 +37,10 @@ username_env = "ERCOT_API_USER"
 password_env = "ERCOT_API_PASSWORD"
 budget_requests_per_min = 24
 products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"]
+# D-28 regional solar (NP4-745-CD) is polled unless switched off, whatever `products` lists. The market
+# simulator has no such endpoint (404), and a product that never gets a value leaves a stale og.feed_status
+# row, which sets NO_NEW_COMMITMENTS fleet-wide. Off on the sim-fed stack.
+solar_by_region_enabled = false
 
 [feeds.eia]
 base_url = "http://sim-market:8090/eia"
@@ -49,13 +53,13 @@ user_agent = "OpenGrid-Orchestrator-Dev (dev@localhost)"
 grid_point = "EWX/156,91"
 
 [feeds.staleness]
-# Simulated feeds post on time, so the dev stack keeps main's short windows: DEMO-2 step 18 and the chaos
-# harness's feed-stale test (TS-C-01, mode H) reach "Feed stale" within minutes. Base's R2 hotfix values
-# (2700 s / 172800 s: live ERCOT prices post about 30 min late, load about a day behind) are only in
-# docker.live-feeds.toml, the one config that polls the live APIs.
-ercot_price_fresh_s = 600
+# Base's R2 hotfix values. Since R2 a stale feed sets NO_NEW_COMMITMENTS and the engine and selector enforce
+# it, and the market simulator stamps observations like ERCOT does: prices at the 15-min interval start, load
+# hourly. With 600 s / 1800 s the stack would drop into NO_NEW_COMMITMENTS for about 5 min of every 15 (price)
+# and half of every hour (load). Live ERCOT posts later still (prices ~30 min, load ~1 day behind).
+ercot_price_fresh_s = 2700
 ercot_price_lgv_s = 900
-ercot_load_fresh_s = 1800
+ercot_load_fresh_s = 172800
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800
