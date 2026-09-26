@@ -25,6 +25,8 @@ dependencies = [
     "prometheus-client>=0.20",
     "pyyaml>=6.0",
     "jsonschema>=4.21",
+    # The advisory copilot's primary model provider (opengrid.ai_agent.claude); official SDK, MIT.
+    "anthropic>=1.8,<2",
 ]
 
 [project.optional-dependencies]

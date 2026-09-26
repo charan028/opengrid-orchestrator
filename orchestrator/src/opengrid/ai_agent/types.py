@@ -28,6 +28,25 @@ Intent = Literal["deterministic_query", "explain_decision", "draft_action", "out
 
 ConfidenceLabel = Literal["High", "Medium", "Low"]
 
+#: Which model provider answered. Claude is the primary; TypeSafe is an opt-in fallback only.
+ProviderName = Literal["claude", "typesafe"]
+
+#: What a model call was for. Screening (routing plus prompt-injection risk) always precedes explanation.
+Purpose = Literal["screen", "explain"]
+
+
+class ModelCall(BaseModel):
+    """One model call, successful or not, exactly as it was charged against the budget and traced."""
+
+    provider: ProviderName
+    model: str
+    purpose: Purpose
+    input_tokens: int = 0
+    output_tokens: int = 0
+    usd: float = 0.0
+    ok: bool = True
+    error: str | None = None
+
 
 class Citation(BaseModel):
     """Where a claim came from. `source` is the API path or table the value was read from; `ref` is the
@@ -53,6 +72,12 @@ class CopilotAnswer(BaseModel):
     #: Set when the request was refused rather than answered (personal data, injection, budget, scope).
     refusal_reason: str | None = None
     trace_id: str | None = None
+    #: The provider whose model produced `text` (None when no model wrote it).
+    provider: ProviderName | None = None
+    #: Every model call made while answering, including screening and failed attempts.
+    model_calls: list[ModelCall] = Field(default_factory=list)
+    #: SHA-256 of the redacted payload the models were sent; None when no model was called.
+    payload_sha256: str | None = None
 
     @property
     def is_ai_assisted(self) -> bool:
@@ -75,6 +100,7 @@ class RouterVerdict(BaseModel):
     needs_trace: float = 0.0
     injection_risk: float = 0.0
     model: str = "unavailable"
+    provider: ProviderName | None = None
 
     @property
     def is_confident(self) -> bool:

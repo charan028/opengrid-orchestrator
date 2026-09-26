@@ -106,16 +106,32 @@ ramp_fleet_s = 120
 # then answers from its deterministic tier and says the assistant is unavailable.
 #
 # Keys come from the environment, never from this file:
-#   TYPESAFE_API_KEY  -- System One judgements (routing, injection screening). Fast: ~200-400 ms.
-#   ANTHROPIC_API_KEY -- plain-language explanations. Provisioned by ops in /etc/opengrid/ai_agent.env.
-# Absent keys are a normal state: the tier they serve simply reports itself unavailable.
-judgement_model = "jev-latest"
-judgement_timeout_s = 6.0
-prose_model = "claude-haiku-4-5-20251001"
+#   ANTHROPIC_API_KEY -- Claude, the primary provider. Provisioned by ops in /etc/opengrid/ai_agent.env
+#                        (og-api: EnvironmentFile=-/etc/opengrid/ai_agent.env).
+#   TYPESAFE_API_KEY  -- TypeSafe System One, an opt-in screening FALLBACK. Used only when Claude is
+#                        unavailable AND this key is set AND fallback_enabled = true.
+# Absent keys are a normal state: the console answers from its no-model tier.
+routing_model = "claude-haiku-4-5-20251001"   # screening: intent + prompt-injection risk (strict tool output)
+explain_model = "claude-opus-5-5"             # plain-language explanations
+fallback_provider = "typesafe"
+fallback_enabled = false
+fallback_model = "jev-latest"
+fallback_timeout_s = 6.0
+# Budgets: every model call (screening, explanation, fallback) counts against all three.
 daily_tokens = 200000
 daily_usd = 5.0
 requests_per_minute = 20
 timeout_s = 20.0
+
+# US$ per million tokens, used to charge each call's reported usage against daily_usd. A model with no
+# entry here is charged at a deliberately high rate (opengrid.ai_agent.budgets.UNPRICED).
+[ai_agent.prices.claude-haiku-4-5-20251001]
+input_per_mtok = 1.0
+output_per_mtok = 5.0
+
+[ai_agent.prices.claude-opus-5-5]
+input_per_mtok = 4.0
+output_per_mtok = 20.0
 
 [health]
 # Cycle-latency alert source (og-engine's [metrics].engine_port).

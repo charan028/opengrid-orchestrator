@@ -7,10 +7,16 @@ sharing the console\'s personal data with a third party or a cloud LLM.
 So this module is a whitelist, not a blocklist. A field reaches the model only if it is named here as
 non-personal. Anything unrecognised is dropped, which means a new personal field added upstream fails
 closed instead of leaking on the next deploy.
+
+Free text is the other way in: an operator can type an address, an ESI ID, a phone number, an email or
+a coordinate pair straight into the question. `redact_text` screens the question itself and replaces
+each of those with a placeholder before the text reaches any model or the trace.
 """
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Any
 
 #: Fields that are safe to send: identifiers of equipment and contracts, states, and aggregate numbers.
@@ -33,8 +39,14 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         # Values.
         "activity",
         "age_s",
+        "active_commitments",
         "at_risk",
         "available",
+        "commitment_switches",
+        "lock_violations",
+        "offline",
+        "open_alert_count",
+        "stale",
         "awarded",
         "bank_id",
         "committed_qty_kw",
@@ -136,11 +148,70 @@ def redact(value: Any, *, _depth: int = 0) -> Any:
         return out
     if isinstance(value, list):
         return [redact(item, _depth=_depth + 1) for item in value[:50]]
-    if isinstance(value, str):
-        return value[:_MAX_STRING]
     if isinstance(value, bool | int | float) or value is None:
         return value
-    return str(value)[:_MAX_STRING]
+    # Allow-listed string fields are free text too (an alert summary can quote an address), so they are
+    # screened like the question before truncation.
+    return redact_text(str(value)).text[:_MAX_STRING]
+
+
+#: Street suffixes that are not ordinary English words, so they are matched in any case.
+_STREET_SUFFIX_ANY_CASE = (
+    r"street|st|avenue|ave|road|rd|boulevard|blvd|dr|ln|ct|parkway|pkwy|highway|hwy|cir|trl|cv"
+)
+#: Suffixes that are also everyday words ("500 kW on the way"): matched only when written as a proper
+#: name, i.e. capitalised together with the street name before them ("12 Pecan Way").
+_STREET_SUFFIX_PROPER = r"Way|Place|Court|Drive|Lane|Trail|Loop|Circle|Cove|Run|Path|Pass|Row|Square|Terrace"
+_UNIT = r"(?:\s*(?:apt|unit|suite|ste|#)\s*[\w-]+)?"
+
+#: Order matters: the long digit runs (ESI IDs) and coordinate pairs are matched before the phone
+#: pattern, which would otherwise claim part of them.
+_TEXT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
+    # ERCOT ESI IDs are 17 or 22 digits (the 22-digit form carries a TDSP prefix).
+    ("esi_id", re.compile(r"(?<!\d)(?:\d{22}|\d{17})(?!\d)")),
+    # Coordinates carry at least three decimals; prices and percentages ("5.37, 30.00") do not.
+    (
+        "lat_lon",
+        re.compile(r"(?<![\d.])[-+]?\d{1,2}\.\d{3,}\s*[,;/ ]\s*[-+]?\d{1,3}\.\d{3,}(?![\d.])"),
+    ),
+    (
+        "phone",
+        re.compile(r"(?<![\w])(?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)"),
+    ),
+    (
+        "street_address",
+        re.compile(
+            rf"\b\d{{1,6}}(?:\s+[A-Za-z0-9][A-Za-z0-9.'-]*){{1,4}}?\s+(?:{_STREET_SUFFIX_ANY_CASE})\b\.?{_UNIT}",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "street_address",
+        re.compile(
+            rf"\b\d{{1,6}}(?:\s+[A-Z0-9][A-Za-z0-9.'-]*){{1,4}}?\s+(?:{_STREET_SUFFIX_PROPER})\b{_UNIT}"
+        ),
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RedactedText:
+    """Operator text after screening: `text` is safe to send and to trace; `found` names what was
+    removed (categories only, never the values)."""
+
+    text: str
+    found: tuple[str, ...] = ()
+
+
+def redact_text(text: str) -> RedactedText:
+    """Replace personal data typed into free text with `[category]` placeholders. Idempotent."""
+    found: list[str] = []
+    for category, pattern in _TEXT_PATTERNS:
+        text, count = pattern.subn(f"[{category}]", text)
+        if count and category not in found:
+            found.append(category)
+    return RedactedText(text=text, found=tuple(found))
 
 
 def contains_personal_data(value: Any) -> bool:

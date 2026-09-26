@@ -39,6 +39,48 @@ class BudgetLimits:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ModelPrice:
+    """US dollars per million tokens, as billed by the provider."""
+
+    input_per_mtok: float
+    output_per_mtok: float
+
+
+#: What an unpriced model is charged at: deliberately above every configured price, so a model someone
+#: forgot to price exhausts the dollar budget early instead of running for free.
+UNPRICED = ModelPrice(input_per_mtok=25.0, output_per_mtok=125.0)
+
+
+class Pricing:
+    """Turns the token usage a provider reports into dollars, from `[ai_agent.prices.<model>]`."""
+
+    def __init__(self, prices: dict[str, ModelPrice] | None = None) -> None:
+        self._prices = dict(prices or {})
+
+    @classmethod
+    def from_config(cls, cfg: ConfigReader) -> Pricing:
+        raw = cfg.get("ai_agent.prices", {}) or {}
+        prices: dict[str, ModelPrice] = {}
+        if isinstance(raw, dict):
+            for model, entry in raw.items():
+                if isinstance(entry, dict):
+                    prices[str(model)] = ModelPrice(
+                        input_per_mtok=float(entry.get("input_per_mtok", UNPRICED.input_per_mtok)),
+                        output_per_mtok=float(entry.get("output_per_mtok", UNPRICED.output_per_mtok)),
+                    )
+        return cls(prices)
+
+    def price_of(self, model: str) -> ModelPrice:
+        return self._prices.get(model, UNPRICED)
+
+    def cost_usd(self, model: str, *, input_tokens: int, output_tokens: int) -> float:
+        price = self.price_of(model)
+        return (
+            max(input_tokens, 0) * price.input_per_mtok + max(output_tokens, 0) * price.output_per_mtok
+        ) / 1_000_000.0
+
+
 @dataclass(slots=True)
 class BudgetState:
     """What has been spent today. Process-local on purpose: og-api is one process per host, and a
