@@ -49,9 +49,11 @@ user_agent = "OpenGrid-Orchestrator-Dev (dev@localhost)"
 grid_point = "EWX/156,91"
 
 [feeds.staleness]
-ercot_price_fresh_s = 600
+# Matches base's R2 hotfix (2026-09-26): live ERCOT prices post about 30 min after the interval starts,
+# and load posts about a day behind, so 600 s / 1800 s flagged healthy feeds as stale.
+ercot_price_fresh_s = 2700
 ercot_price_lgv_s = 900
-ercot_load_fresh_s = 1800
+ercot_load_fresh_s = 172800
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800

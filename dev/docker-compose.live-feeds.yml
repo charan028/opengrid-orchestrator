@@ -4,7 +4,8 @@
 # dev/config/docker.live-feeds.toml (production's [feeds.*] endpoints, a 6 req/min ERCOT budget) and the live
 # credentials from dev/keys/api_keys.env. The owner places that file by hand from
 # docs/orchestrator/07-delivery/integrations/api_keys.env.example (single-quoted values); dev/keys/ is
-# git-ignored. Nothing in this repo reads, prints or copies it.
+# git-ignored. Nothing in this repo reads, prints or copies it. OG_LIVE_KEYS_FILE overrides the path (e.g. a file the
+# owner keeps outside the checkout).
 #
 # ERCOT's key is shared with the base server, so run live feeds only while a test needs them:
 #
@@ -22,5 +23,5 @@ services:
     env_file:
       - path: ./secrets
         required: false
-      - path: ./keys/api_keys.env
+      - path: ${OG_LIVE_KEYS_FILE:-./keys/api_keys.env}
         required: true
