@@ -71,7 +71,45 @@ def _get_responses() -> dict[str, Any]:
     # the dispatch route reads reservations/grants/capacity *and* commitments off one timeline body
     timeline = {**_load("dispatch_ledger_timeline.json"), **_load("dispatch_commitments.json")}
     return {
-        "/og/api/health": _load("health.json"),
+        # health with enough alerts to page and group (3 banks' conservative repeats + distinct process alerts)
+        "/og/api/health": {
+            **_load("health.json"),
+            "alerts": [
+                *[
+                    {
+                        "id": i,
+                        "rule": "ALR-SCOPE-CONSERVATIVE",
+                        "severity": "warning",
+                        "scope_kind": "BANK",
+                        "scope_ref": ("bank-003", "bank-007", "bank-012")[i % 3],
+                        "summary": f"BANK:{('bank-003', 'bank-007', 'bank-012')[i % 3]} CONSERVATIVE: 40% vetoed",
+                        "opened_at": f"2026-09-26T17:{i:02d}:00+00:00",
+                        "acked_by": None,
+                    }
+                    for i in range(1, 16)
+                ],
+                *[
+                    {
+                        "id": 100 + i,
+                        "rule": "ALR-PROCESS-DOWN",
+                        "severity": "critical",
+                        "scope_kind": None,
+                        "scope_ref": None,
+                        "summary": f"Process p{i} heartbeat missing",
+                        "opened_at": f"2026-09-26T16:{i:02d}:00+00:00",
+                        "acked_by": None,
+                    }
+                    for i in range(1, 30)
+                ],
+            ],
+        },
+        "/og/api/views/scope-posture": {
+            "count": 3,
+            "conservative": [
+                {"scope_kind": "BANK", "scope_ref": b, "stop_requested": False}
+                for b in ("bank-003", "bank-007", "bank-012")
+            ],
+        },
         "/og/api/fleet/hubs": _load("hubs.json"),
         "/og/api/fleet/hubs/hub-0001": hub_detail,
         "/og/api/fleet/hubs/hub-0002": {**hub_detail, "hub_id": "hub-0002"},
@@ -148,12 +186,14 @@ def _post_responses() -> dict[str, Any]:
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
         "/og/api/alerts/7/ack": _load("alert_ack.json"),
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},
+        "/og/api/alerts/ack-bulk": {"results": [{"alert_id": i, "status": "acked"} for i in range(1, 200)]},
         "/og/api/dispatch/as-deployments": {"deployment_id": AS_DEPLOYMENT_ID, "status": "ACTIVE"},
     }
 
 
 def _route_modules() -> list[ModuleType]:
     import opengrid.ui.api_client as api_client
+    import opengrid.ui.routes.alerts as alerts
     import opengrid.ui.routes.billing_audit as billing_audit
     import opengrid.ui.routes.control_room as control_room
     import opengrid.ui.routes.copilot as copilot
@@ -165,6 +205,7 @@ def _route_modules() -> list[ModuleType]:
     import opengrid.ui.routes.profitability as profitability
 
     return [
+        alerts,
         api_client,
         billing_audit,
         control_room,

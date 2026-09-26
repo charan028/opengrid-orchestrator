@@ -149,6 +149,8 @@ def chain_verify_result_view(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "passed": bool(result.get("passed")),
         "checked": result.get("checked", 0),
+        # `checked` is the number of hash-chained streams verified; an events count only if the API sends one
+        "events_checked": result.get("events_checked"),
         "first_broken": result.get("first_broken"),
     }
 
@@ -269,7 +271,9 @@ async def run_chain_verify(
     """HTMX partial: runs the chain-verify button, returns the pass/fail fragment (02b S7.1/S8)."""
     try:
         result = await post_json(
-            _TRACE_VERIFY_PATH, {"class": class_, "from": from_, "to": to}, remote_user=remote_user(request)
+            _TRACE_VERIFY_PATH,
+            {"class": class_ or None, "from": from_ or None, "to": to or None},
+            remote_user=remote_user(request),
         )
     except ApiUnavailable as exc:
         result = {"passed": False, "checked": 0, "first_broken": {"error": str(exc)}}

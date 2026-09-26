@@ -9,6 +9,7 @@
 <div class="og-degraded-banner" id="control-room-degraded-banner" role="alert"
      data-labels='{{ degraded_mode_labels|tojson }}'{% if not degraded_mode_banner %} hidden{% endif %}>{% if degraded_mode_banner %}Degraded mode: {{ degraded_mode_banner }}{% endif %}</div>
 {% with id_prefix="control-room" %}{% include "_partials/guardian_attention.html" %}{% endwith %}
+{% with id_prefix="control-room", alerts_link=base_path ~ "/?alert_rule=ALR-SCOPE-CONSERVATIVE#control-room-alerts-panel" %}{% include "_partials/posture_strip.html" %}{% endwith %}
 {% if story %}
 <section class="og-story" aria-label="Fleet status in one line">
   <p>
@@ -88,19 +89,10 @@
     <div id="market-ticker-chart" style="height: 220px;"></div>
     <div class="stale-badge" data-since="{{ ticker.latest_ts or '' }}" data-stale-after="1800">age: unknown</div>
   </div>
-  <div class="og-panel" aria-label="Open alerts">
-    <h2>Open alerts</h2>
-    <p>What needs a human: stale feeds, missing heartbeats, hubs offline. Acknowledge to clear.</p>
-    {% with columns=[{"key": "id", "label": "ID"}, {"key": "severity_badge", "label": "Severity", "html": true}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=alert_rows, empty_message='No open alerts' %}
-      {% include "_partials/data_table.html" %}
-    {% endwith %}
-    {% if is_operator %}
-    <form class="og-form-inline" hx-post="{{ base_path }}/alerts/ack" hx-target="#control-room-ack-result">
-      <label>Alert id <input type="number" name="alert_id" min="1" required></label>
-      <button class="btn" type="submit">Acknowledge</button>
-    </form>
-    <div id="control-room-ack-result" role="status"></div>
-    {% endif %}
+  <div class="og-panel" aria-labelledby="control-room-alerts-heading">
+    <h2 id="control-room-alerts-heading">Open alerts</h2>
+    <p>What needs a human: stale feeds, missing heartbeats, hubs offline. Repeats of one rule on one scope are grouped.</p>
+    {% include "_partials/alerts_component.html" %}
   </div>
 </section>
 {% endblock %}

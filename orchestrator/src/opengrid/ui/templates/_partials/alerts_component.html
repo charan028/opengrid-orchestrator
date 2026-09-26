@@ -1,0 +1,5 @@
+{# alerts_component.html -- the alerts panel plus its dialog and result slots (outside the panel, so a
+   refresh after an ack keeps the result visible). Params: as alerts_panel.html. #}
+{% include "_partials/alerts_panel.html" %}
+<div id="{{ panel_id }}-ack-dialog"></div>
+<div id="{{ panel_id }}-ack-result" role="status"></div>

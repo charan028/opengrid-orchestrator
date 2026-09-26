@@ -2240,3 +2240,51 @@ label > select {
     flex: 1 1 100%;
   }
 }
+
+/* --- alerts component (Control room, System Health) ---------------------------------------------- */
+.og-alerts-filters { margin-bottom: 10px; }
+
+.og-alerts-bulkbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.og-alerts-scroll {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.og-alerts-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+
+.og-alerts-pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.og-alerts-ack-result { margin-top: 8px; font-size: 13px; }
+
+.og-posture-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 8px 14px;
+  border: 1px solid color-mix(in srgb, var(--status-caution) 45%, var(--border));
+  background: color-mix(in srgb, var(--status-caution) 10%, var(--panel));
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.og-posture-why { color: var(--muted); font-size: 12px; }

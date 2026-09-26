@@ -635,6 +635,9 @@ def as_awards_view(
         at_risk = bool(award.get("at_risk", False))
         if energy_held is not None and required_energy is not None:
             at_risk = at_risk or energy_held < required_energy
+        margin = _f(award.get("energy_margin_kwh"))
+        if margin is not None:
+            at_risk = at_risk or margin < 0
         rows.append(
             {
                 "obligation_id": obligation_id,
@@ -642,6 +645,7 @@ def as_awards_view(
                 "product": product or "ERCOT_AS",
                 "committed_kw": award.get("committed_qty_kw", award.get("requested_kw")),
                 "energy_held_kwh": energy_held,
+                "energy_margin_kwh": _f(award.get("energy_margin_kwh")),
                 "required_energy_kwh": required_energy,
                 "required_hours": required_hours,
                 "max_minutes": AS_MAX_DEPLOY_MINUTES.get(product),

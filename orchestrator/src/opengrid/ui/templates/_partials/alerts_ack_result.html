@@ -1,0 +1,7 @@
+{# alerts_ack_result.html -- outcome of a bulk (or single-row) acknowledgement. Carries the target's id. #}
+<div id="{{ panel_id }}-ack-result" role="{{ 'status' if not failed else 'alert' }}" class="og-alerts-ack-result">
+  {% if acked %}{% with status='ok', label='ACKED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ acked|length }} alert{{ '' if acked|length == 1 else 's' }} acknowledged{% if mode == 'sequential' %} (one at a time: the bulk endpoint is not deployed yet){% endif %}.{% endif %}
+  {% if failed %}{% with status='caution', label='NOT ACKED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ failed|length }} could not be acknowledged{% if message %}: {{ message }}{% endif %} (ids {{ failed[:10]|join(', ') }}{% if failed|length > 10 %}, ...{% endif %}).{% endif %}
+</div>

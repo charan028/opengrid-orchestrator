@@ -116,7 +116,9 @@ def guardian_attention(alerts: Iterable[Any]) -> list[dict[str, Any]]:
         if not isinstance(alert, dict):
             continue
         rule = alert.get("rule")
-        if rule not in (SAFE_STOP_REQUESTED_RULE, SCOPE_CONSERVATIVE_RULE):
+        # CONSERVATIVE scopes are summarised by the posture strip (current posture, not alerts); only a
+        # safe-stop REQUEST stays a prominent item here.
+        if rule != SAFE_STOP_REQUESTED_RULE:
             continue
         summary = str(alert.get("summary") or "")
         match = _GUARDIAN_SCOPE.match(summary)
@@ -189,6 +191,9 @@ async def health_screen(request: Request) -> HTMLResponse:
     feeds = health.get("feeds", []) if isinstance(health.get("feeds"), list) else []
     alerts = health.get("alerts", []) if isinstance(health.get("alerts"), list) else []
 
+    from opengrid.ui.routes.alerts import panel_context, posture_context
+
+    posture = await posture_context()
     return templates.TemplateResponse(
         request,
         "health.html",
@@ -203,6 +208,13 @@ async def health_screen(request: Request) -> HTMLResponse:
             "degraded": degraded,
             "rendered_at": datetime.now(UTC).isoformat(),
             **degraded_context(health),
+            **panel_context(
+                request,
+                list(health.get("alerts") or []) if isinstance(health, dict) else [],
+                panel_id="health",
+                params=dict(request.query_params),
+            ),
+            **posture,
         },
     )
 

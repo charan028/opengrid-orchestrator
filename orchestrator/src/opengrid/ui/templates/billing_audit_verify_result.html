@@ -1,9 +1,9 @@
 {# billing_audit_verify_result.html -- chain-verify HTMX fragment. Params: result (chain_verify_result_view). #}
 <div id="verify-result" role="{{ 'status' if result.passed else 'alert' }}">
   {% if result.passed %}
-  <p>{% with status='ok', label='PASS' %}{% include "_partials/status_badge.html" %}{% endwith %} {{ result.checked }} events checked.</p>
+  <p>{% with status='ok', label='PASS' %}{% include "_partials/status_badge.html" %}{% endwith %} {{ result.checked }} stream{{ '' if result.checked == 1 else 's' }} verified{% if result.events_checked is not none %} ({{ result.events_checked }} events){% endif %}.</p>
   {% else %}
-  <p>{% with status='critical', label='FAIL' %}{% include "_partials/status_badge.html" %}{% endwith %} {{ result.checked }} events checked.</p>
+  <p>{% with status='critical', label='FAIL' %}{% include "_partials/status_badge.html" %}{% endwith %} {{ result.checked }} stream{{ '' if result.checked == 1 else 's' }} verified{% if result.events_checked is not none %} ({{ result.events_checked }} events){% endif %}.</p>
   {% if result.first_broken %}
   <pre>{{ result.first_broken | tojson(indent=2) }}</pre>
   {% endif %}

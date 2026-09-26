@@ -26,6 +26,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from psycopg.errors import UndefinedTable
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -72,6 +73,11 @@ _OBLIGATIONS_SQL = """
     SELECT o.obligation_id, o.contract_id, o.service_type, o.window_start, o.window_end,
            o.committed_qty_kw, o.state
     FROM og.obligation o WHERE o.obligation_id = ANY(%(ids)s::uuid[])
+"""
+
+_POSTURE_SQL = """
+    SELECT scope_kind, scope_ref, veto_ratio, consecutive, stop_requested, since, updated_at
+    FROM og.scope_posture WHERE posture = 'CONSERVATIVE' ORDER BY scope_kind, scope_ref
 """
 
 _LAST_UPDATED_SQL = """
@@ -231,3 +237,22 @@ async def settlement_view(
         names=customer_names(cfg),
         period=(d0, d1),
     )
+
+
+@router.get("/scope-posture")
+async def scope_posture(
+    _identity: Annotated[Identity, Depends(require_viewer)],
+    pool: Annotated[AsyncConnectionPool, Depends(get_pool)],
+) -> dict[str, Any]:
+    """The guardian's CURRENT safety posture: every scope held CONSERVATIVE right now (`og.scope_posture`,
+    written only by og-guardian, K7). The console's posture strip reads this, not open alerts. A database
+    without the table (before migration 0019) answers an empty list."""
+    try:
+        rows = await _fetch(pool, _POSTURE_SQL)
+    except UndefinedTable:
+        rows = []
+    return {
+        "as_of": datetime.now(UTC).isoformat(),
+        "count": len(rows),
+        "conservative": [_json(r) for r in rows],
+    }

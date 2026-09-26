@@ -1,0 +1,108 @@
+{# alerts_panel.html -- the ONE open-alerts component (Control room and System Health). Params: panel_id,
+   panel (opengrid.ui.alerts.alerts_panel), is_operator, base_path. Grouped by rule + scope, filtered,
+   newest first, paginated, in a fixed-height scroll area; operators select rows (or everything matching the
+   filter) and acknowledge them with one confirm, or ack a single row. Refreshes after an ack. #}
+{% set p = panel %}
+<div id="{{ panel_id }}-alerts-panel" class="og-alerts" role="region" aria-label="Open alerts list">
+  {# reloads this panel (same filter/page) after an acknowledgement; its own element so nothing inherits its values #}
+  <span hidden hx-get="{{ base_path }}/alerts/panel" hx-trigger="og-alerts-changed from:body" hx-target="#{{ panel_id }}-alerts-panel"
+        hx-swap="outerHTML" hx-vals='{"panel_id": "{{ panel_id }}", "alert_severity": "{{ p.severity }}", "alert_rule": "{{ p.rule }}", "alert_page": "{{ p.page }}", "alert_size": "{{ p.size }}"}'></span>
+  <form class="og-alerts-filters og-toolbar" hx-get="{{ base_path }}/alerts/panel" hx-target="#{{ panel_id }}-alerts-panel"
+        hx-swap="outerHTML" hx-trigger="change" aria-label="Filter alerts">
+    <input type="hidden" name="panel_id" value="{{ panel_id }}">
+    <label for="{{ panel_id }}-alert-sev">Severity</label>
+    <select id="{{ panel_id }}-alert-sev" name="alert_severity">
+      <option value="">All</option>
+      {% for s in p.severities %}<option value="{{ s }}"{% if p.severity == s %} selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+    <label for="{{ panel_id }}-alert-rule">Rule</label>
+    <select id="{{ panel_id }}-alert-rule" name="alert_rule">
+      <option value="">All</option>
+      {% for r in p.rules %}<option value="{{ r }}"{% if p.rule == r %} selected{% endif %}>{{ r }}</option>{% endfor %}
+    </select>
+    <label for="{{ panel_id }}-alert-size">Per page</label>
+    <select id="{{ panel_id }}-alert-size" name="alert_size">
+      {% for n in p.sizes %}<option value="{{ n }}"{% if p.size == n %} selected{% endif %}>{{ n }}</option>{% endfor %}
+    </select>
+    <span class="og-card-meta">{{ p.alert_count }} alert{{ '' if p.alert_count == 1 else 's' }} in {{ p.group_count }} group{{ '' if p.group_count == 1 else 's' }}</span>
+  </form>
+
+  <form id="{{ panel_id }}-ack-form" class="og-alerts-form" hx-post="{{ base_path }}/alerts/ack-bulk/propose"
+        hx-target="#{{ panel_id }}-ack-dialog" hx-swap="innerHTML">
+    <input type="hidden" name="panel_id" value="{{ panel_id }}">
+    <input type="hidden" name="all_matching" value="" class="og-alerts-all-flag">
+    <input type="hidden" name="all_ids" value="{{ p.all_matching_ids_csv }}">
+    {% if is_operator %}
+    <div class="og-alerts-bulkbar">
+      <button type="button" class="btn og-alerts-select-page">Select all on page</button>
+      <button type="button" class="btn og-alerts-select-matching" data-count="{{ p.all_matching_count }}">Select all {{ p.all_matching_count }} matching filter</button>
+      <button type="submit" class="btn btn-primary og-alerts-ack-selected" disabled>Acknowledge selected (<span class="og-alerts-selected-n">0</span>)</button>
+    </div>
+    {% endif %}
+    <div class="og-alerts-scroll" tabindex="0" aria-label="Alert list, scrollable">
+      <table class="data-table og-alerts-table">
+        <thead><tr>
+          {% if is_operator %}<th scope="col"><span class="og-visually-hidden">Select</span></th>{% endif %}
+          <th scope="col">Severity</th><th scope="col">Rule</th><th scope="col">Scope</th><th scope="col">Summary</th>
+          <th scope="col" class="num">Count</th><th scope="col">Latest</th>{% if is_operator %}<th scope="col"><span class="og-visually-hidden">Acknowledge</span></th>{% endif %}
+        </tr></thead>
+        <tbody>
+        {% for g in p.groups %}
+          <tr data-rule="{{ g.rule }}">
+            {% if is_operator %}<td>{% if g.ids_csv %}<input type="checkbox" class="og-alert-select" name="sel" value="{{ g.ids_csv }}" data-n="{{ g.unacked_ids|length }}" aria-label="Select {{ g.rule }} {{ g.scope }}">{% endif %}</td>{% endif %}
+            <td>{% with status=g.severity, label=g.severity %}{% include "_partials/status_badge.html" %}{% endwith %}</td>
+            <td>{{ g.rule }}</td>
+            <td>{{ g.scope or '--' }}</td>
+            <td>{{ g.summary }}</td>
+            <td class="num">{% if g.count > 1 %}&times;{{ g.count }}{% else %}1{% endif %}</td>
+            <td><span class="stale-badge" data-since="{{ g.latest }}" data-stale-after="86400" title="{{ g.latest }}">age: unknown</span></td>
+            {% if is_operator %}<td>{% if g.ids_csv %}<button type="button" class="btn og-alert-ack-row"
+                hx-post="{{ base_path }}/alerts/ack-bulk/confirm?panel_id={{ panel_id }}&amp;ids={{ g.ids_csv }}"
+                hx-target="#{{ panel_id }}-ack-result" hx-swap="outerHTML">Ack</button>{% else %}<span class="og-card-meta">acked</span>{% endif %}</td>{% endif %}
+          </tr>
+        {% else %}
+          <tr><td class="empty" colspan="{{ 8 if is_operator else 6 }}">No open alerts{% if p.severity or p.rule %} for this filter{% endif %}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </form>
+
+  {% if p.pages > 1 %}
+  <div class="og-alerts-pager" role="navigation" aria-label="Alert pages">
+    {% for n in range(1, p.pages + 1) %}
+    <button type="button" class="btn{{ ' is-active' if n == p.page else '' }}"{% if n == p.page %} aria-current="page"{% endif %}
+            hx-get="{{ base_path }}/alerts/panel" hx-target="#{{ panel_id }}-alerts-panel" hx-swap="outerHTML"
+            hx-vals='{"panel_id": "{{ panel_id }}", "alert_severity": "{{ p.severity }}", "alert_rule": "{{ p.rule }}", "alert_page": "{{ n }}", "alert_size": "{{ p.size }}"}'>{{ n }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <script>
+    (function () {
+      var root = document.getElementById("{{ panel_id }}-alerts-panel");
+      if (!root || root.dataset.wired) { return; }
+      root.dataset.wired = "1";
+      var form = root.querySelector(".og-alerts-form");
+      var flag = root.querySelector(".og-alerts-all-flag");
+      var countEl = root.querySelector(".og-alerts-selected-n");
+      var ackBtn = root.querySelector(".og-alerts-ack-selected");
+      function boxes() { return Array.prototype.slice.call(root.querySelectorAll(".og-alert-select")); }
+      function refresh() {
+        var n = flag.value === "1"
+          ? Number(root.querySelector(".og-alerts-select-matching").dataset.count || 0)
+          : boxes().filter(function (b) { return b.checked; }).reduce(function (s, b) { return s + Number(b.dataset.n || 1); }, 0);
+        if (countEl) { countEl.textContent = String(n); }
+        if (ackBtn) { ackBtn.disabled = n === 0; }
+      }
+      root.addEventListener("change", function (e) {
+        if (e.target.classList && e.target.classList.contains("og-alert-select")) { flag.value = ""; refresh(); }
+      });
+      var pageBtn = root.querySelector(".og-alerts-select-page");
+      if (pageBtn) { pageBtn.addEventListener("click", function () { flag.value = ""; boxes().forEach(function (b) { b.checked = true; }); refresh(); }); }
+      var allBtn = root.querySelector(".og-alerts-select-matching");
+      if (allBtn) { allBtn.addEventListener("click", function () { flag.value = "1"; boxes().forEach(function (b) { b.checked = true; }); refresh(); }); }
+      refresh();
+      if (window.og && og.initStaleBadges) { og.initStaleBadges(root); }
+    })();
+  </script>
+</div>

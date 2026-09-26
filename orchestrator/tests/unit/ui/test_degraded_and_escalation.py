@@ -97,15 +97,14 @@ def test_banner_is_hidden_when_nothing_is_degraded(
 
 def test_guardian_attention_orders_stop_requests_first_and_links_the_two_step_flow() -> None:
     items = guardian_attention([CONSERVATIVE_ALERT, {"rule": "ALR-PROCESS-DOWN"}, STOP_ALERT])
-    assert [i["rule"] for i in items] == ["ALR-SAFE-STOP-REQUESTED", "ALR-SCOPE-CONSERVATIVE"]
-    stop, conservative = items
+    # only a safe-stop REQUEST is an escalation item now; conservative scopes are the posture strip's job
+    assert [i["rule"] for i in items] == ["ALR-SAFE-STOP-REQUESTED"]
+    (stop,) = items
     assert stop["scope_label"] == "bank bank-007"
     assert (
         stop["review_url"] == "/og/fleet?safestop_scope=bank&safestop_scope_id=bank-007#safestop-propose-form"
     )
     assert "confirm" not in stop["review_url"]
-    assert conservative["review_url"] is None
-    assert conservative["scope_label"] == "zone LZ_NORTH"
 
 
 def test_unparseable_stop_request_still_links_to_the_unfilled_form() -> None:
@@ -122,7 +121,7 @@ def test_operator_sees_escalations_with_a_review_link(
     body = client.get(path, headers={"X-Remote-User": "operator"}).text
     assert f'id="{prefix}-guardian-attention"' in body
     assert "Guardian requests a safe stop: bank bank-007" in body
-    assert "Scope held conservative: zone LZ_NORTH" in body
+    assert "Scope held conservative" not in body  # summarised by the posture strip instead
     assert 'href="/og/fleet?safestop_scope=bank&amp;safestop_scope_id=bank-007#safestop-propose-form"' in body
     assert "/safestop/" not in body.split(f'id="{prefix}-guardian-attention"')[1].split("</section>")[0]
 
