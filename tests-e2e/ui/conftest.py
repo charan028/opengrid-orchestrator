@@ -37,6 +37,8 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from playwright.sync_api import Browser, Page
 
+import fleet_fixture
+
 LIVE_BASE_URL_ENV = "OG_UI_BASE_URL"
 # `opengrid.ui.role` trusts `X-Remote-User` only when the request also carries the proxy secret that
 # Apache (or the dev proxy) injects as `X-OG-Proxy-Auth` (`opengrid.api.auth.proxy_authenticated`), and
@@ -167,6 +169,7 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/banks/bank-038/pq": _load("pq_bank.json"),
         "/og/api/billing/invoice-lines": _load("billing_invoice_lines.json"),
         "/og/api/trace/events": _load("billing_trace_events.json"),
+        **fleet_fixture.responses(),  # the Fleet table at scale (owner review R3)
     }
 
 
@@ -229,7 +232,8 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
         if path not in gets:
             raise ApiUnavailable(f"no fixture registered for GET {path}")
-        return gets[path]
+        body = gets[path]
+        return body(params) if callable(body) else body  # a callable answers per query (fleet_fixture)
 
     post_calls: dict[str, int] = {}
 

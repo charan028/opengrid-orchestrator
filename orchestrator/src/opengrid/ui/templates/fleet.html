@@ -6,277 +6,369 @@
 {% endblock %}
 
 {% block content %}
+<link rel="stylesheet" href="{{ base_path }}/static/og-fleet.css">
+
+{# 1. header: the fleet at a glance #}
+<section class="og-panel fl-summary" aria-label="Fleet summary">
+  <div class="fl-summary-row">
+    <div class="fl-stat"><span class="kpi-label">Hubs</span><strong id="fleet-total">{{ '{:,}'.format(summary.total|int(0)) if summary else approx_text }}</strong></div>
+    {% if summary %}
+    <div class="fl-stat"><span class="kpi-label">Online</span><strong>{{ '{:,}'.format(summary.online|int(0)) }}</strong></div>
+    <div class="fl-stat"><span class="kpi-label">Stale</span><strong>{{ '{:,}'.format(summary.stale|int(0)) }}</strong></div>
+    <div class="fl-stat"><span class="kpi-label">Offline / fault</span><strong>{{ '{:,}'.format(summary.offline|int(0)) }}</strong></div>
+    {% endif %}
+    <div class="fl-stat"><span class="kpi-label">Matching this view</span><strong id="fleet-approx-total">{{ approx_text }} hubs</strong></div>
+  </div>
+</section>
+
+{# 2. filters + table #}
+<section class="og-panel" aria-labelledby="hubs-heading">
+  <h2 id="hubs-heading">Hubs</h2>
+  <p>Filter, sort and page through every home battery. Click a row for its detail; tick rows to command them.</p>
+  <form id="fleet-filter-form" method="get" action="{{ base_path }}/fleet" class="fl-filters" role="search">
+    <div class="fl-field">
+      <label for="flt-q">Hub id</label>
+      <input id="flt-q" type="search" name="q" value="{{ state.q }}" placeholder="starts with..." autocomplete="off">
+    </div>
+    <div class="fl-field">
+      <label for="flt-bank">Bank</label>
+      <div class="fl-combo">
+        <input id="flt-bank" type="text" name="bank" value="{{ state.bank }}" autocomplete="off"
+               role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="flt-bank-list"
+               data-combobox="bank" placeholder="type to search">
+        <ul class="fl-listbox" id="flt-bank-list" role="listbox" hidden></ul>
+      </div>
+    </div>
+    <details class="fl-multi" id="flt-zone">
+      <summary>Zone{% if state.zones %} ({{ state.zones|length }}){% endif %}</summary>
+      <div class="fl-multi-list">
+        {% for z in zone_options %}
+        <label class="fl-check"><input type="checkbox" name="zone" value="{{ z }}" {{ 'checked' if z in state.zones else '' }}> {{ z }}</label>
+        {% else %}
+        <span class="og-card-meta">No zones listed.</span>
+        {% endfor %}
+      </div>
+    </details>
+    <details class="fl-multi" id="flt-health">
+      <summary>Health{% if state.health %} ({{ state.health|length }}){% endif %}</summary>
+      <div class="fl-multi-list">
+        {% for h in health_choices %}
+        <label class="fl-check"><input type="checkbox" name="health" value="{{ h }}" {{ 'checked' if h in state.health else '' }}> {{ h }}</label>
+        {% endfor %}
+      </div>
+    </details>
+    <details class="fl-multi" id="flt-activity">
+      <summary>Activity{% if state.activity %} ({{ state.activity|length }}){% endif %}</summary>
+      <div class="fl-multi-list">
+        {% for key, label in activity_labels.items() %}
+        <label class="fl-check"><input type="checkbox" name="activity" value="{{ key }}" {{ 'checked' if key in state.activity else '' }}> {{ label }}</label>
+        {% endfor %}
+      </div>
+    </details>
+    <div class="fl-field fl-soc">
+      <span class="fl-label" id="flt-soc-label">SoC range</span>
+      <div class="fl-range" role="group" aria-labelledby="flt-soc-label">
+        <div class="og-input-group"><input id="flt-soc-min" type="number" name="soc_min" min="0" max="100" step="1" value="{{ state.soc_min }}" aria-label="SoC from"><span class="og-input-suffix">%</span></div>
+        <div class="og-input-group"><input id="flt-soc-max" type="number" name="soc_max" min="0" max="100" step="1" value="{{ state.soc_max }}" aria-label="SoC to"><span class="og-input-suffix">%</span></div>
+      </div>
+    </div>
+    {% if state.sort != 'hub' or state.dir != 'asc' %}
+    <input type="hidden" name="sort" value="{{ state.sort }}"><input type="hidden" name="dir" value="{{ state.dir }}">
+    {% endif %}
+    <input type="hidden" name="size" value="{{ state.size }}">
+    <div class="fl-filter-actions">
+      <button class="btn btn-primary" type="submit">Apply filters</button>
+      <a class="btn" id="fleet-filter-reset" href="{{ reset_url }}">Reset</a>
+    </div>
+  </form>
+
+  <div class="fl-chips" id="fleet-chips" aria-label="Active filters">
+    {% for chip in state.chips() %}
+    <a class="fl-chip" href="{{ chip.url }}" aria-label="Remove filter {{ chip.label }}">{{ chip.label }} <span aria-hidden="true">&times;</span></a>
+    {% else %}
+    <span class="og-card-meta">No filters: showing the whole fleet.</span>
+    {% endfor %}
+  </div>
+
+  <div class="fl-table-bar">
+    <span id="fleet-page-info" role="status">{{ table_rows|length }} shown of {{ approx_text }} hubs</span>
+    <span class="fl-table-bar-right">
+      {% if is_operator and table_rows %}
+      <button type="button" class="btn btn-sm" id="fleet-select-page">Select this page</button>
+      <button type="button" class="btn btn-sm" id="fleet-select-matching" data-approx="{{ approx_total if approx_total is not none else '' }}">Select all {{ approx_text }} matching</button>
+      {% endif %}
+      <label class="fl-inline" for="fleet-page-size">Rows
+        <select id="fleet-page-size" onchange="window.location = this.value">
+          {% for n in page_sizes %}
+          <option value="{{ state.url(size=n, cursor='') }}" {{ 'selected' if n == state.size else '' }}>{{ n }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </span>
+  </div>
+  <p class="og-card-meta">Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
+
+  <div class="og-table-wrap">
+    <table class="data-table fl-table" id="fleet-table">
+      <thead>
+        <tr>
+          {% if is_operator %}<th class="sel" scope="col"><input type="checkbox" id="fleet-select-all-page" aria-label="Select all hubs on this page"></th>{% endif %}
+          {% for key, label in sort_columns.items() %}
+          <th scope="col" class="{{ 'num' if key in ('soc', 'kw') else '' }}"
+              aria-sort="{{ ('ascending' if state.dir == 'asc' else 'descending') if state.sort == key else 'none' }}">
+            <a class="fl-sort" href="{{ state.sort_url(key) }}" data-sort="{{ key }}">{{ label }}{% if state.sort == key %} <span aria-hidden="true">{{ '&#9650;'|safe if state.dir == 'asc' else '&#9660;'|safe }}</span>{% endif %}</a>
+          </th>
+          {% if key == 'kw' %}<th scope="col">Activity</th>{% endif %}
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in table_rows %}
+        <tr class="clickable-row" data-row-id="{{ row.hub_id }}" tabindex="0">
+          {% if is_operator %}
+          <td class="sel"><input type="checkbox" class="og-row-select" value="{{ row.hub_id }}" aria-label="Select {{ row.hub_id }}"></td>
+          {% endif %}
+          <td>{{ row.hub_id }}</td>
+          <td>{{ row.bank_id }}</td>
+          <td>{{ row.zone }}</td>
+          <td class="num">{{ row.soc_pct if row.soc_pct is not none else '—' }}</td>
+          <td class="num" data-col="kw">{{ row.p_kw if row.p_kw is not none else '—' }}</td>
+          <td>{{ row.activity }}</td>
+          <td><span class="status-badge" data-status="{{ row.health }}"><span class="status-text">{{ row.health_label }}</span></span></td>
+          <td>{{ row.age_badge|safe }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty" colspan="{{ 9 if is_operator else 8 }}">No hubs match these filters. Remove a chip above or Reset to see the fleet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <nav class="fl-pager" aria-label="Pages">
+    {% if first_url %}<a class="btn btn-sm" href="{{ first_url }}" id="fleet-first">First</a>{% endif %}
+    {% if prev_url %}<a class="btn btn-sm" href="{{ prev_url }}" id="fleet-prev" rel="prev">Previous</a>{% endif %}
+    {% if next_url %}<a class="btn btn-sm" href="{{ next_url }}" id="fleet-next" rel="next">Next</a>{% endif %}
+  </nav>
+</section>
+
 <section class="og-panel og-map-panel" aria-label="Fleet map">
   <h2>Fleet map</h2>
-  <p>Every hub, coloured by health. Scroll or pinch to zoom and drag to pan; click a hub for its detail.
-    Turn on <em>Select an area</em>, then drag a rectangle over the hubs you want or click them one at a
-    time; hold Shift while dragging to add to the selection. Ticking rows in the table below does the
-    same thing &mdash; it is one selection either way.</p>
+  <p>The hubs on this page, coloured by health. Click a hub for its detail. Turn on <em>Select an area</em>,
+    then drag a rectangle or click hubs; Shift adds to the selection. The map and the table share one selection.</p>
   <div class="og-map-toolbar">
     {% if is_operator %}
     <button type="button" class="btn" id="fleet-select-toggle" aria-pressed="false">Select an area</button>
     <button type="button" class="btn" id="fleet-select-clear">Clear selection</button>
     {% endif %}
-    <span class="og-selection-count" id="fleet-selection-count" role="status">No hubs selected</span>
   </div>
   <div id="fleet-map" class="og-map og-map-tall" data-hubs='{{ map_hubs|tojson }}'></div>
 </section>
 
-<section class="og-panel" aria-label="Filters">
-  <form method="get" action="{{ base_path }}/fleet" class="og-form">
-    <label>Zone
-      <input type="text" name="zone" value="{{ filters.zone or '' }}">
-    </label>
-    <label>Bank
-      <input type="text" name="bank" value="{{ filters.bank or '' }}">
-    </label>
-    <label>Health
-      <select name="health">
-        <option value="">any</option>
-        {% for h in ["online", "stale", "offline", "fault"] %}
-        <option value="{{ h }}" {{ 'selected' if filters.health == h else '' }}>{{ h }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <button class="btn" type="submit">Filter</button>
-  </form>
-</section>
+{# 3. hub detail side drawer #}
+<aside class="fl-drawer" id="hub-drawer" aria-label="Hub detail" hidden>
+  <div class="fl-drawer-head">
+    <span class="kpi-label">Hub detail</span>
+    <button type="button" class="btn btn-sm" id="hub-drawer-close" aria-label="Close hub detail">Close</button>
+  </div>
+  <div id="hub-drilldown-container" aria-live="polite"></div>
+</aside>
 
+{# 4. actions #}
 {% if is_operator %}
-<section class="og-panel" aria-label="Fleet-wide safe stop">
-  <h2>Scoped safe stop</h2>
-  <p>Stops new dispatch for the chosen scope. Never force-discharges below reserve.
-    Requires a two-step confirmation: propose, then confirm the exact summary the API returns.</p>
-  {% if safestop_prefill %}
-  <p class="og-card-meta" id="safestop-prefill-note">Prefilled from the guardian's safe-stop request. Check the scope, then propose (step 1) and confirm (step 2); nothing is engaged until you confirm.</p>
-  {% endif %}
-  <form id="safestop-propose-form" class="og-form"
-        hx-post="{{ base_path }}/fleet/safestop/propose" hx-target="#safestop-propose-result" hx-swap="innerHTML">
-    <label>Scope
-      <select name="scope">
-        {% for value, label in [("fleet", "Fleet"), ("zone", "Zone"), ("bank", "Bank")] %}
-        <option value="{{ value }}"{% if safestop_prefill and safestop_prefill.scope == value %} selected{% endif %}>{{ label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Scope id (zone or bank) <input type="text" name="scope_id" value="{{ safestop_prefill.scope_id if safestop_prefill else '' }}"></label>
-    <label>Reason <input type="text" name="reason" required value="{{ safestop_prefill.reason if safestop_prefill else '' }}"></label>
-    <button class="btn btn-safestop" type="submit">Propose safe stop (step 1 of 2)</button>
-  </form>
-  <div id="safestop-propose-result" role="status"></div>
-  <div id="safestop-confirm-result" role="status"></div>
+<section class="og-panel fl-actions" aria-labelledby="actions-heading" id="fleet-actions">
+  <h2 id="actions-heading">Actions</h2>
+  <p>Every action is two steps: propose, then confirm the exact summary the API returns. The guardian checks and signs every command.</p>
+  <div class="fl-cards">
+
+    <article class="fl-card" aria-labelledby="card-one">
+      <h3 id="card-one">Command one hub</h3>
+      <p class="fl-instr">Pick a hub (its bank fills in) or a whole bank, set the power, give a reason.</p>
+      <form id="manual-command-form" class="fl-form" novalidate
+            hx-post="{{ base_path }}/fleet/command/propose" hx-target="#command-propose-result" hx-swap="innerHTML">
+        <div class="fl-field">
+          <label for="cmd-hub">Hub id</label>
+          <div class="fl-combo">
+            <input id="cmd-hub" type="text" name="hub_id" autocomplete="off" role="combobox" aria-expanded="false"
+                   aria-autocomplete="list" aria-controls="cmd-hub-list" data-combobox="hub" data-fill-bank="#cmd-bank"
+                   data-limits="#cmd-setpoint">
+            <ul class="fl-listbox" id="cmd-hub-list" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <div class="fl-field">
+          <label for="cmd-bank">Bank id</label>
+          <div class="fl-combo">
+            <input id="cmd-bank" type="text" name="bank_id" autocomplete="off" role="combobox" aria-expanded="false"
+                   aria-autocomplete="list" aria-controls="cmd-bank-list" data-combobox="bank">
+            <ul class="fl-listbox" id="cmd-bank-list" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <div class="fl-field">
+          <label for="cmd-setpoint">Setpoint (kW)</label>
+          <div class="og-input-group"><input id="cmd-setpoint" type="number" step="0.1" name="p_kw_setpoint" required aria-describedby="cmd-setpoint-hint"><span class="og-input-suffix">kW</span></div>
+        </div>
+        <div class="fl-field">
+          <label for="cmd-reason">Reason</label>
+          <input id="cmd-reason" type="text" name="reason" required aria-describedby="cmd-reason-hint">
+        </div>
+        <button class="btn btn-primary fl-submit" type="submit" data-requires="target">Propose (step 1 of 2)</button>
+        <p class="fl-hint" id="cmd-setpoint-hint">+ discharges, &minus; charges. Pick a hub to see its limit.</p>
+        <p class="fl-hint fl-why" id="cmd-reason-hint" aria-live="polite"></p>
+      </form>
+      <div id="command-propose-result" role="status"></div>
+      <div id="command-confirm-result" role="status"></div>
+    </article>
+
+    <article class="fl-card" aria-labelledby="card-sel" id="bulk-card">
+      <h3 id="card-sel">Command selection</h3>
+      <p class="fl-instr">Override what the selected hubs are doing now. A second acknowledgement is needed if any serve a customer or are faulted.</p>
+      <form id="bulk-command-form" class="fl-form" novalidate
+            hx-post="{{ base_path }}/fleet/command/bulk/propose" hx-target="#bulk-propose-result" hx-swap="innerHTML">
+        <input type="hidden" name="hub_ids" id="bulk-hub-ids" value="">
+        <div class="fl-field">
+          <label for="bulk-setpoint">Setpoint (kW)</label>
+          <div class="og-input-group"><input id="bulk-setpoint" type="number" step="0.1" name="p_kw_setpoint" required><span class="og-input-suffix">kW</span></div>
+        </div>
+        <div class="fl-field">
+          <label for="bulk-reason">Reason</label>
+          <input id="bulk-reason" type="text" name="reason" required>
+        </div>
+        <button class="btn btn-primary fl-submit" type="submit" id="bulk-propose-button" disabled>Propose for selection (step 1 of 2)</button>
+        <p class="fl-hint fl-why" id="bulk-selection-note" aria-live="polite">Select hubs in the table or on the map to enable this.</p>
+      </form>
+      <div id="bulk-propose-result" role="status"></div>
+      <div id="bulk-confirm-result" role="status"></div>
+    </article>
+
+    <article class="fl-card fl-card-danger" aria-labelledby="card-stop">
+      <h3 id="card-stop">Safe stop</h3>
+      <p class="fl-instr">Stops new dispatch for the scope; never discharges below reserve. Confirm within 30 s of proposing.</p>
+      {% if safestop_prefill %}
+      <p class="og-card-meta" id="safestop-prefill-note">Prefilled from the guardian's safe-stop request. Check the scope, then propose (step 1) and confirm (step 2); nothing is engaged until you confirm.</p>
+      {% endif %}
+      <form id="safestop-propose-form" class="fl-form" novalidate
+            hx-post="{{ base_path }}/fleet/safestop/propose" hx-target="#safestop-propose-result" hx-swap="innerHTML">
+        <div class="fl-field">
+          <label for="stop-scope">Scope</label>
+          <select id="stop-scope" name="scope" data-scope-for="#stop-scope-id">
+            {% for value, label in [("fleet", "Fleet"), ("zone", "Zone"), ("bank", "Bank")] %}
+            <option value="{{ value }}"{% if safestop_prefill and safestop_prefill.scope == value %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="fl-field">
+          <label for="stop-scope-id">Scope id</label>
+          <div class="fl-combo">
+            <input id="stop-scope-id" type="text" name="scope_id" value="{{ safestop_prefill.scope_id if safestop_prefill else '' }}" autocomplete="off" role="combobox" aria-expanded="false"
+                   aria-autocomplete="list" aria-controls="stop-scope-id-list" data-combobox="zone"
+                   aria-describedby="stop-scope-id-hint">
+            <ul class="fl-listbox" id="stop-scope-id-list" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <div class="fl-field">
+          <label for="stop-reason">Reason</label>
+          <input id="stop-reason" type="text" name="reason" required value="{{ safestop_prefill.reason if safestop_prefill else '' }}">
+        </div>
+        <button class="btn btn-safestop fl-submit" type="submit">Propose safe stop (step 1 of 2)</button>
+        <p class="fl-hint" id="stop-scope-id-hint">Not needed for Fleet scope.</p>
+        <p class="fl-hint fl-why" aria-live="polite"></p>
+      </form>
+      <div id="safestop-propose-result" role="status"></div>
+      <div id="safestop-confirm-result" role="status"></div>
+    </article>
+
+    <article class="fl-card fl-card-danger" aria-labelledby="card-release">
+      <h3 id="card-release">Release a safe stop</h3>
+      <p class="fl-instr">Two operators: one requests, a different one approves. The guardian signs the release; og-safestop relays it.</p>
+      <form id="release-request-form" class="fl-form" novalidate
+            hx-post="{{ base_path }}/fleet/safestop/release/request" hx-target="#safestop-release-result" hx-swap="outerHTML">
+        <div class="fl-field">
+          <label for="rel-scope">Scope</label>
+          <select id="rel-scope" name="scope" data-scope-for="#rel-scope-id">
+            <option value="fleet">Fleet</option>
+            <option value="zone">Zone</option>
+            <option value="bank">Bank</option>
+          </select>
+        </div>
+        <div class="fl-field">
+          <label for="rel-scope-id">Scope id</label>
+          <div class="fl-combo">
+            <input id="rel-scope-id" type="text" name="scope_id" autocomplete="off" role="combobox" aria-expanded="false"
+                   aria-autocomplete="list" aria-controls="rel-scope-id-list" data-combobox="zone">
+            <ul class="fl-listbox" id="rel-scope-id-list" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <div class="fl-field">
+          <label for="rel-reason">Reason</label>
+          <input id="rel-reason" type="text" name="reason" required>
+        </div>
+        <button class="btn btn-danger fl-submit" type="submit">Request release (operator 1)</button>
+        <p class="fl-hint fl-why" aria-live="polite"></p>
+      </form>
+      <form id="release-review-form" class="fl-form fl-form-2"
+            hx-post="{{ base_path }}/fleet/safestop/release/review" hx-target="#release-review-dialog" hx-swap="innerHTML">
+        <div class="fl-field fl-span-3">
+          <label for="rel-request-id">Release request id</label>
+          <select id="rel-request-id" name="proposal_id" required>
+            {% for r in releases %}
+            <option value="{{ r.proposal_id }}">{{ r.proposal_id[:8] }} · {{ r.scope }}:{{ r.scope_ref }} · by {{ r.requested_by }} · {{ r.age_s|int }} s ago</option>
+            {% else %}
+            <option value="" disabled selected>No pending release requests</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button class="btn btn-danger fl-submit" type="submit" id="release-review-button" {{ '' if releases else 'disabled' }}>Review and approve (operator 2)</button>
+        <p class="fl-hint fl-why" id="release-review-why">{{ '' if releases else 'Nothing to approve: no release request is pending.' }}</p>
+      </form>
+      <div id="release-review-dialog"></div>
+      <div id="safestop-release-result" role="status"></div>
+    </article>
+
+    <article class="fl-card fl-card-placeholder" aria-labelledby="card-fw" aria-disabled="true">
+      <h3 id="card-fw">Firmware update</h3>
+      <p class="fl-instr">Available after R3.1: stage a firmware version to a selection, with the guardian's checks.</p>
+      <button class="btn fl-submit" type="button" disabled title="The firmware update API is not deployed yet (R3.1)">Firmware update &mdash; available after R3.1</button>
+    </article>
+  </div>
 </section>
 
-<section class="og-panel" aria-label="Safe-stop release">
-  <h2>Release a safe stop (two operators)</h2>
-  <p class="stale-badge">One operator requests; a different operator reviews and approves. The guardian signs
-    the release only for two authorised operators, and og-safestop relays it to the hubs.</p>
-  <form id="release-request-form" class="og-grid" style="grid-template-columns: repeat(4, auto);"
-        hx-post="{{ base_path }}/fleet/safestop/release/request" hx-target="#safestop-release-result" hx-swap="outerHTML">
-    <label>Scope
-      <select name="scope">
-        <option value="fleet">Fleet</option>
-        <option value="zone">Zone</option>
-        <option value="bank">Bank</option>
-      </select>
-    </label>
-    <label>Scope id (zone or bank) <input type="text" name="scope_id"></label>
-    <label>Reason <input type="text" name="reason" required></label>
-    <button class="btn btn-danger" type="submit">Request release (operator 1)</button>
-  </form>
-  <form id="release-review-form" class="og-grid" style="grid-template-columns: repeat(2, auto);"
-        hx-post="{{ base_path }}/fleet/safestop/release/review" hx-target="#release-review-dialog" hx-swap="innerHTML">
-    <label>Release request id <input type="text" name="proposal_id" required></label>
-    <button class="btn btn-danger" type="submit">Review and approve (operator 2)</button>
-  </form>
-  <div id="release-review-dialog"></div>
-  <div id="safestop-release-result" role="status"></div>
-</section>
-{% endif %}
-
-<section class="og-panel" aria-label="Bank / hub table">
-  <h2>Hubs</h2>
-  <p>Every home battery in the fleet with its charge, power and telemetry age. Click a row for its lease and last command.</p>
-  <p>Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match this filter. Clear the zone, bank or health filter to see the fleet.', row_id_key='hub_id', select_key=('hub_id' if is_operator else none) %}
-    {% include "_partials/data_table.html" %}
-  {% endwith %}
-</section>
-
-<section class="og-panel" id="hub-drilldown-container" aria-label="Hub detail" aria-live="polite">
-  <h2>Hub detail</h2>
-  <p class="og-empty">Select a hub row above to see its drill-down: SoC, power, health, lease, last command and telemetry.</p>
-</section>
-
-{% if is_operator %}
-<section class="og-panel" aria-label="Manual command">
-  <h2>Manual command</h2>
-  <p>Set one hub's power directly. Two steps, and the guardian can still veto it; the result carries a trace id.</p>
-  <form id="manual-command-form" class="og-form"
-        hx-post="{{ base_path }}/fleet/command/propose" hx-target="#command-propose-result" hx-swap="innerHTML">
-    <label>Bank id <input type="text" name="bank_id"></label>
-    <label>Hub id <input type="text" name="hub_id"></label>
-    <label>Setpoint (kW) <input type="number" step="0.1" name="p_kw_setpoint" required></label>
-    <label>Reason <input type="text" name="reason" required></label>
-    <button class="btn btn-primary" type="submit">Propose (step 1 of 2)</button>
-  </form>
-  <div id="command-propose-result" role="status"></div>
-  <div id="command-confirm-result" role="status"></div>
-</section>
-
-<section class="og-panel" aria-label="Bulk command">
-  <h2>Command the selection</h2>
-  <p>Override what the selected hubs are doing now. Two steps as always, and a second explicit
-    acknowledgement when any of them is serving a customer or is in a fault state. The guardian still
-    checks and signs every command.</p>
-  <form id="bulk-command-form" class="og-form"
-        hx-post="{{ base_path }}/fleet/command/bulk/propose" hx-target="#bulk-propose-result" hx-swap="innerHTML">
-    <input type="hidden" name="hub_ids" id="bulk-hub-ids" value="">
-    <label>Setpoint (kW) <input type="number" step="0.1" name="p_kw_setpoint" required></label>
-    <label>Reason <input type="text" name="reason" required></label>
-    <button class="btn btn-primary" type="submit" id="bulk-propose-button" disabled>
-      Propose for selection (step 1 of 2)
-    </button>
-  </form>
-  <p class="og-card-meta" id="bulk-selection-note">Select hubs on the map or in the table to enable this.</p>
-  <div id="bulk-propose-result" role="status"></div>
-  <div id="bulk-confirm-result" role="status"></div>
-</section>
+{# sticky selection summary #}
+<div class="fl-selbar" id="fleet-selbar" role="region" aria-label="Selection">
+  <span class="og-selection-count" id="fleet-selection-count" role="status">No hubs selected</span>
+  <span class="fl-selbar-note" id="fleet-selection-note"></span>
+  <button type="button" class="btn btn-sm" id="fleet-selbar-clear">Clear</button>
+  <a class="btn btn-sm btn-primary" id="fleet-selbar-command" href="#bulk-card">Command selection&hellip;</a>
+</div>
 {% endif %}
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ base_path }}/static/og-fleet.js"></script>
 <script>
   document.addEventListener("DOMContentLoaded", function () {
-    // ---- the fleet map and its selection (CR #19 item 2) ----------------------------------------
-    var mapEl = document.getElementById("fleet-map");
-    var hubs = JSON.parse(mapEl.dataset.hubs || "[]");
-    var handle = og.map.create(mapEl, { center: [31.0, -99.0], zoom: 6 });
-    og.map.addHubLayer(handle, hubs, { colorBy: "health" });
-    og.map.addLegend(
-      handle,
-      [{ heading: "Hub health" }].concat(og.map.hubLegendItems("health"), [
-        { heading: "Selection" },
-        { label: "selected for a command", color: og.token("--accent") },
-      ]),
-      og.map.derivedPositions(hubs)
-        ? "Hubs are placed inside their real load zone; exact coordinates arrive with /og/api/fleet/map."
-        : null
-    );
-
-    // One selection, two ways in: the rectangle on the map and the checkboxes in the table.
-    var selection = [];
-    var idsField = document.getElementById("bulk-hub-ids");
-    var countEl = document.getElementById("fleet-selection-count");
-    var proposeButton = document.getElementById("bulk-propose-button");
-    var selectionNote = document.getElementById("bulk-selection-note");
-
-    function renderSelection() {
-      og.map.markSelected(handle, selection);
-      document.querySelectorAll("input.og-row-select").forEach(function (box) {
-        box.checked = selection.indexOf(box.value) !== -1;
-      });
-      if (idsField) { idsField.value = selection.join(","); }
-      var n = selection.length;
-      if (countEl) {
-        countEl.textContent = n === 0 ? "No hubs selected" : n + " hub" + (n === 1 ? "" : "s") + " selected";
-      }
-      if (proposeButton) { proposeButton.disabled = n === 0; }
-      if (selectionNote) {
-        selectionNote.textContent = n === 0
-          ? "Select hubs on the map or in the table to enable this."
-          : "Ready to command " + n + " hub" + (n === 1 ? "" : "s") + ".";
-      }
-    }
-
-    function setSelection(ids, additive) {
-      if (additive) {
-        ids.forEach(function (id) { if (selection.indexOf(id) === -1) { selection.push(id); } });
-      } else {
-        selection = ids.slice();
-      }
-      renderSelection();
-    }
-
-    document.querySelectorAll("input.og-row-select").forEach(function (box) {
-      // the row itself opens the drill-down, so the checkbox must not bubble into it
-      box.addEventListener("click", function (event) { event.stopPropagation(); });
-      box.addEventListener("change", function () {
-        var at = selection.indexOf(box.value);
-        if (box.checked && at === -1) { selection.push(box.value); }
-        if (!box.checked && at !== -1) { selection.splice(at, 1); }
-        renderSelection();
-      });
+    ogFleet.init({
+      basePath: "{{ base_path }}",
+      query: {{ request.url.query|tojson }},
+      selectionMax: {{ selection_max }},
+      isOperator: {{ 'true' if is_operator else 'false' }},
     });
 
-    // Drag a rectangle for many, click one hub for one (CR #19: "select hubs, one or in bulk").
-    function togglePick(hubId) {
-      var at = selection.indexOf(hubId);
-      if (at === -1) {
-        selection.push(hubId);
-      } else {
-        selection.splice(at, 1);
-      }
-      renderSelection();
-    }
-
-    var areaSelect = og.map.enableAreaSelect(handle, setSelection, togglePick);
-    var toggle = document.getElementById("fleet-select-toggle");
-    if (toggle) {
-      toggle.addEventListener("click", function () {
-        var on = toggle.getAttribute("aria-pressed") !== "true";
-        toggle.setAttribute("aria-pressed", on ? "true" : "false");
-        toggle.classList.toggle("is-active", on);
-        areaSelect.set(on);
-      });
-    }
-    var clear = document.getElementById("fleet-select-clear");
-    if (clear) {
-      clear.addEventListener("click", function () { setSelection([], false); });
-    }
-    renderSelection();
-
-    document.querySelectorAll("tr.clickable-row[data-row-id]").forEach(function (row) {
-      function open() {
-        htmx.ajax("GET", "{{ base_path }}/fleet/hubs/" + row.dataset.rowId, "#hub-drilldown-container");
-      }
-      row.addEventListener("click", open);
-      row.addEventListener("keydown", function (event) {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          open();
-        }
-      });
-    });
-
-    // Live updates (02b S7.2). `opengrid.api` serves no `/api/stream/fleet` (404 on the live stack, U1), so
-    // the `live` badge follows the health stream (~2 s, same cadence). If a frame ever carries
-    // `{"hubs": [{hub_id, soc_kwh, p_kw}, ...]}` the matching rows' numeric cells refresh in place; until
-    // the api owner adds that payload (tests-e2e/ui/NEEDS_FROM_OTHER_OWNERS.md) the table stays as of
-    // first paint and the operator reloads or re-filters.
+    // Live updates (02b S7.2): the badge follows the health stream (~2 s); a frame carrying
+    // `{"hubs": [{hub_id, p_kw}, ...]}` refreshes the matching rows' P cell in place. Health and age
+    // come from last_seen_at on every page load (api `fleet_search`), never from a cached column.
     og.sse("{{ base_path }}/api/stream/health", function (data) {
-      document.getElementById("fleet-updated").textContent = "live";
-      document.getElementById("fleet-updated").dataset.stale = "false";
-      if (!data || !Array.isArray(data.hubs)) {
-        return;
-      }
+      var badge = document.getElementById("fleet-updated");
+      badge.textContent = "live";
+      badge.dataset.stale = "false";
+      if (!data || !Array.isArray(data.hubs)) { return; }
       data.hubs.forEach(function (hub) {
         var row = document.querySelector('tr.clickable-row[data-row-id="' + hub.hub_id + '"]');
-        if (!row) {
-          return;
-        }
-        var cells = row.querySelectorAll("td");
-        if (cells[4]) {
-          cells[4].textContent = hub.soc_kwh;
-        }
-        if (cells[5]) {
-          cells[5].textContent = hub.p_kw;
-        }
+        var cell = row && row.querySelector("td[data-col=kw]");
+        if (cell && hub.p_kw !== undefined) { cell.textContent = hub.p_kw; }
       });
     }, {
       onError: function () {
-        document.getElementById("fleet-updated").textContent = "reconnecting";
-        document.getElementById("fleet-updated").dataset.stale = "true";
+        var badge = document.getElementById("fleet-updated");
+        badge.textContent = "reconnecting";
+        badge.dataset.stale = "true";
       },
     });
   });

@@ -13,11 +13,13 @@ confirmation and renders a pass/veto/timeout/expired result fragment. The templa
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from opengrid.core.timeutil import to_utc
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
@@ -32,6 +34,34 @@ _SAFESTOP_PROPOSE_PATH = "/og/api/safestop"
 _COMMAND_PROPOSE_PATH = "/og/api/fleet/command"
 _BULK_COMMAND_PATH = "/og/api/fleet/commands/bulk"
 _MAP_PATH = "/og/api/fleet/map"
+# owner review R3: the table at scale (api `routers.fleet_search`)
+_TABLE_PATH = "/og/api/fleet/table"
+_SEARCH_PATH = "/og/api/fleet/search"
+_SELECTION_PATH = "/og/api/fleet/selection"
+_RELEASES_PATH = "/og/api/fleet/release-requests"
+_SUMMARY_PATH = "/og/api/fleet/summary"
+_LEGACY_HUBS_PATH = "/og/api/fleet/hubs"
+PAGE_SIZES = (25, 50, 100)
+DEFAULT_PAGE_SIZE = 50
+#: "Select all N matching" cap; the API applies its own `[api].fleet_selection_max` on top.
+SELECTION_MAX = 5000
+HEALTH_CHOICES = ("OK", "WATCH", "DEGRADED", "QUARANTINED", "FAULT", "OFFLINE")
+ACTIVITY_LABELS: dict[str, str] = {
+    "delivering": "Delivering",
+    "serving_home": "Serving home",
+    "charging": "Charging",
+    "idle": "Idle",
+}
+#: sortable column key -> header label (unit in the header, UI-UX spec S5.8)
+SORT_COLUMNS: dict[str, str] = {
+    "hub": "Hub",
+    "bank": "Bank",
+    "zone": "Zone",
+    "soc": "SoC (%)",
+    "kw": "P (kW)",
+    "health": "Health",
+    "age": "Telemetry age",
+}
 _HUB_STALE_AFTER_S = 10.0
 #: The API holds the approval open up to 10 s waiting for the guardian (api `routers.safestop`).
 _RELEASE_APPROVE_TIMEOUT_S = 15.0
@@ -225,47 +255,227 @@ def _confirm_dialog_context(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class TableState:
+    """The Fleet table's whole state, carried in the URL query so a view is shareable and survives a
+    refresh: filters, sort, page size and the keyset cursor (owner review R3)."""
+
+    zones: tuple[str, ...] = ()
+    bank: str = ""
+    health: tuple[str, ...] = ()
+    activity: tuple[str, ...] = ()
+    soc_min: str = ""
+    soc_max: str = ""
+    q: str = ""
+    sort: str = "hub"
+    dir: str = "asc"
+    size: int = DEFAULT_PAGE_SIZE
+    cursor: str = ""
+
+    def filter_params(self) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = [("zone", z) for z in self.zones]
+        if self.bank:
+            out.append(("bank", self.bank))
+        out += [("health", h) for h in self.health]
+        out += [("activity", a) for a in self.activity]
+        for key in ("soc_min", "soc_max", "q"):
+            if getattr(self, key):
+                out.append((key, getattr(self, key)))
+        return out
+
+    def view_params(self) -> list[tuple[str, str]]:
+        """Filters plus sort/size (no cursor): changing any of them starts again at page 1."""
+        out = self.filter_params()
+        if self.sort != "hub" or self.dir != "asc":
+            out += [("sort", self.sort), ("dir", self.dir)]
+        if self.size != DEFAULT_PAGE_SIZE:
+            out.append(("size", str(self.size)))
+        return out
+
+    def url(self, **changes: Any) -> str:
+        state = replace(self, **changes)
+        params = state.view_params() + ([("cursor", state.cursor)] if state.cursor else [])
+        return f"{BASE_PATH}/fleet" + (f"?{urlencode(params)}" if params else "")
+
+    def sort_url(self, key: str) -> str:
+        flip = "desc" if self.sort == key and self.dir == "asc" else "asc"
+        return self.url(sort=key, dir=flip, cursor="")
+
+    def chips(self) -> list[dict[str, str]]:
+        """One removable chip per active filter value: `{label, remove_url}`."""
+        chips: list[dict[str, str]] = []
+        for z in self.zones:
+            chips.append({"label": f"Zone: {z}", "url": self.url(zones=_without(self.zones, z), cursor="")})
+        if self.bank:
+            chips.append({"label": f"Bank: {self.bank}", "url": self.url(bank="", cursor="")})
+        for h in self.health:
+            chips.append(
+                {"label": f"Health: {h}", "url": self.url(health=_without(self.health, h), cursor="")}
+            )
+        for a in self.activity:
+            label = ACTIVITY_LABELS.get(a, a)
+            chips.append(
+                {
+                    "label": f"Activity: {label}",
+                    "url": self.url(activity=_without(self.activity, a), cursor=""),
+                }
+            )
+        if self.soc_min or self.soc_max:
+            span = f"{self.soc_min or '0'}-{self.soc_max or '100'} %"
+            chips.append({"label": f"SoC: {span}", "url": self.url(soc_min="", soc_max="", cursor="")})
+        if self.q:
+            chips.append({"label": f"Hub id: {self.q}*", "url": self.url(q="", cursor="")})
+        return chips
+
+
+def _without(values: tuple[str, ...], drop: str) -> tuple[str, ...]:
+    return tuple(v for v in values if v != drop)
+
+
+def _num_text(value: str | None) -> str:
+    try:
+        number = float(value or "")
+    except ValueError:
+        return ""
+    return f"{min(max(number, 0.0), 100.0):g}"
+
+
+def table_state(request: Request) -> TableState:
+    """Parse the URL query (repeated keys for the multi-selects) into a `TableState`; unknown values
+    are dropped rather than forwarded."""
+    qp = request.query_params
+    size = qp.get("size", str(DEFAULT_PAGE_SIZE))
+    return TableState(
+        zones=tuple(dict.fromkeys(z.strip() for z in qp.getlist("zone") if z.strip())),
+        bank=(qp.get("bank") or "").strip(),
+        health=tuple(dict.fromkeys(h.upper() for h in qp.getlist("health") if h.upper() in HEALTH_CHOICES)),
+        activity=tuple(dict.fromkeys(a for a in qp.getlist("activity") if a in ACTIVITY_LABELS)),
+        soc_min=_num_text(qp.get("soc_min")),
+        soc_max=_num_text(qp.get("soc_max")),
+        q=(qp.get("q") or "").strip()[:64],
+        sort=qp.get("sort", "hub") if qp.get("sort", "hub") in SORT_COLUMNS else "hub",
+        dir="desc" if qp.get("dir") == "desc" else "asc",
+        size=int(size) if size in {str(s) for s in PAGE_SIZES} else DEFAULT_PAGE_SIZE,
+        cursor=(qp.get("cursor") or "")[:512],
+    )
+
+
+_SUMMARY_KEYS = frozenset({"total", "online", "stale", "offline"})
+
+
+def _as_params(pairs: list[tuple[str, str]]) -> dict[str, Any]:
+    """Repeated query keys as `{key: [values]}` (httpx encodes a list as repeated keys)."""
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        out.setdefault(key, []).append(value)
+    return out
+
+
+def _approx(n: int | None) -> str:
+    if n is None:
+        return "unknown number of"
+    return f"~{n:,}"
+
+
+def _table_row(hub: dict[str, Any]) -> dict[str, Any]:
+    last_seen_at = hub.get("last_seen_at")
+    return {
+        "hub_id": hub.get("hub_id", "-"),
+        "bank_id": hub.get("bank_id") or "-",
+        "zone": hub.get("zone") or "-",
+        "soc_pct": hub.get("soc_pct"),
+        "soc_kwh": hub.get("soc_kwh"),
+        "p_kw": hub.get("p_kw"),
+        "activity": ACTIVITY_LABELS.get(str(hub.get("activity") or ""), "-"),
+        "health": hub.get("health", "unknown"),
+        "health_label": hub.get("health_label") or str(hub.get("health", "unknown")).upper(),
+        "last_seen_at": last_seen_at,
+        "age_badge": render_stale_badge(
+            _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=_HUB_STALE_AFTER_S
+        ),
+    }
+
+
+async def _optional_json(path: str, params: Any = None) -> Any:
+    try:
+        return await get_json(path, params=params)
+    except ApiUnavailable as exc:
+        logger.info("fleet screen: %s unavailable (%s)", path, exc)
+        return None
+
+
 @router.get("", response_class=HTMLResponse)
 async def fleet_screen(
     request: Request,
-    zone: str | None = Query(default=None),
-    bank: str | None = Query(default=None),
-    health: str | None = Query(default=None),
     safestop_scope: str | None = Query(default=None),
     safestop_scope_id: str | None = Query(default=None),
 ) -> HTMLResponse:
-    params = {k: v for k, v in {"zone": zone, "bank": bank, "health": health}.items() if v}
+    state = table_state(request)
     degraded: str | None = None
-    hubs: list[dict[str, Any]] = []
-
+    page: dict[str, Any] = {}
+    api_params: list[tuple[str, str]] = [
+        *state.filter_params(),
+        ("sort", state.sort),
+        ("dir", state.dir),
+        ("limit", str(state.size)),
+    ]
+    if state.cursor:
+        api_params.append(("cursor", state.cursor))
     try:
-        raw = await get_json("/og/api/fleet/hubs", params=params)
-        hubs = raw.get("items", []) if isinstance(raw, dict) else []
+        raw = await get_json(_TABLE_PATH, params=_as_params(api_params))
+        page = raw if isinstance(raw, dict) else {}
     except ApiUnavailable as exc:
-        logger.warning("fleet screen: /og/api/fleet/hubs unavailable: %s", exc)
-        degraded = str(exc)
+        # An API without the paged table (older deploy): the plain hub list, first page only.
+        logger.warning("fleet screen: %s unavailable (%s); using %s", _TABLE_PATH, exc, _LEGACY_HUBS_PATH)
+        try:
+            legacy = await get_json(_LEGACY_HUBS_PATH, params={"limit": state.size})
+            page = {"items": legacy.get("items", []) if isinstance(legacy, dict) else []}
+        except ApiUnavailable as legacy_exc:
+            logger.warning("fleet screen: %s unavailable: %s", _LEGACY_HUBS_PATH, legacy_exc)
+            degraded = str(legacy_exc)
+    hubs: list[dict[str, Any]] = [h for h in page.get("items", []) if isinstance(h, dict)]
 
-    # The richer map payload (coordinates, activity, obligations) when it exists; the hub list otherwise.
-    # Its absence is not a degraded screen -- the map draws from the hub list either way (CR #19).
+    # The map draws the current page (or the richer map payload when the API serves one; CR #19).
     map_hubs = [map_hub(h) for h in hubs]
-    try:
-        from_map = map_hubs_from(await get_json(_MAP_PATH, params=params))
-        if from_map:
-            map_hubs = from_map
-    except ApiUnavailable as exc:
-        logger.info(
-            "fleet screen: %s not serving yet (%s); drawing the map from the hub list", _MAP_PATH, exc
-        )
+    from_map = map_hubs_from(await _optional_json(_MAP_PATH, params=_as_params(state.filter_params())))
+    if from_map:
+        map_hubs = from_map
+
+    summary = await _optional_json(_SUMMARY_PATH)
+    zones_raw = await _optional_json(_SEARCH_PATH, params={"kind": "zone", "q": "", "limit": 50})
+    zone_options = sorted(
+        {str(z["id"]) for z in (zones_raw or {}).get("items", []) if isinstance(z, dict) and z.get("id")}
+        | set(state.zones)
+    )
+    operator = is_operator(request)
+    releases: list[dict[str, Any]] = []
+    if operator:
+        pending = await _optional_json(_RELEASES_PATH)
+        releases = [r for r in (pending or {}).get("items", []) if isinstance(r, dict)]
 
     return templates.TemplateResponse(
         request,
         "fleet.html",
         {
             "role": role_of(request),
-            "is_operator": is_operator(request),
-            "table_rows": [_to_table_row(h) for h in hubs],
+            "is_operator": operator,
+            "state": state,
+            "table_rows": [_table_row(h) for h in hubs],
+            "approx_total": page.get("approx_total"),
+            "approx_text": _approx(page.get("approx_total")),
+            "next_url": state.url(cursor=page["next_cursor"]) if page.get("next_cursor") else None,
+            "prev_url": state.url(cursor=page["prev_cursor"]) if page.get("prev_cursor") else None,
+            "first_url": state.url(cursor="") if state.cursor else None,
+            "reset_url": f"{BASE_PATH}/fleet",
+            "sort_columns": SORT_COLUMNS,
+            "page_sizes": PAGE_SIZES,
+            "health_choices": HEALTH_CHOICES,
+            "activity_labels": ACTIVITY_LABELS,
+            "zone_options": zone_options,
+            "summary": summary if isinstance(summary, dict) and summary.keys() >= _SUMMARY_KEYS else None,
+            "selection_max": SELECTION_MAX,
+            "releases": releases,
             "map_hubs": map_hubs,
-            "filters": {"zone": zone, "bank": bank, "health": health},
             "safestop_prefill": safestop_prefill(safestop_scope, safestop_scope_id),
             "degraded": degraded,
             "rendered_at": datetime.now(UTC).isoformat(),
@@ -273,19 +483,70 @@ async def fleet_screen(
     )
 
 
+# -- JSON relays for the page's own scripts (typeahead, select-all-matching, pending releases) ----------
+
+
+@router.get("/search")
+async def fleet_search(
+    kind: str = Query(...), q: str = Query(default=""), limit: int = Query(default=20, gt=0, le=50)
+) -> JSONResponse:
+    """Typeahead for every id field: relays `GET /og/api/fleet/search` (viewer role)."""
+    if kind not in ("hub", "bank", "zone"):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="kind must be hub, bank or zone")
+    body = await _optional_json(_SEARCH_PATH, params={"kind": kind, "q": q[:64], "limit": limit})
+    return JSONResponse(body if isinstance(body, dict) else {"kind": kind, "q": q, "items": []})
+
+
+@router.get("/selection")
+async def fleet_selection(request: Request) -> JSONResponse:
+    """ "Select all N matching": every hub id under the current filter, capped server-side. Operators
+    only -- a viewer has no selection to make."""
+    _require_operator(request)
+    state = table_state(request)
+    try:
+        body = await get_json(
+            _SELECTION_PATH, params=_as_params([*state.filter_params(), ("max", str(SELECTION_MAX))])
+        )
+    except ApiUnavailable as exc:
+        return JSONResponse({"error": str(exc)}, status_code=status.HTTP_502_BAD_GATEWAY)
+    return JSONResponse(body)
+
+
+@router.get("/release-requests")
+async def fleet_release_requests(request: Request) -> JSONResponse:
+    _require_operator(request)
+    body = await _optional_json(_RELEASES_PATH)
+    return JSONResponse(body if isinstance(body, dict) else {"items": []})
+
+
 @router.get("/hubs/{hub_id}", response_class=HTMLResponse)
 async def hub_drilldown(request: Request, hub_id: str) -> HTMLResponse:
+    """The side drawer's body: the one-call detail aggregate when the API serves it, else the plain hub
+    read (older API), so the drawer never goes blank."""
+    detail: dict[str, Any] | None = None
+    hub: dict[str, Any] = {"hub_id": hub_id}
     try:
-        raw = await get_json(f"/og/api/fleet/hubs/{hub_id}")
-        hub = raw if isinstance(raw, dict) else {"hub_id": hub_id}
+        raw = await get_json(f"/og/api/fleet/hubs/{hub_id}/detail")
+        detail = raw if isinstance(raw, dict) else None
     except ApiUnavailable as exc:
-        logger.warning("hub drilldown: /og/api/fleet/hubs/%s unavailable: %s", hub_id, exc)
-        hub = {"hub_id": hub_id, "error": str(exc)}
-
+        logger.info("hub drawer: detail endpoint unavailable (%s); using the hub read", exc)
+    if detail is None:
+        try:
+            raw = await get_json(f"/og/api/fleet/hubs/{hub_id}")
+            hub = raw if isinstance(raw, dict) else hub
+        except ApiUnavailable as exc:
+            logger.warning("hub drilldown: /og/api/fleet/hubs/%s unavailable: %s", hub_id, exc)
+            hub = {"hub_id": hub_id, "error": str(exc)}
     return templates.TemplateResponse(
         request,
         "_partials/hub_drilldown.html",
-        {"hub": hub, "role": role_of(request), "is_operator": is_operator(request)},
+        {
+            "hub": hub,
+            "detail": detail,
+            "activity_labels": ACTIVITY_LABELS,
+            "role": role_of(request),
+            "is_operator": is_operator(request),
+        },
     )
 
 
