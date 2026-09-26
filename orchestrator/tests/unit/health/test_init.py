@@ -173,6 +173,30 @@ async def test_evaluate_alerts_raises_once_and_clears_on_resolve(fake_queries: _
     assert len(fake_queries.cleared) == first_round_open
 
 
+async def test_evaluate_alerts_uses_per_feed_staleness_threshold(fake_queries: _FakeQueries) -> None:
+    """Defect fix: ALR-FEED-STALE must use each feed's own `opengrid.feeds.staleness` budget, not
+    `health.heartbeat_down_after_s` (a few-second, heartbeat-scale value applied to every feed
+    regardless of its real posting cadence -- which paged EIA, a ~3h-cadence source, as stale within
+    seconds, and made ERCOT RT's own much shorter budget irrelevant to when it actually alerted)."""
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "sim", "settle", "api")
+    ]
+    fake_queries.feed_statuses = [
+        # EIA default budget is 10800s (3h, `threshold_s_for_product`'s `eia_fresh_s` default): 2h old
+        # is comfortably fresh.
+        FeedStatus(source="EIA", product="eia-fuel-mix", last_value_at=NOW - timedelta(hours=2)),
+        # ERCOT RT price (np6-905-cd) default budget is 600s (`ercot_price_fresh_s` default): 700s old
+        # is stale.
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW - timedelta(seconds=700)),
+    ]
+
+    await health.evaluate_alerts()
+
+    assert "ALR-FEED-STALE:EIA:eia-fuel-mix" not in fake_queries.raised
+    assert "ALR-FEED-STALE:ERCOT:np6-905-cd" in fake_queries.raised
+
+
 async def test_evaluate_alerts_raises_scada_overload(fake_queries: _FakeQueries) -> None:
     fake_queries.heartbeats = [
         Heartbeat(process=p, pid=1, ts=NOW, status="ok")

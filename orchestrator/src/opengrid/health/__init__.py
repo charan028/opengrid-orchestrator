@@ -18,6 +18,8 @@ from typing import Literal
 
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.models.platform import FeedStatus
+from opengrid.feeds.staleness import threshold_s_for_product
 from opengrid.health import queries
 from opengrid.health.metrics_scrape import (
     histogram_p99_from_buckets,
@@ -63,16 +65,23 @@ _guardian_metrics_url: str | None = None
 _scrape_timeout_s: float = 2.0
 _cycle_p99_history: deque[float] = deque(maxlen=_CYCLE_LATENCY_HISTORY_LEN)
 _cycle_p99_consecutive_breaches: int = 0
+# `[feeds.staleness]` config, e.g. `eia_fresh_s`/`ercot_price_fresh_s`/`nws_fresh_s` -- resolved
+# per-feed via `opengrid.feeds.staleness.threshold_s_for_product` (defect fix: ALR-FEED-STALE used to
+# apply `health.heartbeat_down_after_s`, a heartbeat-scale threshold of a few seconds, to every feed
+# regardless of its own posting cadence, which paged EIA -- a ~3h cadence source -- as "stale" within
+# seconds of a fresh read, and made every feed alert over-eager).
+_staleness_cfg: dict[str, float] = {}
 
 
 def configure(pool: AsyncConnectionPool, cfg: Config) -> None:
     """Called once by `og-settle`'s startup before the first `run()`/`evaluate_once()` tick."""
-    global _pool, _thresholds, _engine_metrics_url, _guardian_metrics_url, _scrape_timeout_s
+    global _pool, _thresholds, _engine_metrics_url, _guardian_metrics_url, _scrape_timeout_s, _staleness_cfg
     _pool = pool
     _thresholds = HealthThresholds.from_config(cfg)
     _engine_metrics_url = cfg.get("health.engine_metrics_url")
     _guardian_metrics_url = cfg.get("health.guardian_metrics_url")
     _scrape_timeout_s = cfg.get("health.metrics_scrape_timeout_s", 2.0)
+    _staleness_cfg = cfg.get("feeds.staleness", {})
 
 
 def _require_pool() -> AsyncConnectionPool:
@@ -85,6 +94,16 @@ def _now() -> datetime:
     """The evaluator's clock, factored out so tests can inject a fixed instant (BUILD.md S5a "no flaky
     sleeps: use injected clocks") without changing any of this module's fixed no-argument signatures."""
     return datetime.now(UTC)
+
+
+def _feed_staleness_threshold_s(feed_status: FeedStatus) -> float:
+    """ALR-FEED-STALE's per-feed staleness budget (defect fix): reuses `opengrid.feeds.staleness`'s
+    own `[feeds.staleness]` thresholds (`eia_fresh_s`, `ercot_price_fresh_s`, `nws_fresh_s`, ...)
+    instead of duplicating them here (BUILD.md S1 "no duplicated functions"). Previously this module
+    passed `health.heartbeat_down_after_s` -- a few-second, heartbeat-scale budget -- to every feed
+    regardless of its real posting cadence, so a ~3h-cadence source like EIA was reported STALE within
+    seconds of a fresh read, and every feed's staleness alert was over-eager."""
+    return threshold_s_for_product(feed_status.source, feed_status.product, _staleness_cfg)
 
 
 async def evaluate_heartbeats() -> dict[str, ProcessStatus]:
@@ -200,7 +219,7 @@ async def evaluate_alerts() -> None:
             feed_status,
             now=now,
             thresholds=_thresholds,
-            staleness_threshold_s=_thresholds.heartbeat_down_after_s,
+            staleness_threshold_s=_feed_staleness_threshold_s(feed_status),
         )
         if finding:
             findings.append(finding)
@@ -260,7 +279,7 @@ async def evaluate_once() -> HealthSnapshot:
     feed_statuses = await queries.fetch_feed_statuses(pool)
     any_feed_stale = any(
         evaluate_feed_alert(
-            fs, now=now, thresholds=_thresholds, staleness_threshold_s=_thresholds.heartbeat_down_after_s
+            fs, now=now, thresholds=_thresholds, staleness_threshold_s=_feed_staleness_threshold_s(fs)
         )
         is not None
         for fs in feed_statuses
