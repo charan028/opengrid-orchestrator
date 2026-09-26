@@ -92,7 +92,10 @@ def series_chart_view(observations: list[dict[str, Any]], *, series_key: str) ->
         "chart_option": {
             "xAxis": {"type": "category", "data": x_axis},
             "yAxis": {"type": "value"},
-            "legend": {"show": len(lines) > 1},
+            # Eight load zones do not fit a 220px tile as a centred legend; scroll it on one row and
+            # leave room for it above the plot.
+            "legend": {"show": len(lines) > 1, "type": "scroll", "top": 0},
+            "grid": {"top": 28 if len(lines) > 1 else 10, "left": 40, "right": 10, "bottom": 24},
             "series": lines,
             "tooltip": {"trigger": "axis"},
         },

@@ -98,6 +98,13 @@
         const ageS = (now - since) / 1000;
         const thresholdRaw = elem.getAttribute("data-stale-after");
         const threshold = thresholdRaw ? parseFloat(thresholdRaw) : null;
+        // A forecast product's latest value is timestamped in the future (day-ahead prices, wind and
+        // solar forecasts); show how far ahead it reaches rather than a negative age (seen live).
+        if (ageS < 0) {
+          elem.textContent = "ahead: " + og.formatAge(-ageS);
+          elem.setAttribute("data-stale", "false");
+          return;
+        }
         elem.textContent = "age: " + og.formatAge(ageS);
         if (threshold !== null) {
           elem.setAttribute("data-stale", ageS > threshold ? "true" : "false");

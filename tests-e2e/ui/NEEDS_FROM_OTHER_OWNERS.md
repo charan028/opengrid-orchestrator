@@ -17,3 +17,9 @@
 5. **`orchestrator/config/test.toml` lacks `[feeds.ercot].token_url`** (owner: architect), so a dev stack's
    feeds process authenticates against the real `ercotb2c.b2clogin.com` instead of the market simulator
    (`http://127.0.0.1:8090/token`). One line fixes it.
+6. **`feed_status.last_value_at` is the latest data timestamp, not the receive time** (owner: feeds/
+   api). For day-ahead prices and the wind/solar forecasts that is up to a week in the future, so the
+   Markets freshness table showed ages like `-49509s` (the UI now shows `ahead: 6d`), and
+   `opengrid.health.rules.evaluate_feed_alert` compares that same field to the staleness window, so
+   `ALR-FEED-STALE` can never fire for a forecast product even if it stops arriving. Store the receive
+   time (`recorded_at`) as the freshness field, and expose the coverage horizon separately if wanted.
