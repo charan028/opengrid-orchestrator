@@ -110,6 +110,17 @@ async def _dispatch_message(
     parts = topic.split("/")
     if "/cmd/" in topic and topic.endswith("/batch"):
         await _handle_command_batch(engine, client, data, public_key)
+    elif "/scada/wave/" in topic and topic.endswith("/request"):
+        # WP-H (06-service-profiles-and-power-quality.md S6.4b): on-demand waveform
+        # capture trigger. `data` is already a `waveform_capture_request.schema.json`
+        # object (validated by the ORCHESTRATOR before it publishes -- this sim, like
+        # `_handle_command_batch`, validates its OWN outbound publish via
+        # `publish_validated`, not every inbound message; a malformed/expired request
+        # simply yields no raw-capture response, per §6.4b).
+        result = engine.handle_wave_capture_request(data, time.time())
+        if result is not None:
+            suffix, message = result
+            await client.publish_validated("pq_waveform_raw", suffix, message, qos=1)
     elif "/stop/" in topic:
         scope = parts[-2]
         scope_id = None if scope == "fleet" else parts[-1]

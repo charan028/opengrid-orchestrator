@@ -107,6 +107,17 @@ class FleetConfig:
     pq_ride_through_class_default: str = "CATEGORY_III"
     # Remote-calibration rate limit, §5.5.4: at most one attempt per unit per rolling window.
     pq_calibration_rate_limit_s: float = 86400.0
+    # Waveform summary/raw generation and publication (06-service-profiles-and-power-quality.md
+    # §6.4/§7.4, WP-H), seeded from `fleet.yaml`'s `wave:` block.
+    wave_harmonic_detail_interval_s: float = 30.0
+    wave_harmonic_detail_delta_pct: float = 1.0
+    wave_raw_audit_sample_pct_per_min: float = 1.0
+    wave_sync_source: str = "ptp"
+    wave_sync_quality_ns: float = 50.0
+    # S9 wave-2 fix: gates the summary message itself (not just its harmonic-detail
+    # sub-block) to this cadence/deadband -- see fleet.yaml's `wave:` block comment.
+    wave_summary_interval_s: float = 10.0
+    wave_summary_delta_pct: float = 1.0
 
     def public_key_path(self) -> str:
         """Guardian public key path; dev override wins when set, so local
@@ -151,6 +162,7 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         safestop_public_key_path=str(raw.get("safestop_public_key_path", defaults.safestop_public_key_path)),
         safestop_public_key_path_dev=str(raw.get("safestop_public_key_path_dev", "")),
         **_inverter_pq_fields(raw, defaults),
+        **_wave_fields(raw, defaults),
     )
 
 
@@ -175,6 +187,28 @@ def _inverter_pq_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str,
         "pq_calibration_rate_limit_s": float(
             block.get("calibration_rate_limit_s", defaults.pq_calibration_rate_limit_s)
         ),
+    }
+
+
+def _wave_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:
+    """Reads the optional `wave:` YAML block (§7.3/§7.4, WP-H), defaulting every field
+    independently so a partial or absent block never crashes config loading."""
+    block = raw.get("wave", {})
+    block = block if isinstance(block, dict) else {}
+    return {
+        "wave_harmonic_detail_interval_s": float(
+            block.get("harmonic_detail_interval_s", defaults.wave_harmonic_detail_interval_s)
+        ),
+        "wave_harmonic_detail_delta_pct": float(
+            block.get("harmonic_detail_delta_pct", defaults.wave_harmonic_detail_delta_pct)
+        ),
+        "wave_raw_audit_sample_pct_per_min": float(
+            block.get("raw_audit_sample_pct_per_min", defaults.wave_raw_audit_sample_pct_per_min)
+        ),
+        "wave_sync_source": str(block.get("sync_source", defaults.wave_sync_source)),
+        "wave_sync_quality_ns": float(block.get("sync_quality_ns", defaults.wave_sync_quality_ns)),
+        "wave_summary_interval_s": float(block.get("summary_interval_s", defaults.wave_summary_interval_s)),
+        "wave_summary_delta_pct": float(block.get("summary_delta_pct", defaults.wave_summary_delta_pct)),
     }
 
 

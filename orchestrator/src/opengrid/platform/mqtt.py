@@ -29,6 +29,10 @@ _SCHEMA_BY_KIND = {
     "scada_bank_signal": "scada_bank_signal.schema.json",
     "scada_utility_instruction": "scada_utility_instruction.schema.json",
     "scenario_control": "scenario_control.schema.json",
+    # WP-G (06-service-profiles-and-power-quality.md S6.4-S6.5): waveform ingest.
+    "pq_waveform_summary": "pq_waveform_summary.schema.json",
+    "pq_waveform_raw": "pq_waveform_raw.schema.json",
+    "waveform_capture_request": "waveform_capture_request.schema.json",
 }
 
 

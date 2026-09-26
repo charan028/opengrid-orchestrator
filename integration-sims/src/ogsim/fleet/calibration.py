@@ -187,9 +187,11 @@ def _apply_to_one_unit(
 
 
 def _residual(pq: InverterPqState, unit_index: int) -> float:
-    return sum(
-        abs(getattr(pq, offset_field)[unit_index] - getattr(pq, baseline_field)[unit_index])
-        for offset_field, baseline_field in _CORRECTION_TO_OFFSET_FIELD.values()
+    return float(
+        sum(
+            abs(getattr(pq, offset_field)[unit_index] - getattr(pq, baseline_field)[unit_index])
+            for offset_field, baseline_field in _CORRECTION_TO_OFFSET_FIELD.values()
+        )
     )
 
 

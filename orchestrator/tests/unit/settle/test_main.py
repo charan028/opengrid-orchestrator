@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import asyncio
 
-from opengrid.settle.main import Cadence, JobRunner
+from opengrid.platform.process import Cadence
+from opengrid.settle.main import JobRunner
 
 
 class _Clock:

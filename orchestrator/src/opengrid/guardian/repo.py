@@ -32,9 +32,18 @@ from opengrid.guardian.ports import (
     HubSnapshot,
     HubStatePort,
     L2Instruction,
+    PqPorts,
     ProposedBatch,
     ProposedItem,
     SafeStopScope,
+)
+from opengrid.guardian.pq_repo import (
+    PgCalibrationHistoryPort,
+    PgHubAssetStatePort,
+    PgPqEnvelopeStatePort,
+    PgPqMeasurementPort,
+    PgSensitiveGrantPort,
+    StaticFirmwareCalibrationBoundsPort,
 )
 from opengrid.ledger.pg_backend import PgLedgerBackend
 from opengrid.trace import TraceStore
@@ -384,5 +393,13 @@ def build_pg_ports(
         l2_instructions=PgL2InstructionPort(pool),
         safe_stop=PgSafeStopPort(pool),
         zones_by_bank=dict(zones_by_bank or {}),
+        pq=PqPorts(
+            envelopes=PgPqEnvelopeStatePort(pool),
+            measurements=PgPqMeasurementPort(pool),
+            hub_assets=PgHubAssetStatePort(pool),
+            calibration_history=PgCalibrationHistoryPort(pool),
+            firmware_bounds=StaticFirmwareCalibrationBoundsPort(),
+            sensitive_grants=PgSensitiveGrantPort(pool),
+        ),
     )
     return ports, leases

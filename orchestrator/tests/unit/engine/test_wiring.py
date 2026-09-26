@@ -332,3 +332,34 @@ async def test_guardian_unavailable_when_heartbeat_is_stale() -> None:
 async def test_guardian_unavailable_when_never_seen() -> None:
     backend = FakeEngineBackend(heartbeat_ages={})
     assert not await engine.guardian_is_available(backend, miss_threshold_s=15.0)
+
+
+async def test_pq_summaries_flush_on_their_own_cadence_and_a_failure_never_breaks_the_tick(
+    monkeypatch,
+) -> None:
+    """Wave-2 wiring: buffered waveform summaries are written every [pq_ingest].flush_interval_s; a failed
+    flush is logged and retried, never raised into the 2 s dispatch tick (K7)."""
+    import types
+
+    import opengrid.pq_ingest as pq_ingest
+    from opengrid.platform.process import Cadence
+
+    clock = {"now": 0.0}
+    calls: list[int] = []
+
+    async def _flush() -> int:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("db hiccup")
+        return 3
+
+    monkeypatch.setattr(pq_ingest, "flush_summaries", _flush)
+    state = types.SimpleNamespace(pq_flush=Cadence(2.0, clock=lambda: clock["now"]))
+
+    await engine._flush_pq_summaries(state)  # due, raises inside -> swallowed
+    clock["now"] = 1.0
+    await engine._flush_pq_summaries(state)  # not due
+    clock["now"] = 2.0
+    await engine._flush_pq_summaries(state)  # due again
+
+    assert len(calls) == 2

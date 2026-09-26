@@ -17,6 +17,14 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from opengrid.core.physics import BankParams, HubParams
+from opengrid.guardian.pq_ports import (
+    CalibrationHistoryPort,
+    FirmwareCalibrationBoundsPort,
+    HubAssetStatePort,
+    PqEnvelopeStatePort,
+    PqMeasurementPort,
+    SensitiveGrantPort,
+)
 
 SafeStopScope = Literal["FLEET", "ZONE", "BANK"]
 UtilityInstructionKind = Literal["LIMIT", "BLOCK", "ESTOP"]
@@ -167,6 +175,19 @@ class SafeStopPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PqPorts:
+    """K14 inputs (G-21..G-25, 06-service-profiles-and-power-quality.md S5.3/S6.7), each the guardian's
+    own independent read (`opengrid.guardian.pq_ports`)."""
+
+    envelopes: PqEnvelopeStatePort
+    measurements: PqMeasurementPort
+    hub_assets: HubAssetStatePort
+    calibration_history: CalibrationHistoryPort
+    firmware_bounds: FirmwareCalibrationBoundsPort
+    sensitive_grants: SensitiveGrantPort
+
+
+@dataclass(frozen=True, slots=True)
 class GuardianPorts:
     """Bundles every port `GuardianService` needs. One object so `main.py` wires it once."""
 
@@ -182,3 +203,4 @@ class GuardianPorts:
     l2_instructions: L2InstructionPort
     safe_stop: SafeStopPort
     zones_by_bank: dict[str, str] = field(default_factory=dict)
+    pq: PqPorts | None = None  # None: K14 checks not wired (tests that predate PQ)

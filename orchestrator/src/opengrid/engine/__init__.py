@@ -44,7 +44,7 @@ from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
 from opengrid.health.queries import raise_alert
 from opengrid.platform.config import Config
 from opengrid.platform.heartbeat import write_heartbeat
-from opengrid.platform.process import run_forever
+from opengrid.platform.process import Cadence, run_forever
 
 if TYPE_CHECKING:
     from opengrid.allocator.gateways import FleetGateway, LedgerGateway, ScadaGateway, ScheduleGateway
@@ -321,6 +321,7 @@ class _EngineState:
     # was VETOED on G-13 (live 2026-09-26).
     epoch: int = 1
     latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
+    pq_flush: Cadence | None = None  # `[pq_ingest].flush_interval_s`; None when waveform ingest is off
 
 
 async def timed_tick(state: _EngineState) -> None:
@@ -341,6 +342,19 @@ async def timed_tick(state: _EngineState) -> None:
                 logger.exception("failed to trace engine cycle latency")
 
 
+async def _flush_pq_summaries(state: _EngineState) -> None:
+    """Write buffered waveform summaries on `[pq_ingest].flush_interval_s` (one batched insert). A failed
+    flush is logged and retried next time; it never costs the dispatch tick (K7)."""
+    from opengrid import pq_ingest
+
+    if state.pq_flush is None or not state.pq_flush.due():
+        return
+    try:
+        await pq_ingest.flush_summaries()
+    except Exception:
+        logger.exception("pq_ingest flush failed; retrying next interval")
+
+
 async def _engine_tick(state: _EngineState) -> None:
     """One driving tick of the og-engine process, run every `[allocator].cycle_interval_s` (default
     2 s). A single tick drives every cadence this process owns (allocator cycle, gate scheduling,
@@ -357,6 +371,7 @@ async def _engine_tick(state: _EngineState) -> None:
 
     await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
     await fleet.flush(now=now)
+    await _flush_pq_summaries(state)
 
     triggers = state.gate_scheduler.due_triggers(
         now,
@@ -440,6 +455,7 @@ async def main(cfg: Config) -> None:
     import opengrid.feeds as feeds_mod
     import opengrid.fleet as fleet_mod
     import opengrid.ledger as ledger_mod
+    import opengrid.pq_ingest as pq_mod
     from opengrid.engine.gateways import (
         DEFAULT_ENERGY_LOOKAHEAD_S,
         EnergySufficiencyGateway,
@@ -456,6 +472,8 @@ async def main(cfg: Config) -> None:
     from opengrid.platform.db import make_pool
     from opengrid.platform.log import configure_logging
     from opengrid.platform.mqtt import build_client
+    from opengrid.pq_ingest.blob_store import FileBlobStore
+    from opengrid.pq_ingest.pg_backend import PgPqIngestBackend
 
     configure_logging(PROCESS_NAME)
     pool = await make_pool(cfg)
@@ -510,6 +528,14 @@ async def main(cfg: Config) -> None:
         # The selector's commit step and the lifecycle step transition obligations through
         # `opengrid.contracts` in this process, so its module facade needs the same repo/trace pair.
         contracts_mod.configure(contracts_repo, trace_store)
+        pq_mod.configure(
+            PgPqIngestBackend(pool),
+            FileBlobStore(str(cfg.get("pq_ingest.blob_store_dir", "/var/lib/opengrid/pq_waveform"))),
+            summary_buffer_max=int(
+                cfg.get("pq_ingest.summary_buffer_max", pq_mod.DEFAULT_SUMMARY_BUFFER_MAX)
+            ),
+            flush_batch_size=int(cfg.get("pq_ingest.flush_batch_size", pq_mod.DEFAULT_FLUSH_BATCH_SIZE)),
+        )
         released = await ledger_mod.release_uncommitted()
         logger.info("released uncommitted reservations at start-up", extra={"released_count": released})
 
@@ -538,6 +564,7 @@ async def main(cfg: Config) -> None:
             lifecycle_backend=backend,
             lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
             epoch=await backend.next_epoch(),
+            pq_flush=Cadence(float(cfg.get("pq_ingest.flush_interval_s", pq_mod.DEFAULT_FLUSH_INTERVAL_S))),
         )
         logger.info("engine epoch", extra={"epoch": state.epoch})
 
@@ -575,12 +602,15 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config) -> None:
     (`async with build_client(...)`) by the caller."""
     import json
 
-    from opengrid import fleet
+    from opengrid import fleet, pq_ingest
     from opengrid.platform.mqtt import SchemaValidationError, topic, validate_payload
 
     tel_topic = topic(cfg, "tel/#")
     scada_instruction_topic = topic(cfg, "scada/instruction/#")
     scada_topic = topic(cfg, "scada/#")
+    # Waveform topics sit under scada/ (topics.md) and must be routed before the SCADA bank-signal branch.
+    wave_summary_topic = topic(cfg, "scada/wave/+/+/+/summary")
+    wave_raw_topic = topic(cfg, "scada/wave/+/+/+/raw")
     ack_topic = topic(cfg, "ack/+")  # hub acks; ack/cal/<hub> (calibration) is a different schema
     await client.subscribe(tel_topic)
     await client.subscribe(ack_topic)
@@ -590,7 +620,13 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config) -> None:
         msg_topic = str(message.topic)
         try:
             payload = json.loads(message.payload)
-            if message.topic.matches(ack_topic):
+            if message.topic.matches(wave_summary_topic):
+                validate_payload("pq_waveform_summary", payload)
+                await pq_ingest.ingest_summary(payload)
+            elif message.topic.matches(wave_raw_topic):
+                validate_payload("pq_waveform_raw", payload)
+                await pq_ingest.ingest_raw_capture(payload)
+            elif message.topic.matches(ack_topic):
                 validate_payload("ack", payload)
                 await fleet.ingest_ack(payload)
             elif message.topic.matches(tel_topic):

@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 from collections.abc import Awaitable, Callable
 
 import opengrid.health as health
@@ -28,7 +27,7 @@ from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.log import configure_logging
-from opengrid.platform.process import run_forever
+from opengrid.platform.process import Cadence, run_forever
 from opengrid.settle import configure, run_settle_cycle, run_trace_pruning_cycle
 from opengrid.settle.pg_backend import PgSettleBackend
 from opengrid.trace import TraceStore
@@ -40,23 +39,6 @@ _DEFAULT_TRACE_PRUNE_INTERVAL_S = 60.0
 _DEFAULT_HEALTH_INTERVAL_S = 5.0
 
 _logger = logging.getLogger(__name__)
-
-
-class Cadence:
-    """Due-check for one periodic job inside a shared tick: due on the first call, then once at least
-    `interval_s` has elapsed on the (injectable) monotonic clock since it last ran."""
-
-    def __init__(self, interval_s: float, *, clock: Callable[[], float] = time.monotonic) -> None:
-        self.interval_s = interval_s
-        self._clock = clock
-        self._last: float | None = None
-
-    def due(self) -> bool:
-        now = self._clock()
-        if self._last is not None and now - self._last < self.interval_s:
-            return False
-        self._last = now
-        return True
 
 
 class JobRunner:

@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -24,16 +24,23 @@ from opengrid.core.crypto import sha256_hex_of_json, sign_payload
 from opengrid.core.models.engine import CommandBatchRow, Verdict, VerdictOutcome
 from opengrid.core.models.mqtt import CommandBatch
 from opengrid.core.physics import hub_ramp_kw_per_s
-from opengrid.guardian import checks
+from opengrid.core.pq.constants import CALIBRATION_MIN_INTERVAL_S_DEFAULT
+from opengrid.guardian import checks, pq_checks
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import GuardianPorts, ProposedBatch
+from opengrid.guardian.pq_ports import ProposedCalibrationCommand
 from opengrid.platform.metrics import guardian_clock_offset_ms, guardian_verdicts_total
 
 logger = logging.getLogger(__name__)
 
 _MAX_CYCLE_HISTORY = 64  # bound the in-memory ramp accumulators; MVP-S runs a 2s cycle, never GC-free
-_ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04"})
+_ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04", "G-24"})
+
+#: G-24's required ride-through class for a PQ-sensitive (non-default-envelope) obligation: the only such
+#: profile defined so far, DATA_CENTER (config/service_profiles/data_center.toml, S4.b), accepts Category III
+#: only. `PqEnvelopeLimits` does not carry the class; revisit when a second sensitive profile exists.
+SENSITIVE_RIDE_THROUGH_CLASS = "CATEGORY_III"
 
 
 #: Cap on violations recorded per verdict trace row (a 50-hub batch can fail one item rule per hub).
@@ -145,6 +152,7 @@ class GuardianService:
             violations.append(g13)
 
         violations.extend(await self._check_hubs_and_bank(proposal))
+        violations.extend(await self._check_power_quality(proposal))
         violations.extend(await self._check_l2_boundary(proposal))
         violations.extend(await self._check_commitment_lock(proposal))
         return violations
@@ -239,6 +247,71 @@ class GuardianService:
                 violations.append(g06)
 
         return violations
+
+    async def _check_power_quality(self, proposal: ProposedBatch) -> list[CheckOutcome]:
+        """K14 (G-21..G-24): only when an obligation behind this bank carries a non-default PQ envelope
+        (`tightest_active_limits` is None otherwise -- grid-code-minimum dispatch is not gated, S4.c)."""
+        pq = self.ports.pq
+        if pq is None:
+            return []
+        limits = await pq.envelopes.tightest_active_limits(proposal.bank_id)
+        if limits is None:
+            return []
+        measurement, is_stale = await pq.measurements.aggregate_measurement(proposal.bank_id)
+        outcomes = [
+            pq_checks.check_g21_phase_imbalance(proposal.bank_id, measurement, limits, is_stale=is_stale),
+            pq_checks.check_g22_thd(proposal.bank_id, measurement, limits, is_stale=is_stale),
+            pq_checks.check_g23_freq_voltage_deviation(
+                proposal.bank_id, measurement, limits, is_stale=is_stale
+            ),
+        ]
+        for item in proposal.items:
+            asset = await pq.hub_assets.snapshot(item.hub_id)
+            if asset is None:
+                outcomes.append(CheckOutcome("G-24", False, "PQ_ASSET_STATE_UNKNOWN", item.hub_id))
+                continue
+            outcomes.append(
+                pq_checks.check_g24_asset_conformance(
+                    item.hub_id,
+                    asset_state=asset.asset_state,
+                    hub_ride_through_class=asset.ride_through_class,
+                    envelope_ride_through_class=SENSITIVE_RIDE_THROUGH_CLASS,
+                    pq_sensitive=True,
+                )
+            )
+        return [o for o in outcomes if not o.ok]
+
+    async def evaluate_and_sign_calibration(self, command: ProposedCalibrationCommand) -> str | None:
+        """S6.7: sign a `CalibrationCommand` only if G-20 (clock quality) and then G-25 (bounds, rate limit,
+        no active PQ-sensitive grant on the hub) pass. Returns the Ed25519 signature, or `None` to hold
+        (fail-safe: the recalibration step is skipped, never forced through)."""
+        pq = self.ports.pq
+        if pq is None:
+            return None
+        offset_ms = await self.ports.clock.offset_from_ntp_ms()
+        if not checks.check_g20_clock_quality(offset_ms, self.config.clock_offset_max_ms).ok:
+            return None
+        g25 = pq_checks.check_g25_calibration_safety(
+            command,
+            firmware_max_bounds=await pq.firmware_bounds.max_bounds_for_hub(command.hub_id),
+            last_attempt_epoch_s=await pq.calibration_history.last_attempt_epoch_s(command.hub_id),
+            now_epoch_s=self.now_fn().timestamp(),
+            min_interval_s=CALIBRATION_MIN_INTERVAL_S_DEFAULT,
+            hub_has_active_sensitive_grant=await pq.sensitive_grants.has_active_non_default_envelope_grant(
+                command.hub_id
+            ),
+        )
+        if not g25.ok:
+            logger.warning("calibration command held", extra={"hub_id": command.hub_id, "reason": g25.reason})
+            return None
+        return sign_payload(
+            self.signing_seed,
+            {
+                "hub_id": command.hub_id,
+                "correction": asdict(command.correction),
+                "bounds": asdict(command.bounds),
+            },
+        )
 
     async def _check_l2_boundary(self, proposal: ProposedBatch) -> list[CheckOutcome]:
         instruction = await self.ports.l2_instructions.active_instruction(proposal.bank_id)

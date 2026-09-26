@@ -24,6 +24,9 @@ _SCHEMA_NAMES = {
     "scada_bank_signal": "scada_bank_signal.schema.json",
     "scada_utility_instruction": "scada_utility_instruction.schema.json",
     "scenario_control": "scenario_control.schema.json",
+    "pq_waveform_summary": "pq_waveform_summary.schema.json",
+    "pq_waveform_raw": "pq_waveform_raw.schema.json",
+    "waveform_capture_request": "waveform_capture_request.schema.json",
 }
 
 
