@@ -48,6 +48,7 @@ _SERVER_READY_TIMEOUT_S = 15.0
 _SERVER_STOP_TIMEOUT_S = 5.0
 _MAP_TILE_URL_GLOB = "**/tile.openstreetmap.org/**"
 
+BULK_PROPOSAL_ID = "55555555-5555-5555-5555-555555555555"
 SAFESTOP_PROPOSAL_ID = "11111111-1111-1111-1111-111111111111"
 COMMAND_PROPOSAL_ID = "33333333-3333-3333-3333-333333333333"
 AS_DEPLOYMENT_ID = "44444444-4444-4444-4444-444444444444"
@@ -101,6 +102,8 @@ def _post_responses() -> dict[str, Any]:
         "/og/api/safestop": _load("fleet_safestop_propose.json"),
         f"/og/api/safestop/{SAFESTOP_PROPOSAL_ID}/confirm": _load("fleet_safestop_confirm.json"),
         "/og/api/fleet/command": _load("fleet_command_propose.json"),
+        "/og/api/fleet/commands/bulk": _load("fleet_bulk_command_propose.json"),
+        f"/og/api/fleet/commands/bulk/{BULK_PROPOSAL_ID}/confirm": _load("fleet_bulk_command_confirm.json"),
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
         "/og/api/alerts/7/ack": _load("alert_ack.json"),
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},

@@ -6,6 +6,21 @@
 {% endblock %}
 
 {% block content %}
+<section class="og-panel og-map-panel" aria-label="Fleet map">
+  <h2>Fleet map</h2>
+  <p>Every hub, coloured by health and sized by state. Scroll or pinch to zoom and drag to pan. Turn on
+    <em>Select an area</em> to drag a rectangle over the hubs you want, or tick them in the table below;
+    the two selections are the same list.</p>
+  <div class="og-map-toolbar">
+    {% if is_operator %}
+    <button type="button" class="btn" id="fleet-select-toggle" aria-pressed="false">Select an area</button>
+    <button type="button" class="btn" id="fleet-select-clear">Clear selection</button>
+    {% endif %}
+    <span class="og-selection-count" id="fleet-selection-count" role="status">No hubs selected</span>
+  </div>
+  <div id="fleet-map" class="og-map og-map-tall" data-hubs='{{ map_hubs|tojson }}'></div>
+</section>
+
 <section class="og-panel" aria-label="Filters">
   <form method="get" action="{{ base_path }}/fleet" class="og-form">
     <label>Zone
@@ -82,7 +97,7 @@
   <h2>Hubs</h2>
   <p>Every home battery in the fleet with its charge, power and telemetry age. Click a row for its lease and last command.</p>
   <p>Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match this filter. Clear the zone, bank or health filter to see the fleet.', row_id_key='hub_id' %}
+  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match this filter. Clear the zone, bank or health filter to see the fleet.', row_id_key='hub_id', select_key=('hub_id' if is_operator else none) %}
     {% include "_partials/data_table.html" %}
   {% endwith %}
 </section>
@@ -107,12 +122,105 @@
   <div id="command-propose-result" role="status"></div>
   <div id="command-confirm-result" role="status"></div>
 </section>
+
+<section class="og-panel" aria-label="Bulk command">
+  <h2>Command the selection</h2>
+  <p>Override what the selected hubs are doing now. Two steps as always, and a second explicit
+    acknowledgement when any of them is serving a customer or is in a fault state. The guardian still
+    checks and signs every command.</p>
+  <form id="bulk-command-form" class="og-form"
+        hx-post="{{ base_path }}/fleet/command/bulk/propose" hx-target="#bulk-propose-result" hx-swap="innerHTML">
+    <input type="hidden" name="hub_ids" id="bulk-hub-ids" value="">
+    <label>Setpoint (kW) <input type="number" step="0.1" name="p_kw_setpoint" required></label>
+    <label>Reason <input type="text" name="reason" required></label>
+    <button class="btn btn-primary" type="submit" id="bulk-propose-button" disabled>
+      Propose for selection (step 1 of 2)
+    </button>
+  </form>
+  <p class="og-card-meta" id="bulk-selection-note">Select hubs on the map or in the table to enable this.</p>
+  <div id="bulk-propose-result" role="status"></div>
+  <div id="bulk-confirm-result" role="status"></div>
+</section>
 {% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
   document.addEventListener("DOMContentLoaded", function () {
+    // ---- the fleet map and its selection (CR #19 item 2) ----------------------------------------
+    var mapEl = document.getElementById("fleet-map");
+    var hubs = JSON.parse(mapEl.dataset.hubs || "[]");
+    var handle = og.map.create(mapEl, { center: [31.0, -99.0], zoom: 6 });
+    og.map.addHubLayer(handle, hubs, { colorBy: "health" });
+    og.map.addLegend(
+      handle,
+      og.map.hubLegendItems("health"),
+      og.map.derivedPositions(hubs)
+        ? "Hubs are placed inside their real load zone; exact coordinates arrive with /og/api/fleet/map."
+        : null
+    );
+
+    // One selection, two ways in: the rectangle on the map and the checkboxes in the table.
+    var selection = [];
+    var idsField = document.getElementById("bulk-hub-ids");
+    var countEl = document.getElementById("fleet-selection-count");
+    var proposeButton = document.getElementById("bulk-propose-button");
+    var selectionNote = document.getElementById("bulk-selection-note");
+
+    function renderSelection() {
+      og.map.markSelected(handle, selection);
+      document.querySelectorAll("input.og-row-select").forEach(function (box) {
+        box.checked = selection.indexOf(box.value) !== -1;
+      });
+      if (idsField) { idsField.value = selection.join(","); }
+      var n = selection.length;
+      if (countEl) {
+        countEl.textContent = n === 0 ? "No hubs selected" : n + " hub" + (n === 1 ? "" : "s") + " selected";
+      }
+      if (proposeButton) { proposeButton.disabled = n === 0; }
+      if (selectionNote) {
+        selectionNote.textContent = n === 0
+          ? "Select hubs on the map or in the table to enable this."
+          : "Ready to command " + n + " hub" + (n === 1 ? "" : "s") + ".";
+      }
+    }
+
+    function setSelection(ids, additive) {
+      if (additive) {
+        ids.forEach(function (id) { if (selection.indexOf(id) === -1) { selection.push(id); } });
+      } else {
+        selection = ids.slice();
+      }
+      renderSelection();
+    }
+
+    document.querySelectorAll("input.og-row-select").forEach(function (box) {
+      // the row itself opens the drill-down, so the checkbox must not bubble into it
+      box.addEventListener("click", function (event) { event.stopPropagation(); });
+      box.addEventListener("change", function () {
+        var at = selection.indexOf(box.value);
+        if (box.checked && at === -1) { selection.push(box.value); }
+        if (!box.checked && at !== -1) { selection.splice(at, 1); }
+        renderSelection();
+      });
+    });
+
+    var areaSelect = og.map.enableAreaSelect(handle, setSelection);
+    var toggle = document.getElementById("fleet-select-toggle");
+    if (toggle) {
+      toggle.addEventListener("click", function () {
+        var on = toggle.getAttribute("aria-pressed") !== "true";
+        toggle.setAttribute("aria-pressed", on ? "true" : "false");
+        toggle.classList.toggle("is-active", on);
+        areaSelect.set(on);
+      });
+    }
+    var clear = document.getElementById("fleet-select-clear");
+    if (clear) {
+      clear.addEventListener("click", function () { setSelection([], false); });
+    }
+    renderSelection();
+
     document.querySelectorAll("tr.clickable-row[data-row-id]").forEach(function (row) {
       function open() {
         htmx.ajax("GET", "{{ base_path }}/fleet/hubs/" + row.dataset.rowId, "#hub-drilldown-container");
