@@ -47,6 +47,9 @@ finding depends on server-side state this checkout cannot see (for example wheth
 | OL-2 | Scale test (10,000 hubs) | operational | plan written, never run | — | No |
 | OL-3 | Simulator-only data sources (fleet telemetry, SCADA) | operational | ERCOT/EIA/NWS feeds are real; fleet and SCADA are simulated | Real hardware fleet, utility SCADA access | Yes |
 | OL-4 | API identity trust (`X-Remote-User` / proxy secret, D-12) | operational | verified built and fail-closed | — | No |
+| OL-5 | M1 delivery charge (D-19) settles at $0 | operational | grid-charged kWh attribution not built; a constant 0 is used | — | No (fix in progress for R3) |
+| DM-1 | Hub stop-release `issued_at` backstop is scope-wide | dormant | unreachable while the guardian releases a whole scope at once | — | No |
+| DM-2 | Need-basis K13 check reads migration-0015 tables | dormant | gated behind the absent `opengrid.site_ingest` package | Customer-services package + migration 0015 | No |
 
 ---
 
@@ -535,7 +538,46 @@ through Apache. **Operational limit, not a gap:** this mechanism's safety depend
 `og-api` process's environment, and on nothing else on the host ever being handed that secret — there is no code
 issue here, only an ordinary deployment-hygiene dependency.
 
+### OL-5. The M1 delivery charge settles at $0
+
+- D-19 says "assume the FULL TDSP charge on grid charging". The tariff side is built:
+  `orchestrator/src/opengrid/settle/tariffs.py` and `orchestrator/config/tdsp_tariffs.toml`.
+- The grid-charged kWh the charge multiplies is a constant 0 until per-obligation charging attribution exists
+  (`orchestrator/src/opengrid/settle/pg_backend.py:296`, `:669-679`).
+- So every settled interval carries a $0 M1 charge, and margins in ERCOT competitive zones are overstated by the
+  full delivery charge.
+- The code discloses this and logs it on every settlement. The lead reports a fix in progress for R3 (2026-09-26).
+
+## 4. Dormant edge cases
+
+These code paths are correct today only because another path never exercises them. None is reachable in production
+at `434d230`; each becomes live when the named change lands.
+
+### DM-1. The hub's stop-release backstop compares scope-wide, not per stop
+
+- `StopRegistry.release_stop` (`integration-sims/src/ogsim/fleet/stop.py:126-136`) ignores a RELEASE whose
+  `issued_at` is older than the newest ENGAGE seen for the whole scope (`newest_engage_at`, `:114`, `:123`). It does
+  not compare against the ENGAGE of the specific `stop_id` being released.
+- So a legitimate release of an old, still-outstanding stop would be refused if an unrelated ENGAGE landed on the
+  same scope after the release was approved but before it was delivered.
+- **Unreachable today:** the guardian always releases every outstanding stop on a scope at once, stamped at approval
+  time (`orchestrator/src/opengrid/guardian/stop_release.py:98-121`). A release is never older than any engage it
+  covers.
+- **Becomes live if** releases are ever issued per stop. The fix then: compare against the target stop's own ENGAGE
+  `issued_at`.
+
+### DM-2. The need-basis K13 check reads tables that migration 0015 creates
+
+- `invariants.queries.fetch_measured_need_sample` queries `og.customer_site_meter_reading` and
+  `og.corridor_current_reading` (`orchestrator/src/opengrid/invariants/queries.py:357-368`).
+- Those tables come from migration 0015, which is reserved for the customer-services work and is not on main
+  (`orchestrator/migrations/0017_invariant_violation_dedupe_and_trace_watermark.sql:2`).
+- **Unreachable today:** the query runs only after `opengrid.site_ingest` imports successfully (`:344-350`), and that
+  package isn't on main either.
+- **Becomes live** when customer services land. Migration 0015 must land with `opengrid.site_ingest` or before it.
+  The lead routed this to REVIEW-FIX on 2026-09-26.
+
 ---
 
-*Section outline, item counts and anything left unverified are summarized in this document's accompanying hand-over
-message; they are not repeated in the file itself.*
+*Verified against main `434d230` on 2026-09-26. Every file:line reference in this document was checked against the
+tracked files at that commit.*

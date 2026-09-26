@@ -1139,10 +1139,10 @@ names, and by the time K14 (power-quality) shipped, G-21…G-25 were assigned fo
 `orchestrator/src/opengrid/guardian/checks.py:1-2` confirms the actually-built guardian set stops at G-01…G-20.
 This table's own G-21 ("service-transformer
 loading") and G-29/G-30 ("emergency posture", "cross-principal cumulative windows") therefore collide with the K14
-numbers and must not be built under these labels. `09` §2.5 canonically reassigns the flow-limit/territory checks
-this table's G-21/G-27/G-30 items were gesturing at to **G-26…G-32** (`00-invariants.md` now reserves these; see
-K4/K15 there). This table is kept here for its content and history — do not delete it — but treat every G-number
-in it as **retired**; new flow-limit/territory work uses G-26…G-32 (§6.7 below), all **specified, not built**.
+numbers and must not be built under these labels. `09` §2.5 canonically reassigns the flow-limit and territory
+checks this table's G-21/G-27/G-30 items were gesturing at to **G-26…G-33**, with the final numbering in
+`00-invariants.md` ("Flow limits and territory") and §6.7 below. This table is kept for its content and history;
+do not delete it. Treat every G-number in it as **retired**.
 
 **Per-bank load-zone pricing (D-10).** Frank's review finding, quoted in the decision log: "The delivery-rate
 economics use per-bank load-zone pricing. Hub prices are reference only (the Houston Hub bug is fixed)." This is a
@@ -1265,11 +1265,13 @@ ordinary reduction below the commitment floor — **built**, wired into the same
   guardian's own reads show the obligation is `ERCOT_AS`, **no** deployment covering now is active for it (a
   `None`/unreadable deployment status is a VETO, never an assumed hold), and no other obligation on the bank is
   borrowing the held reservation. Called from `guardian/service.py:712-730`, reading `og.as_deployment` via its own
-  port (`guardian/ports.py:225-231`, `guardian/repo.py:286-309`). The full hold-availability compliance check (SoC
-  stays above the hold floor throughout, `09-optimizer-dispatcher-update.md` D6/G-32) is **specified, not built**
-  (`orchestrator/src/opengrid/settle/__init__.py:148-161` notes this explicitly: settle's AS performance defaults
-  to "available/compliant" because it "has no independent signal that the hold ever failed" — it is not itself
-  checking G-32's inequality).
+  port (`guardian/ports.py:225-231`, `guardian/repo.py:286-309`).
+- **The AS energy hold itself is not a guardian check.** The selector's C3′ floor
+  (`orchestrator/src/opengrid/selector/model.py:296`) and the engine's S6 hold floor
+  (`orchestrator/src/opengrid/engine/gateways.py:124-127`) enforce it, and both are built. The invariants check
+  `CHECK_AS_HOLD` is to measure it; it is not on main at `434d230`. Settlement does not yet check hold availability:
+  settle's AS performance defaults to "available/compliant" because it "has no independent signal that the hold
+  ever failed" (`orchestrator/src/opengrid/settle/__init__.py:148-161`).
 - **The AS deployment endpoint (d43da06) — built.** `POST /og/api/dispatch/as-deployments` creates an
   `og.as_deployment` row (the demo's stand-in for an ERCOT deployment instruction), traced before it takes effect
   (K10) — `orchestrator/src/opengrid/api/routers/dispatch.py:74-119`; `GET .../as-deployments` lists active ones
@@ -1285,17 +1287,30 @@ limits are **"each enforced independently by the guardian"** (D-27), on **"its o
 (09 §2.6). This is the K3/K4 "one formula, two data paths" pattern already used for G-01…G-06 (§6.1), extended to
 the new limit families and to territory (K15, `00-invariants.md`).
 
-**Specified, not built.** None of the seven proposed checks (G-02 changed for derating; **G-26** home meter
-export/import; **G-27** service transformer; **G-28** feeder thermal/reverse flow; **G-29** substation POI/
-transformer; **G-30** territory market segregation; **G-31** sustained vs peak; **G-32** energy hold against
-headroom, per `09` §2.5/§2.6) exist in `orchestrator/src/opengrid/guardian/checks.py` or `guardian/service.py`
-today — the built check set stops at G-01…G-20 (`guardian/checks.py:1-2`), plus the unrelated K14 PQ checks G-21…
-G-25 (`guardian/pq_checks.py:1`). `guardian/service.py:50`'s `_ITEM_LEVEL_RULES` set
-(`{"G-01","G-01-ENERGY","G-02","G-04","G-24"}`) does not include any of G-26…G-32 either. §6.1 above records the
-numbering collision this creates with the *old* 02a supplemental table and why G-26…G-32 (not that table's G-21…
-G-31) are now canonical.
+**Final numbering (lead, 2026-09-26; matches `09` §2.5/§2.6 as renumbered):**
 
-Full per-check inequalities, data sources, fail-closed rules and negative tests (G-02 changed, G-26…G-32) are in
+| Check | Limit |
+|---|---|
+| G-02 (changed) | Derating |
+| G-26 | Home meter export/import |
+| G-27 | Service transformer |
+| G-28 | Feeder thermal / reverse flow |
+| G-29 | Substation POI / transformer |
+| G-30 | Territory export (K15c) |
+| G-31 | Sustained vs peak |
+| G-32 | Feeder ramp for non-firm steps |
+| G-33 | K15 market segregation |
+
+**Status at main `434d230`: specified, not built.**
+- None of these checks exists in `orchestrator/src/opengrid/guardian/checks.py` or `guardian/service.py`. The built
+  set stops at G-01…G-20 (`guardian/checks.py:1-2`), plus the unrelated K14 PQ checks G-21…G-25
+  (`guardian/pq_checks.py:1`).
+- `guardian/service.py:50`'s `_ITEM_LEVEL_RULES` (`{"G-01","G-01-ENERGY","G-02","G-04","G-24"}`) includes none of
+  G-26…G-33 either.
+- The ERCOT_AS energy hold is not among these checks: the selector and engine enforce it (§6.6).
+- §6.1 above records why G-26…G-33, and not the old supplemental table's G-21…G-31, are canonical.
+
+Full per-check inequalities, data sources, fail-closed rules and negative tests (G-02 changed, G-26…G-33) are in
 `09-optimizer-dispatcher-update.md` §2.6 (not edited here). See §5.7 for the matching dispatcher-side status and
 `00-invariants.md`'s K4/K15 additions for the invariant-level summary.
 
