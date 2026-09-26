@@ -292,15 +292,23 @@ failure at step 1 shows **UNAVAILABLE** with the reason.
 ### 6.2 Manual command (one hub or bank)
 
 Fields: Bank id or Hub id (one is required), Setpoint (kW), Reason. The guardian evaluates the command when you
-confirm.
+confirm. A hub may move at most its ramp step in one 2-second cycle (G-04): about 0.12 kW for an 11 kW hub and
+0.22 kW for a 20 kW hub. A setpoint further from the hub's current output is refused, so manual commands are for
+small corrections; the engine ramps its own setpoints.
 
 | Result | Meaning |
 |---|---|
 | **PASS** | The guardian signed it; it goes to the hub in a signed batch. "Command accepted. Trace ..." |
-| **VETOED** (critical) | The guardian refused it: "Vetoed by guardian: G-02, ... Trace ...", with the rule ids (for example G-02 hub power, G-04 hub ramp, G-19 commitment lock, G-01 reserve, and since R2 the flow and territory checks G-26…G-33) |
+| **VETOED** (critical) | The guardian refused it: "Vetoed by guardian: G-02, ... Trace ...", with the rule ids (for example G-02 hub power, G-04 hub ramp, G-05 fleet ramp, G-19 commitment lock, G-01 reserve, and since R2 the flow and territory checks G-26…G-33) |
+| **PARTLY_VETOED** (critical) | The guardian refused it on per-hub rules only (G-04, G-26, G-27, G-31, ...); for a one-hub command this means refused. Same sentence as VETOED |
 | **TIMEOUT** | No guardian verdict within the poll window (check og-guardian on System Health). A guardian TIMEOUT verdict shows the TIMEOUT badge with "Vetoed by guardian: no rule ids given." |
 | **EXPIRED** | The proposal expired, or the hub id is unknown. Propose again |
 | **FAILED** | Anything else, with the error |
+
+**Known gap:** the guardian counts the kW of every manual (and bulk) command, refused ones included, against one
+shared ramp budget (G-05). After a burst of refused commands, every further manual command is refused with G-05.
+The budget frees up as newer engine cycles push it out: about 2 minutes on a fleet that is dispatching, but on an
+idle fleet only a restart of og-guardian clears it.
 
 ### 6.3 Scoped safe stop
 
@@ -376,7 +384,8 @@ Reason → **Propose for selection (step 1 of 2)** → **Send to selection**.
 - Results: **PASS** (every hub passed the guardian) or **PARTIAL** ("P of N hubs passed ..." with each refused
   hub and its rule ids), **TIMEOUT**, **EXPIRED**, **FAILED**.
 - The guardian checks and signs every hub's command; a selection never bypasses it. At most 500 hubs per bulk
-  command (a larger selection is refused).
+  command (a larger selection is refused). Each hub's step is bounded by G-04 and shares the manual G-05 budget
+  (6.2).
 
 ### 6.7 Power-quality actions
 
@@ -429,9 +438,9 @@ load). Several modes can be active together ("Feed stale + Guardian down").
   ERCOT load 172,800 s (48 h), wind and solar 10,800 s (including the regional solar feed `np4-745-cd`), NWS
   10,800 s, EIA 10,800 s (counted only while the ERCOT load feed is stale), AS prices 93,600 s (they post once a
   day).
-- **Watch the regional solar feed.** `np4-745-cd` is new in this release and polled by default. If its row never
-  gets a value, "Feed stale" stays on and nothing new is committed anywhere: tell the lead, who can switch that
-  feed off in configuration without a deploy.
+- **Watch the regional solar feed.** `np4-745-cd` is new on `main` (on the server from R3) and is polled by
+  default. If its row never gets a value, "Feed stale" stays on and nothing new is committed anywhere. Tell the
+  lead: switching the feed off in configuration is not enough, the stale feed-status row must be removed too.
 
 ### 7.2 Guardian escalation (K7)
 
@@ -511,6 +520,7 @@ it clears and re-opens.
 | Gap | What to do meanwhile |
 |---|---|
 | Run chain verify reports FAIL from an unfiltered page | Set From and To first, or use the API call in 6.9 |
+| After refused manual commands, later manual and bulk commands are refused with G-05 | Wait about 2 minutes while the fleet dispatches; on an idle fleet the lead restarts og-guardian |
 | Fleet table shows at most 200 hubs and does not update live | Filter by zone or bank; reload |
 | AS deploy form offers "all held AS awards" and 1-240 min; og-api refuses both beyond one award and its product | Deploy one award, within its product's window; never chain deployments |
 | Only Feed stale is enforced; "SCADA silent" is never raised | Treat the other banners as a call to act (7.1) |

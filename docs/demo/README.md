@@ -140,7 +140,7 @@ Timing is the budget per step; the total is about 15 minutes.
   "Forecast band (P10 / P50 / P90)".
 - **Expect:** One price line per ERCOT load zone; each bank is dispatched and settled at its own zone's price,
   never at a hub price (decision D-10). Freshness rows for `np6-905-cd` (price), `np6-345-cd` (load),
-  `np4-732-cd` (wind), `np4-737-cd` (solar), `np4-745-cd` (solar by region, new in R2), `np4-188-cd` (AS), EIA
+  `np4-732-cd` (wind), `np4-737-cd` (solar), `np4-745-cd` (solar by region, where deployed), `np4-188-cd` (AS), EIA
   and NWS, each `LIVE` (or `SIM` when feeds read the simulator), failures `0`, breaker `closed`. The forecast
   band is drawn ahead of now for `LZ_NORTH`. The "Bid funnel" is derived from the pipeline, so it shows the
   demo offers.
@@ -282,8 +282,9 @@ skip to step 13.
   done; echo
   ```
 - **Show:** The printed status codes; then System Health (reload).
-- **Expect:** A row of `409`: the guardian vetoes every one (G-02 hub power; since R2 the flow checks, e.g. G-31,
-  may be listed too). More than 5% of a tick's commands vetoed puts `$BANK` (and its zone, if the zone crosses
+- **Expect:** A row of `409`: the guardian refuses every one, as VETOED or PARTLY_VETOED, with rule ids such as
+  G-04 hub ramp, G-26 home meter, G-27 transformer, G-31 peak and G-05 fleet ramp. An occasional TIMEOUT is
+  possible. More than 5% of a tick's commands vetoed puts `$BANK` (and its zone, if the zone crosses
   5% too) **CONSERVATIVE**: "Guardian escalations" shows "Scope held conservative" (`ALR-SCOPE-CONSERVATIVE`),
   and the engine stops selling spot headroom there. After three bad ticks it shows "Guardian requests a safe
   stop" (`ALR-SAFE-STOP-REQUESTED`) with **Review safe stop (two-step)**.
@@ -301,8 +302,11 @@ skip to step 13.
 ### Topic 9: a forged command, and the legitimate path
 
 **Step 17: The signed path, for contrast** (45 s)
-- **Action:** `/og/fleet`, "Manual command": hub `hub-00142`, setpoint `2`, reason `demo signed path`,
-  **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown.
+- **Order:** run this step before step 15. After step 15's burst the guardian refuses every manual command with
+  G-05 for a while (a known gap, operator guide 6.2).
+- **Action:** `/og/fleet`, "Manual command": hub `hub-00142` (idle, 0 kW), setpoint `0.1`, reason
+  `demo signed path`, **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown. A hub
+  moves at most about 0.12 kW per 2 s cycle (G-04), so a larger step would be refused.
 - **Show:** The confirm dialog (focus starts on Cancel, Tab to the confirm button, Escape closes); the result.
 - **Expect:** `PASS` "Command accepted. Trace ..." (the drill-down's last command id changes), or `VETOED` "Vetoed
   by guardian: <rule ids>. Trace ..."; the 409 in step 15 is the same veto seen from the API. Either way the
