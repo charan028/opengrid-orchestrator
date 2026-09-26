@@ -97,4 +97,4 @@ def test_fleet_filter_inputs_are_blank_when_no_filter_is_set(
     app = FastAPI()
     app.include_router(ui.build_router(), prefix="/og")
     body = TestClient(app).get("/og/fleet").text
-    assert 'name="zone" value=""' in body and 'name="bank" value=""' in body
+    assert 'name="q" value=""' in body and 'name="bank" value=""' in body

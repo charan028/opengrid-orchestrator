@@ -1,25 +1,103 @@
-{# hub_drilldown.html -- HTMX fragment for a single hub (Fleet screen drill-down, 02b S8 row 2).
-   Params: hub: dict with hub_id/bank_id/zone/soc_kwh/p_kw/health/lease_epoch/lease_expires_at/
-   last_command_id/last_seen_at, and optionally `error`. #}
+{# hub_drilldown.html -- the Fleet hub drawer (owner review R3). Params: `detail` (GET
+   /og/api/fleet/hubs/{id}/detail, one call) or, from an older API, `hub` (flat hub+state dict, optionally
+   `error`). Sections by importance: status, last message, alerts, location, asset, control. #}
+{% macro dash(v) %}{% if v is none or v == '' %}<span title="not recorded">&mdash;</span>{% else %}{{ v }}{% endif %}{% endmacro %}
 <div class="og-panel" id="hub-drilldown">
+{% if detail %}
+  {% set st = detail.status %}
+  <h2>Hub {{ detail.hub_id }}</h2>
+  <section class="fl-dsec" aria-label="Status">
+    <p>
+      <span class="status-badge" data-status="{{ st.health }}"><span class="status-text">{{ st.health_label }}</span></span>
+      <strong>{{ 'Online' if st.online else 'Offline' }}</strong> &middot;
+      {% if st.activity == 'delivering' %}Delivering{% if st.serving %} to {{ st.serving|map(attribute='service_type')|join(', ') }}{% endif %}
+      {% else %}{{ activity_labels.get(st.activity, st.activity|capitalize) }}{% endif %}
+    </p>
+    <dl class="fl-kv">
+      <div><dt>Last communication</dt><dd>{{ dash(st.last_seen_at) }}
+        <span class="stale-badge" data-since="{{ st.last_seen_at }}" data-stale-after="6">age: unknown</span></dd></div>
+      <div><dt>Power</dt><dd>{{ dash(st.p_kw) }} kW <span class="og-card-meta" title="+ discharging, &minus; charging">(+ out / &minus; in)</span></dd></div>
+      <div><dt>SoC</dt><dd>{{ dash(st.soc_pct) }} % &middot; {{ dash(st.soc_kwh) }} kWh</dd></div>
+      <div><dt>Above reserve</dt><dd>{{ dash(st.above_reserve_kwh) }} kWh</dd></div>
+    </dl>
+    {% if st.soc_pct is not none %}
+    <div class="fl-socbar" role="img" aria-label="Charge {{ st.soc_pct }} %, reserve floor {{ st.reserve_pct }} %">
+      <div class="fl-socbar-fill" style="width: {{ [[st.soc_pct, 0]|max, 100]|min }}%"></div>
+      {% if st.reserve_pct is not none %}<div class="fl-socbar-reserve" style="left: {{ st.reserve_pct }}%" title="reserve floor"></div>{% endif %}
+    </div>
+    {% endif %}
+    {% if st.fault_code %}<p class="og-degraded-banner">Fault: {{ st.fault_code }}</p>{% endif %}
+  </section>
+  <section class="fl-dsec" aria-label="Last message">
+    <h3>Last message</h3>
+    {% if detail.telemetry.raw %}
+    <p class="og-card-meta">{{ detail.telemetry.ts }}</p>
+    <dl class="fl-kv">
+      {% for k, v in detail.telemetry.fields.items() if k != 'ts' %}<div><dt>{{ k }}</dt><dd>{{ dash(v) }}</dd></div>{% endfor %}
+    </dl>
+    <details><summary>Raw JSON</summary><pre class="fl-raw">{{ detail.telemetry.raw|tojson(indent=2) }}</pre></details>
+    {% else %}<p class="og-empty">No telemetry recorded.</p>{% endif %}
+  </section>
+  <section class="fl-dsec" aria-label="Alerts">
+    <h3>Alerts</h3>
+    {% for a in detail.alerts %}
+    <div class="fl-alert">
+      <span class="status-badge" data-status="{{ a.severity }}"><span class="status-text">{{ a.severity }}</span></span>
+      <span>{{ a.rule }} &middot; {{ 'closed' if a.cleared_at else 'open' }} &middot; opened {{ a.opened_at }}{% if a.cleared_at %} &middot; closed {{ a.cleared_at }}{% endif %}</span>
+    </div>
+    {% else %}<p class="og-empty">No recent alerts for this hub or its bank.</p>{% endfor %}
+    <a href="{{ base_path }}/health?scope_ref={{ detail.hub_id|urlencode }}">All alerts for this hub</a>
+  </section>
+  <section class="fl-dsec" aria-label="Location">
+    <h3>Location</h3>
+    <dl class="fl-kv">
+      <div><dt>Lat, lon</dt><dd>{% if detail.location.lat is not none %}<span id="hub-latlon">{{ detail.location.lat }}, {{ detail.location.lon }}</span>
+        <button type="button" class="btn btn-sm" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('hub-latlon').textContent)">Copy</button>{% else %}{{ dash(none) }}{% endif %}</dd></div>
+      <div><dt>Zone</dt><dd>{{ dash(detail.location.zone) }}</dd></div>
+      <div><dt>Bank</dt><dd>{{ dash(detail.location.bank_id) }}</dd></div>
+      <div><dt>Feeder</dt><dd>{{ dash(detail.location.feeder_id) }}</dd></div>
+      <div><dt>Service transformer</dt><dd>{{ dash(detail.location.service_transformer_id) }}</dd></div>
+    </dl>
+  </section>
+  <section class="fl-dsec" aria-label="Asset">
+    <h3>Asset</h3>
+    <p class="og-card-meta">{% if detail.asset.device_info %}Reported by battery &middot; {{ detail.asset.device_info_at or 'time not recorded' }}{% else %}From records{% endif %}</p>
+    <dl class="fl-kv">
+      {% for k, v in (detail.asset.device_info or {}).items() %}<div><dt>{{ k|replace('_', ' ')|capitalize }}</dt><dd>{{ v }}</dd></div>{% endfor %}
+      <div><dt>Installed</dt><dd>{{ detail.asset.install_date or 'not recorded' }}</dd></div>
+      <div><dt>Last serviced</dt><dd>{{ detail.asset.last_serviced_at or 'not recorded' }}</dd></div>
+      <div><dt>Units</dt><dd>{{ dash(detail.asset.units) }}</dd></div>
+      <div><dt>Rated</dt><dd>{{ dash(detail.asset.rated_p_kw) }} kW / {{ dash(detail.asset.rated_e_kwh) }} kWh</dd></div>
+      <div><dt>Reserve floor</dt><dd>{{ dash(detail.asset.reserve_kwh) }} kWh</dd></div>
+      <div><dt>Last calibration</dt><dd>{% if detail.asset.last_calibration %}{{ detail.asset.last_calibration.status }} {{ detail.asset.last_calibration.created_at or '' }}{% else %}not recorded{% endif %}</dd></div>
+    </dl>
+  </section>
+  <section class="fl-dsec" aria-label="Control">
+    <h3>Control</h3>
+    <dl class="fl-kv">
+      <div><dt>Lease epoch</dt><dd>{{ dash(detail.control.lease_epoch) }}</dd></div>
+      <div><dt>Lease expires</dt><dd>{{ dash(detail.control.lease_expires_at) }}</dd></div>
+      <div><dt>Last command</dt><dd>{{ dash(detail.control.last_command_id) }}</dd></div>
+      <div><dt>Verdict</dt><dd>{{ dash(detail.control.last_command_verdict.outcome if detail.control.last_command_verdict else none) }}</dd></div>
+    </dl>
+  </section>
+{% else %}
   <h2>Hub {{ hub.hub_id }}</h2>
   {% if hub.error %}
   <p class="og-degraded-banner">{{ hub.error }}</p>
   {% else %}
-  <dl class="og-grid">
-    <div><dt class="kpi-label">Bank</dt><dd>{{ hub.bank_id|default('-') }}</dd></div>
-    <div><dt class="kpi-label">Zone</dt><dd>{{ hub.zone|default('-') }}</dd></div>
-    <div>
-      <dt class="kpi-label">Health</dt>
-      <dd>{% with status = hub.health|default('unknown') %}{% include "_partials/status_badge.html" %}{% endwith %}</dd>
-    </div>
-    <div><dt class="kpi-label">SoC</dt><dd>{{ hub.soc_kwh|default('-') }} kWh</dd></div>
-    <div><dt class="kpi-label">P</dt><dd>{{ hub.p_kw|default('-') }} kW</dd></div>
-    <div><dt class="kpi-label">Lease epoch</dt><dd>{{ hub.lease_epoch|default('-') }}</dd></div>
-    <div><dt class="kpi-label">Lease expires</dt><dd>{{ hub.lease_expires_at|default('-') }}</dd></div>
-    <div><dt class="kpi-label">Last command</dt><dd>{{ hub.last_command_id|default('-') }}</dd></div>
+  <dl class="fl-kv">
+    <div><dt>Bank</dt><dd>{{ dash(hub.bank_id) }}</dd></div>
+    <div><dt>Zone</dt><dd>{{ dash(hub.zone) }}</dd></div>
+    <div><dt>Health</dt><dd>{% with status = hub.health|default('unknown') %}{% include "_partials/status_badge.html" %}{% endwith %}</dd></div>
+    <div><dt>SoC</dt><dd>{{ dash(hub.soc_kwh) }} kWh</dd></div>
+    <div><dt>P</dt><dd>{{ dash(hub.p_kw) }} kW</dd></div>
+    <div><dt>Lease epoch</dt><dd>{{ dash(hub.lease_epoch) }}</dd></div>
+    <div><dt>Lease expires</dt><dd>{{ dash(hub.lease_expires_at) }}</dd></div>
+    <div><dt>Last command</dt><dd>{{ dash(hub.last_command_id) }}</dd></div>
   </dl>
   <div class="stale-badge" data-since="{{ hub.last_seen_at }}" data-stale-after="6">age: unknown</div>
   <div id="telemetry-sparkline" class="og-map" style="height: 160px;" data-hub-id="{{ hub.hub_id }}"></div>
   {% endif %}
+{% endif %}
 </div>

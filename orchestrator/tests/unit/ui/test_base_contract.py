@@ -68,8 +68,8 @@ def test_fleet_screen_lists_hubs_and_hides_writes_from_viewer(
     assert "hub-0001" in body
     assert "hub-0002" in body
     # viewer role (default, no X-Remote-User identity) must not see manual command or safe stop controls
-    assert "Manual command" not in body
-    assert "Scoped safe stop" not in body
+    assert 'id="card-one"' not in body
+    assert 'id="card-stop"' not in body
 
 
 def test_fleet_screen_shows_write_actions_for_operator(
@@ -81,8 +81,8 @@ def test_fleet_screen_shows_write_actions_for_operator(
 
     assert response.status_code == 200
     body = response.text
-    assert "Manual command" in body
-    assert "Scoped safe stop" in body
+    assert "Command one hub" in body
+    assert 'id="card-stop"' in body
     assert "Propose safe stop (step 1 of 2)" in body
     assert 'hx-post="/og/fleet/safestop/propose"' in body
 
@@ -98,8 +98,8 @@ def test_fleet_screen_does_not_show_write_actions_for_a_spoofed_x_og_role_header
 
     assert response.status_code == 200
     body = response.text
-    assert "Manual command" not in body
-    assert "Scoped safe stop" not in body
+    assert 'id="card-one"' not in body
+    assert 'id="card-stop"' not in body
 
 
 def test_fleet_hub_table_shows_a_per_row_age_column(
@@ -111,7 +111,7 @@ def test_fleet_hub_table_shows_a_per_row_age_column(
 
     assert response.status_code == 200
     body = response.text
-    assert "Age</th>" in body
+    assert "Telemetry age</a>" in body
     table_html = body.split("<table")[1].split("</table>")[0]
     # last_seen_at is set in the fixture -- the per-row age badge renders a real age, not "unknown"
     # (the screen's own "Data age: unknown" badge just above the table is a separate, pre-existing
