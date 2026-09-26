@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple, Protocol
 
-from opengrid.core.models.mqtt import ScadaBankSignal, ScadaUtilityInstruction, Telemetry
+from opengrid.core.models.mqtt import Ack, ScadaBankSignal, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.core.physics import (
     DEFAULT_ETA_D,
@@ -108,6 +108,11 @@ class FleetBackend(Protocol):
 
     async def copy_telemetry(self, rows: list[TelemetryRow]) -> None: ...
 
+    async def insert_acks(self, acks: list[Ack]) -> None:
+        """Persists hub command acknowledgements to `og.command_ack` (idempotent per batch/hub).
+        Called in batch from `flush`, never per message."""
+        ...
+
     async def record_scada_observations(self, signals: list[ScadaBankSignal]) -> None:
         """Persists SCADA bank readings to `og.feed_obs` (source='scada') -- the ONLY writer of that row
         shape, read by other processes (`opengrid.guardian.repo.PgBankStatePort`'s G-03 bank-kVA check,
@@ -158,6 +163,7 @@ _banks: dict[str, _BankRuntime] = {}
 _pending_telemetry: list[TelemetryRow] = []
 _bank_scada: dict[str, ScadaBankSignal] = {}
 _pending_scada: dict[str, ScadaBankSignal] = {}  # latest unpersisted reading per bank, for `flush`
+_pending_acks: list[Ack] = []  # hub acknowledgements not yet written, for `flush`
 _utility_instructions: dict[str, ScadaUtilityInstruction] = {}
 
 
@@ -175,6 +181,7 @@ def configure(backend: FleetBackend, cfg: Config) -> None:
     _pending_telemetry.clear()
     _bank_scada.clear()
     _pending_scada.clear()
+    _pending_acks.clear()
     _utility_instructions.clear()
 
 
@@ -310,6 +317,9 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
     _pending_scada.clear()
     if scada:
         await backend.record_scada_observations(scada)
+    acks, _pending_acks[:] = list(_pending_acks), []
+    if acks:
+        await backend.insert_acks(acks)
 
     states: list[HubState] = []
     health_counts: dict[str, int] = {"online": 0, "stale": 0, "offline": 0, "fault": 0}
@@ -370,6 +380,18 @@ async def ingest_scada_signal(payload: dict[str, Any]) -> None:
 def bank_scada_signal(bank_id: str) -> ScadaBankSignal | None:
     """Latest stored SCADA reading for `bank_id`, or `None` if none has ever arrived."""
     return _bank_scada.get(bank_id)
+
+
+async def ingest_ack(payload: dict[str, Any]) -> None:
+    """A3: record a hub's acknowledgement of a signed command batch (`<root>/ack/<hub_id>`). An accepted
+    ack sets the hub's `last_command_id` (persisted with `hub_state`); every ack, accepted or rejected
+    with its reason, is buffered for `flush` to write to `og.command_ack`. No I/O here (see
+    `ingest_scada_signal`)."""
+    ack = Ack.model_validate(payload)
+    runtime = _hubs.get(ack.hub_id)
+    if runtime is not None and ack.accepted:
+        runtime.last_command_id = ack.batch_id
+    _pending_acks.append(ack)
 
 
 async def ingest_utility_instruction(payload: dict[str, Any]) -> None:

@@ -25,7 +25,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid import fleet, ledger
+from opengrid import contracts, fleet, ledger
 from opengrid.allocator.energy_sufficiency import (
     EnergySufficiencyResult,
     HubEnergyState,
@@ -393,8 +393,23 @@ class EnergySufficiencyGateway:
 
         results = await self._evaluate_banks(by_bank, now)
         now_at_risk = {r.obligation_id for r in results if r.at_risk}
+        for obligation_id in self._at_risk - now_at_risk:
+            await self._set_at_risk(obligation_id, False)
         self._at_risk &= now_at_risk  # recovered obligations may alert again on a later entry
         return results
+
+    @staticmethod
+    async def _set_at_risk(
+        obligation_id: str, at_risk: bool, payload: dict[str, object] | None = None
+    ) -> None:
+        """Mirror the check onto `og.obligation.at_risk` (UI/API/settle read it). Best effort: the trace
+        and alert are the safety record; a failed flag write never blocks the cycle."""
+        try:
+            await contracts.set_obligation_at_risk(
+                UUID(obligation_id), at_risk, reason_code=ALR_ENERGY_SHORTFALL_RISK, payload=payload
+            )
+        except Exception:
+            logger.exception("failed to set obligation at_risk", extra={"obligation_id": obligation_id})
 
     async def _evaluate_banks(
         self, by_bank: dict[str, list[tuple[str, float, datetime, str | None]]], now: datetime
@@ -477,6 +492,9 @@ class EnergySufficiencyGateway:
             )
 
     async def _record_at_risk(self, result: EnergySufficiencyResult, customer_id: str | None) -> None:
+        await self._set_at_risk(
+            result.obligation_id, True, {"margin_kwh": result.margin_kwh, "required_kwh": result.required_kwh}
+        )
         payload = {
             "obligation_id": result.obligation_id,
             "customer_id": customer_id,

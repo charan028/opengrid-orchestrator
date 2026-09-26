@@ -105,6 +105,18 @@ class _FakeTraceBackend:
 
 
 @pytest.fixture(autouse=True)
+def _flags(monkeypatch):
+    """Records `contracts.set_obligation_at_risk` calls (the obligation-row flag, lead finding 4)."""
+    calls: list[tuple[str, bool]] = []
+
+    async def _fake_set(obligation_id, at_risk, *, reason_code, payload=None):
+        calls.append((str(obligation_id), at_risk))
+
+    monkeypatch.setattr(gw.contracts, "set_obligation_at_risk", _fake_set)
+    return calls
+
+
+@pytest.fixture(autouse=True)
 def _patch_alert_raising(monkeypatch):
     raised: list = []
 
@@ -235,3 +247,21 @@ async def test_query_is_scoped_to_remaining_energy_within_the_lookahead(monkeypa
     assert "GROUP BY" in sql
     assert params == {"now": NOW, "lookahead_end": NOW + timedelta(seconds=600)}
     assert result.required_kwh == pytest.approx(11.0)
+
+
+async def test_at_risk_flag_is_set_on_entry_and_cleared_on_recovery(monkeypatch, _flags):
+    """Lead finding 4: the check traced and alerted but never set og.obligation.at_risk."""
+    obligation_id = uuid4()
+    rows = [(obligation_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    soc = {"value": None}
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=soc["value"])]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    await gateway.run(NOW)
+    await gateway.run(NOW + timedelta(seconds=2))
+    soc["value"] = 39.2
+    await gateway.run(NOW + timedelta(seconds=4))
+
+    assert _flags == [(str(obligation_id), True), (str(obligation_id), False)]

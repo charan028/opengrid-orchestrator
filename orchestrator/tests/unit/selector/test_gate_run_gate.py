@@ -84,8 +84,19 @@ def _wired(monkeypatch):
 
     monkeypatch.setattr(commit.ledger, "reserve", _fake_reserve)
     monkeypatch.setattr(commit.contracts, "transition_obligation", _RecordingTransitions())
+    monkeypatch.setattr(commit.contracts, "record_opportunity_decision", _RecordingDecisions())
 
     return persisted, reserved
+
+
+class _RecordingDecisions:
+    """Fake `contracts.record_opportunity_decision`: records `(opportunity_id, state, reason, gate)`."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[UUID, str, str, UUID]] = []
+
+    async def __call__(self, opportunity_id, state, *, reason_code, gate_id, decided_at=None):
+        self.calls.append((opportunity_id, state, reason_code, gate_id))
 
 
 class _RecordingTransitions:
@@ -270,3 +281,16 @@ def test_plan_mode_is_l_da_only_at_midnight_scheduled_gate():
     assert gate._plan_mode_for("SCHEDULED_15MIN", midnight) == "L-DA"
     assert gate._plan_mode_for("SCHEDULED_15MIN", noon) == "L-ID"
     assert gate._plan_mode_for("ADMISSION", midnight) == "L-ID"
+
+
+async def test_opportunity_records_the_gate_decision(monkeypatch, _wired):
+    """Lead review 2026-09-26: og.opportunity.state/gate_id never moved off OFFERED/NULL. The gate's
+    decision (and the deciding plan) is now recorded on the opportunity too."""
+    _persisted, reserved = _wired
+    decisions = commit.contracts.record_opportunity_decision
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    ((opportunity_id, state, reason, gate_id),) = decisions.calls
+    assert (opportunity_id, state, reason) == (UUID(OPPORTUNITY_ID), "SELECTED", "R-GATE-SELECT")
+    assert gate_id == reserved["plan_id"]

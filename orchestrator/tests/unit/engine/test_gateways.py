@@ -51,6 +51,9 @@ class FakeFleetBackend:
     async def record_scada_observations(self, signals):
         pass
 
+    async def insert_acks(self, acks):
+        pass
+
 
 class FakeCursor:
     def __init__(self, responses: list) -> None:

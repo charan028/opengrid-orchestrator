@@ -23,6 +23,7 @@ class FakeFleetBackend:
     upserted: list[HubState] = field(default_factory=list)
     copied_rows: list[fleet.TelemetryRow] = field(default_factory=list)
     recorded_scada: list = field(default_factory=list)
+    acks: list = field(default_factory=list)
 
     async def load_hubs(self) -> list[Hub]:
         return self.hubs
@@ -41,6 +42,9 @@ class FakeFleetBackend:
 
     async def record_scada_observations(self, signals) -> None:
         self.recorded_scada.extend(signals)
+
+    async def insert_acks(self, acks) -> None:
+        self.acks.extend(acks)
 
 
 def _cfg(**overrides: float) -> Config:
@@ -372,3 +376,44 @@ async def test_load_topology_rehydrates_from_persisted_hub_state() -> None:
     await _seed(backend)
     cap = await fleet.capability("bank-1", now)
     assert "h1" not in cap.excluded_hub_ids
+
+
+async def test_a3_hub_acks_are_buffered_and_persisted_on_flush() -> None:
+    """A3: hub acknowledgements were never persisted (live 2026-09-26: visible only on MQTT). An
+    accepted ack sets the hub's last_command_id; every ack (accepted or rejected) is written on flush."""
+    now = datetime.now(UTC)
+    backend = FakeFleetBackend(
+        hubs=[_hub("h1")],
+        banks=[_bank()],
+        states=[HubState(hub_id="h1", soc_kwh=5.0, p_kw=0.0, last_seen_at=now)],
+    )
+    await _seed(backend)
+    accepted_batch = "5d3f0d8c-f0d4-4191-bfbc-eb94d834c621"
+
+    await fleet.ingest_ack(
+        {
+            "hub_id": "h1",
+            "batch_id": accepted_batch,
+            "accepted": True,
+            "applied_p_kw": -3.0,
+            "ts": now.isoformat(),
+        }
+    )
+    await fleet.ingest_ack(
+        {
+            "hub_id": "h1",
+            "batch_id": "6d3f0d8c-f0d4-4191-bfbc-eb94d834c621",
+            "accepted": False,
+            "reject_reason": "STALE_SEQ",
+            "ts": now.isoformat(),
+        }
+    )
+    assert backend.acks == []
+
+    await fleet.flush(now=now)
+
+    assert [(str(a.batch_id), a.accepted, a.reject_reason) for a in backend.acks] == [
+        (accepted_batch, True, None),
+        ("6d3f0d8c-f0d4-4191-bfbc-eb94d834c621", False, "STALE_SEQ"),
+    ]
+    assert str(backend.upserted[-1].last_command_id) == accepted_batch

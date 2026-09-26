@@ -581,14 +581,19 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config) -> None:
     tel_topic = topic(cfg, "tel/#")
     scada_instruction_topic = topic(cfg, "scada/instruction/#")
     scada_topic = topic(cfg, "scada/#")
+    ack_topic = topic(cfg, "ack/+")  # hub acks; ack/cal/<hub> (calibration) is a different schema
     await client.subscribe(tel_topic)
+    await client.subscribe(ack_topic)
     await client.subscribe(scada_topic)  # also matches scada/instruction/#, disambiguated below
 
     async for message in client.messages:
         msg_topic = str(message.topic)
         try:
             payload = json.loads(message.payload)
-            if message.topic.matches(tel_topic):
+            if message.topic.matches(ack_topic):
+                validate_payload("ack", payload)
+                await fleet.ingest_ack(payload)
+            elif message.topic.matches(tel_topic):
                 validate_payload("telemetry", payload)
                 await fleet.ingest_telemetry(payload)
             elif message.topic.matches(scada_instruction_topic):

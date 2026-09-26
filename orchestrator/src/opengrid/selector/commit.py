@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from opengrid import contracts, ledger
@@ -85,6 +86,7 @@ async def commit_candidate(
         await contracts.transition_obligation(
             obligation_id, "REJECTED", reason_code=R_COMMIT_LOCK_INFEASIBLE, payload=trace_payload
         )
+        await _record_opportunity_decision(candidate, "REJECTED", R_COMMIT_LOCK_INFEASIBLE, plan_id)
         logger.warning(
             "commitment infeasible at commit time; obligation rejected",
             extra={"obligation_id": str(obligation_id), "reason_code": R_COMMIT_LOCK_INFEASIBLE},
@@ -94,7 +96,24 @@ async def commit_candidate(
     await contracts.transition_obligation(
         obligation_id, "COMMITTED", reason_code=R_COMMIT_LOCK_ENTER, payload=trace_payload
     )
+    await _record_opportunity_decision(candidate, "SELECTED", R_GATE_SELECT, plan_id)
     return True
+
+
+async def _record_opportunity_decision(
+    candidate: CandidateOpportunity, state: Literal["SELECTED", "REJECTED"], reason_code: str, plan_id: UUID
+) -> None:
+    """Mirror the obligation's outcome onto its opportunity (state, reason, deciding gate). Best
+    effort: the obligation transition above is the authoritative record, so a failure here is logged
+    and never undoes a commitment."""
+    try:
+        await contracts.record_opportunity_decision(
+            UUID(candidate.opportunity_id), state, reason_code=reason_code, gate_id=plan_id
+        )
+    except Exception:
+        logger.exception(
+            "failed to record opportunity decision", extra={"opportunity_id": candidate.opportunity_id}
+        )
 
 
 async def _reserve_with_substitute(

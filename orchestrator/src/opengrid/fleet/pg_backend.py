@@ -10,7 +10,7 @@ from typing import Any
 from psycopg import sql
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.core.models.mqtt import ScadaBankSignal
+from opengrid.core.models.mqtt import Ack, ScadaBankSignal
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.fleet import TelemetryRow
 
@@ -18,6 +18,12 @@ _INSERT_SCADA_FEED_OBS_SQL = """
 INSERT INTO og.feed_obs (source, product, series, ts, value, unit, quality)
 VALUES ('scada', %(bank_id)s, %(series)s, %(ts)s, %(value)s, %(unit)s, %(quality)s)
 ON CONFLICT (source, product, series, ts) DO NOTHING
+"""
+
+_INSERT_ACK_SQL = """
+INSERT INTO og.command_ack (batch_id, hub_id, accepted, applied_p_kw, reject_reason, ts)
+VALUES (%(batch_id)s, %(hub_id)s, %(accepted)s, %(applied_p_kw)s, %(reject_reason)s, %(ts)s)
+ON CONFLICT (batch_id, hub_id) DO NOTHING
 """
 
 _SCADA_QUALITY_TO_FEED_OBS: dict[str, str] = {
@@ -158,6 +164,27 @@ class PgFleetBackend:
                     await copy.write_row(
                         (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health)
                     )
+
+    async def insert_acks(self, acks: list[Ack]) -> None:
+        """One statement batch, one asynchronous commit (acks are an audit record of hub behaviour,
+        re-derivable from the hubs' own state; see `_ASYNC_COMMIT_SQL`)."""
+        if not acks:
+            return
+        rows = [
+            {
+                "batch_id": a.batch_id,
+                "hub_id": a.hub_id,
+                "accepted": a.accepted,
+                "applied_p_kw": a.applied_p_kw,
+                "reject_reason": a.reject_reason,
+                "ts": a.ts,
+            }
+            for a in acks
+        ]
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_ASYNC_COMMIT_SQL)
+            await cur.executemany(_INSERT_ACK_SQL, rows)
+            await conn.commit()
 
     async def record_scada_observations(self, signals: list[ScadaBankSignal]) -> None:
         """All buffered readings in one statement batch and one commit (called from `fleet.flush`)."""
