@@ -2,7 +2,7 @@
 
 Kept next to `docs/demo/README.md` (DEMO-2, release R2). Each item names the owner lane the lead routed it to
 and the demo step that depends on it. Status re-checked against R2 (`main` `6470cfa`); items resolved in R2 or
-earlier are listed at the end for the record. Items 12-13 concern the simulators and were not re-checked at R2.
+earlier are listed at the end for the record. Items 13-14 concern the simulators and were not re-checked at R2.
 
 ## Open
 
@@ -47,9 +47,14 @@ earlier are listed at the end for the record. Items 12-13 concern the simulators
 10. **The Hubs table shows at most 200 hubs** (owner: UI; step 3). The map draws every hub since R2.
 11. **The System Health processes and feeds tables, the Control-room banner and "Guardian escalations" reflect
     page load** (owner: UI; steps 2, 16, 18).
-12. **`tampered_unsigned_command` has no observable effect** (owner: sims; the forged-command moment is out of
+12. **The control plane's page behind `/ogsim/`** (owner: deploy/FLEET-SIM; "Before you start" item 6). Since
+    `afb26c2` the page honours `X-Forwarded-Prefix` or `OGSIM_CONTROL_BASE_PATH`
+    (`integration-sims/src/ogsim/control/app.py:63-71` there). Neither `deploy/apache/opengrid.conf` nor
+    `deploy/systemd/og-sim-control.service` sets them, so its calls still go to the domain root; the script uses
+    `curl`.
+13. **`tampered_unsigned_command` has no observable effect** (owner: sims; the forged-command moment is out of
     the script). Its self-test is never invoked on anomaly start, and no rejected ack reaches the orchestrator.
-13. **Legacy scenario files use ids the simulator does not know** (owner: sims; not used by the script).
+14. **Legacy scenario files use ids the simulator does not know** (owner: sims; not used by the script).
     `bank_overload_and_utility_limit`, `compound_stress` and `tampered_command` target `BANK_07`, `BANK_12`,
     `HUB_0501` and `HUB_0142`; the simulator's ids are `bank-NNN`/`hub-NNNNN`. A fix is on `wp/scenario-target-ids`.
 
@@ -57,7 +62,7 @@ earlier are listed at the end for the record. Items 12-13 concern the simulators
 
 - **R2 hotfix v3 (`afb26c2`):**
   - **The random-mode pause is saved** across a control-plane restart.
-  - **The control plane's page works behind `/ogsim/`**, with Run, Stop and Stop all buttons.
+  - **The control plane's page** has Run, Stop and Stop all buttons.
   - **Scenarios can be stopped:** `POST /api/scenarios/{name}/stop` and `/api/scenarios/stop-all` cancel the
     pending steps and end what was injected.
 - **R2:**

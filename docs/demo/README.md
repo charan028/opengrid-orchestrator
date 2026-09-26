@@ -89,8 +89,8 @@ the id you `DELETE` to end a moment early.
    `curl -u tester:... -X POST $SIM/api/random/pause` → `"paused": true`. Pausing does not cancel what is
    already active: list `curl -u tester:... "$SIM/api/anomalies?source=random"` and
    `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>` each one, then check `$SIM/api/anomalies` returns
-   `{"active": []}`. Since R2 hotfix v3 the pause is saved across a restart of `og-sim-control`; check
-   `curl -u tester:... $SIM/api/random/status` after one.
+   `{"active": []}`. Since R2 hotfix v3 the pause is saved across a restart of `og-sim-control`, but an
+   unreadable state file resumes random mode, so check `curl -u tester:... $SIM/api/random/status` after one.
 2. **All processes up.** Open **System Health**: every process in the Processes table has a heartbeat time from
    the last few seconds (the Status column always reads `ok`, so read the time), no `ALR-PROCESS-DOWN`, no
    degraded-mode banner, and no open critical alert. One `ALR-XFMR-UNMAPPED` warning per commanded bank is
@@ -112,8 +112,9 @@ the id you `DELETE` to end a moment early.
    active ERCOT_AS awards are visible", give that contract an opportunity for the demo window as in item 3.
 5. **Three browser windows**: `og-op-a` (the one you present from), `og-op-b` (the second operator, for the
    release), and `viewer` on the Fleet screen.
-6. **The control plane.** The `curl` lines below always work. Since R2 hotfix v3 its web page also works behind
-   `/ogsim/`, with Run, Stop and Stop all buttons for scenarios.
+6. **The control plane.** Use the `curl` lines below. R2 hotfix v3 gave its web page Run, Stop and Stop all
+   buttons, and support for a path prefix. But the repo's Apache and systemd config do not set that prefix
+   yet, so behind `/ogsim/` the page's calls may still fail.
 7. **Only when feeds read the simulator: start step 18's stale price now**, at least 50 minutes before step 18
    (the `curl` is in step 18). Everything already committed keeps delivering, but nothing new is committed once
    the price is 45 minutes old, so run the demo seed (item 3) first.
