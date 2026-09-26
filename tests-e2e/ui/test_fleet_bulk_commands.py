@@ -85,6 +85,7 @@ def _hub_screen_point(page: Page, index: int = 0) -> tuple[str, float, float]:
     """The id and viewport position of a real hub marker, read off the live map (`og.map.instances`).
     Clicking a guessed fraction of the map hits empty space more often than not, which is exactly how a
     working click-to-select looked broken during review."""
+    page.locator("#fleet-map").scroll_into_view_if_needed()
     box = page.locator("#fleet-map").bounding_box()
     assert box is not None
     probe = page.evaluate(
@@ -113,8 +114,8 @@ def test_clicking_a_hub_opens_its_detail_when_not_selecting(operator_page: Page)
 def test_clicking_a_hub_in_select_mode_picks_and_unpicks_it(operator_page: Page) -> None:
     """CR #19 asks for "one or in bulk": one click is the "one"."""
     goto_ok(operator_page, f"{BASE_PATH}/fleet")
-    hub_id, x, y = _hub_screen_point(operator_page)
     operator_page.locator("#fleet-select-toggle").click()
+    hub_id, x, y = _hub_screen_point(operator_page)
 
     operator_page.mouse.click(x, y)
     expect(operator_page.locator("#fleet-selection-count")).to_have_text("1 hub selected")
@@ -129,6 +130,7 @@ def test_a_click_on_empty_map_keeps_the_selection(operator_page: Page) -> None:
     goto_ok(operator_page, f"{BASE_PATH}/fleet")
     _select_first_rows(operator_page, 2)
     operator_page.locator("#fleet-select-toggle").click()
+    operator_page.locator("#fleet-map").scroll_into_view_if_needed()
     box = operator_page.locator("#fleet-map").bounding_box()
     assert box is not None
 
