@@ -46,7 +46,7 @@ class FakeFleetBackend:
     async def copy_telemetry(self, rows):
         pass
 
-    async def record_scada_observation(self, signal):
+    async def record_scada_observations(self, signals):
         pass
 
 
@@ -237,6 +237,9 @@ async def test_ledger_gateway_persist_grants_and_version(monkeypatch: pytest.Mon
     class FakeLedgerBackend:
         async def next_version(self):
             return 7
+
+        async def current_version(self):
+            return 0
 
         async def active_reservations(self, bank_id, interval_start):
             return []

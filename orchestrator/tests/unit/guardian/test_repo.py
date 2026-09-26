@@ -51,6 +51,10 @@ class FakeConn:
     def cursor(self):
         return self._cursor
 
+    async def execute(self, sql, params=None):
+        await self._cursor.execute(sql, params)
+        return self._cursor
+
     async def commit(self):
         self.committed = True
 
@@ -67,6 +71,20 @@ class FakePool:
 
     def connection(self):
         return self._conn
+
+
+async def test_ts_06_09_ledger_version_port_reads_the_durable_version_not_the_engine_facade():
+    """Regression (live 2026-09-26): the guardian delegated to `opengrid.ledger.ledger_version()`, the
+    og-engine process's in-memory facade, which is never configured in og-guardian -- every evaluation
+    raised RuntimeError. The port reads `og.reservation` through the ledger backend's own query."""
+    import opengrid.ledger as ledger_module
+
+    ledger_module._instance = None  # og-guardian never configures the engine facade
+    cursor = FakeCursor([(41,)])
+    ports, _leases = repo.build_pg_ports(FakePool(cursor), trace_store=None, hubs=None)  # type: ignore[arg-type]
+
+    assert await ports.ledger.ledger_version() == 41
+    assert "MAX(ledger_version)" in cursor.executed[0][0]
 
 
 async def test_pg_bank_state_port_found_with_load():

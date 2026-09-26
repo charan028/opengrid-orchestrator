@@ -103,13 +103,10 @@ class FleetBackend(Protocol):
 
     async def copy_telemetry(self, rows: list[TelemetryRow]) -> None: ...
 
-    async def record_scada_observation(self, signal: ScadaBankSignal) -> None:
-        """Persists one SCADA bank reading to `og.feed_obs` (source='scada') -- the ONLY writer of that
-        row shape (dispatch-live pass: this was previously missing entirely, so `og.feed_obs
-        WHERE source='scada'` -- which both `opengrid.guardian.repo.PgBankStatePort`'s G-03 bank-kva
-        check and `opengrid.health`'s `ALR-SCADA-OVERLOAD` alert already read from -- never had a row to
-        find, no matter how fresh the in-process `bank_scada_signal()` cache was, since those are
-        separate processes)."""
+    async def record_scada_observations(self, signals: list[ScadaBankSignal]) -> None:
+        """Persists SCADA bank readings to `og.feed_obs` (source='scada') -- the ONLY writer of that row
+        shape, read by other processes (`opengrid.guardian.repo.PgBankStatePort`'s G-03 bank-kVA check,
+        `opengrid.health`'s `ALR-SCADA-OVERLOAD`). Called in batch from `flush`, never per message."""
         ...
 
 
@@ -155,6 +152,7 @@ _hubs: dict[str, _HubRuntime] = {}
 _banks: dict[str, _BankRuntime] = {}
 _pending_telemetry: list[TelemetryRow] = []
 _bank_scada: dict[str, ScadaBankSignal] = {}
+_pending_scada: dict[str, ScadaBankSignal] = {}  # latest unpersisted reading per bank, for `flush`
 _utility_instructions: dict[str, ScadaUtilityInstruction] = {}
 
 
@@ -171,6 +169,7 @@ def configure(backend: FleetBackend, cfg: Config) -> None:
     _banks.clear()
     _pending_telemetry.clear()
     _bank_scada.clear()
+    _pending_scada.clear()
     _utility_instructions.clear()
 
 
@@ -302,6 +301,10 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
     rows, _pending_telemetry[:] = list(_pending_telemetry), []
     if rows:
         await backend.copy_telemetry(rows)
+    scada = list(_pending_scada.values())
+    _pending_scada.clear()
+    if scada:
+        await backend.record_scada_observations(scada)
 
     states: list[HubState] = []
     health_counts: dict[str, int] = {"online": 0, "stale": 0, "offline": 0, "fault": 0}
@@ -350,13 +353,13 @@ async def ingest_scada_signal(payload: dict[str, Any]) -> None:
     quality flag included, for the allocator's `DIST_DEFERRAL` PI loop and `capability()`'s charge
     headroom to read. `fleet` stores/aggregates only -- it never runs the PI loop itself (02b S12).
 
-    Also persists the reading to `og.feed_obs` (`record_scada_observation`) so `og-guardian`'s G-03
-    check and `og-settle`'s `ALR-SCADA-OVERLOAD` health alert -- both separate processes from `og-engine`,
-    which is the only one that ever receives this MQTT message -- can read it independently (dispatch-
-    live pass: this cross-process gap meant neither could ever see a SCADA reading at all)."""
+    The reading is also buffered (latest per bank) for `flush` to persist to `og.feed_obs`, where
+    `og-guardian`'s G-03 check and the `ALR-SCADA-OVERLOAD` alert read it from other processes. No I/O
+    here: a per-message commit on the MQTT ingest path fell behind under load (live 2026-09-26) and
+    delayed every hub's telemetry by minutes."""
     signal = ScadaBankSignal.model_validate(payload)
     _bank_scada[signal.bank_id] = signal
-    await _require_backend().record_scada_observation(signal)
+    _pending_scada[signal.bank_id] = signal
 
 
 def bank_scada_signal(bank_id: str) -> ScadaBankSignal | None:

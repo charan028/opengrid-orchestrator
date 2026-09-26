@@ -196,6 +196,10 @@ class LedgerBackend(Protocol):
         """Atomically allocate and return the next monotonic ledger version."""
         ...
 
+    async def current_version(self) -> int:
+        """The latest durably written ledger version (0 for an empty ledger)."""
+        ...
+
     async def active_reservations(self, bank_id: str, interval_start: datetime) -> list[ReservationRecord]:
         """Active (`released_at IS NULL`) reservations for a bank/interval, row-locked for a writer."""
         ...
@@ -276,12 +280,19 @@ class ReservationLedger:
         self._cache = _ReadCache()
         self._write_lock = asyncio.Lock()
         self._version = 0
+        self._version_loaded = False
 
     async def _bump_version(self) -> int:
         self._version = await self._backend.next_version()
+        self._version_loaded = True
         return self._version
 
     async def ledger_version(self) -> int:
+        """The durable ledger version. Loaded from the backend on first use, so a restarted process
+        stamps the same version the guardian reads independently (G-09) instead of restarting at 0."""
+        if not self._version_loaded:
+            self._version = max(self._version, await self._backend.current_version())
+            self._version_loaded = True
         return self._version
 
     async def reservations_for_obligation(self, obligation_id: UUID) -> list[ReservationRecord]:
@@ -367,6 +378,8 @@ class ReservationLedger:
             released = await self._backend.release_uncommitted(
                 reason=_UNCOMMITTED_RELEASE_REASON, version=version
             )
+            # With nothing released the bumped version was never written; resync to the durable one.
+            self._version = await self._backend.current_version()
             self._cache = _ReadCache()
             return released
 

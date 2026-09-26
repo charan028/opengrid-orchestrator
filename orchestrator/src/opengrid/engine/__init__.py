@@ -507,6 +507,7 @@ async def main(cfg: Config) -> None:
             cfg, username="og_engine", password=mqtt_password, client_id="og-engine"
         ) as client:
             ingest_task = asyncio.create_task(_mqtt_ingest_loop(client, cfg))
+            ingest_task.add_done_callback(_log_ingest_exit)
             try:
                 await run_forever(
                     lambda: _engine_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
@@ -517,6 +518,15 @@ async def main(cfg: Config) -> None:
                     await ingest_task
     finally:
         await pool.close()
+
+
+def _log_ingest_exit(task: asyncio.Task[None]) -> None:
+    """The MQTT ingest task must never end silently: without it the fleet twin goes stale and every
+    hub drops out of dispatch while the engine tick still looks healthy (no process restart follows)."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    logger.error("mqtt ingest loop exited", exc_info=exc)
 
 
 async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config) -> None:

@@ -36,6 +36,7 @@ from opengrid.guardian.ports import (
     ProposedItem,
     SafeStopScope,
 )
+from opengrid.ledger.pg_backend import PgLedgerBackend
 from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
@@ -125,14 +126,17 @@ class PgBankStatePort:
         )
 
 
-class LedgerModulePort:
-    """Delegates to `opengrid.ledger.ledger_version()` (single owner, BUILD.md S1 "no duplicated
-    functions") rather than re-reading `og.reservation` itself."""
+class PgLedgerVersionPort:
+    """G-09's current ledger version, read from Postgres through the ledger's own backend query
+    (`PgLedgerBackend.current_version`, single owner). The module-level `opengrid.ledger.ledger_version()`
+    is the og-engine process's in-memory facade and is never configured in og-guardian (live
+    2026-09-26: every evaluation raised `RuntimeError: opengrid.ledger.configure() must be called`)."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._backend = PgLedgerBackend(pool)
 
     async def ledger_version(self) -> int:
-        from opengrid import ledger
-
-        return await ledger.ledger_version()
+        return await self._backend.current_version()
 
 
 class PgCommitmentPort:
@@ -365,7 +369,7 @@ def build_pg_ports(
         trace=TraceStorePort(trace_store),
         hubs=hubs,
         banks=PgBankStatePort(pool),
-        ledger=LedgerModulePort(),
+        ledger=PgLedgerVersionPort(pool),
         commitments=PgCommitmentPort(pool),
         prior_grants=PgPriorGrantPort(pool),
         leases=leases,

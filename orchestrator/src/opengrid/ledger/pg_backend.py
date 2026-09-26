@@ -84,6 +84,12 @@ class PgLedgerBackend:
             row = await cur.fetchone()
             return int(row[0]) if row else 1
 
+    async def current_version(self) -> int:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("SELECT COALESCE(MAX(ledger_version), 0) FROM og.reservation")
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
     async def active_reservations(self, bank_id: str, interval_start: datetime) -> list[ReservationRecord]:
         async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(

@@ -264,6 +264,20 @@ async def test_release_uncommitted_frees_orphan_reservations(ledger: Reservation
     assert orphan.release_reason == "R-COMMIT-LOCK-INFEASIBLE"
 
 
+async def test_ts_06_09_restarted_ledger_reports_the_durable_version(backend, capability):
+    """Regression (live 2026-09-26): a restarted og-engine reported ledger_version 0 until its first
+    write, while the guardian reads the durable version -- G-09 would veto every batch. The version is
+    loaded from the backend, and an empty `release_uncommitted()` does not leave a phantom bump."""
+    first = ReservationLedger(backend, capability)
+    await first.reserve(uuid4(), {_key(): Decimal(10)}, uuid4())
+    durable = await first.ledger_version()
+
+    restarted = ReservationLedger(backend, capability)
+    assert await restarted.ledger_version() == durable
+    assert await restarted.release_uncommitted() == 0
+    assert await restarted.ledger_version() == durable == await backend.current_version()
+
+
 async def test_module_level_functions_require_configure():
     import opengrid.ledger as ledger_module
 

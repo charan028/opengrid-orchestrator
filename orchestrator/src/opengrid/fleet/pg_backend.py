@@ -154,18 +154,21 @@ class PgFleetBackend:
                     (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health)
                 )
 
-    async def record_scada_observation(self, signal: ScadaBankSignal) -> None:
-        quality = _SCADA_QUALITY_TO_FEED_OBS.get(signal.quality, "ESTIMATED")
+    async def record_scada_observations(self, signals: list[ScadaBankSignal]) -> None:
+        """All buffered readings in one statement batch and one commit (called from `fleet.flush`)."""
+        if not signals:
+            return
+        rows = [
+            {
+                "bank_id": s.bank_id,
+                "series": s.signal,
+                "ts": s.ts,
+                "value": s.value,
+                "unit": s.unit,
+                "quality": _SCADA_QUALITY_TO_FEED_OBS.get(s.quality, "ESTIMATED"),
+            }
+            for s in signals
+        ]
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                _INSERT_SCADA_FEED_OBS_SQL,
-                {
-                    "bank_id": signal.bank_id,
-                    "series": signal.signal,
-                    "ts": signal.ts,
-                    "value": signal.value,
-                    "unit": signal.unit,
-                    "quality": quality,
-                },
-            )
+            await cur.executemany(_INSERT_SCADA_FEED_OBS_SQL, rows)
             await conn.commit()

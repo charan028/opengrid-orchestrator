@@ -25,8 +25,11 @@ class InMemoryLedgerBackend:
         return nullcontext()
 
     async def next_version(self) -> int:
-        self._version += 1
-        return self._version
+        """Mirrors the Postgres backend: MAX(written version) + 1, nothing persisted until a write."""
+        return await self.current_version() + 1
+
+    async def current_version(self) -> int:
+        return max((r.ledger_version for r in self.rows.values()), default=self._version)
 
     async def active_reservations(self, bank_id: str, interval_start: datetime) -> list[ReservationRecord]:
         return [

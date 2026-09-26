@@ -39,8 +39,8 @@ class FakeFleetBackend:
     async def copy_telemetry(self, rows: list[fleet.TelemetryRow]) -> None:
         self.copied_rows.extend(rows)
 
-    async def record_scada_observation(self, signal) -> None:
-        self.recorded_scada.append(signal)
+    async def record_scada_observations(self, signals) -> None:
+        self.recorded_scada.extend(signals)
 
 
 def _cfg(**overrides: float) -> Config:
@@ -252,10 +252,42 @@ async def test_ingest_scada_signal_bounds_charge_headroom() -> None:
     )
     cap = await fleet.capability("bank-1", now)
     assert cap.max_charge_kw == pytest.approx(10.0)  # 50 kVA rating - 40 kVA load
-    # Dispatch-live pass: must also persist to the backend (og.feed_obs) so guardian/health -- separate
-    # processes -- can read the same reading independently of this process's in-memory cache.
-    assert len(backend.recorded_scada) == 1
-    assert backend.recorded_scada[0].bank_id == "bank-1"
+    # Persisted to og.feed_obs (guardian/health read it from other processes) -- but on flush, never
+    # inline on the MQTT ingest path.
+    assert backend.recorded_scada == []
+    await fleet.flush(now=now)
+    assert [s.bank_id for s in backend.recorded_scada] == ["bank-1"]
+
+
+async def test_scada_ingest_never_touches_the_database_and_flush_writes_latest_per_bank() -> None:
+    """Regression (live 2026-09-26): a per-message INSERT+COMMIT for every SCADA reading on the MQTT
+    ingest path fell behind under WAL pressure; aiomqtt queued the backlog in memory and the twin
+    processed telemetry minutes late, so all 2,000 hubs went stale/offline and dispatch stopped."""
+    now = datetime.now(UTC)
+    backend = FakeFleetBackend(hubs=[_hub("h1")], banks=[_bank(), _bank("bank-2")])
+    await _seed(backend)
+
+    for i, bank_id in enumerate(("bank-1", "bank-1", "bank-2")):
+        await fleet.ingest_scada_signal(
+            {
+                "bank_id": bank_id,
+                "signal": "APPARENT_POWER_KVA",
+                "value": 10.0 + i,
+                "unit": "kVA",
+                "quality": "good",
+                "ts": (now + timedelta(seconds=i)).isoformat(),
+            }
+        )
+    assert backend.recorded_scada == []
+
+    await fleet.flush(now=now)
+    assert sorted((s.bank_id, s.value) for s in backend.recorded_scada) == [
+        ("bank-1", 11.0),
+        ("bank-2", 12.0),
+    ]
+
+    await fleet.flush(now=now)  # nothing new buffered -> nothing rewritten
+    assert len(backend.recorded_scada) == 2
 
 
 async def test_utility_block_instruction_zeroes_capability() -> None:

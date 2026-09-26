@@ -18,6 +18,9 @@ class FakeCursor:
     async def execute(self, sql, params=None):
         self.executed.append((str(sql), params))
 
+    async def executemany(self, sql, params_seq):
+        self.executed.append((str(sql), list(params_seq)))
+
     async def __aenter__(self):
         return self
 
@@ -61,25 +64,29 @@ class FakePool:
         ("comm_fail", "STALE"),
     ],
 )
-async def test_record_scada_observation_maps_quality_and_commits(quality_in: str, quality_out: str) -> None:
+async def test_record_scada_observations_maps_quality_and_commits_once(
+    quality_in: str, quality_out: str
+) -> None:
     cursor = FakeCursor()
     pool = FakePool(cursor)
     backend = PgFleetBackend(pool)
-    signal = ScadaBankSignal(
-        bank_id="bank-000",
-        signal="APPARENT_POWER_KVA",
-        value=42.0,
-        unit="kVA",
-        quality=quality_in,
-        ts=datetime.now(UTC),
-    )
+    signals = [
+        ScadaBankSignal(
+            bank_id=bank_id,
+            signal="APPARENT_POWER_KVA",
+            value=42.0,
+            unit="kVA",
+            quality=quality_in,
+            ts=datetime.now(UTC),
+        )
+        for bank_id in ("bank-000", "bank-001")
+    ]
 
-    await backend.record_scada_observation(signal)
+    await backend.record_scada_observations(signals)
 
-    assert len(cursor.executed) == 1
-    sql, params = cursor.executed[0]
+    sql, rows = cursor.executed[0]
     assert "og.feed_obs" in sql
-    assert params["bank_id"] == "bank-000"
-    assert params["series"] == "APPARENT_POWER_KVA"
-    assert params["quality"] == quality_out
+    assert [r["bank_id"] for r in rows] == ["bank-000", "bank-001"]
+    assert {r["series"] for r in rows} == {"APPARENT_POWER_KVA"}
+    assert {r["quality"] for r in rows} == {quality_out}
     assert pool._conn.committed is True
