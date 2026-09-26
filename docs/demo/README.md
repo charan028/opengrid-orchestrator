@@ -1,4 +1,4 @@
-# OpenGrid Orchestrator: 20-step sign-off demo
+# OpenGrid Orchestrator: 21-step sign-off demo
 
 A presenter runs this start to finish in about 10 minutes against the dev stack or the server. Every
 injected moment is a scenario file in `integration-sims/scenarios/demo-*.yaml`, so the run is repeatable.
@@ -35,7 +35,7 @@ to do, where to look, and what must happen.
 | Moment | Scenario | Target | Screen to watch |
 |---|---|---|---|
 | Price spike during delivery | `demo-01-price-spike-lock` | `np6-905-cd` (wholesale), `np4-188-cd` RRS | Dispatch, Control room, Profitability |
-| SCADA overload | `demo-02-bank-overload` | `bank-012` (LZ_NORTH, 75 kVA) | Health, Dispatch |
+| SCADA overload | `demo-02-bank-overload` | `bank-012` (LZ_NORTH, 600 kVA) | Health, Dispatch |
 | Comms loss | `demo-03-zone-comms-loss` | `hub-00001` then zone `LZ_SOUTH` | Fleet, Health |
 | Forged command | `demo-04-tampered-command` | `hub-00142` (bank-022, LZ_HOUSTON) | Fleet drill-down, Control room |
 | Scoped safe stop | operator action, no scenario | `bank-022` | Fleet |
@@ -75,7 +75,7 @@ Scenario anomaly ids are deterministic: `<scenario>:<type>:<at_s>`, e.g.
    with a **Run** button each; the Active anomalies panel has a **Cancel** button per id. Use it or the
    `curl` lines, whichever you prefer to show.
 
-## The 20 steps
+## The 21 steps
 
 Timing is the budget per step; the total is about 10 minutes. Steps marked **[JUDGES]** are the 2-minute
 short version for hackathon judges: steps 7-8, 13 and 20 (run the price spike, show the lock holding and the
@@ -159,8 +159,8 @@ forgone upside; run the forged command and show it rejected; run chain verify).
 - **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-02-bank-overload/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
 - **Show:** `/og/health`, Alerts table.
 - **Expect:** Within two SCADA cycles a new alert row: rule `ALR-SCADA-OVERLOAD`, severity **critical**
-  (25% over the 75 kVA rating is above the 120% critical line), summary
-  `Bank bank-012 SCADA load 93.8 kVA over rating 75.0 kVA (125%)`. The same row appears in the Control room
+  (25% over the 600 kVA feeder-segment rating is above the 120% critical line), summary
+  `Bank bank-012 SCADA load 750.0 kVA over rating 600.0 kVA (125%)`. The same row appears in the Control room
   "Open alerts".
 
 **Step 10: The DIST_DEFERRAL loop pulls the bank back** (45 s)
@@ -272,6 +272,19 @@ forgone upside; run the forged command and show it rejected; run chain verify).
 - **Expect:** `passed: true`, `checked: <number of streams>`, `first_broken: null`. Say: records are
   hash-chained per stream, so nothing above could have been edited or removed without this turning to
   `passed: false` with the first broken `stream_id`/`seq`. That closes the run.
+
+**Step 21: Energy runs low on a committed delivery** (60 s)
+- **Action:** Run scenario `demo-05-energy-runs-low` (`curl -u tester:... -X POST $SIM/api/scenarios/demo-05-energy-runs-low/run`).
+  It raises simulated home load on every hub in `LZ_NORTH` to 10 kW for 5 minutes, so the homes behind
+  bank-012's committed deliveries drain toward their 20% reserve (7.84 kWh per unit) while still committed.
+- **Show:** Dispatch board, the bank-012 cards; then Health, Alerts; then the Control room invariant tiles.
+- **Expect:** The affected obligation cards turn amber (**AT_RISK**) and show a falling energy margin and a
+  time-to-depletion; `ALR-ENERGY-SHORTFALL-RISK` opens on Health (requirement change 2026-09-25, `docs/team/NOTICES.md`;
+  until that alert rule lands, the AT_RISK card and substitution grants to other hubs are the evidence).
+  Substitution moves the delivery to hubs with energy left rather than over-drawing; **Reserve breaches stays 0**
+  throughout (K1 on energy, not just power). Say: a home can have 11 kW of headroom and still be out of charge;
+  the system checks energy every cycle and never plans a discharge below reserve. End early with
+  `DELETE $SIM/api/anomalies/demo-05-energy-runs-low:reserve_floor_pressure:0`.
 
 ## Reset between runs (3 minutes)
 
