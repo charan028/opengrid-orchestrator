@@ -408,13 +408,8 @@ def test_ts_15b_stacking_regime_exceeds_cancellation_regime(dual_unit_share: flo
     assert locked.thd_current_vector_sum_pct > 2.0 * diverse.thd_current_vector_sum_pct
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "bank_measurement() reports thd_current_pct as the plain mean of per-hub THD_I, not the S3.2(b) vector "
-        "sum that S6.5 step 3 and TS-15b require (opengrid.core.pq.bank_thd_current_pct exists but is not called)"
-    ),
-)
+# Was a strict xfail (#16): bank_measurement reported THD_I as a per-hub mean. Fixed on main in R2, so it is
+# now a plain regression test that the bank THD_I is the S3.2(b) vector sum.
 @pytest.mark.parametrize("seed", SEEDS[:1])
 def test_ts_15b_bank_measurement_thd_current_is_the_vector_sum(
     dual_unit_share: float, seed: int, tmp_path: Path
