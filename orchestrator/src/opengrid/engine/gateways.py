@@ -198,6 +198,7 @@ class EngineFleetGateway:
                         reserve_kwh=snap.reserve_kwh,
                         e_kwh=snap.e_kwh,
                         eta_d=snap.eta_d,
+                        rated_kw=snap.rated_kw,
                     )
                 )
         return FleetState(hubs=tuple(hubs), banks=tuple(banks))

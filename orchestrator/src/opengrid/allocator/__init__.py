@@ -214,4 +214,5 @@ def _to_grant_row(cycle_id: str, ledger_version: int, grant: ProposedGrant) -> G
         granted_kw=Decimal(str(round(grant.granted_kw, 3))),
         is_headroom=grant.is_headroom,
         ledger_version=ledger_version,
+        reason_code=grant.reason_code or None,
     )

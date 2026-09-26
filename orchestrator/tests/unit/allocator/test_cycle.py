@@ -98,6 +98,71 @@ def test_ts_05_51_k13_substitution_on_hub_loss_keeps_full_delivery() -> None:
     assert result.shortfalls == ()
 
 
+def _rated_hub(hub_id: str, kw: float, *, health: str = "OK", soc_kwh: float = 1_000_000.0) -> HubSnapshot:
+    return HubSnapshot(
+        hub_id=hub_id,
+        bank_id="b1",
+        free_discharge_kw=kw if health == "OK" else 0.0,
+        health=health,
+        soc_kwh=soc_kwh if health == "OK" else None,
+        reserve_kwh=0.0 if health == "OK" else None,
+        e_kwh=1_000_000.0,
+        rated_kw=50.0,
+    )
+
+
+def test_ts_04_08_l0_device_fault_reduction_carries_override_l0() -> None:
+    """K13/ES05-S03: a device-safety exclusion (FAULT hub) that leaves the committed kW undeliverable is
+    reported R-COMMIT-LOCK-OVERRIDE-L0, and the reduced grant carries that reason (G-19 accepts it)."""
+    fleet = FleetState(
+        hubs=(_rated_hub("h1", 0.0, health="FAULT"), _rated_hub("h2", 50.0)),
+        banks=(_bank("b1", 50.0),),
+    )
+    ledger = LedgerView(calls=(_call("o1", "b1", "T1", 80.0, "PARTNER_CAPACITY", ("h2",)),))
+    result = cycle(_T0, fleet, ledger, Schedule(), {}, ())
+
+    shortfall = next(s for s in result.shortfalls if s.obligation_id == "o1")
+    assert shortfall.reason_code == reasons.R_COMMIT_LOCK_OVERRIDE_L0
+    grant = next(g for g in result.grants if g.obligation_id == "o1")
+    assert grant.granted_kw == 50.0
+    assert grant.reason_code == reasons.R_COMMIT_LOCK_OVERRIDE_L0
+
+
+def test_ts_04_09_l1_reserve_floor_reduction_carries_override_l1() -> None:
+    """K13/ES05-S03: hubs whose deliverable kW is cut by the homeowner reserve floor (SoC just above
+    reserve) are an L1 exception: R-COMMIT-LOCK-OVERRIDE-L1 on the shortfall and the reduced grant."""
+    low = 0.5  # kWh above a 0 kWh reserve: sustainable for a 10 s lease is far below the 50 kW rating
+    fleet = FleetState(
+        hubs=(_rated_hub("h1", 50.0, soc_kwh=low), _rated_hub("h2", 50.0, soc_kwh=low)),
+        banks=(_bank("b1", 100.0),),
+    )
+    ledger = LedgerView(calls=(_call("o1", "b1", "T1", 90.0, "PARTNER_CAPACITY", ("h1", "h2")),))
+    result = cycle(_T0, fleet, ledger, Schedule(), {}, (), lease_ttl_s=60.0)
+
+    shortfall = next(s for s in result.shortfalls if s.obligation_id == "o1")
+    assert shortfall.reason_code == reasons.R_COMMIT_LOCK_OVERRIDE_L1
+    grant = next(g for g in result.grants if g.obligation_id == "o1")
+    assert grant.granted_kw < 90.0
+    assert grant.reason_code == reasons.R_COMMIT_LOCK_OVERRIDE_L1
+
+
+def test_a_stale_hub_loss_stays_infeasible_and_a_full_grant_keeps_its_normal_reason() -> None:
+    fleet = FleetState(
+        hubs=(_rated_hub("h1", 0.0, health="STALE"), _rated_hub("h2", 50.0)),
+        banks=(_bank("b1", 50.0),),
+    )
+    short = LedgerView(calls=(_call("o1", "b1", "T1", 80.0, "PARTNER_CAPACITY", ("h2",)),))
+    result = cycle(_T0, fleet, short, Schedule(), {}, ())
+    assert next(s for s in result.shortfalls if s.obligation_id == "o1").reason_code == (
+        reasons.R_COMMIT_LOCK_INFEASIBLE
+    )
+
+    full = LedgerView(calls=(_call("o1", "b1", "T1", 40.0, "PARTNER_CAPACITY", ("h2",)),))
+    result = cycle(_T0, fleet, full, Schedule(), {}, ())
+    assert result.shortfalls == ()
+    assert next(g for g in result.grants if g.obligation_id == "o1").reason_code == reasons.R_GRANT_COMMITTED
+
+
 def test_ts_05_52_k5_l2_block_instruction_zeroes_bank_capability() -> None:
     fleet = FleetState(hubs=(_hub("h1", "b1", 50.0),), banks=(_bank("b1", 100.0),))
     ledger = LedgerView(calls=(_call("o1", "b1", "T1", 40.0, "DIST_DEFERRAL", ("h1",)),))

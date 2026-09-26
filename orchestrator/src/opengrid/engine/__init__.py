@@ -38,6 +38,7 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
+from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine.background import BackgroundIngest, run_periodic
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
@@ -211,6 +212,8 @@ def _distribute_hub_items(
         if granted_kw <= 0:
             continue
         reason_code = "R-GRANT-HEADROOM" if grant.is_headroom else "R-GRANT-COMMITTED"
+        if not grant.is_headroom and grant.reason_code in COMMIT_LOCK_OVERRIDE_REASONS:
+            reason_code = grant.reason_code  # K13 exception for a grant below its commitment (G-19)
         for hub in hubs:
             share_kw = granted_kw * (hub.free_discharge_kw / total_free_kw)
             if share_kw <= 1e-9:

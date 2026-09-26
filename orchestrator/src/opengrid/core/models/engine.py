@@ -163,6 +163,9 @@ class Grant(_Row):
     is_headroom: bool = False
     ledger_version: int
     command_batch_id: UUID | None = None
+    # Not an og.grant column: the allocator's reason for this grant, carried to the guardian batch items
+    # (a grant below the committed kW must carry its K13 exception, G-19). `None` = ordinary grant.
+    reason_code: str | None = None
 
 
 class CommandBatchRow(_Row):

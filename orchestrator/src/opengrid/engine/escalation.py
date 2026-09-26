@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 
 from opengrid.core.reasons import (
     R_COMMIT_LOCK_INFEASIBLE,
+    R_COMMIT_LOCK_OVERRIDE_L0,
+    R_COMMIT_LOCK_OVERRIDE_L1,
     R_COMMIT_LOCK_OVERRIDE_L2,
     R_SHORTFALL_BANK_CAPACITY,
     R_SHORTFALL_L2_INSTRUCTION,
@@ -36,8 +38,13 @@ _LOCK_REASON_BY_SHORTFALL: dict[str, str] = {
     R_SHORTFALL_BANK_CAPACITY: R_COMMIT_LOCK_INFEASIBLE,
 }
 
-#: When both apply in one cycle, the authority override wins (it is the stronger, externally-ordered one).
-_PRECEDENCE = (R_COMMIT_LOCK_OVERRIDE_L2, R_COMMIT_LOCK_INFEASIBLE)
+#: When several apply in one cycle, the higher tier wins: L0 safety > L1 reserve > L2 authority > infeasible.
+_PRECEDENCE = (
+    R_COMMIT_LOCK_OVERRIDE_L0,
+    R_COMMIT_LOCK_OVERRIDE_L1,
+    R_COMMIT_LOCK_OVERRIDE_L2,
+    R_COMMIT_LOCK_INFEASIBLE,
+)
 
 
 def lock_reason_for_shortfall(shortfall_reason: str) -> str | None:

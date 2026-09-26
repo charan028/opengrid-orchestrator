@@ -77,6 +77,9 @@ class HubCapabilitySnapshot(NamedTuple):
     # the engine can ramp each per-hub setpoint from where the hub actually is (K4).
     p_kw: float | None = None
     ramp_kw_per_s: float = 0.0
+    # Nameplate discharge kW (`params.p_kw`) regardless of health/SoC: lets the allocator attribute a
+    # shortfall to a device fault (L0) or the reserve floor (L1), K13.
+    rated_kw: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,6 +549,7 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
                 eta_d=runtime.params.eta_d,
                 p_kw=p_kw,
                 ramp_kw_per_s=hub_ramp_kw_per_s(runtime.params),
+                rated_kw=runtime.params.p_kw,
             )
         )
     return snapshots

@@ -316,6 +316,28 @@ def test_hub_setpoint_is_the_full_share_once_ramped_up() -> None:
     assert item["p_kw_setpoint"] == pytest.approx(-10.0)
 
 
+@pytest.mark.parametrize(
+    ("grant_reason", "item_reason"),
+    [
+        (None, "R-GRANT-COMMITTED"),
+        ("R-COMMIT-LOCK-OVERRIDE-L0", "R-COMMIT-LOCK-OVERRIDE-L0"),
+        ("R-COMMIT-LOCK-OVERRIDE-L1", "R-COMMIT-LOCK-OVERRIDE-L1"),
+        ("R-COMMIT-LOCK-INFEASIBLE", "R-COMMIT-LOCK-INFEASIBLE"),
+        ("R-GRANT-DIST-DEFERRAL-PI", "R-GRANT-COMMITTED"),  # not a K13 exception: unchanged
+    ],
+)
+def test_a_reduced_grant_carries_its_k13_exception_onto_the_batch_items(grant_reason, item_reason) -> None:
+    """K13/G-19: a grant the allocator reduced below its commitment (L0 fault, L1 reserve floor, L2,
+    infeasible) must reach the guardian with that exception, or G-19 refuses the whole batch."""
+    fleet_module = FakeFleetModule(
+        {"b1": [RampingHubCap("h1", "b1", 10.0, p_kw=-10.0, ramp_kw_per_s=0.1)]}  # type: ignore[list-item]
+    )
+    grant = _grant(kw="6").model_copy(update={"reason_code": grant_reason})
+    (item,) = engine._distribute_hub_items("b1", [grant], fleet_module=fleet_module, cycle_interval_s=2.0)
+
+    assert item["reason_code"] == item_reason
+
+
 # --- guardian-hold degraded mode (02b S6.5) --------------------------------------------------------
 
 

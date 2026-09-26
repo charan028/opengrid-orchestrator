@@ -44,6 +44,9 @@ class HubSnapshot:
     e_kwh: float | None = None  # usable energy capacity, for the symmetric charge-side cap
     eta_c: float = DEFAULT_ETA_C
     eta_d: float = DEFAULT_ETA_D
+    # Nameplate discharge kW regardless of health/SoC, so a shortfall can be attributed to the K13
+    # exception that caused it (device fault = L0, reserve floor = L1). `None`: unknown, attributes nothing.
+    rated_kw: float | None = None
 
     @property
     def is_healthy(self) -> bool:

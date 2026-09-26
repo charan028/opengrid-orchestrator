@@ -88,6 +88,19 @@ def test_the_real_allocators_shortfall_reasons_escalate() -> None:
     assert merge_signals([(OBL, "R-COMMIT-LOCK-INFEASIBLE")], []) == {OBL: {"R-COMMIT-LOCK-INFEASIBLE"}}
 
 
+def test_l0_and_l1_shortfalls_escalate_with_tier_precedence() -> None:
+    signals = merge_signals(
+        [
+            (OBL, "R-COMMIT-LOCK-OVERRIDE-L1"),
+            (OBL, "R-COMMIT-LOCK-OVERRIDE-L2"),
+            (OTHER, "R-COMMIT-LOCK-OVERRIDE-L0"),
+        ],
+        energy_infeasible=[OBL],
+    )
+    due = dict(ShortfallEscalator(sustain_cycles=1).observe(signals))
+    assert due == {OBL: "R-COMMIT-LOCK-OVERRIDE-L1", OTHER: "R-COMMIT-LOCK-OVERRIDE-L0"}
+
+
 def _energy(obligation_id: str, margin_kwh: float) -> EnergySufficiencyResult:
     return EnergySufficiencyResult(
         obligation_id=obligation_id,

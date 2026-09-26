@@ -149,6 +149,8 @@ async def test_fleet_gateway_bank_ids_and_fleet_state():
     assert hub_ids == {"hub-00000", "hub-00001"}
     online = next(h for h in state.hubs if h.hub_id == "hub-00000")
     assert online.health == "OK"
+    # Nameplate kW for every hub, online or not (K13 L0/L1 shortfall attribution).
+    assert {h.hub_id: h.rated_kw for h in state.hubs} == {"hub-00000": 5.0, "hub-00001": 5.0}
 
 
 async def test_fleet_gateway_skips_unknown_bank_id():
