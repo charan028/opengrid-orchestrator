@@ -2296,7 +2296,7 @@ label > select {
 .og-asset-sub span { transform: rotate(45deg) scale(.72); border-radius: 2px; }
 .og-asset-depot span { background: var(--panel); border: 2px solid var(--text); border-radius: 3px 3px 0 0;
   clip-path: polygon(50% 0, 100% 40%, 100% 100%, 0 100%, 0 40%); }
-.og-map-legend .og-legend-square { display: inline-block; width: 10px; height: 10px; border-radius: 1px; margin-right: 6px; }
-.og-map-legend .og-legend-diamond { display: inline-block; width: 9px; height: 9px; transform: rotate(45deg); margin: 0 7px 0 1px; }
+.og-map-legend .og-legend-square { display: inline-block; width: 10px; height: 10px; border-radius: 1px !important; margin-right: 6px; }
+.og-map-legend .og-legend-diamond { display: inline-block; width: 9px; height: 9px; border-radius: 1px !important; transform: rotate(45deg); margin: 0 7px 0 1px; }
 .og-map-legend .og-legend-depot { display: inline-block; width: 11px; height: 11px; margin-right: 6px; background: transparent !important;
   border: 2px solid var(--text); clip-path: polygon(50% 0, 100% 40%, 100% 100%, 0 100%, 0 40%); }
