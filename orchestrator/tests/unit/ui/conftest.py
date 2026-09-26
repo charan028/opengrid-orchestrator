@@ -64,10 +64,15 @@ def fake_api(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, Any]], None
 def fake_post_api(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, Any]], None]:
     """Install a fake `post_json` that serves fixture payloads keyed by request path. A value that is
     itself an `api_client.ApiUnavailable` instance is raised instead of returned, so a single `install()`
-    call can set up both the happy path and an error path (e.g. a 409 veto, a 503 timeout) per test."""
+    call can set up both the happy path and an error path (e.g. a 409 veto, a 503 timeout) per test.
+    Every call is recorded on `install.posted` (path, payload, forwarded remote_user)."""
+    posted: list[dict[str, Any]] = []
 
     def install(responses: dict[str, Any]) -> None:
-        async def fake_post_json(path: str, payload: dict[str, Any]) -> Any:
+        async def fake_post_json(
+            path: str, payload: dict[str, Any], *, remote_user: str | None = None
+        ) -> Any:
+            posted.append({"path": path, "payload": payload, "remote_user": remote_user})
             if path not in responses:
                 raise api_client.ApiUnavailable(f"no fixture registered for POST {path}")
             entry = responses[path]
@@ -90,4 +95,5 @@ def fake_post_api(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, Any]],
             return
         monkeypatch.setattr(billing_audit, "post_json", fake_post_json)
 
+    install.posted = posted  # type: ignore[attr-defined]
     return install

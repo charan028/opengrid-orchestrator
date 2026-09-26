@@ -8,20 +8,22 @@ NOTIFY `REQUEST_CHANNEL` with `{"action": "PROPOSE"|"CONFIRM", "proposal_id", "s
 "reason", "initiator_ref"}`; `og-safestop`'s own `ConfirmationBroker` only calls `engage()` when a
 CONFIRM lands within its `confirm_window_s` of the matching PROPOSE.
 
-`release()` always fails closed from `og-safestop` (`SafestopService.release`, K8: the stop-only key
-can never sign a RELEASE) -- release requires the guardian's Tier-2 (two-person) co-signed path, which
-no agent has built yet. `api` does not fabricate a signature to work around that; the release endpoint
-below reports the gap honestly (`501`) rather than pretending to have released the stop.
+A RELEASE is never signed by `og-safestop`'s stop-only key (K8). It is the guardian's two-person path:
+operator A requests (`request_release`), a different operator B approves (`approve_release`), which
+writes one confirmed TIER2 `og.operator_action`; the guardian verifies it against
+`[guardian].stop_release_authorised_operators` and signs, and `og-safestop` relays it to the hubs. `api`
+never fabricates a signature or a release.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from opengrid.api.auth import Identity, require_operator
 from opengrid.api.deps import get_proposals, get_store, get_trace_store
@@ -39,8 +41,10 @@ from opengrid.trace.store import TraceStore
 router = APIRouter(prefix="/og/api/safestop", tags=["safestop"])
 
 _SAFESTOP_PROPOSAL_KIND = "safestop"
+_RELEASE_PROPOSAL_KIND = "safestop-release"
 _STOP_POLL_INTERVAL_S = 0.2
 _STOP_POLL_TIMEOUT_S = 3.0
+_RELEASE_POLL_TIMEOUT_S = 10.0  # guardian poll + sign + og-safestop relay
 _SCOPE_KIND = {"fleet": "FLEET", "zone": "ZONE", "bank": "BANK"}
 
 
@@ -126,55 +130,128 @@ async def confirm_safestop(
     )
 
 
-@router.post("/{scope}/{scope_id}/release")
-async def release_safestop(
+@dataclass(frozen=True, slots=True)
+class _ReleaseRequest:
+    scope_kind: str
+    scope_ref: str
+    reason: str
+    requested_by: str
+
+
+@router.post("/{scope}/{scope_id}/release", status_code=status.HTTP_202_ACCEPTED)
+async def request_release(
     scope: str,
     scope_id: str,
     body: SafestopReleaseRequest,
+    proposals: Annotated[ProposalStore, Depends(get_proposals)],
+    identity: Annotated[Identity, Depends(require_operator)],
+) -> ProposalAccepted:
+    """K8 release, step 1 of 2 (operator A). Nothing is written or released yet: `og-safestop`'s
+    stop-only key can never sign a RELEASE; the guardian signs one only for a request approved by a
+    SECOND authorised operator (`approve_release`, `opengrid.guardian.stop_release`)."""
+    scope_kind, scope_ref = _normalise_scope(scope, scope_id)
+    request = _ReleaseRequest(scope_kind, scope_ref, body.reason, identity.user)
+    summary = f"Release safe stop on {scope_kind}:{scope_ref} ({body.reason}); needs a second operator"
+    proposal = proposals.create(_RELEASE_PROPOSAL_KIND, request, summary, identity.user)
+    return ProposalAccepted(proposal_id=proposal.proposal_id, summary=summary, expires_in_s=60.0)
+
+
+@router.post("/release/{proposal_id}/approve")
+async def approve_release(
+    proposal_id: UUID,
+    response: Response,
+    proposals: Annotated[ProposalStore, Depends(get_proposals)],
     trace_store: Annotated[TraceStore, Depends(get_trace_store)],
     store: Annotated[StoreProtocol, Depends(get_store)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
-    """Single step in the API shape (02b S7.1: "release is inherently reversible, engage is not"), but
-    `og-safestop`'s stop-only key always refuses to sign a RELEASE (K8) -- that requires the guardian's
-    Tier-2 (two-person) co-signed path, not yet built by any agent. Records the attempt for audit and
-    reports the gap as `501`, rather than fabricating a signature or silently no-op-ing."""
-    scope_kind = _SCOPE_KIND.get(scope.lower(), scope.upper())
+    """K8 release, step 2 of 2 (operator B, never the requester: `403`). Writes ONE `og.operator_action`
+    SAFE_STOP_RELEASE (tier TIER2, confirmed, `operator_ref` = A, `approver_ref` = B) that the guardian
+    verifies (allow-list, distinct operators, age, scope still engaged) and signs, and `og-safestop`
+    relays to the hubs. Then polls `og.stop_event` for the RELEASE: `200` when it lands, `202` while the
+    guardian has not released (it may refuse -- e.g. an empty allow-list -- which is never faked here)."""
+    try:
+        request: _ReleaseRequest = proposals.peek(proposal_id, kind=_RELEASE_PROPOSAL_KIND).body
+    except ProposalExpiredError as exc:
+        raise HTTPException(status.HTTP_410_GONE, detail="release request expired, request again") from exc
+    except KeyError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="unknown release request") from exc
+    if identity.user.casefold() == request.requested_by.casefold():
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="a release needs a second operator; the requester cannot approve",
+        )
+    _pop_or_404(proposals, proposal_id, kind=_RELEASE_PROPOSAL_KIND)
+
+    since = datetime.now(UTC)
+    target_ref = f"{request.scope_kind}:{request.scope_ref}"
     trace_ref = await trace_store.append(
         stream_id=f"operator_action:{identity.user}",
         decision_type="OPERATOR_ACTION",
         event_class="SAFE_STOP_RELEASE",
         payload={
-            "decision_ref": f"{scope_kind}:{scope_id}",
-            "scope": scope_kind,
-            "scope_ref": scope_id,
-            "reason": body.reason,
-            "result": "REFUSED_NO_TIER2_PATH",
+            "decision_ref": target_ref,
+            "scope": request.scope_kind,
+            "scope_ref": request.scope_ref,
+            "reason": request.reason,
+            "requested_by": request.requested_by,
+            "approved_by": identity.user,
         },
     )
     await store.insert_operator_action(
-        operator_ref=identity.user,
+        operator_ref=request.requested_by,
         action_kind="SAFE_STOP_RELEASE",
-        target_ref=f"{scope_kind}:{scope_id}",
+        target_ref=target_ref,
         tier="TIER2",
-        reason=body.reason,
+        reason=request.reason,
         trace_id=trace_ref.trace_id,
-        confirmed_at=None,
+        confirmed_at=since,
+        approver_ref=identity.user,
     )
-    raise HTTPException(
-        status.HTTP_501_NOT_IMPLEMENTED,
-        detail="release requires the guardian's Tier-2 (two-person) co-signed path (02a S6.5); "
-        "og-safestop's stop-only key cannot sign a RELEASE and that path is not yet built",
+    released = await _poll_for_stop_action(
+        store,
+        request.scope_kind,
+        request.scope_ref,
+        "RELEASE",
+        since=since,
+        timeout_s=_RELEASE_POLL_TIMEOUT_S,
     )
+    if not released:
+        response.status_code = status.HTTP_202_ACCEPTED
+    return {
+        "proposal_id": str(proposal_id),
+        "scope": request.scope_kind,
+        "scope_ref": request.scope_ref,
+        "released": released,
+        "trace_id": str(trace_ref.trace_id),
+        "detail": None if released else "approved; waiting for the guardian's signed release",
+    }
+
+
+def _normalise_scope(scope: str, scope_id: str) -> tuple[str, str]:
+    """`fleet` -> ("FLEET", "FLEET") whatever id was passed (the engage path's own fleet scope_ref);
+    `zone`/`bank` keep their id."""
+    scope_kind = _SCOPE_KIND.get(scope.lower())
+    if scope_kind is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"unknown scope {scope!r}")
+    return scope_kind, ("FLEET" if scope_kind == "FLEET" else scope_id)
 
 
 async def _poll_for_engage(store: StoreProtocol, scope_kind: str, scope_ref: str, *, since: datetime) -> bool:
+    return await _poll_for_stop_action(
+        store, scope_kind, scope_ref, "ENGAGE", since=since, timeout_s=_STOP_POLL_TIMEOUT_S
+    )
+
+
+async def _poll_for_stop_action(
+    store: StoreProtocol, scope_kind: str, scope_ref: str, action: str, *, since: datetime, timeout_s: float
+) -> bool:
     elapsed = 0.0
-    while elapsed < _STOP_POLL_TIMEOUT_S:
+    while elapsed < timeout_s:
         latest = await store.latest_stop_event(scope_kind, scope_ref)
         if latest is not None:
-            action, created_at = latest
-            if action == "ENGAGE" and created_at >= since:
+            latest_action, created_at = latest
+            if latest_action == action and created_at >= since:
                 return True
         await asyncio.sleep(_STOP_POLL_INTERVAL_S)
         elapsed += _STOP_POLL_INTERVAL_S

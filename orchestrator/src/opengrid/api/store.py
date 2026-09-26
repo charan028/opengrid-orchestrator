@@ -213,7 +213,11 @@ class StoreProtocol(Protocol):
         reason: str | None,
         trace_id: UUID | None,
         confirmed_at: datetime | None,
-    ) -> UUID: ...
+        approver_ref: str | None = None,
+    ) -> UUID:
+        """`approver_ref` defaults to `operator_ref` (single-operator actions); the two-person stop
+        RELEASE passes the second operator."""
+        ...
 
 
 def _row_or_none(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -654,6 +658,7 @@ class PgStore:
         reason: str | None,
         trace_id: UUID | None,
         confirmed_at: datetime | None,
+        approver_ref: str | None = None,
     ) -> UUID:
         action_id = uuid4()
         await self._execute(
@@ -671,7 +676,7 @@ class PgStore:
                 tier,
                 reason,
                 confirmed_at,
-                operator_ref,
+                approver_ref if approver_ref is not None else operator_ref,
                 trace_id,
             ),
         )

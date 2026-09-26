@@ -383,7 +383,16 @@ class FakeStore:
         self.retention[event_class] = retention_days
 
     async def insert_operator_action(
-        self, *, operator_ref, action_kind, target_ref, tier, reason, trace_id, confirmed_at
+        self,
+        *,
+        operator_ref,
+        action_kind,
+        target_ref,
+        tier,
+        reason,
+        trace_id,
+        confirmed_at,
+        approver_ref=None,
     ) -> UUID:
         action_id = uuid4()
         self.operator_actions.append(
@@ -392,6 +401,9 @@ class FakeStore:
                 "operator_ref": operator_ref,
                 "action_kind": action_kind,
                 "target_ref": target_ref,
+                "tier": tier,
+                "confirmed_at": confirmed_at,
+                "approver_ref": approver_ref if approver_ref is not None else operator_ref,
                 "trace_id": trace_id,
             }
         )
