@@ -70,3 +70,70 @@ def test_viewer_gets_no_selection_or_bulk_command(viewer_page: Page) -> None:
     expect(viewer_page.locator("input.og-row-select")).to_have_count(0)
     expect(viewer_page.locator("#bulk-command-form")).to_have_count(0)
     expect(viewer_page.locator("#fleet-select-toggle")).to_have_count(0)
+
+
+def _hub_screen_point(page: Page, index: int = 0) -> tuple[str, float, float]:
+    """The id and viewport position of a real hub marker, read off the live map (`og.map.instances`).
+    Clicking a guessed fraction of the map hits empty space more often than not, which is exactly how a
+    working click-to-select looked broken during review."""
+    box = page.locator("#fleet-map").bounding_box()
+    assert box is not None
+    probe = page.evaluate(
+        """(index) => {
+            const handle = og.map.instances['fleet-map'];
+            const ids = Object.keys(handle.hubMarkers).sort();
+            const id = ids[index];
+            const point = handle.map.latLngToContainerPoint(handle.hubMarkers[id].getLatLng());
+            return {id: id, x: point.x, y: point.y};
+        }""",
+        index,
+    )
+    return probe["id"], box["x"] + probe["x"], box["y"] + probe["y"]
+
+
+def test_clicking_a_hub_opens_its_detail_when_not_selecting(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    _hub_id, x, y = _hub_screen_point(operator_page)
+
+    operator_page.mouse.click(x, y)
+
+    expect(operator_page.locator(".leaflet-popup")).to_have_count(1)
+    expect(operator_page.locator("#fleet-selection-count")).to_have_text("No hubs selected")
+
+
+def test_clicking_a_hub_in_select_mode_picks_and_unpicks_it(operator_page: Page) -> None:
+    """CR #19 asks for "one or in bulk": one click is the "one"."""
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    hub_id, x, y = _hub_screen_point(operator_page)
+    operator_page.locator("#fleet-select-toggle").click()
+
+    operator_page.mouse.click(x, y)
+    expect(operator_page.locator("#fleet-selection-count")).to_have_text("1 hub selected")
+    expect(operator_page.locator("#bulk-hub-ids")).to_have_value(hub_id)
+
+    operator_page.mouse.click(x, y)
+    expect(operator_page.locator("#fleet-selection-count")).to_have_text("No hubs selected")
+
+
+def test_a_click_on_empty_map_keeps_the_selection(operator_page: Page) -> None:
+    """A stray click used to sweep a zero-area rectangle and silently clear everything selected."""
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    _select_first_rows(operator_page, 2)
+    operator_page.locator("#fleet-select-toggle").click()
+    box = operator_page.locator("#fleet-map").bounding_box()
+    assert box is not None
+
+    # the far top-left of the ERCOT view is open water/desert -- no hub within the pick radius
+    operator_page.mouse.click(box["x"] + 12, box["y"] + 12)
+
+    expect(operator_page.locator("#fleet-selection-count")).to_have_text("2 hubs selected")
+
+
+def test_the_map_legend_names_every_layer(viewer_page: Page) -> None:
+    goto_ok(viewer_page, f"{BASE_PATH}/fleet")
+    legend = viewer_page.locator(".og-map-legend")
+
+    expect(legend).to_contain_text("Hub health")
+    for state in ("Online", "Stale", "Offline", "Fault"):
+        expect(legend).to_contain_text(state)
+    expect(legend).to_contain_text("selected for a command")

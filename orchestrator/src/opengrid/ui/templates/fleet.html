@@ -8,9 +8,10 @@
 {% block content %}
 <section class="og-panel og-map-panel" aria-label="Fleet map">
   <h2>Fleet map</h2>
-  <p>Every hub, coloured by health and sized by state. Scroll or pinch to zoom and drag to pan. Turn on
-    <em>Select an area</em> to drag a rectangle over the hubs you want, or tick them in the table below;
-    the two selections are the same list.</p>
+  <p>Every hub, coloured by health. Scroll or pinch to zoom and drag to pan; click a hub for its detail.
+    Turn on <em>Select an area</em>, then drag a rectangle over the hubs you want or click them one at a
+    time; hold Shift while dragging to add to the selection. Ticking rows in the table below does the
+    same thing &mdash; it is one selection either way.</p>
   <div class="og-map-toolbar">
     {% if is_operator %}
     <button type="button" class="btn" id="fleet-select-toggle" aria-pressed="false">Select an area</button>
@@ -154,7 +155,10 @@
     og.map.addHubLayer(handle, hubs, { colorBy: "health" });
     og.map.addLegend(
       handle,
-      og.map.hubLegendItems("health"),
+      [{ heading: "Hub health" }].concat(og.map.hubLegendItems("health"), [
+        { heading: "Selection" },
+        { label: "selected for a command", color: og.token("--accent") },
+      ]),
       og.map.derivedPositions(hubs)
         ? "Hubs are placed inside their real load zone; exact coordinates arrive with /og/api/fleet/map."
         : null
@@ -205,7 +209,18 @@
       });
     });
 
-    var areaSelect = og.map.enableAreaSelect(handle, setSelection);
+    // Drag a rectangle for many, click one hub for one (CR #19: "select hubs, one or in bulk").
+    function togglePick(hubId) {
+      var at = selection.indexOf(hubId);
+      if (at === -1) {
+        selection.push(hubId);
+      } else {
+        selection.splice(at, 1);
+      }
+      renderSelection();
+    }
+
+    var areaSelect = og.map.enableAreaSelect(handle, setSelection, togglePick);
     var toggle = document.getElementById("fleet-select-toggle");
     if (toggle) {
       toggle.addEventListener("click", function () {

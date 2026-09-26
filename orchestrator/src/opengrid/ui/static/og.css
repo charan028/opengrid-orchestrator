@@ -1185,10 +1185,6 @@ label > select {
 
 /* --- grid map: panel, controls, layer toggles, legend, selection (CR #19 items 1-2) ------------- */
 
-.og-map-tall {
-  height: 520px;
-}
-
 .og-map-panel > p:first-of-type {
   max-width: 88ch;
 }
@@ -1282,6 +1278,26 @@ label > select {
 
 .og-map-legend i {
   flex: none;
+}
+
+.og-legend-line {
+  width: 16px !important;
+  height: 3px !important;
+  border-radius: 2px !important;
+}
+
+.og-legend-heading {
+  flex-basis: 100%;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.og-legend-heading:first-child {
+  margin-top: 0;
 }
 
 /* Customer sites: a square pin, so a site is never confused with a round hub dot. */
@@ -1681,6 +1697,11 @@ label > select {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--panel-2);
+}
+
+/* Declared after `.og-map` on purpose: same specificity, so the taller variant only wins from here. */
+.og-map-tall {
+  height: 560px;
 }
 
 [data-theme="dark"] .leaflet-tile-pane,
