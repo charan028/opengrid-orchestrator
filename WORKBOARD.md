@@ -16,9 +16,14 @@ is claimed. Only the **Lead** deploys and merges to `main`.
 | WP | Scope | Status |
 |---|---|---|
 | L1 | Deploy the opportunity intake; prove the live path (live prices → commitments for several customers → guardian PASS → acks → settle) | IN PROGRESS (lead) |
-| L2 | Security fixes: CSRF, safestop keygen seed, Mosquitto test ACL | IN PROGRESS (lead) |
+| L2 | Security fixes: CSRF, safestop keygen seed, Mosquitto test ACL, simulators bound to loopback | DONE (lead) |
 | L3 | Merge PRs, run the gate + server integration tests, deploy, live verification; A1–A11 smoke | ONGOING (lead) |
 | L4 | Soak (1 h) and kill-each-process chaos runs on the server (uses Q3's tooling) | OPEN (lead) |
+| L5 | Power quality (spec `06`, approved): wave 1 A/B/E, wave 2 C/D/G/H/I, wave 3 F/J | IN PROGRESS (lead): B done; A, E finishing on `wip/pq-wave1-20260925` |
+
+Live status (2026-09-25 late): A1, A4-grants, A9, A10, A11 pass. Commitments, guardian PASS and settlement are not yet
+live: `ledger.reserve()` returns `R-COMMIT-LOCK-INFEASIBLE`, which is under investigation. Details are in
+`docs/team/NOTICES.md`.
 
 ## Contributor work packages (no server access needed)
 
