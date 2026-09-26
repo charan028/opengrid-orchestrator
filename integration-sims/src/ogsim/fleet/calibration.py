@@ -11,6 +11,18 @@ A `calibration_drift_correctable` anomaly's drift is fully or partially
 removed in proportion to the command's `correction` fields; a
 `calibration_drift_hardware` anomaly is never affected by any command,
 exercising the escalation path (§5.5.4) deterministically in tests.
+
+Freshness (K6 pattern): the guardian assigns each hub's calibration commands a
+strictly increasing `(epoch, seq)`. A hub rejects (`STALE_SEQ`) any command whose
+pair does not exceed the last one it APPLIED, so a captured command can never be
+replayed within its lease, even across the 24 h rate-limit window.
+
+Rollback is hub-local (§5.5.4 "automatic rollback"): when applying a command makes
+a unit worse, the hub itself restores the parameters it had immediately before that
+same command, inside the same apply, and acks `WORSE_ROLLED_BACK`. No second remote
+command is ever needed or sent for a rollback, so the guardian's G-25 rate limit
+(one signed calibration command per hub per 24 h) applies to every command without
+exception, and a rollback cannot be used to chase the limit.
 """
 
 from __future__ import annotations
@@ -110,6 +122,13 @@ def apply_calibration(
     if not (issued_at <= now_dt < expires_at):
         return CalibrationOutcome(calibration_id, hub_id, False, "EXPIRED", None, None, "EXPIRED")
 
+    try:
+        epoch, seq = int(command["epoch"]), int(command["seq"])
+    except (KeyError, TypeError, ValueError):
+        return _reject(calibration_id, hub_id, "STALE_SEQ")
+    if any((epoch, seq) <= (int(pq.last_calibration_epoch[i]), int(pq.last_calibration_seq[i])) for i in idx):
+        return _reject(calibration_id, hub_id, "STALE_SEQ")
+
     if any(pq.last_calibration_at[i] >= 0 and now - pq.last_calibration_at[i] < rate_limit_s for i in idx):
         return _reject(calibration_id, hub_id, "RATE_LIMITED")
 
@@ -119,7 +138,6 @@ def apply_calibration(
         return _reject(calibration_id, hub_id, "BOUNDS_EXCEEDED")
 
     outcome_label, resulting = _apply_to_units(pq, anomalies, idx, correction)
-    epoch, seq = int(command.get("epoch", -1)), int(command.get("seq", -1))
     for i in idx:
         pq.last_calibration_at[i] = now
         pq.last_calibration_epoch[i] = epoch

@@ -5,11 +5,14 @@ tests, no DB/MQTT")."""
 from __future__ import annotations
 
 import asyncio
+import math
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 
+from opengrid.core.pq import OffsetVector
 from opengrid.guardian import repo
 
 
@@ -81,19 +84,26 @@ async def test_ts_06_09_ledger_version_port_reads_the_durable_version_not_the_en
 
     ledger_module._instance = None  # og-guardian never configures the engine facade
     cursor = FakeCursor([(41,)])
-    ports, _leases = repo.build_pg_ports(FakePool(cursor), trace_store=None, hubs=None)  # type: ignore[arg-type]
+    ports, _leases = repo.build_pg_ports(
+        FakePool(cursor),
+        trace_store=None,  # type: ignore[arg-type]
+        hubs=None,  # type: ignore[arg-type]
+        clock=object(),  # type: ignore[arg-type]
+        l2_instructions=object(),  # type: ignore[arg-type]
+    )
 
     assert await ports.ledger.ledger_version() == 41
     assert "MAX(ledger_version)" in cursor.executed[0][0]
 
 
 async def test_pg_bank_state_port_found_with_load():
-    cursor = FakeCursor([(75.0, 5.0, "feeder-1"), (42.0,)])
+    cursor = FakeCursor([(75.0, 5.0, "feeder-1"), (42.0, 1.5)])
     port = repo.PgBankStatePort(FakePool(cursor))
     snap = await port.snapshot("bank-1")
     assert snap is not None
     assert snap.feeder_id == "feeder-1"
     assert snap.bank_load_kva == 42.0
+    assert snap.bank_load_age_s == 1.5
 
 
 async def test_pg_bank_state_port_missing_bank():
@@ -102,12 +112,15 @@ async def test_pg_bank_state_port_missing_bank():
     assert await port.snapshot("nope") is None
 
 
-async def test_pg_bank_state_port_no_load_defaults_zero():
+async def test_pg_bank_state_port_no_load_reading_is_unknown_not_empty():
+    """K4 regression: a bank with no SCADA reading used to look like a 0 kVA bank to G-03 (fail-open).
+    It now carries an infinite reading age, which G-03 vetoes as BANK_LOAD_STALE."""
     cursor = FakeCursor([(75.0, 5.0, None), None])
     port = repo.PgBankStatePort(FakePool(cursor))
     snap = await port.snapshot("bank-1")
     assert snap is not None
     assert snap.bank_load_kva == 0.0
+    assert snap.bank_load_age_s == math.inf
 
 
 async def test_pg_commitment_port_found_and_default():
@@ -173,13 +186,11 @@ async def test_pg_lease_state_record_accepted_never_raises_on_db_failure():
     await leases.record_accepted("bank-1", 3, 7)  # must not raise (K7: degrade, don't trip)
 
 
-async def test_pg_l2_instruction_port_active_and_none():
-    active = repo.PgL2InstructionPort(FakePool(FakeCursor([("LIMIT", 10.0)])))
-    instruction = await active.active_instruction("bank-1")
-    assert instruction is not None and instruction.kind == "LIMIT" and instruction.limit_kw == 10.0
-
-    none_port = repo.PgL2InstructionPort(FakePool(FakeCursor([None])))
-    assert await none_port.active_instruction("bank-1") is None
+def test_pg_l2_instruction_port_removed():
+    """K5: the Postgres L2 port read `payload ->> 'kind'` from RT_ALLOCATION traces the engine never
+    writes (live: 0 rows in 24 h), so G-15 and any L2 override check always saw "no instruction". The
+    guardian now subscribes to utility instructions itself (`mqtt_io.MqttL2InstructionPort`)."""
+    assert not hasattr(repo, "PgL2InstructionPort")
 
 
 async def test_pg_safe_stop_port_engaged_and_clear():
@@ -245,50 +256,263 @@ async def test_load_hub_params():
     assert params["hub-1"].params.p_kw == 11.0
 
 
-async def test_chrony_clock_port_falls_back_to_zero_when_unavailable(monkeypatch):
-    async def fail_exec(*args, **kwargs):
-        raise OSError("chronyc not found")
+# ---------------------------------------------------------------------------------------------------
+# K12/G-20 clock adapters: recorded `chronyc tracking` outputs and kernel adjtimex states. Every failure
+# mode must report +inf (out of limit -> TIMEOUT hold); the old adapter reported 0.0 ms (a PASS).
+# ---------------------------------------------------------------------------------------------------
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_exec)
-    clock = repo.ChronyClockPort()
-    assert await clock.offset_from_ntp_ms() == 0.0
+CHRONY_SYNCED = b"""Reference ID    : C0A80101 (ntp1.example.net)
+Stratum         : 3
+Ref time (UTC)  : Sat Sep 26 09:53:31 2026
+System time     : 0.000123456 seconds slow of NTP time
+Last offset     : -0.000021370 seconds
+RMS offset      : 0.000180522 seconds
+Frequency       : 12.914 ppm fast
+Residual freq   : -0.001 ppm
+Skew            : 0.041 ppm
+Root delay      : 0.020233121 seconds
+Root dispersion : 0.001204512 seconds
+Update interval : 1031.4 seconds
+Leap status     : Normal
+"""
+
+CHRONY_UNSYNCED = b"""Reference ID    : 00000000 ()
+Stratum         : 0
+Ref time (UTC)  : Thu Jan 01 00:00:00 1970
+System time     : 0.000000000 seconds fast of NTP time
+Last offset     : +0.000000000 seconds
+RMS offset      : 0.000000000 seconds
+Frequency       : 0.000 ppm slow
+Residual freq   : +0.000 ppm
+Skew            : 0.000 ppm
+Root delay      : 1.000000000 seconds
+Root dispersion : 1.000000000 seconds
+Update interval : 0.0 seconds
+Leap status     : Not synchronised
+"""
 
 
-async def test_chrony_clock_port_parses_system_time_line(monkeypatch):
-    class FakeProcess:
-        async def communicate(self):
-            return b"System time     : 0.000123456 seconds fast of NTP time\n", b""
+class _FakeChronyProcess:
+    def __init__(self, stdout: bytes, *, returncode: int = 0, hang: bool = False) -> None:
+        self._stdout = stdout
+        self.returncode = returncode
+        self._hang = hang
+        self.killed = False
+
+    async def communicate(self):
+        if self._hang:
+            await asyncio.sleep(3600)
+        return self._stdout, b""
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _patch_chronyc(monkeypatch, process: _FakeChronyProcess | None = None, *, error: Exception | None = None):
+    calls: list[tuple] = []
 
     async def fake_exec(*args, **kwargs):
-        return FakeProcess()
+        calls.append(args)
+        if error is not None:
+            raise error
+        return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    clock = repo.ChronyClockPort()
-    offset = await clock.offset_from_ntp_ms()
-    assert offset == pytest.approx(0.123456)
+    return calls
 
 
-async def test_chrony_clock_port_missing_system_time_line_returns_zero(monkeypatch):
-    class FakeProcess:
-        async def communicate(self):
-            return b"Reference ID    : ABCD1234\n", b""
+async def test_chrony_synced_output_reports_signed_offset(monkeypatch):
+    calls = _patch_chronyc(monkeypatch, _FakeChronyProcess(CHRONY_SYNCED))
+    offset = await repo.ChronyClockPort().offset_from_ntp_ms()
+    assert offset == pytest.approx(-0.123456)  # "slow of NTP time" -> negative
+    assert calls[0] == ("chronyc", "tracking")
 
-    async def fake_exec(*args, **kwargs):
-        return FakeProcess()
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    clock = repo.ChronyClockPort()
-    assert await clock.offset_from_ntp_ms() == 0.0
+async def test_chrony_unsynchronised_leap_status_is_out_of_limit(monkeypatch):
+    """Regression: a "Not synchronised" chrony still prints a 0.000 s System time, which the old
+    adapter reported as a perfect 0.0 ms offset."""
+    _patch_chronyc(monkeypatch, _FakeChronyProcess(CHRONY_UNSYNCED))
+    assert await repo.ChronyClockPort().offset_from_ntp_ms() == math.inf
+
+
+async def test_chrony_missing_binary_is_out_of_limit(monkeypatch):
+    """Regression (K12 fail-open): the old adapter returned 0.0 ms when chronyc was missing -- which is
+    the live host's actual state (it runs ntpd; chronyc is not installed)."""
+    _patch_chronyc(monkeypatch, error=FileNotFoundError("chronyc"))
+    assert await repo.ChronyClockPort().offset_from_ntp_ms() == math.inf
+
+
+async def test_chrony_timeout_is_out_of_limit_and_the_process_is_killed(monkeypatch):
+    process = _FakeChronyProcess(b"", hang=True)
+    _patch_chronyc(monkeypatch, process)
+    assert await repo.ChronyClockPort(timeout_s=0.01).offset_from_ntp_ms() == math.inf
+    assert process.killed
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        b"",
+        b"506 Cannot talk to daemon\n",
+        b"Reference ID    : ABCD1234\nLeap status     : Normal\n",  # no System time line
+        b"System time     : banana seconds fast of NTP time\nLeap status     : Normal\n",
+        b"System time     : 0.0001 seconds sideways of NTP time\nLeap status     : Normal\n",
+        b"System time     : nan seconds fast of NTP time\nLeap status     : Normal\n",
+        b"System time     : 0.0001 seconds fast of NTP time\n",  # no leap status line
+    ],
+)
+async def test_chrony_garbage_output_is_out_of_limit(monkeypatch, stdout):
+    _patch_chronyc(monkeypatch, _FakeChronyProcess(stdout))
+    assert await repo.ChronyClockPort().offset_from_ntp_ms() == math.inf
+
+
+async def test_chrony_nonzero_exit_is_out_of_limit(monkeypatch):
+    _patch_chronyc(monkeypatch, _FakeChronyProcess(CHRONY_SYNCED, returncode=1))
+    assert await repo.ChronyClockPort().offset_from_ntp_ms() == math.inf
+
+
+async def test_chrony_reading_is_cached_briefly(monkeypatch):
+    clock = {"t": 0.0}
+    calls = _patch_chronyc(monkeypatch, _FakeChronyProcess(CHRONY_SYNCED))
+    port = repo.ChronyClockPort(cache_s=1.0, monotonic_fn=lambda: clock["t"])
+
+    for _ in range(50):  # one tick evaluating 50 batches
+        await port.offset_from_ntp_ms()
+    assert len(calls) == 1
+
+    clock["t"] = 1.5
+    await port.offset_from_ntp_ms()
+    assert len(calls) == 2
+
+
+def _timex(**overrides: int) -> repo.KernelTimex:
+    base = {"state": 0, "status": 0x2001, "offset": -145_368, "esterror_us": 1_451, "maxerror_us": 459_704}
+    base.update(overrides)
+    return repo.KernelTimex(**base)
+
+
+def test_kernel_offset_from_the_live_hosts_recorded_ntpd_state():
+    """Recorded on the live host 2026-09-26 (ntpd, STA_PLL|STA_NANO): -0.145 ms offset, 1.451 ms
+    estimated error, 460 ms max error (1024 s poll). Well inside the 200 ms G-20 limit."""
+    assert repo.kernel_clock_offset_ms(_timex()) == pytest.approx(-(0.145368 + 1.451))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"state": 5},  # TIME_ERROR
+        {"status": 0x2041},  # STA_UNSYNC
+        {"maxerror_us": 2_500_000},  # daemon stopped updating the kernel
+    ],
+)
+def test_kernel_unsynchronised_states_are_out_of_limit(overrides):
+    assert repo.kernel_clock_offset_ms(_timex(**overrides)) == math.inf
+
+
+def test_kernel_microsecond_offset_units():
+    assert repo.kernel_clock_offset_ms(_timex(status=0x0001, offset=2_000, esterror_us=0)) == pytest.approx(
+        2.0
+    )
+
+
+async def test_kernel_clock_port_read_failure_is_out_of_limit():
+    def unavailable() -> repo.KernelTimex:
+        raise OSError("adjtimex is only available on Linux")
+
+    assert await repo.KernelClockPort(read_timex=unavailable).offset_from_ntp_ms() == math.inf
+
+
+async def test_kernel_clock_port_reports_the_reading():
+    port = repo.KernelClockPort(read_timex=lambda: _timex(offset=5_000_000, esterror_us=0))
+    assert await port.offset_from_ntp_ms() == pytest.approx(5.0)
+
+
+def test_build_clock_port_selects_the_configured_source():
+    assert isinstance(repo.build_clock_port("kernel"), repo.KernelClockPort)
+    assert isinstance(repo.build_clock_port("chrony"), repo.ChronyClockPort)
 
 
 async def test_build_pg_ports_wires_everything():
     pool = FakePool(FakeCursor([]))
     trace_store = object()  # opaque -- only passed through to TraceStorePort's constructor
     hubs = object()  # GUARD-02/04: caller must supply guardian's own telemetry-backed hubs port
-    ports, leases = repo.build_pg_ports(pool, trace_store, hubs, zones_by_bank={"bank-1": "zone-a"})  # type: ignore[arg-type]
+    clock, l2, members = object(), object(), object()
+    ports, leases = repo.build_pg_ports(
+        pool,
+        trace_store,  # type: ignore[arg-type]
+        hubs,  # type: ignore[arg-type]
+        clock=clock,  # type: ignore[arg-type]
+        l2_instructions=l2,  # type: ignore[arg-type]
+        bank_members=members,  # type: ignore[arg-type]
+        zones_by_bank={"bank-1": "zone-a"},
+    )
     assert ports.zones_by_bank == {"bank-1": "zone-a"}
     assert ports.hubs is hubs
+    assert ports.clock is clock and ports.l2_instructions is l2 and ports.bank_members is members
     assert isinstance(leases, repo.PgLeaseStatePort)
+
+
+async def test_load_bank_membership():
+    cursor = FakeCursor([[("hub-00000", "bank-000"), ("hub-00040", "bank-000")]])
+    assert await repo.load_bank_membership(FakePool(cursor)) == {
+        "hub-00000": "bank-000",
+        "hub-00040": "bank-000",
+    }
+
+
+async def test_calibration_queue_maps_rows_and_excludes_already_evaluated_attempts():
+    calibration_id = uuid4()
+    requested_at = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
+    cursor = FakeCursor(
+        [
+            [
+                (
+                    calibration_id,
+                    "hub-1",
+                    Decimal("0.000"),
+                    Decimal("60.0000"),
+                    Decimal("240.00"),
+                    Decimal("-0.0200"),
+                    None,
+                    Decimal("1.500"),
+                    requested_at,
+                )
+            ]
+        ]
+    )
+    pending = await repo.PgCalibrationQueuePort(FakePool(cursor)).pending(max_age_s=600.0)
+
+    assert pending == [
+        repo.PendingCalibration(
+            calibration_id=calibration_id,
+            hub_id="hub-1",
+            reference_phase_deg=0.0,
+            reference_freq_hz=60.0,
+            reference_amplitude_v=240.0,
+            correction=OffsetVector(freq_hz=-0.02, voltage_pct=0.0, phase_deg=1.5),
+            requested_at=requested_at,
+        )
+    ]
+    sql, params = cursor.executed[0]
+    assert "outcome = 'PENDING'" in sql and "NOT EXISTS" in sql and "'CALIBRATION'" in sql
+    assert params == {"max_age_s": 600.0, "limit": 20}
+
+
+async def test_trace_store_port_records_calibration_verdicts_on_the_guardian_stream():
+    class RecordingStore:
+        def __init__(self) -> None:
+            self.appended: list[tuple] = []
+
+        async def append(self, *args):
+            self.appended.append(args)
+
+    store = RecordingStore()
+    calibration_id = uuid4()
+    await repo.TraceStorePort(store).append_calibration_verdict(calibration_id, {"outcome": "SIGNED"})  # type: ignore[arg-type]
+
+    stream, decision_type, event_class, payload = store.appended[0]
+    assert (stream, decision_type, event_class) == ("guardian", "GUARDIAN_VERDICT", "GUARDIAN_VERDICT")
+    assert payload == {"outcome": "SIGNED", "kind": "CALIBRATION", "calibration_id": str(calibration_id)}
 
 
 def test_pg_hub_state_port_removed():

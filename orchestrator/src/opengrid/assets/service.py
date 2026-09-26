@@ -174,6 +174,22 @@ class AssetHealthService:
         await self._advance(hub_id, record.asset_state, event, now)
         return outcome
 
+    async def record_calibration_rejected(
+        self, hub_id: str, calibration_id: UUID, *, now: datetime
+    ) -> AssetState | None:
+        """A `CalibrationAck` with `status != 'APPLIED'` (`REJECTED`/`EXPIRED` -- bad signature, expired
+        lease, or the hub itself refused the bounds): the hub never applied any correction, so there is
+        no "post" offset to classify against a "pre" one. Treated as `NO_CHANGE` (S5.5.4's own default
+        for "this attempt did not help") -- never silently discarded, since an attempt that never even
+        reached the hub still counts toward the "at most one attempt per drift episode" escalation rule."""
+        await self.ports.calibration_attempts.record_outcome(
+            calibration_id, CalibrationOutcome.NO_CHANGE, verified_at=now
+        )
+        record = await self.ports.asset_health.get(hub_id)
+        if record is None:
+            return None
+        return await self._advance(hub_id, record.asset_state, DriftEvent.CALIBRATION_NO_CHANGE, now)
+
     async def quarantine(self, hub_id: str, *, now: datetime) -> AssetState | None:
         """S5.5.5: escalate a `DEGRADED` unit to `QUARANTINED` ahead of a scheduled replacement, when
         the drift's severity warrants pulling it from all grid-facing dispatch immediately."""

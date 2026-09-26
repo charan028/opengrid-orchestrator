@@ -682,9 +682,9 @@ drift detected (WATCH) → remote recalibration attempt(s) → verify from new w
   pre-calibration characterization; outcome is recorded as `CORRECTED`, `IMPROVED` (partial, stays `WATCH`),
   `NO_CHANGE`, or `WORSE_ROLLED_BACK`.
 - **Automatic rollback.** If the post-calibration waveform is *worse* than pre-calibration on any tracked dimension,
-  the orchestrator immediately re-applies the unit's last-known-good correction parameters (itself a guardian-signed
-  calibration command) and marks the attempt `WORSE_ROLLED_BACK`; this counts toward escalation just as a failed
-  attempt does.
+  the hub restores its own pre-command parameters locally, within the same apply; no second command is issued (amended
+  2026-09-26, so G-25's one-per-24 h limit applies to every signed command without exemption). The attempt is marked
+  `WORSE_ROLLED_BACK` and counts toward escalation just as a failed attempt does.
 - **Never on a live PQ-sensitive delivery.** A calibration command is never sent to a hub that is currently the
   source (in whole or in part) of a committed `DATA_CENTER`/`PIPELINE_AC` (or any non-default-envelope) obligation,
   unless §5.4 step 2 (substitution) has already moved that obligation's delivery off the hub first. This is enforced

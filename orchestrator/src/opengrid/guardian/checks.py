@@ -10,11 +10,13 @@ inputs and interprets the resulting `CheckOutcome`s into a `Verdict`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
 from opengrid.core import limits as core_limits
+from opengrid.core import reasons
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.core.timeutil import check_command_freshness, clock_offset_ok
 from opengrid.guardian.ports import L2Instruction, ProposedItem
@@ -67,6 +69,36 @@ def check_g03_bank_kva(
     """K4/K9: bank/feeder loading, calling the same `recharge_headroom` the allocator's PI loop uses."""
     result = core_limits.check_bank_kva(bank_load_kva, additional_kw, bank, loading_pct=loading_pct)
     return CheckOutcome("G-03", result.ok, result.reason, bank_id)
+
+
+def check_g03_bank_load_fresh(bank_id: str, bank_load_age_s: float, max_age_s: float) -> CheckOutcome:
+    """K4: G-03 needs a live SCADA bank-load reading. A missing (`inf`) or stale one is unknown loading
+    -- VETO (a hold), never a silent 0 kVA that would let any batch through."""
+    if not math.isfinite(bank_load_age_s) or bank_load_age_s > max_age_s:
+        return CheckOutcome("G-03", False, "BANK_LOAD_STALE", bank_id)
+    return CheckOutcome.passed("G-03", hub_id=bank_id)
+
+
+def check_g03_bank_kva_magnitude(
+    bank_id: str, bank_load_kva: float, net_delta_kw: float, bank: BankParams, *, loading_pct: float = 0.95
+) -> CheckOutcome:
+    """K4: transformer loading is a MAGNITUDE, so discharge that drives the bank into reverse flow loads
+    it exactly as charging does, and so does cutting discharge on an importing bank. Bounds the projected
+    |bank load + the batch's net setpoint change| by the same rating-net-of-reserve envelope
+    (`core.limits.check_bank_kva` on the magnitude), in both directions.
+
+    SCADA reports apparent power as a magnitude; it is taken as import-positive (the residential bank
+    convention the sim and the allocator's PI loop share). A batch that does not increase the magnitude
+    (relief on an already-overloaded bank) is never vetoed here: blocking it would block the relief."""
+    projected_kw = bank_load_kva + net_delta_kw
+    magnitude_kw = abs(projected_kw)
+    if magnitude_kw <= abs(bank_load_kva) + 1e-9:
+        return CheckOutcome.passed("G-03", hub_id=bank_id)
+    result = core_limits.check_bank_kva(0.0, magnitude_kw, bank, loading_pct=loading_pct)
+    if result.ok:
+        return CheckOutcome.passed("G-03", hub_id=bank_id)
+    reason = "BANK_KVA_LIMIT_REVERSE_FLOW" if projected_kw < 0 else result.reason
+    return CheckOutcome("G-03", False, reason, bank_id)
 
 
 def check_g04_hub_ramp(
@@ -175,6 +207,59 @@ def check_g19_commitment_lock(
         new_kw, frozen_kw, prior_kw, reason_code, as_release_enabled=as_release_enabled
     )
     return CheckOutcome("G-19", result.ok, result.reason, obligation_id=obligation_id)
+
+
+def g19_reduction_below_floor(new_kw: float, frozen_kw: float, prior_kw: float) -> bool:
+    """True when `new_kw` is below the commitment floor, i.e. G-19 passes only if an override reason
+    excuses it. Asks `core.limits.check_commitment_lock` itself (no reason code), never re-derives it."""
+    return not core_limits.check_commitment_lock(new_kw, frozen_kw, prior_kw, None).ok
+
+
+#: K13 overrides the guardian re-verifies from its own capability read (02a S2.1: L0 device safety and
+#: L1 homeowner reserve both surface as hubs that cannot deliver; INFEASIBLE is "no substitute hub").
+CAPABILITY_OVERRIDE_REASONS = frozenset(
+    {reasons.R_COMMIT_LOCK_OVERRIDE_L0, reasons.R_COMMIT_LOCK_OVERRIDE_L1, reasons.R_COMMIT_LOCK_INFEASIBLE}
+)
+
+
+def check_g19_override_evidence(
+    obligation_id: str,
+    reason_code: str | None,
+    *,
+    l2_instruction_active: bool,
+    bank_capability_kw: float | None,
+    committed_floor_kw: float,
+    bank_capability_upper_kw: float | None = None,
+) -> CheckOutcome:
+    """K13: an override reason code is a CLAIM by the engine; the guardian signs a reduction below the
+    commitment lock only when its own independent reads back that claim up (review S3.3-2).
+
+    - `R-COMMIT-LOCK-OVERRIDE-L2`: the guardian's own L2InstructionPort shows an active utility/ISO
+      instruction for the bank.
+    - `-L0`/`-L1`/`R-COMMIT-LOCK-INFEASIBLE`: the guardian's own capability read of the bank's hubs is
+      below the bank's committed floor, i.e. no substitution within the bank could have kept the
+      commitment. The bound used is `bank_capability_upper_kw` (hubs whose telemetry the guardian has not
+      seen recently counted at their full rating; `None` means no read at all): a shortfall that exists
+      only because hubs are unseen is not corroborated (`..._EVIDENCE_STALE`), so stale telemetry
+      fails the claim closed instead of proving it. `bank_capability_kw` (unseen hubs at 0) only
+      distinguishes that reason; when the upper bound is omitted it is used as-is.
+
+    Any other reason passes here: `check_g19_commitment_lock` already refuses it (and governs the
+    config-gated `R-AS-RELEASE`)."""
+    if reason_code == reasons.R_COMMIT_LOCK_OVERRIDE_L2:
+        if l2_instruction_active:
+            return CheckOutcome.passed("G-19")
+        return CheckOutcome("G-19", False, "COMMIT_LOCK_OVERRIDE_L2_UNVERIFIED", obligation_id=obligation_id)
+    if reason_code in CAPABILITY_OVERRIDE_REASONS:
+        upper_kw = bank_capability_upper_kw if bank_capability_upper_kw is not None else bank_capability_kw
+        if upper_kw is not None and upper_kw < committed_floor_kw - 1e-9:
+            return CheckOutcome.passed("G-19")
+        stale = bank_capability_kw is not None and bank_capability_kw < committed_floor_kw - 1e-9
+        reason = (
+            "COMMIT_LOCK_OVERRIDE_EVIDENCE_STALE" if stale else "COMMIT_LOCK_OVERRIDE_INFEASIBLE_UNVERIFIED"
+        )
+        return CheckOutcome("G-19", False, reason, obligation_id=obligation_id)
+    return CheckOutcome.passed("G-19")
 
 
 def check_g20_clock_quality(offset_ms: float, max_offset_ms: float) -> CheckOutcome:

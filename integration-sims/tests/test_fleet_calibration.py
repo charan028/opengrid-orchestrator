@@ -385,3 +385,61 @@ def test_build_calibration_ack_for_rejected_outcome_has_no_resulting_offsets(
     assert ack["applied"] is False
     assert ack["resulting_offsets"] is None
     assert ack["reject_reason"] == "BAD_SIGNATURE"
+
+
+# ---------------------------------------------------------------------------
+# Freshness: per-hub strictly increasing (epoch, seq)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("epoch", "seq"), [(1, 1), (1, 0), (0, 99)])
+def test_non_increasing_epoch_seq_is_rejected_as_stale(
+    guardian_key: Ed25519PrivateKey, epoch: int, seq: int
+) -> None:
+    """A replayed (or older) guardian-signed command is refused even after the rate limit clears."""
+    pq = _build_pq()
+    anomalies = PqAnomalyManager(pq)
+    first = _command(guardian_key, epoch=1, seq=1)
+    assert apply_calibration(
+        pq, anomalies, first, guardian_key.public_key(), now=NOW_TS, rate_limit_s=1.0
+    ).applied
+
+    replay = _command(guardian_key, epoch=epoch, seq=seq, expires_at=NOW + timedelta(seconds=300))
+    outcome = apply_calibration(
+        pq, anomalies, replay, guardian_key.public_key(), now=NOW_TS + 10.0, rate_limit_s=1.0
+    )
+    assert outcome.status == "REJECTED" and outcome.reject_reason == "STALE_SEQ"
+
+
+def test_a_newer_guardian_epoch_is_accepted_after_a_restart(guardian_key: Ed25519PrivateKey) -> None:
+    pq = _build_pq()
+    anomalies = PqAnomalyManager(pq)
+    apply_calibration(
+        pq,
+        anomalies,
+        _command(guardian_key, epoch=5, seq=9),
+        guardian_key.public_key(),
+        now=NOW_TS,
+        rate_limit_s=1.0,
+    )
+    newer = _command(guardian_key, epoch=6, seq=1, expires_at=NOW + timedelta(seconds=300))
+    outcome = apply_calibration(
+        pq, anomalies, newer, guardian_key.public_key(), now=NOW_TS + 10.0, rate_limit_s=1.0
+    )
+    assert outcome.applied is True
+
+
+def test_a_rejected_command_does_not_advance_the_hubs_sequence(guardian_key: Ed25519PrivateKey) -> None:
+    pq = _build_pq()
+    anomalies = PqAnomalyManager(pq)
+    too_big = _command(guardian_key, epoch=1, seq=7, correction={"freq_hz": 9.0})
+    assert (
+        apply_calibration(
+            pq, anomalies, too_big, guardian_key.public_key(), now=NOW_TS, rate_limit_s=1.0
+        ).reject_reason
+        == "BOUNDS_EXCEEDED"
+    )
+    ok = _command(guardian_key, epoch=1, seq=2)
+    assert apply_calibration(
+        pq, anomalies, ok, guardian_key.public_key(), now=NOW_TS, rate_limit_s=1.0
+    ).applied

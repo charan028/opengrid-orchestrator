@@ -11,6 +11,22 @@ guardian's own inputs, never from a second implementation of the formulas.
 
 - Fixed public entry point (`orchestrator/INTERFACES.md`): `opengrid.guardian.evaluate_and_sign(batch:
   CommandBatchRow) -> Verdict`. Delegates to a `GuardianService` installed once via `configure()`.
+- Calibration signing (06 §6.7, K14): `opengrid.guardian.evaluate_and_sign_calibration(proposed:
+  ProposedCalibrationCommand) -> CalibrationCommand | None` runs G-20 then G-25 and returns the signed
+  wire command (guardian-assigned per-hub `(epoch, seq)`, signature over `CalibrationCommand.signing_payload()`),
+  or `None` (a hold; the refusal is traced). **Cross-process hand-off:** the ladder (`opengrid.assets`)
+  records a `PENDING` `og.calibration_attempt` row with `command_batch_id IS NULL`; `og-guardian` polls it
+  every cycle (`main.process_pending_calibrations`), and publishes each signed command on
+  `<root>/cmd/cal/<hub_id>` (QoS 1). Its own `GUARDIAN_VERDICT` trace row (`kind='CALIBRATION'`, outcome
+  `SIGNED`/`REFUSED`) claims the attempt, so it is evaluated at most once; rows older than
+  `guardian.calibration_max_request_age_s` (600 s) are ignored. The signing key never leaves this process.
+- Stop RELEASE (K8, crypto.md §2.3): `GuardianService.evaluate_and_sign_stop_release(request)` signs a
+  RELEASE only for a Tier-2 request og-api recorded (`og.operator_action`: SAFE_STOP_RELEASE, TIER2,
+  distinct `operator_ref`/`approver_ref`, both in `guardian.stop_release_authorised_operators`, approved
+  within `guardian.stop_release_max_age_s`, traced), for a scope that is still engaged, whose ENGAGEs all
+  predate the approval, that was not a utility stop, and with no ESTOP/BLOCK active on any of its banks.
+  `main.process_pending_stop_releases` then hands each signed event to og-safestop, which verifies and
+  publishes it. Full path: `stop_release.py` module docstring.
 - Process entry point: `python -m opengrid.guardian.main` (unit `og-guardian`).
 - Keygen CLI: `python -m opengrid.guardian keygen --out <dir> [--key-id guardian-2026a]` writes
   `<key-id>.key` (private seed, mode 0600) and `<key-id>.pub` (hex public key) — the file the fleet
@@ -25,9 +41,15 @@ guardian's own inputs, never from a second implementation of the formulas.
 | `config.py` | `GuardianConfig` (`[guardian]`/`[allocator]` TOML, no hard-coded thresholds). |
 | `keys.py` | Ed25519 signing-seed resolution (`GUARDIAN_SIGNING_SEED` env or key file) + `keygen`. |
 | `service.py` | `GuardianService.evaluate_and_sign` — the decision engine: runs every check, classifies PASS/VETOED/PARTLY_VETOED/TIMEOUT, signs on PASS, traces the verdict. No I/O. |
-| `repo.py` | Postgres-backed port implementations (`PgCommitmentPort` incl. its own `active_obligations_for_bank` enumeration, `PgProposalPort`, `ChronyClockPort`, …). Deliberately has no hub-state port — that must always be `mqtt_io.MqttHubStatePort`. |
-| `mqtt_io.py` | Guardian's own independent telemetry cache (`<root>/tel/#`) and signed publish (`<root>/cmd/*/batch`, `<root>/lease/*`). |
-| `main.py` | Process wiring: pool, MQTT client, `run_forever` cycle over pending `og.command_batch` rows. |
+| `repo.py` | Postgres-backed port implementations (`PgCommitmentPort` incl. its own `active_obligations_for_bank` enumeration, `PgProposalPort`, `PgCalibrationQueuePort`, …) and the K12 clock adapters (`KernelClockPort`, default, reads `adjtimex` under any NTP daemon; `ChronyClockPort`), both fail-closed: any read failure or unsynchronised clock reports `inf`. Deliberately has no hub-state port — that must always be `mqtt_io.MqttHubStatePort`. |
+| `mqtt_io.py` | Guardian's own independent inputs — the telemetry cache (`<root>/tel/#`, stale after `guardian.telemetry_max_age_s`) and utility instructions (`<root>/scada/instruction/+`, `MqttL2InstructionPort`) — and signed publish (`<root>/cmd/*/batch`, `<root>/cmd/cal/*`, `<root>/lease/*`). |
+| `main.py` | Process wiring: pool, MQTT client, `run_forever` cycle over pending `og.command_batch` rows (publishing exactly the evaluated proposal) and pending calibration attempts. |
+
+**Override corroboration (K13/G-19).** A reduction below the commitment lock is signed only when the
+guardian's own reads back the batch's override reason: `R-COMMIT-LOCK-OVERRIDE-L2` needs an active
+instruction in `MqttL2InstructionPort`; `-L0`/`-L1`/`R-COMMIT-LOCK-INFEASIBLE` need the bank's deliverable
+discharge capability, computed from the guardian's own telemetry of every member hub (`bank_members`), to
+be below the bank's committed floor. Anything else is vetoed.
 
 **Known open item for the architect:** `og.command_batch` has no `bank_id`/epoch/seq columns, so there is
 no durable per-bank lease-sequence table yet. `InMemoryLeaseStatePort` (in `repo.py`) tracks the last

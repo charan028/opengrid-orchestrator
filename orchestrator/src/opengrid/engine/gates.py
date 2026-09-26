@@ -9,6 +9,7 @@ failure is logged, traced and raised as an `ALR-SELECTOR-GATE-FAILED` alert, and
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Protocol
@@ -51,33 +52,64 @@ async def run_due_gates(
     trace: TraceAppender,
     raise_alert: RaiseAlert,
     on_renomination: OnRenomination | None = None,
+    observe_duration: Callable[[str, float], None] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
-    """Run intake then the selector gate for each trigger. Returns the number of gates that failed."""
+    """Run intake then the selector gate for each trigger. Returns the number of gates that failed.
+    `observe_duration(gate_kind, seconds)` receives each gate's wall time (intake + gate), failed or not."""
     failed = 0
     for trigger in triggers:
-        scope = {"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
-        logger.info("running gate", extra=scope)
-        # Intake generates this gate's OFFERED opportunities from live feeds first; a feed hiccup must
-        # not block the gate itself.
+        started = clock()
         try:
-            await run_intake(trigger.gate_kind, trigger.contract_scope, now=now)
-        except Exception:
-            logger.exception("intake failed ahead of gate -- running the gate anyway", extra=scope)
-        try:
-            plan = await run_gate(trigger.gate_kind, trigger.contract_scope)
-        except Exception as exc:
-            failed += 1
-            logger.exception("selector gate failed", extra=scope)
-            await _report_gate_failure(trigger, exc, trace=trace, raise_alert=raise_alert)
-            continue
-        if trigger.gate_kind == "RENOMINATION" and on_renomination is not None and trigger.contract_scope:
-            # The gate reached the contract's due re-nomination point(s): record them exercised, or the
-            # engine re-runs this gate every tick (02a S1.7).
-            try:
-                await on_renomination(trigger.contract_scope, getattr(plan, "plan_id", None))
-            except Exception:
-                logger.exception("could not exercise re-nomination point(s)", extra=scope)
+            gate_failed = await _run_one(
+                trigger,
+                now=now,
+                run_intake=run_intake,
+                run_gate=run_gate,
+                trace=trace,
+                raise_alert=raise_alert,
+                on_renomination=on_renomination,
+            )
+        finally:
+            if observe_duration is not None:
+                observe_duration(str(trigger.gate_kind), clock() - started)
+        failed += int(gate_failed)
     return failed
+
+
+async def _run_one(
+    trigger: Any,
+    *,
+    now: datetime,
+    run_intake: RunIntake,
+    run_gate: RunGate,
+    trace: TraceAppender,
+    raise_alert: RaiseAlert,
+    on_renomination: OnRenomination | None,
+) -> bool:
+    """One trigger: intake, then the gate, then its re-nomination points. Returns True if the gate failed."""
+    scope = {"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
+    logger.info("running gate", extra=scope)
+    # Intake generates this gate's OFFERED opportunities from live feeds first; a feed hiccup must
+    # not block the gate itself.
+    try:
+        await run_intake(trigger.gate_kind, trigger.contract_scope, now=now)
+    except Exception:
+        logger.exception("intake failed ahead of gate -- running the gate anyway", extra=scope)
+    try:
+        plan = await run_gate(trigger.gate_kind, trigger.contract_scope)
+    except Exception as exc:
+        logger.exception("selector gate failed", extra=scope)
+        await _report_gate_failure(trigger, exc, trace=trace, raise_alert=raise_alert)
+        return True
+    if trigger.gate_kind == "RENOMINATION" and on_renomination is not None and trigger.contract_scope:
+        # The gate reached the contract's due re-nomination point(s): record them exercised, or the
+        # engine re-runs this gate every tick (02a S1.7).
+        try:
+            await on_renomination(trigger.contract_scope, getattr(plan, "plan_id", None))
+        except Exception:
+            logger.exception("could not exercise re-nomination point(s)", extra=scope)
+    return False
 
 
 async def _report_gate_failure(

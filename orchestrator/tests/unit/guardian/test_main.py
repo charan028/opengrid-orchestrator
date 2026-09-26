@@ -11,8 +11,14 @@ from uuid import uuid4
 from opengrid.core.crypto import generate_keypair, verify_payload
 from opengrid.core.models.engine import Verdict
 from opengrid.core.models.mqtt import COMMAND_BATCH_SIGNED_FIELDS
+from opengrid.core.models.pq import CalibrationBounds as WireCalibrationBounds
+from opengrid.core.models.pq import CalibrationCommand, CalibrationCorrection
+from opengrid.core.pq import DEFAULT_FIRMWARE_CALIBRATION_BOUNDS, CalibrationBounds, OffsetVector
 from opengrid.guardian import main as guardian_main
+from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import ProposedBatch, ProposedItem
+from opengrid.guardian.pq_ports import ProposedCalibrationCommand
+from opengrid.guardian.repo import PendingCalibration
 from opengrid.guardian.service import GuardianService
 from opengrid.platform.config import Config
 
@@ -112,3 +118,127 @@ async def test_publish_signed_batch_publishes_batch_and_leases_per_item():
     assert "ogtest/guard/lease/hub-1" in topics
     assert "ogtest/guard/lease/hub-2" in topics
     assert len(client.published) == 3
+
+
+# --- S6.7 calibration hand-off ---------------------------------------------------------------------
+
+
+def _pending(hub_id: str = "hub-1") -> PendingCalibration:
+    return PendingCalibration(
+        calibration_id=uuid4(),
+        hub_id=hub_id,
+        reference_phase_deg=0.0,
+        reference_freq_hz=60.0,
+        reference_amplitude_v=240.0,
+        correction=OffsetVector(freq_hz=-0.02, voltage_pct=0.4, phase_deg=1.0),
+        requested_at=NOW - timedelta(seconds=30),
+    )
+
+
+class _Queue:
+    def __init__(self, rows: list[PendingCalibration]) -> None:
+        self.rows = rows
+        self.max_age_s: float | None = None
+
+    async def pending(self, *, max_age_s: float) -> list[PendingCalibration]:
+        self.max_age_s = max_age_s
+        return list(self.rows)
+
+
+class _Bounds:
+    async def max_bounds_for_hub(self, hub_id: str) -> CalibrationBounds:
+        return DEFAULT_FIRMWARE_CALIBRATION_BOUNDS
+
+
+class _Signer:
+    """Stands in for GuardianService: signs hub-1, refuses anything else."""
+
+    def __init__(self) -> None:
+        self.seen: list[ProposedCalibrationCommand] = []
+
+    async def evaluate_and_sign_calibration(
+        self, proposed: ProposedCalibrationCommand
+    ) -> CalibrationCommand | None:
+        self.seen.append(proposed)
+        if proposed.hub_id != "hub-1":
+            return None
+        return CalibrationCommand(
+            calibration_id=proposed.calibration_id,
+            hub_id=proposed.hub_id,
+            epoch=1,
+            seq=1,
+            issued_at=proposed.issued_at,
+            expires_at=proposed.expires_at,
+            reference=proposed.reference,
+            correction=CalibrationCorrection(freq_hz=-0.02, voltage_pct=0.4, phase_deg=1.0),
+            bounds=WireCalibrationBounds(max_freq_hz=0.1, max_voltage_pct=2.0, max_phase_deg=5.0),
+            key_id="guardian-2026a",
+            signature="sig",
+        )
+
+
+def test_build_proposed_calibration_uses_the_guardians_own_lease_bounds_and_time_source():
+    pending = _pending()
+    proposed = guardian_main.build_proposed_calibration(
+        pending,
+        bounds=DEFAULT_FIRMWARE_CALIBRATION_BOUNDS,
+        now=NOW,
+        lease_s=60.0,
+        sync_source="ntp_disciplined",
+    )
+    assert proposed.calibration_id == pending.calibration_id and proposed.hub_id == "hub-1"
+    assert proposed.issued_at == NOW and proposed.expires_at == NOW + timedelta(seconds=60)
+    assert proposed.bounds == DEFAULT_FIRMWARE_CALIBRATION_BOUNDS
+    assert proposed.reference.sync_source == "ntp_disciplined" and proposed.reference.freq_hz == 60.0
+    assert proposed.correction == pending.correction
+
+
+async def test_process_pending_calibrations_publishes_only_signed_commands():
+    queue = _Queue([_pending("hub-1"), _pending("hub-2")])
+    signer = _Signer()
+    published: list[CalibrationCommand] = []
+
+    async def publish(command: CalibrationCommand) -> None:
+        published.append(command)
+
+    count = await guardian_main.process_pending_calibrations(
+        queue=queue,  # type: ignore[arg-type]
+        firmware_bounds=_Bounds(),
+        service=signer,  # type: ignore[arg-type]
+        publish=publish,
+        config=GuardianConfig(key_path=""),
+        now_fn=lambda: NOW,
+    )
+
+    assert count == 1
+    assert [c.hub_id for c in published] == ["hub-1"]
+    assert [p.hub_id for p in signer.seen] == ["hub-1", "hub-2"]
+    assert queue.max_age_s == GuardianConfig(key_path="").calibration_max_request_age_s
+
+
+async def test_process_pending_calibrations_survives_a_publish_failure():
+    async def failing_publish(command: CalibrationCommand) -> None:
+        raise RuntimeError("broker down")
+
+    count = await guardian_main.process_pending_calibrations(
+        queue=_Queue([_pending("hub-1")]),  # type: ignore[arg-type]
+        firmware_bounds=_Bounds(),
+        service=_Signer(),  # type: ignore[arg-type]
+        publish=failing_publish,
+        config=GuardianConfig(key_path=""),
+        now_fn=lambda: NOW,
+    )
+    assert count == 0
+
+
+def test_main_publishes_the_evaluated_proposal_not_a_reread():
+    """The PASS path publishes `service.evaluated_proposal(...)`; re-fetching the pre-image after the
+    verdict could sign items the guardian never checked."""
+    source = inspect.getsource(guardian_main.main)
+    assert "evaluated_proposal" in source
+    assert "proposals.fetch" not in source
+
+
+def test_main_uses_process_names_for_mqtt_client_ids():
+    source = inspect.getsource(guardian_main.main)
+    assert 'process="guardian"' in source and "client_id=" not in source

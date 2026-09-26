@@ -11,7 +11,9 @@ InitiatorKind = Literal["OPERATOR", "GUARDIAN", "SAFESTOP_AUTHORITY", "UTILITY"]
 
 
 class StopEventBackend(Protocol):
-    """Persistence for `og.stop_event` (02a S1.12). `safestop` is the only writer of ENGAGE rows."""
+    """Persistence for `og.stop_event` (02a S1.12). `safestop` is the only writer of stop rows: ENGAGE
+    rows it signed itself, and RELEASE rows only for guardian-signed events it has verified and
+    published (`SafestopService.relay_guardian_release`)."""
 
     async def insert_stop_event(
         self,
@@ -26,6 +28,11 @@ class StopEventBackend(Protocol):
         approver_ref: str | None,
         signature: str,
     ) -> None: ...
+
+    async def has_signature(self, signature: str) -> bool:
+        """Whether a `stop_event` row with exactly this signature exists -- i.e. this signed event has
+        already been published and recorded (relay idempotency)."""
+        ...
 
     async def latest_action(self, scope_kind: str, scope_ref: str) -> str | None:
         """Most recent `action` for this scope, or None if never stopped. Used only for observability

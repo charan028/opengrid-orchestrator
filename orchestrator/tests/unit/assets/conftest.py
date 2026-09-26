@@ -12,6 +12,7 @@ import pytest
 from opengrid.assets.ports import (
     DriftObservationWindow,
     HubAssetRecord,
+    PendingCalibrationAttempt,
 )
 from opengrid.assets.service import AssetHealthPorts, AssetHealthService
 from opengrid.core.models.pq import MaintenanceWorkOrder
@@ -33,6 +34,9 @@ class FakeAssetHealth:
     def __init__(self) -> None:
         self.records: dict[str, HubAssetRecord] = {}
         self.reset_at: dict[str, datetime] = {}
+
+    async def list_hub_ids(self) -> list[str]:
+        return sorted(self.records)
 
     async def get(self, hub_id: str) -> HubAssetRecord | None:
         return self.records.get(hub_id)
@@ -91,8 +95,21 @@ class FakeCalibrationAttempts:
         correction: OffsetVector,
         command_batch_id: UUID | None,
     ) -> None:
-        self.attempts[calibration_id] = {"hub_id": hub_id, "requested_at": requested_at}
+        self.attempts[calibration_id] = {
+            "hub_id": hub_id,
+            "requested_at": requested_at,
+            "measured_offset": measured_offset,
+        }
         self.last_attempt[hub_id] = requested_at.timestamp()
+
+    async def get_pending(self, calibration_id: UUID) -> PendingCalibrationAttempt | None:
+        attempt = self.attempts.get(calibration_id)
+        if attempt is None:
+            return None
+        return PendingCalibrationAttempt(
+            hub_id=str(attempt["hub_id"]),
+            measured_offset=attempt["measured_offset"],  # type: ignore[arg-type]
+        )
 
     async def record_outcome(
         self, calibration_id: UUID, outcome: CalibrationOutcome, *, verified_at: datetime

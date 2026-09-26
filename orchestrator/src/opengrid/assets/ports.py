@@ -19,6 +19,15 @@ from opengrid.guardian.pq_ports import AssetState
 
 
 @dataclass(frozen=True, slots=True)
+class PendingCalibrationAttempt:
+    """The subset of a recorded `og.calibration_attempt` row `handle_calibration_ack` needs: which hub
+    it was for, and the pre-calibration measured offset the candidate's correction was computed from."""
+
+    hub_id: str
+    measured_offset: OffsetVector
+
+
+@dataclass(frozen=True, slots=True)
 class DriftObservationWindow:
     """S5.5.1's rolling observation-window evidence for one tracked dimension (frequency, voltage, THD
     or phase-angle offset) on one hub: whether each summary in the window exceeded the WATCH threshold,
@@ -51,6 +60,11 @@ class HubAssetRecord:
 
 
 class AssetHealthRepoPort(Protocol):
+    async def list_hub_ids(self) -> list[str]:
+        """Every hub with a characterization row (`og.hub_inverter_pq`) -- the runner's own candidate
+        set for a drift-evaluation sweep (`opengrid.assets.runner.run_once`)."""
+        ...
+
     async def get(self, hub_id: str) -> HubAssetRecord | None: ...
 
     async def set_state(
@@ -86,6 +100,13 @@ class CalibrationAttemptRepoPort(Protocol):
         correction: OffsetVector,
         command_batch_id: UUID | None,
     ) -> None: ...
+
+    async def get_pending(self, calibration_id: UUID) -> PendingCalibrationAttempt | None:
+        """The `hub_id` and pre-calibration `measured_offset` recorded by `record_attempt` for
+        `calibration_id` -- read back when a `CalibrationAck` arrives (`opengrid.assets.calibration_ack.
+        handle_calibration_ack`) so the outcome classifier has the SAME pre-offset the candidate was
+        built from, never a value the ack itself claims."""
+        ...
 
     async def record_outcome(
         self, calibration_id: UUID, outcome: CalibrationOutcome, *, verified_at: datetime

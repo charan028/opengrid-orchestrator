@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from opengrid.core.pq import CalibrationBounds
+from opengrid.core.pq import DEFAULT_FIRMWARE_CALIBRATION_BOUNDS, CalibrationBounds
 from opengrid.guardian import pq_repo
 
 pytestmark = pytest.mark.asyncio
@@ -218,6 +218,20 @@ async def test_calibration_history_none_when_never_attempted():
     assert await port.last_attempt_epoch_s("hub-00000") is None
 
 
+async def test_calibration_history_reads_the_guardians_own_signed_record_not_the_ladder_table():
+    """Regression: the rate limit read `og.calibration_attempt`, whose newest row is always the PENDING
+    candidate under evaluation (the ladder records it first), so G-25 refused every calibration."""
+    cursor = FakeCursor(responses=[(None,)])
+    port = pq_repo.PgCalibrationHistoryPort(FakePool(cursor), lookback_s=3600.0)  # type: ignore[arg-type]
+
+    assert await port.last_attempt_epoch_s("hub-00007") is None
+
+    sql, params = cursor.executed[0]
+    assert "og.calibration_attempt" not in sql
+    assert "GUARDIAN_VERDICT" in sql and "'SIGNED'" in sql and "'CALIBRATION'" in sql
+    assert params == {"hub_id": "hub-00007", "lookback_s": 3600.0}
+
+
 # ---------------------------------------------------------------------------
 # StaticFirmwareCalibrationBoundsPort
 # ---------------------------------------------------------------------------
@@ -227,11 +241,12 @@ async def test_static_firmware_bounds_returns_configured_defaults_for_any_hub():
     port = pq_repo.StaticFirmwareCalibrationBoundsPort()
     bounds = await port.max_bounds_for_hub("hub-00000")
     assert bounds == CalibrationBounds(max_freq_hz=0.10, max_voltage_pct=2.0, max_phase_deg=5.0)
+    assert bounds == DEFAULT_FIRMWARE_CALIBRATION_BOUNDS
 
 
 async def test_static_firmware_bounds_accepts_overrides():
     port = pq_repo.StaticFirmwareCalibrationBoundsPort(
-        max_freq_hz=0.05, max_voltage_pct=1.0, max_phase_deg=2.5
+        CalibrationBounds(max_freq_hz=0.05, max_voltage_pct=1.0, max_phase_deg=2.5)
     )
     bounds = await port.max_bounds_for_hub("hub-anything")
     assert bounds == CalibrationBounds(max_freq_hz=0.05, max_voltage_pct=1.0, max_phase_deg=2.5)

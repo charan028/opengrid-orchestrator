@@ -47,12 +47,22 @@ class PhaseTimer:
 class LoopLagProbe:
     """Sleeps `interval_s` in a loop and records how late each wake-up is (ms)."""
 
-    def __init__(self, *, interval_s: float = 0.1, window: int = 3000) -> None:
+    def __init__(
+        self,
+        *,
+        interval_s: float = 0.1,
+        window: int = 3000,
+        on_sample: Callable[[float], None] | None = None,
+    ) -> None:
         self._interval_s = interval_s
+        self._on_sample = on_sample
         self.samples: deque[float] = deque(maxlen=window)
 
     def observe(self, *, expected: float, actual: float) -> None:
-        self.samples.append(max(0.0, (actual - expected) * 1000.0))
+        lag_ms = max(0.0, (actual - expected) * 1000.0)
+        self.samples.append(lag_ms)
+        if self._on_sample is not None:
+            self._on_sample(lag_ms)
 
     async def run(self) -> None:
         while True:

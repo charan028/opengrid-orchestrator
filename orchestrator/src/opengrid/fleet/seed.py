@@ -44,6 +44,20 @@ _P_KW_DUAL_UNIT_DEFAULT: float = 20.0
 # (confirmed by Base, 2026-09-25).
 _BANK_KVA_RATING_DEFAULT: float = 600.0
 
+# K4/G-06: a feeder groups this many consecutive banks (feeder segments) of ONE load zone, so the
+# per-feeder firm-event ramp ceiling has a feeder to bind to. 40 banks x 4 zones -> 8 feeders of 5 banks
+# (3 MVA of segment rating each). Override with `[fleet].banks_per_feeder`.
+BANKS_PER_FEEDER_DEFAULT: int = 5
+
+
+def feeder_id_for(zone: str, rank_in_zone: int, banks_per_feeder: int) -> str:
+    """`feeder-<zone>-<NN>`: the `rank_in_zone`-th bank of `zone` (0-based, by bank index) belongs to
+    feeder `rank_in_zone // banks_per_feeder`. The live backfill SQL in the guardian safety report
+    derives the same ids with `row_number() OVER (PARTITION BY zone ORDER BY bank_id)`."""
+    if banks_per_feeder < 1:
+        raise ValueError("banks_per_feeder must be >= 1")
+    return f"feeder-{zone}-{rank_in_zone // banks_per_feeder:02d}"
+
 
 @dataclass(frozen=True, slots=True)
 class SimFleetTopologyConfig:
@@ -140,11 +154,14 @@ def _is_dual_unit(index: int, dual_unit_share: float) -> bool:
     return math.floor((index + 1) * dual_unit_share) > math.floor(index * dual_unit_share)
 
 
-def build_topology(config: SimFleetTopologyConfig) -> Topology:
+def build_topology(
+    config: SimFleetTopologyConfig, *, banks_per_feeder: int = BANKS_PER_FEEDER_DEFAULT
+) -> Topology:
     """Pure (no I/O): reproduces `ogsim.fleet.state.build_fleet_state`'s id/grouping scheme exactly --
     `hub-{i:05d}` for `i` in `range(hub_count)`, `bank-{i % bank_count:03d}`, zone `zones[i % len(zones)]`
     -- so every id this generates is one the simulator will actually publish telemetry for. Dual-unit
-    hub selection uses `_is_dual_unit`, identical to `ogsim.fleet.state`'s vectorized rule.
+    hub selection uses `_is_dual_unit`, identical to `ogsim.fleet.state`'s vectorized rule. Each bank's
+    `feeder_id` groups `banks_per_feeder` banks of the same zone (`feeder_id_for`), so G-06 evaluates.
     """
     n_zones = len(config.zones)
 
@@ -174,6 +191,7 @@ def build_topology(config: SimFleetTopologyConfig) -> Topology:
         hub_zone_by_bank[bank_id][zone] += 1
 
     banks = []
+    banks_seen_by_zone: dict[str, int] = {}
     for b in range(config.bank_count):
         bank_id = f"bank-{b:03d}"
         # A bank's own `zone` column has no independent source in the sim (hubs cycle zones by hub
@@ -181,12 +199,15 @@ def build_topology(config: SimFleetTopologyConfig) -> Topology:
         # single answer, deterministic via (count desc, zone asc) so re-seeding never flips it.
         zone_counts = hub_zone_by_bank.get(bank_id, {})
         zone = min(zone_counts, key=lambda z: (-zone_counts[z], z)) if zone_counts else config.zones[0]
+        rank_in_zone = banks_seen_by_zone.get(zone, 0)
+        banks_seen_by_zone[zone] = rank_in_zone + 1
         banks.append(
             Bank(
                 bank_id=bank_id,
                 zone=zone,
                 kva_rating=config.bank_kva_rating_default,
                 reserve_kva=0.0,
+                feeder_id=feeder_id_for(zone, rank_in_zone, banks_per_feeder),
             )
         )
     return Topology(hubs=tuple(hubs), banks=tuple(banks))
@@ -257,7 +278,9 @@ async def run_seed(cfg: Config, pool: AsyncConnectionPool) -> SeedResult:
     """Full pipeline: resolve the sim's config, build the topology, upsert it. The single entry point
     both the CLI and the admin API call."""
     sim_cfg = load_sim_fleet_topology_config(cfg)
-    topology = build_topology(sim_cfg)
+    topology = build_topology(
+        sim_cfg, banks_per_feeder=int(cfg.get("fleet.banks_per_feeder", BANKS_PER_FEEDER_DEFAULT))
+    )
     return await seed_topology(pool, topology)
 
 

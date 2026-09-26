@@ -14,13 +14,20 @@ process startup while tests wire an in-memory fake.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from opengrid.safestop.service import ReleaseNotPermittedError, SafestopService
 
 Scope = Literal["FLEET", "ZONE", "BANK"]
 
-__all__ = ["ReleaseNotPermittedError", "Scope", "configure_service", "engage", "release"]
+__all__ = [
+    "ReleaseNotPermittedError",
+    "Scope",
+    "configure_service",
+    "engage",
+    "relay_guardian_release",
+    "release",
+]
 
 _service: SafestopService | None = None
 
@@ -47,6 +54,12 @@ async def engage(scope: Scope, scope_ref: str, reason: str, initiator_ref: str) 
     """Sign (stop-only key) and broadcast a retained ENGAGE stop for `scope`/`scope_ref` (02a S6.5).
     Ramps to zero over the scope's configured window (30s bank / 60s zone / 120s fleet)."""
     await _require_service().engage(scope, scope_ref, reason, initiator_ref)
+
+
+async def relay_guardian_release(event: dict[str, Any]) -> bool:
+    """Verify and publish a RELEASE the guardian signed after Tier-2 approval (K8, crypto.md S2.3). The
+    stop-only key signs nothing here; see `SafestopService.relay_guardian_release`."""
+    return await _require_service().relay_guardian_release(event)
 
 
 async def release(scope: Scope, scope_ref: str, approver_ref: str) -> None:

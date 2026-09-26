@@ -27,11 +27,13 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.assets.repo import PQ_SENSITIVE_SERVICE_TYPES
 from opengrid.core.models.pq import PqWaveformSummaryRow
 from opengrid.core.pq import (
+    DEFAULT_FIRMWARE_CALIBRATION_BOUNDS,
     CalibrationBounds,
     PqEnvelopeLimits,
     PqMeasurement,
     bank_thd_current_pct,
 )
+from opengrid.core.pq.constants import CALIBRATION_MIN_INTERVAL_S_DEFAULT
 from opengrid.guardian.pq_ports import HubAssetSnapshot
 from opengrid.pq_ingest.aggregation import bank_measurement
 
@@ -274,23 +276,36 @@ class PgHubAssetStatePort:
         return HubAssetSnapshot(asset_state=asset_state, ride_through_class=ride_through_class)
 
 
-_LAST_ATTEMPT_SQL = """
-SELECT extract(epoch FROM requested_at) FROM og.calibration_attempt
-WHERE hub_id = %(hub_id)s ORDER BY requested_at DESC LIMIT 1
+# The guardian's OWN record of calibration commands it signed (`TraceStorePort.append_calibration_verdict`,
+# event_class GUARDIAN_VERDICT, payload kind CALIBRATION). Bounded to the rate-limit window so the scan
+# stays on `ix_trace_class_time`'s (event_class, created_at) range.
+_LAST_SIGNED_CALIBRATION_SQL = """
+SELECT extract(epoch FROM max(created_at)) FROM og.trace
+WHERE event_class = 'GUARDIAN_VERDICT'
+  AND created_at > now() - make_interval(secs => %(lookback_s)s)
+  AND payload ->> 'kind' = 'CALIBRATION'
+  AND payload ->> 'outcome' = 'SIGNED'
+  AND payload ->> 'hub_id' = %(hub_id)s
 """
 
 
 class PgCalibrationHistoryPort:
-    """G-25's rate-limit re-check (S5.5.4, default 1/24h): guardian's own read of
-    `og.calibration_attempt`, independent of `opengrid.assets.repo.PgCalibrationAttemptRepo`'s own read
-    of the same table for the ladder's primary check."""
+    """G-25's rate-limit re-check (S5.5.4, default 1/24h) on the guardian's own signed-command record,
+    independent of the ladder's `og.calibration_attempt` bookkeeping (see
+    `pq_ports.CalibrationHistoryPort`): what the rate limit protects is the inverter, and only a
+    guardian-signed command ever reaches it."""
 
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(
+        self, pool: AsyncConnectionPool, *, lookback_s: float = CALIBRATION_MIN_INTERVAL_S_DEFAULT
+    ) -> None:
         self._pool = pool
+        self._lookback_s = lookback_s
 
     async def last_attempt_epoch_s(self, hub_id: str) -> float | None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_LAST_ATTEMPT_SQL, {"hub_id": hub_id})
+            await cur.execute(
+                _LAST_SIGNED_CALIBRATION_SQL, {"hub_id": hub_id, "lookback_s": self._lookback_s}
+            )
             row = await cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
@@ -303,29 +318,11 @@ class StaticFirmwareCalibrationBoundsPort:
     dedicated `og.inverter_firmware_bounds` table, keyed by firmware family, is the natural next
     migration once real firmware-family data exists) rather than guessed at silently (BUILD.md S5a "no
     silent fallbacks"). The defaults mirror `calibration_command.schema.json`'s own `bounds` fields'
-    units and are deliberately tight (a remote correction is a small trim, never a large swing)."""
+    units and are deliberately tight (a remote correction is a small trim, never a large swing). The
+    default is the single canonical `opengrid.core.pq.DEFAULT_FIRMWARE_CALIBRATION_BOUNDS`."""
 
-    #: Hz -- a PLL/clock bias correction beyond this would indicate a miscalibrated reference, not the
-    #: inverter, and should not be auto-corrected.
-    DEFAULT_MAX_FREQ_HZ = 0.10
-    #: % of nominal -- matches `og.pq_envelope`'s tightest typical `voltage_band_pct` (data-center
-    #: contracts, S4.b) so a calibration command can never itself push a unit outside a sensitive
-    #: customer's own envelope.
-    DEFAULT_MAX_VOLTAGE_PCT = 2.0
-    #: degrees -- larger than `og.hub_inverter_pq.phase_angle_error_deg`'s WATCH floor (3 deg, S5.5.1)
-    #: but still a trim, not a re-synchronization.
-    DEFAULT_MAX_PHASE_DEG = 5.0
-
-    def __init__(
-        self,
-        *,
-        max_freq_hz: float = DEFAULT_MAX_FREQ_HZ,
-        max_voltage_pct: float = DEFAULT_MAX_VOLTAGE_PCT,
-        max_phase_deg: float = DEFAULT_MAX_PHASE_DEG,
-    ) -> None:
-        self._bounds = CalibrationBounds(
-            max_freq_hz=max_freq_hz, max_voltage_pct=max_voltage_pct, max_phase_deg=max_phase_deg
-        )
+    def __init__(self, bounds: CalibrationBounds = DEFAULT_FIRMWARE_CALIBRATION_BOUNDS) -> None:
+        self._bounds = bounds
 
     async def max_bounds_for_hub(self, hub_id: str) -> CalibrationBounds:
         _ = hub_id  # same fixed bound for every hub until a firmware-family table exists (see docstring)

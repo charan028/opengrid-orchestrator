@@ -26,6 +26,8 @@ VALUES (%(stop_event_id)s, %(scope_kind)s, %(scope_ref)s, %(action)s, %(initiato
         %(initiator_ref)s, %(reason)s, %(approver_ref)s, %(signature)s)
 """
 
+_HAS_SIGNATURE_SQL = "SELECT 1 FROM og.stop_event WHERE signature = %(signature)s LIMIT 1"
+
 _LATEST_ACTION_SQL = """
 SELECT action FROM og.stop_event
 WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s
@@ -68,6 +70,11 @@ class PgStopEventBackend:
                     "signature": signature,
                 },
             )
+
+    async def has_signature(self, signature: str) -> bool:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_HAS_SIGNATURE_SQL, {"signature": signature})
+            return await cur.fetchone() is not None
 
     async def latest_action(self, scope_kind: str, scope_ref: str) -> str | None:
         async with self.pool.connection() as conn, conn.cursor() as cur:

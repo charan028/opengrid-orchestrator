@@ -10,6 +10,11 @@ pq_ports` supplies this module's own independently-read inputs, exactly like `ch
 
 from __future__ import annotations
 
+from datetime import datetime
+
+# `RIDE_THROUGH_RANK` is canonical PQ data in `opengrid.core.pq` (one copy, BUILD.md S1). The explicit
+# re-export is transitional only, for callers that still import it from here; new code imports core.
+from opengrid.core.pq import RIDE_THROUGH_RANK as RIDE_THROUGH_RANK
 from opengrid.core.pq import (
     CalibrationBounds,
     ComplianceState,
@@ -28,13 +33,6 @@ _BOUNDS_TOL = 1e-9
 _ALWAYS_EXCLUDED_STATES: frozenset[AssetState] = frozenset(
     {"QUARANTINED", "AWAITING_REPLACEMENT", "RECOMMISSIONING"}
 )
-
-#: S2's `ride_through_class` labels, ranked low-to-high per IEEE 1547-2018 Table 15's Category I/II/III
-#: (higher category = broader sag/swell ride-through the inverter must not trip on). Kept local to this
-#: module rather than `opengrid.core.pq` -- it is a simple ordinal label map, not PQ math; move it to
-#: `core.pq.constants` if another owner (e.g. the allocator's S5.5.3 eligibility filter) needs the same
-#: ranking, so there is still exactly one copy (BUILD.md S1).
-RIDE_THROUGH_RANK: dict[str, int] = {"CATEGORY_I": 1, "CATEGORY_II": 2, "CATEGORY_III": 3}
 
 
 def _envelope_verdicts(measurement: PqMeasurement, limits: PqEnvelopeLimits) -> dict[str, ComplianceState]:
@@ -160,7 +158,11 @@ def check_g25_calibration_safety(
     grant for a non-default-envelope obligation on the target hub (S5.4 step 2 must have already
     substituted any PQ-sensitive delivery off it). Fail-safe: refuse to sign (hold) -- the ladder's
     recalibration step is skipped and drift proceeds toward escalation on its own timeline (S6.7), never
-    forced through."""
+    forced through.
+
+    No rollback exemption: S5.5.4's automatic rollback is hub-local (the hub restores the parameters it
+    had before the same command, within that apply, and acks WORSE_ROLLED_BACK), so the orchestrator
+    never sends a rollback command and the rate limit applies to every signed command."""
     if hub_has_active_sensitive_grant:
         return CheckOutcome("G-25", False, "PQ_CALIBRATION_ACTIVE_SENSITIVE_GRANT", command.hub_id)
     if not calibration_allowed(last_attempt_epoch_s, now_epoch_s, min_interval_s=min_interval_s):
@@ -169,4 +171,21 @@ def check_g25_calibration_safety(
         return CheckOutcome("G-25", False, "PQ_CALIBRATION_BOUNDS_EXCEED_FIRMWARE_LIMIT", command.hub_id)
     if _correction_exceeds_bounds(command):
         return CheckOutcome("G-25", False, "PQ_CALIBRATION_CORRECTION_EXCEEDS_BOUNDS", command.hub_id)
+    return CheckOutcome.passed("G-25", hub_id=command.hub_id)
+
+
+def check_g25_calibration_lease(
+    command: ProposedCalibrationCommand, *, now: datetime, max_lease_s: float, max_issue_skew_s: float
+) -> CheckOutcome:
+    """K6-style lease sanity for a calibration command (S6.7's `issued_at`/`expires_at`): the guardian
+    never signs a command that is already expired, issued in the future beyond clock skew, or valid for
+    longer than `max_lease_s` -- a long-lived signed calibration command is a replay window."""
+    lease_s = (command.expires_at - command.issued_at).total_seconds()
+    if (
+        command.expires_at <= now
+        or (command.issued_at - now).total_seconds() > max_issue_skew_s
+        or lease_s <= 0.0
+        or lease_s > max_lease_s
+    ):
+        return CheckOutcome("G-25", False, "PQ_CALIBRATION_LEASE_INVALID", command.hub_id)
     return CheckOutcome.passed("G-25", hub_id=command.hub_id)

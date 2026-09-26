@@ -24,7 +24,11 @@ Everywhere below, `<root>` stands for that configured prefix.
 | `<root>/ack/cal/<hub_id>` | hub → orchestrator | 1 | No | `og_sim` (or a real hub) | `og_engine`, `og_guardian` | `calibration_ack.schema.json` |
 
 `<scope>` for `<root>/stop/*` is one of `fleet`, `zone/<zone>`, `bank/<bank_id>`; `<id>` is the `stop_event`
-UUID. A retained **empty payload** on a given `<root>/stop/<scope>/<id>` clears that stop (release).
+UUID. Stop state changes **only** through a signature-verified `StopEvent` (crypto.md §2.3): `ENGAGE` signed
+by the safestop key, `RELEASE` signed by the guardian key (Tier-2 approved); the event's signed `scope`/`scope_id`
+govern, not the topic. A retained **empty payload** (zero-length, or any JSON that is not a non-empty object,
+e.g. `{}`, `null`, `[]`, `0`, `false`) is broker housekeeping that clears the retained message; it **never**
+releases or otherwise changes a stop (K8: an unsigned message must not be able to release a stop).
 
 ## QoS rationale
 

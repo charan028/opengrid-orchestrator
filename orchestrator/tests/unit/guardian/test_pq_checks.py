@@ -4,8 +4,13 @@ negative cases for G-25, mirroring the style of `test_checks.py`."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+from opengrid.core.models.pq import CalibrationReference
 from opengrid.core.pq import CalibrationBounds, OffsetVector, PqEnvelopeLimits, PqMeasurement
 from opengrid.guardian import pq_checks
+from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.pq_ports import ProposedCalibrationCommand
 
 LIMITS = PqEnvelopeLimits(
@@ -170,10 +175,60 @@ def test_g24_negative_unknown_ride_through_class_fails_closed():
 BOUNDS = CalibrationBounds(max_freq_hz=0.05, max_voltage_pct=1.0, max_phase_deg=2.0)
 
 
+ISSUED_AT = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
+
+
 def _command(**overrides: object) -> ProposedCalibrationCommand:
     correction = overrides.get("correction", OffsetVector(freq_hz=0.02, voltage_pct=0.3, phase_deg=1.0))
     bounds = overrides.get("bounds", BOUNDS)
-    return ProposedCalibrationCommand(hub_id="hub-1", correction=correction, bounds=bounds)  # type: ignore[arg-type]
+    issued_at = overrides.get("issued_at", ISSUED_AT)
+    expires_at = overrides.get("expires_at", ISSUED_AT + timedelta(seconds=60))
+    return ProposedCalibrationCommand(
+        hub_id="hub-1",
+        correction=correction,  # type: ignore[arg-type]
+        bounds=bounds,  # type: ignore[arg-type]
+        calibration_id=UUID("00000000-0000-4000-8000-0000000000c1"),
+        reference=CalibrationReference(
+            phase_deg=0.0, freq_hz=60.0, amplitude_v=240.0, sync_source="ntp_disciplined"
+        ),
+        issued_at=issued_at,  # type: ignore[arg-type]
+        expires_at=expires_at,  # type: ignore[arg-type]
+    )
+
+
+def _lease(command: ProposedCalibrationCommand, *, now: datetime = ISSUED_AT) -> CheckOutcome:
+    return pq_checks.check_g25_calibration_lease(command, now=now, max_lease_s=300.0, max_issue_skew_s=5.0)
+
+
+def test_g25_lease_positive():
+    assert _lease(_command()).ok
+
+
+def test_g25_lease_negative_expired():
+    r = _lease(_command(), now=ISSUED_AT + timedelta(seconds=60))
+    assert not r.ok and r.rule_id == "G-25" and r.reason == "PQ_CALIBRATION_LEASE_INVALID"
+
+
+def test_g25_lease_negative_future_dated_beyond_skew():
+    r = _lease(
+        _command(issued_at=ISSUED_AT + timedelta(seconds=30), expires_at=ISSUED_AT + timedelta(seconds=90))
+    )
+    assert not r.ok and r.reason == "PQ_CALIBRATION_LEASE_INVALID"
+
+
+def test_g25_lease_negative_too_long_lived():
+    r = _lease(_command(expires_at=ISSUED_AT + timedelta(hours=1)))
+    assert not r.ok and r.reason == "PQ_CALIBRATION_LEASE_INVALID"
+
+
+def test_ride_through_rank_is_the_canonical_core_constant():
+    """The allocator must not import the guardian for canonical PQ data: one copy, in core.pq."""
+    from opengrid.core.pq import RIDE_THROUGH_RANK
+
+    assert pq_checks.RIDE_THROUGH_RANK is RIDE_THROUGH_RANK
+    assert (
+        RIDE_THROUGH_RANK["CATEGORY_I"] < RIDE_THROUGH_RANK["CATEGORY_II"] < RIDE_THROUGH_RANK["CATEGORY_III"]
+    )
 
 
 def test_g25_positive_within_bounds_no_grant_rate_ok():

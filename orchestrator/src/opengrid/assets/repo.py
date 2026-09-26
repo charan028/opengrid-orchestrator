@@ -13,7 +13,8 @@ from uuid import UUID
 from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.assets.ports import DriftObservationWindow, HubAssetRecord
+from opengrid import pq_ingest
+from opengrid.assets.ports import DriftObservationWindow, HubAssetRecord, PendingCalibrationAttempt
 from opengrid.core.models.pq import MaintenanceWorkOrder
 from opengrid.core.pq import CalibrationOutcome, OffsetVector, exceeds_watch_threshold
 from opengrid.core.pq.constants import (
@@ -22,11 +23,15 @@ from opengrid.core.pq.constants import (
     DRIFT_FLOOR_THD_PCT,
     DRIFT_FLOOR_VOLTAGE_PCT,
     DRIFT_OBSERVATION_WINDOW_S_DEFAULT,
+    NOMINAL_FREQ_HZ,
 )
 from opengrid.guardian.pq_ports import AssetState
+from opengrid.pq_ingest import aggregation as pq_ingest_aggregation
 from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
+
+_HUB_ASSET_LIST_IDS_SQL = "SELECT hub_id FROM og.hub_inverter_pq ORDER BY hub_id"
 
 _HUB_ASSET_SELECT_SQL = """
 SELECT asset_state, asset_state_since, consecutive_correctable_drifts, last_recalibration_at,
@@ -53,6 +58,12 @@ UPDATE og.hub_inverter_pq SET last_estimated_at = %(at)s WHERE hub_id = %(hub_id
 class PgAssetHealthRepo:
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
+
+    async def list_hub_ids(self) -> list[str]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_HUB_ASSET_LIST_IDS_SQL)
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
 
     async def get(self, hub_id: str) -> HubAssetRecord | None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -126,6 +137,11 @@ UPDATE og.calibration_attempt SET outcome = %(outcome)s, verified_at = %(verifie
 WHERE calibration_id = %(calibration_id)s
 """
 
+_GET_PENDING_SQL = """
+SELECT hub_id, measured_offset_freq_hz, measured_offset_voltage_pct, measured_offset_phase_deg
+FROM og.calibration_attempt WHERE calibration_id = %(calibration_id)s
+"""
+
 
 class PgCalibrationAttemptRepo:
     def __init__(self, pool: AsyncConnectionPool) -> None:
@@ -176,6 +192,22 @@ class PgCalibrationAttemptRepo:
                 },
             )
             await conn.commit()
+
+    async def get_pending(self, calibration_id: UUID) -> PendingCalibrationAttempt | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_GET_PENDING_SQL, {"calibration_id": calibration_id})
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        hub_id, freq_hz, voltage_pct, phase_deg = row
+        return PendingCalibrationAttempt(
+            hub_id=hub_id,
+            measured_offset=OffsetVector(
+                freq_hz=float(freq_hz or 0),
+                voltage_pct=float(voltage_pct or 0),
+                phase_deg=float(phase_deg or 0),
+            ),
+        )
 
     async def record_outcome(
         self, calibration_id: UUID, outcome: CalibrationOutcome, *, verified_at: datetime
@@ -329,14 +361,6 @@ class PgAssetEventRepo:
             await conn.commit()
 
 
-_RECENT_SUMMARIES_SQL = """
-SELECT freq_hz, v_rms_a, v_rms_b, v_rms_c, thd_i_pct_a, thd_i_pct_b, thd_i_pct_c,
-       phase_angle_deg_a, phase_angle_deg_b, phase_angle_deg_c
-FROM og.pq_waveform_summary
-WHERE hub_id = %(hub_id)s AND ts >= %(window_start)s
-ORDER BY ts ASC
-"""
-
 _CHARACTERIZATION_SQL = """
 SELECT freq_offset_hz, freq_offset_std_hz, voltage_offset_pct, voltage_offset_std_pct,
        thd_current_pct, phase_angle_error_deg
@@ -344,20 +368,24 @@ FROM og.hub_inverter_pq WHERE hub_id = %(hub_id)s
 """
 
 
-#: Placeholder nominal line voltage for the pct-deviation math below (a residential split-phase leg).
-#: NOTE for Agent A/D (reported, not silently assumed): this should come from the hub's own interconnect
-#: config once that lives somewhere queryable; MVP-S+'s schema has no per-hub nominal-voltage column yet.
-_NOMINAL_VOLTAGE_V = 240.0
+#: Reuses Agent G's own nominal-voltage constant (`opengrid.pq_ingest.aggregation`, the same one
+#: `bank_measurement` expresses voltage deviation against) rather than a second copy (BUILD.md S1).
+_NOMINAL_VOLTAGE_V = pq_ingest_aggregation.NOMINAL_VOLTAGE_V
 
 
 class PgDriftObservationRepo:
-    """S5.5.1's rolling observation window, from measured `og.pq_waveform_summary` rows compared against
-    the hub's own characterized values (`og.hub_inverter_pq`). NOTE (reported, not silently assumed):
-    S5.5.1's "correlates with a fleet-wide/bank-wide event already explained by a trace entry" transient
-    classification needs the bank/feeder-wide event log Agent G's waveform-ingestion service and the
-    existing `03 S8.6` R26 frequency-freeze alerting own -- this adapter conservatively reports
-    `correlates_with_fleet_event=False` (never hides a real drift behind an unconfirmed correlation) until
-    that event feed exists; wire it in once Agent G's ingestion service is in place."""
+    """S5.5.1's rolling observation window, from measured PQ summaries compared against the hub's own
+    characterized values (`og.hub_inverter_pq`). Reads summaries through `opengrid.pq_ingest.
+    latest_summaries` (Agent G's own read-through, S6.5 step 4's "kept here rather than duplicated in
+    each caller") rather than querying `og.pq_waveform_summary` directly -- this package owns no SQL
+    against that table (BUILD.md S1: one owner per function).
+
+    NOTE (reported, not silently assumed): S5.5.1's "correlates with a fleet-wide/bank-wide event
+    already explained by a trace entry" transient classification needs the bank/feeder-wide event log
+    Agent G's waveform-ingestion service and the existing `03 S8.6` R26 frequency-freeze alerting own --
+    this adapter conservatively reports `correlates_with_fleet_event=False` (never hides a real drift
+    behind an unconfirmed correlation) until that event feed exists; wire it in once Agent G's ingestion
+    service surfaces one."""
 
     def __init__(
         self, pool: AsyncConnectionPool, *, window_s: float = DRIFT_OBSERVATION_WINDOW_S_DEFAULT
@@ -369,47 +397,49 @@ class PgDriftObservationRepo:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_CHARACTERIZATION_SQL, {"hub_id": hub_id})
             char_row = await cur.fetchone()
-            if char_row is None:
-                return None
-            await cur.execute(
-                _RECENT_SUMMARIES_SQL,
-                {"hub_id": hub_id, "window_start": _window_start(self._window_s)},
-            )
-            rows = await cur.fetchall()
+        if char_row is None:
+            return None
+        freq_offset_std_hz, voltage_offset_std_pct, thd_current_pct = (
+            float(char_row[1]),
+            float(char_row[3]),
+            float(char_row[4]),
+        )
+        rows = await pq_ingest.latest_summaries([hub_id], since=_window_start(self._window_s))
         if not rows:
             return None
 
-        (
-            _freq_offset_hz,
-            freq_offset_std_hz,
-            _voltage_offset_pct,
-            voltage_offset_std_pct,
-            thd_current_pct,
-            _phase_angle_error_deg,
-        ) = (float(v) for v in char_row)
-
         exceeded: list[bool] = []
-        for freq_hz, v_a, v_b, v_c, thd_a, thd_b, thd_c, ph_a, ph_b, ph_c in rows:
-            freq_dev = abs(float(freq_hz) - 60.0) if freq_hz is not None else 0.0
-            voltage_dev_pct = _max_pct_deviation(v_a, v_b, v_c, nominal=_NOMINAL_VOLTAGE_V)
-            thd_dev_pct = _max_abs_deviation(thd_a, thd_b, thd_c, baseline=thd_current_pct)
+        for row in rows:
+            freq_dev = abs(float(row.freq_hz) - NOMINAL_FREQ_HZ) if row.freq_hz is not None else 0.0
+            voltage_dev_pct = _max_pct_deviation(
+                row.v_rms_a, row.v_rms_b, row.v_rms_c, nominal=_NOMINAL_VOLTAGE_V
+            )
+            thd_dev_pct = _max_abs_deviation(
+                row.thd_i_pct_a, row.thd_i_pct_b, row.thd_i_pct_c, baseline=thd_current_pct
+            )
+            phase_dev = _max_abs(row.phase_angle_deg_a, row.phase_angle_deg_b, row.phase_angle_deg_c)
             exceeded.append(
                 exceeds_watch_threshold(freq_dev, freq_offset_std_hz, DRIFT_FLOOR_FREQ_HZ)
                 or exceeds_watch_threshold(voltage_dev_pct, voltage_offset_std_pct, DRIFT_FLOOR_VOLTAGE_PCT)
                 or exceeds_watch_threshold(thd_dev_pct, DRIFT_FLOOR_THD_PCT / 1.5, DRIFT_FLOOR_THD_PCT)
-                or exceeds_watch_threshold(_max_abs(ph_a, ph_b, ph_c), 1.0, DRIFT_FLOOR_PHASE_DEG)
+                or exceeds_watch_threshold(phase_dev, 1.0, DRIFT_FLOOR_PHASE_DEG)
             )
         last = rows[-1]
         latest_offset = OffsetVector(
-            freq_hz=(float(last[0]) - 60.0) if last[0] is not None else 0.0,
-            voltage_pct=_max_pct_deviation(last[1], last[2], last[3], nominal=_NOMINAL_VOLTAGE_V),
-            phase_deg=_max_abs(last[7], last[8], last[9]),
+            freq_hz=(float(last.freq_hz) - NOMINAL_FREQ_HZ) if last.freq_hz is not None else 0.0,
+            voltage_pct=_max_pct_deviation(
+                last.v_rms_a, last.v_rms_b, last.v_rms_c, nominal=_NOMINAL_VOLTAGE_V
+            ),
+            phase_deg=_max_abs(last.phase_angle_deg_a, last.phase_angle_deg_b, last.phase_angle_deg_c),
         )
         return DriftObservationWindow(
             exceeded_per_summary=exceeded,
             correlates_with_fleet_event=False,
             latest_measured_offset=latest_offset,
         )
+
+    async def _characterization(self, hub_id: str) -> tuple[float, float, float] | None:
+        raise NotImplementedError  # replaced below once bound to a pool -- see PgDriftObservationRepo.bind
 
 
 def _window_start(window_s: float) -> datetime:

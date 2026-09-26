@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from opengrid.platform import mqtt
-from opengrid.platform.config import load_config
+from opengrid.platform.config import Config, load_config
 from opengrid.platform.mqtt import SchemaValidationError, topic, validate_payload
 
 
@@ -96,3 +96,75 @@ def test_validate_payload_command_batch():
         "signature": "abc",
     }
     validate_payload("command_batch", payload)
+
+
+# --- MQTT client identity (a workspace must never reuse a production client id) ------------------------
+
+
+def _identity_cfg(*, prefix: str | None = None, env: str | None = None) -> Config:
+    data: dict = {"mqtt": {"topic_root": "og/v1"}}
+    if prefix is not None:
+        data["mqtt"]["client_id_prefix"] = prefix
+    if env is not None:
+        data["general"] = {"env": env}
+    return Config(data)
+
+
+def test_production_client_ids_are_unchanged(monkeypatch):
+    monkeypatch.delenv("OG_WS", raising=False)
+    cfg = _identity_cfg(prefix="og", env="prod")
+    assert mqtt.compose_client_id(cfg, "guardian") == "og-guardian"
+    assert mqtt.compose_client_id(cfg, "guardian-tel") == "og-guardian-tel"
+    assert mqtt.compose_client_id(cfg, "safestop") == "og-safestop"
+
+
+def test_workspace_client_ids_carry_the_prefix_and_workspace(monkeypatch):
+    monkeypatch.setenv("OG_WS", "guardsafe")
+    cfg = _identity_cfg(prefix="og-test", env="dev")
+    assert mqtt.compose_client_id(cfg, "engine") == "og-test-guardsafe-engine"
+
+
+@pytest.mark.parametrize(("workspace", "env"), [("guardsafe", "prod"), ("", "dev"), ("guardsafe", "dev")])
+def test_production_prefix_is_refused_outside_production(monkeypatch, workspace, env):
+    """The broker drops the older session on a duplicate client id: a workspace or dev run with the
+    production prefix would silently disconnect og-guardian/og-engine/og-safestop in production."""
+    monkeypatch.setenv("OG_WS", workspace)
+    with pytest.raises(mqtt.MqttIdentityError):
+        mqtt.compose_client_id(_identity_cfg(prefix="og", env=env), "guardian")
+
+
+def test_missing_prefix_defaults_to_production_and_is_refused_in_a_workspace(monkeypatch):
+    monkeypatch.setenv("OG_WS", "guardsafe")
+    with pytest.raises(mqtt.MqttIdentityError):
+        mqtt.compose_client_id(_identity_cfg(env="dev"), "guardian")
+
+
+def test_build_client_composes_the_identifier(monkeypatch):
+    monkeypatch.setenv("OG_WS", "guardsafe")
+    captured: dict = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(mqtt.aiomqtt, "Client", fake_client)
+    cfg = _identity_cfg(prefix="og-test", env="dev")
+
+    mqtt.build_client(cfg, username="u", password="p", process="guardian")
+    assert captured["identifier"] == "og-test-guardsafe-guardian"
+
+    mqtt.build_client(cfg, username="u", password="p", client_id="og-engine")  # legacy call sites
+    assert captured["identifier"] == "og-test-guardsafe-engine"
+
+
+def test_build_client_refuses_a_workspace_with_the_production_prefix(monkeypatch):
+    monkeypatch.setenv("OG_WS", "guardsafe")
+    monkeypatch.setattr(mqtt.aiomqtt, "Client", lambda **kwargs: object())
+    with pytest.raises(mqtt.MqttIdentityError):
+        mqtt.build_client(
+            _identity_cfg(prefix="og", env="prod"), username="u", password="p", process="guardian"
+        )
+
+
+def test_calibration_schemas_are_registered():
+    assert "calibration_command" in mqtt._SCHEMA_BY_KIND and "calibration_ack" in mqtt._SCHEMA_BY_KIND

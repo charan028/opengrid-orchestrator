@@ -87,10 +87,15 @@ class HubSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class BankSnapshot:
+    """Guardian's own view of one bank. `bank_load_kva` is its latest SCADA apparent-power reading and
+    `bank_load_age_s` that reading's age (`inf` when there is none): G-03 treats a missing or stale
+    reading as unknown loading and vetoes, never as an empty bank."""
+
     params: BankParams
     bank_load_kva: float
     feeder_id: str | None
     feeder_ceiling_kw_per_min: float | None
+    bank_load_age_s: float = 0.0
 
 
 class ClockPort(Protocol):
@@ -112,9 +117,27 @@ class TracePort(Protocol):
         """Trace the verdict itself (GUARDIAN_VERDICT, 02a S8.1) after signing/veto/timeout."""
         ...
 
+    async def append_calibration_verdict(self, calibration_id: UUID, payload: dict[str, object]) -> None:
+        """Trace a calibration-command verdict (signed or refused, S6.7/G-25). Raises on failure: a
+        signed calibration command is only released once this record is durable (K10)."""
+        ...
+
+    async def append_stop_release_verdict(self, operator_action_id: UUID, payload: dict[str, object]) -> None:
+        """Trace a stop-RELEASE verdict (signed or refused, K8). Raises on failure: signed RELEASE events
+        are handed to og-safestop only from this durable record (K10)."""
+        ...
+
 
 class HubStatePort(Protocol):
     async def snapshot(self, hub_id: str) -> HubSnapshot | None: ...
+
+
+class BankMembersPort(Protocol):
+    async def member_snapshots(self, bank_id: str) -> list[HubSnapshot]:
+        """Guardian's own telemetry snapshot of EVERY hub on `bank_id` (membership from `og.hub`
+        configuration), used to re-derive the bank's deliverable capability independently of the
+        engine (G-19's check of an `R-COMMIT-LOCK-INFEASIBLE`/`-L0`/`-L1` override)."""
+        ...
 
 
 class BankStatePort(Protocol):
@@ -174,6 +197,49 @@ class SafeStopPort(Protocol):
         ...
 
 
+StopScopeKind = Literal["FLEET", "ZONE", "BANK"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseRequest:
+    """A Tier-2 stop-release request as og-api durably recorded it (`og.operator_action`,
+    action_kind SAFE_STOP_RELEASE, tier TIER2): who asked, who approved, when, for which scope, and the
+    trace row og-api wrote for it. The guardian re-checks every field itself (K8)."""
+
+    operator_action_id: UUID
+    requested_by: str
+    approved_by: str | None
+    scope_kind: StopScopeKind
+    scope_ref: str  # "FLEET" for fleet scope, as og.stop_event stores it
+    reason: str
+    requested_at: datetime
+    approved_at: datetime | None
+    trace_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class EngagedStop:
+    """One outstanding ENGAGE on a scope (no RELEASE recorded after it), from `og.stop_event`."""
+
+    stop_id: UUID
+    initiator_kind: str
+    engaged_at: datetime
+
+
+class StopReleasePort(Protocol):
+    async def pending_requests(self, *, max_age_s: float) -> list[ReleaseRequest]:
+        """Approved Tier-2 release requests the guardian has not yet decided (no verdict trace row)."""
+        ...
+
+    async def outstanding_engages(self, scope_kind: StopScopeKind, scope_ref: str) -> list[EngagedStop]:
+        """Every ENGAGE on exactly this scope recorded after its last RELEASE."""
+        ...
+
+    async def banks_in_scope(self, scope_kind: StopScopeKind, scope_ref: str) -> list[str]:
+        """The banks a scope covers (configuration: `og.bank`)."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class PqPorts:
     """K14 inputs (G-21..G-25, 06-service-profiles-and-power-quality.md S5.3/S6.7), each the guardian's
@@ -204,3 +270,7 @@ class GuardianPorts:
     safe_stop: SafeStopPort
     zones_by_bank: dict[str, str] = field(default_factory=dict)
     pq: PqPorts | None = None  # None: K14 checks not wired (tests that predate PQ)
+    # None: no independent capability read, so a capability-based G-19 override is never verified (VETO).
+    bank_members: BankMembersPort | None = None
+    # None: the K8 stop-release path is not wired, so every release request is refused.
+    stop_release: StopReleasePort | None = None

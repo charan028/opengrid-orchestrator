@@ -40,6 +40,7 @@ from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine import metrics as engine_metrics
 from opengrid.engine.background import BackgroundIngest, run_periodic
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
 from opengrid.engine.gates import run_due_gates
@@ -330,6 +331,7 @@ class _EngineState:
     latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
     phase_timer: PhaseTimer = field(default_factory=PhaseTimer)
     last_tick_at: float | None = None  # monotonic time the last tick completed (heartbeat liveness)
+    flush_lag: engine_metrics.FlushLag | None = None  # og_engine_fleet_flush_lag_seconds
     escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
     pq_flush: Cadence | None = None
     gate_task: asyncio.Task[int] | None = None
@@ -349,8 +351,10 @@ async def timed_tick(state: _EngineState) -> None:
         finished = time.monotonic()
         state.last_tick_at = finished
         state.latency.record((finished - started) * 1000.0, state.phase_timer.phases)
+        engine_metrics.observe_tick(finished - started)
         if state.latency.report_due(finished):
             summary = state.latency.summary()
+            engine_metrics.publish_cycle_summary(summary)
             logger.info("engine cycle latency", extra=summary)
             try:
                 await state.trace.append("engine-cycle-latency", "RT_ALLOCATION", "CYCLE_LATENCY", summary)
@@ -492,6 +496,10 @@ async def persist_fleet_state(state: Any) -> None:
         await fleet.flush()
     except Exception:
         logger.exception("fleet flush failed; retrying next interval")
+    else:
+        flush_lag = getattr(state, "flush_lag", None)
+        if flush_lag is not None:
+            flush_lag.mark_ok()
     await _flush_pq_summaries(state)
 
 
@@ -535,6 +543,7 @@ async def _engine_tick(state: _EngineState) -> None:
                 on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
                     contract_id, plan_id, now
                 ),
+                observe_duration=engine_metrics.observe_gate,
             ),
         )
 
@@ -709,6 +718,8 @@ async def main(cfg: Config) -> None:
         backend = PgEngineBackend(pool)
         fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool, trace_store)
         allocator_mod.configure(ledger_gateway)
+        flush_lag = engine_metrics.FlushLag()
+        flush_lag.bind()
         state = _EngineState(
             cfg=cfg,
             backend=backend,
@@ -732,13 +743,16 @@ async def main(cfg: Config) -> None:
             lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
             epoch=await backend.next_epoch(),
             pq_flush=Cadence(float(cfg.get("pq_ingest.flush_interval_s", pq_mod.DEFAULT_FLUSH_INTERVAL_S))),
-            latency=CycleLatencyWindow(lag_probe=LoopLagProbe()),
+            latency=CycleLatencyWindow(lag_probe=LoopLagProbe(on_sample=engine_metrics.observe_loop_lag)),
+            flush_lag=flush_lag,
         )
+        metrics_port = engine_metrics.start_metrics_server(cfg)
+        logger.info("engine metrics endpoint", extra={"port": metrics_port})
         logger.info("engine epoch", extra={"epoch": state.epoch})
 
         mqtt_password = resolve_secret("OG_MQTT_ENGINE_PASSWORD")
         async with build_client(
-            cfg, username="og_engine", password=mqtt_password, client_id="og-engine"
+            cfg, username="og_engine", password=mqtt_password, process="engine"
         ) as client:
             raw_worker = BackgroundIngest("pq-raw", ingest_raw_capture_off_loop)
             raw_task = asyncio.create_task(raw_worker.run())
@@ -824,6 +838,7 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config, raw_worker: Bac
                 await fleet.ingest_ack(payload)
             elif message.topic.matches(tel_topic):
                 validate_payload("telemetry", payload)
+                engine_metrics.observe_ingest(payload.get("ts"))
                 await fleet.ingest_telemetry(payload)
             elif message.topic.matches(scada_instruction_topic):
                 validate_payload("scada_utility_instruction", payload)

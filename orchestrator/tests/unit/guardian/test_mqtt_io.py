@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from opengrid.core.models.mqtt import CommandBatch, CommandItem, Lease, Telemetry
+from opengrid.core.models.mqtt import CommandBatch, CommandItem, Lease, ScadaUtilityInstruction, Telemetry
 from opengrid.core.physics import HubParams
 from opengrid.guardian import mqtt_io
 from opengrid.guardian.ports import HubSnapshot
@@ -164,7 +164,7 @@ async def test_run_telemetry_listener_ingests_valid_and_skips_malformed(monkeypa
     ]
     fake_client = FakeSubscribeClient(messages)
 
-    def fake_build_client(cfg, *, username, password, client_id):
+    def fake_build_client(cfg, *, username, password, process):
         return fake_client
 
     import opengrid.platform.mqtt as platform_mqtt
@@ -175,3 +175,156 @@ async def test_run_telemetry_listener_ingests_valid_and_skips_malformed(monkeypa
 
     snap = await cache.snapshot("hub-1")
     assert snap is not None and snap.soc_kwh == 12.0
+
+
+def _seed(*hub_ids: str) -> dict[str, HubSnapshot]:
+    return {
+        hub_id: HubSnapshot(
+            params=HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0), soc_kwh=0.0, prev_p_kw=0.0, health="stale"
+        )
+        for hub_id in hub_ids
+    }
+
+
+def _telemetry(hub_id: str, *, health: str = "online") -> Telemetry:
+    return Telemetry(
+        hub_id=hub_id,
+        bank_id="bank-1",
+        zone="z",
+        ts=NOW,
+        soc_kwh=20.0,
+        p_kw=-3.0,
+        health=health,
+        seq=1,
+        epoch=1,
+    )
+
+
+async def test_hub_whose_telemetry_stopped_is_reported_stale():
+    """K1: before, the cache kept a silent hub "online" on its last SoC forever, so the guardian kept
+    signing discharge on an arbitrarily old reading. Beyond `max_age_s` it is stale (zero discharge)."""
+    clock = {"t": 100.0}
+    cache = mqtt_io.MqttHubStatePort(_seed("hub-1"), max_age_s=60.0, monotonic_fn=lambda: clock["t"])
+    cache.ingest(_telemetry("hub-1"))
+
+    clock["t"] = 159.0
+    fresh = await cache.snapshot("hub-1")
+    assert fresh is not None and fresh.health == "online"
+
+    clock["t"] = 161.0
+    silent = await cache.snapshot("hub-1")
+    assert silent is not None and silent.health == "stale" and silent.soc_kwh == 20.0
+
+
+async def test_member_snapshots_cover_every_configured_hub_of_the_bank():
+    cache = mqtt_io.MqttHubStatePort(
+        _seed("hub-1", "hub-2", "hub-3"),
+        bank_by_hub={"hub-1": "bank-1", "hub-2": "bank-1", "hub-3": "bank-2"},
+        max_age_s=60.0,
+        monotonic_fn=lambda: 0.0,
+    )
+    cache.ingest(_telemetry("hub-1"))
+
+    members = await cache.member_snapshots("bank-1")
+
+    assert sorted(m.health for m in members) == ["online", "stale"]  # hub-2 never reported
+    assert await cache.member_snapshots("bank-unknown") == []
+
+
+def _instruction(**overrides: object) -> ScadaUtilityInstruction:
+    data: dict[str, object] = {
+        "instruction_id": "019842d1-0000-7000-8000-0000000000aa",
+        "bank_id": "bank-1",
+        "kind": "LIMIT",
+        "limit_kw": 40.0,
+        "issued_at": NOW,
+        "expires_at": NOW + timedelta(minutes=5),
+        "issued_by": "utility",
+    }
+    data.update(overrides)
+    return ScadaUtilityInstruction.model_validate(data)
+
+
+async def test_l2_instruction_port_reports_only_unexpired_instructions():
+    now = {"t": NOW}
+    port = mqtt_io.MqttL2InstructionPort(now_fn=lambda: now["t"])
+    assert await port.active_instruction("bank-1") is None
+
+    port.ingest(_instruction())
+    active = await port.active_instruction("bank-1")
+    assert active is not None and active.kind == "LIMIT" and active.limit_kw == 40.0
+    assert await port.active_instruction("bank-2") is None
+
+    now["t"] = NOW + timedelta(minutes=5)
+    assert await port.active_instruction("bank-1") is None
+
+
+async def test_listener_routes_utility_instructions_to_the_guardians_own_l2_port(monkeypatch):
+    """K5: the guardian's L2 read is its own subscription (the previous Postgres port read a trace key
+    the engine never writes, so G-15 never saw an instruction)."""
+    cache = mqtt_io.MqttHubStatePort(_seed("hub-1"))
+    l2 = mqtt_io.MqttL2InstructionPort(now_fn=lambda: NOW)
+    messages = [
+        FakeMessage("ogtest/guard/scada/instruction/bank-1", _instruction().model_dump_json().encode()),
+        FakeMessage("ogtest/guard/tel/z/bank-1/hub-1", _telemetry("hub-1").model_dump_json().encode()),
+    ]
+    fake_client = FakeSubscribeClient(messages)
+    import opengrid.platform.mqtt as platform_mqtt
+
+    monkeypatch.setattr(platform_mqtt, "build_client", lambda cfg, **kwargs: fake_client)
+
+    await mqtt_io.run_telemetry_listener(
+        _cfg(), cache, username="og_guardian", password="x", l2_instructions=l2
+    )
+
+    assert "ogtest/guard/scada/instruction/+" in fake_client.subscribed
+    assert await l2.active_instruction("bank-1") is not None
+    snap = await cache.snapshot("hub-1")
+    assert snap is not None and snap.health == "online"
+
+
+async def test_publish_calibration_command_goes_to_the_hubs_calibration_topic():
+    from uuid import UUID
+
+    from opengrid.core.models.pq import (
+        CalibrationBounds,
+        CalibrationCommand,
+        CalibrationCorrection,
+        CalibrationReference,
+    )
+
+    client = FakePublishClient()
+    command = CalibrationCommand(
+        calibration_id=UUID("00000000-0000-4000-8000-0000000000c1"),
+        hub_id="hub-1",
+        epoch=1,
+        seq=1,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(seconds=60),
+        reference=CalibrationReference(
+            phase_deg=0.0, freq_hz=60.0, amplitude_v=240.0, sync_source="ntp_disciplined"
+        ),
+        correction=CalibrationCorrection(freq_hz=0.01, voltage_pct=-0.5, phase_deg=1.0),
+        bounds=CalibrationBounds(max_freq_hz=0.1, max_voltage_pct=2.0, max_phase_deg=5.0),
+        key_id="guardian-2026a",
+        signature="c2ln",
+    )
+
+    await mqtt_io.publish_calibration_command(client, _cfg(), command)
+
+    topic, payload, qos, retain = client.published[0]
+    assert topic == "ogtest/guard/cmd/cal/hub-1"
+    assert qos == 1 and retain is False
+    assert json.loads(payload)["signature"] == "c2ln"
+
+
+async def test_an_old_fault_report_is_stale_too():
+    """An offline/fault report the guardian has not refreshed is as unverifiable as an old online one."""
+    clock = {"t": 0.0}
+    cache = mqtt_io.MqttHubStatePort(_seed("hub-1"), max_age_s=60.0, monotonic_fn=lambda: clock["t"])
+    cache.ingest(_telemetry("hub-1", health="fault"))
+    fresh = await cache.snapshot("hub-1")
+    assert fresh is not None and fresh.health == "fault"
+    clock["t"] = 61.0
+    old = await cache.snapshot("hub-1")
+    assert old is not None and old.health == "stale"

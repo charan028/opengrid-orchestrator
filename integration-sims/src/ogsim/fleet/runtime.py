@@ -441,6 +441,10 @@ async def run_fleet(
     await client.subscribe("lease/+", qos=1)
     await client.subscribe("scenario/cmd", qos=1)
     await client.subscribe("scada/wave/+/+/+/request", qos=1)
+    # 06-service-profiles-and-power-quality.md S6.7 (WP-I): guardian-signed remote-
+    # calibration commands, handled by `FleetEngine.handle_calibration_command` (already
+    # implemented, this file's own docstring above -- only the subscribe was missing).
+    await client.subscribe("cmd/cal/+", qos=1)
     while True:
         now = clock.now()
         try:

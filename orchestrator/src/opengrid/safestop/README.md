@@ -13,6 +13,13 @@ anywhere in the package (enforced by `tests/unit/safestop/test_import_isolation.
 - `opengrid.safestop.release(scope, scope_ref, approver_ref)` -- **always raises**
   `ReleaseNotPermittedError`. The stop-only key can never sign `RELEASE`; that requires the guardian's
   Tier-2 (two-person) signing path plus a fresh operator action, never this process.
+- `opengrid.safestop.relay_guardian_release(event)` -- the only way a RELEASE reaches the hubs. og-guardian
+  NOTIFYs `{"action": "PUBLISH_RELEASE", "event": <StopEvent>}` on the request channel; this process
+  verifies it itself (guardian key from `[safestop].guardian_public_key_path`, default
+  `/etc/opengrid/guardian_ed25519.pub`; `action="RELEASE"`; a `guardian-*` key id; `approver_ref` present
+  and different from `issued_by`), then traces it, publishes it retained on the ENGAGE's own topic (the
+  RELEASE reuses the ENGAGE's `stop_id`), and records the `og.stop_event` RELEASE row. No key file: no
+  relay. Idempotent by signature. See `opengrid.guardian.stop_release` for the end-to-end path.
 - Both delegate to whatever `SafestopService` `configure_service()` last installed; `main.py` wires the
   real Postgres/MQTT-backed service at process startup, tests wire an in-memory fake.
 

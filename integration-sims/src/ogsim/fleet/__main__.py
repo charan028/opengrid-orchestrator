@@ -13,7 +13,11 @@ import asyncio
 import json
 import logging
 import time
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
+
+import jsonschema
 
 from ogsim.common.clock import RealClock
 from ogsim.common.config import load_fleet_config
@@ -94,6 +98,21 @@ async def _run_forever() -> None:
         await asyncio.gather(consume(), run_fleet(client, engine, clock, public_key))
 
 
+def handle_stop_message(
+    engine: FleetEngine, topic: str, data: Any, safestop_public_key: Any, guardian_public_key: Any
+) -> bool:
+    """K8 / crypto.md S2.3: stop state changes ONLY through a signature-verified StopEvent -- ENGAGE
+    signed by the safestop key, RELEASE signed by the guardian key (`FleetEngine.handle_stop_event`).
+    The event's own signed `scope`/`scope_id` govern, never the topic. Anything that is not a non-empty
+    JSON object ({}, null, [], 0, false, ...) is broker housekeeping (clearing a retained message) and
+    never changes stop state -- an unsigned "empty" payload must not be able to release a stop.
+    Returns True only when a verified event was applied."""
+    if not isinstance(data, dict) or not data:
+        logger.info("ignoring non-event payload on %s: it never changes stop state", topic)
+        return False
+    return engine.handle_stop_event(data, safestop_public_key, guardian_public_key)
+
+
 async def _dispatch_message(
     engine: FleetEngine,
     client: SimMqttClient,
@@ -102,6 +121,9 @@ async def _dispatch_message(
     public_key: Any,
     safestop_public_key: Any,
 ) -> None:
+    if isinstance(payload, bytes | bytearray) and not payload:
+        # Zero-length: the broker clearing a retained message. Never a command or a stop-state change.
+        return
     try:
         data = json.loads(payload)
     except (json.JSONDecodeError, TypeError):
@@ -121,16 +143,15 @@ async def _dispatch_message(
         if result is not None:
             suffix, message = result
             await client.publish_validated("pq_waveform_raw", suffix, message, qos=1)
+    elif "/cmd/cal/" in topic:
+        # S6.7 (WP-I): guardian-signed remote-calibration command. `data` is a
+        # calibration_command.schema.json object; verification/application is entirely
+        # `ogsim.fleet.calibration.apply_calibration` via `engine.handle_calibration_
+        # command` (unmodified) -- this branch only routes the message in and the ack
+        # back out.
+        await _handle_calibration_command(engine, client, data, public_key)
     elif "/stop/" in topic:
-        scope = parts[-2]
-        scope_id = None if scope == "fleet" else parts[-1]
-        if not data:
-            # An empty retained payload clears the retained MQTT message
-            # itself (stop.schema.json) -- there is no StopEvent content to
-            # verify a signature over, so this always releases.
-            engine.stops.apply_stop_event("RELEASE", scope, scope_id)
-        else:
-            engine.handle_stop_event(data, safestop_public_key, public_key)
+        handle_stop_message(engine, topic, data, safestop_public_key, public_key)
     elif "/lease/" in topic and data:
         engine.handle_lease_message(parts[-1], data["expires_at"])
     elif topic.endswith("/scenario/cmd"):
@@ -149,6 +170,51 @@ async def _handle_command_batch(
     for verdict in verdicts:
         ack = engine.build_ack(verdict, batch_id, now)
         await client.publish_validated("ack", f"ack/{verdict.hub_id}", ack, qos=1)
+
+
+#: calibration_ack.schema.json's own field set (additionalProperties: false). `ogsim.fleet.
+#: calibration.build_calibration_ack` also returns an internal `outcome`/`reject_reason` pair this
+#: sim's own scenario assertions use -- narrowed here to the wire schema before publish, never a change
+#: to `calibration.py`'s own outcome-computation logic.
+_CALIBRATION_ACK_WIRE_FIELDS = frozenset(
+    {"calibration_id", "hub_id", "applied", "applied_at", "resulting_offsets", "status"}
+)
+
+
+@lru_cache(maxsize=1)
+def _calibration_ack_validator() -> jsonschema.protocols.Validator:
+    """Loads `interfaces/mqtt/calibration_ack.schema.json` directly (mirrors `ogsim.common.schemas`'s
+    own technique) rather than adding an entry to that module's `_SCHEMA_NAMES` table, which is outside
+    this file's edit scope for this change -- see the build report for the one-line addition that would
+    let this go through `client.publish_validated("calibration_ack", ...)` instead."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "interfaces" / "mqtt" / "calibration_ack.schema.json"
+        if candidate.is_file():
+            with candidate.open(encoding="utf-8") as fh:
+                schema: dict[str, Any] = json.load(fh)
+            validator_cls = jsonschema.validators.validator_for(schema)
+            validator_cls.check_schema(schema)
+            return validator_cls(schema)
+    raise FileNotFoundError("calibration_ack.schema.json not found from ogsim.fleet.__main__")
+
+
+async def _handle_calibration_command(
+    engine: FleetEngine, client: SimMqttClient, command: dict[str, Any], public_key: Any
+) -> None:
+    """S6.7: verifies+applies `command` (`FleetEngine.handle_calibration_command`, entirely delegating
+    to the unmodified `ogsim.fleet.calibration` logic) and publishes the resulting `CalibrationAck` on
+    `<root>/ack/cal/<hub_id>`, QoS 1. Uses the transport directly (not `publish_validated`, see
+    `_calibration_ack_validator`'s docstring) after this file's own schema check."""
+    hub_id = str(command.get("hub_id", ""))
+    ack = engine.handle_calibration_command(command, public_key, time.time())
+    wire_ack = {k: v for k, v in ack.items() if k in _CALIBRATION_ACK_WIRE_FIELDS}
+    errors = sorted(_calibration_ack_validator().iter_errors(wire_ack), key=lambda e: e.path)
+    if errors:
+        logger.warning("calibration ack failed schema validation hub_id=%s: %s", hub_id, errors[0].message)
+        return
+    payload = json.dumps(wire_ack).encode("utf-8")
+    await client._transport.publish(client.topic(f"ack/cal/{hub_id}"), payload=payload, qos=1)  # noqa: SLF001
 
 
 def main() -> None:

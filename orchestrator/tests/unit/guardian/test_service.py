@@ -5,17 +5,22 @@ test list)."""
 from __future__ import annotations
 
 import asyncio
+import math
+from dataclasses import replace
 from datetime import UTC, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from opengrid.core.crypto import generate_keypair, verify_payload
 from opengrid.guardian.config import GuardianConfig
-from opengrid.guardian.ports import L2Instruction
+from opengrid.guardian.ports import L2Instruction, ProposedItem
 
 from .conftest import (
     BANK_ID,
     NOW,
+    FakeBankMembers,
     make_bank_snapshot,
     make_batch_row,
     make_hub_snapshot,
@@ -245,20 +250,105 @@ async def test_g19_commitment_lock_blocks_unreasoned_reduction(fakes, guardian_c
     assert verdict.signature is None
 
 
-async def test_g19_commitment_lock_allows_override_reason(fakes, guardian_config, signing_seed):
+def _reduced_commitment(fakes, reason_code: str):
+    """A batch granting 2 kW against a 5 kW frozen commitment, claiming `reason_code`."""
     obligation_id = uuid4()
     proposal = make_proposal(
-        obligation_id=obligation_id,
-        obligation_granted_kw=Decimal("2.0"),
-        reason_code="R-COMMIT-LOCK-OVERRIDE-L1",
+        obligation_id=obligation_id, obligation_granted_kw=Decimal("2.0"), reason_code=reason_code
     )
     wire_default_passing_scenario(fakes, proposal)
     fakes.commitments.frozen[obligation_id] = Decimal("5.0")
     fakes.prior_grants.prior[obligation_id] = Decimal("5.0")
-    batch = make_batch_row(proposal)
-    service = service_with(fakes, guardian_config, signing_seed)
+    return proposal
 
-    verdict = await service.evaluate_and_sign(batch)
+
+def _bank_members(fakes, *socs_kwh: float) -> None:
+    fakes.bank_members = FakeBankMembers()
+    fakes.bank_members.members[BANK_ID] = [make_hub_snapshot(soc_kwh=soc) for soc in socs_kwh]
+
+
+async def test_g19_commitment_lock_allows_override_reason(fakes, guardian_config, signing_seed):
+    """L1 (homeowner reserve) is signed when the guardian's OWN telemetry shows the bank's hubs cannot
+    carry the commitment: every member hub is at its reserve floor."""
+    proposal = _reduced_commitment(fakes, "R-COMMIT-LOCK-OVERRIDE-L1")
+    _bank_members(fakes, 7.84, 7.84)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert verdict.outcome == "PASS"
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    ["R-COMMIT-LOCK-INFEASIBLE", "R-COMMIT-LOCK-OVERRIDE-L0", "R-COMMIT-LOCK-OVERRIDE-L1"],
+)
+async def test_g19_forged_capability_override_is_vetoed(fakes, guardian_config, signing_seed, reason_code):
+    """K13 regression: the guardian accepted any reduction below the lock whose item merely CLAIMED
+    INFEASIBLE/L0/L1. Its own read of the bank's hubs (2 x 5 kW, well above reserve) covers the 5 kW
+    commitment, so the claim is false and the reduction is vetoed."""
+    proposal = _reduced_commitment(fakes, reason_code)
+    _bank_members(fakes, 20.0, 20.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert verdict.outcome == "VETOED" and verdict.signature is None
+    assert "G-19" in verdict.vetoed_rule_ids
+    reasons = {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]}
+    assert "COMMIT_LOCK_OVERRIDE_INFEASIBLE_UNVERIFIED" in reasons
+
+
+async def test_g19_capability_override_without_an_independent_read_is_vetoed(
+    fakes, guardian_config, signing_seed
+):
+    proposal = _reduced_commitment(fakes, "R-COMMIT-LOCK-INFEASIBLE")
+    assert fakes.bank_members is None  # no guardian-side capability read wired
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert "G-19" in verdict.vetoed_rule_ids and verdict.signature is None
+
+
+async def test_g19_infeasible_is_signed_when_the_bank_really_cannot_deliver(
+    fakes, guardian_config, signing_seed
+):
+    """One member hub a sliver above reserve (~1.7 kW sustainable over the 10 s lease) and one offline
+    (0 kW, K1): the bank's own capability is below the 5 kW commitment, so the claim is corroborated."""
+    proposal = _reduced_commitment(fakes, "R-COMMIT-LOCK-INFEASIBLE")
+    fakes.bank_members = FakeBankMembers()
+    offline = replace(make_hub_snapshot(soc_kwh=30.0), health="offline")
+    fakes.bank_members.members[BANK_ID] = [make_hub_snapshot(soc_kwh=7.845, p_kw=5.0), offline]
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert verdict.outcome == "PASS"
+
+
+async def test_g19_forged_l2_override_is_vetoed(fakes, guardian_config, signing_seed):
+    """K13 regression: an L2 override claim with no utility instruction in the guardian's own L2 read."""
+    proposal = _reduced_commitment(fakes, "R-COMMIT-LOCK-OVERRIDE-L2")
+    _bank_members(fakes, 7.84)  # even with capability short, L2 needs an actual instruction
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert verdict.outcome == "VETOED" and "G-19" in verdict.vetoed_rule_ids
+    reasons = {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]}
+    assert "COMMIT_LOCK_OVERRIDE_L2_UNVERIFIED" in reasons
+
+
+async def test_g19_l2_override_is_signed_under_an_active_instruction(fakes, guardian_config, signing_seed):
+    proposal = _reduced_commitment(fakes, "R-COMMIT-LOCK-OVERRIDE-L2")
+    fakes.l2_instructions.active[BANK_ID] = L2Instruction(kind="LIMIT", limit_kw=10.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
     assert verdict.outcome == "PASS"
 
 
@@ -456,3 +546,206 @@ async def test_veto_trace_records_each_violation_reason(fakes, guardian_config, 
         "hub_id": BANK_ID,
         "obligation_id": None,
     } in payload["violations"]
+
+
+# --- K4/G-03 in both directions ---------------------------------------------------------------------
+
+
+def _bank_batch(
+    fakes, setpoints_and_prev: list[tuple[float, float]], *, bank_load_kva: float, kva_rating: float
+):
+    """A batch of hubs `hub-i` moving from `prev` to `setpoint` on one bank (hubs rated 20 kW so G-02/G-04
+    stay quiet with a generous per-hub ramp)."""
+    proposal = replace(
+        make_proposal(),
+        items=[ProposedItem(f"hub-{i}", sp, "SELECTOR") for i, (sp, _prev) in enumerate(setpoints_and_prev)],
+    )
+    wire_default_passing_scenario(fakes, proposal)
+    for i, (_sp, prev) in enumerate(setpoints_and_prev):
+        hub = make_hub_snapshot(soc_kwh=30.0, prev_p_kw=prev, p_kw=20.0)
+        fakes.hubs.hubs[f"hub-{i}"] = replace(hub, params=replace(hub.params, ramp_kw_per_s=100.0))
+    fakes.banks.banks[BANK_ID] = make_bank_snapshot(bank_load_kva=bank_load_kva, kva_rating=kva_rating)
+    return proposal
+
+
+async def test_g03_discharge_into_reverse_flow_beyond_rating_is_vetoed(fakes, guardian_config, signing_seed):
+    """K4 regression: G-03 only ran when a batch added charge, so discharge that drove the bank into
+    reverse flow past its rating was never checked. 10 kVA import - 80 kW more discharge = 70 kW export
+    through a 75 kVA bank (limit (75-5)*0.95 = 66.5)."""
+    guardian_config = GuardianConfig(key_path="", cycle_interval_s=2.0, inverter_cap_kw=20.0)
+    proposal = _bank_batch(fakes, [(-20.0, 0.0)] * 4, bank_load_kva=10.0, kva_rating=75.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert "G-03" in verdict.vetoed_rule_ids and verdict.signature is None
+    reasons = {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]}
+    assert "BANK_KVA_LIMIT_REVERSE_FLOW" in reasons
+
+
+async def test_g03_discharge_within_the_reverse_rating_is_signed(fakes, guardian_config, signing_seed):
+    guardian_config = GuardianConfig(key_path="", cycle_interval_s=2.0, inverter_cap_kw=20.0)
+    proposal = _bank_batch(fakes, [(-20.0, 0.0)] * 3, bank_load_kva=10.0, kva_rating=75.0)  # -> 50 kW export
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert "G-03" not in verdict.vetoed_rule_ids
+
+
+async def test_g03_cutting_discharge_on_an_importing_bank_is_bounded_too(
+    fakes, guardian_config, signing_seed
+):
+    """Stopping 20 kW of discharge adds 20 kW of import (60 -> 80 kVA on a 75 kVA bank) although the batch
+    adds no charge -- the old additional-charge-only rule let this through."""
+    guardian_config = GuardianConfig(key_path="", cycle_interval_s=2.0, inverter_cap_kw=20.0)
+    proposal = _bank_batch(fakes, [(0.0, -20.0)], bank_load_kva=60.0, kva_rating=75.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert "G-03" in verdict.vetoed_rule_ids
+
+
+async def test_g03_relief_on_an_overloaded_bank_is_still_signed(fakes, guardian_config, signing_seed):
+    guardian_config = GuardianConfig(key_path="", cycle_interval_s=2.0, inverter_cap_kw=20.0)
+    proposal = _bank_batch(fakes, [(-20.0, 0.0)], bank_load_kva=3000.0, kva_rating=600.0)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert "G-03" not in verdict.vetoed_rule_ids
+
+
+@pytest.mark.parametrize("age_s", [math.inf, 31.0])
+async def test_g03_missing_or_stale_scada_is_vetoed(fakes, guardian_config, signing_seed, age_s):
+    """K4 regression: with no SCADA reading the bank looked like 0 kVA and G-03 passed everything."""
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.banks.banks[BANK_ID] = make_bank_snapshot(bank_load_age_s=age_s)
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert verdict.outcome == "VETOED" and "G-03" in verdict.vetoed_rule_ids
+    assert {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]} == {"BANK_LOAD_STALE"}
+
+
+# --- K4/G-06 now that banks carry a feeder -----------------------------------------------------------
+
+
+async def test_g06_evaluates_for_a_bank_with_a_feeder(fakes, guardian_config, signing_seed):
+    """G-06 was inert because no bank had a feeder_id; with the seeded feeder it binds firm events."""
+    guardian_config = GuardianConfig(
+        key_path="",
+        cycle_interval_s=2.0,
+        inverter_cap_kw=20.0,
+        default_feeder_ramp_ceiling_kw_per_min=600.0,  # 20 kW per 2 s tick
+    )
+    proposal = replace(
+        _bank_batch(fakes, [(-20.0, 0.0)] * 2, bank_load_kva=10.0, kva_rating=600.0), is_firm_event=True
+    )
+    fakes.proposals.add(proposal)
+    fakes.banks.banks[BANK_ID] = make_bank_snapshot(
+        bank_load_kva=10.0, kva_rating=600.0, feeder_id="feeder-LZ_NORTH-00"
+    )
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert "G-06" in verdict.vetoed_rule_ids
+
+    fakes.banks.banks[BANK_ID] = make_bank_snapshot(bank_load_kva=10.0, kva_rating=600.0, feeder_id=None)
+    unassigned = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert "G-06" not in unassigned.vetoed_rule_ids
+
+
+# --- K12/G-20 fail-closed at the service -------------------------------------------------------------
+
+
+async def test_clock_port_failure_holds_as_timeout(fakes, guardian_config, signing_seed):
+    class BrokenClock:
+        async def offset_from_ntp_ms(self) -> float:
+            raise RuntimeError("clock source unavailable")
+
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.clock = BrokenClock()  # type: ignore[assignment]
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert verdict.outcome == "TIMEOUT" and verdict.vetoed_rule_ids == ["G-20"] and verdict.signature is None
+
+
+@pytest.mark.parametrize("offset_ms", [math.inf, -math.inf, math.nan])
+async def test_non_finite_clock_offset_holds_as_timeout(fakes, guardian_config, signing_seed, offset_ms):
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.clock.offset_ms = offset_ms
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert verdict.outcome == "TIMEOUT" and verdict.vetoed_rule_ids == ["G-20"]
+
+
+# --- the published batch is exactly the evaluated one ------------------------------------------------
+
+
+async def test_evaluated_proposal_is_what_was_checked_not_a_later_pre_image(
+    fakes, guardian_config, signing_seed
+):
+    """A second RT_ALLOCATION row for the same batch id written after evaluation must not be what gets
+    signed and published (main.py used to re-read the pre-image after PASS)."""
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+    fakes.proposals.add(replace(proposal, items=[ProposedItem("hub-0001", 999.0, "SELECTOR")]))
+
+    assert verdict.outcome == "PASS"
+    assert service.evaluated_proposal(proposal.command_batch_id) == proposal
+
+
+@pytest.mark.parametrize("reason_code", ["R-COMMIT-LOCK-INFEASIBLE", "R-COMMIT-LOCK-OVERRIDE-L1"])
+async def test_g19_capability_override_on_a_stale_bank_is_vetoed(
+    fakes, guardian_config, signing_seed, reason_code
+):
+    """Gap (a) regression: with the whole bank's telemetry stale, the seen capability is 0 kW and an
+    INFEASIBLE claim looked corroborated. Unseen hubs now count at their full rating, so the claim fails
+    closed with its own reason."""
+    proposal = _reduced_commitment(fakes, reason_code)
+    fakes.bank_members = FakeBankMembers()
+    fakes.bank_members.members[BANK_ID] = [replace(make_hub_snapshot(soc_kwh=7.84), health="stale")] * 2
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+    assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids
+    reasons = {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]}
+    assert "COMMIT_LOCK_OVERRIDE_EVIDENCE_STALE" in reasons
+
+
+async def test_g19_shortfall_that_holds_even_with_unseen_hubs_at_full_rating_is_signed(
+    fakes, guardian_config, signing_seed
+):
+    """One live hub at reserve (0 kW) and one stale 3 kW hub: even at its full rating the bank cannot
+    carry 5 kW, so the INFEASIBLE claim stands."""
+    proposal = _reduced_commitment(fakes, "R-COMMIT-LOCK-INFEASIBLE")
+    fakes.bank_members = FakeBankMembers()
+    fakes.bank_members.members[BANK_ID] = [
+        make_hub_snapshot(soc_kwh=7.84),
+        replace(make_hub_snapshot(soc_kwh=30.0, p_kw=3.0), health="stale"),
+    ]
+
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+    assert verdict.outcome == "PASS"

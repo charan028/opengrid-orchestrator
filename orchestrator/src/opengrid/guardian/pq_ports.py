@@ -13,8 +13,11 @@ seams; a real process wires Postgres/MQTT-backed adapters, tests use in-memory f
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Protocol
+from uuid import UUID
 
+from opengrid.core.models.pq import CalibrationReference
 from opengrid.core.pq import CalibrationBounds, OffsetVector, PqEnvelopeLimits, PqMeasurement
 
 AssetState = Literal["OK", "WATCH", "DEGRADED", "QUARANTINED", "AWAITING_REPLACEMENT", "RECOMMISSIONING"]
@@ -23,12 +26,18 @@ AssetState = Literal["OK", "WATCH", "DEGRADED", "QUARANTINED", "AWAITING_REPLACE
 @dataclass(frozen=True, slots=True)
 class ProposedCalibrationCommand:
     """The unsigned candidate `CalibrationCommand` content G-25 evaluates -- mirrors `guardian.ports.
-    ProposedItem`'s role for `CommandBatch`. Built by `opengrid.assets.calibration` (WP-I); guardian never
-    re-derives the correction, only re-checks it (defense in depth, S6.7)."""
+    ProposedBatch`'s role for `CommandBatch`. Built from a `PENDING` `og.calibration_attempt` row the
+    ladder (`opengrid.assets`) recorded; guardian never re-derives the correction, only re-checks it
+    (defense in depth, S6.7). `epoch`/`seq` are deliberately absent: the guardian assigns them itself
+    when it signs (per-hub strictly increasing, `GuardianService.evaluate_and_sign_calibration`)."""
 
     hub_id: str
     correction: OffsetVector
     bounds: CalibrationBounds
+    calibration_id: UUID
+    reference: CalibrationReference
+    issued_at: datetime
+    expires_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,9 +74,11 @@ class HubAssetStatePort(Protocol):
 
 class CalibrationHistoryPort(Protocol):
     async def last_attempt_epoch_s(self, hub_id: str) -> float | None:
-        """Epoch seconds of the last calibration attempt against `hub_id`, or `None` if there has never
-        been one -- feeds G-25's rate limit (S5.5.4, default 1/24h), read fresh from `og.calibration_
-        attempt`, never from the ladder's own bookkeeping."""
+        """Epoch seconds of the last calibration command the GUARDIAN ITSELF signed for `hub_id`, or
+        `None` if it never signed one -- feeds G-25's rate limit (S5.5.4, default 1/24h). Read from the
+        guardian's own signed-verdict trace, never from the ladder's `og.calibration_attempt` rows: the
+        ladder records its candidate before the guardian evaluates it, so that table's newest row is
+        always the very command under evaluation (which would refuse every calibration)."""
         ...
 
 

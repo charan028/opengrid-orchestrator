@@ -1,8 +1,12 @@
 """ogsim.fleet.stop -- retained stop handling (interfaces/mqtt/stop.schema.json).
 
 Scopes: `fleet`, `zone/<zone>`, `bank/<bank_id>`. A `StopRegistry` mirrors
-the retained MQTT state: `ENGAGE` sets a scope active, `RELEASE` (or an
-empty retained payload on the same topic) clears it. Because it is a plain
+the retained MQTT state: a verified `ENGAGE` sets a scope active, a verified
+`RELEASE` clears it. Nothing else changes stop state: an empty or non-object
+retained payload is broker housekeeping (clearing the retained message) and is
+ignored (K8; `ogsim.fleet.__main__.handle_stop_message`). The guardian publishes
+its RELEASE on the ENGAGE's own topic, so the retained state of that topic
+becomes the RELEASE and a late joiner never sees the stale ENGAGE. Because it is a plain
 in-memory mapping queried fresh on every tick, a hub added *after* a stop
 was already engaged sees it immediately -- there is no separate "did I
 already process this event" flag to miss, which is what makes a late
@@ -14,9 +18,11 @@ it just removes market dispatch.
 
 `verify_stop_event` implements crypto.md §2.3's signing rule: only the
 safestop key may sign `action="ENGAGE"`; `action="RELEASE"` must be signed
-by the guardian key (Tier-2 approved). A StopEvent that fails this --
-wrong key for the action, or a bad/missing signature -- is rejected and
-must never reach `StopRegistry.apply_stop_event`.
+by the guardian key (Tier-2 approved) and name a second approver distinct
+from the requester (`approver_ref` != `issued_by`). A StopEvent that fails
+this -- wrong key for the action, a bad/missing signature, an unknown action,
+or a RELEASE without two people on it -- is rejected and must never reach
+`StopRegistry.apply_stop_event`.
 """
 
 from __future__ import annotations
@@ -28,7 +34,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ogsim.common.crypto import verify_signature
 
-StopRejectReason = str  # currently just "BAD_SIGNATURE"; callers log rejects themselves
+#: "BAD_SIGNATURE" | "UNKNOWN_ACTION" | "NOT_TIER2_APPROVED"; callers log rejects themselves.
+StopRejectReason = str
 
 # stop.schema.json fields that are signed over (JCS bytes), i.e. everything
 # except `key_id`/`signature` (crypto.md §2.3).
@@ -58,11 +65,20 @@ def verify_stop_event(
     reason. `action="ENGAGE"` must verify against `safestop_public_key`;
     any other action (i.e. "RELEASE") must verify against
     `guardian_public_key` -- a RELEASE signed by the safestop key is
-    rejected, and so is an ENGAGE signed by the guardian key."""
-    key = safestop_public_key if event.get("action") == "ENGAGE" else guardian_public_key
+    rejected, and so is an ENGAGE signed by the guardian key. A RELEASE must
+    also carry a Tier-2 second approver distinct from its requester."""
+    action = event.get("action")
+    if action not in ("ENGAGE", "RELEASE"):
+        return "UNKNOWN_ACTION"
+    key = safestop_public_key if action == "ENGAGE" else guardian_public_key
     signing_fields = _stop_signing_fields(event)
     if not verify_signature(key, signing_fields, event.get("signature")):
         return "BAD_SIGNATURE"
+    if action == "RELEASE":
+        approver = str(event.get("approver_ref") or "").strip()
+        requester = str(event.get("issued_by") or "").strip()
+        if not approver or approver.casefold() == requester.casefold():
+            return "NOT_TIER2_APPROVED"
     return None
 
 

@@ -52,7 +52,7 @@ async def trigger_scenario(
     validate_payload("scenario_control", payload)
 
     password = os.environ.get(_MQTT_API_PASSWORD_ENV, "")
-    async with build_client(cfg, username="og_api", password=password, client_id="og-api-scenario") as client:
+    async with build_client(cfg, username="og_api", password=password, process="api-scenario") as client:
         await client.publish(topic(cfg, "scenario/cmd"), payload=_json_bytes(payload), qos=1)
 
     trace_ref = await trace_store.append(

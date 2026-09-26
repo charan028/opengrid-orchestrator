@@ -9,8 +9,10 @@ from pathlib import Path
 import pytest
 
 from opengrid.fleet.seed import (
+    BANKS_PER_FEEDER_DEFAULT,
     SimFleetTopologyConfig,
     build_topology,
+    feeder_id_for,
     load_sim_fleet_topology_config,
     resolve_sim_fleet_config_path,
     seed_topology,
@@ -575,3 +577,42 @@ async def test_seed_topology_upserts_banks_then_hubs():
     assert len(hub_statements) == 3
     assert all("ON CONFLICT" in sql for sql, _ in cursor.executed)
     assert pool._conn.committed is True
+
+
+def test_every_seeded_bank_has_a_feeder_so_g06_evaluates():
+    """K4/G-06 regression: G-06 only runs for a bank with a feeder_id, and the seed never set one, so the
+    feeder ramp ceiling was inert. 40 banks x 4 zones -> 8 feeders of 5 same-zone banks."""
+    topology = build_topology(SimFleetTopologyConfig())
+
+    assert all(bank.feeder_id for bank in topology.banks)
+    feeders: dict[str, list] = {}
+    for bank in topology.banks:
+        assert bank.feeder_id is not None
+        feeders.setdefault(bank.feeder_id, []).append(bank)
+    assert len(feeders) == 8
+    for feeder_id, banks in feeders.items():
+        assert len(banks) == BANKS_PER_FEEDER_DEFAULT
+        assert {b.zone for b in banks} == {feeder_id.removeprefix("feeder-").rsplit("-", 1)[0]}
+    bank_by_id = {b.bank_id: b for b in topology.banks}
+    assert bank_by_id["bank-000"].feeder_id == "feeder-LZ_NORTH-00"
+    assert bank_by_id["bank-016"].feeder_id == "feeder-LZ_NORTH-00"  # 5th LZ_NORTH bank
+    assert bank_by_id["bank-020"].feeder_id == "feeder-LZ_NORTH-01"  # 6th LZ_NORTH bank
+
+
+def test_feeder_grouping_is_configurable_and_deterministic():
+    config = SimFleetTopologyConfig()
+    one_per_bank = build_topology(config, banks_per_feeder=1)
+    assert len({b.feeder_id for b in one_per_bank.banks}) == 40
+    assert build_topology(config).banks == build_topology(config).banks
+    with pytest.raises(ValueError, match="banks_per_feeder"):
+        feeder_id_for("LZ_NORTH", 0, 0)
+
+
+async def test_seed_writes_the_feeder_id():
+    topology = build_topology(SimFleetTopologyConfig(hub_count=4, bank_count=2, zones=("LZ_NORTH",)))
+    cursor = FakeCursor()
+
+    await seed_topology(FakePool(cursor), topology)
+
+    bank_params = [params for sql, params in cursor.executed if sql.strip().startswith("INSERT INTO og.bank")]
+    assert [p["feeder_id"] for p in bank_params] == ["feeder-LZ_NORTH-00", "feeder-LZ_NORTH-00"]

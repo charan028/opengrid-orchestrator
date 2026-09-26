@@ -96,9 +96,19 @@ class World:
     last_lease: tuple[int, int] = (0, 0)
     l2: L2Instruction | None = None
     stopped: bool = False
+    members: list[HubSnapshot] | None = None  # None: no guardian-side bank capability read wired
 
     async def offset_from_ntp_ms(self) -> float:
         return self.offset_ms
+
+    async def member_snapshots(self, bank_id: str) -> list[HubSnapshot]:
+        return list(self.members or [])
+
+    async def append_calibration_verdict(self, calibration_id: UUID, payload: dict[str, object]) -> None:
+        return None
+
+    async def append_stop_release_verdict(self, operator_action_id: UUID, payload: dict[str, object]) -> None:
+        return None
 
     async def fetch(self, command_batch_id: UUID) -> ProposedBatch | None:
         return self.proposal
@@ -142,6 +152,7 @@ class World:
             leases=self,
             l2_instructions=self,
             safe_stop=self,
+            bank_members=self if self.members is not None else None,
         )
 
 
