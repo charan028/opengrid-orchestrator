@@ -5,10 +5,8 @@
   stop.
 - K7 escalation: more than 5% vetoes per tick puts the scope CONSERVATIVE; three ticks raise
   ALR-SAFE-STOP-REQUESTED plus an unconfirmed proposal, never an automatic stop; recovery clears both.
-- ERCOT_AS capacity hold: a held award reserves kW and energy (Non-Spin 4 h) with zero discharge until an ERCOT
-  deployment event.
 
-K7 and the AS capacity hold are written against the spec ahead of their code and are strict xfails until it lands.
+The ERCOT_AS capacity hold needs a live delivery window and lives in `test_as_capacity_hold.py` (slow).
 """
 
 from __future__ import annotations
@@ -17,7 +15,6 @@ import json
 import os
 import shutil
 import subprocess
-from decimal import Decimal
 
 import pytest
 from e2e_stack import REPO_ROOT, Stack, _dev_secret, now_utc, wait_until
@@ -168,13 +165,9 @@ def test_k8_a_replayed_old_release_never_lifts_a_newer_stop(stack: Stack) -> Non
         _two_person_release(stack)
 
 
-# --- K7 escalation (strict xfail until guardian escalation lands) --------------------------------------
+# --- K7 escalation --------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="K7 veto-rate escalation (guardian escalation.py, ALR-SAFE-STOP-REQUESTED) is not on main yet",
-)
 def test_k7_sustained_vetoes_request_a_stop_but_never_engage_one(stack: Stack) -> None:
     started = now_utc()
     hub = stack.online_hub(exclude_banks=(STOP_BANK,))
@@ -210,42 +203,4 @@ def test_k7_sustained_vetoes_request_a_stop_but_never_engage_one(stack: Stack) -
         ),
         timeout_s=120,
         what="the escalation to clear once vetoes stop",
-    )
-
-
-# --- ERCOT_AS capacity hold (strict xfail until the live-path change lands) ------------------------------
-
-
-NONSPIN_HOLD_H = 4
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="ERCOT_AS as a capacity hold (kW + energy reservation, zero discharge until deployment) lands later today",
-)
-def test_ercot_as_award_is_a_capacity_hold_reserving_kw_and_energy(stack: Stack) -> None:
-    contract_id = stack.create_contract("ERCOT_AS", "T2", variant="NONSPIN")
-    stack.add_product_rule(
-        contract_id,
-        product_code="NONSPIN",
-        min_qty_kw=100,
-        increment_kw=100,
-        block=False,
-        duration_minutes=NONSPIN_HOLD_H * 60,
-        variable_kind="SEMI_CONTINUOUS",
-    )
-    start, end = stack.free_window(4)
-    offer = stack.offer(contract_id, window_start=start, window_end=end, requested_kw=200, value_per_mwh=200)
-    obligation = stack.wait_decided(offer)
-    assert obligation["state"] == "COMMITTED", obligation
-
-    reserved = stack.rows(
-        "SELECT kind, sum(amount) AS amount FROM og.reservation WHERE obligation_id = %(o)s "
-        "AND released_at IS NULL GROUP BY kind",
-        {"o": obligation["obligation_id"]},
-    )
-    by_kind = {row["kind"]: row["amount"] for row in reserved}
-    assert by_kind.get("POWER_KW", Decimal(0)) >= Decimal(200), by_kind
-    assert by_kind.get("ENERGY_KWH", Decimal(0)) >= Decimal(200 * NONSPIN_HOLD_H), (
-        f"a Non-Spin hold must reserve {NONSPIN_HOLD_H} h of energy: {by_kind}"
     )

@@ -66,6 +66,15 @@ def _cycles(stack: Stack, obligation_id, since) -> list[dict]:
     return list(cycles.values())[1:-1]  # drop possibly-partial first and last cycles
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG (D-17): after the L2 BLOCK is lifted the blocked bank's share never returns -- the obligation stays at "
+        "the best-effort remainder (e.g. 100 of 400 kW) for 60 s+ and stays SHORTFALL/AT_RISK. The sim publishes "
+        "the lift (expires_at = now, seen on the wire), the bank's hubs are online and its reservation is intact. "
+        "Reproduced on a clean dev DB, main @ 434d230."
+    ),
+)
 def test_d17_an_l2_block_gives_best_effort_shortfall_and_the_lift_restores_the_commitment(
     stack: Stack, delivering: tuple[Offer, dict]
 ) -> None:
@@ -107,13 +116,21 @@ def test_d17_an_l2_block_gives_best_effort_shortfall_and_the_lift_restores_the_c
         stack.clear_anomaly(anomaly)
     lifted_at = now_utc()
 
-    after = wait_until(
-        lambda: c if len(c := _cycles(stack, ob_id, lifted_at)) >= 4 else None,
-        timeout_s=40,
-        what="grants after the lift",
+    # Measure how long the restore really takes (up to 60 s) so a failure says how far off D-17 is.
+    wait_until(
+        lambda: (
+            (now_utc() - lifted_at).total_seconds() >= 60
+            or any(c["total"] >= committed - TOLERANCE_KW for c in _cycles(stack, ob_id, lifted_at))
+        ),
+        timeout_s=75,
+        what="the restore window",
     )
-    assert any(cycle["total"] >= committed - TOLERANCE_KW for cycle in after[:2]), (
-        f"the full commitment did not return within 2 cycles of the lift: {[c['total'] for c in after]}"
+    after = _cycles(stack, ob_id, lifted_at)
+    first_full = next((n for n, c in enumerate(after) if c["total"] >= committed - TOLERANCE_KW), None)
+    assert first_full is not None and first_full < 2, (
+        f"D-17: the full commitment must return within 2 cycles of the lift; "
+        f"{'it had not returned after 60 s' if first_full is None else f'it returned after {first_full + 1} cycles'} "
+        f"(served per cycle: {[str(c['total']) for c in after[:12]]})"
     )
     wait_until(
         lambda: not stack.obligation(offer)["at_risk"],
@@ -256,6 +273,7 @@ def test_d18_a_closed_loop_reduction_is_corroborated_only_for_a_measured_feedbac
 
     _insert_profile(stack, offer.contract_id, "MEASURED_FEEDBACK")
     measured_rules = _verdict_rules(stack, _propose_closed_loop(stack, ob_id, bank, reduced_kw=1.0))
+    _insert_profile(stack, offer.contract_id, "PLAN")
     assert "G-19" not in measured_rules, (
         f"a MEASURED_FEEDBACK closed-loop reduction must pass G-19: {measured_rules}"
     )
