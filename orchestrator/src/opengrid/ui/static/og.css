@@ -1568,3 +1568,25 @@ label > select {
     min-width: 0;
   }
 }
+
+/* --- settlement tables (Profitability, Billing & audit) --------------------------------------- */
+/* a row superseded by a settlement correction stays visible for audit but is struck and not counted */
+.og-settlement-table tr.is-superseded,
+.og-settlement-table tr.is-superseded td {
+  text-decoration-line: line-through;
+  color: var(--muted);
+}
+
+.og-settlement-table td.contract-cell,
+.og-settlement-table td.obligation-cell {
+  white-space: nowrap;
+}
+
+.og-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

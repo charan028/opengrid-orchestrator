@@ -81,6 +81,7 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/markets/series": _load("markets_series_price.json"),
         "/og/api/forecast": _load("markets_forecast.json"),
         "/og/api/profitability/summary": _load("profitability_summary.json"),
+        "/og/api/views/settlement": _load("views_settlement.json"),
         "/og/api/billing/invoice-lines": _load("billing_invoice_lines.json"),
         "/og/api/trace/events": _load("billing_trace_events.json"),
     }

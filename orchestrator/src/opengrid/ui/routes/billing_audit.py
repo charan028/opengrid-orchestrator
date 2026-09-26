@@ -34,6 +34,7 @@ from fastapi.responses import HTMLResponse
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.api_client import get_bytes as api_get_bytes
 from opengrid.ui.role import is_operator, role_of
+from opengrid.ui.settlement import SETTLEMENT_VIEW_PATH, filter_options, invoice_view, last_updated
 from opengrid.ui.templating import templates
 
 logger = logging.getLogger(__name__)
@@ -146,8 +147,13 @@ async def billing_page(
     class_: str | None = Query(default=None, alias="class"),
     from_: str | None = Query(default=None, alias="from"),
     to: str | None = Query(default=None),
+    customer: str | None = Query(default=None),
+    contract: str | None = Query(default=None),
+    obligation: str | None = Query(default=None),
 ) -> HTMLResponse:
-    """Billing & audit screen (`/og/billing`, viewer role read-only, on-demand per 02b S8)."""
+    """Billing & audit screen (`/og/billing`, viewer role read-only, on-demand per 02b S8). Invoice lines
+    come from the shared settlement view (`opengrid.ui.settlement`, same contract labels as
+    Profitability); M&V performance still rides on `GET .../invoice-lines`."""
     now = datetime.now(tz=UTC)
     invoice_params = {
         "from": api_date(from_, now - timedelta(days=_DEFAULT_PERIOD_DAYS)),
@@ -158,6 +164,14 @@ async def billing_page(
     lines: list[dict[str, Any]] = []
     performance: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
+    view: dict[str, Any] = {}
+
+    try:
+        raw_view = await get_json(SETTLEMENT_VIEW_PATH, params=invoice_params)
+        view = raw_view if isinstance(raw_view, dict) else {}
+    except ApiUnavailable as exc:
+        logger.warning("billing: %s unavailable: %s", SETTLEMENT_VIEW_PATH, exc)
+        degraded = str(exc)
 
     try:
         billing = await get_json(_INVOICE_LINES_PATH, params=invoice_params)
@@ -165,7 +179,7 @@ async def billing_page(
         performance = billing.get("performance", []) if isinstance(billing, dict) else []
     except ApiUnavailable as exc:
         logger.warning("billing: %s unavailable: %s", _INVOICE_LINES_PATH, exc)
-        degraded = str(exc)
+        degraded = degraded or str(exc)
 
     try:
         trace = await get_json(_TRACE_EVENTS_PATH, params=trace_params)
@@ -183,7 +197,14 @@ async def billing_page(
             "class_": class_,
             "from_": from_,
             "to": to,
-            "invoices": invoice_table_view(lines if isinstance(lines, list) else []),
+            "customer": customer,
+            "contract": contract,
+            "obligation": obligation,
+            "options": filter_options(view),
+            "invoices": invoice_view(view, customer=customer, contract=contract, obligation=obligation),
+            "legacy_line_count": len(lines) if isinstance(lines, list) else 0,
+            "last_invoiced_at": last_updated(view, "invoice_line"),
+            "last_metered_at": last_updated(view, "meter_interval"),
             "mnv": mnv_performance_view(performance if isinstance(performance, list) else []),
             "trace_events": [
                 _to_trace_table_row(row)
