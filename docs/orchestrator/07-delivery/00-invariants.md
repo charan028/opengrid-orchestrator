@@ -76,21 +76,21 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
     fields only: `HubSnapshot.cell_temp_c`/`p_dis_max_kw`/`meter_kw`/`export_limit_kw`/`xfmr_id`
     (`orchestrator/src/opengrid/allocator/models.py:53-57`) and `BankSnapshot.feeder_id`/`substation_id`
     (`orchestrator/src/opengrid/allocator/models.py:75-76`) are carried but read by no check function yet. See
-    `09-optimizer-dispatcher-update.md` §1.9 (families F1-F7) and §2.6 (guardian checks G-02(changed)/G-26…G-32)
-    for the full target design (not edited here).
+    `09-optimizer-dispatcher-update.md` §1.9 (families F1-F7) and §2.6 (guardian checks G-02 (changed) and
+    G-26…G-33; final numbering in "Flow limits and territory" below) for the full target design (not edited here).
 - **K15 — territory (new) (D-20, D-21, D-27).** Three parts (`09-optimizer-dispatcher-update.md` §6, quoted here):
   - A REG(u) obligation is reserved, granted and delivered only by assets inside utility $u$'s service territory.
   - An asset inside a regulated territory takes FREE (ERCOT) opportunities only if $u$'s contract grants wholesale
     access.
   - Base's net injection at every boundary substation of $u$ stays ≤ 0 (energy is consumed inside the territory).
     Charging is priced and settled under the asset's own territory tariff.
-  - Principle P2. Enforced at (target): contracts admission → selector C25 → allocator eligibility → guardian G-30
-    (+ G-29) → settle tariff attribution. Fail-safe (target): VETO the item; a shortfall is recorded against the
-    same obligation (K13 best effort, above).
+  - Principle P2. Enforced at (target): contracts admission → selector C25 → allocator eligibility → guardian
+    G-33 (market segregation) + G-30 (territory export) → settle tariff attribution. Fail-safe (target): VETO the
+    item; a shortfall is recorded against the same obligation (K13 best effort, above).
   - **Specified, not built.** No stage of the chain exists in code: `orchestrator/src/opengrid/contracts/admission.py`
     has no market/territory check; `orchestrator/src/opengrid/selector/model.py` and `selector/gate.py` have no C25
     rows; the guardian's built check set stops at G-20 (`orchestrator/src/opengrid/guardian/checks.py:1-2` lists
-    G-01…G-20; there is no G-29/G-30 anywhere in `guardian/checks.py` or `guardian/service.py`). The data-model
+    G-01…G-20; there is no G-30/G-33 anywhere in `guardian/checks.py` or `guardian/service.py`). The data-model
     groundwork is in place but inert: `BankSnapshot.territory`/`free_access`
     (`orchestrator/src/opengrid/allocator/models.py:74-81`) are carried fields nothing yet populates or reads (the
     comment there names `opengrid.market.territory_of_zone`, a module that does not exist in this repo); the config
@@ -124,9 +124,27 @@ G-14 trace pre-image present · G-15 L2 instruction · G-19 commitment lock · G
 imbalance (K14) · G-22 THD estimate/measurement (K14) · G-23 frequency/voltage deviation (K14) · G-24 ride-through
 and asset-state conformance (K14) · G-25 calibration-command safety (K14; bounds, rate limit, no active
 non-default-envelope grant on the target hub)** — G-21..G-25 defined in `06-service-profiles-and-power-quality.md`
-§5.3/§6.7. Other G-numbers (G-07/08/10-12/16-18) are deferred to later releases. **G-26…G-32 are reserved (D-26,
-D-27; specified, not built)** for the K4 flow-limit families and the K15 territory checks proposed by
-`09-optimizer-dispatcher-update.md` §2.5/§2.6 (home meter export/import, service-transformer, feeder thermal,
-substation POI/transformer, territory market segregation, sustained-vs-peak, and the AS/firm/need-basis energy
-hold against headroom) — none exist in `orchestrator/src/opengrid/guardian/checks.py` or `guardian/service.py`
-today (the built set stops at G-20, plus the K14 checks G-21..G-25 above). Do not reuse G-26…G-32 for anything else.
+§5.3/§6.7. Other G-numbers (G-07/08/10-12/16-18) are deferred to later releases. G-26…G-33 are assigned below.
+
+**Flow limits and territory (D-26, D-27; K4 extended, K15).** The final guardian numbering (lead, 2026-09-26)
+matches `09-optimizer-dispatcher-update.md` §2.5/§2.6 as renumbered:
+
+| Check | Limit |
+|---|---|
+| G-26 | Home meter: export and import at the meter, net of home load |
+| G-27 | Service transformer |
+| G-28 | Feeder thermal and reverse flow |
+| G-29 | Substation POI / transformer |
+| G-30 | Territory export (K15c) |
+| G-31 | Sustained vs peak |
+| G-32 | Feeder ramp for non-firm steps |
+| G-33 | K15 market segregation |
+
+- **Status at main `434d230`:** none of G-26…G-33 is in the guardian yet. `guardian/checks.py` and
+  `guardian/pq_checks.py` stop at G-25. The ids are fixed so the implementations land on them and nothing else
+  reuses them.
+- **The ERCOT_AS energy hold is not a guardian check.** Two built pieces enforce it:
+  - the selector's C3′ floor (`orchestrator/src/opengrid/selector/model.py:296`);
+  - the engine's S6 hold floor (`orchestrator/src/opengrid/engine/gateways.py:124-127`).
+
+  The invariants check `CHECK_AS_HOLD` is to measure it; it is not on main at `434d230`.
