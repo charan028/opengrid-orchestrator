@@ -22,6 +22,21 @@ anywhere in the package (enforced by `tests/unit/safestop/test_import_isolation.
   relay. Idempotent by signature. See `opengrid.guardian.stop_release` for the end-to-end path.
 - Both delegate to whatever `SafestopService` `configure_service()` last installed; `main.py` wires the
   real Postgres/MQTT-backed service at process startup, tests wire an in-memory fake.
+- Host CLI (K8, for when og-api or og-safestop itself is down):
+  `python -m opengrid.safestop.cli engage --scope {FLEET,ZONE,BANK} --ref <id> --reason <text>
+  --operator <id> --confirm <SCOPE>:<ref>`. `--confirm` must repeat `<SCOPE>:<ref>` exactly (FLEET:
+  omit `--ref`, confirm `FLEET:FLEET`), else exit 2 with nothing signed. Same stop-only key, Postgres
+  backends and `SafestopService.engage` as the daemon (trace -> `stop_event` row -> retained publish),
+  `initiator_kind=OPERATOR`, `initiator_ref=operator:<id>@host-cli`, own MQTT client `og-safestop-cli`
+  (user `og_safestop`, `OG_MQTT_SAFESTOP_PASSWORD`). Prints `stop_id=` and `topic=`. There is no
+  `release` subcommand. Needs Postgres (K10: no stop without its trace pre-image).
+- Utility L2 intake (K5/K8, `l2_intake.py`): the daemon subscribes to `<root>/scada/instruction/+` on a
+  second MQTT client `og-safestop-l2` and engages a BANK stop on the named bank for every unexpired
+  `BLOCK`/`ESTOP` `ScadaUtilityInstruction` (`LIMIT` is the guardian's). Reason
+  `L2 <kind> <instruction_id> from <issued_by>`, `initiator_kind=UTILITY`, `initiator_ref=utility:<issued_by>`.
+  At most once per `instruction_id` (in-memory set + `PgStopEventBackend.has_l2_engage` after restart); a
+  new instruction id for an already-stopped bank still engages its own stop. A payload whose `bank_id`
+  differs from the topic's bank level, or is malformed, is logged and skipped.
 
 ## Request intake (two-step confirmation)
 

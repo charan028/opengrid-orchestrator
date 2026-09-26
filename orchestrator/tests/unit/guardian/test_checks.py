@@ -65,10 +65,22 @@ def test_g02_hub_power_positive():
 def test_g02_dual_unit_home_at_20_kw_passes_and_21_kw_is_vetoed():
     """Regression (demo-critical): the guardian's default 11 kW cap vetoed every dual-unit home command
     above 11 kW. The home's own 20 kW rating is the cap."""
-    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0)
+    dual = HubParams(e_kwh=78.4, r_kwh=15.68, p_kw=20.0, units=2)
     assert checks.check_g02_hub_power(_item(p_kw=-20.0), dual, inverter_cap_kw=DEFAULT_INVERTER_CAP_KW).ok
     r = checks.check_g02_hub_power(_item(p_kw=21.0), dual, inverter_cap_kw=DEFAULT_INVERTER_CAP_KW)
     assert not r.ok and r.rule_id == "G-02"
+
+
+def test_g02_mis_seeded_single_unit_home_at_20_kw_is_vetoed():
+    """Review fix: G-02's per-unit cap was dead (no production site passed `units`). A single-unit home
+    whose p_kw was mis-seeded at 20 kW is vetoed above 11 kW, and so is one with no unit count at all."""
+    mis_seeded = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=20.0, units=1)
+    r = checks.check_g02_hub_power(_item(p_kw=-20.0), mis_seeded, inverter_cap_kw=DEFAULT_INVERTER_CAP_KW)
+    assert not r.ok and r.rule_id == "G-02"
+    unknown = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=20.0)
+    assert not checks.check_g02_hub_power(
+        _item(p_kw=-20.0), unknown, inverter_cap_kw=DEFAULT_INVERTER_CAP_KW
+    ).ok
 
 
 def test_g02_single_unit_home_above_11_kw_is_vetoed():

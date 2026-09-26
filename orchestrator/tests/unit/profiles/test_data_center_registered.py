@@ -11,7 +11,8 @@ from opengrid.core.models.engine import ServiceType
 from opengrid.selector.gate import _CATEGORY_BY_SERVICE_TYPE
 from opengrid.settle.baselines import METER_SOURCE_BY_SERVICE
 
-MIGRATION = Path(__file__).resolve().parents[3] / "migrations" / "0013_service_type_data_center.sql"
+# 0025 owns the full og.contract service_type CHECK list (lead decision 2026-09-26); 0013 only added DATA_CENTER.
+MIGRATION = Path(__file__).resolve().parents[3] / "migrations" / "0025_market_model.sql"
 
 
 def test_data_center_is_registered_everywhere_a_service_type_is_mapped() -> None:

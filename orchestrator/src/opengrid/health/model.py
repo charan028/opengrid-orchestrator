@@ -48,6 +48,10 @@ HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
         "ALR-RESERVE-BREACH",
         "ALR-SCADA-OVERLOAD",
         "ALR-SIM-OFFLINE",
+        # Prepared, not yet raised anywhere (R2 item 3: FLEET-SIM hasn't landed the telemetry yet) --
+        # listed now so wiring them into evaluate_alerts() later doesn't also require touching this set.
+        "ALR-METER-EXPORT-LIMIT",
+        "ALR-TEMPERATURE-LIMIT",
     }
 )
 
@@ -85,6 +89,14 @@ class HealthThresholds:
     # (2s) and comfortably past `scada.publish_interval_s` (2s), so a couple of missed publishes never
     # false-positives, but an actually-dead sim process is caught quickly.
     sim_offline_s: float = 60.0
+    # ALR-METER-EXPORT-LIMIT / ALR-TEMPERATURE-LIMIT (R2 item 3, prepared ahead of FLEET-SIM landing meter
+    # export / temperature telemetry -- not wired into evaluate_alerts() yet, see
+    # `rules.evaluate_meter_export_limit_alert`/`evaluate_temperature_limit_alert`'s docstrings). Warning
+    # once a reading has stayed at or above this fraction of its limit for
+    # `limit_proximity_sustained_cycles` consecutive cycles -- a momentary spike doesn't count.
+    meter_export_warn_ratio: float = 0.90
+    temperature_warn_ratio: float = 0.90
+    limit_proximity_sustained_cycles: int = 3
 
     @property
     def heartbeat_down_after_s(self) -> float:
@@ -128,6 +140,13 @@ class HealthThresholds:
             ),
             sim_offline_s=cfg.get("health.sim_offline_s", defaults.sim_offline_s),
             cycle_p99_warn_ratio=cfg.get("health.cycle_p99_warn_ratio", defaults.cycle_p99_warn_ratio),
+            meter_export_warn_ratio=cfg.get(
+                "health.meter_export_warn_ratio", defaults.meter_export_warn_ratio
+            ),
+            temperature_warn_ratio=cfg.get("health.temperature_warn_ratio", defaults.temperature_warn_ratio),
+            limit_proximity_sustained_cycles=cfg.get(
+                "health.limit_proximity_sustained_cycles", defaults.limit_proximity_sustained_cycles
+            ),
         )
 
 

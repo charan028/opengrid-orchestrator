@@ -22,7 +22,7 @@ import httpx
 
 from opengrid.core.models.platform import FeedObs
 from opengrid.feeds.eia import EiaClient
-from opengrid.feeds.ercot import DEFAULT_TOKEN_URL, ErcotClient
+from opengrid.feeds.ercot import DEFAULT_TOKEN_URL, SOLAR_BY_REGION_PRODUCT, ErcotClient
 from opengrid.feeds.nws import NwsClient
 from opengrid.feeds.scheduler import FeedsScheduler
 from opengrid.feeds.store import FeedStore
@@ -117,7 +117,18 @@ def _build_scheduler(
         nws_grid_point_pinned=nws_cfg.get("grid_point"),
         ercot_bucket=bucket,
         trace=trace,
+        disabled_products=disabled_ercot_products(ercot_cfg),
     )
+
+
+def disabled_ercot_products(ercot_cfg: dict[str, object]) -> frozenset[str]:
+    """ERCOT products switched off in `[feeds.ercot]`. Today only D-28's regional solar product has a
+    switch (`solar_by_region_enabled`, default true): its per-region field names are not yet confirmed
+    against a live response, and a product that keeps failing shares the ERCOT breaker with the price and
+    load feeds, so ops can turn it off without a deploy."""
+    if bool(ercot_cfg.get("solar_by_region_enabled", True)):
+        return frozenset()
+    return frozenset({SOLAR_BY_REGION_PRODUCT})
 
 
 async def _tick_with_heartbeat(
@@ -161,9 +172,12 @@ async def run_feeds_process(cfg: Config, *, extra_tick: Callable[[], Awaitable[N
 
     trace_store: TraceStore | None = None
     try:
-        from opengrid.trace.pg_backend import PgTraceBackend  # health-owned (BUILD.md S4)
+        from opengrid.trace.pg_backend import (
+            PgTraceBackend,
+            journal_path_from_config,
+        )  # health-owned (BUILD.md S4)
 
-        trace_store = TraceStore(PgTraceBackend(pool))
+        trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
     except ImportError:
         # Degrade, don't trip (K7): if health's backend is ever unavailable, log FEED_CHANGE events
         # instead of writing to the trace table rather than crashing the feeds process over it.

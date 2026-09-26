@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ogsim.market.anomalies import MARKET_ANOMALY_TYPES, Anomaly
+from ogsim.market.data import active_as_deployment
 from ogsim.market.runtime import get_runtime
 
 router = APIRouter(prefix="/admin")
@@ -30,6 +31,16 @@ class InjectRequest(BaseModel):
 async def list_anomalies(request: Request) -> dict[str, Any]:
     rt = get_runtime(request)
     return {"anomalies": [a.to_dict() for a in rt.anomalies.all()]}
+
+
+@router.get("/as_deployment")
+async def as_deployment(request: Request) -> dict[str, Any]:
+    """Build phase, 2026-09-26 (FLEET-SIM): the currently-active simulated ERCOT AS deployment (if
+    any), for DISPATCH/the release manager to poll and treat exactly like an operator-declared
+    `og.as_deployment` row -- see the FLEET-SIM build report's wiring note. `{"active": None}` means
+    nothing is currently declared."""
+    rt = get_runtime(request)
+    return {"active": active_as_deployment(rt.anomalies, rt.now())}
 
 
 @router.post("/anomalies", response_model=None)
@@ -53,7 +64,13 @@ async def inject_anomaly(request: Request, body: InjectRequest) -> JSONResponse 
         duration=body.duration,
     )
     rt.anomalies.inject(anomaly)
-    rt.anomalies.sweep_expired()
+    # Bug fix (build phase, 2026-09-26): must sweep against the injected/fake clock (`rt.now()`), not
+    # `sweep_expired`'s own real-wall-clock default -- once the real system clock drifted past a fake
+    # clock's injected "now" (as it does for any test whose fake clock is set to a near-future time,
+    # e.g. later the same day), the real clock could already be past `start + duration +
+    # EXPIRY_GRACE_PERIOD_S`, sweeping an anomaly the instant it was injected, before any caller ever
+    # observed it as active.
+    rt.anomalies.sweep_expired(rt.now().timestamp())
     return {"ok": True, "anomaly": anomaly.to_dict()}
 
 

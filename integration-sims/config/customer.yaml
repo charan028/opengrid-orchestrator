@@ -1,0 +1,112 @@
+# ogsim.customer configuration (customer-operator simulators).
+# Env overrides: OG_MQTT_HOST/OG_MQTT_PORT/OG_MQTT_ROOT/OG_MQTT_CUSTOMER_PASSWORD,
+# OGSIM_CUSTOMER_API_BASE, OGSIM_CUSTOMER_API_MODE.
+# Point OGSIM_CUSTOMER_CONFIG at a copy of this file to override values below.
+#
+# Auth: the sim calls the API THROUGH Apache with HTTP Basic, never the loopback API
+# directly. Each site's `auth_group` (or the default inferred from its service_profile)
+# selects which Apache account's credentials to use:
+#   OGSIM_CUSTOMER_<GROUP>_USER / OGSIM_CUSTOMER_<GROUP>_PASSWORD
+# GROUP in {DC, PIPE, ERCOT, DIST, PARTNER}. These, plus OGSIM_CUSTOMER_API_BASE (the
+# Apache-fronted URL, e.g. https://base.tocy-net.net -- NEVER the orchestrator's
+# loopback port, which 401s without the Apache proxy secret), come from
+# /etc/opengrid/customer_sim.env (systemd EnvironmentFile) -- never set them here. If
+# OGSIM_CUSTOMER_API_BASE is unset, ogsim.customer refuses to start the API part; the MQTT
+# site-measurement signals still run.
+
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+  topic_root: og/v1
+
+api:
+  # No base_url default here -- OGSIM_CUSTOMER_API_BASE (env, Apache-fronted) is required.
+  # A YAML base_url is for local dev/test only (e.g. a fake API in a unit test harness).
+  mode: customer  # or operator_fallback, before the customer role/routes exist
+  timeout_s: 10.0
+
+seed: 42
+
+# One simulated operator per customer/service (BUILD.md: "one simulated operator per
+# customer type"). customer_id values are the fixed dev/test UUIDs
+# (dev/seed/customer_services_seed.sql, [api.roles.customer]); MQTT topics and API payloads
+# use these UUIDs directly. contract_id is left empty for the three customers seeded by
+# migration 0002 (ERCOT_ENERGY/DIST_DEFERRAL/PARTNER_CAPACITY) -- ogsim.customer discovers
+# their contract id from the API (GET obligations/contracts) at startup rather than
+# hard-coding it; DATA_CENTER/PIPELINE_AC's contract ids below come straight from
+# dev/seed/customer_services_seed.sql, which also fixes their site_id/corridor_id. Sizes
+# respect the fleet: 2,000 hubs, 39.2 kWh/11 kW per unit, 20% dual-unit homes, 40x600 kVA
+# banks -- request_kw values below stay well inside that envelope for a single
+# customer/window.
+sites:
+  - customer_id: 00000000-0000-7000-8000-0000000000c6
+    service_profile: DATA_CENTER
+    contract_id: 00000000-0000-7000-8000-0000000000d6
+    site_id: site-dc-01
+    baseline_kw: 2500.0
+    request_kw: 400.0  # matches the seeded contract's 400 kW commitment
+    request_interval_s: 60.0
+    meter_interval_s: 2.0
+    poll_interval_s: 60.0
+
+  - customer_id: 00000000-0000-7000-8000-0000000000c7
+    service_profile: PIPELINE_AC
+    contract_id: 00000000-0000-7000-8000-0000000000d7
+    corridor_id: corridor-pipe-01
+    line_id: line-345kv-pipe-01
+    limit_a: 15.0  # matches the seeded pq_envelope's current_limit_a
+    request_kw: 150.0
+    request_interval_s: 60.0
+    meter_interval_s: 2.0
+    poll_interval_s: 60.0
+
+  - customer_id: 00000000-0000-7000-8000-000000000c02
+    service_profile: ERCOT_ENERGY
+    request_kw: 500.0
+    request_interval_s: 60.0
+    poll_interval_s: 60.0
+
+  - customer_id: 00000000-0000-7000-8000-000000000c04
+    service_profile: DIST_DEFERRAL
+    request_kw: 300.0
+    request_interval_s: 60.0
+    poll_interval_s: 60.0
+
+  - customer_id: 00000000-0000-7000-8000-000000000c05
+    service_profile: PARTNER_CAPACITY
+    request_kw: 1000.0
+    request_interval_s: 60.0
+    poll_interval_s: 60.0
+
+  # 14-additional-services.md: three more operators. Disabled until their Apache accounts
+  # (og-cust-pjm / og-cust-mobile / og-cust-largeld) exist and customer_sim.env carries
+  # OGSIM_CUSTOMER_{PJM,MOBILE,LARGELD}_{USER,PASSWORD}. Ids from dev/seed/services_seed.sql.
+  - customer_id: 00000000-0000-7000-8000-0000000000c8
+    service_profile: PJM_CAPACITY
+    contract_id: 00000000-0000-7000-8000-0000000000d8
+    request_kw: 5000.0  # the seeded 5,000 kW simulated RPM commitment
+    request_interval_s: 300.0
+    poll_interval_s: 60.0
+    enabled: false
+
+  - customer_id: 00000000-0000-7000-8000-0000000000c9
+    service_profile: MOBILE_STORAGE
+    contract_id: 00000000-0000-7000-8000-0000000000d9
+    site_id: site-warehouse-01  # the seeded first deployment's site meter
+    baseline_kw: 800.0
+    request_kw: 500.0  # the seeded 500 kW trailer
+    request_interval_s: 300.0
+    meter_interval_s: 2.0
+    poll_interval_s: 60.0
+    enabled: false
+
+  - customer_id: 00000000-0000-7000-8000-0000000000ca
+    service_profile: LARGE_LOAD
+    contract_id: 00000000-0000-7000-8000-0000000000da
+    site_id: large-load-crypto-01
+    baseline_kw: 3000.0
+    request_kw: 2000.0
+    request_interval_s: 300.0
+    meter_interval_s: 2.0
+    poll_interval_s: 60.0
+    enabled: false

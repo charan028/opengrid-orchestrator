@@ -152,3 +152,92 @@ async def test_fetch_degraded_modes_returns_mode_since_pairs() -> None:
     result = await queries.fetch_degraded_modes(pool)
 
     assert result == [("HOLD", SINCE)]
+
+
+class ReturningFakeCursor(FakeCursor):
+    """Like `FakeCursor`, but `fetchone` returns a fixed row -- for `raise_alert`'s `RETURNING id`."""
+
+    def __init__(self, fetchone_row: tuple) -> None:
+        super().__init__()
+        self._row = fetchone_row
+
+    async def fetchone(self):
+        return self._row
+
+
+async def test_raise_alert_populates_scope_columns_from_detail() -> None:
+    """R2 item 1: `og.alert.scope_kind`/`scope_ref` (migration 0024) come straight from
+    `AlertFinding.detail`'s "scope_kind"/"scope_ref" keys -- the single writer both health's own rules
+    and guardian's `PgAlertPort.raise_alert` (`opengrid.guardian.repo`) go through, so guardian's
+    escalation alerts (whose `detail` already carries these keys, `opengrid.guardian.main.
+    apply_escalation`) get structured scope with no guardian-side change."""
+    from opengrid.health.model import AlertFinding
+
+    cursor = ReturningFakeCursor(fetchone_row=(42,))
+    pool = FakePool(cursor)
+    finding = AlertFinding(
+        rule="ALR-SCOPE-CONSERVATIVE",
+        severity="warning",
+        summary="BANK:bank-000 CONSERVATIVE: 12% of commands vetoed",
+        condition_key="ALR-SCOPE-CONSERVATIVE:BANK:bank-000",
+        detail={"scope_kind": "BANK", "scope_ref": "bank-000", "veto_ratio": 0.12},
+    )
+
+    alert_id = await queries.raise_alert(pool, finding, opened_at=NOW)
+
+    assert alert_id == 42
+    insert_statement, params = cursor.executed[0]
+    assert "INSERT INTO og.alert" in insert_statement
+    assert params["scope_kind"] == "BANK"
+    assert params["scope_ref"] == "bank-000"
+
+
+async def test_raise_alert_scope_columns_none_when_detail_has_no_scope() -> None:
+    """A system-wide alert (e.g. ALR-RESERVE-BREACH) has no scope in its detail -- the columns must be
+    `None`, not raise a `KeyError`."""
+    from opengrid.health.model import AlertFinding
+
+    cursor = ReturningFakeCursor(fetchone_row=(43,))
+    pool = FakePool(cursor)
+    finding = AlertFinding(
+        rule="ALR-RESERVE-BREACH",
+        severity="critical",
+        summary="Reserve-floor breach counter at 1 (must be 0, A10)",
+        condition_key="ALR-RESERVE-BREACH",
+        detail={"count": 1},
+    )
+
+    await queries.raise_alert(pool, finding, opened_at=NOW)
+
+    _statement, params = cursor.executed[0]
+    assert params["scope_kind"] is None
+    assert params["scope_ref"] is None
+
+
+async def test_fetch_open_alerts_round_trips_scope_columns() -> None:
+    cursor = ReturningFakeCursor(fetchone_row=None)
+
+    async def fetchall():
+        return [
+            (
+                1,
+                "ALR-SCOPE-CONSERVATIVE",
+                "warning",
+                "BANK:bank-000 CONSERVATIVE",
+                {"scope_kind": "BANK", "scope_ref": "bank-000"},
+                NOW,
+                None,
+                None,
+                "BANK",
+                "bank-000",
+            )
+        ]
+
+    cursor.fetchall = fetchall
+    pool = FakePool(cursor)
+
+    alerts = await queries.fetch_open_alerts(pool)
+
+    assert len(alerts) == 1
+    assert alerts[0].scope_kind == "BANK"
+    assert alerts[0].scope_ref == "bank-000"

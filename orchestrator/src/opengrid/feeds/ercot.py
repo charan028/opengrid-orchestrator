@@ -20,6 +20,7 @@ from opengrid.feeds.http_client import DEFAULT_TIMEOUT_S, FeedHttpError, request
 from opengrid.feeds.normalize import (
     ercot_as_price_to_feed_obs,
     ercot_load_to_feed_obs,
+    ercot_solar_by_region_to_feed_obs,
     ercot_solar_to_feed_obs,
     ercot_spp_to_feed_obs,
     ercot_wind_to_feed_obs,
@@ -42,12 +43,21 @@ TOKEN_RENEW_MARGIN_S = 300  # renew 5 min before expiry (02b S2.2)
 
 KeyName = Literal["PRIMARY", "SECONDARY"]
 
+#: D-28 regional solar product id (see `PRODUCT_PATHS`); `[feeds.ercot].solar_by_region_enabled` switches
+#: its polling off without a deploy (`opengrid.feeds._build_scheduler`).
+SOLAR_BY_REGION_PRODUCT = "np4-745-cd"
+
 PRODUCT_PATHS: dict[str, tuple[str, dict[str, str]]] = {
     "np6-905-cd": ("/np6-905-cd/spp_node_zone_hub", {"settlementPointType": "LZ"}),
     "np6-345-cd": ("/np6-345-cd/act_sys_load_by_wzn", {}),
     "np4-732-cd": ("/np4-732-cd/wpp_hrly_avrg_actl_fcast", {}),
     "np4-737-cd": ("/np4-737-cd/spp_hrly_avrg_actl_fcast", {}),
     "np4-188-cd": ("/np4-188-cd/dam_clear_price_for_cap", {}),
+    # D-28: Solar Power Production - Hourly Averaged Actual and Forecasted Values by Geographical Region
+    # (ERCOT data product NP4-745-CD, hourly, public). Endpoint verified against ERCOT's data-product page
+    # and the public-API spec; the per-region field names are inferred from NP4-737-CD's live-confirmed
+    # pattern and are UNCONFIRMED against a live response (see `ercot_solar_by_region_to_feed_obs`).
+    SOLAR_BY_REGION_PRODUCT: ("/np4-745-cd/spp_hrly_actual_fcast_geo", {}),
 }
 
 # BUILD.md follow-up finding: confirmed live that np6-345-cd/np4-732-cd/np4-737-cd/np4-188-cd return
@@ -61,6 +71,7 @@ _DATE_RANGE_PARAM_NAMES: dict[str, tuple[str, str]] = {
     "np4-732-cd": ("postedDatetimeFrom", "postedDatetimeTo"),
     "np4-737-cd": ("postedDatetimeFrom", "postedDatetimeTo"),
     "np4-188-cd": ("deliveryDateFrom", "deliveryDateTo"),
+    SOLAR_BY_REGION_PRODUCT: ("postedDatetimeFrom", "postedDatetimeTo"),
 }
 
 
@@ -84,6 +95,7 @@ _NORMALIZERS = {
     "np4-732-cd": ercot_wind_to_feed_obs,
     "np4-737-cd": ercot_solar_to_feed_obs,
     "np4-188-cd": ercot_as_price_to_feed_obs,
+    SOLAR_BY_REGION_PRODUCT: ercot_solar_by_region_to_feed_obs,
 }
 
 

@@ -20,6 +20,7 @@ from opengrid.core import reasons
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.core.timeutil import check_command_freshness, clock_offset_ok
 from opengrid.guardian.ports import L2Instruction, ProposedItem
+from opengrid.market.territory import TERRITORY_REASONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,23 @@ class CheckOutcome:
     @staticmethod
     def passed(rule_id: str, *, hub_id: str | None = None) -> CheckOutcome:
         return CheckOutcome(rule_id, True, None, hub_id)
+
+
+def hub_setpoints(items: list[ProposedItem]) -> list[ProposedItem]:
+    """One item per hub carrying the SUM of that hub's setpoints in the batch (a hub executes the sum of its
+    items, one per obligation). Every hub-level limit is evaluated on this; the per-item obligation mapping
+    stays on the batch for G-19. The first item's reason code is kept for tracing only."""
+    totals: dict[str, float] = {}
+    first: dict[str, ProposedItem] = {}
+    for item in items:
+        totals[item.hub_id] = totals.get(item.hub_id, 0.0) + item.p_kw_setpoint
+        first.setdefault(item.hub_id, item)
+    return [
+        first[hub_id]
+        if totals[hub_id] == first[hub_id].p_kw_setpoint
+        else ProposedItem(hub_id, totals[hub_id], first[hub_id].reason_code)
+        for hub_id in totals
+    ]
 
 
 def check_g01_reserve(
@@ -231,6 +249,8 @@ def check_g19_override_evidence(
     bank_capability_kw: float | None,
     committed_floor_kw: float,
     bank_capability_upper_kw: float | None = None,
+    pq_capability_upper_kw: float | None = None,
+    pq_floor_kw: float | None = None,
 ) -> CheckOutcome:
     """K13: an override reason code is a CLAIM by the engine; the guardian signs a reduction below the
     commitment lock only when its own independent reads back that claim up (review S3.3-2).
@@ -243,7 +263,13 @@ def check_g19_override_evidence(
       seen recently counted at their full rating; `None` means no read at all): a shortfall that exists
       only because hubs are unseen is not corroborated (`..._EVIDENCE_STALE`), so stale telemetry
       fails the claim closed instead of proving it. `bank_capability_kw` (unseen hubs at 0) only
-      distinguishes that reason; when the upper bound is omitted it is used as-is.
+      distinguishes that reason; when the upper bound is omitted it is used as-is. Both are the
+      caller's DERATED capability (`core.limits.derated_power_bounds_kw`, the allocator's own bound), so a
+      shortfall caused by SoC/temperature derating or a BMS limit is corroborated, not vetoed.
+    - PQ eligibility (K14): for a PQ-sensitive obligation the allocator may only use hubs that pass the
+      guardian's own G-24 asset conformance. `pq_capability_upper_kw` is that PQ-eligible capability
+      (same upper-bound rule) and `pq_floor_kw` the bank's PQ-sensitive commitments: below it, the claim
+      is corroborated too. Either None: no PQ evidence (the plain capability rule alone decides).
 
     Any other reason passes here: `check_g19_commitment_lock` already refuses it (and governs the
     config-gated `R-AS-RELEASE`)."""
@@ -255,12 +281,33 @@ def check_g19_override_evidence(
         upper_kw = bank_capability_upper_kw if bank_capability_upper_kw is not None else bank_capability_kw
         if upper_kw is not None and upper_kw < committed_floor_kw - 1e-9:
             return CheckOutcome.passed("G-19")
+        if (
+            pq_capability_upper_kw is not None
+            and pq_floor_kw is not None
+            and pq_capability_upper_kw < pq_floor_kw - 1e-9
+        ):
+            return CheckOutcome.passed("G-19")
         stale = bank_capability_kw is not None and bank_capability_kw < committed_floor_kw - 1e-9
         reason = (
             "COMMIT_LOCK_OVERRIDE_EVIDENCE_STALE" if stale else "COMMIT_LOCK_OVERRIDE_INFEASIBLE_UNVERIFIED"
         )
         return CheckOutcome("G-19", False, reason, obligation_id=obligation_id)
     return CheckOutcome.passed("G-19")
+
+
+#: K15 territory blocks an allocator may carry on a 0 kW grant for an obligation it must not serve from this
+#: bank (`market.territory.check_territory`'s codes, plus the guardian's own G-33 code).
+TERRITORY_BLOCK_REASONS = TERRITORY_REASONS | {reasons.R_TERRITORY_INELIGIBLE}
+
+
+def check_g19_territory_block(obligation_id: str, *, guardian_block: str | None) -> CheckOutcome:
+    """K13 x K15: a reduction claimed as territory-ineligible is signed only when the guardian's OWN territory
+    check (`market.check_territory` on its own contract and zone reads, the G-33 predicate) also refuses
+    serving this obligation from this bank. Serving it would be vetoed by G-33 anyway, so the reduction is
+    the only admissible outcome; if the guardian finds the bank eligible, the claim is VETOED."""
+    if guardian_block is not None:
+        return CheckOutcome.passed("G-19")
+    return CheckOutcome("G-19", False, "TERRITORY_INELIGIBLE_UNVERIFIED", obligation_id=obligation_id)
 
 
 def g19_lock_reason(reason_code: str | None) -> str | None:

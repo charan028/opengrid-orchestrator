@@ -13,7 +13,7 @@
       "additionalProperties": false,
       "required": ["kind", "ref"],
       "properties": {
-        "kind": { "type": "string", "enum": ["sim", "asset", "zone", "bank", "hub"] },
+        "kind": { "type": "string", "enum": ["sim", "asset", "zone", "bank", "hub", "customer", "site", "corridor"] },
         "ref": { "type": "string", "minLength": 1 }
       }
     },
@@ -33,7 +33,12 @@
         "MARKET_PRICE_SPIKE", "MARKET_NEGATIVE_PRICE", "MARKET_AS_PRICE_JUMP", "MARKET_HTTP_5XX",
         "MARKET_429_THROTTLE", "MARKET_401_KEY_REJECT", "MARKET_STALE_POSTING",
         "MARKET_MALFORMED_PAYLOAD", "MARKET_SLOW_RESPONSE", "MARKET_NWS_EXTREME_WEATHER",
-        "PARTNER_CALL"
+        "MARKET_PJM_EMERGENCY_PERFORMANCE_EVENT", "MARKET_AS_DEPLOYMENT",
+        "PARTNER_CALL",
+        "FLEET_MOBILE_DEPLOYMENT_START", "FLEET_MOBILE_DEPLOYMENT_RELOCATE",
+        "CUSTOMER_LOAD_STEP", "CUSTOMER_PIPELINE_CURRENT_SURGE", "CUSTOMER_REQUEST_BURST",
+        "CUSTOMER_MALFORMED_REQUEST", "CUSTOMER_LATE_CANCELLATION", "CUSTOMER_INVOICE_DISPUTE",
+        "CUSTOMER_SITE_METER_STALE", "CUSTOMER_LARGE_LOAD_CURTAILMENT_REQUEST"
       ]
     },
     "params": { "type": "object" },

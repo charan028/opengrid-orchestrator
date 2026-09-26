@@ -188,6 +188,45 @@ class Topology:
     banks: tuple[Bank, ...]
 
 
+# Deterministic per-hub lat/lon (owner UI request, 2026-09-26, #19): each hub gets a fixed point
+# inside its load zone's real geography, clustered around a real Texas city/region per zone, so the
+# fleet map looks like a plausible distribution instead of one dot. Must match
+# `ogsim.fleet.state`/`ogsim.common.config`'s independent copy exactly (BUILD.md S1 "share no code") --
+# both derive the jitter purely from the hub's own numeric index and its zone, no shared code or RNG
+# state, so cross-package agreement is a pure-function guarantee, not a coincidence of seeding order.
+# Centers are approximate city/region centroids (illustrative geography, not real interconnection
+# points): DFW for LZ_NORTH, Houston for LZ_HOUSTON, San Antonio for LZ_SOUTH, Midland/west TX for
+# LZ_WEST, Austin for LZ_AEN, San Antonio for LZ_CPS, the LCRA Highland Lakes area for LZ_LCRA, and
+# Rayburn Country (east TX, near Lake Fork) for LZ_RAYBN. Unknown zones fall back to a Texas-centroid
+# default rather than raising, so a not-yet-listed zone still gets a plausible (if unclustered) point.
+ZONE_GEO_CENTERS: dict[str, tuple[float, float]] = {
+    "LZ_NORTH": (32.7767, -96.7970),
+    "LZ_HOUSTON": (29.7604, -95.3698),
+    "LZ_SOUTH": (29.4241, -98.4936),
+    "LZ_WEST": (31.9973, -102.0779),
+    "LZ_AEN": (30.2672, -97.7431),
+    "LZ_CPS": (29.4241, -98.4936),
+    "LZ_LCRA": (30.5000, -98.3000),
+    "LZ_RAYBN": (32.8700, -95.7500),
+}
+_DEFAULT_ZONE_GEO_CENTER: tuple[float, float] = (31.0000, -100.0000)  # Texas centroid, unknown zones
+_GEO_JITTER_SPREAD_DEG: float = 0.35  # ~35 km radius cluster around each zone's center
+
+
+def hub_lat_lon(index: int, zone: str) -> tuple[float, float]:
+    """Deterministic `(lat, lon)` for hub index `i`, jittered within `ZONE_GEO_CENTERS[zone]` (or the
+    Texas-centroid default for an unlisted zone). The jitter is a simple two-constant linear
+    congruential hash of `i` -- not cryptographic, just decorrelated and reproducible with plain
+    arithmetic in Python, numpy (vectorized) and SQL alike, which is why it isn't `random`/`np.random`
+    (both would need identical seeding *and* algorithm across three independent implementations)."""
+    center_lat, center_lon = ZONE_GEO_CENTERS.get(zone, _DEFAULT_ZONE_GEO_CENTER)
+    frac_lat = ((index * 9301 + 49297) % 233280) / 233280.0
+    frac_lon = ((index * 134775813 + 40503) % 1000003) / 1000003.0
+    lat = center_lat + (frac_lat - 0.5) * _GEO_JITTER_SPREAD_DEG
+    lon = center_lon + (frac_lon - 0.5) * _GEO_JITTER_SPREAD_DEG
+    return lat, lon
+
+
 def _is_dual_unit(index: int, bank_count: int, dual_unit_share: float) -> bool:
     """Dual-unit rule (must match `ogsim.fleet.state` exactly, and the bank-assignment rule below):
     hub index `i` belongs to bank `i % bank_count` (round-robin, single-zone banks -- see
@@ -233,6 +272,7 @@ def build_topology(
         e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default
         p_kw = config.p_kw_dual_unit if dual_unit else config.p_kw_default
         r_kwh = e_kwh * config.reserve_frac_default
+        lat, lon = hub_lat_lon(i, zone)
         hubs.append(
             Hub(
                 hub_id=hub_id,
@@ -243,6 +283,8 @@ def build_topology(
                 p_kw=p_kw,
                 eta_c=config.eta_c,
                 eta_d=config.eta_d,
+                lat=lat,
+                lon=lon,
             )
         )
         hub_zone_by_bank.setdefault(bank_id, {}).setdefault(zone, 0)
@@ -304,9 +346,11 @@ def _build_zone_block(
         dual_unit = _is_dual_unit(j, block.banks, config.dual_unit_share)
         e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default
         p_kw = config.p_kw_dual_unit if dual_unit else config.p_kw_default
+        hub_index = hub_offset + j
+        lat, lon = hub_lat_lon(hub_index, block.zone)
         hubs.append(
             Hub(
-                hub_id=f"hub-{hub_offset + j:05d}",
+                hub_id=f"hub-{hub_index:05d}",
                 bank_id=f"bank-{bank_offset + (j % block.banks):03d}",
                 zone=block.zone,
                 e_kwh=e_kwh,
@@ -314,6 +358,8 @@ def _build_zone_block(
                 p_kw=p_kw,
                 eta_c=config.eta_c,
                 eta_d=config.eta_d,
+                lat=lat,
+                lon=lon,
             )
         )
 

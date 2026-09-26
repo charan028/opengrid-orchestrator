@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """One-off, audited R2 incident remediation (2026-09-26): resets hub-01996/01997/01998 from their
-wrong `QUARANTINED` state back to `OK`, and cancels their 3 open maintenance work orders as a
-FALSE_POSITIVE.
+wrong `WATCH`/`DEGRADED`/`QUARANTINED` state back to `OK`, and cancels any of their open maintenance
+work orders as a FALSE_POSITIVE.
+
+**2026-09-26 update.** hub-01998's dry run refused it: a false 09:41 "corrected" verification (itself
+downstream of the same ordering bug) triggered the S5.5.4 recurrence rule on its next drift reading,
+landing it on `DEGRADED` rather than `QUARANTINED`. `WATCH`/`DEGRADED`/`QUARANTINED` are all reachable
+by the same ordering bug (a wrong pre-calibration offset can read `CORRECTED`, `NO_CHANGE` or `WORSE_
+ROLLED_BACK` depending on what the wrong "post" comparison happens to land on), so all three are
+allowed for the explicitly listed hubs below. `AWAITING_REPLACEMENT` is deliberately NOT allowed (not
+confirmed part of this incident); `RECOMMISSIONING` is NEVER allowed -- a physical replacement already
+happened there, so it is refused both by this script's own guard and by `opengrid.assets.state_
+machine`'s transition table (no entry for it, `InvalidAssetTransitionError`).
 
 **Root cause (fixed in this release).** `opengrid.assets.repo.PgDriftObservationRepo.observation_
 window` read `rows[-1]` for "the latest measured offset", but `pq_ingest.latest_summaries`/
@@ -21,8 +31,8 @@ Every action goes through `opengrid.assets.service.AssetHealthService.record_fal
 the exact same code path this release ships, not a separate one-off SQL script -- so the audit trail
 (K10/K11: `ASSET_STATE_TRANSITION` + `OPERATOR_ACTION`, both written to `og.trace`) matches what any
 other false-positive reset will produce from here on. It refuses (raises, makes no changes) if a
-listed hub is not currently `QUARANTINED` -- never resets a hub for an unrelated, possibly-legitimate
-reason.
+listed hub's current state is not one of `ALLOWED_RESET_STATES` (`WATCH`, `DEGRADED`, `QUARANTINED`)
+-- never resets a hub for an unrelated, possibly-legitimate reason, and never `RECOMMISSIONING`.
 
 **Dry-run by default.** Running with no arguments only prints each hub's current state and open work
 order id and makes no changes. Pass `--apply` to actually perform the reset.
@@ -61,9 +71,16 @@ from opengrid.trace.pg_backend import PgTraceBackend
 from psycopg_pool import AsyncConnectionPool
 
 # The three hubs the lead confirmed were false-positived by the R2 ordering bug. Edit this list only
-# after confirming (via `SELECT hub_id, asset_state FROM og.hub_inverter_pq WHERE asset_state =
-# 'QUARANTINED'`) that no OTHER hub is in scope for this specific incident.
+# after confirming (via `SELECT hub_id, asset_state FROM og.hub_inverter_pq WHERE asset_state IN
+# ('WATCH', 'DEGRADED', 'QUARANTINED')`) that no OTHER hub is in scope for this specific incident.
 AFFECTED_HUB_IDS = ["hub-01996", "hub-01997", "hub-01998"]
+
+# 2026-09-26: hub-01998 landed on DEGRADED (via the S5.5.4 recurrence rule after a false "corrected"
+# reading), not QUARANTINED -- both, plus WATCH, are reachable by the same ordering bug depending on
+# what the wrong pre-calibration offset happened to compare against on verification. AWAITING_
+# REPLACEMENT is deliberately excluded (not confirmed part of this incident); RECOMMISSIONING is
+# never allowed (a physical replacement already happened there).
+ALLOWED_RESET_STATES = frozenset({"WATCH", "DEGRADED", "QUARANTINED"})
 
 REASON = (
     "R2 incident 2026-09-26: PgDriftObservationRepo read the OLDEST summary in the observation window "
@@ -79,10 +96,12 @@ async def _reset_one(service: AssetHealthService, hub_id: str, *, apply: bool) -
     if record is None:
         print(f"{hub_id}: NOT FOUND -- skipping")
         return
-    if record.asset_state != "QUARANTINED":
+    if record.asset_state not in ALLOWED_RESET_STATES:
         raise RuntimeError(
-            f"{hub_id} is {record.asset_state!r}, not QUARANTINED -- refusing to reset an unexpected "
-            "state; confirm this hub is actually part of the R2 incident before touching it manually"
+            f"{hub_id} is {record.asset_state!r}, not one of {sorted(ALLOWED_RESET_STATES)} -- refusing "
+            "to reset an unexpected state (RECOMMISSIONING is never allowed: a physical replacement "
+            "already happened there); confirm this hub is actually part of the R2 incident before "
+            "touching it manually"
         )
     work_order = await service.ports.work_orders.open_for_hub(hub_id)
     work_order_id = work_order.work_order_id if work_order else None

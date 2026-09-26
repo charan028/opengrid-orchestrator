@@ -10,7 +10,7 @@ from typing import Any
 from psycopg import sql
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.core.models.mqtt import Ack, ScadaBankSignal
+from opengrid.core.models.mqtt import FLOW_TELEMETRY_FIELDS, Ack, ScadaBankSignal
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.fleet import TelemetryRow
 
@@ -34,11 +34,12 @@ _SCADA_QUALITY_TO_FEED_OBS: dict[str, str] = {
     "comm_fail": "STALE",
 }
 
-_LOAD_HUBS_SQL = "SELECT hub_id, bank_id, zone, e_kwh, r_kwh, p_kw, eta_c, eta_d, lat, lon FROM og.hub"
+_LOAD_HUBS_SQL = "SELECT hub_id, bank_id, zone, e_kwh, r_kwh, p_kw, eta_c, eta_d, lat, lon, units FROM og.hub"
 _LOAD_BANKS_SQL = "SELECT bank_id, zone, kva_rating, reserve_kva, feeder_id FROM og.bank"
 _LOAD_HUB_STATES_SQL = """
 SELECT hub_id, soc_kwh, p_kw, health, lease_epoch, lease_expires_at, last_command_id, last_seen_at,
-       fault_code
+       fault_code, home_load_kw, pv_kw, meter_kw, cell_temp_c, p_dis_max_kw, p_ch_max_kw,
+       peak_power_budget_kws
 FROM og.hub_state
 """
 _UPSERT_HUB_STATE_COLUMNS = (
@@ -51,6 +52,7 @@ _UPSERT_HUB_STATE_COLUMNS = (
     "last_command_id",
     "last_seen_at",
     "fault_code",
+    *FLOW_TELEMETRY_FIELDS,
 )
 
 _UPSERT_HUB_STATE_CONFLICT_SET = sql.SQL(
@@ -63,10 +65,20 @@ _UPSERT_HUB_STATE_CONFLICT_SET = sql.SQL(
         lease_expires_at = EXCLUDED.lease_expires_at,
         last_command_id = EXCLUDED.last_command_id,
         last_seen_at = EXCLUDED.last_seen_at,
-        fault_code = EXCLUDED.fault_code
+        fault_code = EXCLUDED.fault_code,
+        home_load_kw = EXCLUDED.home_load_kw,
+        pv_kw = EXCLUDED.pv_kw,
+        meter_kw = EXCLUDED.meter_kw,
+        cell_temp_c = EXCLUDED.cell_temp_c,
+        p_dis_max_kw = EXCLUDED.p_dis_max_kw,
+        p_ch_max_kw = EXCLUDED.p_ch_max_kw,
+        peak_power_budget_kws = EXCLUDED.peak_power_budget_kws
     """
 )
-_COPY_TELEMETRY_SQL = "COPY og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health) FROM STDIN"
+_COPY_TELEMETRY_SQL = (
+    "COPY og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health, home_load_kw, pv_kw, meter_kw, "
+    "cell_temp_c, p_dis_max_kw, p_ch_max_kw, peak_power_budget_kws) FROM STDIN"
+)
 
 # Telemetry, hub_state and SCADA readings are soft state re-sent every 2 s: their transactions commit
 # asynchronously (WAL still written, just not fsync-waited). On the base server a WAL fsync took ~0.5 s
@@ -85,7 +97,19 @@ class PgFleetBackend:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_LOAD_HUBS_SQL)
             rows = await cur.fetchall()
-        columns = ("hub_id", "bank_id", "zone", "e_kwh", "r_kwh", "p_kw", "eta_c", "eta_d", "lat", "lon")
+        columns = (
+            "hub_id",
+            "bank_id",
+            "zone",
+            "e_kwh",
+            "r_kwh",
+            "p_kw",
+            "eta_c",
+            "eta_d",
+            "lat",
+            "lon",
+            "units",
+        )
         return [Hub(**dict(zip(columns, row, strict=True))) for row in rows]
 
     async def load_banks(self) -> list[Bank]:
@@ -109,6 +133,7 @@ class PgFleetBackend:
             "last_command_id",
             "last_seen_at",
             "fault_code",
+            *FLOW_TELEMETRY_FIELDS,
         )
         return [HubState(**dict(zip(columns, row, strict=True))) for row in rows]
 
@@ -150,6 +175,7 @@ class PgFleetBackend:
                             s.last_command_id,
                             s.last_seen_at,
                             s.fault_code,
+                            *(getattr(s, name) for name in FLOW_TELEMETRY_FIELDS),
                         )
                     )
                 await cur.execute(statement, params)
@@ -162,7 +188,7 @@ class PgFleetBackend:
             async with cur.copy(_COPY_TELEMETRY_SQL) as copy:
                 for row in rows:
                     await copy.write_row(
-                        (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health)
+                        (row.hub_id, row.ts, row.soc_kwh, row.p_kw, row.seq, row.epoch, row.health, *row.flow)
                     )
 
     async def insert_acks(self, acks: list[Ack]) -> None:

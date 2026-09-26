@@ -182,13 +182,18 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
         builtin = asdict(loader("does-not-exist.yaml"))
         shipped.pop("zone_blocks", None)
         builtin.pop("zone_blocks", None)
+        shipped.pop("substation_assets", None)
+        builtin.pop("substation_assets", None)
         assert shipped == builtin
     fleet = load_fleet_config()
     assert (fleet.e_kwh_default, fleet.p_kw_default, fleet.dual_unit_share) == (39.2, 11.0, 0.2)
     assert (fleet.e_kwh_dual_unit, fleet.p_kw_dual_unit, fleet.bank_kva_rating_default) == (78.4, 20.0, 600.0)
     assert (fleet.hub_count, fleet.bank_count) == (2000, 40)
     assert all(not block.enabled for block in fleet.zone_blocks)
-    assert {block.zone for block in fleet.zone_blocks} == {"LZ_AEN", "LZ_CPS"}
+    assert {block.zone for block in fleet.zone_blocks} == {"LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"}
+    assert [a.asset_id for a in fleet.substation_assets] == ["sub-LZ_AEN-00"]
+    assert fleet.substation_assets[0].enabled is False
+    assert (fleet.substation_assets[0].rated_mw, fleet.substation_assets[0].duration_h) == (20.0, 2.0)
 
 
 # --- broker credentials ----------------------------------------------------------------------

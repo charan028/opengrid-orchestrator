@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 from opengrid.selector.extract import extract_plan
 from opengrid.selector.model import build_mode_o_model
@@ -84,23 +85,19 @@ def test_ts_04_semi_continuous_snaps_to_increment():
     assert ok, violations
 
 
-def test_zero_value_firm_candidate_with_degradation_cost_is_never_selected():
+def test_zero_value_firm_candidate_with_wear_is_never_selected():
     """Regression, real-shaped (`qa/merge-notes.md` S15): before the intake fix, a DIST_DEFERRAL
     opportunity was admitted with `value_per_mwh=None` -> persisted as null -> read back by
-    `selector.gate.load_candidates` as `0.0`. This model's objective coefficient for a candidate is
-    `value_per_mwh/1000 - degradation_cost_per_kwh` (`model.py`'s objective section); with a real
-    demo-shaped degradation cost (0.03 $/kWh, `0002_seed_demo.sql`) and zero value, that coefficient is
-    strictly negative, so the *correct* optimum -- given that flawed input -- is `x_o=0` no matter how
-    much free capacity is available. This was never a solver bug: 94 `OPTIMAL` solves that all
-    correctly refused a candidate whose only recorded value was zero. Locks in that this is still true
-    (so nobody "fixes" it by special-casing the model), and that a real positive value flips the
-    decision -- the actual fix belongs in intake (`contracts/intake/deferral.py`'s
+    `selector.gate.load_candidates` as `0.0`. A delivery's objective coefficient is `value_per_mwh/1000 -
+    wear` (09 D8: the discharging bank's asset-class wear, `BankSnapshot.wear_usd_per_kwh`); with the
+    home-bank rate (0.03 $/kWh) and zero value that coefficient is strictly negative, so the *correct*
+    optimum -- given that flawed input -- is `x_o=0` no matter how much free capacity is available.
+    Locks in that this is still true (so nobody "fixes" it by special-casing the model), and that a real
+    positive value flips the decision -- the actual fix belongs in intake (`contracts/intake/deferral.py`'s
     `DEFAULT_DEFERRAL_VALUE_USD_PER_MWH`), not here."""
-    bank = make_bank("B1", 500.0, range(1))
+    bank = replace(make_bank("B1", 500.0, range(1)), wear_usd_per_kwh=0.03)
     scenario = zero_price_scenario(range(1))
-    unpriced = semi_continuous_candidate(
-        "deferral-o1", 500.0, 1.0, 1.0, 0.0, (0,), ("B1",), category="FIRM", degradation_cost_per_kwh=0.03
-    )
+    unpriced = semi_continuous_candidate("deferral-o1", 500.0, 1.0, 1.0, 0.0, (0,), ("B1",), category="FIRM")
     inputs = simple_inputs((bank,), (scenario,), (), (unpriced,), n_intervals=1)
 
     built = build_mode_o_model(inputs)
@@ -112,9 +109,7 @@ def test_zero_value_firm_candidate_with_degradation_cost_is_never_selected():
 
     # The real fix: intake records a real capacity-payment value (e.g. $120/MWh), which clears the
     # degradation cost and flips the optimum to fully select the candidate.
-    priced = semi_continuous_candidate(
-        "deferral-o1", 500.0, 1.0, 1.0, 120.0, (0,), ("B1",), category="FIRM", degradation_cost_per_kwh=0.03
-    )
+    priced = semi_continuous_candidate("deferral-o1", 500.0, 1.0, 1.0, 120.0, (0,), ("B1",), category="FIRM")
     inputs_priced = simple_inputs((bank,), (scenario,), (), (priced,), n_intervals=1)
     built_priced = build_mode_o_model(inputs_priced)
     outcome_priced = highs_solve(built_priced, FAST_SETTINGS)
@@ -127,21 +122,18 @@ def test_zero_value_firm_candidate_with_degradation_cost_is_never_selected():
     assert ok, violations
 
 
-def test_as_capacity_hold_is_not_charged_cycling_degradation_cost():
-    """Regression, real-shaped (live 2026-09-25/26 diagnosis after the S15 intake fix deployed): once
-    intake correctly generated `ERCOT_AS` opportunities (`value_per_mwh=5.37` -- a real live NSPIN MCPC,
-    `og.opportunity` dump), the LP *still* never selected any of them, even with real bank capacity.
-    `model.py`'s objective previously charged every candidate the full cycling `degradation_cost_per_kwh`
-    (0.03 $/kWh = $30/MWh-equivalent, `0002_seed_demo.sql`) regardless of `category` -- for a capacity
-    *hold* (AS/FIRM), whose value is a capacity payment/MCPC, not an energy-arbitrage spread, that
-    overwhelmed any realistic MCPC ($5.37/MWh << $30/MWh), so the objective coefficient
-    (`value_per_mwh/1000 - degradation_cost_per_kwh`) was always negative and `q_o=0` was the solver's
-    correct answer given that flawed cost basis -- not an infeasibility, not a units/window bug. Fixed:
-    `degradation_cost_per_kwh` now only applies to `MARKET` (real energy-cycling) candidates."""
-    bank = make_bank("B1", 500.0, range(1))
+def test_as_capacity_hold_is_not_charged_wear():
+    """Regression, real-shaped (live 2026-09-25/26): `ERCOT_AS` opportunities (`value_per_mwh=5.37`, a
+    real NSPIN MCPC) were never selected because the objective charged every candidate $30/MWh of
+    cycling wear. 09 D8 (Frank #7) states the rule: wear is charged on kWh actually DISCHARGED, for every
+    purpose, never on capacity held. A held AS award (`energy_hold_h > 0`, as the gate always sets for
+    ERCOT_AS) discharges nothing while held, so pays no wear; the same numbers as a delivery that
+    discharges its profile pay the bank's wear and are declined."""
+    bank = replace(make_bank("B1", 500.0, range(1)), wear_usd_per_kwh=0.03)
     scenario = zero_price_scenario(range(1))
-    as_candidate = semi_continuous_candidate(
-        "as-o1", 500.0, 100.0, 100.0, 5.37, (0,), ("B1",), category="AS", degradation_cost_per_kwh=0.03
+    as_candidate = replace(
+        semi_continuous_candidate("as-o1", 500.0, 100.0, 100.0, 5.37, (0,), ("B1",), category="AS"),
+        energy_hold_h=1.0,
     )
     inputs = simple_inputs((bank,), (scenario,), (), (as_candidate,), n_intervals=1)
 
@@ -150,23 +142,23 @@ def test_as_capacity_hold_is_not_charged_cycling_degradation_cost():
     plan = extract_plan(built, outcome, "L-ID")
 
     assert outcome.status == "OPTIMAL"
-    assert plan.selected_q["as-o1"] == 500.0  # fully selected: no cycling degradation charged against it
+    assert plan.selected_q["as-o1"] == 500.0  # fully selected: a hold pays no wear
 
     ok, violations = validate_plan(inputs, plan)
     assert ok, violations
 
-    # Same numbers, but MARKET (real energy cycling): the degradation cost still applies and correctly
-    # blocks selection -- this fix must not accidentally exempt ERCOT_ENERGY candidates too.
+    # Same numbers, but a delivery that discharges (FIRM or MARKET alike, D8 "every purpose").
+    for category in ("MARKET", "FIRM"):
+        delivery = semi_continuous_candidate(
+            "delivery-o1", 500.0, 100.0, 100.0, 5.37, (0,), ("B1",), category=category
+        )
+        inputs_delivery = simple_inputs((bank,), (scenario,), (), (delivery,), n_intervals=1)
+        built_delivery = build_mode_o_model(inputs_delivery)
+        plan_delivery = extract_plan(built_delivery, highs_solve(built_delivery, FAST_SETTINGS), "L-ID")
+        assert plan_delivery.selected_q.get("delivery-o1", 0.0) == 0.0, category
+
     market_candidate = semi_continuous_candidate(
-        "market-o1",
-        500.0,
-        100.0,
-        100.0,
-        5.37,
-        (0,),
-        ("B1",),
-        category="MARKET",
-        degradation_cost_per_kwh=0.03,
+        "market-o1", 500.0, 100.0, 100.0, 5.37, (0,), ("B1",), category="MARKET"
     )
     inputs_market = simple_inputs((bank,), (scenario,), (), (market_candidate,), n_intervals=1)
     built_market = build_mode_o_model(inputs_market)

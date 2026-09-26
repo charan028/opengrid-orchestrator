@@ -112,6 +112,11 @@ async def test_pg_bank_state_port_missing_bank():
     assert await port.snapshot("nope") is None
 
 
+def test_g03_bank_load_reads_only_good_quality_scada():
+    """A SCADA reading marked ESTIMATED/STALE is ignored (treated as no reading, i.e. stale), never as 0 kVA."""
+    assert "quality = 'GOOD'" in repo._BANK_LOAD_SQL
+
+
 async def test_pg_bank_state_port_no_load_reading_is_unknown_not_empty():
     """K4 regression: a bank with no SCADA reading used to look like a 0 kVA bank to G-03 (fail-open).
     It now carries an infinite reading age, which G-03 vetoes as BANK_LOAD_STALE."""
@@ -249,11 +254,15 @@ async def test_pg_proposal_port_malformed_payload_returns_none():
 
 
 async def test_load_hub_params():
-    cursor = FakeCursor([[("hub-1", 39.2, 7.84, 11.0, 0.9487, 0.9487)]])
+    cursor = FakeCursor(
+        [[("hub-1", 39.2, 7.84, 11.0, 0.9487, 0.9487, 1), ("hub-2", 78.4, 15.68, 20.0, 0.9487, 0.9487, 2)]]
+    )
     params = await repo.load_hub_params(FakePool(cursor))
-    assert set(params) == {"hub-1"}
+    assert set(params) == {"hub-1", "hub-2"}
     assert params["hub-1"].health == "stale"
     assert params["hub-1"].params.p_kw == 11.0
+    assert params["hub-1"].params.units == 1
+    assert params["hub-2"].params.units == 2  # G-02's per-unit cap is populated, not left None
 
 
 # ---------------------------------------------------------------------------------------------------

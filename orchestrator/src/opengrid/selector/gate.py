@@ -9,12 +9,14 @@ they need (BUILD.md "use fakes for siblings") without touching the pure `model`/
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import multiprocessing
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
@@ -22,12 +24,24 @@ from uuid import UUID, uuid4
 
 from opengrid import forecast, ledger
 from opengrid.core.models.engine import Plan
+from opengrid.core.models.market import ERCOT_COMPETITIVE, Utility
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
+from opengrid.core.reasons import R_DEGRADED_NO_NEW_COMMIT
+from opengrid.core.solar_share import SolarShare
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.fleet import capability as fleet_capability
 from opengrid.fleet import hub_capabilities as fleet_hub_capabilities
 from opengrid.fleet import rated_discharge_kw as fleet_rated_discharge_kw
-from opengrid.selector import db
+from opengrid.market import (
+    MarketModel,
+    MarketModelError,
+    MarketRef,
+    load_market_model,
+    market_of,
+    regulated_capacity_payment,
+)
+from opengrid.market.territory import utility_of_territory
+from opengrid.selector import db, energy_value, solar_history
 from opengrid.selector.commit import (
     commit_candidate,
     reject_structurally_infeasible,
@@ -48,6 +62,7 @@ from opengrid.selector.types import (
     solver_settings_for,
 )
 from opengrid.selector.validate import validate_plan
+from opengrid.selector.value import shadow_comparison
 
 logger = logging.getLogger(__name__)
 
@@ -56,28 +71,60 @@ SCHEDULED_HORIZON_INTERVALS = 96  # 24h / 15min, 02a S3.2
 
 # 02a S3.7's "firm first, then AS, then market" F2 priority bucket, keyed by `contract.service_type`
 # (`CandidateOpportunity.category`'s docstring). `ERCOT_ENERGY` (spot-like) falls back to `MARKET`.
+# Every `core.models.engine.ServiceType` value must be here (tested).
 _CATEGORY_BY_SERVICE_TYPE: dict[str, Literal["FIRM", "AS", "MARKET"]] = {
     "HOME": "FIRM",
     "DIST_DEFERRAL": "FIRM",
     "PARTNER_CAPACITY": "FIRM",
     "DATA_CENTER": "FIRM",  # firm bridging capacity (06-service-profiles S4.b)
+    "PIPELINE_AC": "FIRM",
+    "REGULATED_CAPACITY": "FIRM",  # regulated market: selected first, in stage R (09 D3)
+    "PJM_CAPACITY": "MARKET",  # a simulated ISO capacity market (SERVICES agent)
+    "MOBILE_STORAGE": "FIRM",
+    "LARGE_LOAD": "FIRM",
     "ERCOT_AS": "AS",
     "ERCOT_ENERGY": "MARKET",
 }
 
+#: Capacity-hold services outside the AS category: a regulated capacity commitment is a need-basis
+#: reservation (09 D9) -- kW locked, energy held for its sustain duration, nothing drained while held.
+_CAPACITY_HOLD_SERVICE_TYPES = frozenset({"REGULATED_CAPACITY"})
+
+#: 09 S1.3 psi: expected share of a held ERCOT_AS award actually deployed, for its wear (D8). A planning
+#: ASSUMPTION (~30 min/day for Non-Spin/ECRS) until settle measures deployment from og.as_deployment.
+AS_EXPECTED_DEPLOYMENT_SHARE = 0.02
+
 #: Full-deployment duration for an ERCOT_AS award whose product rule has none (ECRS 1 h, the shortest).
 DEFAULT_AS_HOLD_MINUTES = 60.0
+
+#: 09 S1.2 c^deg by asset class, $ per AC kWh discharged: homes $0.03 (A-DE-16). Every `og.bank` is a
+#: home bank today; substation assets ($0.015, OQ-15) join with the asset registry.
+HOME_BANK_WEAR_USD_PER_KWH = 0.03
 
 
 def as_energy_hold_h(service_type: object, duration_minutes: object) -> float:
     """Energy-hold hours for the selector's SoC model: an ERCOT_AS award is a capacity hold that must be
-    deployable for its product's full duration (Non-Spin 4 h, ECRS 1 h, NPRR1282); 0 for every other
-    service (those discharge their profile). Keyed on the service's AS category, so any AS service type
-    added to `_CATEGORY_BY_SERVICE_TYPE` is held too (from ftbrown's #13)."""
-    if not isinstance(service_type, str) or _CATEGORY_BY_SERVICE_TYPE.get(service_type) != "AS":
+    deployable for its product's full duration (Non-Spin 4 h, ECRS 1 h, NPRR1282), and so is a regulated
+    capacity commitment (09 D9 need basis); 0 for every other service (those discharge their profile).
+    Keyed on the service's AS category, so any AS service type added to `_CATEGORY_BY_SERVICE_TYPE` is
+    held too (from ftbrown's #13)."""
+    if not isinstance(service_type, str):
+        return 0.0
+    if (
+        _CATEGORY_BY_SERVICE_TYPE.get(service_type) != "AS"
+        and service_type not in _CAPACITY_HOLD_SERVICE_TYPES
+    ):
         return 0.0
     minutes = float(str(duration_minutes)) if duration_minutes else DEFAULT_AS_HOLD_MINUTES
     return minutes / 60.0
+
+
+def expected_deployment_share(service_type: object) -> float:
+    """psi for a held award of `service_type`: the AS assumption for ERCOT_AS; 0 otherwise (a regulated
+    need-basis reserve has no deployment statistic yet)."""
+    if isinstance(service_type, str) and _CATEGORY_BY_SERVICE_TYPE.get(service_type) == "AS":
+        return AS_EXPECTED_DEPLOYMENT_SHARE
+    return 0.0
 
 
 # Simple warm-start memory: previous gate's selection, shifted one interval by the caller if needed
@@ -108,6 +155,8 @@ def shutdown_solver_process() -> None:
 
 
 R_PQ_ELIGIBLE_CAPACITY = "R-PQ-ELIGIBLE-CAPACITY"
+#: `opengrid.health.model.DegradedMode` value that freezes new selection.
+NO_NEW_COMMITMENTS = "NO_NEW_COMMITMENTS"
 
 #: `(service_type, bank_id) -> eligible kW` for PQ-sensitive profiles (`None` for other services); wired by
 #: og-engine to `opengrid.engine.pq_eligibility.eligible_kw`. Unset: no PQ cap (tests, tools).
@@ -269,6 +318,305 @@ async def load_banks(
     return tuple(snapshots)
 
 
+@dataclass(frozen=True, slots=True)
+class BankMarketTerms:
+    """A bank's market position for one gate (09 D1/D2/D5/D8, D-22, D-28), applied onto its snapshot."""
+
+    zone: str | None
+    territory: str | None
+    wear_usd_per_kwh: float
+    delivery_charge_usd_per_kwh: float
+    charge_price_usd_per_kwh: dict[int, float]
+    free_market_access: bool
+    solar_cost_usd_per_kwh: float | None = None
+    solar_share_floor: float = 0.0
+    grid_charge_intervals: frozenset[int] | None = None
+    solar_shares: Mapping[int, SolarShare] = dataclasses.field(default_factory=dict)
+
+
+#: Utility tariff periods in which a regulated bank may charge from the grid (owner, D-22: "the rest at
+#: the night rate"): AE's TOU off-peak (nights and weekends), CPS's night rate.
+_GRID_CHARGE_PERIODS = frozenset({"OFF_PEAK", "NIGHT"})
+
+
+async def load_market(bank_ids: tuple[str, ...]) -> tuple[MarketModel, dict[str, str]]:
+    """The gate's `opengrid.market.MarketModel` (territories, utilities, TDSP tariffs from
+    `tdsp_tariffs.toml`) over the banks' `og.bank.zone`, plus that zone map. A missing tariffs file
+    raises (config error, the gate fails loudly): without the territory table a regulated zone would be
+    priced as the competitive market."""
+    zone_by_bank = await db.load_bank_zones(list(bank_ids))
+    return load_market_model(banks=list(zone_by_bank.items())), zone_by_bank
+
+
+def bank_market_terms(
+    market: MarketModel,
+    zone_by_bank: Mapping[str, str],
+    bank_ids: Sequence[str],
+    horizon_start: datetime,
+    n_intervals: int,
+    solar_shares: Mapping[str, Mapping[int, SolarShare]] | None = None,
+) -> dict[str, BankMarketTerms]:
+    """Pure: each bank's territory, M1 and charging terms from the `MarketModel` (the single owner of
+    the territory predicate and the charging-cost model; M1 resolves through `settle.tariffs`).
+
+    - ERCOT competitive area: grid kWh at the zone price + the TDSP's M1 (`MarketModel.charging_cost`'s
+      `delivery_usd_per_kwh`; the zone price itself is per scenario, so it is added in the model); PV
+      surplus at its forgone export credit, no M1.
+    - Regulated territory (Austin Energy, CPS Energy): grid kWh at the utility's grid rate, and only in
+      its night / off-peak period (D-22); solar kWh at the utility's solar price; a 30% solar floor; no
+      M1; no FREE headroom unless the utility granted wholesale access (K15 b).
+    - Unknown zone or territory: no FREE headroom and (`prepare_obligations`) no obligation: K15 fails
+      closed.
+
+    `solar_shares` is each bank's D-28 measured share per interval (`solar_history.planned_shares`)."""
+    shares = solar_shares or {}
+    out: dict[str, BankMarketTerms] = {}
+    for bank_id in bank_ids:
+        zone = zone_by_bank.get(bank_id)
+        territory = market.territory_of_bank(bank_id)
+        delivery = 0.0
+        charge_price: dict[int, float] = {}
+        solar_cost: float | None = None
+        floor = 0.0
+        grid_intervals: frozenset[int] | None = None
+        if territory is None or zone is None:
+            logger.warning(
+                "selector: bank has no known territory; it serves nothing this gate (K15 fail-closed)",
+                extra={"bank_id": bank_id, "zone": zone},
+            )
+        elif territory == ERCOT_COMPETITIVE:
+            cost = market.charging_cost(zone, horizon_start, wholesale_usd_per_kwh=Decimal("0"))
+            if cost.tariff_ref.endswith("M1-NONE"):
+                logger.warning("selector: no TDSP tariff for zone; M1 priced at 0", extra={"zone": zone})
+            delivery = float(cost.delivery_usd_per_kwh)
+        else:
+            allowed: set[int] = set()
+            for t in range(n_intervals):
+                cost = market.charging_cost(
+                    zone, horizon_start + timedelta(minutes=INTERVAL_MINUTES * t), solar_share=Decimal("0")
+                )
+                charge_price[t] = float(cost.grid_energy_usd_per_kwh)
+                solar_cost = float(cost.solar_usd_per_kwh)
+                if cost.period in _GRID_CHARGE_PERIODS:
+                    allowed.add(t)
+            grid_intervals = frozenset(allowed)
+            utility_id = utility_of_territory(territory)
+            floor = float(market.utility(utility_id).solar_share_floor) if utility_id else 0.0
+        out[bank_id] = BankMarketTerms(
+            zone=zone,
+            territory=territory,
+            wear_usd_per_kwh=HOME_BANK_WEAR_USD_PER_KWH,
+            delivery_charge_usd_per_kwh=delivery,
+            charge_price_usd_per_kwh=charge_price,
+            free_market_access=market.free_access(territory),
+            solar_cost_usd_per_kwh=solar_cost,
+            solar_share_floor=floor,
+            grid_charge_intervals=grid_intervals,
+            solar_shares=shares.get(bank_id, {}),
+        )
+    return out
+
+
+async def load_solar_shares(
+    zone_by_bank: Mapping[str, str], horizon_start: datetime, n_intervals: int, now: datetime
+) -> dict[str, dict[int, SolarShare]]:
+    """D-28 measured solar share per bank and planned interval: sample this gate's fleet telemetry into
+    the trailing-week history, then the zone's same-hour measured share, else ERCOT's same-hour solar
+    share (guarded: an absent feed or a DB error is simply no ERCOT source), else the 30% assumption."""
+
+    def _hubs(bank_id: str) -> list[Any]:
+        try:
+            return list(fleet_hub_capabilities(bank_id))
+        except LookupError:
+            return []
+
+    solar_history.sample_fleet(zone_by_bank, now, _hubs)
+    try:
+        ercot = await db.load_ercot_solar_share_by_hour()
+    except Exception:
+        logger.warning("ERCOT solar share unreadable; measured share or the 30% assumption", exc_info=True)
+        ercot = {}
+    starts = [(t, horizon_start + timedelta(minutes=INTERVAL_MINUTES * t)) for t in range(n_intervals)]
+    by_zone = {
+        zone: solar_history.planned_shares(zone, starts, now, ercot) for zone in set(zone_by_bank.values())
+    }
+    return {bank_id: by_zone[zone] for bank_id, zone in zone_by_bank.items()}
+
+
+def apply_market_terms(
+    banks: tuple[BankSnapshot, ...], terms: Mapping[str, BankMarketTerms]
+) -> tuple[BankSnapshot, ...]:
+    """Copy each bank's market terms onto its snapshot (banks without terms are left as they are). The
+    solar charging available per interval is the measured share of the bank's charge envelope (D-28)."""
+    out = []
+    for bank in banks:
+        term = terms.get(bank.bank_id)
+        if term is None:
+            out.append(bank)
+            continue
+        shares = term.solar_shares
+        out.append(
+            dataclasses.replace(
+                bank,
+                zone=term.zone,
+                territory=term.territory,
+                wear_usd_per_kwh=term.wear_usd_per_kwh,
+                delivery_charge_usd_per_kwh=term.delivery_charge_usd_per_kwh,
+                charge_price_usd_per_kwh=term.charge_price_usd_per_kwh,
+                free_market_access=term.free_market_access,
+                solar_cost_usd_per_kwh=term.solar_cost_usd_per_kwh,
+                solar_share_floor=term.solar_share_floor,
+                grid_charge_intervals=term.grid_charge_intervals,
+                solar_charge_kw={
+                    t: float(s.share) * bank.max_charge_kw.get(t, 0.0)
+                    for t, s in shares.items()
+                    if s.share > 0
+                },
+                solar_share={t: float(s.share) for t, s in shares.items()},
+                solar_share_source={t: s.source for t, s in shares.items()},
+            )
+        )
+    return tuple(out)
+
+
+def _market_ref(market: str, utility_id: str | None) -> MarketRef | None:
+    try:
+        return market_of(market=market, utility_id=utility_id)
+    except MarketModelError:
+        return None
+
+
+def _eligible(market: MarketModel, ref: MarketRef | None, bank_ids: tuple[str, ...]) -> tuple[str, ...]:
+    """K15 (09 C25 a/b) through `MarketModel.bank_eligible` (the one predicate)."""
+    if ref is None:
+        return ()
+    return tuple(b for b in bank_ids if market.bank_eligible(b, ref))
+
+
+def prepare_obligations(
+    candidates: tuple[CandidateOpportunity, ...],
+    committed: tuple[CommittedObligation, ...],
+    market: MarketModel,
+) -> tuple[tuple[CandidateOpportunity, ...], tuple[CommittedObligation, ...]]:
+    """Apply the market model to the gate's obligations.
+
+    - K15: every obligation's eligible banks narrow to those its market allows -- a REGULATED obligation
+      only its utility's territory, a FREE one only the competitive area (and regulated banks whose
+      utility granted wholesale access). A committed obligation keeps whatever banks remain (C24
+      substitutes among them; with none left the validator reports the K13 shortfall and F2 takes over).
+    - A regulated candidate without a recorded value is valued at its utility's capacity price
+      (`regulated_value_per_mwh`), so stage R (09 D3) has something to maximise."""
+    narrowed_candidates = []
+    for c in candidates:
+        ref = _market_ref(c.market, c.utility_id)
+        value = c.value_per_mwh
+        if ref is not None and ref.is_regulated and value <= 0.0 and ref.utility_id is not None:
+            value = regulated_value_per_mwh(market.utility(ref.utility_id))
+        narrowed_candidates.append(
+            dataclasses.replace(
+                c, eligible_bank_ids=_eligible(market, ref, c.eligible_bank_ids), value_per_mwh=value
+            )
+        )
+    narrowed_committed = []
+    for co in committed:
+        eligible = _eligible(market, _market_ref(co.market, co.utility_id), co.eligible_bank_ids)
+        if not eligible:
+            logger.error(
+                "committed obligation has no territory-eligible bank (K15)",
+                extra={"obligation_id": co.obligation_id, "market": co.market, "utility_id": co.utility_id},
+            )
+        narrowed_committed.append(dataclasses.replace(co, eligible_bank_ids=eligible))
+    return tuple(narrowed_candidates), tuple(narrowed_committed)
+
+
+async def new_commitments_allowed() -> bool:
+    """02b S6.5 row 1: False while health's NO_NEW_COMMITMENTS mode is active (a feed crossed STALE).
+    An unreadable mode counts as active (fail closed): no new commitment on data that may be stale."""
+    try:
+        return NO_NEW_COMMITMENTS not in await db.load_degraded_modes()
+    except Exception:
+        logger.exception(
+            "degraded-mode state unreadable; no new commitments this gate (fail closed)",
+            extra={"reason_code": R_DEGRADED_NO_NEW_COMMIT},
+        )
+        return False
+
+
+def withhold_unfit_series(
+    candidates: tuple[CandidateOpportunity, ...],
+    banks: tuple[BankSnapshot, ...],
+    scenarios: tuple[ScenarioPrice, ...],
+    unfit_series: frozenset[str],
+) -> tuple[CandidateOpportunity, ...]:
+    """02b S6.5: no selection priced off a series forecast flags `NOT_FOR_FIRM` (its feed is STALE or its
+    history too short). Each candidate loses the banks priced off such a series: a bank in that zone, and
+    -- while any series is unfit -- a bank with no zone path of its own (it is priced at the fleet mean,
+    which includes the unfit series). The candidate stays selectable on the remaining banks."""
+    if not unfit_series:
+        return candidates
+    priced_off_unfit = {
+        bank.bank_id
+        for bank in banks
+        if (bank.zone is not None and bank.zone in unfit_series)
+        or not _has_zone_path(scenarios, bank.bank_id)
+    }
+    out = []
+    for c in candidates:
+        kept = tuple(b for b in c.eligible_bank_ids if b not in priced_off_unfit)
+        if len(kept) < len(c.eligible_bank_ids):
+            logger.warning(
+                "candidate withheld from banks priced off a NOT_FOR_FIRM series",
+                extra={"obligation_id": c.obligation_id, "reason_code": R_DEGRADED_NO_NEW_COMMIT},
+            )
+        out.append(dataclasses.replace(c, eligible_bank_ids=kept))
+    return tuple(out)
+
+
+async def freeze_new_selection(
+    candidates: tuple[CandidateOpportunity, ...],
+    banks: tuple[BankSnapshot, ...],
+    scenarios: tuple[ScenarioPrice, ...],
+    horizon_start: datetime,
+    horizon_end: datetime,
+) -> tuple[CandidateOpportunity, ...]:
+    """The candidates this gate may still select (02b S6.5). Under NO_NEW_COMMITMENTS none: they stay
+    OFFERED, nothing is reserved, committed obligations keep delivering (K13 is unaffected by feed
+    staleness). Otherwise each loses the banks priced off an unfit series (`withhold_unfit_series`); an
+    unreadable fitness flag withholds every candidate (fail closed)."""
+    if not candidates:
+        return candidates
+    if not await new_commitments_allowed():
+        logger.warning(
+            "NO_NEW_COMMITMENTS active: the gate selects nothing new",
+            extra={"reason_code": R_DEGRADED_NO_NEW_COMMIT, "candidates_withheld": len(candidates)},
+        )
+        return ()
+    try:
+        unfit = await db.load_unfit_price_series(horizon_start, horizon_end)
+    except Exception:
+        logger.exception(
+            "forecast firm-fitness unreadable; no new commitments this gate (fail closed)",
+            extra={"reason_code": R_DEGRADED_NO_NEW_COMMIT},
+        )
+        return ()
+    return withhold_unfit_series(candidates, banks, scenarios, unfit)
+
+
+def regulated_value_per_mwh(utility: Utility) -> float:
+    """The utility's capacity price as $ per MWh-held (one kW held for one hour,
+    `market.regulated_capacity_payment`), so the objective's `value x kW x dt` term pays exactly the
+    pro-rated capacity payment (09 S1.5 stage R)."""
+    if utility.capacity_price_usd_per_kw is None:
+        return 0.0
+    per_kw_hour = regulated_capacity_payment(
+        committed_kw=Decimal("1"),
+        price_usd_per_kw=utility.capacity_price_usd_per_kw,
+        basis=utility.payment_basis,
+        hours=Decimal("1"),
+    )
+    return float(per_kw_hour * 1000)
+
+
 async def load_scenarios(
     horizon_start: datetime, horizon_end: datetime, bank_ids: tuple[str, ...] = ()
 ) -> tuple[ScenarioPrice, ...]:
@@ -280,7 +628,21 @@ async def load_scenarios(
     and the fleet path (for a bank with no zone path) is the mean of the zones."""
     points = await forecast.scenarios(horizon_start, horizon_end)
     zone_by_bank = await db.load_bank_zones(list(bank_ids)) if bank_ids else {}
-    return scenarios_from_points(points, horizon_start, zone_by_bank)
+    scenarios = scenarios_from_points(points, horizon_start, zone_by_bank)
+    unpriced = sorted(
+        {zone for bank_id, zone in zone_by_bank.items() if not _has_zone_path(scenarios, bank_id)}
+    )
+    if unpriced:
+        # e.g. LZ_AEN/LZ_CPS banks before those zones are in `[fleet].zones` (forecast's price series).
+        logger.warning(
+            "selector: no price forecast for these bank zones; their banks use the fleet mean path",
+            extra={"zones": unpriced},
+        )
+    return scenarios
+
+
+def _has_zone_path(scenarios: tuple[ScenarioPrice, ...], bank_id: str) -> bool:
+    return bool(scenarios) and all(bank_id in s.price_by_bank for s in scenarios)
 
 
 def scenarios_from_points(
@@ -322,7 +684,7 @@ async def load_committed(
     reduction -- see `types.CommittedObligation`); a future refinement can narrow this per obligation
     once `contracts`/`ledger` expose an eligibility query."""
     frozen = await db.load_frozen_commitments(horizon_start.isoformat(), horizon_end.isoformat())
-    as_minutes = await db.load_as_hold_minutes([str(o) for o in frozen])
+    terms = await db.load_obligation_terms([str(o) for o in frozen])
     n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
     interval_index_by_iso = {
         (horizon_start + timedelta(minutes=INTERVAL_MINUTES * t)).isoformat(): t for t in range(n_intervals)
@@ -335,16 +697,18 @@ async def load_committed(
             if iso in interval_index_by_iso
         }
         if by_index:
+            term = terms.get(str(obligation_id), {})
+            value = term.get("value_per_mwh")
             result.append(
                 CommittedObligation(
                     obligation_id=str(obligation_id),
                     eligible_bank_ids=bank_ids,
                     committed_kw_by_interval=by_index,
-                    energy_hold_h=(
-                        as_energy_hold_h("ERCOT_AS", as_minutes[str(obligation_id)])
-                        if str(obligation_id) in as_minutes
-                        else 0.0
-                    ),
+                    energy_hold_h=as_energy_hold_h(term.get("service_type"), term.get("duration_minutes")),
+                    expected_deployment_share=expected_deployment_share(term.get("service_type")),
+                    value_per_mwh=float(value) if value is not None else 0.0,
+                    market="REGULATED" if term.get("market") == "REGULATED" else "FREE",
+                    utility_id=term.get("utility_id"),
                 )
             )
     return tuple(result)
@@ -376,6 +740,18 @@ async def load_candidates(
         window_intervals = tuple(range(max(start_t, 0), min(end_t, n_intervals)))
         if not window_intervals:
             continue  # window does not actually overlap this horizon after clamping/rounding
+        try:
+            ref = market_of(
+                market=row.get("market"), utility_id=row.get("utility_id"), service_type=row["service_type"]
+            )
+        except MarketModelError:
+            logger.warning(
+                "opportunity with an inconsistent market is not offered to the selector (K15 fail-closed)",
+                extra={"opportunity_id": str(row["opportunity_id"])},
+            )
+            continue
+        # A regulated candidate with no recorded value is priced from its utility in `prepare_obligations`.
+        value_per_mwh = float(row["value_per_mwh"]) if row["value_per_mwh"] is not None else 0.0
         candidates.append(
             CandidateOpportunity(
                 opportunity_id=str(row["opportunity_id"]),
@@ -384,7 +760,7 @@ async def load_candidates(
                 eligible_bank_ids=bank_ids,
                 window_intervals=window_intervals,
                 requested_kw=float(row["requested_kw"]),
-                value_per_mwh=float(row["value_per_mwh"]) if row["value_per_mwh"] is not None else 0.0,
+                value_per_mwh=value_per_mwh,
                 variable_kind=row["variable_kind"] or "CONTINUOUS",
                 min_qty_kw=float(row["min_qty_kw"] or 0.0),
                 increment_kw=float(row["increment_kw"] or 0.0),
@@ -393,6 +769,9 @@ async def load_candidates(
                 category=_CATEGORY_BY_SERVICE_TYPE.get(row["service_type"], "MARKET"),
                 service_type=str(row["service_type"] or ""),
                 energy_hold_h=as_energy_hold_h(row["service_type"], row.get("duration_minutes")),
+                expected_deployment_share=expected_deployment_share(row["service_type"]),
+                market=ref.market,
+                utility_id=ref.utility_id,
             )
         )
     return tuple(candidates)
@@ -460,14 +839,98 @@ def solve_gate(
         q_hint=_last_hint_q if q_hint is None else q_hint,
     )
     result = extract_plan(built, outcome, plan_mode)
+    # ES05-S07: the rule baseline runs on EVERY gate, on the same inputs, as the KPI-22 shadow (and it
+    # is the plan itself whenever the LP cannot be used).
+    rule_plan = rule_fallback_f2(inputs)
 
+    chosen = result
     if outcome.status in ("INFEASIBLE_F1", "TIME_LIMIT_GAP"):
-        return rule_fallback_f2(inputs)
+        chosen = rule_plan
+    else:
+        ok, violations = validate_plan(inputs, result)
+        if not ok:
+            logger.warning(
+                "selector plan failed validation; rule fallback", extra={"violations": violations[:5]}
+            )
+            chosen = rule_plan
+    return dataclasses.replace(chosen, shadow=shadow_comparison(inputs, chosen, rule_plan))
 
-    ok, _violations = validate_plan(inputs, result)
-    if not ok:
-        return rule_fallback_f2(inputs)
-    return result
+
+def plan_analytics_rows(
+    plan_id: UUID, horizon_start: datetime, inputs: ModelInputs, result: ExtractedPlan
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rows for `db.insert_plan_analytics` (migration 0030): plan value, shadow obligation-intervals and
+    the per-bank stored-energy value."""
+    shadow = result.shadow
+    step = timedelta(minutes=INTERVAL_MINUTES)
+    value_row: dict[str, Any] = {
+        "plan_id": plan_id,
+        "lp_net_value": Decimal(str(round(shadow.lp_value.net, 4))) if shadow else Decimal("0"),
+        "rule_net_value": Decimal(str(round(shadow.rule_value.net, 4))) if shadow else Decimal("0"),
+        "value_added": Decimal(str(round(shadow.value_added, 4))) if shadow else Decimal("0"),
+        "forgone_upside": Decimal(str(round(shadow.forgone_upside, 4))) if shadow else Decimal("0"),
+        "stage_r_objective": (
+            Decimal(str(round(result.stage_r_objective, 4))) if result.stage_r_objective is not None else None
+        ),
+        "breakdown": json.dumps(
+            {
+                "plan_mode": result.plan_mode,
+                "lp": dataclasses.asdict(shadow.lp_value) if shadow else None,
+                "rule": dataclasses.asdict(shadow.rule_value) if shadow else None,
+            }
+        ),
+    }
+    shadow_rows = [
+        {
+            "plan_id": plan_id,
+            "obligation_id": row.obligation_id,
+            "interval_start": horizon_start + step * row.interval,
+            "interval_end": horizon_start + step * (row.interval + 1),
+            "lp_kw": Decimal(str(round(row.lp_kw, 3))),
+            "rule_kw": Decimal(str(round(row.rule_kw, 3))),
+            "best_competing_value_per_kwh": (
+                Decimal(str(round(row.best_competing_value_per_kwh, 6)))
+                if row.best_competing_value_per_kwh is not None
+                else None
+            ),
+        }
+        for row in (shadow.obligation_intervals if shadow else ())
+    ]
+    energy_rows = [
+        {
+            "plan_id": plan_id,
+            "bank_id": value.bank_id,
+            "horizon_start": value.horizon_start,
+            "horizon_end": value.horizon_end,
+            "interval_minutes": value.interval_minutes,
+            "water_value_usd_per_mwh": list(value.water_value_usd_per_mwh),
+            "discharge_threshold_usd_per_mwh": list(value.discharge_threshold_usd_per_mwh),
+            "planned_floor_kwh": list(value.planned_floor_kwh),
+            "hold_floor_kwh": list(value.hold_floor_kwh),
+            "solar_share": list(value.solar_share),
+            "solar_share_source": list(value.solar_share_source),
+        }
+        for value in energy_value.build_energy_values(inputs, result, horizon_start).values()
+    ]
+    return value_row, shadow_rows, energy_rows
+
+
+async def persist_plan_analytics(
+    plan_id: UUID, horizon_start: datetime, inputs: ModelInputs, result: ExtractedPlan
+) -> None:
+    """Publish the stored-energy value in-process (DISPATCH's read API) and write the plan analytics.
+    Analytics never fail a gate: a DB error (e.g. migration 0030 not applied yet) is logged."""
+    energy_value.publish(energy_value.build_energy_values(inputs, result, horizon_start))
+    try:
+        await db.insert_plan_analytics(*plan_analytics_rows(plan_id, horizon_start, inputs, result))
+    except Exception:
+        logger.exception("selector plan analytics not persisted", extra={"plan_id": str(plan_id)})
+    try:
+        pruned = await db.prune_plan_energy_value()
+        if pruned:
+            logger.info("pruned old stored-energy values", extra={"rows": pruned})
+    except Exception:
+        logger.exception("stored-energy value retention prune failed")
 
 
 async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> Plan:
@@ -484,14 +947,24 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
     horizon_start, horizon_end = await compute_horizon(gate_kind, now)
     bank_ids = tuple(sorted(set(await _configured_bank_ids())))
 
-    banks, scenarios, committed, candidates = (
+    n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
+    banks, scenarios, committed, candidates, (market, zone_by_bank) = (
         await load_banks(horizon_start, horizon_end, bank_ids),
         await load_scenarios(horizon_start, horizon_end, bank_ids),
         await load_committed(horizon_start, horizon_end, bank_ids),
         await load_candidates(horizon_start, horizon_end, bank_ids, contract_scope),
+        await load_market(bank_ids),
     )
+    shares = await load_solar_shares(zone_by_bank, horizon_start, n_intervals, now)
+    banks = apply_market_terms(
+        banks, bank_market_terms(market, zone_by_bank, bank_ids, horizon_start, n_intervals, shares)
+    )
+    candidates, committed = prepare_obligations(candidates, committed, market)
+    # 02b S6.5 row 1: no new selection on stale data. The structural (pre-freeze) eligibility is kept for
+    # the R-ADMIT-REJECT check, so a candidate withheld only for a stale series is never rejected for it.
+    structural_by_id = {c.opportunity_id: c for c in candidates}
+    candidates = await freeze_new_selection(candidates, banks, scenarios, horizon_start, horizon_end)
 
-    n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
     inputs = ModelInputs(
         intervals=tuple(range(n_intervals)),
         interval_minutes=INTERVAL_MINUTES,
@@ -511,6 +984,7 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
     _last_hint_q.update(result.selected_q)
 
     plan_id = await persist_plan(result.plan_mode, gate_kind, horizon_start, horizon_end, scenarios, result)
+    await persist_plan_analytics(plan_id, horizon_start, inputs, result)
 
     unselected: list[CandidateOpportunity] = []
     for c in candidates:
@@ -543,7 +1017,9 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
                 )
     rated_kw_by_bank = _rated_kw_by_bank(bank_ids) if unselected else None
     if unselected and rated_kw_by_bank is not None:
-        await reject_structurally_infeasible(unselected, rated_kw_by_bank, plan_id)
+        await reject_structurally_infeasible(
+            [structural_by_id.get(c.opportunity_id, c) for c in unselected], rated_kw_by_bank, plan_id
+        )
 
     return Plan(
         plan_id=plan_id,

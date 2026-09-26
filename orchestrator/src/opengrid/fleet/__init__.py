@@ -25,7 +25,13 @@ from typing import Any, Literal, NamedTuple, Protocol
 
 from prometheus_client import Counter
 
-from opengrid.core.models.mqtt import Ack, ScadaBankSignal, ScadaUtilityInstruction, Telemetry
+from opengrid.core.models.mqtt import (
+    FLOW_TELEMETRY_FIELDS,
+    Ack,
+    ScadaBankSignal,
+    ScadaUtilityInstruction,
+    Telemetry,
+)
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.core.physics import (
     DEFAULT_ETA_D,
@@ -90,6 +96,17 @@ class HubCapabilitySnapshot(NamedTuple):
     # Nameplate discharge kW (`params.p_kw`) regardless of health/SoC: lets the allocator attribute a
     # shortfall to a device fault (L0) or the reserve floor (L1), K13.
     rated_kw: float | None = None
+    # Latest optional discharge-flow telemetry (migration 0027; `None` until the hub reports it or while
+    # excluded): cell temperature and BMS limits for dispatch derating, meter/home/PV for flow checks.
+    home_load_kw: float | None = None
+    pv_kw: float | None = None
+    meter_kw: float | None = None
+    cell_temp_c: float | None = None
+    p_dis_max_kw: float | None = None
+    p_ch_max_kw: float | None = None
+    peak_power_budget_kws: float | None = None
+    # Battery/inverter units in the home (og.hub.units, migration 0032): G-02's per-unit cap.
+    units: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +120,8 @@ class TelemetryRow:
     seq: int
     epoch: int
     health: str
+    # Optional discharge-flow telemetry (migration 0027), in `FLOW_TELEMETRY_FIELDS` order; None = absent.
+    flow: tuple[float | None, ...] = (None,) * len(FLOW_TELEMETRY_FIELDS)
 
 
 class FleetBackend(Protocol):
@@ -151,6 +170,8 @@ class _HubRuntime:
     last_seen_at: datetime | None = None
     seq: int = -1
     epoch: int = -1
+    #: Latest optional discharge-flow telemetry, `FLOW_TELEMETRY_FIELDS` name -> value (absent = None).
+    flow: dict[str, float | None] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -227,7 +248,12 @@ async def load_topology() -> None:
             bank_id=hub.bank_id,
             zone=hub.zone,
             params=HubParams(
-                e_kwh=hub.e_kwh, r_kwh=hub.r_kwh, p_kw=hub.p_kw, eta_c=hub.eta_c, eta_d=hub.eta_d
+                e_kwh=hub.e_kwh,
+                r_kwh=hub.r_kwh,
+                p_kw=hub.p_kw,
+                eta_c=hub.eta_c,
+                eta_d=hub.eta_d,
+                units=hub.units,
             ),
         )
         bank_rt = banks_by_id.get(hub.bank_id)
@@ -245,6 +271,7 @@ async def load_topology() -> None:
         runtime.lease_expires_at = state.lease_expires_at
         runtime.last_command_id = state.last_command_id
         runtime.last_seen_at = state.last_seen_at
+        runtime.flow = {name: getattr(state, name) for name in FLOW_TELEMETRY_FIELDS}
 
     _banks.clear()
     _banks.update(banks_by_id)
@@ -285,6 +312,8 @@ async def ingest_telemetry(payload: dict[str, Any]) -> None:
     runtime.last_seen_at = telemetry.ts
     runtime.seq = telemetry.seq
     runtime.epoch = telemetry.epoch
+    flow = tuple(getattr(telemetry, name) for name in FLOW_TELEMETRY_FIELDS)
+    runtime.flow = dict(zip(FLOW_TELEMETRY_FIELDS, flow, strict=True))
 
     _pending_telemetry.append(
         TelemetryRow(
@@ -295,6 +324,7 @@ async def ingest_telemetry(payload: dict[str, Any]) -> None:
             seq=telemetry.seq,
             epoch=telemetry.epoch,
             health=telemetry.health,
+            flow=flow,
         )
     )
 
@@ -373,6 +403,13 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
                 last_command_id=runtime.last_command_id,
                 last_seen_at=runtime.last_seen_at,
                 fault_code=runtime.fault_code,
+                home_load_kw=runtime.flow.get("home_load_kw"),
+                pv_kw=runtime.flow.get("pv_kw"),
+                meter_kw=runtime.flow.get("meter_kw"),
+                cell_temp_c=runtime.flow.get("cell_temp_c"),
+                p_dis_max_kw=runtime.flow.get("p_dis_max_kw"),
+                p_ch_max_kw=runtime.flow.get("p_ch_max_kw"),
+                peak_power_budget_kws=runtime.flow.get("peak_power_budget_kws"),
             )
         )
 
@@ -542,6 +579,15 @@ def known_bank_ids() -> list[str]:
     return list(_banks.keys())
 
 
+def bank_feeder(bank_id: str) -> str | None:
+    """The bank's feeder (`og.bank.feeder_id`), for feeder-level flow limits (G-28, dispatch); None when
+    the bank has no feeder mapping. Raises `LookupError` if `bank_id` is not a known bank."""
+    bank_rt = _banks.get(bank_id)
+    if bank_rt is None:
+        raise LookupError(f"unknown bank_id: {bank_id}")
+    return bank_rt.feeder_id
+
+
 def bank_zone(bank_id: str) -> str:
     """The bank's configured zone (`og.bank.zone`), for the allocator's `BankSnapshot.zone` (ZONE-scoped
     L2 instructions/safe-stop grouping). Raises `LookupError` if `bank_id` is not a known bank."""
@@ -587,6 +633,7 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
             reserve_kwh = runtime.params.r_kwh
             e_kwh = runtime.params.e_kwh
             p_kw = runtime.p_kw
+        flow = runtime.flow if classification == "online" else {}
         snapshots.append(
             HubCapabilitySnapshot(
                 hub_id=hub_id,
@@ -601,6 +648,14 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
                 p_kw=p_kw,
                 ramp_kw_per_s=hub_ramp_kw_per_s(runtime.params),
                 rated_kw=runtime.params.p_kw,
+                home_load_kw=flow.get("home_load_kw"),
+                pv_kw=flow.get("pv_kw"),
+                meter_kw=flow.get("meter_kw"),
+                cell_temp_c=flow.get("cell_temp_c"),
+                p_dis_max_kw=flow.get("p_dis_max_kw"),
+                p_ch_max_kw=flow.get("p_ch_max_kw"),
+                peak_power_budget_kws=flow.get("peak_power_budget_kws"),
+                units=runtime.params.units,
             )
         )
     return snapshots

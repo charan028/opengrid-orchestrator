@@ -1,7 +1,8 @@
 """Selector's own read-only queries against `og.commitment`/`og.opportunity`/`og.obligation` (02a S2.2,
 S3.8). Selector never writes these tables (`ledger`/`contracts` do); it only reads them to assemble a
 gate's `ModelInputs`, exactly as `load_frozen_commitments`'s fixed interface already does for
-`commitment`. No migrations exist yet for these tables (architect-owned, BUILD.md S4) -- this module is
+`commitment`. It writes only its own plan-analytics tables (migration 0030: `og.plan_value`,
+`og.plan_shadow_obligation`, `og.plan_energy_value`). No migrations exist yet for these tables (architect-owned, BUILD.md S4) -- this module is
 correct against the DDL in `02a-mvp-s-spec-engine.md` S1 and will run once they land; until then it is
 exercised in tests only through `_get_pool`, which callers/tests may monkeypatch.
 """
@@ -17,6 +18,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.timeutil import to_utc
+from opengrid.health.queries import fetch_degraded_modes
 from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 
@@ -30,21 +32,32 @@ _FROZEN_COMMITMENTS_SQL = """
 """
 
 _BANK_IDS_SQL = "SELECT bank_id FROM og.bank ORDER BY bank_id"
+_UNFIT_PRICE_SERIES_SQL = """
+    SELECT DISTINCT series_key FROM og.forecast
+    WHERE kind = 'price' AND firm_fitness = 'NOT_FOR_FIRM'
+      AND interval_start_utc >= %(horizon_start)s AND interval_start_utc < %(horizon_end)s
+"""
 _BANK_ZONES_SQL = "SELECT bank_id, zone FROM og.bank WHERE bank_id = ANY(%(ids)s)"
 
-# ERCOT_AS obligations among the given ids, with their product's full-deployment duration: these are
-# capacity holds (energy locked above reserve, no drain) in the selector's SoC model.
-_AS_HOLD_MINUTES_SQL = """
-    SELECT o.obligation_id, MAX(pr.duration_minutes)
+# The terms of committed obligations the selector needs beyond their frozen kW: service type and product
+# duration (capacity holds lock energy instead of draining it), own value (forgone upside), and the
+# contract's market (K15 territory). `to_jsonb(c) ->> 'market'` reads migration 0025's columns without
+# failing on a database where 0025 is not applied yet (NULL -> FREE, `market.territory.market_of`).
+_OBLIGATION_TERMS_SQL = """
+    SELECT o.obligation_id, o.service_type, op.value_per_mwh,
+           to_jsonb(c) ->> 'market' AS market, to_jsonb(c) ->> 'utility_id' AS utility_id,
+           (SELECT MAX(pr.duration_minutes) FROM og.product_rule pr
+            WHERE pr.contract_id = o.contract_id) AS duration_minutes
     FROM og.obligation o
-    LEFT JOIN og.product_rule pr ON pr.contract_id = o.contract_id
-    WHERE o.service_type = 'ERCOT_AS' AND o.obligation_id = ANY(%(ids)s::uuid[])
-    GROUP BY o.obligation_id
+    JOIN og.contract c ON c.contract_id = o.contract_id
+    LEFT JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
+    WHERE o.obligation_id = ANY(%(ids)s::uuid[])
 """
 
 _OFFERED_OPPORTUNITIES_SQL = """
     SELECT o.opportunity_id, ob.obligation_id, o.contract_id, o.window_start, o.window_end,
            o.requested_kw, o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
+           to_jsonb(c) ->> 'market' AS market, to_jsonb(c) ->> 'utility_id' AS utility_id,
            pr.variable_kind, pr.min_qty_kw, pr.increment_kw,
            COALESCE(pr.duration_minutes, (SELECT MAX(p2.duration_minutes) FROM og.product_rule p2
                                           WHERE p2.contract_id = o.contract_id)) AS duration_minutes
@@ -98,15 +111,15 @@ async def load_frozen_commitments(horizon_start: str, horizon_end: str) -> dict[
     return dict(frozen)
 
 
-async def load_as_hold_minutes(obligation_ids: list[str]) -> dict[str, float | None]:
-    """Read-only: `obligation_id -> product duration_minutes` for the ERCOT_AS obligations among
-    `obligation_ids` (None when the contract has no product rule)."""
+async def load_obligation_terms(obligation_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Read-only: `obligation_id -> {service_type, value_per_mwh, market, utility_id, duration_minutes}`
+    for the given obligations (see `_OBLIGATION_TERMS_SQL`)."""
     if not obligation_ids:
         return {}
     pool = await get_pool()
-    async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_AS_HOLD_MINUTES_SQL, {"ids": obligation_ids})
-        return {str(row[0]): (float(row[1]) if row[1] is not None else None) async for row in cur}
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_OBLIGATION_TERMS_SQL, {"ids": obligation_ids})
+        return {str(row["obligation_id"]): dict(row) async for row in cur}
 
 
 async def load_bank_zones(bank_ids: list[str]) -> dict[str, str]:
@@ -118,6 +131,24 @@ async def load_bank_zones(bank_ids: list[str]) -> dict[str, str]:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(_BANK_ZONES_SQL, {"ids": bank_ids})
         return {str(row[0]): str(row[1]) async for row in cur}
+
+
+async def load_degraded_modes() -> frozenset[str]:
+    """Read-only: the currently-active degraded modes (`og.degraded_mode_state`, health's persisted
+    set, read through health's own query). Raises on any DB error: callers fail closed."""
+    return frozenset(mode for mode, _since in await fetch_degraded_modes(await get_pool()))
+
+
+async def load_unfit_price_series(horizon_start: datetime, horizon_end: datetime) -> frozenset[str]:
+    """Read-only: price series (`og.forecast.series_key`, a load zone) flagged `NOT_FOR_FIRM` anywhere in
+    the horizon -- forecast marks a series so when its live feed is STALE or its history too short
+    (02b S3). `forecast.scenarios` does not carry the flag, so it is read from the table directly."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            _UNFIT_PRICE_SERIES_SQL, {"horizon_start": horizon_start, "horizon_end": horizon_end}
+        )
+        return frozenset([str(row[0]) async for row in cur])
 
 
 async def load_bank_ids_rows() -> list[str]:
@@ -157,3 +188,136 @@ async def load_offered_opportunities_rows(
             },
         )
         return [dict(row) async for row in cur]
+
+
+# --- selector-owned plan analytics (migration 0030) -------------------------------------------------
+
+_INSERT_PLAN_VALUE_SQL = """
+    INSERT INTO og.plan_value (plan_id, lp_net_value, rule_net_value, value_added, forgone_upside,
+                               stage_r_objective, breakdown)
+    VALUES (%(plan_id)s, %(lp_net_value)s, %(rule_net_value)s, %(value_added)s, %(forgone_upside)s,
+            %(stage_r_objective)s, %(breakdown)s)
+    ON CONFLICT (plan_id) DO NOTHING
+"""
+
+_INSERT_SHADOW_OBLIGATION_SQL = """
+    INSERT INTO og.plan_shadow_obligation (plan_id, obligation_id, interval_start, interval_end, lp_kw,
+                                           rule_kw, best_competing_value_per_kwh)
+    VALUES (%(plan_id)s, %(obligation_id)s, %(interval_start)s, %(interval_end)s, %(lp_kw)s, %(rule_kw)s,
+            %(best_competing_value_per_kwh)s)
+    ON CONFLICT (plan_id, obligation_id, interval_start) DO NOTHING
+"""
+
+_INSERT_ENERGY_VALUE_SQL = """
+    INSERT INTO og.plan_energy_value (plan_id, bank_id, horizon_start, horizon_end, interval_minutes,
+                                      water_value_usd_per_mwh, discharge_threshold_usd_per_mwh,
+                                      planned_floor_kwh, hold_floor_kwh, solar_share, solar_share_source)
+    VALUES (%(plan_id)s, %(bank_id)s, %(horizon_start)s, %(horizon_end)s, %(interval_minutes)s,
+            %(water_value_usd_per_mwh)s, %(discharge_threshold_usd_per_mwh)s, %(planned_floor_kwh)s,
+            %(hold_floor_kwh)s, %(solar_share)s, %(solar_share_source)s)
+    ON CONFLICT (plan_id, bank_id) DO NOTHING
+"""
+
+# As `_ENERGY_VALUE_THRESHOLDS_SQL`, for the hard hold floor.
+_HOLD_FLOORS_SQL = """
+    SELECT DISTINCT ON (bank_id) bank_id,
+           hold_floor_kwh[
+               1 + floor(extract(epoch FROM (%(at)s::timestamptz - horizon_start)) / (60 * interval_minutes))::int
+           ] AS hold_floor
+    FROM og.plan_energy_value
+    WHERE bank_id = ANY(%(ids)s) AND horizon_start <= %(at)s AND horizon_end > %(at)s
+    ORDER BY bank_id, created_at DESC
+"""
+
+#: D-28 source 2: ERCOT's published solar production (FOLLOWUPS' feed, `og.feed_obs`) as a share of
+#: ERCOT system load (`np6-345-cd`, series `total`), per America/Chicago hour over the trailing week.
+#: Product/series ids to be confirmed with FOLLOWUPS; an absent feed simply yields no rows.
+ERCOT_SOLAR_PRODUCT = "np4-745-cd"
+ERCOT_SOLAR_SERIES = "SYSTEM"
+_ERCOT_SOLAR_SHARE_SQL = """
+    SELECT extract(hour FROM s.ts AT TIME ZONE 'America/Chicago')::int AS hour,
+           avg(s.value / nullif(l.value, 0)) AS share
+    FROM og.feed_obs s
+    JOIN og.feed_obs l
+      ON l.source = 'ERCOT' AND l.product = 'np6-345-cd' AND l.series = 'total'
+     AND date_trunc('hour', l.ts) = date_trunc('hour', s.ts)
+    WHERE s.source = 'ERCOT' AND s.product = %(product)s AND s.series = %(series)s
+      AND s.ts > now() - interval '7 days'
+    GROUP BY 1
+"""
+
+#: Retention of `og.plan_energy_value` (about 40 rows per gate): only the newest plan is ever read.
+ENERGY_VALUE_RETENTION_DAYS = 7
+_PRUNE_ENERGY_VALUE_SQL = """
+    DELETE FROM og.plan_energy_value WHERE created_at < now() - make_interval(days => %(days)s)
+"""
+
+# The newest plan's series covering `at`, per bank: the index into the arrays is computed in SQL so the
+# dispatcher gets one number per bank (NULL outside the array or for an interval without a dual).
+_ENERGY_VALUE_THRESHOLDS_SQL = """
+    SELECT DISTINCT ON (bank_id) bank_id,
+           discharge_threshold_usd_per_mwh[
+               1 + floor(extract(epoch FROM (%(at)s::timestamptz - horizon_start)) / (60 * interval_minutes))::int
+           ] AS threshold
+    FROM og.plan_energy_value
+    WHERE bank_id = ANY(%(ids)s) AND horizon_start <= %(at)s AND horizon_end > %(at)s
+    ORDER BY bank_id, created_at DESC
+"""
+
+
+async def insert_plan_analytics(
+    value_row: dict[str, Any],
+    shadow_rows: list[dict[str, Any]],
+    energy_rows: list[dict[str, Any]],
+) -> None:
+    """Write one plan's analytics (og.plan_value, og.plan_shadow_obligation, og.plan_energy_value) in one
+    transaction. Selector-owned tables; idempotent per plan."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        await cur.execute(_INSERT_PLAN_VALUE_SQL, value_row)
+        if shadow_rows:
+            await cur.executemany(_INSERT_SHADOW_OBLIGATION_SQL, shadow_rows)
+        if energy_rows:
+            await cur.executemany(_INSERT_ENERGY_VALUE_SQL, energy_rows)
+
+
+async def load_energy_value_thresholds(bank_ids: list[str], at: datetime) -> dict[str, float]:
+    """DISPATCH read API (DB): `bank_id -> headroom-discharge break-even price ($/MWh)` at `at`, from the
+    newest plan covering `at` (`og.plan_energy_value`). Banks without a value are absent: keep the
+    fallback threshold for them. Same figure as `selector.energy_value.discharge_threshold_usd_per_mwh`."""
+    if not bank_ids:
+        return {}
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_ENERGY_VALUE_THRESHOLDS_SQL, {"ids": bank_ids, "at": at})
+        return {str(row[0]): float(row[1]) async for row in cur if row[1] is not None}
+
+
+async def load_hold_floors_kwh(bank_ids: list[str], at: datetime) -> dict[str, float]:
+    """DISPATCH/guardian read API (DB): `bank_id -> hard SoC floor (kWh)` at `at` from the newest plan
+    covering `at`. Same figure as `selector.energy_value.hold_floor_kwh`."""
+    if not bank_ids:
+        return {}
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_HOLD_FLOORS_SQL, {"ids": bank_ids, "at": at})
+        return {str(row[0]): float(row[1]) async for row in cur if row[1] is not None}
+
+
+async def load_ercot_solar_share_by_hour() -> dict[int, float]:
+    """D-28 source 2: `local hour -> ERCOT solar share of system load` (trailing week); empty when the
+    feed is absent. Callers treat an error as no ERCOT source."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            _ERCOT_SOLAR_SHARE_SQL, {"product": ERCOT_SOLAR_PRODUCT, "series": ERCOT_SOLAR_SERIES}
+        )
+        return {int(row[0]): float(row[1]) async for row in cur if row[1] is not None}
+
+
+async def prune_plan_energy_value(keep_days: int = ENERGY_VALUE_RETENTION_DAYS) -> int:
+    """Delete `og.plan_energy_value` rows older than `keep_days`; returns how many."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_PRUNE_ENERGY_VALUE_SQL, {"days": keep_days})
+        return int(cur.rowcount or 0)

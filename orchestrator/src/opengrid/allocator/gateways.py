@@ -17,6 +17,8 @@ from datetime import datetime
 from typing import Protocol
 
 from opengrid.allocator.models import (
+    CycleExtras,
+    CycleResult,
     FleetState,
     Instruction,
     LedgerView,
@@ -86,3 +88,15 @@ class ScheduleGateway(Protocol):
     async def schedule(self, bank_ids: Sequence[str]) -> Schedule: ...
 
     async def instructions(self, bank_ids: Sequence[str]) -> Sequence[Instruction]: ...
+
+
+class CycleExtrasGateway(Protocol):
+    """The optional per-cycle inputs beyond S1-S7's core (`models.CycleExtras`): closed-loop caps, the PQ
+    context, K15 territory enforcement and flow limits -- and the hook that sees each cycle's result
+    (controller reconciliation, PQ ladder, traces)."""
+
+    async def extras(
+        self, fleet_state: FleetState, ledger_view: LedgerView, now: datetime
+    ) -> CycleExtras: ...
+
+    async def observe(self, result: CycleResult, ledger_view: LedgerView, now: datetime) -> None: ...

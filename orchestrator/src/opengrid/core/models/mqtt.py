@@ -32,6 +32,35 @@ class Telemetry(_Wire):
     # Optional, additive per-phase electrical quality (06-service-profiles-and-power-quality.md S6.1);
     # existing consumers that ignore unknown/absent fields are unaffected.
     pq: TelemetryPq | None = None
+    # Optional, additive discharge-flow-limit fields (09-optimizer-dispatcher-update.md S1.9/G11,
+    # migration 0027): read by the guardian flow checks (G-26/G-31) and dispatch derating; absent on a
+    # hub still on the old wire schema, in which case consumers fall back to their defaults.
+    home_load_kw: float | None = None
+    pv_kw: float | None = None
+    meter_kw: float | None = None
+    cell_temp_c: float | None = None
+    p_dis_max_kw: float | None = None
+    p_ch_max_kw: float | None = None
+    peak_power_budget_kws: float | None = None
+    # Optional, additive fields already in interfaces/mqtt/telemetry.schema.json: hub position (owner UI
+    # request) and the D-28 charge-source split. Accepted on the wire, not persisted yet (charge_* get
+    # columns in migration 0034). R2 hotfix: rejecting them dropped every telemetry message.
+    lat: float | None = None
+    lon: float | None = None
+    charge_pv_kw: float | None = None
+    charge_grid_kw: float | None = None
+
+
+#: The optional discharge-flow telemetry fields, in the one order every persisting caller uses.
+FLOW_TELEMETRY_FIELDS: tuple[str, ...] = (
+    "home_load_kw",
+    "pv_kw",
+    "meter_kw",
+    "cell_temp_c",
+    "p_dis_max_kw",
+    "p_ch_max_kw",
+    "peak_power_budget_kws",
+)
 
 
 class CommandItem(_Wire):

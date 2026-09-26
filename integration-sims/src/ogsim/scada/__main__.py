@@ -41,7 +41,7 @@ async def _run_forever() -> None:
     clock = RealClock()
 
     async with aiomqtt.Client(
-        **mqtt_settings(config.mqtt.host, config.mqtt.port, config.mqtt.password)
+        **mqtt_settings(config.mqtt.host, config.mqtt.port, config.mqtt.password, config.mqtt.username)
     ) as raw:
         client = SimMqttClient(AiomqttTransportAdapter(raw), config.mqtt.topic_root)
 
