@@ -1,0 +1,142 @@
+# dev/config/docker.live-feeds.toml -- docker.toml with og-feeds pointed at the LIVE ERCOT, EIA and NWS APIs.
+# Used only by og-feeds through dev/docker-compose.live-feeds.yml; every other section is docker.toml's and must be
+# kept in sync with it (only [feeds.*] differ). The credentials come from dev/keys/api_keys.env, which the owner
+# places by hand (git-ignored; names as docs/orchestrator/07-delivery/integrations/api_keys.env.example).
+# ERCOT shares its key with the base server: the budget below keeps dev at 6 of ERCOT's ~30 requests/min, and live
+# feeds run only when a test needs them (stop og-feeds otherwise).
+
+# dev/config/docker.toml -- used only by containerized processes on the compose network:
+# the one-shot `migrate` service, and the optional `orchestrator` profile (BUILD.md WP D0:
+# "an optional orchestrator compose profile running all N processes"). Identical to
+# dev/config/dev.toml except every host is a compose *service name* instead of `127.0.0.1`/
+# `localhost`, and the API/metrics bind hosts are `0.0.0.0` so their published ports are
+# reachable from outside the container. Host-side processes (your IDE/venv) should use
+# dev/config/dev.toml instead.
+
+[general]
+env = "dev"
+node_id = "dev-stack-docker"
+timezone_market = "America/Chicago"
+
+[postgres]
+host = "postgres"
+port = 5432
+database = "og"
+pool_min = 1
+pool_max = 4
+
+[mqtt]
+host = "mosquitto"
+port = 1883
+topic_root = "og/v1"
+client_id_prefix = "og-dev"
+keepalive_s = 20
+
+[feeds.ercot]
+base_url = "https://api.ercot.com/api/public-reports"
+# token_url unset: the real ERCOT B2C token endpoint (opengrid.feeds.ercot.DEFAULT_TOKEN_URL).
+subscription_key_env = "ERCOT_PUBLIC_API_KEY_PRIMARY"
+subscription_key_secondary_env = "ERCOT_PUBLIC_API_KEY_SECONDARY"
+username_env = "ERCOT_API_USER"
+password_env = "ERCOT_API_PASSWORD"
+budget_requests_per_min = 6   # shared ERCOT key with base (24): 24 + 6 = ERCOT's ~30/min
+products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"]
+
+[feeds.eia]
+base_url = "https://api.eia.gov/v2"
+api_key_env = "EIA_API_KEY"
+respondent = "ERCO"
+
+[feeds.nws]
+base_url = "https://api.weather.gov"
+user_agent = "OpenGrid-Orchestrator-Dev (ops@tocy-net.net)"
+grid_point = "EWX/156,91"
+
+[feeds.staleness]
+ercot_price_fresh_s = 600
+ercot_price_lgv_s = 900
+ercot_load_fresh_s = 1800
+wind_solar_fresh_s = 10800
+nws_fresh_s = 10800
+eia_fresh_s = 10800
+
+[forecast]
+horizon_hours = 24
+resolution_min = 15
+quantiles = [0.10, 0.50, 0.90]
+
+[fleet]
+hub_count = 200
+banks = 8
+zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"]
+telemetry_interval_s = 2
+lease_ttl_s = 30
+
+[allocator]
+cycle_interval_s = 2
+dwell_s = 300
+hysteresis_usd_per_mwh = 5
+
+[guardian]
+key_path = "/app/dev/keys/guardian-dev.key"
+verdict_timeout_ms = 300
+clock_offset_max_ms = 200
+# D-12 test operators (og-op-a/og-op-b), matching orchestrator/config/orchestrator.toml -- the
+# two-person stop RELEASE path (guardian/service.py) signs nothing without this allow-list.
+stop_release_authorised_operators = ["og-op-a", "og-op-b"]
+
+[safestop]
+key_path = "/app/dev/keys/safestop-dev.key"
+ramp_bank_s = 30
+ramp_zone_s = 60
+ramp_fleet_s = 120
+# og-safestop's own copy of the guardian's PUBLIC key, to verify a guardian-signed RELEASE
+# before relaying it (safestop/main.py) -- without it, safestop refuses with
+# GUARDIAN_PUBLIC_KEY_NOT_CONFIGURED. Same keypair dev/scripts/gen-keys.ps1 generates below.
+guardian_public_key_path = "/app/dev/keys/guardian-dev.pub"
+
+[health]
+heartbeat_interval_s = 5
+heartbeat_miss_threshold = 3
+hub_stale_s = 6
+hub_offline_s = 30
+
+[retention]
+"trace.selection".days = 90
+"trace.commitment".days = 400
+"trace.renomination".days = 400
+"trace.exception".days = 400
+"trace.shortfall".days = 400
+"trace.command".days = 30
+"trace.operator_action".days = 400
+"trace.feed_change".days = 90
+"trace.alert".days = 90
+"telemetry".days = 14
+"feed_obs".days = 30
+
+[api]
+bind_host = "0.0.0.0"
+# api/main.py::resolve_bind_host refuses a non-loopback bind_host unless this is set explicitly
+# (review #16) -- required here since og-api runs in a container and 127.0.0.1 there would not
+# be reachable from the published port.
+allow_non_loopback_bind = true
+bind_port = 8080
+sse_heartbeat_s = 15
+csrf_allowed_hosts = ["localhost:8080", "127.0.0.1:8080", "og-api:8080"]
+
+[api.roles]
+# D-12 test operators (og-op-a/og-op-b), matching orchestrator/config/orchestrator.toml. The
+# literal Apache accounts "operator"/"viewer" still map by name (api/auth.py's zero-config
+# fallback); named accounts for the two-person release scenarios are listed here.
+operator = ["operator", "og-op-a", "og-op-b"]
+viewer = ["viewer"]
+
+[ui]
+base_path = "/og"
+
+[metrics]
+bind_host = "0.0.0.0"
+# og-engine /metrics (cycle latency, as orchestrator/config/orchestrator.toml). The engine binds it to
+# loopback inside its container whatever bind_host says (opengrid.engine.metrics), so it is not
+# published; scrape it with `docker compose exec og-engine` (see README, "Scale runs").
+engine_port = 9101

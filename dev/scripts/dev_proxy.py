@@ -33,7 +33,7 @@ from starlette.responses import PlainTextResponse, StreamingResponse
 from starlette.routing import Route
 
 SECRETS_FILE = Path(__file__).resolve().parents[1] / "secrets"
-SECRET_KEY = "OG_API_PROXY_SECRET"  # noqa: S105 -- the key name in dev/secrets, not a secret
+SECRET_KEY = "OG_API_PROXY_SECRET"
 PROXY_AUTH_HEADER = "x-og-proxy-auth"
 HOP_BY_HOP = frozenset(
     {
@@ -53,7 +53,9 @@ HOP_BY_HOP = frozenset(
 def load_proxy_secret(path: Path = SECRETS_FILE) -> str:
     """The `OG_API_PROXY_SECRET` value from dev/secrets. Raises without echoing any file content."""
     if not path.is_file():
-        raise SystemExit(f"dev_proxy: {path} not found (create it from dev/secrets.example)")
+        raise SystemExit(
+            f"dev_proxy: {path} not found (create it from dev/secrets.example)"
+        )
     for line in path.read_text(encoding="utf-8").splitlines():
         key, sep, value = line.partition("=")
         if sep and key.strip() == SECRET_KEY and value.strip():
@@ -90,7 +92,10 @@ def build_app(upstream: str, secret: str) -> Starlette:
         try:
             upstream_response = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
-            return PlainTextResponse(f"dev_proxy: upstream unreachable ({type(exc).__name__})", status_code=502)
+            return PlainTextResponse(
+                f"dev_proxy: upstream unreachable ({type(exc).__name__})",
+                status_code=502,
+            )
         response = StreamingResponse(
             upstream_response.aiter_raw(),
             status_code=upstream_response.status_code,
@@ -105,7 +110,9 @@ def build_app(upstream: str, secret: str) -> Starlette:
         return response
 
     methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-    return Starlette(routes=[Route("/{path:path}", forward, methods=methods)], lifespan=lifespan)
+    return Starlette(
+        routes=[Route("/{path:path}", forward, methods=methods)], lifespan=lifespan
+    )
 
 
 def main() -> None:

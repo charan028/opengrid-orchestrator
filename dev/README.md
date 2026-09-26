@@ -198,6 +198,30 @@ identity through it: use it on the dev stack only, never deploy it. Identities w
 host it returns `403` even through the proxy (Docker's port forwarding arrives from the bridge
 gateway). The System Health screen itself works, since og-api reads its own API from inside.
 
+## Demo customers (DEMO-2)
+
+`docs/demo/README.md` needs three committed customers. `python dev/scripts/seed_demo_customers.py` offers the
+three seeded demo contracts (ERCOT_ENERGY, DIST_DEFERRAL, PARTNER_CAPACITY, from migration `0002`) for a
+one-hour window starting at the quarter hour after next, through og-api's admission, sets each offer's value
+in the database right after admission (the API has no field for it; `tests-e2e/functional` does the same),
+and waits for the selector to commit them. It never writes obligations, commitments or reservations itself.
+It is idempotent, and it ends by naming the demo bank the selector used (the demo script's `$BANK`, `$ZONE`,
+`$HUB`). `--dry-run` shows what it would do; `--start`, `--minutes` and `--value` change the window and value.
+
+## Live market feeds (only when a test needs them)
+
+The stack's og-feeds normally reads `sim-market`. `dev/docker-compose.live-feeds.yml` points og-feeds alone at
+the live ERCOT, EIA and NWS APIs (`dev/config/docker.live-feeds.toml`), with the live credentials in
+`dev/keys/api_keys.env`. The owner places that file by hand from
+`docs/orchestrator/07-delivery/integrations/api_keys.env.example` (single-quoted values); `dev/keys/` is
+git-ignored and nothing here reads or prints it. ERCOT's key is shared with the base server, so the dev budget
+is 6 requests/min (base uses 24 of ERCOT's ~30) and live feeds should run only while a test needs them:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.live-feeds.yml --profile orchestrator up -d og-feeds
+docker compose -f docker-compose.yml --profile orchestrator up -d --force-recreate og-feeds   # back to the simulator
+```
+
 ## Scale runs (12-scale-test-plan)
 
 `docs/orchestrator/07-delivery/12-scale-test-plan.md` runs the fleet at 2,000 and 10,000 hubs.
