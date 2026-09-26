@@ -142,3 +142,29 @@
   .fl-kv { grid-template-columns: minmax(0, 1fr); }
   .fl-table-bar .btn-sm { white-space: normal; }
 }
+
+/* R3.1: HW/FW, operator targets, ramp progress, charging schedule */
+.fl-target { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+  background: color-mix(in srgb, var(--status-info) 16%, transparent); border: 1px solid color-mix(in srgb, var(--status-info) 45%, var(--border)); }
+.fl-hwfw { display: flex; gap: 16px; font-size: 15px; margin: 0 0 6px; }
+.fl-ramp { margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.fl-ramp-bar { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; margin: 6px 0; }
+.fl-ramp-fill { height: 100%; width: 0; background: var(--accent); transition: width 600ms var(--ease); }
+.fl-card-placeholder { opacity: .7; }
+.fl-cw-tree, .fl-cw-tree ul { list-style: none; margin: 0; padding: 0; }
+.fl-cw-tree > li { margin-bottom: 10px; }
+.fl-cw-tree ul { padding-left: 12px; border-left: 2px solid var(--border); }
+.fl-cw-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 0; }
+.fl-cw-windows { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
+.fl-cw-window { display: flex; gap: 8px; align-items: center; }
+.fl-cw-window input[type=time] { min-height: 36px; }
+#cw-add { justify-self: start; }
+
+/* asset type icon (table, filter, drawer badge) */
+.fl-asset-icon { display: inline-block; width: 10px; height: 10px; background: var(--muted); vertical-align: middle; }
+.fl-asset-home { border-radius: 50%; }
+.fl-asset-mobile { border-radius: 1px; background: var(--status-info); }
+.fl-asset-utility_scale { transform: rotate(45deg) scale(.85); background: var(--series-pipeline-ac); }
+.fl-asset-cell { white-space: nowrap; }
+.fl-type-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; margin: 0 0 6px;
+  border: 1px solid var(--border); background: var(--panel-2); font-size: 12px; font-weight: 600; }

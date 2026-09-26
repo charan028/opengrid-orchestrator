@@ -1,26 +1,20 @@
-"""Degraded-mode banner and guardian escalations on Health and Control room (health agent backend:
-`GET /og/api/health` `degraded_modes`, ALR-SAFE-STOP-REQUESTED / ALR-SCOPE-CONSERVATIVE)."""
+"""Degraded-mode labels and guardian escalations (health agent backend: `GET /og/api/health`
+`degraded_modes`, ALR-SAFE-STOP-REQUESTED / ALR-SCOPE-CONSERVATIVE). Where they are shown -- the header
+bell's popover, not above the map -- is test_notification_centre.py."""
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-import opengrid.ui.routes.control_room as control_room_route
 import opengrid.ui.routes.fleet as fleet_route
-import opengrid.ui.routes.health as health_route
-from opengrid.ui.api_client import ApiUnavailable
 from opengrid.ui.routes.fleet import safestop_prefill
 from opengrid.ui.routes.health import (
-    degraded_mode_banner_text,
     degraded_modes_of,
     guardian_attention,
 )
-
-from .conftest import load_fixture
 
 STOP_ALERT = {
     "id": 41,
@@ -38,61 +32,10 @@ CONSERVATIVE_ALERT = {
 }
 
 
-def _health(**extra: Any) -> dict[str, Any]:
-    return {**load_fixture("health.json"), **extra}
-
-
-def _serve(monkeypatch: pytest.MonkeyPatch, health: dict[str, Any]) -> None:
-    async def fake_get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
-        if path == "/og/api/health":
-            return health
-        if path == "/og/api/fleet/hubs":
-            return {"items": []}
-        raise ApiUnavailable(f"no fixture for {path}")
-
-    monkeypatch.setattr(health_route, "get_json", fake_get_json)
-    monkeypatch.setattr(control_room_route, "get_json", fake_get_json)
-
-
-def test_banner_text_joins_labels_and_keeps_unknown_codes() -> None:
-    assert degraded_mode_banner_text([]) is None
-    assert degraded_mode_banner_text(["NO_NEW_COMMITMENTS", "HOLD"]) == "Feed stale + Guardian down"
-    assert degraded_mode_banner_text(["HOLD_LOCAL_AUTONOMY", "DIST_DEFERRAL_OPEN_LOOP"]) == (
-        "Engine down + SCADA silent"
-    )
-    assert degraded_mode_banner_text(["SOMETHING_NEW"]) == "SOMETHING_NEW"
-
-
 def test_degraded_modes_of_tolerates_an_older_payload() -> None:
     assert degraded_modes_of({}) == []
     assert degraded_modes_of({"degraded_modes": None}) == []
     assert degraded_modes_of({"degraded_modes": ["HOLD", "HOLD", ""]}) == ["HOLD"]
-
-
-@pytest.mark.parametrize(("path", "banner_id"), [("/og/health", "health"), ("/og/", "control-room")])
-def test_banner_shows_the_active_modes(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, banner_id: str
-) -> None:
-    _serve(monkeypatch, _health(degraded_modes=["NO_NEW_COMMITMENTS", "HOLD"]))
-    body = client.get(path, headers={"X-Remote-User": "viewer"}).text
-    banner = re.search(
-        rf'<div class="og-degraded-banner" id="{banner_id}-degraded-banner" role="alert"[^>]*>([^<]*)<', body
-    )
-    assert banner is not None
-    assert " hidden" not in banner.group(0)
-    assert banner.group(1) == "Degraded mode: Feed stale + Guardian down"
-
-
-@pytest.mark.parametrize(("path", "banner_id"), [("/og/health", "health"), ("/og/", "control-room")])
-def test_banner_is_hidden_when_nothing_is_degraded(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, banner_id: str
-) -> None:
-    _serve(monkeypatch, _health(degraded_modes=[]))
-    body = client.get(path, headers={"X-Remote-User": "viewer"}).text
-    banner = re.search(rf'<div class="og-degraded-banner" id="{banner_id}-degraded-banner"[^>]*>', body)
-    assert banner is not None and " hidden>" in banner.group(0)
-    assert "Degraded mode:" not in body
-    assert "Guardian escalations" not in body
 
 
 def test_guardian_attention_orders_stop_requests_first_and_links_the_two_step_flow() -> None:
@@ -111,28 +54,6 @@ def test_unparseable_stop_request_still_links_to_the_unfilled_form() -> None:
     (item,) = guardian_attention([{**STOP_ALERT, "summary": "safe stop requested"}])
     assert item["review_url"] == "/og/fleet#safestop-propose-form"
     assert item["scope_label"] is None
-
-
-@pytest.mark.parametrize(("path", "prefix"), [("/og/health", "health"), ("/og/", "control-room")])
-def test_operator_sees_escalations_with_a_review_link(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, prefix: str
-) -> None:
-    _serve(monkeypatch, _health(alerts=[CONSERVATIVE_ALERT, STOP_ALERT]))
-    body = client.get(path, headers={"X-Remote-User": "operator"}).text
-    assert f'id="{prefix}-guardian-attention"' in body
-    assert "Guardian requests a safe stop: bank bank-007" in body
-    assert "Scope held conservative" not in body  # summarised by the posture strip instead
-    assert 'href="/og/fleet?safestop_scope=bank&amp;safestop_scope_id=bank-007#safestop-propose-form"' in body
-    assert "/safestop/" not in body.split(f'id="{prefix}-guardian-attention"')[1].split("</section>")[0]
-
-
-def test_viewer_sees_escalations_without_an_action(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _serve(monkeypatch, _health(alerts=[STOP_ALERT]))
-    body = client.get("/og/health", headers={"X-Remote-User": "viewer"}).text
-    assert "Guardian requests a safe stop: bank bank-007" in body
-    assert "Review safe stop" not in body
 
 
 def test_safestop_prefill_only_fills_the_step_one_form() -> None:

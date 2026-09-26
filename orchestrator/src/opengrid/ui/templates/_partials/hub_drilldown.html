@@ -5,7 +5,32 @@
 <div class="og-panel" id="hub-drilldown">
 {% if detail %}
   {% set st = detail.status %}
+  {% set ac = detail.asset_class or 'HOME' %}
+  <p class="fl-type-badge fl-type-{{ ac|lower }}" id="drawer-asset-type"><span class="fl-asset-icon fl-asset-{{ ac|lower }}" aria-hidden="true"></span> {{ (asset_labels or {}).get(ac, ac) }}</p>
   <h2>Hub {{ detail.hub_id }}</h2>
+  {% if detail.mobile %}{% set m = detail.mobile %}
+  <section class="fl-dsec" aria-label="Truck" id="drawer-truck">
+    <h3>Truck</h3>
+    <dl class="fl-kv">
+      <div><dt>Status</dt><dd>{{ 'At home station' if m.status == 'AT_HOME_STATION' else 'Away from home station (in transit or deployed)' }}</dd></div>
+      <div><dt>Home station</dt><dd>{% if m.home_station %}{{ m.home_station.home_station_id }} ({{ m.home_station.zone }}){% else %}not assigned{% endif %}</dd></div>
+      <div><dt>Current location</dt><dd>{% if m.location.lat is not none %}{{ m.location.lat }}, {{ m.location.lon }}{% else %}not reported{% endif %}</dd></div>
+      <div><dt>Charging allowed</dt><dd title="{{ m.charging_note }}">{{ 'Yes' if m.charging_allowed else 'No' }} &middot; only at its home station (D-31)</dd></div>
+      <div><dt>Next planned return</dt><dd>{{ m.next_return or 'not scheduled (no deployment schedule yet)' }}</dd></div>
+    </dl>
+  </section>
+  {% endif %}
+  {% if detail.utility_scale %}{% set u = detail.utility_scale %}
+  <section class="fl-dsec" aria-label="Substation BESS" id="drawer-substation">
+    <h3>Substation BESS</h3>
+    <dl class="fl-kv">
+      <div><dt>Rating</dt><dd>{{ dash(u.mw) }} MW / {{ dash(u.mwh) }} MWh</dd></div>
+      <div><dt>POI (import / export)</dt><dd>{{ dash(u.poi_import_kva) }} / {{ dash(u.poi_export_kva) }} kVA</dd></div>
+      <div><dt>Feeder</dt><dd>{{ dash(u.feeder_id) }}</dd></div>
+      <div><dt>Substation</dt><dd>{{ dash(u.substation_id) }}</dd></div>
+    </dl>
+  </section>
+  {% endif %}
   <section class="fl-dsec" aria-label="Status">
     <p>
       <span class="status-badge" data-status="{{ st.health }}"><span class="status-text">{{ st.health_label }}</span></span>
@@ -16,7 +41,7 @@
     <dl class="fl-kv">
       <div><dt>Last communication</dt><dd>{{ dash(st.last_seen_at) }}
         <span class="stale-badge" data-since="{{ st.last_seen_at }}" data-stale-after="6">age: unknown</span></dd></div>
-      <div><dt>Power</dt><dd>{{ dash(st.p_kw) }} kW <span class="og-card-meta" title="+ discharging, &minus; charging">(+ out / &minus; in)</span></dd></div>
+      <div><dt>Power</dt><dd>{{ dash(st.p_kw) }} kW <span class="og-card-meta" title="+ charging, &minus; discharging">(+ charge / &minus; discharge)</span></dd></div>
       <div><dt>SoC</dt><dd>{{ dash(st.soc_pct) }} % &middot; {{ dash(st.soc_kwh) }} kWh</dd></div>
       <div><dt>Above reserve</dt><dd>{{ dash(st.above_reserve_kwh) }} kWh</dd></div>
     </dl>
@@ -27,6 +52,9 @@
     </div>
     {% endif %}
     {% if st.fault_code %}<p class="og-degraded-banner">Fault: {{ st.fault_code }}</p>{% endif %}
+    {% if target %}<p class="fl-target" id="drawer-target">Operator target {{ target.p_kw_target }} kW until {{ target.expires_at }} (by {{ target.proposer or '—' }}: {{ target.reason or 'no reason' }})</p>{% endif %}
+    <p class="og-card-meta" id="drawer-charge-window">Grid charging:
+      {% if charge_window and charge_window.windows is defined %}{{ (charge_window.windows or [])|join(', ') or 'not allowed' }} ({{ charge_window.tz or 'America/Chicago' }}) &middot; from {{ charge_window.source.scope_kind if charge_window.source else '?' }}{% if charge_window.source and charge_window.source.scope_ref not in (none, '*') %}:{{ charge_window.source.scope_ref }}{% endif %}{% else %}not available yet{% endif %}</p>
   </section>
   <section class="fl-dsec" aria-label="Last message">
     <h3>Last message</h3>
@@ -61,10 +89,12 @@
   </section>
   <section class="fl-dsec" aria-label="Asset">
     <h3>Asset</h3>
-    <p class="og-card-meta">{% if detail.asset.device_info %}Reported by battery &middot; {{ detail.asset.device_info_at or 'time not recorded' }}{% else %}From records{% endif %}</p>
+    {% set di = detail.asset.device_info or {} %}
+    <p class="fl-hwfw" id="drawer-hwfw"><span>HW rev <strong>{{ di.hardware_revision or '—' }}</strong></span> <span>FW <strong>{{ di.firmware_version or '—' }}</strong></span></p>
+    <p class="og-card-meta">{% if di %}Reported by battery &middot; {{ detail.asset.device_info_at or 'time not recorded' }}{% else %}From records{% endif %}</p>
     <dl class="fl-kv">
-      {% for k, v in (detail.asset.device_info or {}).items() %}<div><dt>{{ k|replace('_', ' ')|capitalize }}</dt><dd>{{ v }}</dd></div>{% endfor %}
-      <div><dt>Installed</dt><dd>{{ detail.asset.install_date or 'not recorded' }}</dd></div>
+      {% for k, v in di.items() if k not in ('hardware_revision', 'firmware_version') %}<div><dt>{{ k|replace('_', ' ')|capitalize }}</dt><dd>{{ v }}</dd></div>{% endfor %}
+      <div><dt>Installed</dt><dd>{{ detail.asset.installed_at or 'not recorded' }}</dd></div>
       <div><dt>Last serviced</dt><dd>{{ detail.asset.last_serviced_at or 'not recorded' }}</dd></div>
       <div><dt>Units</dt><dd>{{ dash(detail.asset.units) }}</dd></div>
       <div><dt>Rated</dt><dd>{{ dash(detail.asset.rated_p_kw) }} kW / {{ dash(detail.asset.rated_e_kwh) }} kWh</dd></div>

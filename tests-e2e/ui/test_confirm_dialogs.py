@@ -34,7 +34,7 @@ COMMAND = Flow(
     confirm="Send command",
     confirm_result="#command-confirm-result",
     fixture_summary="Set bank-01 to 5.0 kW (load test)",
-    fixture_badge="PASS",
+    fixture_badge="RAMPING",
 )
 SAFESTOP = Flow(
     form="#safestop-propose-form",

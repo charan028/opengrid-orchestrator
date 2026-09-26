@@ -6,10 +6,6 @@
 {% endblock %}
 
 {% block content %}
-<div class="og-degraded-banner" id="health-degraded-banner" role="alert"
-     data-labels='{{ degraded_mode_labels|tojson }}'{% if not degraded_mode_banner %} hidden{% endif %}>{% if degraded_mode_banner %}Degraded mode: {{ degraded_mode_banner }}{% endif %}</div>
-{% with id_prefix="health" %}{% include "_partials/guardian_attention.html" %}{% endwith %}
-{% with id_prefix="health", alerts_link=base_path ~ "/health?alert_rule=ALR-SCOPE-CONSERVATIVE#health-alerts-panel" %}{% include "_partials/posture_strip.html" %}{% endwith %}
 
 <section class="og-panel" aria-label="Process status">
   <h2>Processes</h2>
@@ -132,7 +128,7 @@
     // (same shape as first paint) -- rebuild the hub-health-by-zone chart from `hub_health_counts`. It
     // has no cycle-latency series, so that chart stays as of first paint until the api agent adds one.
     og.sse("{{ base_path }}/api/stream/health", function (data) {
-      og.renderDegradedBanner(document.getElementById("health-degraded-banner"), data && data.degraded_modes);
+      og.noteDegradedModes(data && data.degraded_modes);
       document.getElementById("health-updated").textContent = "live";
       document.getElementById("health-updated").dataset.stale = "false";
       if (data && data.hub_health_counts && typeof data.hub_health_counts === "object") {

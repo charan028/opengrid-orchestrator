@@ -5,6 +5,8 @@
 - `alerts_panel`: open alerts grouped by rule + scope (count x N, latest time), filtered by severity and
   rule, newest first, paginated; each group carries the alert ids it stands for, so a row can be
   acknowledged on its own or selected for a bulk acknowledgement.
+- `notification_centre`: the header bell's popover (safety, degraded modes, alerts) and the single
+  critical status line; nothing stacks above the map any more.
 
 Pure functions; the routes fetch.
 """
@@ -124,6 +126,112 @@ def alerts_panel(
         "severities": severities,
         "all_matching_ids_csv": ",".join(str(i) for i in unacked_matching),
         "all_matching_count": len(unacked_matching),
+    }
+
+
+#: Degraded modes that are a CRITICAL state (the fleet is held), eligible for the one-line status strip.
+CRITICAL_MODES = frozenset({"HOLD", "HOLD_LOCAL_AUTONOMY"})
+SAFE_STOP_REQUESTED_RULE = "ALR-SAFE-STOP-REQUESTED"
+SCOPE_CONSERVATIVE_RULE = "ALR-SCOPE-CONSERVATIVE"
+_NOTIFY_ALERTS_SHOWN = 8
+
+
+def _top_severity(severities: list[str]) -> str | None:
+    return min(severities, key=lambda s: SEVERITY_RANK.get(s, 9)) if severities else None
+
+
+def notification_centre(
+    *,
+    guardian_items: list[dict[str, Any]],
+    degraded_modes: list[str],
+    mode_labels: dict[str, str],
+    posture: dict[str, Any] | None,
+    alerts: list[dict[str, Any]],
+    base_path: str,
+) -> dict[str, Any]:
+    """The header bell's content (owner UX review, R3.1): every notice that used to stack above the map,
+    grouped Safety / Degraded modes / Alerts, plus the ONE critical line allowed at the top of the page
+    (an active critical state: a requested safe stop or a fleet hold), or None."""
+    health_alerts = f"{base_path}/health#health-alerts-panel"
+    safety: list[dict[str, Any]] = [
+        {
+            "severity": "critical",
+            "title": f"{item['title']}{': ' + item['scope_label'] if item.get('scope_label') else ''}",
+            "detail": item.get("summary") or "",
+            "href": item.get("review_url") or f"{base_path}/fleet",
+            "safestop_review": True,
+        }
+        for item in guardian_items
+        if item.get("stop_requested")
+    ]
+    if posture:
+        scopes = ", ".join(posture["shown"]) + (f", +{posture['more']}" if posture.get("more") else "")
+        safety.append(
+            {
+                "severity": "warning",
+                "title": f"{posture['count']} scope{'' if posture['count'] == 1 else 's'} held conservative",
+                "detail": f"{scopes}. The guardian is vetoing most commands in these scopes; it clears "
+                "automatically after 3 clean cycles.",
+                "href": f"{base_path}/health?alert_rule={SCOPE_CONSERVATIVE_RULE}#health-alerts-panel",
+            }
+        )
+    degraded = [
+        {
+            "severity": "critical" if mode in CRITICAL_MODES else "warning",
+            "title": f"Degraded mode: {mode_labels.get(mode, mode)}",
+            "detail": mode,
+            "href": f"{base_path}/health",
+        }
+        for mode in degraded_modes
+    ]
+    # Guardian escalations and conservative scopes are already in Safety; the rest are grouped alerts.
+    others = [
+        a
+        for a in alerts
+        if isinstance(a, dict) and a.get("rule") not in (SAFE_STOP_REQUESTED_RULE, SCOPE_CONSERVATIVE_RULE)
+    ]
+    groups = [g for g in alerts_panel(others, size=100)["groups"] if g["unacked_ids"]]
+    groups.sort(key=lambda g: SEVERITY_RANK.get(str(g["severity"]), 9))  # stable: newest first per severity
+    alert_items = [
+        {
+            "severity": str(g["severity"]),
+            "title": f"{g['rule']}{' on ' + g['scope'] if g['scope'] else ''}",
+            "count": g["count"],
+            "detail": g["summary"],
+            "href": f"{base_path}/health?alert_rule={g['rule']}#health-alerts-panel",
+            "ack_ids": g["ids_csv"],
+        }
+        for g in groups
+    ]
+    critical = [i for i in (*safety, *degraded) if i["severity"] == "critical"]
+    sections = [
+        {"key": "safety", "label": "Safety", "entries": safety, "total": len(safety), "more": 0},
+        {
+            "key": "degraded",
+            "label": "Degraded modes",
+            "entries": degraded,
+            "total": len(degraded),
+            "more": 0,
+        },
+        {
+            "key": "alerts",
+            "label": "Alerts",
+            "entries": alert_items[:_NOTIFY_ALERTS_SHOWN],
+            "total": len(alert_items),
+            "more": max(len(alert_items) - _NOTIFY_ALERTS_SHOWN, 0),
+            "more_href": health_alerts,
+        },
+    ]
+    every = [*safety, *degraded, *alert_items]
+    return {
+        "count": len(every),
+        "top_severity": _top_severity([str(i["severity"]) for i in every]),
+        "groups": sections,
+        "critical": (
+            {"title": critical[0]["title"], "href": critical[0]["href"], "more": len(critical) - 1}
+            if critical
+            else None
+        ),
     }
 
 

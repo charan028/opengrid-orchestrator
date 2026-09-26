@@ -112,7 +112,7 @@ def _serve(
 
 
 @pytest.mark.parametrize(("path", "pid"), [("/og/", "control-room"), ("/og/health", "health")])
-def test_both_screens_render_the_same_component_and_the_strip(
+def test_both_screens_render_the_same_component_and_no_stacked_notices(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, pid: str
 ) -> None:
     _serve(monkeypatch, _alerts(), {"conservative": [{"scope_kind": "BANK", "scope_ref": "bank-003"}]}, 404)
@@ -120,14 +120,10 @@ def test_both_screens_render_the_same_component_and_the_strip(
     assert (
         f'id="{pid}-alerts-panel"' in html and f'id="{pid}-ack-form"' in html and "og-alerts-scroll" in html
     )
-    assert f'id="{pid}-posture-strip"' in html and "1 scope conservative (bank-003)" in html
-    assert "Scope held conservative" not in html  # the old stacked list is gone
+    # the posture lives in the header bell's popover now (test_notification_centre.py), not above the map
+    assert "posture-strip" not in html and "Scope held conservative" not in html
+    assert 'id="og-notify"' in html
     assert "&times;" in html and "Select all 54 matching filter" in html
-
-
-def test_no_strip_when_nothing_is_conservative(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _serve(monkeypatch, _alerts(3), {"conservative": []}, 404)
-    assert "posture-strip" not in client.get("/og/", headers=OP).text
 
 
 def test_panel_fragment_filters_and_pages(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

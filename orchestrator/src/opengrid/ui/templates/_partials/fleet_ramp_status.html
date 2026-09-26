@@ -1,0 +1,19 @@
+{# fleet_ramp_status.html -- an operator target the engine is ramping to (R3.1). Params: result with
+   status RAMPING, trace_id (or manual_target_trace_id), expires_at, hub_ids, p_kw_target; `results`
+   (bulk) gives the hub ids when hub_ids is absent. og-fleet.js polls the hubs' P for the progress bar
+   and estimates the time left from the observed ramp rate (the ramp limit lives in the engine). #}
+{% set trace = result.manual_target_trace_id or result.trace_id %}
+{% set hub_ids = result.hub_ids or ((result.results or [])|map(attribute='hub_id')|list) %}
+<div class="fl-ramp" data-hubs="{{ hub_ids[:10]|join(',') }}" data-target="{{ result.p_kw_target if result.p_kw_target is not none else '' }}" data-expires="{{ result.expires_at or '' }}">
+  <p>{% with status='info', label='RAMPING' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Ramping {{ hub_ids|length }} hub{{ '' if hub_ids|length == 1 else 's' }} to
+    <strong>{{ result.p_kw_target if result.p_kw_target is not none else '?' }} kW</strong>
+    <span class="fl-ramp-eta">(estimating time at the hub's ramp limit&hellip;)</span>.
+    Holds until {{ result.expires_at or 'its expiry' }}. Trace {{ trace|default('-') }}.</p>
+  <div class="fl-ramp-bar" role="progressbar" aria-label="Ramp progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="fl-ramp-fill"></div></div>
+  <p class="fl-hint fl-ramp-now" aria-live="polite">Now: waiting for telemetry&hellip;</p>
+  {% if trace %}
+  <button type="button" class="btn btn-danger btn-sm fl-cancel-target"
+          hx-post="{{ base_path }}/fleet/manual-targets/{{ trace }}/cancel" hx-target="closest .fl-ramp" hx-swap="outerHTML">Cancel target</button>
+  {% endif %}
+</div>

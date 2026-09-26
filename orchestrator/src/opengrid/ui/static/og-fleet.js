@@ -43,7 +43,7 @@
         var hint = document.getElementById(limits.getAttribute("aria-describedby"));
         if (hint) {
           hint.textContent = "Between " + (-item.rated_p_kw) + " and " + item.rated_p_kw +
-            " kW for " + item.id + " (+ discharges, − charges).";
+            " kW for " + item.id + " (+ charges, − discharges).";
         }
       }
       close();
@@ -83,6 +83,7 @@
     }
     function search() {
       var kind = input.dataset.combobox;
+      if (!kind) { close(); return; }  // free-text scope (provider, substation, feeder)
       var mine = ++seq;
       fetch(basePath + "/fleet/search?kind=" + encodeURIComponent(kind) + "&q=" +
             encodeURIComponent(input.value.trim()) + "&limit=20", { credentials: "same-origin" })
@@ -164,8 +165,19 @@
           problems.push("Setpoint is outside this hub's ±" + limit + " kW.");
         }
       }
-      var scopeId = form.querySelector("[name=scope_id]");
+      var scopeId = form.querySelector("[name=scope_id], [name=scope_ref]");
       if (scopeId && !scopeId.disabled && !scopeId.value.trim()) { problems.push("Pick a scope id."); }
+      form.querySelectorAll(".fl-cw-window").forEach(function (row, i) {
+        var times = row.querySelectorAll("input[type=time]");
+        if (!times[0].value || !times[1].value) {
+          problems.push("Window " + (i + 1) + " needs a start and an end.");
+        } else if (times[0].value === times[1].value) {
+          problems.push("Window " + (i + 1) + " starts and ends at the same time.");
+        }
+      });
+      if (form.querySelector(".fl-cw-windows") && !form.querySelector(".fl-cw-window")) {
+        problems.push("Add at least one window.");
+      }
       var reason = form.querySelector("[name=reason]");
       if (reason && !reason.value.trim()) { problems.push("A reason is required."); }
       button.disabled = problems.length > 0;
@@ -178,6 +190,102 @@
     form.ogCheck = check;
   }
 
+  // ---- charging schedule editor (D-30) -------------------------------------------------------------
+  function chargeEditor() {
+    var form = document.getElementById("charge-edit-form");
+    if (!form) { return; }
+    var scope = document.getElementById("cw-scope");
+    var ref = document.getElementById("cw-scope-ref");
+    var hint = document.getElementById("cw-scope-ref-hint");
+    var box = document.getElementById("cw-windows");
+    var kinds = { ZONE: "zone", BANK: "bank", HUB: "hub" };
+    function syncScope() {
+      var fleet = scope.value === "FLEET";
+      ref.disabled = fleet;
+      if (fleet) { ref.value = ""; }
+      ref.dataset.combobox = kinds[scope.value] || "";
+      ref.placeholder = fleet ? "all hubs" : (kinds[scope.value] ? "type to search" : "type the id");
+      hint.textContent = fleet ? "The Fleet default applies to every hub without an override."
+        : "Overrides everything less specific than " + scope.options[scope.selectedIndex].text + ".";
+      if (form.ogCheck) { form.ogCheck(); }
+    }
+    function renumber() {
+      box.querySelectorAll(".fl-cw-window").forEach(function (row, i) {
+        var t = row.querySelectorAll("input[type=time]");
+        t[0].setAttribute("aria-label", "Window " + (i + 1) + " start");
+        t[1].setAttribute("aria-label", "Window " + (i + 1) + " end");
+        row.querySelector(".fl-cw-del").setAttribute("aria-label", "Remove window " + (i + 1));
+      });
+      document.getElementById("cw-add").disabled = box.querySelectorAll(".fl-cw-window").length >= 4;
+      if (form.ogCheck) { form.ogCheck(); }
+    }
+    box.addEventListener("click", function (e) {
+      if (e.target.classList.contains("fl-cw-del")) { e.target.closest(".fl-cw-window").remove(); renumber(); }
+    });
+    document.getElementById("cw-add").addEventListener("click", function () {
+      var row = document.createElement("div");
+      row.className = "fl-cw-window";
+      row.innerHTML = "<input type=\"time\" name=\"start\" required><span aria-hidden=\"true\">\u2013</span>" +
+        "<input type=\"time\" name=\"end\" required><button type=\"button\" class=\"btn btn-sm fl-cw-del\">\u00d7</button>";
+      box.appendChild(row);
+      renumber();
+      row.querySelector("input").focus();
+    });
+    scope.addEventListener("change", syncScope);
+    syncScope();
+    renumber();
+  }
+
+  // ---- ramp progress for an operator target (R3.1) ----------------------------------------------
+  function watchRamp(el, basePath) {
+    if (el.dataset.watching) { return; }
+    el.dataset.watching = "1";
+    var ids = (el.dataset.hubs || "").split(",").filter(Boolean);
+    var target = parseFloat(el.dataset.target);
+    var expires = el.dataset.expires ? Date.parse(el.dataset.expires) : NaN;
+    var fill = el.querySelector(".fl-ramp-fill");
+    var bar = el.querySelector(".fl-ramp-bar");
+    var now = el.querySelector(".fl-ramp-now");
+    var eta = el.querySelector(".fl-ramp-eta");
+    var first = null;
+    var last = null;
+    function tick() {
+      if (!document.body.contains(el) || !ids.length || isNaN(target)) { return; }
+      if (!isNaN(expires) && Date.now() > expires) { now.textContent = "Target expired; the hubs are back on normal dispatch."; return; }
+      Promise.all(ids.map(function (id) {
+        return fetch(basePath + "/fleet/hubs/" + encodeURIComponent(id) + "/live", { credentials: "same-origin" })
+          .then(function (r) { return r.ok ? r.json() : {}; }).catch(function () { return {}; });
+      })).then(function (rows) {
+        var ps = rows.map(function (r) { return parseFloat(r.p_kw); }).filter(function (v) { return !isNaN(v); });
+        if (ps.length) {
+          var p = ps.reduce(function (a, b) { return a + b; }, 0) / ps.length;
+          var sample = { p: p, t: Date.now() };
+          if (!first) { first = sample; }
+          var span = target - first.p;
+          var pct = Math.abs(span) < 0.05 ? 100 : Math.max(0, Math.min(100, (p - first.p) / span * 100));
+          fill.style.width = pct + "%";
+          bar.setAttribute("aria-valuenow", String(Math.round(pct)));
+          now.textContent = "Now " + p.toFixed(1) + " kW" + (ids.length > 1 ? " (mean of " + ids.length + " hubs)" : "") +
+            " \u00b7 " + Math.round(pct) + "% of the way";
+          if (last && sample.t > last.t) {
+            var rate = Math.abs(sample.p - first.p) / ((sample.t - first.t) / 1000);
+            if (pct >= 99) {
+              eta.textContent = "(at target)";
+            } else if (rate > 0.01) {
+              eta.textContent = "(\u2248 " + Math.round(Math.abs(target - p) / rate) + " s at the hub\u2019s ramp limit)";
+            }
+          }
+          last = sample;
+        }
+        setTimeout(tick, 2000);
+      });
+    }
+    tick();
+  }
+  function watchRamps(root, basePath) {
+    (root || document).querySelectorAll(".fl-ramp").forEach(function (el) { watchRamp(el, basePath); });
+  }
+
   // ---- the page -------------------------------------------------------------------------------
   function init(opts) {
     var basePath = opts.basePath;
@@ -185,9 +293,12 @@
     var hubs = JSON.parse(mapEl.dataset.hubs || "[]");
     var handle = og.map.create(mapEl, { center: [31.0, -99.0], zoom: 6 });
     og.map.addHubLayer(handle, hubs, { colorBy: "health" });
+    var stations = JSON.parse(mapEl.dataset.stations || "[]");
+    og.map.addDepotLayer(handle, stations, hubs);
+    og.map.addLayerToggles(handle, og.map.assetLayerItems(), "fleet-layer");
     og.map.addLegend(
       handle,
-      [{ heading: "Hub health" }].concat(og.map.hubLegendItems("health"), [
+      [{ heading: "Asset type" }].concat(og.map.assetLegendItems(), [{ heading: "Hub health" }], og.map.hubLegendItems("health"), [
         { heading: "Selection" },
         { label: "selected for a command", color: og.token("--accent") },
       ]),
@@ -364,7 +475,10 @@
     });
 
     // ---- action cards -----------------------------------------------------------------------
-    document.querySelectorAll("input[data-combobox]").forEach(function (input) { combobox(input, basePath); });
+    document.querySelectorAll("input[role=combobox]").forEach(function (input) { combobox(input, basePath); });
+    chargeEditor();
+    document.body.addEventListener("htmx:afterSwap", function (e) { watchRamps(e.target, basePath); });
+    watchRamps(document, basePath);
     document.querySelectorAll("select[data-scope-for]").forEach(scopeLink);
     document.querySelectorAll("form.fl-form").forEach(validation);
     var relSelect = document.getElementById("rel-request-id");

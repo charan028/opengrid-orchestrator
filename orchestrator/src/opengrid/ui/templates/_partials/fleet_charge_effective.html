@@ -1,0 +1,11 @@
+{# fleet_charge_effective.html -- the effective grid-charging windows for a hub/bank and their source. #}
+<div id="charge-effective" role="status">
+  {% if effective and effective.windows is defined %}
+  <p><strong>{{ (effective.windows or [])|join(', ') or 'no grid charging' }}</strong> ({{ effective.tz or 'America/Chicago' }})
+    &middot; from {{ effective.source.scope_kind if effective.source else '?' }}{% if effective.source and effective.source.scope_ref and effective.source.scope_ref != '*' %}:{{ effective.source.scope_ref }}{% endif %}</p>
+  {% elif target.hub_id or target.bank_id %}
+  <p class="og-card-meta">No effective schedule available for {{ target.hub_id or target.bank_id }}.</p>
+  {% else %}
+  <p class="og-card-meta">Pick a hub or a bank to preview.</p>
+  {% endif %}
+</div>

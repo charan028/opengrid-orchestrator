@@ -1,0 +1,54 @@
+{# notification_centre.html -- the header bell (every page) and its popover: Safety, Degraded modes, Alerts
+   (owner UX review R3.1: nothing stacks above the map). Swapped into #og-notify by GET /og/alerts/notifications;
+   the one critical status line is copied into #og-critical-strip (an aria-live region in base.html). Params: nc (opengrid.ui.alerts.notification_centre), is_operator, unavailable.
+   A safe-stop request only LINKS to Fleet's two-step form; nothing here engages or confirms a stop (K8). #}
+{% set sev = nc.top_severity or 'none' %}
+<button type="button" class="og-notify-bell sev-{{ sev }}" id="og-notify-bell" popovertarget="og-notify-panel"
+        aria-haspopup="dialog" aria-controls="og-notify-panel" data-count="{{ nc.count }}" data-severity="{{ sev }}"
+        aria-label="Notifications: {{ nc.count }}{% if nc.top_severity %}, highest severity {{ nc.top_severity }}{% endif %}">
+  <svg class="og-icon" aria-hidden="true"><use href="#i-bell"/></svg>
+  {% if nc.count %}<span class="og-notify-badge" aria-hidden="true">{{ nc.count if nc.count < 100 else '99+' }}</span>{% endif %}
+</button>
+<div id="og-notify-panel" class="og-notify-panel" popover role="dialog" aria-labelledby="og-notify-title">
+  <div class="og-notify-head">
+    <h2 id="og-notify-title">Notifications</h2>
+    <button type="button" class="og-notify-close" popovertarget="og-notify-panel" popovertargetaction="hide"
+            aria-label="Close notifications">&times;</button>
+  </div>
+  {% if unavailable %}
+  <p class="og-notify-empty" role="status">Status unavailable: the API did not answer ({{ unavailable }}).</p>
+  {% elif not nc.count %}
+  <p class="og-notify-empty">Nothing needs attention.</p>
+  {% endif %}
+  {% for group in nc.groups if group.entries %}
+  <section class="og-notify-group" id="og-notify-{{ group.key }}" aria-labelledby="og-notify-{{ group.key }}-h">
+    <h3 id="og-notify-{{ group.key }}-h">{{ group.label }} <span class="og-notify-group-count">{{ group.total }}</span></h3>
+    <ul>
+      {% for item in group.entries %}
+      <li class="og-notify-item sev-{{ item.severity }}">
+        <span class="og-notify-dot" aria-hidden="true"></span>
+        <div class="og-notify-text">
+          <a href="{{ item.href }}">{{ item.title }}</a>{% if item.count and item.count > 1 %} <span class="og-notify-times">&times;{{ item.count }}</span>{% endif %}
+          {% if item.detail %}<span class="og-notify-detail">{{ item.detail }}</span>{% endif %}
+        </div>
+        {% if is_operator and item.safestop_review %}
+        <a class="btn btn-safestop og-notify-action" href="{{ item.href }}">Review (two-step)</a>
+        {% elif is_operator and item.ack_ids %}
+        <button type="button" class="btn og-notify-action" hx-post="{{ base_path }}/alerts/ack-bulk/confirm?panel_id=notify&ids={{ item.ack_ids }}"
+                hx-target="#notify-ack-result" hx-swap="outerHTML" aria-label="Acknowledge {{ item.title }}">Ack</button>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% if group.more %}<a class="og-notify-more" href="{{ group.more_href }}">+{{ group.more }} more &middot; all alerts</a>{% endif %}
+  </section>
+  {% endfor %}
+  <div id="notify-ack-result" role="status"></div>
+</div>
+{# Staged here; og.syncCriticalStrip copies it into the aria-live #og-critical-strip only when the text
+   changes, so a 30 s refresh never re-announces the same critical state. #}
+<template id="og-critical-next">{% if nc.critical %}<div class="og-critical-line">
+  <svg class="og-icon" aria-hidden="true"><use href="#i-octagon"/></svg>
+  <strong>{{ nc.critical.title }}</strong>{% if nc.critical.more %} &middot; +{{ nc.critical.more }} more critical{% endif %}
+  &middot; <a href="{{ nc.critical.href }}">View</a>
+</div>{% endif %}</template>
