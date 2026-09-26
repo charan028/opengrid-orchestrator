@@ -11,7 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-ServiceType = Literal["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY"]
+ServiceType = Literal["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY", "DATA_CENTER"]
 Tier = Literal["L0", "L1", "L2", "T1", "T2", "T3", "T4"]
 
 
@@ -144,7 +144,7 @@ class Plan(_Row):
 class Reservation(_Row):
     reservation_id: UUID
     obligation_id: UUID
-    bank_id: UUID
+    bank_id: str  # topology id (`bank-000`); og.reservation.bank_id is text since migration 0004
     kind: Literal["POWER_KW", "ENERGY_KWH"]
     amount: Decimal
     interval_start: datetime
@@ -158,11 +158,14 @@ class Grant(_Row):
     grant_id: UUID
     cycle_id: str
     obligation_id: UUID | None = None
-    bank_id: UUID
+    bank_id: str  # topology id (`bank-000`); og.grant.bank_id is text since migration 0004
     granted_kw: Decimal
     is_headroom: bool = False
     ledger_version: int
     command_batch_id: UUID | None = None
+    # Not an og.grant column: the allocator's reason for this grant, carried to the guardian batch items
+    # (a grant below the committed kW must carry its K13 exception, G-19). `None` = ordinary grant.
+    reason_code: str | None = None
 
 
 class CommandBatchRow(_Row):

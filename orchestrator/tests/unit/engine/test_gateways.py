@@ -5,14 +5,16 @@ pool/cursor, mirroring `tests/unit/guardian/test_repo.py`'s pattern."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 
 from opengrid import fleet, ledger
+from opengrid.allocator.models import SubstitutionEvent
 from opengrid.core.models.platform import Bank, Hub
+from opengrid.engine import gateways as gw
 from opengrid.engine.gateways import (
     EngineFleetGateway,
     EngineLedgerGateway,
@@ -46,7 +48,10 @@ class FakeFleetBackend:
     async def copy_telemetry(self, rows):
         pass
 
-    async def record_scada_observation(self, signal):
+    async def record_scada_observations(self, signals):
+        pass
+
+    async def insert_acks(self, acks):
         pass
 
 
@@ -144,6 +149,8 @@ async def test_fleet_gateway_bank_ids_and_fleet_state():
     assert hub_ids == {"hub-00000", "hub-00001"}
     online = next(h for h in state.hubs if h.hub_id == "hub-00000")
     assert online.health == "OK"
+    # Nameplate kW for every hub, online or not (K13 L0/L1 shortfall attribution).
+    assert {h.hub_id: h.rated_kw for h in state.hubs} == {"hub-00000": 5.0, "hub-00001": 5.0}
 
 
 async def test_fleet_gateway_skips_unknown_bank_id():
@@ -208,7 +215,7 @@ async def test_schedule_gateway_defaults_to_zero_price_when_no_data():
 async def test_ledger_gateway_ledger_view_builds_obligation_calls():
     await _seed_fleet()
     obligation_id = uuid4()
-    call_row = (obligation_id, "bank-000", Decimal("3.5"), "HOME", "L1", None)
+    call_row = (obligation_id, "bank-000", Decimal("3.5"), "HOME", "L1", None, "SHORTFALL")
     prior_rows: list = []
     cursor = FakeCursor([[call_row], prior_rows])
     gw = EngineLedgerGateway(pool=FakePool(cursor))
@@ -223,6 +230,7 @@ async def test_ledger_gateway_ledger_view_builds_obligation_calls():
     assert call.eligible_hub_ids == ("hub-00000",)  # only the online hub
     assert call.prior_granted_kw is None
     assert call.value_per_mwh == 0.0
+    assert call.in_shortfall  # still dispatched best-effort (owner decision 2026-09-26)
 
 
 async def test_ledger_gateway_persist_grants_and_version(monkeypatch: pytest.MonkeyPatch):
@@ -237,6 +245,9 @@ async def test_ledger_gateway_persist_grants_and_version(monkeypatch: pytest.Mon
     class FakeLedgerBackend:
         async def next_version(self):
             return 7
+
+        async def current_version(self):
+            return 0
 
         async def active_reservations(self, bank_id, interval_start):
             return []
@@ -276,3 +287,75 @@ async def test_fleet_capability_provider_reads_max_discharge_kw():
     provider = FleetCapabilityProvider()
     kw = await provider.capability_kw("bank-000", datetime.now(UTC))
     assert isinstance(kw, Decimal)
+
+
+async def test_ledger_gateway_records_substitutions_as_trace_events() -> None:
+    """S5.3: hub swaps are recorded as SUBSTITUTION trace events with reason R-SUBSTITUTION (it raised
+    NotImplementedError before, so no swap was ever recorded)."""
+    appended: list[tuple] = []
+
+    class _Trace:
+        async def append(self, stream_id, decision_type, event_class, payload, reason_codes=None):
+            appended.append((stream_id, decision_type, payload, reason_codes))
+
+    gateway = gw.EngineLedgerGateway(pool=None, trace=_Trace())  # type: ignore[arg-type]
+    await gateway.record_substitution("o1", "h1", "h2", "R-SUBSTITUTION")
+    await gateway.record_substitution_events(
+        "c1", [SubstitutionEvent(obligation_id="o2", bank_id="b1", from_hub_ids=("h3",), to_hub_ids=("h4",))]
+    )
+
+    assert [(a[0], a[1], a[3]) for a in appended] == [
+        ("substitution-o1", "SUBSTITUTION", ["R-SUBSTITUTION"]),
+        ("substitution-o2", "SUBSTITUTION", ["R-SUBSTITUTION"]),
+    ]
+    assert appended[1][2]["bank_id"] == "b1"
+
+
+async def test_ledger_gateway_traces_a_k13_shortfall_once_per_episode_and_interval() -> None:
+    """K13 invariant finding (live 2026-09-26): two dips below a committed 150 kW (88 kW at 00:49, 11 kW
+    at 01:09, right after engine restarts while the twin's hubs were not yet fresh) carried no traced
+    exception -- the allocator reported R-COMMIT-LOCK-INFEASIBLE, but only in memory. A K13-exception
+    shortfall is now traced when it starts, and again in each new 15-min interval it spans."""
+    from opengrid.allocator.models import ShortfallReport
+
+    appended: list[tuple] = []
+
+    class _Trace:
+        async def append(self, stream_id, decision_type, event_class, payload, reason_codes=None):
+            appended.append((stream_id, decision_type, event_class, payload, reason_codes))
+
+    gateway = gw.EngineLedgerGateway(pool=None, trace=_Trace())  # type: ignore[arg-type]
+    infeasible = ShortfallReport(
+        obligation_id="o1", bank_id="b1", shortfall_kw=62.0, reason_code="R-COMMIT-LOCK-INFEASIBLE"
+    )
+    t0 = datetime(2026, 9, 26, 5, 49, 0, tzinfo=UTC)
+
+    await gateway.record_shortfalls("c1", [infeasible], now=t0)
+    await gateway.record_shortfalls("c2", [infeasible], now=t0 + timedelta(seconds=2))  # same episode
+    await gateway.record_shortfalls("c3", [], now=t0 + timedelta(seconds=4))  # cleared
+    await gateway.record_shortfalls("c4", [infeasible], now=t0 + timedelta(seconds=6))  # new episode
+    await gateway.record_shortfalls("c5", [infeasible], now=datetime(2026, 9, 26, 6, 0, 1, tzinfo=UTC))
+
+    assert [(a[0], a[1], a[2], a[4]) for a in appended] == [
+        ("shortfall-o1", "SHORTFALL", "ALLOCATOR_SHORTFALL", ["R-COMMIT-LOCK-INFEASIBLE"]),
+    ] * 3
+    assert appended[0][3]["obligation_id"] == "o1"
+    assert appended[0][3]["shortfall_kw"] == 62.0
+    assert gateway.last_shortfalls == [("o1", "R-COMMIT-LOCK-INFEASIBLE")]
+
+
+async def test_a_shortfall_without_a_k13_reason_is_not_traced() -> None:
+    from opengrid.allocator.models import ShortfallReport
+
+    appended: list[tuple] = []
+
+    class _Trace:
+        async def append(self, *args, **kwargs):
+            appended.append(args)
+
+    gateway = gw.EngineLedgerGateway(pool=None, trace=_Trace())  # type: ignore[arg-type]
+    report = ShortfallReport(
+        obligation_id="o1", bank_id="b1", shortfall_kw=1.0, reason_code="R-GRANT-HEADROOM"
+    )
+    await gateway.record_shortfalls("c1", [report], now=datetime(2026, 9, 26, 5, 0, tzinfo=UTC))
+    assert appended == []

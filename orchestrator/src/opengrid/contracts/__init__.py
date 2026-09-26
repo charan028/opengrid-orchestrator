@@ -16,8 +16,9 @@ else here is additional surface this module owns per BUILD.md S4's "contracts" r
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from opengrid.contracts import admission as _admission
@@ -59,8 +60,10 @@ __all__ = [
     "list_contracts",
     "list_customer_ids",
     "product_rules_for",
+    "record_opportunity_decision",
     "reset_for_testing",
     "set_contract_status",
+    "set_obligation_at_risk",
     "transition_obligation",
 ]
 
@@ -191,6 +194,49 @@ async def transition_obligation(
         reason_code=reason_code,
         payload=payload,
         at_risk=at_risk,
+    )
+
+
+async def set_obligation_at_risk(
+    obligation_id: UUID, at_risk: bool, *, reason_code: str, payload: dict[str, object] | None = None
+) -> Obligation:
+    """Flag (or clear) an obligation as at risk of shortfall, with no state change (K13: the commitment
+    is untouched). Traced as `ALERT` / `AT_RISK` (or `AT_RISK_CLEARED`) on the obligation's stream; a
+    no-op write is skipped. Used by og-engine's continuous energy-sufficiency check (K1)."""
+    repo = _require_repo()
+    current = await repo.get_obligation(obligation_id)
+    if current is None:
+        raise LookupError(f"no such obligation: {obligation_id}")
+    if current.at_risk == at_risk:
+        return current
+    updated = await repo.set_obligation_at_risk(obligation_id, at_risk)
+    await _require_trace().append(
+        f"obligation-{obligation_id}",
+        "ALERT",
+        "AT_RISK" if at_risk else "AT_RISK_CLEARED",
+        {"obligation_id": str(obligation_id), "at_risk": at_risk, **(payload or {})},
+        [reason_code],
+    )
+    return updated
+
+
+async def record_opportunity_decision(
+    opportunity_id: UUID,
+    state: Literal["SELECTED", "REJECTED"],
+    *,
+    reason_code: str,
+    gate_id: UUID,
+    decided_at: datetime | None = None,
+) -> Opportunity:
+    """Record the selector gate's decision on an opportunity (02a S1.4: `state`, `reason_code`,
+    `decided_at`, `gate_id` = the deciding plan), mirroring its obligation's transition. Without it
+    every opportunity stayed `OFFERED` with no gate forever."""
+    return await _require_repo().update_opportunity_state(
+        opportunity_id,
+        state=state,
+        reason_code=reason_code,
+        decided_at=decided_at or datetime.now(UTC),
+        gate_id=gate_id,
     )
 
 

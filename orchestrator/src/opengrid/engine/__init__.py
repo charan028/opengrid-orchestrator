@@ -25,7 +25,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
@@ -35,12 +37,25 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
+from opengrid.core.physics import apply_ramp_limit
+from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine import metrics as engine_metrics
+from opengrid.engine import pq_eligibility
+from opengrid.engine.alerts import clear_open_alerts, open_alert_details
+from opengrid.engine.background import BackgroundIngest, run_periodic
+from opengrid.engine.escalation import ShortfallEscalator, merge_signals
+from opengrid.engine.gates import ALR_SELECTOR_GATE_FAILED, gate_failure_matches, run_due_gates
+from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
+from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations, resolve_stuck_selected
+from opengrid.health.model import AlertFinding
+from opengrid.health.queries import raise_alert
 from opengrid.platform.config import Config
 from opengrid.platform.heartbeat import write_heartbeat
-from opengrid.platform.process import run_forever
+from opengrid.platform.process import Cadence, run_forever
 
 if TYPE_CHECKING:
+    from opengrid.allocator.energy_sufficiency import EnergySufficiencyResult
     from opengrid.allocator.gateways import FleetGateway, LedgerGateway, ScadaGateway, ScheduleGateway
     from opengrid.engine.gateways import EnergySufficiencyGateway
     from opengrid.trace import TraceStore
@@ -72,6 +87,10 @@ class EngineBackend(Protocol):
         """Seconds since `process`'s last heartbeat, or `None` if it has never reported one."""
         ...
 
+    async def next_epoch(self) -> int:
+        """K6: an epoch strictly greater than any the guardian has accepted (`og.lease_state`)."""
+        ...
+
     async def insert_command_batch(self, row: CommandBatchRow) -> None: ...
 
     async def notify_guardian(self, command_batch_id: UUID) -> None:
@@ -97,6 +116,9 @@ class GateScheduler:
 
     def __init__(self) -> None:
         self._last_scheduled_slot: datetime | None = None
+        # contract_id -> slot of its last ADMISSION gate: an offer the gate did not select stays
+        # pending, and re-solving it every 2 s tick would starve the allocator.
+        self._admitted_slot: dict[UUID, datetime] = {}
 
     def due_triggers(
         self,
@@ -110,7 +132,10 @@ class GateScheduler:
         if current_slot != self._last_scheduled_slot:
             self._last_scheduled_slot = current_slot
             triggers.append(GateTrigger("SCHEDULED_15MIN"))
-        triggers.extend(GateTrigger("ADMISSION", cid) for cid in pending_admission_contract_ids)
+        for cid in pending_admission_contract_ids:
+            if self._admitted_slot.get(cid) != current_slot:
+                self._admitted_slot[cid] = current_slot
+                triggers.append(GateTrigger("ADMISSION", cid))
         triggers.extend(GateTrigger("RENOMINATION", cid) for cid in due_renomination_contract_ids)
         return triggers
 
@@ -152,7 +177,24 @@ def build_command_batch_row(
     )
 
 
-def _distribute_hub_items(bank_id: str, grants: list[Grant], *, fleet_module: Any) -> list[dict[str, object]]:
+#: Fraction of the hub's G-04 ramp bound the engine uses per cycle, so a setpoint built from the twin's
+#: telemetry stays inside the guardian's bound computed from its own (slightly different) telemetry.
+RAMP_SAFETY_FACTOR = 0.9
+
+
+def _ramped_setpoint_kw(hub: Any, target_kw: float, cycle_interval_s: float | None) -> float:
+    """K4/G-04: move from the hub's measured power toward `target_kw` by at most one cycle's ramp. The
+    obligation's grant is unchanged (G-19 compares the grant); only the per-hub command ramps."""
+    prev_kw = getattr(hub, "p_kw", None)
+    ramp_kw_per_s = getattr(hub, "ramp_kw_per_s", 0.0)
+    if cycle_interval_s is None or prev_kw is None or ramp_kw_per_s <= 0:
+        return target_kw
+    return apply_ramp_limit(prev_kw, target_kw, cycle_interval_s, ramp_kw_per_s * RAMP_SAFETY_FACTOR)
+
+
+def _distribute_hub_items(
+    bank_id: str, grants: list[Grant], *, fleet_module: Any, cycle_interval_s: float | None = None
+) -> list[dict[str, object]]:
     """S8 command build (02a S1.10: "per-hub detail ... derivable from the command log referenced by
     command_batch_id"): distribute each bank-level `Grant`'s kW across the bank's currently-online hubs,
     proportional to each hub's `free_discharge_kw` share -- the per-hub `ProposedItem` list guardian's
@@ -174,6 +216,8 @@ def _distribute_hub_items(bank_id: str, grants: list[Grant], *, fleet_module: An
         if granted_kw <= 0:
             continue
         reason_code = "R-GRANT-HEADROOM" if grant.is_headroom else "R-GRANT-COMMITTED"
+        if not grant.is_headroom and grant.reason_code in COMMIT_LOCK_OVERRIDE_REASONS:
+            reason_code = grant.reason_code  # K13 exception for a grant below its commitment (G-19)
         for hub in hubs:
             share_kw = granted_kw * (hub.free_discharge_kw / total_free_kw)
             if share_kw <= 1e-9:
@@ -181,10 +225,12 @@ def _distribute_hub_items(bank_id: str, grants: list[Grant], *, fleet_module: An
             items.append(
                 {
                     "hub_id": hub.hub_id,
-                    "p_kw_setpoint": -share_kw,
+                    "p_kw_setpoint": _ramped_setpoint_kw(hub, -share_kw, cycle_interval_s),
                     "reason_code": reason_code,
                     "obligation_id": str(grant.obligation_id) if grant.obligation_id else None,
-                    "obligation_granted_kw": str(grant.granted_kw) if grant.obligation_id else None,
+                    # This hub's share of the grant: guardian G-19 sums the shares per obligation.
+                    # (The whole grant on every item claimed it once per hub -- 50x on a 50-hub bank.)
+                    "obligation_granted_kw": str(share_kw) if grant.obligation_id else None,
                 }
             )
     return items
@@ -203,6 +249,7 @@ async def propose_batch_to_guardian(
     seq: int,
     now: datetime,
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
+    cycle_interval_s: float | None = None,
 ) -> UUID | None:
     """Build this bank's command-batch summary, durably write its `RT_ALLOCATION` decision pre-image to
     the trace FIRST (K10), then persist `og.command_batch` (carrying that SAME trace row's id as
@@ -218,7 +265,9 @@ async def propose_batch_to_guardian(
     command_batch_id = uuid4()
     issued_at = now
     expires_at = now + timedelta(seconds=lease_ttl_s)
-    items = _distribute_hub_items(bank_id, grants, fleet_module=fleet_module)
+    items = _distribute_hub_items(
+        bank_id, grants, fleet_module=fleet_module, cycle_interval_s=cycle_interval_s
+    )
     trace_payload = {
         "command_batch_id": str(command_batch_id),
         "bank_id": bank_id,
@@ -274,13 +323,281 @@ class _EngineState:
     scada_gateway: ScadaGateway
     schedule_gateway: ScheduleGateway
     energy_sufficiency_gateway: EnergySufficiencyGateway | None = None
+    lifecycle_backend: LifecycleBackend | None = None
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S
     cycle_seq: int = 0
-    # MVP-S simplification: a single static epoch for the process lifetime (00-invariants.md K6's
-    # "epochs increase strictly" is satisfied trivially -- a real epoch bump on guardian/engine restart
-    # recovery is `MVP-J` scope, tracked separately; `seq` alone (monotonic per tick) already gives every
-    # batch a strictly-increasing freshness key within this epoch, which is all G-13 needs for MVP-S).
+    # K6: one epoch per engine process, strictly above every (epoch, seq) the guardian has durably
+    # accepted (`EngineBackend.next_epoch`); `seq` (per tick) orders batches within it. A fixed epoch
+    # restarted `seq` at 1 below the guardian's high-water mark, so every batch after an engine restart
+    # was VETOED on G-13 (live 2026-09-26).
     epoch: int = 1
+    latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
+    phase_timer: PhaseTimer = field(default_factory=PhaseTimer)
+    last_tick_at: float | None = None  # monotonic time the last tick completed (heartbeat liveness)
+    flush_lag: engine_metrics.FlushLag | None = None  # og_engine_fleet_flush_lag_seconds
+    stuck_sweep: Cadence = field(default_factory=lambda: Cadence(STUCK_SWEEP_INTERVAL_S))
+    escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
+    short_flagged: set[str] = field(default_factory=set)  # obligations flagged AT_RISK for a shortfall
+    pq_flush: Cadence | None = None
+    gate_task: asyncio.Task[int] | None = None
+    gate_backlog: list[GateTrigger] = field(
+        default_factory=list
+    )  # `[pq_ingest].flush_interval_s`; None when waveform ingest is off
+
+
+async def timed_tick(state: _EngineState) -> None:
+    """One engine tick, timed into `state.latency` (A11) whether it succeeds or raises; publishes the
+    window's p50/p99/max as an `RT_ALLOCATION` / `CYCLE_LATENCY` trace event when a report is due."""
+    started = time.monotonic()
+    state.phase_timer = PhaseTimer()
+    succeeded = False
+    try:
+        await _engine_tick(state)
+        succeeded = True
+    finally:
+        finished = time.monotonic()
+        if succeeded:
+            # Only a tick that completes keeps the heartbeat alive: an engine failing every tick must read
+            # as down (ALR-PROCESS-DOWN), not as healthy (review #9).
+            state.last_tick_at = finished
+        state.latency.record((finished - started) * 1000.0, state.phase_timer.phases)
+        engine_metrics.observe_tick(finished - started)
+        if state.latency.report_due(finished):
+            summary = state.latency.summary()
+            engine_metrics.publish_cycle_summary(summary)
+            logger.info("engine cycle latency", extra=summary)
+            try:
+                await state.trace.append("engine-cycle-latency", "RT_ALLOCATION", "CYCLE_LATENCY", summary)
+            except Exception:
+                logger.exception("failed to trace engine cycle latency")
+
+
+async def flag_short_obligations(state: Any, signals: dict[str, set[str]]) -> None:
+    """Owner decision 2026-09-26: while an obligation is short of its commitment (any K13 shortfall
+    signal this cycle) it is flagged AT_RISK; the flag clears as soon as it is served in full again,
+    unless the energy check still holds it at risk. Dispatch never stops for it (SHORTFALL included)."""
+    from opengrid import contracts
+
+    short_now = set(signals)
+    flagged: set[str] = state.short_flagged
+    energy_gw = state.energy_sufficiency_gateway
+    energy_at_risk: set[str] = getattr(energy_gw, "_at_risk", set()) if energy_gw is not None else set()
+    for obligation_id in sorted(short_now - flagged):
+        reason = sorted(signals[obligation_id])[0]
+        try:
+            await contracts.set_obligation_at_risk(
+                UUID(obligation_id), True, reason_code=reason, payload={"cause": "allocator_shortfall"}
+            )
+            flagged.add(obligation_id)
+        except Exception:
+            logger.exception(
+                "could not flag a short obligation at risk", extra={"obligation_id": obligation_id}
+            )
+    for obligation_id in sorted(flagged - short_now):
+        flagged.discard(obligation_id)
+        if obligation_id in energy_at_risk:
+            continue
+        try:
+            await contracts.set_obligation_at_risk(
+                UUID(obligation_id),
+                False,
+                reason_code="R-SHORTFALL-RECOVERED",
+                payload={"cause": "recovered"},
+            )
+        except Exception:
+            logger.exception(
+                "could not clear a recovered obligation's at_risk", extra={"obligation_id": obligation_id}
+            )
+
+
+async def escalate_sustained_shortfalls(
+    state: _EngineState, energy_results: list[EnergySufficiencyResult], transition: Any
+) -> list[tuple[str, str]]:
+    """02a S2.1 mid-window `DELIVERING -> SHORTFALL` for a sustained allocator shortfall (L2 instruction,
+    no substitute) or energy infeasibility after substitution (`opengrid.engine.escalation`). An
+    obligation not yet delivering is skipped (the state machine refuses the edge). Returns what escalated."""
+    allocator_shortfalls = getattr(state.ledger_gateway, "last_shortfalls", [])
+    infeasible = [r.obligation_id for r in energy_results if r.at_risk and r.margin_kwh < 0]
+    signals = merge_signals(allocator_shortfalls, infeasible)
+    await flag_short_obligations(state, signals)
+    escalated: list[tuple[str, str]] = []
+    for obligation_id, reason in state.escalator.observe(signals):
+        try:
+            await transition(
+                UUID(obligation_id),
+                "SHORTFALL",
+                reason_code=reason,
+                payload={"escalation": "sustained", "sustain_cycles": state.escalator.sustain_cycles},
+            )
+        except Exception:
+            logger.info("shortfall escalation not applicable", extra={"obligation_id": obligation_id})
+            continue
+        logger.warning(
+            "obligation escalated to SHORTFALL", extra={"obligation_id": obligation_id, "reason_code": reason}
+        )
+        escalated.append((obligation_id, reason))
+    return escalated
+
+
+async def exercise_due_renomination_points(
+    contract_id: UUID, plan_id: UUID | None, now: datetime
+) -> list[str]:
+    """After a RENOMINATION gate for `contract_id`: exercise each of its due points (02a S1.7/S2.1). A
+    point whose obligation is DELIVERING is `RESELECTED` (the `R-RENOM-GATE` self-loop, traced); any other
+    point (obligation not delivering, or none) is `CONFIRMED` -- the gate ran, nothing changed. Returns
+    the outcomes."""
+    from opengrid import contracts
+
+    outcomes: list[str] = []
+    for point in await contracts.due_renomination_points(as_of=now):
+        if point.contract_id != contract_id:
+            continue
+        outcome = "RESELECTED" if point.obligation_id is not None else "CONFIRMED"
+        try:
+            await contracts.exercise_renomination_point(point.renomination_point_id, outcome, plan_id=plan_id)
+        except contracts.IllegalTransitionError:
+            outcome = "CONFIRMED"  # obligation not DELIVERING (yet / any more)
+            await contracts.exercise_renomination_point(point.renomination_point_id, outcome, plan_id=plan_id)
+        outcomes.append(outcome)
+    return outcomes
+
+
+def start_gates_in_background(
+    state: Any, triggers: list[GateTrigger], run: Callable[[list[GateTrigger]], Coroutine[Any, Any, int]]
+) -> bool:
+    """Gates run as ONE background task, never awaited by the 2 s tick: a 24 h gate (capability load,
+    intake, LP) took 10-20 s and held dispatch for committed obligations that long (A11 p99, live
+    2026-09-26). Triggers arriving while a gate task runs wait in a de-duplicated backlog. Returns True
+    if a gate task was started now."""
+    for trigger in triggers:
+        if trigger not in state.gate_backlog:
+            state.gate_backlog.append(trigger)
+    if not state.gate_backlog or (state.gate_task is not None and not state.gate_task.done()):
+        return False
+    batch, state.gate_backlog = state.gate_backlog, []
+    state.gate_task = asyncio.create_task(run(batch))
+    return True
+
+
+async def _flush_pq_summaries(state: _EngineState) -> None:
+    """Write buffered waveform summaries on `[pq_ingest].flush_interval_s` (one batched insert). A failed
+    flush is logged and retried next time; it never costs the dispatch tick (K7)."""
+    from opengrid import pq_ingest
+
+    if state.pq_flush is None or not state.pq_flush.due():
+        return
+    try:
+        await pq_ingest.flush_summaries()
+    except Exception:
+        logger.exception("pq_ingest flush failed; retrying next interval")
+
+
+ALR_OBLIGATION_STUCK_SELECTED = "ALR-OBLIGATION-STUCK-SELECTED"
+STUCK_SWEEP_INTERVAL_S = 30.0
+
+
+async def sweep_stuck_selected(state: Any, transition: Any, now: datetime) -> list[UUID]:
+    """Review #8: resolve obligations a failed commit left in SELECTED (`resolve_stuck_selected`), alert
+    on any that cannot be resolved (capacity may be locked), and clear this sweep's alerts for obligations
+    no longer stuck. Returns the unresolved ids."""
+    _resolved, unresolved = await resolve_stuck_selected(state.lifecycle_backend, transition, now)
+    pool = state.heartbeat_pool
+    still = {str(o) for o in unresolved}
+    open_ids = {
+        str(d.get("obligation_id")) for d in await open_alert_details(pool, ALR_OBLIGATION_STUCK_SELECTED)
+    }
+    for obligation_id in still - open_ids:
+        await raise_alert(
+            pool,
+            AlertFinding(
+                rule=ALR_OBLIGATION_STUCK_SELECTED,
+                severity="critical",
+                summary=f"Obligation {obligation_id} stuck in SELECTED; could not complete or reject it",
+                condition_key=f"{ALR_OBLIGATION_STUCK_SELECTED}:{obligation_id}",
+                detail={"obligation_id": obligation_id},
+            ),
+            opened_at=now,
+        )
+    if open_ids - still:
+        await clear_open_alerts(
+            pool, ALR_OBLIGATION_STUCK_SELECTED, lambda d: str(d.get("obligation_id")) not in still
+        )
+    return unresolved
+
+
+PQ_ELIGIBILITY_REFRESH_S = 60.0
+
+#: Heavy background work (PQ characterization) waits this long after start-up so dispatch resumes first.
+STARTUP_QUIET_S = 120.0
+
+PROPOSE_CONCURRENCY = 4  # bank batches in flight at once; leaves pool connections for ingest/persistence
+
+
+async def propose_all_banks[G](
+    grants_by_bank: dict[str, list[G]],
+    propose: Callable[[str, list[G]], Coroutine[Any, Any, None]],
+    *,
+    concurrency: int,
+) -> list[str]:
+    """Propose every bank's batch, up to `concurrency` banks at once. Each bank is its own trace stream,
+    so batches are independent; within a bank `propose_batch_to_guardian` keeps K10's order (pre-image,
+    then batch row, then NOTIFY). A bank whose proposal fails is logged and returned; the others still go
+    out this cycle (K7)."""
+    gate = asyncio.Semaphore(concurrency)
+
+    async def _one(bank_id: str, bank_grants: list[G]) -> None:
+        async with gate:
+            await propose(bank_id, bank_grants)
+
+    bank_ids = list(grants_by_bank)
+    results = await asyncio.gather(*(_one(b, grants_by_bank[b]) for b in bank_ids), return_exceptions=True)
+    failed: list[str] = []
+    for bank_id, result in zip(bank_ids, results, strict=True):
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            logger.error("command batch proposal failed", exc_info=result, extra={"bank_id": bank_id})
+            failed.append(bank_id)
+    return failed
+
+
+async def characterize_hubs() -> int:
+    """One PQ characterization pass over every hub in the fleet twin (fills `og.hub_inverter_pq` from
+    measured waveform summaries; one batched read, one async-commit upsert). Run by `run_periodic` every
+    `[pq_ingest].characterization_interval_s`; a failure is logged there and retried next interval."""
+    from opengrid import fleet, pq_ingest
+
+    return await pq_ingest.run_characterization_pass(fleet.known_hub_ids())
+
+
+async def beat_if_ticking(state: Any, *, monotonic_now: float | None = None) -> bool:
+    """Write og-engine's heartbeat, run by `run_periodic` beside the dispatch tick -- but only while that
+    tick keeps completing (within 3 cycles), so a hung tick still reads as "engine down" to health. The
+    tick itself never waits on the heartbeat's synchronous commit (a host disk stall on 2026-09-26 made
+    that commit take up to 10 s, and the tick waited). Returns whether a heartbeat was written."""
+    now = time.monotonic() if monotonic_now is None else monotonic_now
+    last = state.last_tick_at
+    if last is None or now - last > 3 * state.cycle_interval_s:
+        return False
+    await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
+    return True
+
+
+async def persist_fleet_state(state: Any) -> None:
+    """One fleet-persistence pass, run by `run_periodic` beside (never inside) the dispatch tick: flush
+    the twin's buffered telemetry/SCADA/acks and hub_state rows, then the buffered PQ summaries. A failed
+    fleet flush is logged and the summaries are still written (K7)."""
+    from opengrid import fleet
+
+    try:
+        await fleet.flush()
+    except Exception:
+        logger.exception("fleet flush failed; retrying next interval")
+    else:
+        flush_lag = getattr(state, "flush_lag", None)
+        if flush_lag is not None:
+            flush_lag.mark_ok()
+    await _flush_pq_summaries(state)
 
 
 async def _engine_tick(state: _EngineState) -> None:
@@ -297,77 +614,117 @@ async def _engine_tick(state: _EngineState) -> None:
     state.cycle_seq += 1
     cycle_id = f"{int(now.timestamp())}-{state.cycle_seq}"
 
-    await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
-    await fleet.flush(now=now)
+    # Fleet persistence (telemetry COPY, hub_state upsert, SCADA/ack rows, PQ summaries) runs in its own
+    # periodic task (`persist_fleet_state`): nothing in this tick reads it back -- dispatch uses the
+    # in-memory twin and the guardian its own MQTT view -- and it was ~700 ms of the tick's p99 (A11).
+    # The heartbeat is its own task too (`beat_if_ticking`), gated on this tick completing.
+    # Dispatch first (rule: a restarted engine resumes grants for DELIVERING obligations on its FIRST
+    # cycle, before any other work): lifecycle -> allocator -> guardian hand-off, then the K1 energy
+    # check, mid-window escalation and gate scheduling, none of which changes this cycle's grants.
+    phase = state.phase_timer.phase
 
-    triggers = state.gate_scheduler.due_triggers(
-        now,
-        pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
-        due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
-    )
-    for trigger in triggers:
-        logger.info(
-            "running gate", extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
+    if state.lifecycle_backend is not None:
+        with phase("lifecycle"):
+            try:
+                await advance_obligations(
+                    state.lifecycle_backend, contracts.transition_obligation, contracts.expire_unselected, now
+                )
+            except Exception:
+                logger.exception("obligation lifecycle step failed", extra={"cycle_id": cycle_id})
+
+    with phase("allocator"):
+        grants = await allocator.run_cycle(
+            cycle_id,
+            fleet=state.fleet_gateway,
+            ledger=state.ledger_gateway,
+            scada_gateway=state.scada_gateway,
+            schedule_gateway=state.schedule_gateway,
+            now=now,
         )
-        # opengrid.contracts.intake (BUILD.md intake task): generate this gate's OFFERED opportunities
-        # from live feeds/forecast/contract terms *before* the selector runs, so run_gate always has
-        # this gate's candidates rather than relying on demo seed data (qa/merge-notes.md's "zero
-        # opportunity/obligation rows" finding). Degrade, don't trip: a feed/forecast hiccup here must
-        # never block the selector gate itself.
-        try:
-            await intake.run_intake_gate(trigger.gate_kind, trigger.contract_scope, now=now)
-        except Exception:
-            logger.exception(
-                "intake failed ahead of gate -- running the gate anyway with whatever candidates exist",
-                extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope},
+
+    with phase("guardian_check"):
+        available = await guardian_is_available(
+            state.backend,
+            now=now,
+            miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold,
+        )
+    if available:
+        grants_by_bank: dict[str, list[Grant]] = {}
+        for grant in grants:
+            grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
+
+        async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
+            await propose_batch_to_guardian(
+                backend=state.backend,
+                trace=state.trace,
+                fleet_module=fleet,
+                cycle_id=cycle_id,
+                bank_id=bank_id,
+                grants=bank_grants,
+                ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+                epoch=state.epoch,
+                seq=state.cycle_seq,
+                now=now,
+                lease_ttl_s=state.lease_ttl_s,
+                cycle_interval_s=state.cycle_interval_s,
             )
-        await selector.run_gate(trigger.gate_kind, trigger.contract_scope)
 
-    grants = await allocator.run_cycle(
-        cycle_id,
-        fleet=state.fleet_gateway,
-        ledger=state.ledger_gateway,
-        scada_gateway=state.scada_gateway,
-        schedule_gateway=state.schedule_gateway,
-        now=now,
-    )
-
-    # K1 (user requirement: energy above reserve checked continuously, EVERY cycle, not just power
-    # headroom): independent of the S1-S7 power-capability path above. Degrade, don't trip (K7) -- a
-    # failure here must never block the allocator's own grant/guardian handoff this cycle.
-    if state.energy_sufficiency_gateway is not None:
-        try:
-            await state.energy_sufficiency_gateway.run(now)
-        except Exception:
-            logger.exception("energy-sufficiency check failed this cycle", extra={"cycle_id": cycle_id})
-    if not await guardian_is_available(
-        state.backend, now=now, miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold
-    ):
+        with phase("propose"):
+            await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+    else:
         logger.warning(
             "guardian unavailable this cycle -- holding, no new batches proposed",
             extra={"cycle_id": cycle_id},
         )
-        return
 
-    grants_by_bank: dict[str, list[Grant]] = {}
-    for grant in grants:
-        grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
-    for bank_id, bank_grants in grants_by_bank.items():
-        await propose_batch_to_guardian(
-            backend=state.backend,
-            trace=state.trace,
-            fleet_module=fleet,
-            cycle_id=cycle_id,
-            bank_id=bank_id,
-            grants=bank_grants,
-            ledger_version=max((g.ledger_version for g in bank_grants), default=0),
-            epoch=state.epoch,
-            seq=state.cycle_seq,
-            now=now,
-            lease_ttl_s=state.lease_ttl_s,
+    # K1 (user requirement: energy above reserve checked continuously, EVERY cycle, not just power
+    # headroom): independent of the S1-S7 power-capability path above. Degrade, don't trip (K7).
+    energy_results: list[EnergySufficiencyResult] = []
+    if state.energy_sufficiency_gateway is not None:
+        with phase("energy_check"):
+            try:
+                energy_results = await state.energy_sufficiency_gateway.run(now)
+            except Exception:
+                logger.exception("energy-sufficiency check failed this cycle", extra={"cycle_id": cycle_id})
+    with phase("escalation"):
+        try:
+            await escalate_sustained_shortfalls(state, energy_results, contracts.transition_obligation)
+        except Exception:
+            logger.exception("shortfall escalation failed this cycle", extra={"cycle_id": cycle_id})
+
+    if state.lifecycle_backend is not None and state.stuck_sweep.due():
+        with phase("stuck_selected"):
+            try:
+                await sweep_stuck_selected(state, contracts.transition_obligation, now)
+            except Exception:
+                logger.exception("stuck-SELECTED sweep failed", extra={"cycle_id": cycle_id})
+
+    with phase("gate_schedule"):
+        triggers = state.gate_scheduler.due_triggers(
+            now,
+            pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
+            due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
         )
-
-    _ = contracts  # imported for process-wiring completeness; admission itself is api/contracts' own path
+        # A failed gate is traced + alerted inside run_due_gates (K7/K13); gates run in the background.
+        start_gates_in_background(
+            state,
+            triggers,
+            lambda batch: run_due_gates(
+                batch,
+                now=now,
+                run_intake=intake.run_intake_gate,
+                run_gate=selector.run_gate,
+                trace=state.trace,
+                raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
+                on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
+                    contract_id, plan_id, now
+                ),
+                observe_duration=engine_metrics.observe_gate,
+                clear_failure=lambda kind, scope: clear_open_alerts(
+                    state.heartbeat_pool, ALR_SELECTOR_GATE_FAILED, gate_failure_matches(kind, scope)
+                ),
+            ),
+        )
 
 
 async def main(cfg: Config) -> None:
@@ -378,10 +735,18 @@ async def main(cfg: Config) -> None:
     itself (it is the only module that knows which series matters per contract, 02b S6.5); an
     unavailable guardian is enforced here (`guardian_is_available`, "hold, don't pile up batches").
     """
+    import opengrid.allocator as allocator_mod
+    import opengrid.contracts as contracts_mod
     import opengrid.feeds as feeds_mod
     import opengrid.fleet as fleet_mod
     import opengrid.ledger as ledger_mod
-    from opengrid.engine.gateways import EnergySufficiencyGateway, FleetCapabilityProvider, build_gateways
+    import opengrid.pq_ingest as pq_mod
+    from opengrid.engine.gateways import (
+        DEFAULT_ENERGY_LOOKAHEAD_S,
+        EnergySufficiencyGateway,
+        FleetCapabilityProvider,
+        build_gateways,
+    )
     from opengrid.engine.pg_backend import PgEngineBackend
     from opengrid.fleet.pg_backend import PgFleetBackend
     from opengrid.forecast import configure as configure_forecast
@@ -392,6 +757,8 @@ async def main(cfg: Config) -> None:
     from opengrid.platform.db import make_pool
     from opengrid.platform.log import configure_logging
     from opengrid.platform.mqtt import build_client
+    from opengrid.pq_ingest.blob_store import FileBlobStore
+    from opengrid.pq_ingest.pg_backend import PgPqIngestBackend
 
     configure_logging(PROCESS_NAME)
     pool = await make_pool(cfg)
@@ -436,15 +803,41 @@ async def main(cfg: Config) -> None:
         # One TraceStore instance for this process (shared with intake) -- `propose_batch_to_guardian`
         # writes each cycle's RT_ALLOCATION pre-image through this same store (qa/merge-notes.md S17).
         trace_store = TraceStore(PgTraceBackend(pool))
+        contracts_repo = PgContractsRepo(pool)
         configure_intake(
-            PgContractsRepo(pool),
+            contracts_repo,
             trace_store,
             PgMarketDataPort(pool),
             forecast_scenarios=forecast_scenarios,
         )
+        # The selector's commit step and the lifecycle step transition obligations through
+        # `opengrid.contracts` in this process, so its module facade needs the same repo/trace pair.
+        contracts_mod.configure(contracts_repo, trace_store)
+        pq_mod.configure(
+            PgPqIngestBackend(pool),
+            FileBlobStore(str(cfg.get("pq_ingest.blob_store_dir", "/var/lib/opengrid/pq_waveform"))),
+            summary_buffer_max=int(
+                cfg.get("pq_ingest.summary_buffer_max", pq_mod.DEFAULT_SUMMARY_BUFFER_MAX)
+            ),
+            flush_batch_size=int(cfg.get("pq_ingest.flush_batch_size", pq_mod.DEFAULT_FLUSH_BATCH_SIZE)),
+        )
+        released = await ledger_mod.release_uncommitted()
+        logger.info("released uncommitted reservations at start-up", extra={"released_count": released})
 
         backend = PgEngineBackend(pool)
-        fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool)
+        fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool, trace_store)
+        allocator_mod.configure(ledger_gateway)
+        from opengrid.assets.repo import PgCalibrationAckGuard
+        from opengrid.assets.wiring import build_asset_health_service
+        from opengrid.selector import gate as selector_gate
+
+        asset_service = build_asset_health_service(pool, trace_store)
+        # WP-D: PQ-sensitive profiles (DATA_CENTER) draw only on PQ-eligible hubs, and the selector never
+        # commits one beyond that capacity (fail closed until the first refresh).
+        pq_eligibility.configure(pq_eligibility.load_profile_configs())
+        selector_gate.configure_pq_capacity(pq_eligibility.eligible_kw)
+        flush_lag = engine_metrics.FlushLag()
+        flush_lag.bind()
         state = _EngineState(
             cfg=cfg,
             backend=backend,
@@ -459,49 +852,207 @@ async def main(cfg: Config) -> None:
             ledger_gateway=ledger_gateway,
             scada_gateway=scada_gateway,
             schedule_gateway=schedule_gateway,
-            energy_sufficiency_gateway=EnergySufficiencyGateway(pool, trace_store),
+            energy_sufficiency_gateway=EnergySufficiencyGateway(
+                pool,
+                trace_store,
+                lookahead_s=float(cfg.get("allocator.energy_check_lookahead_s", DEFAULT_ENERGY_LOOKAHEAD_S)),
+            ),
+            lifecycle_backend=backend,
             lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
+            epoch=await backend.next_epoch(),
+            pq_flush=Cadence(float(cfg.get("pq_ingest.flush_interval_s", pq_mod.DEFAULT_FLUSH_INTERVAL_S))),
+            latency=CycleLatencyWindow(lag_probe=LoopLagProbe(on_sample=engine_metrics.observe_loop_lag)),
+            flush_lag=flush_lag,
         )
+        metrics_port = engine_metrics.start_metrics_server(cfg)
+        logger.info("engine metrics endpoint", extra={"port": metrics_port})
+        logger.info("engine epoch", extra={"epoch": state.epoch})
 
         mqtt_password = resolve_secret("OG_MQTT_ENGINE_PASSWORD")
         async with build_client(
-            cfg, username="og_engine", password=mqtt_password, client_id="og-engine"
+            cfg, username="og_engine", password=mqtt_password, process="engine"
         ) as client:
-            ingest_task = asyncio.create_task(_mqtt_ingest_loop(client, cfg))
+            raw_worker = BackgroundIngest("pq-raw", ingest_raw_capture_off_loop)
+            raw_task = asyncio.create_task(raw_worker.run())
+            cal_worker = BackgroundIngest(
+                "calibration-ack", make_calibration_ack_handler(asset_service, PgCalibrationAckGuard(pool))
+            )
+            cal_task = asyncio.create_task(cal_worker.run())
+            summary_worker = BackgroundIngest(
+                "pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX
+            )
+            summary_task = asyncio.create_task(summary_worker.run())
+            ingest_task = asyncio.create_task(
+                _mqtt_ingest_loop(client, cfg, raw_worker, cal_worker, summary_worker)
+            )
+            ingest_task.add_done_callback(_log_ingest_exit)
+            lag_probe = state.latency.lag_probe
+            lag_task = asyncio.create_task(lag_probe.run()) if lag_probe is not None else raw_task
+            persist_task = asyncio.create_task(
+                run_periodic("fleet-persist", state.cycle_interval_s, lambda: persist_fleet_state(state))
+            )
+            characterize_task = asyncio.create_task(
+                run_periodic(
+                    "pq-characterize",
+                    float(
+                        cfg.get(
+                            "pq_ingest.characterization_interval_s",
+                            pq_mod.DEFAULT_CHARACTERIZATION_INTERVAL_S,
+                        )
+                    ),
+                    characterize_hubs,
+                    initial_delay_s=STARTUP_QUIET_S,
+                )
+            )
+            pq_elig_task = asyncio.create_task(
+                run_periodic("pq-eligibility", PQ_ELIGIBILITY_REFRESH_S, lambda: pq_eligibility.refresh(pool))
+            )
+            heartbeat_task = asyncio.create_task(
+                run_periodic("heartbeat", state.cycle_interval_s, lambda: beat_if_ticking(state))
+            )
             try:
                 await run_forever(
-                    lambda: _engine_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
+                    lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
-                ingest_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await ingest_task
+                background = (
+                    raw_task,
+                    cal_task,
+                    summary_task,
+                    lag_task,
+                    persist_task,
+                    heartbeat_task,
+                    characterize_task,
+                    pq_elig_task,
+                )
+                for task in {ingest_task, *background}:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
     finally:
         await pool.close()
 
 
-async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config) -> None:
+#: ~100 s of waveform summaries at 2,000 hubs; beyond that the newest are dropped (counted) rather than
+#: letting a slow database back up into telemetry ingest.
+SUMMARY_QUEUE_MAX = 20_000
+
+
+async def ingest_summary_off_loop(payload: dict[str, Any]) -> None:
+    """Background handler for a waveform summary. `pq_ingest.ingest_summary` flushes inline whenever its
+    buffer reaches a batch -- a database write that, on the MQTT ingest loop, held every hub's telemetry
+    during a host disk stall (live 2026-09-26 06:04-06:09: hubs aged, a delivering obligation flapped
+    AT_RISK). Validation and that flush now run here, off the ingest path."""
+    from opengrid import pq_ingest
+    from opengrid.platform.mqtt import SchemaValidationError, validate_payload
+
+    try:
+        validate_payload("pq_waveform_summary", payload)
+    except SchemaValidationError:
+        logger.warning("dropped invalid waveform summary", extra={"hub_id": payload.get("hub_id")})
+        return
+    await pq_ingest.ingest_summary(payload)
+
+
+def make_calibration_ack_handler(
+    service: Any, guard: Any = None
+) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+    """Background handler for `ack/cal/<hub_id>` (S6.7 calibration loop). Each queued item is
+    `{"topic_hub_id": <hub from the topic>, "payload": <ack>}`: validate against calibration_ack.schema.json,
+    then `opengrid.assets.calibration_ack.handle_calibration_ack` binds the ack to the topic's hub and the
+    guardian-issued command (`guard`, the durable calibration ledger: consumed once), classifies the outcome
+    and advances the hub's asset state. An invalid or unbound ack is logged and dropped (fail closed)."""
+
+    async def _handle(item: dict[str, Any]) -> None:
+        from opengrid.assets.calibration_ack import handle_calibration_ack
+        from opengrid.platform.mqtt import SchemaValidationError, validate_payload
+
+        payload = item["payload"]
+        try:
+            validate_payload("calibration_ack", payload)
+        except SchemaValidationError:
+            logger.warning("dropped invalid calibration ack", extra={"hub_id": payload.get("hub_id")})
+            return
+        await handle_calibration_ack(service, payload, topic_hub_id=item.get("topic_hub_id"), guard=guard)
+
+    return _handle
+
+
+async def ingest_raw_capture_off_loop(payload: dict[str, Any]) -> None:
+    """Background handler for a raw waveform capture: schema validation (the per-sample array check was
+    ~34% of og-engine CPU on the event loop, live 2026-09-26) runs in a worker thread, then the blob and
+    index are written. An invalid capture is logged and dropped."""
+    from opengrid import pq_ingest
+    from opengrid.platform.mqtt import SchemaValidationError, validate_payload
+
+    try:
+        await asyncio.to_thread(validate_payload, "pq_waveform_raw", payload)
+    except SchemaValidationError:
+        logger.warning("dropped invalid raw waveform capture", extra={"hub_id": payload.get("hub_id")})
+        return
+    await pq_ingest.ingest_raw_capture(payload)
+
+
+def _log_ingest_exit(task: asyncio.Task[None]) -> None:
+    """The MQTT ingest task must never end silently: without it the fleet twin goes stale and every
+    hub drops out of dispatch while the engine tick still looks healthy (no process restart follows)."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    logger.error("mqtt ingest loop exited", exc_info=exc)
+
+
+async def _mqtt_ingest_loop(
+    client: aiomqtt.Client,
+    cfg: Config,
+    raw_worker: BackgroundIngest,
+    cal_worker: BackgroundIngest | None = None,
+    summary_worker: BackgroundIngest | None = None,
+) -> None:
     """Subscribe to `<root>/tel/#`, `<root>/scada/#`, `<root>/scada/instruction/#` (topics.md) and route
     validated payloads into the fleet twin. Split out of `main` so it runs concurrently with the 2 s
     driving tick as one cancellable task (graceful shutdown, 02b S1.1-S1.3). `client` is already entered
     (`async with build_client(...)`) by the caller."""
     import json
 
-    from opengrid import fleet
+    from opengrid import fleet, pq_ingest
     from opengrid.platform.mqtt import SchemaValidationError, topic, validate_payload
 
     tel_topic = topic(cfg, "tel/#")
     scada_instruction_topic = topic(cfg, "scada/instruction/#")
     scada_topic = topic(cfg, "scada/#")
+    # Waveform topics sit under scada/ (topics.md) and must be routed before the SCADA bank-signal branch.
+    wave_summary_topic = topic(cfg, "scada/wave/+/+/+/summary")
+    wave_raw_topic = topic(cfg, "scada/wave/+/+/+/raw")
+    ack_topic = topic(cfg, "ack/+")  # hub acks; ack/cal/<hub> (calibration) is a different schema
+    cal_ack_topic = topic(cfg, "ack/cal/+")
     await client.subscribe(tel_topic)
+    await client.subscribe(ack_topic)
+    if cal_worker is not None:
+        await client.subscribe(cal_ack_topic)
     await client.subscribe(scada_topic)  # also matches scada/instruction/#, disambiguated below
 
     async for message in client.messages:
         msg_topic = str(message.topic)
         try:
             payload = json.loads(message.payload)
-            if message.topic.matches(tel_topic):
+            if message.topic.matches(wave_summary_topic):
+                if summary_worker is not None:
+                    summary_worker.submit(payload)  # validation and any size-triggered flush off the loop
+                else:
+                    validate_payload("pq_waveform_summary", payload)
+                    await pq_ingest.ingest_summary(payload)
+            elif message.topic.matches(wave_raw_topic):
+                raw_worker.submit(payload)  # validation, blob write and index insert off the ingest path
+            elif cal_worker is not None and message.topic.matches(cal_ack_topic):
+                # validation and the asset-state write off the ingest path; the hub is bound from the topic
+                cal_worker.submit({"topic_hub_id": msg_topic.rsplit("/", 1)[-1], "payload": payload})
+            elif message.topic.matches(ack_topic):
+                validate_payload("ack", payload)
+                await fleet.ingest_ack(payload)
+            elif message.topic.matches(tel_topic):
                 validate_payload("telemetry", payload)
+                engine_metrics.observe_ingest(payload.get("ts"))
                 await fleet.ingest_telemetry(payload)
             elif message.topic.matches(scada_instruction_topic):
                 validate_payload("scada_utility_instruction", payload)

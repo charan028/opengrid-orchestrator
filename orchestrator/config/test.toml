@@ -105,3 +105,9 @@ base_path = "/og"
 
 [metrics]
 bind_host = "127.0.0.1"
+
+[pq_ingest]
+# Never the production /var/lib/opengrid/pq_waveform. Relative, so it resolves inside the process's
+# working directory: tools/remote.ps1 runs every command from its own /opt/opengrid/work/<ws> tree,
+# which makes this a per-workspace path without a per-workspace config file.
+blob_store_dir = "var/pq_waveform"

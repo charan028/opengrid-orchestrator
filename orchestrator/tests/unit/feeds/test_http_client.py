@@ -3,6 +3,7 @@ on 429, never retries 400/401/403/404/422."""
 
 from __future__ import annotations
 
+import logging
 import random
 
 import httpx
@@ -13,6 +14,16 @@ from opengrid.feeds.http_client import FeedHttpError, request_with_retry
 
 def _client(handler: httpx.MockTransport) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=handler)
+
+
+def test_httpx_request_logging_is_quieted() -> None:
+    """Live defect: httpx's own logger emits `"HTTP Request: {method} {url} ..."` at INFO for every
+    call, full query string included. EIA's API only documents `api_key` as a query parameter (unlike
+    ERCOT, which sends its token/subscription key as headers), so at the root logger's default INFO
+    level that one line put the EIA key in plain text in journalctl on every successful poll (confirmed
+    live) -- BUILD.md S6 "never print, log or commit secret values". Importing this module (every feeds
+    HTTP client does) must raise httpx's own logger above INFO."""
+    assert logging.getLogger("httpx").level >= logging.WARNING
 
 
 async def test_success_on_first_try() -> None:

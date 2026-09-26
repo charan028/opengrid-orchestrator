@@ -10,6 +10,7 @@ import pytest
 
 from ogsim.common.config import load_scada_config
 from ogsim.common.scenario import WIRE_TYPE_TO_CATALOGUE_ID
+from ogsim.common.schemas import validate
 from ogsim.scada.runtime import ScadaEngine
 
 _CATALOGUE_ID_TO_WIRE_TYPE = {v: k for k, v in WIRE_TYPE_TO_CATALOGUE_ID.items()}
@@ -148,6 +149,110 @@ def test_utility_instruction_publishes_and_is_one_shot(engine: ScadaEngine) -> N
     assert dict(instructions_1)[f"scada/instruction/{bank_id}"]["kind"] == "BLOCK"
     _, instructions_2 = engine.tick(2.0)
     assert f"scada/instruction/{bank_id}" not in dict(instructions_2)
+
+
+# ---------------------------------------------------------------------------
+# utility_instruction lift (blocker fix: ending the anomaly never lifted the BLOCK)
+# ---------------------------------------------------------------------------
+
+
+def test_utility_instruction_natural_expiry_publishes_a_lift(engine: ScadaEngine) -> None:
+    bank_id = engine.bank_ids[0]
+    _inject(engine, "utility_instruction", bank_id, {"mode": "block"}, 0.0, 10.0)
+    _, instructions_start = engine.tick(1.0)
+    block_msg = dict(instructions_start)[f"scada/instruction/{bank_id}"]
+    assert block_msg["kind"] == "BLOCK"
+    assert block_msg["expires_at"] is None
+    validate("scada_utility_instruction", block_msg)
+
+    # Duration (10s) elapses -- tick()'s expiry sweep must revert AND publish a lift.
+    _, instructions_after = engine.tick(11.0)
+    lift_msg = dict(instructions_after)[f"scada/instruction/{bank_id}"]
+    assert lift_msg["expires_at"] is not None
+    assert lift_msg["expires_at"] <= lift_msg["issued_at"]  # already expired on arrival
+    validate("scada_utility_instruction", lift_msg)
+
+    # No lingering BLOCK: fleet's own read of the instruction stream must see it as inactive.
+    assert engine.anomalies.modifiers[bank_id].pending_instruction is None
+
+
+def test_utility_instruction_manual_cancel_lifts_with_no_lingering_block(engine: ScadaEngine) -> None:
+    bank_id = engine.bank_ids[0]
+    # A long-running (effectively indefinite) BLOCK, cancelled well before it would naturally
+    # expire -- exercises the manual-cancel path, not natural duration elapse.
+    _inject(engine, "utility_instruction", bank_id, {"mode": "block"}, 0.0, 3600.0)
+    _, instructions_start = engine.tick(1.0)
+    assert dict(instructions_start)[f"scada/instruction/{bank_id}"]["kind"] == "BLOCK"
+
+    # ogsim.control.injector.Injector.cancel's wire shape: same id/type/target/params, start
+    # UNCHANGED (the original injection's start), duration_s=0 ("no cancel verb in the wire
+    # schema" -- see injector.py's own comment).
+    cancel_raw = {
+        "id": "anom-utility_instruction",
+        "target": {"kind": "bank", "ref": bank_id},
+        "type": _CATALOGUE_ID_TO_WIRE_TYPE["utility_instruction"],
+        "params": {"mode": "block"},
+        "start": datetime.fromtimestamp(0.0, tz=UTC).isoformat(),
+        "duration_s": 0,
+    }
+    assert engine.handle_scenario_cmd(cancel_raw) is True
+
+    # The anomaly is gone from the active registry immediately -- no lingering active entry
+    # waiting for a future tick to clean it up.
+    assert "anom-utility_instruction" not in engine.anomalies._active
+
+    # And the lift is queued immediately (available on the very next tick, whenever it runs),
+    # not deferred to a later expiry sweep.
+    _, instructions_after_cancel = engine.tick(2.0)
+    lift_msg = dict(instructions_after_cancel)[f"scada/instruction/{bank_id}"]
+    assert lift_msg["expires_at"] is not None
+    assert lift_msg["expires_at"] <= lift_msg["issued_at"]
+    validate("scada_utility_instruction", lift_msg)
+    assert engine.anomalies.modifiers[bank_id].pending_instruction is None
+
+
+def test_utility_instruction_manual_cancel_never_re_issues_the_block(engine: ScadaEngine) -> None:
+    """The specific risk the lead flagged: does cancelling briefly re-publish the BLOCK before
+    lifting it? `start()` must skip `_apply()` entirely for an already-expired (duration<=0)
+    command, so only ONE message -- the lift -- is ever queued, never BLOCK-then-lift."""
+    bank_id = engine.bank_ids[0]
+    _inject(engine, "utility_instruction", bank_id, {"mode": "block"}, 0.0, 3600.0)
+    engine.tick(1.0)  # consumes/publishes the initial BLOCK
+
+    cancel_raw = {
+        "id": "anom-utility_instruction",
+        "target": {"kind": "bank", "ref": bank_id},
+        "type": _CATALOGUE_ID_TO_WIRE_TYPE["utility_instruction"],
+        "params": {"mode": "block"},
+        "start": datetime.fromtimestamp(0.0, tz=UTC).isoformat(),
+        "duration_s": 0,
+    }
+    engine.handle_scenario_cmd(cancel_raw)
+
+    # Immediately after the cancel is processed (before any further tick), the pending
+    # instruction slot must hold the LIFT, never a re-issued BLOCK.
+    pending = engine.anomalies.modifiers[bank_id].pending_instruction
+    assert pending is not None
+    assert pending["lift"] is True
+
+    # And the only instruction message the next tick actually publishes for this bank is
+    # that one lift -- there is no separate BLOCK message anywhere in the batch.
+    _, instructions = engine.tick(2.0)
+    bank_instructions = [msg for suffix, msg in instructions if suffix == f"scada/instruction/{bank_id}"]
+    assert len(bank_instructions) == 1
+    assert bank_instructions[0]["expires_at"] is not None
+
+
+def test_utility_instruction_estop_mode_lift_preserves_kind(engine: ScadaEngine) -> None:
+    bank_id = engine.bank_ids[0]
+    _inject(engine, "utility_instruction", bank_id, {"mode": "estop"}, 0.0, 5.0)
+    engine.tick(1.0)
+    _, instructions_after = engine.tick(6.0)
+    lift_msg = dict(instructions_after)[f"scada/instruction/{bank_id}"]
+    assert lift_msg["kind"] == "ESTOP"
+    assert lift_msg["limit_kw"] is None
+    assert lift_msg["expires_at"] is not None
+    validate("scada_utility_instruction", lift_msg)
 
 
 def test_time_skew_offsets_timestamp_and_reverts(engine: ScadaEngine) -> None:

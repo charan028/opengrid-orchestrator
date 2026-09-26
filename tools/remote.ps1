@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Sync this repository to the base server into an isolated workspace and run a command there.
 
@@ -7,7 +7,9 @@
   The repo is packed with tar, copied with scp, and extracted into /opt/opengrid/work/<Ws> as user opengrid.
   The command runs as user opengrid in that directory, with:
     OG_WS=<Ws>  OG_DB=og_t_<Ws>  OG_MQTT_ROOT=ogtest/<Ws>
-    /etc/opengrid/secrets.env and /etc/opengrid/api_keys.env loaded
+    /etc/opengrid/secrets.env and /etc/opengrid/api_keys.env loaded WITHOUT any OG_MQTT_* credential, and the
+    workspace's own MQTT user from /opt/opengrid/work/<Ws>/.mqtt.env (tools/ws_env.sh; provisioned by
+    deploy/mosquitto/provision_ws_users.py). Production MQTT credentials are never exported into a workspace.
     PATH containing /opt/opengrid/venv/bin (orchestrator) — use /opt/ogsim/venv/bin/python for integration-sims.
   The command is sent as a script file (never inline) to avoid PowerShell 5.1 quoting problems.
 
@@ -46,15 +48,15 @@ DIR=/opt/opengrid/work/`$WS
 if [ "$([int](-not $NoSync))" = "1" ]; then
   rm -rf "`$DIR.new" && install -d -o opengrid -g opengrid "`$DIR.new"
   tar -xzf /tmp/og_`$WS.tgz -C "`$DIR.new" && rm -f /tmp/og_`$WS.tgz
+  rm -f "`$DIR.new/.mqtt.env"
   chown -R opengrid:opengrid "`$DIR.new"
+  # The workspace MQTT credentials live outside the synced tree's content: carry them across the swap.
+  if [ -f "`$DIR/.mqtt.env" ]; then cp -p "`$DIR/.mqtt.env" "`$DIR.new/.mqtt.env"; fi
   rm -rf "`$DIR" && mv "`$DIR.new" "`$DIR"
 fi
 cat > /tmp/og_cmd_`$WS.sh <<'OGCMD'
-set -a
-. /etc/opengrid/secrets.env
-. /etc/opengrid/api_keys.env
-set +a
-export OG_WS=$Ws OG_DB=og_t_$Ws OG_MQTT_ROOT=ogtest/$Ws PYTHONDONTWRITEBYTECODE=1
+. /opt/opengrid/work/$Ws/tools/ws_env.sh
+og_ws_env $Ws
 export PYTHONPATH=/opt/opengrid/work/$Ws/orchestrator/src
 export OG_CONFIG=/opt/opengrid/work/$Ws/orchestrator/config/test.toml
 export PATH=/opt/opengrid/venv/bin:`$PATH

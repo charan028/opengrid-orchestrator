@@ -226,7 +226,7 @@ class FakeStore:
             Reservation(
                 reservation_id=uuid4(),
                 obligation_id=uuid4(),
-                bank_id=uuid4(),
+                bank_id=SAMPLE_BANK_ID,
                 kind="POWER_KW",
                 amount=Decimal("50"),
                 interval_start=_now(),
@@ -246,7 +246,7 @@ class FakeStore:
                 grant_id=uuid4(),
                 cycle_id="cycle-1",
                 obligation_id=uuid4(),
-                bank_id=uuid4(),
+                bank_id=SAMPLE_BANK_ID,
                 granted_kw=Decimal("50"),
                 is_headroom=False,
                 ledger_version=1,
@@ -383,7 +383,16 @@ class FakeStore:
         self.retention[event_class] = retention_days
 
     async def insert_operator_action(
-        self, *, operator_ref, action_kind, target_ref, tier, reason, trace_id, confirmed_at
+        self,
+        *,
+        operator_ref,
+        action_kind,
+        target_ref,
+        tier,
+        reason,
+        trace_id,
+        confirmed_at,
+        approver_ref=None,
     ) -> UUID:
         action_id = uuid4()
         self.operator_actions.append(
@@ -392,6 +401,9 @@ class FakeStore:
                 "operator_ref": operator_ref,
                 "action_kind": action_kind,
                 "target_ref": target_ref,
+                "tier": tier,
+                "confirmed_at": confirmed_at,
+                "approver_ref": approver_ref if approver_ref is not None else operator_ref,
                 "trace_id": trace_id,
             }
         )

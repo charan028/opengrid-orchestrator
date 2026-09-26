@@ -6,7 +6,9 @@ Message shape (until interfaces/mqtt/ schemas exist, per BUILD.md):
 
 Topic: `<root>/scenario/cmd` (publish), `<root>/scenario/ack` (subscribe).
 User `og_simctl`, password from env `OG_MQTT_SIMCTL_PASSWORD`. Root from env
-`OG_MQTT_ROOT` (default `og/v1`).
+`OG_MQTT_ROOT`; the production root `og/v1` is used only by an explicitly marked production
+process (`OGSIM_ENV=prod`), exactly as `ogsim.common.config.resolve_topic_root` decides for the fleet
+and SCADA sims -- never as a silent fallback.
 """
 
 from __future__ import annotations
@@ -18,22 +20,27 @@ from typing import Any
 
 import aiomqtt
 
+from ogsim.common.config import resolve_mqtt_credentials, resolve_topic_root
 from ogsim.control.schema_validation import validate_scenario_cmd
 
 DEFAULT_MQTT_PORT = 1883
 
 
 def mqtt_settings() -> dict[str, Any]:
+    """Workspace credentials (`OG_MQTT_WS_USER`/`OG_MQTT_WS_PASSWORD`) win; otherwise `og_simctl`
+    (`ogsim.common.config.resolve_mqtt_credentials`, which refuses a workspace without its own user)."""
+    username, password = resolve_mqtt_credentials("og_simctl", "OG_MQTT_SIMCTL_PASSWORD")
     return {
         "hostname": os.environ.get("OG_MQTT_HOST", "127.0.0.1"),
         "port": int(os.environ.get("OG_MQTT_PORT", str(DEFAULT_MQTT_PORT))),
-        "username": "og_simctl",
-        "password": os.environ.get("OG_MQTT_SIMCTL_PASSWORD", ""),
+        "username": username,
+        "password": password,
     }
 
 
 def topic_root() -> str:
-    return os.environ.get("OG_MQTT_ROOT", "og/v1")
+    """OG_MQTT_ROOT, else the production root only when marked production (raises otherwise)."""
+    return resolve_topic_root({})
 
 
 async def publish_scenario_cmd(message: dict[str, Any], wait_ack_s: float = 0.0) -> dict[str, Any] | None:

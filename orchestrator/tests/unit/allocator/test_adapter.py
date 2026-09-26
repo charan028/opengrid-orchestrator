@@ -13,12 +13,14 @@ import opengrid.allocator as allocator_module
 from opengrid.allocator import reasons, run_cycle, substitute_hub
 from opengrid.allocator.models import (
     BankSnapshot,
+    CycleResult,
     FleetState,
     HubSnapshot,
     LedgerView,
     ObligationCall,
     ProposedGrant,
     Schedule,
+    SubstitutionEvent,
 )
 
 _T0 = datetime(2026, 9, 26, 12, 0, 0, tzinfo=UTC)
@@ -41,6 +43,7 @@ class FakeLedgerGateway:
         self._ledger_view = ledger_view
         self.persisted: list[ProposedGrant] = []
         self.substitutions: list[tuple[str, str, str, str]] = []
+        self.substitution_events: list[tuple[str, SubstitutionEvent]] = []
         self.version = 7
 
     async def ledger_view(self, bank_ids, interval_start):
@@ -54,6 +57,12 @@ class FakeLedgerGateway:
 
     async def record_substitution(self, obligation_id, from_hub_id, to_hub_id, reason_code):
         self.substitutions.append((obligation_id, from_hub_id, to_hub_id, reason_code))
+
+    async def record_shortfalls(self, cycle_id, shortfalls):
+        self.shortfalls = list(shortfalls)
+
+    async def record_substitution_events(self, cycle_id, events):
+        self.substitution_events.extend((cycle_id, e) for e in events)
 
 
 @pytest.mark.asyncio
@@ -101,6 +110,48 @@ async def test_ts_05_61_run_cycle_builds_grant_rows_from_fakes() -> None:
     assert grants[0].ledger_version == 7
     assert float(grants[0].granted_kw) == 20.0
     assert len(ledger.persisted) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_grant_rows_keep_the_real_bank_and_obligation_ids() -> None:
+    """Regression (live 2026-09-26): grant rows carried `uuid5(bank_id)` and `uuid5(obligation_id)`, so
+    the engine asked the fleet twin for bank `bdb1788d-...` (LookupError, every tick with a committed
+    grant failed before proposing a batch) and the guardian could never match the obligation."""
+    obligation_id = "3b60e803-dabf-4df9-a284-1386c0426952"
+    fleet_state = FleetState(
+        hubs=(
+            HubSnapshot(
+                hub_id="hub-00001",
+                bank_id="bank-000",
+                free_discharge_kw=50.0,
+                soc_kwh=1_000_000.0,
+                reserve_kwh=0.0,
+                e_kwh=1_000_000.0,
+            ),
+        ),
+        banks=(BankSnapshot(bank_id="bank-000", capability_kw=50.0, kva_rating=600.0),),
+    )
+    ledger_view = LedgerView(
+        calls=(
+            ObligationCall(
+                obligation_id=obligation_id,
+                bank_id="bank-000",
+                service_type="ERCOT_ENERGY",
+                tier="T2",
+                committed_kw=20.0,
+                eligible_hub_ids=("hub-00001",),
+            ),
+        )
+    )
+
+    grants = await run_cycle(
+        "cycle-2",
+        fleet=FakeFleetGateway(fleet_state, ("bank-000",)),
+        ledger=FakeLedgerGateway(ledger_view),
+        now=_T0,
+    )
+
+    assert [(g.bank_id, str(g.obligation_id)) for g in grants] == [("bank-000", obligation_id)]
 
 
 @pytest.mark.asyncio
@@ -158,3 +209,31 @@ async def test_alloc_05_gateway_timeout_holds_last_grants(monkeypatch: pytest.Mo
 
     assert grants == [held_grant]
     assert ledger.persisted == []  # never reached persist_grants -- the cycle never ran
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_records_the_cycles_hub_substitutions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lead review 2026-09-26: run_cycle dropped CycleResult.substitutions -- automatic hub swaps were
+    never recorded (S5.3 requires every swap in the audit trail, reason R-SUBSTITUTION)."""
+    event = SubstitutionEvent(obligation_id="o1", bank_id="b1", from_hub_ids=("h1",), to_hub_ids=("h2",))
+    monkeypatch.setattr(
+        allocator_module, "cycle", lambda *a, **k: CycleResult(cycle_id="cycle-3", substitutions=(event,))
+    )
+    ledger = FakeLedgerGateway(LedgerView(calls=()))
+    fleet = FakeFleetGateway(FleetState(hubs=(), banks=()), ())
+
+    await run_cycle("cycle-3", fleet=fleet, ledger=ledger, now=_T0)
+
+    assert ledger.substitution_events == [("cycle-3", event)]
+
+
+@pytest.mark.asyncio
+async def test_substitute_hub_uses_the_configured_ledger_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lead review 2026-09-26: the public substitute_hub always passed ledger=None and raised."""
+    ledger = FakeLedgerGateway(LedgerView(calls=()))
+    monkeypatch.setattr(allocator_module, "_ledger_gateway", None)
+    allocator_module.configure(ledger)
+
+    await substitute_hub("o1", "h1", "h2", reasons.R_SUBSTITUTION)
+
+    assert ledger.substitutions == [("o1", "h1", "h2", reasons.R_SUBSTITUTION)]

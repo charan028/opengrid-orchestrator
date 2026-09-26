@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+from opengrid.core.models.engine import ServiceType
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 
 Tier = Literal["T1", "T2", "T3", "T4"]
@@ -43,6 +44,9 @@ class HubSnapshot:
     e_kwh: float | None = None  # usable energy capacity, for the symmetric charge-side cap
     eta_c: float = DEFAULT_ETA_C
     eta_d: float = DEFAULT_ETA_D
+    # Nameplate discharge kW regardless of health/SoC, so a shortfall can be attributed to the K13
+    # exception that caused it (device fault = L0, reserve floor = L1). `None`: unknown, attributes nothing.
+    rated_kw: float | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -72,12 +76,15 @@ class ObligationCall:
 
     obligation_id: str
     bank_id: str
-    service_type: Literal["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY"]
+    service_type: ServiceType
     tier: Tier
     committed_kw: float
     eligible_hub_ids: tuple[str, ...]
     prior_granted_kw: float | None = None
     value_per_mwh: float = 0.0
+    #: Already escalated to SHORTFALL mid-window: still dispatched best-effort (owner decision 2026-09-26),
+    #: its partial grants carry the shortfall code G-19 corroborates.
+    in_shortfall: bool = False
 
 
 @dataclass(frozen=True, slots=True)

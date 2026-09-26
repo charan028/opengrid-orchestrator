@@ -183,7 +183,7 @@ async def test_engine_written_preimage_is_found_and_batch_is_signed_pass() -> No
         grant_id=uuid4(),
         cycle_id="cycle-1",
         obligation_id=uuid4(),
-        bank_id=UUID(int=1),
+        bank_id=BANK_ID,
         granted_kw=Decimal("10.0"),
         is_headroom=False,
         ledger_version=1,

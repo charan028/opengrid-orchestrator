@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -46,6 +47,12 @@ logger = logging.getLogger("opengrid.safestop.main")
 PROCESS_NAME = "safestop"
 DEFAULT_KEY_ID = "safestop-2026a"
 DEFAULT_HEARTBEAT_INTERVAL_S = 5.0
+DEFAULT_GUARDIAN_PUBLIC_KEY_PATH = "/etc/opengrid/guardian_ed25519.pub"
+GUARDIAN_PUBLIC_KEY_LENGTH = 32
+#: K8: how long a relayed RELEASE stays retained before its topic is cleared. Must exceed the longest a
+#: hub may be offline and still hold its in-memory stop set; after that a reconnecting hub that lost its
+#: memory starts unstopped anyway, which is correct once the stop is released.
+DEFAULT_RELEASE_RETAIN_S = 86_400.0
 
 
 async def _handle_request(payload: dict[str, Any], broker: ConfirmationBroker) -> None:
@@ -70,7 +77,33 @@ async def _handle_request(payload: dict[str, Any], broker: ConfirmationBroker) -
         await safestop.engage(proposal.scope, proposal.scope_ref, proposal.reason, proposal.initiator_ref)
         return
 
+    if action == "PUBLISH_RELEASE":
+        # From og-guardian only in practice, but trusted by nothing: the relay verifies the guardian
+        # signature and Tier-2 fields itself, and the stop-only key signs nothing (K8).
+        event = payload.get("event")
+        await safestop.relay_guardian_release(event if isinstance(event, dict) else {})
+        return
+
     logger.warning("unrecognised safestop request action", extra={"action": action})
+
+
+def load_guardian_public_key(cfg: Config) -> bytes | None:
+    """The guardian's public key (hex file, `[safestop].guardian_public_key_path`, default the same file
+    the hub simulators verify with). Unreadable or malformed -> None: RELEASE relay stays disabled."""
+    path = Path(str(cfg.get("safestop.guardian_public_key_path", DEFAULT_GUARDIAN_PUBLIC_KEY_PATH)))
+    try:
+        key = bytes.fromhex(path.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        logger.warning(
+            "guardian public key unavailable; stop RELEASE relay disabled", extra={"path": str(path)}
+        )
+        return None
+    if len(key) != GUARDIAN_PUBLIC_KEY_LENGTH:
+        logger.warning(
+            "guardian public key malformed; stop RELEASE relay disabled", extra={"path": str(path)}
+        )
+        return None
+    return key
 
 
 async def _request_intake_loop(pool: Any, broker: ConfirmationBroker) -> None:
@@ -105,10 +138,14 @@ async def main(cfg: Config | None = None) -> None:
     heartbeat_interval_s = float(cfg.get("health.heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S))
 
     async with build_client(
-        cfg, username=mqtt_username, password=mqtt_password, client_id="og-safestop"
+        cfg, username=mqtt_username, password=mqtt_password, process="safestop"
     ) as client:
         publisher = AiomqttStopPublisher(client=client, config=cfg)
-        safestop.configure_service(SafestopService(stop_key, backend, publisher, trace))
+        service = SafestopService(
+            stop_key, backend, publisher, trace, guardian_public_key=load_guardian_public_key(cfg)
+        )
+        safestop.configure_service(service)
+        release_retain_s = float(cfg.get("safestop.release_retain_s", DEFAULT_RELEASE_RETAIN_S))
 
         intake_task = asyncio.create_task(_request_intake_loop(pool, broker))
         try:
@@ -116,6 +153,10 @@ async def main(cfg: Config | None = None) -> None:
             async def _tick() -> None:
                 broker.discard_expired()
                 await write_heartbeat(pool, PROCESS_NAME)
+                try:
+                    await service.clear_released_retained(backend, retain_s=release_retain_s)
+                except Exception:
+                    logger.exception("retained stop-topic housekeeping failed; retried next tick")
 
             await run_forever(_tick, interval_s=heartbeat_interval_s, process_name=PROCESS_NAME)
         finally:

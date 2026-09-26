@@ -55,8 +55,16 @@ class ContractsRepo(Protocol):
     async def get_opportunity(self, opportunity_id: UUID) -> Opportunity | None: ...
 
     async def update_opportunity_state(
-        self, opportunity_id: UUID, *, state: str, reason_code: str | None, decided_at: datetime
-    ) -> Opportunity: ...
+        self,
+        opportunity_id: UUID,
+        *,
+        state: str,
+        reason_code: str | None,
+        decided_at: datetime,
+        gate_id: UUID | None = None,
+    ) -> Opportunity:
+        """Set the opportunity's decision; `gate_id` (the deciding plan) is kept when not given."""
+        ...
 
     # -- obligation lifecycle (02a S2.1) ---------------------------------------------------------
     async def get_obligation(self, obligation_id: UUID) -> Obligation | None: ...
@@ -74,6 +82,10 @@ class ContractsRepo(Protocol):
     ) -> Obligation:
         """Compare-and-swap on `version` (02a S1.5's optimistic lock). Raises
         `ConcurrentUpdateError` if the row is no longer at `expected_version`."""
+        ...
+
+    async def set_obligation_at_risk(self, obligation_id: UUID, at_risk: bool) -> Obligation:
+        """Set the `at_risk` flag only (no state change, no version bump). Raises `LookupError`."""
         ...
 
     async def active_obligations_by_interval(

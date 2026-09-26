@@ -12,8 +12,12 @@ ProcessStatus = Literal["ok", "down"]
 HubHealthState = Literal["online", "stale", "offline", "fault"]
 AlertSeverity = Literal["warning", "critical"]
 
-#: 02b S6.4: "every process (all 7: feeds, engine, guardian, safestop, sim, settle, api)".
-ALL_PROCESSES: tuple[str, ...] = ("feeds", "engine", "guardian", "safestop", "sim", "settle", "api")
+#: 02b S6.4 names 7 processes including "sim", but `ogsim` (the integration simulators) is an external
+#: system that shares no code with `opengrid` (BUILD.md S1) and never writes an `og.heartbeat` row --
+#: expecting one made `ALR-PROCESS-DOWN:sim` permanently open (defect fix). `ogsim`'s liveness is instead
+#: inferred from its own MQTT-driven writes (`ALR-SIM-OFFLINE`, see `evaluate_sim_offline_alert`), so only
+#: the 6 `opengrid` processes that actually call `opengrid.platform.heartbeat.write_heartbeat` are listed.
+ALL_PROCESSES: tuple[str, ...] = ("feeds", "engine", "guardian", "safestop", "settle", "api")
 
 DegradedMode = Literal[
     "NO_NEW_COMMITMENTS",  # 02b S6.5 row 1: a feed crosses STALE
@@ -21,6 +25,28 @@ DegradedMode = Literal[
     "HOLD",  # 02b S6.5 row 3: guardian down / verdict timeout
     "DIST_DEFERRAL_OPEN_LOOP",  # 02b S6.5 row 5: sim SCADA silent for a bank
 ]
+
+#: `og.alert` has no owner/source column (`migrations/0001_init.sql`), so this code-level allow-list is
+#: the fix for a live defect: `evaluate_alerts()`'s clear pass used to close ANY open alert whose
+#: rule+scope didn't match one of ITS OWN this-cycle findings -- which also closed alerts other modules
+#: raise and own the lifecycle of (`ALR-SETTLE-STALLED` from settle, `ALR-SELECTOR-GATE-FAILED` from
+#: selector, `ALR-ENERGY-SHORTFALL-RISK` raised directly by the allocator/engine hook, see
+#: `evaluate_energy_shortfall_risk_alert`'s docstring) within one ~5s cycle of them being raised. Only a
+#: rule in this set -- exactly the `ALR-*` rules `opengrid.health.evaluate_alerts` itself evaluates every
+#: cycle -- may be auto-cleared here; every other module clears its own alerts.
+HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
+    {
+        "ALR-FEED-STALE",
+        "ALR-FEED-LGV-EXHAUSTED",
+        "ALR-PROCESS-DOWN",
+        "ALR-HUB-OFFLINE-RATIO",
+        "ALR-CYCLE-P99",
+        "ALR-GUARDIAN-TIMEOUT-RATE",
+        "ALR-RESERVE-BREACH",
+        "ALR-SCADA-OVERLOAD",
+        "ALR-SIM-OFFLINE",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +72,12 @@ class HealthThresholds:
     # reliably crosses into critical rather than sitting just under a warning-only threshold.
     bank_kva_overload_warning_pct: float = 1.00
     bank_kva_overload_critical_pct: float = 1.20
+    # ALR-SIM-OFFLINE (defect fix): `ogsim` writes no heartbeat (see `ALL_PROCESSES`'s docstring), so its
+    # liveness is inferred from the freshest of its own MQTT-driven writes -- `og.hub_state.last_seen_at`
+    # (`ogsim.fleet`) and `og.feed_obs` SCADA readings (`ogsim.scada`). 60s is 30x `fleet.telemetry_interval_s`
+    # (2s) and comfortably past `scada.publish_interval_s` (2s), so a couple of missed publishes never
+    # false-positives, but an actually-dead sim process is caught quickly.
+    sim_offline_s: float = 60.0
 
     @property
     def heartbeat_down_after_s(self) -> float:
@@ -87,6 +119,7 @@ class HealthThresholds:
             bank_kva_overload_critical_pct=cfg.get(
                 "health.bank_kva_overload_critical_pct", defaults.bank_kva_overload_critical_pct
             ),
+            sim_offline_s=cfg.get("health.sim_offline_s", defaults.sim_offline_s),
         )
 
 

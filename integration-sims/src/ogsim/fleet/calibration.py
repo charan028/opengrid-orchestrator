@@ -11,6 +11,18 @@ A `calibration_drift_correctable` anomaly's drift is fully or partially
 removed in proportion to the command's `correction` fields; a
 `calibration_drift_hardware` anomaly is never affected by any command,
 exercising the escalation path (§5.5.4) deterministically in tests.
+
+Freshness (K6 pattern): the guardian assigns each hub's calibration commands a
+strictly increasing `(epoch, seq)`. A hub rejects (`STALE_SEQ`) any command whose
+pair does not exceed the last one it APPLIED, so a captured command can never be
+replayed within its lease, even across the 24 h rate-limit window.
+
+Rollback is hub-local (§5.5.4 "automatic rollback"): when applying a command makes
+a unit worse, the hub itself restores the parameters it had immediately before that
+same command, inside the same apply, and acks `WORSE_ROLLED_BACK`. No second remote
+command is ever needed or sent for a rollback, so the guardian's G-25 rate limit
+(one signed calibration command per hub per 24 h) applies to every command without
+exception, and a rollback cannot be used to chase the limit.
 """
 
 from __future__ import annotations
@@ -110,6 +122,13 @@ def apply_calibration(
     if not (issued_at <= now_dt < expires_at):
         return CalibrationOutcome(calibration_id, hub_id, False, "EXPIRED", None, None, "EXPIRED")
 
+    try:
+        epoch, seq = int(command["epoch"]), int(command["seq"])
+    except (KeyError, TypeError, ValueError):
+        return _reject(calibration_id, hub_id, "STALE_SEQ")
+    if any((epoch, seq) <= (int(pq.last_calibration_epoch[i]), int(pq.last_calibration_seq[i])) for i in idx):
+        return _reject(calibration_id, hub_id, "STALE_SEQ")
+
     if any(pq.last_calibration_at[i] >= 0 and now - pq.last_calibration_at[i] < rate_limit_s for i in idx):
         return _reject(calibration_id, hub_id, "RATE_LIMITED")
 
@@ -119,7 +138,6 @@ def apply_calibration(
         return _reject(calibration_id, hub_id, "BOUNDS_EXCEEDED")
 
     outcome_label, resulting = _apply_to_units(pq, anomalies, idx, correction)
-    epoch, seq = int(command.get("epoch", -1)), int(command.get("seq", -1))
     for i in idx:
         pq.last_calibration_at[i] = now
         pq.last_calibration_epoch[i] = epoch
@@ -187,9 +205,11 @@ def _apply_to_one_unit(
 
 
 def _residual(pq: InverterPqState, unit_index: int) -> float:
-    return sum(
-        abs(getattr(pq, offset_field)[unit_index] - getattr(pq, baseline_field)[unit_index])
-        for offset_field, baseline_field in _CORRECTION_TO_OFFSET_FIELD.values()
+    return float(
+        sum(
+            abs(getattr(pq, offset_field)[unit_index] - getattr(pq, baseline_field)[unit_index])
+            for offset_field, baseline_field in _CORRECTION_TO_OFFSET_FIELD.values()
+        )
     )
 
 
@@ -203,17 +223,45 @@ def np_sign(value: float) -> float:
     return 0.0
 
 
-def build_calibration_ack(outcome: CalibrationOutcome, applied_at: str) -> dict[str, Any]:
-    """Builds a `calibration_ack.schema.json`-shaped message (§6.7), plus an
-    `outcome` field (asset-health bookkeeping, §5.5.4) beyond that schema's
-    required set."""
+def current_offsets(pq: InverterPqState, hub_id: str) -> dict[str, float]:
+    """The hub's present offsets (first unit), or zeros for an unknown hub: what a REJECTED/EXPIRED ack
+    reports, since nothing was applied (the schema requires `resulting_offsets` on every ack)."""
+    idx = pq.indices_for_hub(hub_id)
+    if not idx:
+        return {"freq_hz": 0.0, "voltage_pct": 0.0, "phase_deg": 0.0}
+    first = idx[0]
     return {
+        "freq_hz": float(pq.freq_offset_hz[first]),
+        "voltage_pct": float(pq.voltage_offset_pct[first]),
+        "phase_deg": float(pq.phase_angle_error_deg[first]),
+    }
+
+
+def build_calibration_ack(
+    outcome: CalibrationOutcome,
+    applied_at: str,
+    *,
+    command: dict[str, Any] | None = None,
+    fallback_offsets: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Builds a `calibration_ack.schema.json`-shaped message (§6.7): it echoes the command's `(epoch,
+    seq)` (the orchestrator binds the ack to the command it issued, crypto.md §2.5) and carries the
+    hub's `reject_reason`, plus an internal `outcome` field (asset-health bookkeeping, §5.5.4) the
+    MQTT publisher strips before sending."""
+    ack: dict[str, Any] = {
         "calibration_id": outcome.calibration_id,
         "hub_id": outcome.hub_id,
         "applied": outcome.applied,
         "applied_at": applied_at,
-        "resulting_offsets": outcome.resulting_offsets,
+        "resulting_offsets": outcome.resulting_offsets
+        if outcome.resulting_offsets is not None
+        else fallback_offsets,
         "status": outcome.status,
         "outcome": outcome.outcome_label,
         "reject_reason": outcome.reject_reason,
     }
+    for field_name in ("epoch", "seq"):
+        value = (command or {}).get(field_name)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            ack[field_name] = value
+    return ack

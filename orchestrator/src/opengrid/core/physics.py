@@ -16,6 +16,8 @@ DEFAULT_ETA_C = 0.9487
 DEFAULT_ETA_D = 0.9487
 DEFAULT_SELF_DISCHARGE_KWH_PER_H = 0.0005
 DEFAULT_INVERTER_CAP_KW = 11.0  # CORE-004: named default hub inverter power cap, not a bare literal
+#: 02a S6.1 G-04 default ("firm ramp Kc/3 per minute"): a hub reaches its full power rating in 3 min.
+FIRM_RAMP_MINUTES_TO_FULL_POWER = 3.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +28,16 @@ class HubParams:
     eta_c: float = DEFAULT_ETA_C
     eta_d: float = DEFAULT_ETA_D
     self_discharge_kwh_per_h: float = DEFAULT_SELF_DISCHARGE_KWH_PER_H
-    ramp_kw_per_s: float | None = None  # None = unconstrained ramp for this hub
+    ramp_kw_per_s: float | None = None  # None = the 02a S6.1 firm default, see `hub_ramp_kw_per_s`
+
+
+def hub_ramp_kw_per_s(params: HubParams) -> float:
+    """G-04/K4 per-hub ramp bound in kW/s: the hub's own `ramp_kw_per_s`, else the 02a S6.1 firm
+    default (full power rating over `FIRM_RAMP_MINUTES_TO_FULL_POWER`). The one definition both the
+    engine (when it builds per-hub setpoints) and the guardian (G-04) use."""
+    if params.ramp_kw_per_s is not None:
+        return params.ramp_kw_per_s
+    return params.p_kw / FIRM_RAMP_MINUTES_TO_FULL_POWER / 60.0
 
 
 def soc_step(

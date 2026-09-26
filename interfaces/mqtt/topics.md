@@ -9,7 +9,7 @@ Everywhere below, `<root>` stands for that configured prefix.
 
 | Topic | Direction | QoS | Retain | Publisher | Subscriber(s) | Schema |
 |---|---|---|---|---|---|---|
-| `<root>/tel/<zone>/<bank_id>/<hub_id>` | hub → orchestrator | 0 | No | `og_sim` (or a real hub) | `og_engine`, `og_api` (sampled SSE) | `telemetry.schema.json` |
+| `<root>/tel/<zone>/<bank_id>/<hub_id>` | hub → orchestrator | 0 | No | `og_sim` (or a real hub) | `og_engine` (fleet twin), `og_guardian` (its own hub-state read, GUARD-02); `og_api` does not subscribe -- its SSE streams poll Postgres | `telemetry.schema.json` |
 | `<root>/cmd/<bank_id>/batch` | guardian → hubs | 1 | No | `og_guardian` | `og_sim` hub tasks for that bank | `command_batch.schema.json` |
 | `<root>/ack/<hub_id>` | hub → orchestrator | 1 | No | `og_sim` (or a real hub) | `og_engine`, `og_guardian` | `ack.schema.json` |
 | `<root>/stop/<scope>/<id>` | safestop → hubs | 1 | **Yes** | `og_safestop` | all hubs in scope, `og_api` | `stop.schema.json` |
@@ -24,7 +24,11 @@ Everywhere below, `<root>` stands for that configured prefix.
 | `<root>/ack/cal/<hub_id>` | hub → orchestrator | 1 | No | `og_sim` (or a real hub) | `og_engine`, `og_guardian` | `calibration_ack.schema.json` |
 
 `<scope>` for `<root>/stop/*` is one of `fleet`, `zone/<zone>`, `bank/<bank_id>`; `<id>` is the `stop_event`
-UUID. A retained **empty payload** on a given `<root>/stop/<scope>/<id>` clears that stop (release).
+UUID. Stop state changes **only** through a signature-verified `StopEvent` (crypto.md §2.3): `ENGAGE` signed
+by the safestop key, `RELEASE` signed by the guardian key (Tier-2 approved); the event's signed `scope`/`scope_id`
+govern, not the topic. A retained **empty payload** (zero-length, or any JSON that is not a non-empty object,
+e.g. `{}`, `null`, `[]`, `0`, `false`) is broker housekeeping that clears the retained message; it **never**
+releases or otherwise changes a stop (K8: an unsigned message must not be able to release a stop).
 
 ## QoS rationale
 

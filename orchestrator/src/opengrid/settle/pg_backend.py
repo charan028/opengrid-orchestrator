@@ -42,14 +42,42 @@ JOIN og.opportunity opp ON opp.opportunity_id = o.opportunity_id
 WHERE o.obligation_id = %(obligation_id)s
 """
 
+#: One 1-minute sample per minute of the interval: the kW the obligation actually received. Per bank the
+#: hubs' measured discharge (-sum of p_kw, 2 s telemetry averaged per hub per minute; charging counts as
+#: 0) is attributed to this obligation by its share of the bank's granted kW that minute (other
+#: obligations and headroom exports share the same hubs), then summed over its banks. A minute with no
+#: grant for the obligation attributes 0. Replaces a query that averaged raw per-hub 2 s samples as if
+#: they were the obligation's 1-minute kW (signed, per hub): every obligation metered ~0 kWh (live
+#: 2026-09-26: ERCOT_AS delivering 500 kW metered -0.08 kWh per 15 min).
 _FETCH_TELEMETRY_SQL = """
-SELECT hub_id, ts, p_kw
-FROM og.telemetry
-WHERE hub_id IN (SELECT hub_id FROM og.hub WHERE bank_id IN (
-        SELECT bank_id FROM og.reservation WHERE obligation_id = %(obligation_id)s
-    ))
-  AND ts >= %(interval_start)s AND ts < %(interval_end)s
-ORDER BY ts
+WITH banks AS (
+    SELECT DISTINCT bank_id FROM og.reservation
+    WHERE obligation_id = %(obligation_id)s
+      AND interval_start < %(interval_end)s AND interval_end > %(interval_start)s
+),
+tel AS (
+    SELECT date_trunc('minute', t.ts) AS m, h.bank_id, t.hub_id, avg(t.p_kw) AS p
+    FROM og.telemetry t JOIN og.hub h USING (hub_id)
+    WHERE h.bank_id IN (SELECT bank_id FROM banks)
+      AND t.ts >= %(interval_start)s AND t.ts < %(interval_end)s
+    GROUP BY 1, 2, 3
+),
+bank_kw AS (SELECT m, bank_id, greatest(-sum(p), 0) AS discharge_kw FROM tel GROUP BY 1, 2),
+cyc AS (
+    SELECT date_trunc('minute', created_at) AS m, cycle_id, bank_id,
+           coalesce(sum(granted_kw) FILTER (WHERE obligation_id = %(obligation_id)s), 0) AS ob_kw,
+           sum(granted_kw) AS tot_kw
+    FROM og.grant
+    WHERE bank_id IN (SELECT bank_id FROM banks)
+      AND created_at >= %(interval_start)s AND created_at < %(interval_end)s
+    GROUP BY 1, 2, 3
+),
+share AS (SELECT m, bank_id, avg(ob_kw) AS ob_kw, avg(tot_kw) AS tot_kw FROM cyc GROUP BY 1, 2)
+SELECT b.m AS ts,
+       sum(b.discharge_kw * CASE WHEN s.tot_kw > 0 THEN s.ob_kw / s.tot_kw ELSE 0 END) AS kw
+FROM bank_kw b LEFT JOIN share s USING (m, bank_id)
+GROUP BY b.m
+ORDER BY b.m
 """
 
 _FETCH_ACTIVE_METER_SQL = """
@@ -139,6 +167,30 @@ ORDER BY o.obligation_id, gs.interval_start
 LIMIT 500
 """
 
+_FETCH_SETTLEABLE_SQL = """
+SELECT o.obligation_id
+FROM og.obligation o
+WHERE o.state IN ('FULFILLED', 'SHORTFALL')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM generate_series(
+          date_trunc('hour', o.window_start)
+              + (floor(extract(minute FROM o.window_start) / 15) * interval '15 minutes'),
+          o.window_end - interval '15 minutes',
+          interval '15 minutes'
+      ) AS gs(interval_start)
+      WHERE NOT EXISTS (
+          SELECT 1 FROM og.meter_interval mi
+          WHERE mi.obligation_id = o.obligation_id AND mi.interval_start = gs.interval_start
+            AND mi.superseded_by IS NULL
+      )
+  )
+  AND EXISTS (SELECT 1 FROM og.pnl p WHERE p.obligation_id = o.obligation_id)
+  AND (o.service_type = 'HOME'
+       OR EXISTS (SELECT 1 FROM og.invoice_line il WHERE il.obligation_id = o.obligation_id))
+LIMIT 200
+"""
+
 _INSERT_PNL_SQL = """
 INSERT INTO og.pnl
     (pnl_id, obligation_id, interval_start, interval_end, revenue, energy_cost, degradation_cost,
@@ -202,7 +254,8 @@ class PgSettleBackend:
                 },
             )
             rows = await cur.fetchall()
-        return [PowerSample(hub_id=r["hub_id"], ts=r["ts"], kw=Decimal(str(r["p_kw"]))) for r in rows]
+        # One attributed sample per minute (see `_FETCH_TELEMETRY_SQL`), not one per hub.
+        return [PowerSample(hub_id="obligation", ts=r["ts"], kw=Decimal(str(r["kw"]))) for r in rows]
 
     async def fetch_active_meter_interval(
         self, obligation_id: UUID, interval_start: datetime
@@ -426,6 +479,12 @@ class PgSettleBackend:
             )
             rows = await cur.fetchall()
         return [MeterIntervalExportRow(**r) for r in rows]
+
+    async def fetch_settleable_obligations(self) -> list[UUID]:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_FETCH_SETTLEABLE_SQL)
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
 
     async def fetch_pending_intervals(self) -> list[tuple[UUID, datetime, datetime]]:
         async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

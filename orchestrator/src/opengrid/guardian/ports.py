@@ -17,6 +17,15 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from opengrid.core.physics import BankParams, HubParams
+from opengrid.guardian.pq_ports import (
+    CalibrationHistoryPort,
+    CalibrationLedgerPort,
+    FirmwareCalibrationBoundsPort,
+    HubAssetStatePort,
+    PqEnvelopeStatePort,
+    PqMeasurementPort,
+    SensitiveGrantPort,
+)
 
 SafeStopScope = Literal["FLEET", "ZONE", "BANK"]
 UtilityInstructionKind = Literal["LIMIT", "BLOCK", "ESTOP"]
@@ -79,10 +88,15 @@ class HubSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class BankSnapshot:
+    """Guardian's own view of one bank. `bank_load_kva` is its latest SCADA apparent-power reading and
+    `bank_load_age_s` that reading's age (`inf` when there is none): G-03 treats a missing or stale
+    reading as unknown loading and vetoes, never as an empty bank."""
+
     params: BankParams
     bank_load_kva: float
     feeder_id: str | None
     feeder_ceiling_kw_per_min: float | None
+    bank_load_age_s: float = 0.0
 
 
 class ClockPort(Protocol):
@@ -104,9 +118,27 @@ class TracePort(Protocol):
         """Trace the verdict itself (GUARDIAN_VERDICT, 02a S8.1) after signing/veto/timeout."""
         ...
 
+    async def append_calibration_verdict(self, calibration_id: UUID, payload: dict[str, object]) -> None:
+        """Trace a calibration-command verdict (signed or refused, S6.7/G-25). Raises on failure: a
+        signed calibration command is only released once this record is durable (K10)."""
+        ...
+
+    async def append_stop_release_verdict(self, operator_action_id: UUID, payload: dict[str, object]) -> None:
+        """Trace a stop-RELEASE verdict (signed or refused, K8). Raises on failure: signed RELEASE events
+        are handed to og-safestop only from this durable record (K10)."""
+        ...
+
 
 class HubStatePort(Protocol):
     async def snapshot(self, hub_id: str) -> HubSnapshot | None: ...
+
+
+class BankMembersPort(Protocol):
+    async def member_snapshots(self, bank_id: str) -> list[HubSnapshot]:
+        """Guardian's own telemetry snapshot of EVERY hub on `bank_id` (membership from `og.hub`
+        configuration), used to re-derive the bank's deliverable capability independently of the
+        engine (G-19's check of an `R-COMMIT-LOCK-INFEASIBLE`/`-L0`/`-L1` override)."""
+        ...
 
 
 class BankStatePort(Protocol):
@@ -155,6 +187,13 @@ class LeaseStatePort(Protocol):
         ...
 
 
+class ServiceProfilePort(Protocol):
+    async def setpoint_source(self, obligation_id: UUID) -> str | None:
+        """The obligation's current service profile `setpoint_source` (e.g. MEASURED_FEEDBACK for a
+        need-basis closed-loop profile), read by the guardian from the DB; None if it has none."""
+        ...
+
+
 class L2InstructionPort(Protocol):
     async def active_instruction(self, bank_id: str) -> L2Instruction | None: ...
 
@@ -164,6 +203,64 @@ class SafeStopPort(Protocol):
         """Whether an ENGAGE stop_event with no matching RELEASE is in force for this scope/scope_ref,
         or for a containing scope (FLEET stops everything; ZONE stops its banks)."""
         ...
+
+
+StopScopeKind = Literal["FLEET", "ZONE", "BANK"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseRequest:
+    """A Tier-2 stop-release request as og-api durably recorded it (`og.operator_action`,
+    action_kind SAFE_STOP_RELEASE, tier TIER2): who asked, who approved, when, for which scope, and the
+    trace row og-api wrote for it. The guardian re-checks every field itself (K8)."""
+
+    operator_action_id: UUID
+    requested_by: str
+    approved_by: str | None
+    scope_kind: StopScopeKind
+    scope_ref: str  # "FLEET" for fleet scope, as og.stop_event stores it
+    reason: str
+    requested_at: datetime
+    approved_at: datetime | None
+    trace_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class EngagedStop:
+    """One outstanding ENGAGE on a scope (no RELEASE recorded after it), from `og.stop_event`."""
+
+    stop_id: UUID
+    initiator_kind: str
+    engaged_at: datetime
+
+
+class StopReleasePort(Protocol):
+    async def pending_requests(self, *, max_age_s: float) -> list[ReleaseRequest]:
+        """Approved Tier-2 release requests the guardian has not yet decided (no verdict trace row)."""
+        ...
+
+    async def outstanding_engages(self, scope_kind: StopScopeKind, scope_ref: str) -> list[EngagedStop]:
+        """Every ENGAGE on exactly this scope recorded after its last RELEASE."""
+        ...
+
+    async def banks_in_scope(self, scope_kind: StopScopeKind, scope_ref: str) -> list[str]:
+        """The banks a scope covers (configuration: `og.bank`)."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class PqPorts:
+    """K14 inputs (G-21..G-25, 06-service-profiles-and-power-quality.md S5.3/S6.7), each the guardian's
+    own independent read (`opengrid.guardian.pq_ports`)."""
+
+    envelopes: PqEnvelopeStatePort
+    measurements: PqMeasurementPort
+    hub_assets: HubAssetStatePort
+    calibration_history: CalibrationHistoryPort
+    firmware_bounds: FirmwareCalibrationBoundsPort
+    sensitive_grants: SensitiveGrantPort
+    # None: no durable command ledger, so no calibration command is ever signed (fail closed).
+    calibration_ledger: CalibrationLedgerPort | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,3 +279,10 @@ class GuardianPorts:
     l2_instructions: L2InstructionPort
     safe_stop: SafeStopPort
     zones_by_bank: dict[str, str] = field(default_factory=dict)
+    pq: PqPorts | None = None  # None: K14 checks not wired (tests that predate PQ)
+    # None: no independent capability read, so a capability-based G-19 override is never verified (VETO).
+    bank_members: BankMembersPort | None = None
+    # None: the K8 stop-release path is not wired, so every release request is refused.
+    stop_release: StopReleasePort | None = None
+    # None: no profile read, so no need-basis (R-GRANT-CLOSED-LOOP) reduction is ever corroborated (VETO).
+    service_profiles: ServiceProfilePort | None = None

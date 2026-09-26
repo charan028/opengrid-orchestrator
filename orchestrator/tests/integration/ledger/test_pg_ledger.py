@@ -92,13 +92,83 @@ async def _seed_obligation(dsn: str) -> tuple[str, str]:
     return obligation_id, opportunity_id
 
 
+async def _seed_bank(dsn: str) -> str:
+    """`og.reservation.bank_id` FK-references `og.bank` (migration 0004), so tests need a real bank."""
+    bank_id = f"bank-{uuid4()}"
+    async with await psycopg.AsyncConnection.connect(dsn) as conn:
+        await conn.execute(
+            "INSERT INTO og.bank (bank_id, zone, kva_rating) VALUES (%s, 'test-zone', 600)", (bank_id,)
+        )
+        await conn.commit()
+    return bank_id
+
+
+async def _seed_plan(dsn: str) -> str:
+    """`og.commitment.plan_id` FK-references `og.plan`, so every reserve() needs a real plan row."""
+    plan_id = str(uuid4())
+    async with await psycopg.AsyncConnection.connect(dsn) as conn:
+        await conn.execute(
+            """
+            INSERT INTO og.plan (plan_id, plan_mode, gate_kind, horizon_start, horizon_end, scenario_set,
+                                 solver_status)
+            VALUES (%s, 'L-ID', 'ADMISSION', now(), now() + interval '1 day', '[]', 'OPTIMAL')
+            """,
+            (plan_id,),
+        )
+        await conn.commit()
+    return plan_id
+
+
+@requires_db
+async def test_ts_05_03_reserve_writes_commitments_and_orphans_are_released() -> None:
+    """Regression (live 2026-09-26): reserve() must write `og.commitment` rows with the reservations,
+    and `release_uncommitted()` must free reservations that have no commitment."""
+    assert _DSN is not None
+    migrate_sync(_DSN)
+    bank_id = await _seed_bank(_DSN)
+    t0 = datetime(2030, 1, 2, tzinfo=UTC)
+    t1 = datetime(2030, 1, 2, 0, 15, tzinfo=UTC)
+    pool = AsyncConnectionPool(_DSN, min_size=1, max_size=4, open=False)
+    await pool.open(wait=True)
+    try:
+        ledger = ReservationLedger(PgLedgerBackend(pool), _FixedCapability(Decimal(100)))
+        committed_id, _ = await _seed_obligation(_DSN)
+        orphan_id, _ = await _seed_obligation(_DSN)
+        plan_id = await _seed_plan(_DSN)
+        await ledger.reserve(
+            committed_id, {encode_interval_key(bank_id, t0, t1): Decimal(30)}, plan_id, variable_kind="BINARY"
+        )
+        async with pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO og.reservation (reservation_id, obligation_id, bank_id, kind, amount, "
+                "interval_start, interval_end, ledger_version) VALUES (%s, %s, %s, 'POWER_KW', 20, %s, %s, 1)",
+                (uuid4(), orphan_id, bank_id, t0, t1),
+            )
+            cur = await conn.execute(
+                "SELECT committed_kw, variable_kind FROM og.commitment WHERE obligation_id = %s",
+                (committed_id,),
+            )
+            assert await cur.fetchall() == [(Decimal("30.000"), "BINARY")]
+
+        assert await ledger.release_uncommitted() >= 1
+
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT obligation_id::text FROM og.reservation WHERE bank_id = %s AND released_at IS NULL",
+                (bank_id,),
+            )
+            assert [r[0] for r in await cur.fetchall()] == [committed_id]
+    finally:
+        await pool.close()
+
+
 @requires_db
 async def test_single_writer_no_double_sale_under_concurrency() -> None:
     """TS-05-02/ES05-S05: two concurrent writers reserving the same bank/interval beyond capability --
     only enough succeed to stay within capability; nothing is ever double-sold."""
     assert _DSN is not None
     migrate_sync(_DSN)
-    bank_id = f"bank-{uuid4()}"
+    bank_id = await _seed_bank(_DSN)
     interval_start = datetime(2030, 1, 1, tzinfo=UTC)
     interval_end = datetime(2030, 1, 1, 0, 15, tzinfo=UTC)
     capability_kw = Decimal(50)
@@ -115,11 +185,12 @@ async def test_single_writer_no_double_sale_under_concurrency() -> None:
         for _ in range(4):  # 4 * 20kW = 80kW requested against 50kW capability
             obligation_id, _opportunity_id = await _seed_obligation(_DSN)
             obligation_ids.append(obligation_id)
+        plan_id = await _seed_plan(_DSN)
 
         async def _attempt(ledger: ReservationLedger, obligation_id: str) -> bool:
             key = encode_interval_key(bank_id, interval_start, interval_end)
             try:
-                await ledger.reserve(obligation_id, {key: Decimal(20)}, uuid4())
+                await ledger.reserve(obligation_id, {key: Decimal(20)}, plan_id)
             except ReservationError:
                 return False
             return True

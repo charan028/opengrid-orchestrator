@@ -12,6 +12,8 @@ the in-process `asyncio.Lock` in `ReservationLedger`.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -21,9 +23,40 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.ledger import GrantRecord, ReservationRecord
+from opengrid.ledger import CommitmentRecord, GrantRecord, ReservationRecord
 
 _ADVISORY_LOCK_KEY = 774_411_001  # arbitrary fixed key for og.reservation's version counter
+_WRITE_LOCK_KEY = 774_411_002  # arbitrary fixed key serializing reserve() across processes (K2)
+
+_INSERT_COMMITMENT_SQL = """
+INSERT INTO og.commitment
+    (commitment_id, obligation_id, plan_id, interval_start, interval_end, committed_kw, variable_kind,
+     reason_code)
+VALUES (%(commitment_id)s, %(obligation_id)s, %(plan_id)s, %(interval_start)s, %(interval_end)s,
+        %(committed_kw)s, %(variable_kind)s, %(reason_code)s)
+"""
+
+_RELEASE_UNCOMMITTED_SQL = """
+UPDATE og.reservation r
+SET released_at = now(), release_reason = %(reason)s, ledger_version = %(version)s
+WHERE r.released_at IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM og.commitment c WHERE c.obligation_id = r.obligation_id AND c.supersedes IS NULL
+  )
+"""
+
+
+def _commitment_params(commitment: CommitmentRecord) -> dict[str, Any]:
+    return {
+        "commitment_id": commitment.commitment_id,
+        "obligation_id": commitment.obligation_id,
+        "plan_id": commitment.plan_id,
+        "interval_start": commitment.interval_start,
+        "interval_end": commitment.interval_end,
+        "committed_kw": commitment.committed_kw,
+        "variable_kind": commitment.variable_kind,
+        "reason_code": commitment.reason_code,
+    }
 
 
 class PgLedgerBackend:
@@ -32,12 +65,30 @@ class PgLedgerBackend:
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
 
+    @asynccontextmanager
+    async def write_guard(self) -> AsyncIterator[None]:
+        """Hold a session-level advisory lock on a dedicated connection for one reserve() check-then-
+        insert, so two processes can never both pass K2 against the same free headroom. (The
+        `FOR UPDATE` reads alone lock nothing: each runs in its own short transaction.)"""
+        async with self._pool.connection() as conn:
+            await conn.execute("SELECT pg_advisory_lock(%s)", (_WRITE_LOCK_KEY,))
+            try:
+                yield
+            finally:
+                await conn.execute("SELECT pg_advisory_unlock(%s)", (_WRITE_LOCK_KEY,))
+
     async def next_version(self) -> int:
         async with self._pool.connection() as conn, conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_ADVISORY_LOCK_KEY,))
             cur = await conn.execute("SELECT COALESCE(MAX(ledger_version), 0) + 1 FROM og.reservation")
             row = await cur.fetchone()
             return int(row[0]) if row else 1
+
+    async def current_version(self) -> int:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("SELECT COALESCE(MAX(ledger_version), 0) FROM og.reservation")
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
 
     async def active_reservations(self, bank_id: str, interval_start: datetime) -> list[ReservationRecord]:
         async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -83,10 +134,16 @@ class PgLedgerBackend:
             row = await cur.fetchone()
             return _row_to_record(row) if row else None
 
-    async def insert_reservations(self, records: list[ReservationRecord]) -> None:
-        if not records:
+    async def insert_reservations(
+        self, records: list[ReservationRecord], commitments: list[CommitmentRecord]
+    ) -> None:
+        """Reservations and their equality-freeze commitment rows in ONE transaction, so an obligation
+        is never left holding K2 headroom without a commitment (or frozen without reservations)."""
+        if not records and not commitments:
             return
         async with self._pool.connection() as conn, conn.transaction():
+            for commitment in commitments:
+                await conn.execute(_INSERT_COMMITMENT_SQL, _commitment_params(commitment))
             for record in records:
                 await conn.execute(
                     """
@@ -117,6 +174,11 @@ class PgLedgerBackend:
                 (reason, version, reservation_id),
             )
 
+    async def release_uncommitted(self, *, reason: str, version: int) -> int:
+        async with self._pool.connection() as conn, conn.transaction():
+            cur = await conn.execute(_RELEASE_UNCOMMITTED_SQL, {"reason": reason, "version": version})
+            return cur.rowcount
+
 
 class PgGrantBackend:
     """`GrantBackend` implementation over `og.grant` (merge task A3). Separate class from
@@ -131,6 +193,10 @@ class PgGrantBackend:
         if not records:
             return
         async with self._pool.connection() as conn, conn.transaction():
+            # One grant set per 2 s cycle, re-derived every cycle: commit without waiting on the WAL
+            # fsync (see opengrid.fleet.pg_backend._ASYNC_COMMIT_SQL). Reservations/commitments above
+            # keep synchronous commit (K2/K13 durability).
+            await conn.execute("SET LOCAL synchronous_commit TO OFF")
             for record in records:
                 await conn.execute(
                     """

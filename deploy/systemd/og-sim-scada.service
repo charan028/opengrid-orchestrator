@@ -10,6 +10,8 @@ User=opengrid
 Group=opengrid
 WorkingDirectory=/opt/opengrid/current/integration-sims
 Environment=PYTHONPATH=/opt/opengrid/current/integration-sims/src
+# Production marker: ogsim.common.config refuses the production topic root (og/v1) without it.
+Environment=OGSIM_ENV=prod
 EnvironmentFile=/etc/opengrid/secrets.env
 ExecStart=/opt/ogsim/venv/bin/python -m ogsim.scada
 Restart=always

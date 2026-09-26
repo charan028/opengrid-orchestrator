@@ -42,3 +42,12 @@ class AiomqttStopPublisher:
             )
         except aiomqtt.MqttError as exc:
             raise StopPublishError(f"MQTT publish failed for {full_topic}: {exc}") from exc
+
+    async def clear_retained(self, topic_suffix: str) -> None:
+        """Zero-length retained publish: deletes the broker's retained message on the topic (topics.md:
+        housekeeping only, never a stop-state change)."""
+        full_topic = topic(self.config, topic_suffix)
+        try:
+            await self.client.publish(full_topic, payload=b"", qos=STOP_QOS, retain=True)
+        except aiomqtt.MqttError as exc:
+            raise StopPublishError(f"MQTT retained clear failed for {full_topic}: {exc}") from exc

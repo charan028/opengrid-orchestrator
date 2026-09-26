@@ -116,11 +116,8 @@ def _check_soc_dynamics(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
                     - (dt_h / bank.eta_d) * discharge_total
                     - bank.self_discharge_kwh_per_h * dt_h
                 )
-            if expected_soc < bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh - _TOL_KW:
-                violations.append(
-                    f"C15: bank {bank.bank_id} scenario {scenario} terminal SoC {expected_soc:.3f}kWh "
-                    f"< initial {bank.initial_soc_kwh}kWh - slack {inputs.terminal_soc_slack_kwh}kWh"
-                )
+            # C15 (terminal energy) is a penalized target in the model, not a hard bound, so ending
+            # below it is priced, never a validity violation; C1/C2 above stay hard.
     return violations
 
 

@@ -114,7 +114,9 @@ def _hub_unit_layout(state: FleetState, dual_unit: np.ndarray) -> tuple[list[str
     return hub_ids, np.array(unit_index, dtype=np.int64)
 
 
-def _assign_phase_connection(hub_ids: list[str], unit_index: np.ndarray, rng: np.random.Generator) -> list[str]:
+def _assign_phase_connection(
+    hub_ids: list[str], unit_index: np.ndarray, rng: np.random.Generator
+) -> list[str]:
     """Single-unit homes are assigned a leg round-robin by hub position (spreads
     single-phase load evenly across A/B/C, §3.1); a dual-unit home's second
     inverter is recorded independently -- a seeded coin flip decides whether it
@@ -225,9 +227,12 @@ def quality_score(
     return np.clip(score, 0.0, 1.0)
 
 
-def _ou_step(value: np.ndarray, baseline: np.ndarray, step_std: float, rng: np.random.Generator) -> np.ndarray:
+def _ou_step(
+    value: np.ndarray, baseline: np.ndarray, step_std: float, rng: np.random.Generator
+) -> np.ndarray:
     noise = rng.normal(0.0, step_std, size=value.shape)
-    return baseline + (value - baseline) * (1.0 - _AMBIENT_MEAN_REVERSION) + noise
+    result: np.ndarray = baseline + (value - baseline) * (1.0 - _AMBIENT_MEAN_REVERSION) + noise
+    return result
 
 
 def tick_ambient_drift(pq: InverterPqState, dt_s: float, rng: np.random.Generator) -> None:
@@ -271,11 +276,16 @@ def inverter_state(pq: InverterPqState, hub_id: str) -> list[InverterSnapshot]:
     """Returns one `InverterSnapshot` per unit on `hub_id` (one, or two for a
     dual-unit home). This is the function WP-H (waveform generation, later)
     calls; it never generates samples itself."""
-    scores = quality_score(pq.freq_offset_hz, pq.voltage_offset_pct, pq.thd_current_pct, pq.phase_angle_error_deg)
+    scores = quality_score(
+        pq.freq_offset_hz, pq.voltage_offset_pct, pq.thd_current_pct, pq.phase_angle_error_deg
+    )
     snapshots = []
     for i in pq.indices_for_hub(hub_id):
         harmonics = {
-            order: {"mag_pct": float(pq.harmonic_mag_pct[order][i]), "angle_deg": float(pq.harmonic_angle_deg[order][i])}
+            order: {
+                "mag_pct": float(pq.harmonic_mag_pct[order][i]),
+                "angle_deg": float(pq.harmonic_angle_deg[order][i]),
+            }
             for order in HARMONIC_ORDERS
         }
         snapshots.append(
@@ -301,8 +311,13 @@ def inverter_state(pq: InverterPqState, hub_id: str) -> list[InverterSnapshot]:
 # ---------------------------------------------------------------------------
 
 PQ_ANOMALY_TYPES = frozenset(
-    {"frequency_drift", "harmonic_injection", "phase_imbalance_injection", "calibration_drift_correctable",
-     "calibration_drift_hardware"}
+    {
+        "frequency_drift",
+        "harmonic_injection",
+        "phase_imbalance_injection",
+        "calibration_drift_correctable",
+        "calibration_drift_hardware",
+    }
 )
 
 

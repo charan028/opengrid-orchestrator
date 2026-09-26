@@ -12,15 +12,30 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.engine import CommandBatchRow
+from opengrid.engine.lifecycle import ClosingObligation, StuckSelected
 
 _PENDING_ADMISSION_SQL = """
-SELECT DISTINCT contract_id FROM og.opportunity WHERE state = 'OFFERED' AND gate_id IS NULL
+SELECT DISTINCT op.contract_id
+FROM og.opportunity op
+JOIN og.obligation ob ON ob.opportunity_id = op.opportunity_id
+WHERE op.state = 'OFFERED' AND op.gate_id IS NULL AND ob.state = 'OFFERED'
+"""
+_DUE_FOR_DELIVERY_SQL = """
+SELECT obligation_id FROM og.obligation WHERE state = 'COMMITTED' AND window_start <= %(now)s
+"""
+_DUE_FOR_CLOSE_SQL = """
+SELECT o.obligation_id,
+       EXISTS (SELECT 1 FROM og.performance p
+               WHERE p.obligation_id = o.obligation_id AND NOT p.passed_threshold) AS any_failed
+FROM og.obligation o
+WHERE o.state = 'DELIVERING' AND o.window_end <= %(now)s
 """
 _DUE_RENOMINATION_SQL = """
 SELECT DISTINCT contract_id FROM og.renomination_point
 WHERE scheduled_at <= %(now)s AND exercised_at IS NULL
 """
 _HEARTBEAT_TS_SQL = "SELECT ts FROM og.heartbeat WHERE process = %(process)s"
+_NEXT_EPOCH_SQL = "SELECT COALESCE(MAX(epoch), 0) + 1 FROM og.lease_state"
 _INSERT_COMMAND_BATCH_SQL = """
 INSERT INTO og.command_batch
     (command_batch_id, cycle_id, ledger_version, submission_id, command_count, merkle_root,
@@ -29,6 +44,18 @@ VALUES (%(command_batch_id)s, %(cycle_id)s, %(ledger_version)s, %(submission_id)
         %(merkle_root)s, %(trace_pre_image_id)s)
 """
 _NOTIFY_SQL = "SELECT pg_notify('og_command_batch', %(payload)s)"
+
+
+#: Review #8: SELECTED obligations older than `before`, and whether `ledger.reserve()` already wrote both
+#: an active reservation and a commitment for them.
+_STUCK_SELECTED_SQL = """
+SELECT o.obligation_id,
+       EXISTS (SELECT 1 FROM og.commitment c WHERE c.obligation_id = o.obligation_id)
+       AND EXISTS (SELECT 1 FROM og.reservation r
+                   WHERE r.obligation_id = o.obligation_id AND r.released_at IS NULL)
+FROM og.obligation o
+WHERE o.state = 'SELECTED' AND o.updated_at < %(before)s
+"""
 
 
 class PgEngineBackend:
@@ -42,6 +69,24 @@ class PgEngineBackend:
             await cur.execute(_PENDING_ADMISSION_SQL)
             rows = await cur.fetchall()
         return [row[0] for row in rows]
+
+    async def obligations_due_for_delivery(self, now: datetime) -> list[UUID]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_DUE_FOR_DELIVERY_SQL, {"now": now})
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
+    async def obligations_due_for_close(self, now: datetime) -> list[ClosingObligation]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_DUE_FOR_CLOSE_SQL, {"now": now})
+            rows = await cur.fetchall()
+        return [ClosingObligation(obligation_id=row[0], any_interval_failed=bool(row[1])) for row in rows]
+
+    async def stuck_selected(self, before: datetime) -> list[StuckSelected]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_STUCK_SELECTED_SQL, {"before": before})
+            rows = await cur.fetchall()
+        return [StuckSelected(obligation_id=row[0], reserved=bool(row[1])) for row in rows]
 
     async def due_renomination_contract_ids(self, now: datetime) -> list[UUID]:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -58,6 +103,12 @@ class PgEngineBackend:
             return None
         last_ts: datetime = row[0]
         return (now - last_ts).total_seconds()
+
+    async def next_epoch(self) -> int:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_NEXT_EPOCH_SQL)
+            row = await cur.fetchone()
+        return int(row[0]) if row else 1
 
     async def insert_command_batch(self, row: CommandBatchRow) -> None:
         # K10: must be durably committed before `notify_guardian` wakes the guardian -- without an

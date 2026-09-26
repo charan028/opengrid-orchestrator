@@ -23,7 +23,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple, Protocol
 
-from opengrid.core.models.mqtt import ScadaBankSignal, ScadaUtilityInstruction, Telemetry
+from prometheus_client import Counter
+
+from opengrid.core.models.mqtt import Ack, ScadaBankSignal, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.core.physics import (
     DEFAULT_ETA_D,
@@ -31,6 +33,7 @@ from opengrid.core.physics import (
     HubParams,
     bank_capability,
     hub_capability,
+    hub_ramp_kw_per_s,
     recharge_headroom,
 )
 from opengrid.core.timeutil import is_stale
@@ -39,6 +42,12 @@ from opengrid.platform.metrics import hubs as hubs_gauge
 from opengrid.platform.metrics import telemetry_fresh_ratio
 
 logger = logging.getLogger(__name__)
+
+fleet_rows_dropped_total = Counter(
+    "og_fleet_rows_dropped_total",
+    "Buffered fleet rows dropped after failed database writes (oldest first, bounded requeue).",
+    labelnames=("kind",),  # telemetry | ack
+)
 
 HubHealth = str  # "online" | "stale" | "offline" | "fault" -- see _classify_health
 
@@ -72,6 +81,13 @@ class HubCapabilitySnapshot(NamedTuple):
     reserve_kwh: float | None = None
     e_kwh: float | None = None
     eta_d: float = DEFAULT_ETA_D
+    # Measured power now (+charge/-discharge; `None` when excluded) and the hub's G-04 ramp bound, so
+    # the engine can ramp each per-hub setpoint from where the hub actually is (K4).
+    p_kw: float | None = None
+    ramp_kw_per_s: float = 0.0
+    # Nameplate discharge kW (`params.p_kw`) regardless of health/SoC: lets the allocator attribute a
+    # shortfall to a device fault (L0) or the reserve floor (L1), K13.
+    rated_kw: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,13 +119,15 @@ class FleetBackend(Protocol):
 
     async def copy_telemetry(self, rows: list[TelemetryRow]) -> None: ...
 
-    async def record_scada_observation(self, signal: ScadaBankSignal) -> None:
-        """Persists one SCADA bank reading to `og.feed_obs` (source='scada') -- the ONLY writer of that
-        row shape (dispatch-live pass: this was previously missing entirely, so `og.feed_obs
-        WHERE source='scada'` -- which both `opengrid.guardian.repo.PgBankStatePort`'s G-03 bank-kva
-        check and `opengrid.health`'s `ALR-SCADA-OVERLOAD` alert already read from -- never had a row to
-        find, no matter how fresh the in-process `bank_scada_signal()` cache was, since those are
-        separate processes)."""
+    async def insert_acks(self, acks: list[Ack]) -> None:
+        """Persists hub command acknowledgements to `og.command_ack` (idempotent per batch/hub).
+        Called in batch from `flush`, never per message."""
+        ...
+
+    async def record_scada_observations(self, signals: list[ScadaBankSignal]) -> None:
+        """Persists SCADA bank readings to `og.feed_obs` (source='scada') -- the ONLY writer of that row
+        shape, read by other processes (`opengrid.guardian.repo.PgBankStatePort`'s G-03 bank-kVA check,
+        `opengrid.health`'s `ALR-SCADA-OVERLOAD`). Called in batch from `flush`, never per message."""
         ...
 
 
@@ -155,6 +173,8 @@ _hubs: dict[str, _HubRuntime] = {}
 _banks: dict[str, _BankRuntime] = {}
 _pending_telemetry: list[TelemetryRow] = []
 _bank_scada: dict[str, ScadaBankSignal] = {}
+_pending_scada: dict[str, ScadaBankSignal] = {}  # latest unpersisted reading per bank, for `flush`
+_pending_acks: list[Ack] = []  # hub acknowledgements not yet written, for `flush`
 _utility_instructions: dict[str, ScadaUtilityInstruction] = {}
 
 
@@ -171,6 +191,8 @@ def configure(backend: FleetBackend, cfg: Config) -> None:
     _banks.clear()
     _pending_telemetry.clear()
     _bank_scada.clear()
+    _pending_scada.clear()
+    _pending_acks.clear()
     _utility_instructions.clear()
 
 
@@ -299,9 +321,33 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
     backend = _require_backend()
     now = now or datetime.now(UTC)
 
+    # Each buffer is taken before its write; on a failed write the rows go back in front of anything that
+    # arrived meanwhile (bounded: the oldest are dropped and counted), so a database error never silently
+    # loses telemetry/SCADA/ack evidence (review #13). The first failure is re-raised after requeueing.
+    failure: Exception | None = None
     rows, _pending_telemetry[:] = list(_pending_telemetry), []
     if rows:
-        await backend.copy_telemetry(rows)
+        try:
+            await backend.copy_telemetry(rows)
+        except Exception as exc:
+            failure = exc
+            _requeue(_pending_telemetry, rows, "telemetry")
+    scada = list(_pending_scada.values())
+    _pending_scada.clear()
+    if scada:
+        try:
+            await backend.record_scada_observations(scada)
+        except Exception as exc:
+            failure = failure or exc
+            for signal in scada:  # keep a newer reading that arrived meanwhile
+                _pending_scada.setdefault(signal.bank_id, signal)
+    acks, _pending_acks[:] = list(_pending_acks), []
+    if acks:
+        try:
+            await backend.insert_acks(acks)
+        except Exception as exc:
+            failure = failure or exc
+            _requeue(_pending_acks, acks, "ack")
 
     states: list[HubState] = []
     health_counts: dict[str, int] = {"online": 0, "stale": 0, "offline": 0, "fault": 0}
@@ -342,7 +388,25 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
         ratio = sum(1 for f in flags if f) / len(flags) if flags else 1.0
         telemetry_fresh_ratio.labels(zone=zone).set(ratio)
 
+    if failure is not None:
+        raise failure
     return FlushStats(telemetry_rows=len(rows), hub_states=len(states))
+
+
+#: Most rows of one kind held for a retry after failed writes (~50 s of telemetry at 2,000 hubs).
+REQUEUE_MAX_ROWS = 50_000
+
+
+def _requeue(buffer: list[Any], failed: list[Any], kind: str) -> None:
+    """Put `failed` back ahead of rows buffered since, keeping at most `REQUEUE_MAX_ROWS` (newest)."""
+    merged = failed + buffer
+    dropped = max(0, len(merged) - REQUEUE_MAX_ROWS)
+    if dropped:
+        fleet_rows_dropped_total.labels(kind=kind).inc(dropped)
+        logger.error(
+            "fleet persistence backlog full; dropping oldest rows", extra={"kind": kind, "dropped": dropped}
+        )
+    buffer[:] = merged[dropped:]
 
 
 async def ingest_scada_signal(payload: dict[str, Any]) -> None:
@@ -350,18 +414,30 @@ async def ingest_scada_signal(payload: dict[str, Any]) -> None:
     quality flag included, for the allocator's `DIST_DEFERRAL` PI loop and `capability()`'s charge
     headroom to read. `fleet` stores/aggregates only -- it never runs the PI loop itself (02b S12).
 
-    Also persists the reading to `og.feed_obs` (`record_scada_observation`) so `og-guardian`'s G-03
-    check and `og-settle`'s `ALR-SCADA-OVERLOAD` health alert -- both separate processes from `og-engine`,
-    which is the only one that ever receives this MQTT message -- can read it independently (dispatch-
-    live pass: this cross-process gap meant neither could ever see a SCADA reading at all)."""
+    The reading is also buffered (latest per bank) for `flush` to persist to `og.feed_obs`, where
+    `og-guardian`'s G-03 check and the `ALR-SCADA-OVERLOAD` alert read it from other processes. No I/O
+    here: a per-message commit on the MQTT ingest path fell behind under load (live 2026-09-26) and
+    delayed every hub's telemetry by minutes."""
     signal = ScadaBankSignal.model_validate(payload)
     _bank_scada[signal.bank_id] = signal
-    await _require_backend().record_scada_observation(signal)
+    _pending_scada[signal.bank_id] = signal
 
 
 def bank_scada_signal(bank_id: str) -> ScadaBankSignal | None:
     """Latest stored SCADA reading for `bank_id`, or `None` if none has ever arrived."""
     return _bank_scada.get(bank_id)
+
+
+async def ingest_ack(payload: dict[str, Any]) -> None:
+    """A3: record a hub's acknowledgement of a signed command batch (`<root>/ack/<hub_id>`). An accepted
+    ack sets the hub's `last_command_id` (persisted with `hub_state`); every ack, accepted or rejected
+    with its reason, is buffered for `flush` to write to `og.command_ack`. No I/O here (see
+    `ingest_scada_signal`)."""
+    ack = Ack.model_validate(payload)
+    runtime = _hubs.get(ack.hub_id)
+    if runtime is not None and ack.accepted:
+        runtime.last_command_id = ack.batch_id
+    _pending_acks.append(ack)
 
 
 async def ingest_utility_instruction(payload: dict[str, Any]) -> None:
@@ -443,6 +519,22 @@ async def capability(bank_id: str, interval_start: datetime) -> AvailableCapabil
     )
 
 
+def rated_discharge_kw(bank_id: str) -> float:
+    """The bank's STRUCTURAL discharge capability: every configured hub at its rated power, bounded by
+    the bank's kVA rating (`core.physics.bank_capability`), regardless of health or SoC. What admission
+    can ever hope for from this bank -- `capability()` is the live, transient figure. Raises
+    `LookupError` for an unknown bank."""
+    bank_rt = _banks.get(bank_id)
+    if bank_rt is None:
+        raise LookupError(f"unknown bank_id: {bank_id}")
+    return bank_capability([_hubs[h].params.p_kw for h in bank_rt.hub_ids], bank_rt.params)
+
+
+def known_hub_ids() -> list[str]:
+    """Every hub the twin has topology for (e.g. og-engine's periodic PQ characterization pass)."""
+    return list(_hubs.keys())
+
+
 def known_bank_ids() -> list[str]:
     """Every bank the twin has topology for (merge task, dispatch-live pass): the engine's
     `FleetGateway.bank_ids()` adapter reads this so `opengrid.allocator.run_cycle` covers every real
@@ -485,11 +577,13 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
         soc_kwh: float | None = None
         reserve_kwh: float | None = None
         e_kwh: float | None = None
+        p_kw: float | None = None
         if classification == "online":
             free_discharge_kw, _charge_kw = hub_capability(runtime.soc_kwh, runtime.params)
             soc_kwh = runtime.soc_kwh
             reserve_kwh = runtime.params.r_kwh
             e_kwh = runtime.params.e_kwh
+            p_kw = runtime.p_kw
         snapshots.append(
             HubCapabilitySnapshot(
                 hub_id=hub_id,
@@ -501,6 +595,9 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
                 reserve_kwh=reserve_kwh,
                 e_kwh=e_kwh,
                 eta_d=runtime.params.eta_d,
+                p_kw=p_kw,
+                ramp_kw_per_s=hub_ramp_kw_per_s(runtime.params),
+                rated_kw=runtime.params.p_kw,
             )
         )
     return snapshots

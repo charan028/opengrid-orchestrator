@@ -77,11 +77,22 @@ class FakeContractsRepo:
         return self.opportunities.get(opportunity_id)
 
     async def update_opportunity_state(
-        self, opportunity_id: UUID, *, state: str, reason_code: str | None, decided_at: datetime
+        self,
+        opportunity_id: UUID,
+        *,
+        state: str,
+        reason_code: str | None,
+        decided_at: datetime,
+        gate_id: UUID | None = None,
     ) -> Opportunity:
         current = self.opportunities[opportunity_id]
         updated = current.model_copy(
-            update={"state": state, "reason_code": reason_code, "decided_at": decided_at}
+            update={
+                "state": state,
+                "reason_code": reason_code,
+                "decided_at": decided_at,
+                "gate_id": gate_id if gate_id is not None else current.gate_id,
+            }
         )
         self.opportunities[opportunity_id] = updated
         return updated
@@ -115,6 +126,13 @@ class FakeContractsRepo:
                 "at_risk": current.at_risk if at_risk is None else at_risk,
             }
         )
+        self.obligations[obligation_id] = updated
+        return updated
+
+    async def set_obligation_at_risk(self, obligation_id: UUID, at_risk: bool) -> Obligation:
+        if obligation_id not in self.obligations:
+            raise LookupError(f"no such obligation: {obligation_id}")
+        updated = self.obligations[obligation_id].model_copy(update={"at_risk": at_risk})
         self.obligations[obligation_id] = updated
         return updated
 

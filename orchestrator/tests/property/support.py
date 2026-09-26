@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 from collections.abc import Coroutine
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -31,7 +32,7 @@ from opengrid.guardian.ports import (
     ProposedItem,
 )
 from opengrid.guardian.service import GuardianService
-from opengrid.ledger import ReservationRecord
+from opengrid.ledger import CommitmentRecord, ReservationRecord
 
 NOW = datetime(2026, 9, 26, 18, 0, 0, tzinfo=UTC)
 BANK_ID = "bank-000"
@@ -95,9 +96,19 @@ class World:
     last_lease: tuple[int, int] = (0, 0)
     l2: L2Instruction | None = None
     stopped: bool = False
+    members: list[HubSnapshot] | None = None  # None: no guardian-side bank capability read wired
 
     async def offset_from_ntp_ms(self) -> float:
         return self.offset_ms
+
+    async def member_snapshots(self, bank_id: str) -> list[HubSnapshot]:
+        return list(self.members or [])
+
+    async def append_calibration_verdict(self, calibration_id: UUID, payload: dict[str, object]) -> None:
+        return None
+
+    async def append_stop_release_verdict(self, operator_action_id: UUID, payload: dict[str, object]) -> None:
+        return None
 
     async def fetch(self, command_batch_id: UUID) -> ProposedBatch | None:
         return self.proposal
@@ -141,6 +152,7 @@ class World:
             leases=self,
             l2_instructions=self,
             safe_stop=self,
+            bank_members=self if self.members is not None else None,
         )
 
 
@@ -283,10 +295,17 @@ class InMemoryLedgerBackend:
     """Minimal `LedgerBackend` for the K2 property tests."""
 
     rows: dict[UUID, ReservationRecord] = field(default_factory=dict)
+    commitments: dict[UUID, CommitmentRecord] = field(default_factory=dict)
     _version: int = 0
+
+    def write_guard(self) -> AbstractAsyncContextManager[None]:
+        return nullcontext()
 
     async def next_version(self) -> int:
         self._version += 1
+        return self._version
+
+    async def current_version(self) -> int:
         return self._version
 
     async def active_reservations(self, bank_id: str, interval_start: datetime) -> list[ReservationRecord]:
@@ -302,9 +321,20 @@ class InMemoryLedgerBackend:
     async def get_reservation(self, reservation_id: UUID) -> ReservationRecord | None:
         return self.rows.get(reservation_id)
 
-    async def insert_reservations(self, records: list[ReservationRecord]) -> None:
+    async def insert_reservations(
+        self, records: list[ReservationRecord], commitments: list[CommitmentRecord]
+    ) -> None:
         for record in records:
             self.rows[record.reservation_id] = record
+        for commitment in commitments:
+            self.commitments[commitment.commitment_id] = commitment
+
+    async def release_uncommitted(self, *, reason: str, version: int) -> int:
+        committed = {c.obligation_id for c in self.commitments.values()}
+        orphans = [r for r in self.rows.values() if r.is_active and r.obligation_id not in committed]
+        for record in orphans:
+            await self.mark_released(record.reservation_id, reason=reason, version=version)
+        return len(orphans)
 
     async def mark_released(self, reservation_id: UUID, *, reason: str, version: int) -> None:
         self.rows[reservation_id] = replace(

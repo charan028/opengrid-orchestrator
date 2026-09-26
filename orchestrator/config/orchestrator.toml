@@ -69,6 +69,8 @@ hysteresis_usd_per_mwh = 5
 key_path = "/etc/opengrid/guardian_ed25519.key"
 verdict_timeout_ms = 300
 clock_offset_max_ms = 200
+# Two-person stop RELEASE allow-list (og-api user ids); named by the owner 2026-09-26 (dev accounts).
+stop_release_authorised_operators = ["og-op-a", "og-op-b"]
 
 [safestop]
 key_path = "/etc/opengrid/safestop_ed25519.key"
@@ -77,6 +79,8 @@ ramp_zone_s = 60
 ramp_fleet_s = 120
 
 [health]
+# Cycle-latency alert source (og-engine's [metrics].engine_port).
+engine_metrics_url = "http://127.0.0.1:9101/metrics"
 heartbeat_interval_s = 5
 heartbeat_miss_threshold = 3
 hub_stale_s = 6
@@ -101,8 +105,32 @@ bind_port = 8080
 sse_heartbeat_s = 15
 csrf_allowed_hosts = ["base.tocy-net.net"]
 
+[api.roles]
+# The literal Apache accounts "operator"/"viewer" still map by name; named accounts are listed here.
+operator = ["operator", "og-op-a", "og-op-b"]
+viewer = ["viewer"]
+
 [ui]
 base_path = "/og"
 
 [metrics]
 bind_host = "127.0.0.1"
+# og-engine /metrics (loopback only): cycle latency, gate duration, flush lag, MQTT ingest lag.
+engine_port = 9101
+
+[assets]
+# Asset-health drift sweep in og-settle (WATCH -> guardian-signed calibration, DEGRADED -> work order).
+# OFF 2026-09-26 10:00: enabling it fleet-wide put 188 hubs in DEGRADED, 4 in QUARANTINED and opened 192
+# work orders within 10 minutes (drift thresholds vs. the simulator's natural drift); re-enable only after tuning.
+drift_enabled = false
+drift_interval_s = 60.0
+
+[pq_ingest]
+# Waveform ingest (06-service-profiles-and-power-quality.md S6.4-6.5): summaries are buffered in og-engine
+# and written in one batch every flush_interval_s; raw captures go to blob_store_dir.
+summary_buffer_max = 20000
+flush_batch_size = 500
+flush_interval_s = 2.0
+blob_store_dir = "/var/lib/opengrid/pq_waveform"
+# og.hub_inverter_pq characterization from measured summaries (one batched pass per interval).
+characterization_interval_s = 300.0

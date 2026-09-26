@@ -45,6 +45,9 @@ import highspy
 from opengrid.selector.types import ModelInputs
 
 _EPS = 1e-9
+#: C15 terminal-energy shortfall cost ($/kWh below the next-day floor, i.e. $1,000/MWh): above every
+#: MVP-S energy/capacity value, so energy is only drawn below the floor when a hard constraint needs it.
+TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH = 1.0
 _MIN_MEANINGFUL_KW = 1e-6  # below this, treat capacity as exactly 0 -- avoids HiGHS "tiny coefficient"
 # numerical errors on pathologically small (but nonzero) capacity readings.
 
@@ -186,6 +189,7 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
     charge_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
     soc_balance_rows: dict[tuple[str, int, str], highspy.highs_cons] = {}
     terminal_soc_rows: dict[tuple[str, str], highspy.highs_cons] = {}
+    terminal_shortfall_vars: dict[tuple[str, str], highspy.highs_var] = {}
 
     for bank in inputs.banks:
         if not bank.models_soc:
@@ -219,9 +223,16 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     - bank.self_discharge_kwh_per_h * dt_h
                 )
 
+            # C15 as a penalized target, not a hard floor: `terminal SoC >= initial` was infeasible
+            # whenever the bank cannot recharge within the horizon (no charge headroom, or just the
+            # unavoidable self-discharge), which forced every live gate to RULE_FALLBACK (2026-09-26).
+            # The shortfall below the floor costs TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH, above any
+            # MVP-S energy value, so the LP only dips below it when a hard constraint requires it.
             terminal_t = intervals[-1] + 1
+            shortfall = highs.addVariable(lb=0.0)
+            terminal_shortfall_vars[bank.bank_id, scenario.scenario] = shortfall
             terminal_soc_rows[bank.bank_id, scenario.scenario] = highs.addConstr(
-                soc_vars[bank.bank_id, terminal_t, scenario.scenario]
+                soc_vars[bank.bank_id, terminal_t, scenario.scenario] + shortfall
                 >= bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh
             )
 
@@ -268,6 +279,12 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     # w_b, a per-bank wheeling tariff, is not yet a modeled parameter anywhere in this
                     # codebase -- see the module's final-report note).
                     obj_terms.append(-scenario.probability * dt_h * (price / 1000.0) * charge)
+
+    probability_by_scenario: dict[str, float] = {s.scenario: s.probability for s in inputs.scenarios}
+    for (_bank_id, scenario_name), shortfall in terminal_shortfall_vars.items():
+        obj_terms.append(
+            -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH * shortfall
+        )
 
     if obj_terms:
         objective = obj_terms[0]

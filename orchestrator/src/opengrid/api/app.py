@@ -4,13 +4,16 @@ mount. `create_app()` is the fixed public entry point (`orchestrator/INTERFACES.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from importlib import import_module
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from psycopg_pool import AsyncConnectionPool
 
 from opengrid.api.csrf import CSRFMiddleware
 from opengrid.api.proposals import ProposalStore
@@ -22,6 +25,7 @@ from opengrid.contracts.pg_repo import PgContractsRepo
 from opengrid.ledger import ReservationError
 from opengrid.platform.config import ConfigError, load_config
 from opengrid.platform.db import make_pool
+from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.log import configure_logging
 from opengrid.platform.mqtt import SchemaValidationError
 from opengrid.trace.store import TraceStore
@@ -45,11 +49,39 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `api` configuring its own repo/trace pair here is the intended reuse (single owner of the
     # write logic, BUILD.md S1 "no duplicated functions"), not a second, independent write path.
     configure_contracts(PgContractsRepo(pool), trace_store)
+    heartbeat_task = asyncio.create_task(
+        heartbeat_loop(pool, interval_s=float(cfg.get("health.heartbeat_interval_s", DEFAULT_HEARTBEAT_S)))
+    )
     logger.info("og-api started", extra={"database": cfg.postgres_database})
     try:
         yield
     finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
         await pool.close()
+
+
+DEFAULT_HEARTBEAT_S = 5.0
+_PROCESS_NAME = "api"  # opengrid.health.model.ALL_PROCESSES
+
+
+async def heartbeat_loop(
+    pool: AsyncConnectionPool,
+    *,
+    interval_s: float,
+    write: Callable[[AsyncConnectionPool, str], Awaitable[None]] = write_heartbeat,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """og-api's process heartbeat (02b S6.4). Without it the health evaluator reported `api` down
+    permanently (ALR-PROCESS-DOWN open since the first deploy, live 2026-09-26). A failed write is
+    logged and retried on the next beat; it never takes the API down."""
+    while True:
+        try:
+            await write(pool, _PROCESS_NAME)
+        except Exception:
+            logger.exception("og-api heartbeat write failed")
+        await sleep(interval_s)
 
 
 def _install_exception_handlers(app: FastAPI) -> None:

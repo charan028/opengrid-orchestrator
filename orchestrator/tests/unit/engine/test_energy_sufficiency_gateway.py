@@ -105,6 +105,92 @@ class _FakeTraceBackend:
 
 
 @pytest.fixture(autouse=True)
+def _flags(monkeypatch):
+    """Records `contracts.set_obligation_at_risk` calls (the obligation-row flag, lead finding 4)."""
+    calls: list[tuple[str, bool]] = []
+
+    async def _fake_set(obligation_id, at_risk, *, reason_code, payload=None):
+        calls.append((str(obligation_id), at_risk))
+
+    monkeypatch.setattr(gw.contracts, "set_obligation_at_risk", _fake_set)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _alert_clears(monkeypatch):
+    """Records `clear_open_alerts` calls as (rule, detail -> matches) predicates to probe."""
+    calls: list = []
+
+    async def _fake_clear(pool, rule, matches):
+        calls.append((rule, matches))
+        return 0
+
+    monkeypatch.setattr(gw, "clear_open_alerts", _fake_clear)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _open_alerts(monkeypatch):
+    """Details of ALR-ENERGY-SHORTFALL-RISK alerts 'left open by a previous engine' (default none)."""
+    details: list[dict] = []
+
+    async def _fake_open(pool, rule):
+        return list(details)
+
+    monkeypatch.setattr(gw, "open_alert_details", _fake_open)
+    return details
+
+
+async def test_an_alert_left_open_is_adopted_not_raised_again(
+    monkeypatch, _open_alerts, _alert_clears, _patch_alert_raising
+):
+    """Review #14: after a restart the first run cleared and re-raised a still-valid alert, losing its
+    ack state. An obligation whose alert is still open and still at risk is adopted: no new alert, and
+    the open one is not cleared."""
+    obligation_id = uuid4()
+    _open_alerts.append({"obligation_id": str(obligation_id)})
+    rows = [(obligation_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=None)]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    results = await gateway.run(NOW)
+
+    assert results[0].at_risk
+    assert _patch_alert_raising == []  # not raised a second time
+    ((_rule, matches),) = _alert_clears
+    assert not matches({"obligation_id": str(obligation_id)})  # still open
+
+
+async def test_the_hook_clears_its_own_energy_alerts(monkeypatch, _alert_clears):
+    """Health only auto-clears its own rules, so ALR-ENERGY-SHORTFALL-RISK is cleared here: on the first
+    run (alerts a previous engine left open) and whenever an obligation leaves AT_RISK -- never for an
+    obligation that is still at risk."""
+    at_risk_id, fine_id = uuid4(), uuid4()
+    soc = {"value": None}
+    rows = [(at_risk_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=soc["value"])]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    await gateway.run(NOW)  # first run: at risk (no SoC), sweep leaves it alone
+    ((rule, matches),) = _alert_clears
+    assert rule == "ALR-ENERGY-SHORTFALL-RISK"
+    assert not matches({"obligation_id": str(at_risk_id)})
+    assert matches({"obligation_id": str(fine_id)})
+
+    await gateway.run(NOW)  # still at risk: no further clearing
+    assert len(_alert_clears) == 1
+
+    soc["value"] = 39.2
+    await gateway.run(NOW)  # recovered: its alert is cleared
+    assert len(_alert_clears) == 2
+    assert _alert_clears[1][1]({"obligation_id": str(at_risk_id)})
+
+
+@pytest.fixture(autouse=True)
 def _patch_alert_raising(monkeypatch):
     raised: list = []
 
@@ -137,13 +223,40 @@ async def test_ample_energy_obligation_is_not_flagged(monkeypatch, _patch_alert_
     status_writes = [
         c
         for c in pool.conns
-        if c.cursor_obj.executed and "og.obligation_energy_status" in (c.cursor_obj.executed[0][0] or "")
+        if any("og.obligation_energy_status" in (sql or "") for sql, _ in c.cursor_obj.executed)
     ]
     assert len(status_writes) == 1
-    _sql, params = status_writes[0].cursor_obj.executed[0]
+    _sql, params = next(e for e in status_writes[0].cursor_obj.executed if e[1])
     assert params["obligation_id"] == str(obligation_id)
     assert params["at_risk"] is False
     assert status_writes[0].committed is True
+
+
+async def test_energy_statuses_are_one_asynchronous_commit_per_cycle(monkeypatch):
+    """A11 (live 2026-09-26 06:04, host disk stall): every obligation's status row was its own synchronous
+    commit, one after another inside the dispatch tick -- 22 obligations = 22 fsyncs, and the tick's
+    energy_check phase reached 5.7 s. The display-only status rows now go out in one transaction with an
+    asynchronous commit (they are recomputed every 2 s); AT_RISK writes stay synchronous."""
+    rows = [
+        (uuid4(), "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
+        (uuid4(), "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
+    ]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=39.2)]
+    )
+    pool = _FakePool(rows)
+    await gw.EnergySufficiencyGateway(pool, TraceStore(_FakeTraceBackend())).run(NOW)
+
+    status_conns = [
+        c
+        for c in pool.conns
+        if any("og.obligation_energy_status" in (sql or "") for sql, _ in c.cursor_obj.executed)
+    ]
+    assert len(status_conns) == 1
+    executed = [sql for sql, _ in status_conns[0].cursor_obj.executed]
+    assert "synchronous_commit" in executed[0]
+    assert sum("og.obligation_energy_status" in s for s in executed) == 2
+    assert status_conns[0].committed is True
 
 
 async def test_missing_soc_flags_at_risk_and_raises_alert(monkeypatch, _patch_alert_raising):
@@ -180,8 +293,8 @@ async def test_two_obligations_sharing_a_bank_the_other_ones_energy_is_excluded_
     # drawing 5 kW for 2h (10 kWh required each) on the SAME single hub -- together they need 20 kWh,
     # more than the hub has, so at least one must be AT_RISK.
     rows = [
-        (obl_a, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
-        (obl_b, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
+        (obl_a, "bank-01", 10.0, NOW + timedelta(hours=2), uuid4()),
+        (obl_b, "bank-01", 10.0, NOW + timedelta(hours=2), uuid4()),
     ]
     monkeypatch.setattr(
         gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=20.0)]
@@ -193,3 +306,63 @@ async def test_two_obligations_sharing_a_bank_the_other_ones_energy_is_excluded_
 
     assert len(results) == 2
     assert any(r.at_risk for r in results)
+
+
+async def test_at_risk_alert_is_raised_on_entry_only(monkeypatch, _patch_alert_raising):
+    """Regression (live 2026-09-26): the gateway raised a new ALR-ENERGY-SHORTFALL-RISK alert and trace
+    row for every at-risk obligation on EVERY 2 s cycle (6,748 alerts in 6 minutes), stalling the
+    engine tick. One alert per entry into AT_RISK; a recovery re-arms it."""
+    obligation_id = uuid4()
+    rows = [(obligation_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    soc = {"value": None}
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=soc["value"])]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    await gateway.run(NOW)
+    await gateway.run(NOW + timedelta(seconds=2))
+    assert len(_patch_alert_raising) == 1
+
+    soc["value"] = 39.2  # recovered
+    await gateway.run(NOW + timedelta(seconds=4))
+    soc["value"] = None  # at risk again -> a new entry
+    await gateway.run(NOW + timedelta(seconds=6))
+    assert len(_patch_alert_raising) == 2
+
+
+async def test_query_is_scoped_to_remaining_energy_within_the_lookahead(monkeypatch, _patch_alert_raising):
+    """The SQL sums only not-yet-elapsed reservation energy of obligations delivering now or within the
+    look-ahead; the third column is kWh (not kW), so the gateway divides by the remaining hours."""
+    obligation_id = uuid4()
+    rows = [(obligation_id, "bank-01", 11.0, NOW + timedelta(hours=1), uuid4())]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=39.2)]
+    )
+    pool = _FakePool(rows)
+    gateway = gw.EnergySufficiencyGateway(pool, TraceStore(_FakeTraceBackend()), lookahead_s=600.0)
+
+    (result,) = await gateway.run(NOW)
+
+    sql, params = pool.conns[0].cursor_obj.executed[0]
+    assert "GROUP BY" in sql
+    assert params == {"now": NOW, "lookahead_end": NOW + timedelta(seconds=600)}
+    assert result.required_kwh == pytest.approx(11.0)
+
+
+async def test_at_risk_flag_is_set_on_entry_and_cleared_on_recovery(monkeypatch, _flags):
+    """Lead finding 4: the check traced and alerted but never set og.obligation.at_risk."""
+    obligation_id = uuid4()
+    rows = [(obligation_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    soc = {"value": None}
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=soc["value"])]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    await gateway.run(NOW)
+    await gateway.run(NOW + timedelta(seconds=2))
+    soc["value"] = 39.2
+    await gateway.run(NOW + timedelta(seconds=4))
+
+    assert _flags == [(str(obligation_id), True), (str(obligation_id), False)]

@@ -11,7 +11,9 @@ InitiatorKind = Literal["OPERATOR", "GUARDIAN", "SAFESTOP_AUTHORITY", "UTILITY"]
 
 
 class StopEventBackend(Protocol):
-    """Persistence for `og.stop_event` (02a S1.12). `safestop` is the only writer of ENGAGE rows."""
+    """Persistence for `og.stop_event` (02a S1.12). `safestop` is the only writer of stop rows: ENGAGE
+    rows it signed itself, and RELEASE rows only for guardian-signed events it has verified and
+    published (`SafestopService.relay_guardian_release`)."""
 
     async def insert_stop_event(
         self,
@@ -27,6 +29,11 @@ class StopEventBackend(Protocol):
         signature: str,
     ) -> None: ...
 
+    async def has_signature(self, signature: str) -> bool:
+        """Whether a `stop_event` row with exactly this signature exists -- i.e. this signed event has
+        already been published and recorded (relay idempotency)."""
+        ...
+
     async def latest_action(self, scope_kind: str, scope_ref: str) -> str | None:
         """Most recent `action` for this scope, or None if never stopped. Used only for observability
         (e.g. `main.py` refuses a redundant ENGAGE) -- never for release, which `safestop` can't do."""
@@ -37,3 +44,15 @@ class StopPublisher(Protocol):
     """Publishes the retained `<root>/stop/<scope>/<id>` MQTT message (topics.md)."""
 
     async def publish_retained(self, topic_suffix: str, payload: dict[str, Any]) -> None: ...
+
+    async def clear_retained(self, topic_suffix: str) -> None:
+        """Publish an empty retained payload: broker housekeeping that deletes the retained message on
+        the topic. Hubs ignore it (it never changes stop state, K8)."""
+        ...
+
+
+class ReleaseHousekeepingBackend(Protocol):
+    async def releases_due_for_clearing(self, *, retain_s: float, limit: int) -> list[dict[str, Any]]:
+        """Relayed guardian RELEASE events older than `retain_s` whose retained topic has not yet been
+        cleared (from og-safestop's own trace stream)."""
+        ...

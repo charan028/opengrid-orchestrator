@@ -282,6 +282,28 @@ async def run_settle_cycle(*, max_concurrency: int = _DEFAULT_MAX_CONCURRENCY) -
     return settled_count
 
 
+R_SETTLED = "R-SETTLED"
+
+
+async def close_settled_obligations() -> int:
+    """02a S2.1 `FULFILLED/SHORTFALL -> SETTLED`, once every interval of the obligation's window is
+    metered and its P&L (and, except HOME, invoice) rows are posted (`fetch_settleable_obligations`).
+    Idempotent: a settled obligation no longer matches the query, and a lost optimistic-lock race is
+    skipped until the next cycle. Traced by `opengrid.contracts` (SETTLEMENT, `R-SETTLED`). Returns the
+    number settled."""
+    from opengrid import contracts
+
+    settled = 0
+    for obligation_id in await _require_backend().fetch_settleable_obligations():
+        try:
+            await contracts.transition_obligation(obligation_id, "SETTLED", reason_code=R_SETTLED)
+        except Exception:
+            _logger.exception("could not settle obligation", extra={"obligation_id": str(obligation_id)})
+            continue
+        settled += 1
+    return settled
+
+
 async def run_trace_pruning_cycle() -> dict[str, int]:
     """Calls `opengrid.trace.TraceStore.checkpoint()` then `.prune()` on settle's cadence (02a S8.3,
     02b S1.2: "trace pruning ... runs on og-settle's cadence"), then, when a trace pool is configured,

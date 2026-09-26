@@ -116,14 +116,14 @@ def test_safestop_confirm_no_response_is_503(client, fake_store, monkeypatch) ->
     assert resp.status_code == 503
 
 
-def test_safestop_release_reports_not_implemented(client, fake_store) -> None:
-    """K8: og-safestop's stop-only key always refuses a RELEASE; no Tier-2 co-sign path exists yet --
-    the API must say so (501), never fabricate a released=True."""
+def test_safestop_release_request_is_step_one_of_two(client, fake_store) -> None:
+    """K8: a release is the guardian's two-person path; the request alone releases nothing and writes
+    no SAFE_STOP_RELEASE action (test_safestop_release.py covers the approval)."""
     resp = client.post(
         "/og/api/safestop/bank/bank-01/release", headers=OPERATOR_HEADERS, json={"reason": "clear"}
     )
-    assert resp.status_code == 501
-    assert fake_store.operator_actions[-1]["action_kind"] == "SAFE_STOP_RELEASE"
+    assert resp.status_code == 202
+    assert fake_store.operator_actions == []
 
 
 def test_safestop_confirm_expired_is_410(client, fake_proposals) -> None:

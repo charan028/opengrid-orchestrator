@@ -47,6 +47,32 @@
   <div id="safestop-propose-result" role="status"></div>
   <div id="safestop-confirm-result" role="status"></div>
 </section>
+
+<section class="og-panel" aria-label="Safe-stop release">
+  <h2>Release a safe stop (two operators)</h2>
+  <p class="stale-badge">One operator requests; a different operator reviews and approves. The guardian signs
+    the release only for two authorised operators, and og-safestop relays it to the hubs.</p>
+  <form id="release-request-form" class="og-grid" style="grid-template-columns: repeat(4, auto);"
+        hx-post="{{ base_path }}/fleet/safestop/release/request" hx-target="#safestop-release-result" hx-swap="outerHTML">
+    <label>Scope
+      <select name="scope">
+        <option value="fleet">Fleet</option>
+        <option value="zone">Zone</option>
+        <option value="bank">Bank</option>
+      </select>
+    </label>
+    <label>Scope id (zone or bank) <input type="text" name="scope_id"></label>
+    <label>Reason <input type="text" name="reason" required></label>
+    <button class="btn btn-danger" type="submit">Request release (operator 1)</button>
+  </form>
+  <form id="release-review-form" class="og-grid" style="grid-template-columns: repeat(2, auto);"
+        hx-post="{{ base_path }}/fleet/safestop/release/review" hx-target="#release-review-dialog" hx-swap="innerHTML">
+    <label>Release request id <input type="text" name="proposal_id" required></label>
+    <button class="btn btn-danger" type="submit">Review and approve (operator 2)</button>
+  </form>
+  <div id="release-review-dialog"></div>
+  <div id="safestop-release-result" role="status"></div>
+</section>
 {% endif %}
 
 <section class="og-panel" aria-label="Bank / hub table">

@@ -8,6 +8,7 @@ via re-authentication/key-rotation, one forced retry, before this helper is invo
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from dataclasses import dataclass
 
@@ -19,6 +20,15 @@ RETRY_CAP_S = 8.0
 MAX_RETRIES = 2
 NON_RETRYABLE_STATUS = frozenset({400, 401, 403, 404, 422})
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+# httpx logs "HTTP Request: {method} {url} ..." at INFO for every call, full query string included.
+# ERCOT/NWS never put a secret in the URL (bearer token and subscription key are headers), but EIA's
+# API only documents `api_key` as a query parameter (feeds.eia) -- so at the root logger's default
+# INFO level (platform.log.configure_logging) that one line put the EIA key in plain text in every
+# journalctl entry for a successful poll (BUILD.md S6 "never print, log or commit secret values";
+# confirmed live). Raising httpx's own logger to WARNING here, in the one module every feeds HTTP call
+# goes through, closes that leak without touching platform/log.py's shared root configuration.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @dataclass

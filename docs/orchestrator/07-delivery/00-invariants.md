@@ -19,6 +19,22 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
 | **K12** | **Time quality.** The guardian refuses to sign when its own clock quality (offset from NTP) exceeds its limit, because leases, epochs and jitter depend on time | P1/P6 | guardian G-20 (time quality) | Hold | Negative test with a skewed clock |
 | **K13** | **Commitment lock.** A committed obligation's allocation $\hat y_{o,b,t}$ is never reduced or reassigned to a different obligation before fulfilment or its next agreed re-nomination point. The only exceptions are L0, L1, L2 or physical infeasibility (reason codes `R-COMMIT-LOCK-OVERRIDE-L0/L1/L2`, `R-COMMIT-LOCK-INFEASIBLE`) or the audited §7.4 release (`R-AS-RELEASE`, default off). Substituting hubs within the same obligation is allowed (`R-SUBSTITUTION`) | P4 | selector (C24 freeze) + allocator (subtract ŷ at S2) + ledger release check → guardian G-19 | Shortfall recorded against the same obligation, never a reallocation | Property test: random arrivals and prices; FR-ARB-014 fixtures |
 
+**Additions (2026-09-26, owner decisions):**
+
+- **K13, best effort after a shortfall.** A mid-window SHORTFALL never stops dispatch for the rest of the window.
+  - The obligation stays served at the maximum feasible kW, as fast and at as high quality as possible: substitution
+    first, then restoring the full commitment as soon as the constraint clears.
+  - It is marked AT_RISK while short, and settlement uses the actual delivered energy.
+  - The shortfall is recorded against the same obligation; capacity is never reallocated.
+- **K13, commitments are over a period.** A commitment is fulfilled over its window either on a **fixed** basis
+  (scheduled kW) or on a **need** basis. Need basis applies to measured closed-loop profiles such as DATA_CENTER and
+  PIPELINE_AC, where the committed kW is a **reserved maximum**:
+  - the reserved capacity stays locked to that obligation and is never reassigned (K2/K13);
+  - delivered kW follows the customer's measured need (`R-GRANT-CLOSED-LOOP`).
+  - The guardian (G-19) accepts a need-basis grant below the reserved maximum only after its own check that the
+    obligation's profile is `MEASURED_FEEDBACK` and that the unused reservation isn't granted to any other obligation.
+  - The invariant checker counts need-basis delivery below the maximum as compliant.
+
 **Additions (2026-09-25):**
 
 - **K1 / K13 energy:** "never below reserve" and the commitment lock are enforced on ENERGY, not only power. Every

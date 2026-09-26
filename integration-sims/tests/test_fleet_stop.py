@@ -38,8 +38,8 @@ def test_bank_scope_stops_only_that_bank() -> None:
 
 def test_release_clears_the_stop() -> None:
     registry = StopRegistry()
-    registry.engage("zone", "LZ_NORTH")
-    registry.release("zone", "LZ_NORTH")
+    registry.engage("zone", "LZ_NORTH", stop_id="s1", issued_at=100.0)
+    assert registry.release_stop("zone", "LZ_NORTH", "s1", issued_at=200.0)
     assert registry.is_stopped("LZ_NORTH", "bank-000") is False
 
 
@@ -142,3 +142,23 @@ def test_missing_signature_is_rejected(
     event = _stop_event(safestop_key, action="ENGAGE")
     del event["signature"]
     assert verify_stop_event(event, safestop_key.public_key(), guardian_key.public_key()) == "BAD_SIGNATURE"
+
+
+@pytest.mark.parametrize("approver", [None, "", "operator-1", " OPERATOR-1 "])
+def test_release_without_a_distinct_second_approver_is_rejected(
+    safestop_key: Ed25519PrivateKey, guardian_key: Ed25519PrivateKey, approver: str | None
+) -> None:
+    """K8 Tier 2: even a guardian-signed RELEASE needs two people (requester operator-1 + approver)."""
+    event = _stop_event(guardian_key, action="RELEASE", key_id="guardian-1")
+    event["approver_ref"] = approver
+    fields = ("stop_id", "scope", "scope_id", "action", "reason", "issued_by", "issued_at", "approver_ref")
+    event["signature"] = sign(guardian_key, {k: event[k] for k in fields})
+    assert (
+        verify_stop_event(event, safestop_key.public_key(), guardian_key.public_key()) == "NOT_TIER2_APPROVED"
+    )
+
+
+def test_unknown_action_is_rejected(safestop_key: Ed25519PrivateKey, guardian_key: Ed25519PrivateKey) -> None:
+    event = _stop_event(guardian_key, action="RELEASE")
+    event["action"] = "PAUSE"
+    assert verify_stop_event(event, safestop_key.public_key(), guardian_key.public_key()) == "UNKNOWN_ACTION"

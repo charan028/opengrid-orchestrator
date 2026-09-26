@@ -472,7 +472,7 @@ def infer_wire_target_kind(entry: AnomalyType, target: str) -> str:
     return entry.wire_target_kind
 
 
-def as_list() -> list[dict]:
+def as_list() -> list[dict[str, Any]]:
     return [
         {
             "id": a.id,

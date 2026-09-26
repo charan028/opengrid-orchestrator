@@ -139,7 +139,9 @@ def test_pq_envelope_matches_schema():
 
 
 def test_pq_envelope_default_fleet_envelope_matches_schema():
-    envelope = pq.PowerQualityEnvelope(pq_envelope_id=uuid4(), customer_id=uuid4(), phase_config="SPLIT_PHASE")
+    envelope = pq.PowerQualityEnvelope(
+        pq_envelope_id=uuid4(), customer_id=uuid4(), phase_config="SPLIT_PHASE"
+    )
     schema = _load_schema("contracts/pq_envelope.schema.json")
     _assert_valid(_jsonable(envelope.model_dump(mode="json")), schema)
 
@@ -175,8 +177,15 @@ def test_telemetry_with_pq_block_matches_schema():
 
 def test_telemetry_without_pq_block_still_matches_schema():
     msg = mqtt.Telemetry(
-        hub_id="hub-1", bank_id="bank-1", zone="LZ_NORTH", ts=NOW, soc_kwh=5.0, p_kw=-1.0,
-        health="online", seq=1, epoch=1,
+        hub_id="hub-1",
+        bank_id="bank-1",
+        zone="LZ_NORTH",
+        ts=NOW,
+        soc_kwh=5.0,
+        p_kw=-1.0,
+        health="online",
+        seq=1,
+        epoch=1,
     )
     schema = _load_schema("mqtt/telemetry.schema.json")
     _assert_valid(msg.model_dump(mode="json"), schema)
@@ -190,7 +199,9 @@ def test_scada_bank_signal_new_enum_values_match_schema():
         ("FREQUENCY_HZ", "Hz"),
         ("THD_V_PCT", "%"),
     ]:
-        msg = mqtt.ScadaBankSignal(bank_id="bank-1", signal=signal, value=1.0, unit=unit, quality="good", ts=NOW)
+        msg = mqtt.ScadaBankSignal(
+            bank_id="bank-1", signal=signal, value=1.0, unit=unit, quality="good", ts=NOW
+        )
         _assert_valid(msg.model_dump(mode="json"), schema)
 
 
@@ -202,9 +213,16 @@ def test_scada_bank_signal_new_enum_values_match_schema():
 def test_waveform_summary_fast_block_matches_schema():
     """A publish carrying only the fast sub-block (harmonics omitted, S6.4a bandwidth mitigation)."""
     msg = pq.WaveformSummary(
-        hub_id="hub-1", bank_id="bank-1", zone="LZ_NORTH", ts=NOW,
-        v_rms_a=240.0, i_rms_a=10.0, freq_hz=60.01, pf_a=0.98,
-        sync_source="ptp", sync_quality_ns=50.0,
+        hub_id="hub-1",
+        bank_id="bank-1",
+        zone="LZ_NORTH",
+        ts=NOW,
+        v_rms_a=240.0,
+        i_rms_a=10.0,
+        freq_hz=60.01,
+        pf_a=0.98,
+        sync_source="ptp",
+        sync_quality_ns=50.0,
     )
     schema = _load_schema("mqtt/pq_waveform_summary.schema.json")
     _assert_valid(msg.model_dump(mode="json"), schema)
@@ -212,10 +230,17 @@ def test_waveform_summary_fast_block_matches_schema():
 
 def test_waveform_summary_with_harmonics_matches_schema():
     msg = pq.WaveformSummary(
-        hub_id="hub-1", bank_id="bank-1", zone="LZ_NORTH", ts=NOW,
-        v_rms_a=240.0, i_rms_a=10.0, freq_hz=60.01, pf_a=0.98,
+        hub_id="hub-1",
+        bank_id="bank-1",
+        zone="LZ_NORTH",
+        ts=NOW,
+        v_rms_a=240.0,
+        i_rms_a=10.0,
+        freq_hz=60.01,
+        pf_a=0.98,
         harmonics_i={"3": pq.HarmonicComponent(mag_pct=Decimal("1.2"), angle_deg=Decimal("40"))},
-        sync_source="gps", sync_quality_ns=20.0,
+        sync_source="gps",
+        sync_quality_ns=20.0,
     )
     schema = _load_schema("mqtt/pq_waveform_summary.schema.json")
     _assert_valid(_jsonable(msg.model_dump(mode="json")), schema)
@@ -223,10 +248,14 @@ def test_waveform_summary_with_harmonics_matches_schema():
 
 def test_waveform_raw_capture_header_matches_schema():
     header = pq.WaveformRawCaptureHeader(
-        hub_id="hub-1", phase_connection="ABC", ts=NOW,
+        hub_id="hub-1",
+        phase_connection="ABC",
+        ts=NOW,
         channels=["V_A", "V_B", "V_C", "I_A", "I_B", "I_C"],
-        sync_source="ptp", sync_quality_ns=50.0,
-        compression="delta_generic", trigger_reason="PQ_DEVIATION",
+        sync_source="ptp",
+        sync_quality_ns=50.0,
+        compression="delta_generic",
+        trigger_reason="PQ_DEVIATION",
     )
     schema = _load_schema("mqtt/pq_waveform_raw.schema.json")
     _assert_valid(header.model_dump(mode="json"), schema)
@@ -247,7 +276,12 @@ def test_waveform_capture_request_matches_schema():
 
 def test_calibration_command_matches_schema_and_signing_payload_excludes_signature():
     cmd = pq.CalibrationCommand(
-        calibration_id=uuid4(), hub_id="hub-1", epoch=1, seq=1, issued_at=NOW, expires_at=NOW,
+        calibration_id=uuid4(),
+        hub_id="hub-1",
+        epoch=1,
+        seq=1,
+        issued_at=NOW,
+        expires_at=NOW,
         reference=pq.CalibrationReference(phase_deg=0.0, freq_hz=60.0, amplitude_v=240.0, sync_source="ptp"),
         correction=pq.CalibrationCorrection(freq_hz=0.01, phase_deg=1.5),
         bounds=pq.CalibrationBounds(max_freq_hz=0.05, max_voltage_pct=2.0, max_phase_deg=5.0),
@@ -264,7 +298,10 @@ def test_calibration_command_matches_schema_and_signing_payload_excludes_signatu
 
 def test_calibration_ack_matches_schema():
     ack = pq.CalibrationAck(
-        calibration_id=uuid4(), hub_id="hub-1", applied=True, applied_at=NOW,
+        calibration_id=uuid4(),
+        hub_id="hub-1",
+        applied=True,
+        applied_at=NOW,
         resulting_offsets=pq.CalibrationOffsets(freq_hz=0.001, voltage_pct=0.1, phase_deg=0.2),
         status="APPLIED",
     )

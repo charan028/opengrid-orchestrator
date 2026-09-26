@@ -1,0 +1,28 @@
+{# safestop_release_result.html -- two-person safe-stop RELEASE fragment. Params:
+     release_request: dict|None (ProposalAccepted from the request step: proposal_id/summary/expires_in_s)
+     result: dict|None (approve step: released/scope/scope_ref/trace_id/detail)
+     status_code: int|None (the API's status code on failure: 403 same operator, 404/410 unknown/expired)
+     message: str|None (failure detail) #}
+<div id="safestop-release-result" role="status">
+  {% if release_request %}
+  <p>{% with status='caution', label='REQUESTED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ release_request.summary }}. Request id <code>{{ release_request.proposal_id }}</code> -- a second operator approves it
+    below within {{ release_request.expires_in_s|default(60) }} s.</p>
+  {% elif result and result.released %}
+  <p>{% with status='ok', label='RELEASED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Safe stop released for {{ result.scope }}:{{ result.scope_ref }}. Trace {{ result.trace_id|default('-') }}.</p>
+  {% elif result %}
+  <p>{% with status='warning', label='PENDING' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Approved; the guardian has not released {{ result.scope }}:{{ result.scope_ref }} yet
+    (it may refuse, e.g. an operator not on the allow-list). Trace {{ result.trace_id|default('-') }}.</p>
+  {% elif status_code == 403 %}
+  <p>{% with status='critical', label='REFUSED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The requesting operator cannot approve their own release. {{ message }}</p>
+  {% elif status_code in (410, 404) %}
+  <p>{% with status='caution', label='EXPIRED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The release request expired or is unknown -- request again. {{ message }}</p>
+  {% else %}
+  <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message|default('the release could not be submitted') }}</p>
+  {% endif %}
+</div>

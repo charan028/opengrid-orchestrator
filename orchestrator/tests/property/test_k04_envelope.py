@@ -13,7 +13,12 @@ from opengrid.core.limits import (
     check_hub_ramp,
 )
 from opengrid.core.physics import BankParams, HubParams, apply_ramp_limit, bank_capability
+from opengrid.guardian.ports import BankSnapshot, ProposedItem
 
+from .support import BASE_BANK, HUB_ID, Signer, evaluate, make_hub, passing_world
+
+_SIGNER = Signer.new()
+_FAST_HUB = HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0, ramp_kw_per_s=100.0)
 _EPSILON = 1e-9
 _kw = st.floats(min_value=-100.0, max_value=100.0, allow_nan=False)
 _positive = st.floats(min_value=0.1, max_value=100.0, allow_nan=False)
@@ -76,3 +81,38 @@ def test_k04_the_feeder_ceiling_binds_firm_events_and_only_firm_events(delta_kw,
 
     expected = (not is_firm) or abs(delta_kw) <= ceiling * dt_s / 60.0 + _EPSILON
     assert result.ok == expected
+
+
+_guardian_banks = st.builds(
+    BankParams,
+    kva_rating=st.floats(min_value=5.0, max_value=200.0),
+    reserve_kva=st.floats(min_value=0.0, max_value=3.0),
+)
+_setpoint = st.floats(min_value=-11.0, max_value=11.0, allow_nan=False)
+
+
+@given(st.floats(min_value=0.0, max_value=250.0), _setpoint, _setpoint, _guardian_banks)
+def test_k04_the_guardian_never_signs_a_batch_that_overloads_its_bank_in_either_direction(
+    load_kva, prev_kw, setpoint_kw, bank
+):
+    """G-03 on the guardian's own SCADA read: a signed batch either keeps |bank load + its net change|
+    within the rating net of reserve, or does not increase the loading magnitude (relief)."""
+    world = passing_world([ProposedItem(HUB_ID, setpoint_kw, "SELECTOR")])
+    world.hub = make_hub(soc_kwh=30.0, prev_p_kw=prev_kw, params=_FAST_HUB)
+    world.bank = BankSnapshot(bank, load_kva, feeder_id=None, feeder_ceiling_kw_per_min=None)
+
+    verdict = evaluate(world, _SIGNER)
+
+    if verdict.signature is not None:
+        projected = load_kva + setpoint_kw - prev_kw
+        limit = (bank.kva_rating - bank.reserve_kva) * 0.95
+        assert abs(projected) <= limit + _EPSILON or abs(projected) <= load_kva + _EPSILON
+
+
+@given(st.floats(min_value=0.0, max_value=250.0), _setpoint, st.floats(min_value=30.01, max_value=1e9))
+def test_k04_the_guardian_never_signs_on_a_stale_or_missing_bank_reading(load_kva, setpoint_kw, age_s):
+    world = passing_world([ProposedItem(HUB_ID, setpoint_kw, "SELECTOR")])
+    world.hub = make_hub(soc_kwh=30.0, prev_p_kw=setpoint_kw, params=_FAST_HUB)
+    world.bank = BankSnapshot(BASE_BANK, load_kva, None, None, bank_load_age_s=age_s)
+
+    assert evaluate(world, _SIGNER).signature is None

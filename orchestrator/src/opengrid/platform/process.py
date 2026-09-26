@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import time
 from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -53,3 +54,21 @@ async def run_forever(tick: TickFn, *, interval_s: float, process_name: str) -> 
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
     logger.info("stopped", extra={"proc_name": process_name})
+
+
+class Cadence:
+    """Due-check for one periodic job driven from a shared `run_forever` tick (one process, one SIGTERM
+    handler): due on the first call, then once at least `interval_s` has elapsed on the (injectable)
+    monotonic clock since it last ran. Used by og-settle's jobs and og-engine's waveform flush."""
+
+    def __init__(self, interval_s: float, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self.interval_s = interval_s
+        self._clock = clock
+        self._last: float | None = None
+
+    def due(self) -> bool:
+        now = self._clock()
+        if self._last is not None and now - self._last < self.interval_s:
+            return False
+        self._last = now
+        return True

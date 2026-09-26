@@ -62,10 +62,14 @@ class CommandBatch(_Wire):
     signature: str
 
     def signing_payload(self) -> dict[str, Any]:
-        """Fields covered by the Ed25519 signature, per interfaces/crypto.md S2.1 (excludes
-        key_id/signature)."""
-        data: dict[str, Any] = self.model_dump(mode="json", exclude={"key_id", "signature"})
+        """Fields covered by the Ed25519 signature: exactly the 7 listed in interfaces/crypto.md
+        S2.1, which is also exactly what the hub recomputes (ogsim.fleet.commands._SIGNED_FIELDS).
+        `precondition`/`lease` are not signed; including them (even as null) breaks verification."""
+        data: dict[str, Any] = self.model_dump(mode="json", include=set(COMMAND_BATCH_SIGNED_FIELDS))
         return data
+
+
+COMMAND_BATCH_SIGNED_FIELDS = ("batch_id", "bank_id", "epoch", "seq", "issued_at", "expires_at", "items")
 
 
 class Ack(_Wire):

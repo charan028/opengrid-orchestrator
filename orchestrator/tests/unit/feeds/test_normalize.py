@@ -288,3 +288,41 @@ def test_nws_forecast_three_series_and_f_to_c() -> None:
 def test_nws_missing_periods_raises() -> None:
     with pytest.raises(FeedDataError):
         nws_forecast_to_feed_obs({"properties": {"periods": []}}, recorded_at=RECORDED_AT)
+
+
+def test_nws_forecast_without_sky_cover_still_returns_temperature_and_dewpoint() -> None:
+    """Live defect: a real `/gridpoints/{office}/{x},{y}/forecast/hourly` response (confirmed against
+    grid EWX/156,91) never carries `skyCover` on a period at all -- that field only exists on the raw
+    `/gridpoints/{office}/{x},{y}` time-series product, a different payload shape entirely. Requiring it
+    made every real response raise `FeedDataError`, so og-feeds' NWS feed never recorded a single
+    success. `sky_cover` must be optional; temperature/dewpoint (which this endpoint does document)
+    must still come through."""
+    payload = {
+        "properties": {
+            "generatedAt": "2026-09-26T17:00:00+00:00",
+            "periods": [
+                {
+                    "number": 1,
+                    "name": "",
+                    "startTime": "2026-09-26T18:00:00-05:00",
+                    "endTime": "2026-09-26T19:00:00-05:00",
+                    "isDaytime": False,
+                    "temperature": 91,
+                    "temperatureUnit": "F",
+                    "temperatureTrend": None,
+                    "probabilityOfPrecipitation": {"unitCode": "wmoUnit:percent", "value": 0},
+                    "dewpoint": {"unitCode": "wmoUnit:degC", "value": 21.1},
+                    "relativeHumidity": {"unitCode": "wmoUnit:percent", "value": 45},
+                    "windSpeed": "5 mph",
+                    "windDirection": "SE",
+                    "icon": "https://api.weather.gov/icons/land/night/bkn?size=small",
+                    "shortForecast": "Mostly Cloudy",
+                    "detailedForecast": "",
+                }
+            ],
+        }
+    }
+    rows = nws_forecast_to_feed_obs(payload, recorded_at=RECORDED_AT)
+    assert {r.series for r in rows} == {"temperature", "dewpoint"}
+    temp = next(r for r in rows if r.series == "temperature")
+    assert temp.value == pytest.approx((91 - 32) * 5 / 9)
