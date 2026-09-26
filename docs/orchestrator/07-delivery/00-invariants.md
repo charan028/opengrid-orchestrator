@@ -1,4 +1,4 @@
-# MVP-S Canonical Invariants (K1–K14)
+# MVP-S Canonical Invariants (K1–K15)
 
 This is the single source of truth for invariant IDs. Every MVP-S document (02a, 02b, 03, 04) and every test uses
 these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-first-principles-review.md` §1.
@@ -21,12 +21,21 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
 
 **Additions (2026-09-26, owner decisions):**
 
-- **K13, best effort after a shortfall.** A mid-window SHORTFALL never stops dispatch for the rest of the window.
+- **K13, best effort after a shortfall (D-17).** A mid-window SHORTFALL never stops dispatch for the rest of the window.
   - The obligation stays served at the maximum feasible kW, as fast and at as high quality as possible: substitution
     first, then restoring the full commitment as soon as the constraint clears.
   - It is marked AT_RISK while short, and settlement uses the actual delivered energy.
   - The shortfall is recorded against the same obligation; capacity is never reallocated.
-- **K13, commitments are over a period.** A commitment is fulfilled over its window either on a **fixed** basis
+  - **Built:** `orchestrator/src/opengrid/engine/escalation.py:1-91` (sustain-cycle counter that turns a persistent
+    L0/L1/L2/infeasible signal into the `DELIVERING → SHORTFALL` edge, never a stop); best-effort continuation at
+    `orchestrator/src/opengrid/allocator/cycle.py:185-192,248-257` (`best_effort_reason`); reason codes at
+    `orchestrator/src/opengrid/core/reasons.py:49-60`; AT_RISK flagging at
+    `orchestrator/src/opengrid/contracts/__init__.py:220-239` (`set_obligation_at_risk`, traces `AT_RISK`/
+    `AT_RISK_CLEARED`) and `orchestrator/src/opengrid/engine/gateways.py:654-664`; the mid-window continuation
+    query at `orchestrator/src/opengrid/engine/gateways.py:111-117,213-231` (`o.state IN ('COMMITTED','DELIVERING',
+    'SHORTFALL')`); settlement on actual delivered energy is inherent to `meter_interval.delivered_kwh`
+    (`orchestrator/src/opengrid/settle/__init__.py:125-132`).
+- **K13, commitments are over a period (D-18).** A commitment is fulfilled over its window either on a **fixed** basis
   (scheduled kW) or on a **need** basis. Need basis applies to measured closed-loop profiles such as DATA_CENTER and
   PIPELINE_AC, where the committed kW is a **reserved maximum**:
   - the reserved capacity stays locked to that obligation and is never reassigned (K2/K13);
@@ -34,6 +43,61 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
   - The guardian (G-19) accepts a need-basis grant below the reserved maximum only after its own check that the
     obligation's profile is `MEASURED_FEEDBACK` and that the unused reservation isn't granted to any other obligation.
   - The invariant checker counts need-basis delivery below the maximum as compliant.
+  - **Built:** `og.service_profile.setpoint_source` incl. `MEASURED_FEEDBACK` at
+    `orchestrator/migrations/0010_service_profile.sql:55-56,71-72`; `R-GRANT-CLOSED-LOOP` at
+    `orchestrator/src/opengrid/core/reasons.py:42`; the guardian's own check at
+    `orchestrator/src/opengrid/guardian/checks.py:275-305` (`NEED_BASIS_SETPOINT_SOURCE`, `check_g19_need_basis`),
+    wired into signing at `orchestrator/src/opengrid/guardian/service.py:731-746,777-779`; need-basis settlement at
+    `orchestrator/src/opengrid/settle/__init__.py:134-146` and `orchestrator/src/opengrid/settle/performance.py:43-46`
+    (`is_need_basis_compliant`); the checker's compliant classification at
+    `orchestrator/src/opengrid/invariants/checks.py:341-343` and
+    `orchestrator/src/opengrid/invariants/queries.py:191-205`.
+- **K4, extended: flow-limit hierarchy (D-26, D-27).** The dispatcher models, and the guardian independently
+  re-checks, discharge/charge flow limits at every level, both directions (reverse flow included); missing data
+  fails closed:
+  - (a) hub/asset power at the derated $P_{max}(SoC,T)$: continuous rating, with the peak rating usable only within
+    its duration budget and a lease no longer than the peak duration;
+  - (b) per-home meter export/import, net of the home's own load, against the interconnection export limit and the
+    service rating;
+  - (c) service-transformer and feeder loading, both directions; no reverse flow at a feeder head or substation
+    unless the utility has confirmed bidirectional settings;
+  - (d) substation-asset POI import/export and substation-transformer limits;
+  - (e) hub, asset, fleet and feeder ramps, with no synchronized fleet steps (unchanged from the original K4 above).
+  - **Built today:** (e) is unchanged and enforced (`orchestrator/src/opengrid/core/limits.py:94-138`
+    `check_hub_ramp`/`check_fleet_ramp_cap`/`check_feeder_ramp_ceiling`, guardian G-04/G-05/G-06); (a)'s flat rated
+    power and energy-over-lease caps are enforced (`orchestrator/src/opengrid/core/limits.py:65-72`
+    `check_hub_power`, `orchestrator/src/opengrid/core/physics.py:63-104`
+    `hub_sustainable_discharge_kw`/`hub_sustainable_charge_kw`), but the SoC/temperature derating curve itself is
+    not; aggregate bank kVA (part of (c)) is enforced (`core/limits.py:75-91` `check_bank_kva`, guardian G-03).
+  - **Specified, not built:** the SoC/temperature derating curve; per-home meter export/import (b); per-service-
+    transformer and feeder/substation thermal loading and reverse-flow limits (c, beyond the existing ramp
+    ceiling); substation-asset POI/transformer limits (d) — there is no substation asset class in code (no
+    `SUBSTATION_BESS`, no substation `og.asset` table). The data-model groundwork for (a)-(d) exists as inert
+    fields only: `HubSnapshot.cell_temp_c`/`p_dis_max_kw`/`meter_kw`/`export_limit_kw`/`xfmr_id`
+    (`orchestrator/src/opengrid/allocator/models.py:53-57`) and `BankSnapshot.feeder_id`/`substation_id`
+    (`orchestrator/src/opengrid/allocator/models.py:75-76`) are carried but read by no check function yet. See
+    `09-optimizer-dispatcher-update.md` §1.9 (families F1-F7) and §2.6 (guardian checks G-02(changed)/G-26…G-32)
+    for the full target design (not edited here).
+- **K15 — territory (new) (D-20, D-21, D-27).** Three parts (`09-optimizer-dispatcher-update.md` §6, quoted here):
+  - A REG(u) obligation is reserved, granted and delivered only by assets inside utility $u$'s service territory.
+  - An asset inside a regulated territory takes FREE (ERCOT) opportunities only if $u$'s contract grants wholesale
+    access.
+  - Base's net injection at every boundary substation of $u$ stays ≤ 0 (energy is consumed inside the territory).
+    Charging is priced and settled under the asset's own territory tariff.
+  - Principle P2. Enforced at (target): contracts admission → selector C25 → allocator eligibility → guardian G-30
+    (+ G-29) → settle tariff attribution. Fail-safe (target): VETO the item; a shortfall is recorded against the
+    same obligation (K13 best effort, above).
+  - **Specified, not built.** No stage of the chain exists in code: `orchestrator/src/opengrid/contracts/admission.py`
+    has no market/territory check; `orchestrator/src/opengrid/selector/model.py` and `selector/gate.py` have no C25
+    rows; the guardian's built check set stops at G-20 (`orchestrator/src/opengrid/guardian/checks.py:1-2` lists
+    G-01…G-20; there is no G-29/G-30 anywhere in `guardian/checks.py` or `guardian/service.py`). The data-model
+    groundwork is in place but inert: `BankSnapshot.territory`/`free_access`
+    (`orchestrator/src/opengrid/allocator/models.py:74-81`) are carried fields nothing yet populates or reads (the
+    comment there names `opengrid.market.territory_of_zone`, a module that does not exist in this repo); the config
+    surface `orchestrator/config/tdsp_tariffs.toml:65-103` (`[zone_territory]`) documents AE/CPS/LCRA/RAYBN
+    territory by ERCOT settlement zone but says of itself "no selector/allocator/guardian code reads this table
+    yet." Proven by: none yet (target: a property test over random fleet/contract mixes, plus the `K15_*` checker
+    counters described in `09-optimizer-dispatcher-update.md` §6).
 
 **Additions (2026-09-25):**
 
@@ -60,4 +124,9 @@ G-14 trace pre-image present · G-15 L2 instruction · G-19 commitment lock · G
 imbalance (K14) · G-22 THD estimate/measurement (K14) · G-23 frequency/voltage deviation (K14) · G-24 ride-through
 and asset-state conformance (K14) · G-25 calibration-command safety (K14; bounds, rate limit, no active
 non-default-envelope grant on the target hub)** — G-21..G-25 defined in `06-service-profiles-and-power-quality.md`
-§5.3/§6.7. Other G-numbers (G-07/08/10-12/16-18) are deferred to later releases.
+§5.3/§6.7. Other G-numbers (G-07/08/10-12/16-18) are deferred to later releases. **G-26…G-32 are reserved (D-26,
+D-27; specified, not built)** for the K4 flow-limit families and the K15 territory checks proposed by
+`09-optimizer-dispatcher-update.md` §2.5/§2.6 (home meter export/import, service-transformer, feeder thermal,
+substation POI/transformer, territory market segregation, sustained-vs-peak, and the AS/firm/need-basis energy
+hold against headroom) — none exist in `orchestrator/src/opengrid/guardian/checks.py` or `guardian/service.py`
+today (the built set stops at G-20, plus the K14 checks G-21..G-25 above). Do not reuse G-26…G-32 for anything else.
