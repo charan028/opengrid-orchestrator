@@ -3,7 +3,7 @@
 {% block header_title %}Profitability{% endblock %}
 
 {% block header_actions %}
-<form method="get" action="{{ base_path }}/profitability" aria-label="Filter profitability" style="display:flex; gap:6px; align-items:center;">
+<form method="get" action="{{ base_path }}/profitability" aria-label="Filter profitability" class="og-toolbar">
   <label for="service">Service</label>
   <select id="service" name="service">
     <option value="" {% if not service %}selected{% endif %}>All</option>
@@ -26,7 +26,7 @@
 <div id="profitability-poll-wrapper"
      hx-get="{{ request.url.path }}{{ ('?' + request.url.query) if request.url.query else '' }}"
      hx-select="#profitability-poll-wrapper" hx-target="this" hx-swap="outerHTML" hx-trigger="every 30s">
-  <section class="og-grid" aria-label="Totals">
+  <section class="og-kpis" aria-label="Totals">
     {% with label='Revenue', value='%.2f'|format(table.totals.revenue), unit='USD', since_iso=generated_at, stale_after_s=60 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
     {% with label='Energy cost', value='%.2f'|format(table.totals.energy_cost), unit='USD', since_iso=generated_at, stale_after_s=60 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
     {% with label='Degradation', value='%.2f'|format(table.totals.degradation_cost), unit='USD', since_iso=generated_at, stale_after_s=60 %}{% include "_partials/kpi_tile.html" %}{% endwith %}
@@ -36,15 +36,16 @@
   </section>
 
   <section class="og-panel" aria-labelledby="pnl-heading">
+    <p class="og-panel-lead">Was the optimizer worth it? Revenue minus energy, degradation and penalties, per obligation, next to what a simple rule would have earned.</p>
     <h2 id="pnl-heading">Per obligation / day ({{ table.row_count }} rows)</h2>
-    {% with columns=[{"key": "obligation_id", "label": "Obligation"}, {"key": "service_type", "label": "Service"}, {"key": "customer_id", "label": "Customer"}, {"key": "revenue", "label": "Revenue", "numeric": true}, {"key": "energy_cost", "label": "Energy cost", "numeric": true}, {"key": "degradation_cost", "label": "Degradation", "numeric": true}, {"key": "penalty", "label": "Penalty", "numeric": true}, {"key": "net_value", "label": "Net", "numeric": true}, {"key": "rule_baseline_value", "label": "Baseline", "numeric": true}, {"key": "forgone_upside", "label": "Forgone", "numeric": true}], rows=table.rows, empty_message='No profitability data for this filter' %}
+    {% with columns=[{"key": "obligation_id", "label": "Obligation"}, {"key": "service_type", "label": "Service"}, {"key": "customer_id", "label": "Customer"}, {"key": "revenue", "label": "Revenue", "numeric": true}, {"key": "energy_cost", "label": "Energy cost", "numeric": true}, {"key": "degradation_cost", "label": "Degradation", "numeric": true}, {"key": "penalty", "label": "Penalty", "numeric": true}, {"key": "net_value", "label": "Net", "numeric": true}, {"key": "rule_baseline_value", "label": "Baseline", "numeric": true}, {"key": "forgone_upside", "label": "Forgone", "numeric": true}], rows=table.rows, empty_message='Nothing settled yet. Rows appear after an obligation is delivered and verified.' %}
       {% include "_partials/data_table.html" %}
     {% endwith %}
   </section>
 
   <section class="og-panel" aria-labelledby="lp-baseline-heading">
     <h2 id="lp-baseline-heading">LP vs rule baseline ({{ lp_vs_baseline.compared_count }} obligations)</h2>
-    <div id="lp-baseline-chart" style="height: 260px;" role="img" aria-label="Bar chart comparing LP net value to rule baseline"></div>
+    <div id="lp-baseline-chart" style="height: 260px;" role="img" aria-label="Bar chart comparing LP net value to rule baseline" data-empty="No settled obligations yet to compare against the rule baseline."></div>
   </section>
 
   <script>

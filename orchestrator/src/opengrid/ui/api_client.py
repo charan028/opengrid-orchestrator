@@ -14,6 +14,7 @@ is a normal HTMX GET").
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar, Token
 from typing import Any
 
 import httpx
@@ -24,6 +25,23 @@ _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _TIMEOUT_S = 3.0
 _POST_TIMEOUT_S = 5.0
 _ENV_BASE_URL = "OG_API_BASE_URL"
+_REMOTE_USER_HEADER = "X-Remote-User"
+
+#: The identity of the browser request a screen route is serving, bound per request by
+#: `opengrid.ui.routes` and forwarded to `opengrid.api` as `X-Remote-User` (its auth requires it on every
+#: non-health endpoint, `opengrid.api.auth`). Without this every server-side first-paint call was a 401
+#: and every screen rendered its degraded banner (found on the first live run, U1).
+_remote_user: ContextVar[str | None] = ContextVar("og_ui_remote_user", default=None)
+
+
+def bind_remote_user(user: str | None) -> Token[str | None]:
+    """Bind the caller identity for the current request; returns the token for `ContextVar.reset`."""
+    return _remote_user.set(user)
+
+
+def _headers() -> dict[str, str]:
+    user = _remote_user.get()
+    return {_REMOTE_USER_HEADER: user} if user else {}
 
 
 class ApiUnavailable(Exception):  # noqa: N818 -- shared symbol name; ui-b's screens already import it
@@ -38,6 +56,13 @@ class ApiUnavailable(Exception):  # noqa: N818 -- shared symbol name; ui-b's scr
     re-parsing the exception message."""
 
     def __init__(self, message: str, *, status_code: int | None = None, detail: Any = None) -> None:
+        if status_code == 401:
+            # Seen live: the console opened on og-api's own port (8080) instead of through Apache or the
+            # dev proxy, so no X-Remote-User reached the UI and every first-paint call was refused.
+            message += (
+                " -- no identity reached the console; open it through Apache (production) or the dev"
+                " proxy (http://127.0.0.1:8088/og/), not on og-api's port directly"
+            )
         super().__init__(message)
         self.status_code = status_code
         self.detail = detail
@@ -65,7 +90,7 @@ async def get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
     url = f"{api_base_url()}{path}"
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, params=params, headers=_headers())
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as exc:
@@ -118,7 +143,7 @@ async def get_bytes(path: str, *, params: dict[str, Any] | None = None) -> bytes
     url = f"{api_base_url()}{path}"
     try:
         async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, params=params, headers=_headers())
             response.raise_for_status()
             return response.content
     except httpx.HTTPStatusError as exc:

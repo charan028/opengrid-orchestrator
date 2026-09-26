@@ -51,6 +51,58 @@ _PIPELINE_LABELS: dict[str, str] = {
 }
 
 
+def _f(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def decision_line(row: dict[str, Any]) -> str:
+    """One sentence saying why a card sits in its column, from the numbers the selector weighed:
+    the offer's value ($/MWh) against the contract's degradation cost ($/kWh -> shown per MWh), the
+    promised kW and the window. This is the board's answer to "what is the optimizer doing?"."""
+    state = row.get("state")
+    value = _f(row.get("value_per_mwh"))
+    degradation = _f(row.get("degradation_cost"))
+    degradation_mwh = degradation * 1000.0 if degradation is not None else None
+    kw = _f(row.get("committed_qty_kw")) or _f(row.get("requested_kw")) or 0.0
+    hours = None
+    try:
+        start = datetime.fromisoformat(str(row["window_start"]))
+        end = datetime.fromisoformat(str(row["window_end"]))
+        hours = max((end - start).total_seconds() / 3600.0, 0.0)
+    except (KeyError, TypeError, ValueError):
+        pass
+    if state == "SELECTED":
+        if value is not None and degradation_mwh is not None:
+            margin = (value - degradation_mwh) / 1000.0 * kw * (hours or 0.0)
+            return (
+                f"Selected: {value:.0f} $/MWh clears {degradation_mwh:.0f} $/MWh degradation, "
+                f"est. margin ${margin:,.0f} for the window"
+            )
+        return "Selected by the optimizer, capacity reserved on the ledger"
+    if state in ("COMMITTED", "DELIVERING"):
+        return "Locked: this promise is kept even if a better price appears (K13)"
+    if state == "FULFILLED":
+        return "Delivered and verified"
+    if state == "SHORTFALL":
+        return "Delivered short; penalty applies"
+    if state == "EXPIRED":
+        return "Window started before a gate could commit it"
+    if state == "OFFERED":
+        if value is None:
+            return "Awaiting the next gate; no price on this offer yet"
+        if degradation_mwh is not None and value < degradation_mwh:
+            return (
+                f"Declined so far: {value:.2f} $/MWh does not cover {degradation_mwh:.0f} $/MWh degradation"
+            )
+        if row.get("decided_at"):
+            return f"Evaluated at {value:.0f} $/MWh; waiting for headroom at the next gate"
+        return f"Offered at {value:.0f} $/MWh; awaiting the next quarter-hour gate"
+    return ""
+
+
 def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
     """Group obligation rows into Kanban columns by state, across all customers concurrently (BUILD.md
     S2). FULFILLED and SHORTFALL share a terminal column so an operator sees each committed obligation's
@@ -72,6 +124,8 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
                 "window_end": row.get("window_end"),
                 "at_risk": bool(row.get("at_risk", False)),
                 "reason_code": row.get("last_reason_code") or row.get("reason_code"),
+                # Energy columns (NOTICES 2026-09-25: energy is checked every cycle). Field contract with the
+                # api owner in tests-e2e/ui/NEEDS_FROM_OTHER_OWNERS.md; absent fields render as "-".
                 "raw_state": state,
                 # K1 continuous energy-sufficiency (build brief item 5): per-committed-obligation energy
                 # margin (kWh, available - required above reserve) and time-to-depletion (hours) at the
@@ -80,8 +134,10 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
                 # (`energy_margin_kwh`, `time_to_depletion_h`) on `/og/api/dispatch/opportunities` rows.
                 "energy_margin_kwh": row.get("energy_margin_kwh"),
                 "time_to_depletion_h": row.get("time_to_depletion_h"),
+                "decision": decision_line(row),
             }
         )
+    shown = sum(len(items) for items in columns.values())
     return {
         "columns": [
             {
@@ -93,6 +149,10 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
             for state in PIPELINE_STATES
         ],
         "total": len(obligations),
+        # EXPIRED/REJECTED/SETTLED rows have no column; say so instead of a total that does not add up
+        # to the cards on the board (seen live: "7 obligations" over a board showing 1).
+        "open": shown,
+        "closed": len(obligations) - shown,
         "customer_count": len({row.get("customer_id") or row.get("contract_id") for row in obligations}),
         "generated_at": now.isoformat(),
     }
@@ -117,7 +177,7 @@ def ledger_timeline_view(
     intervals = sorted(by_interval)
     series: list[dict[str, Any]] = [
         {
-            "name": obligation_id,
+            "name": obligation_id[:8],  # short id, as on the pipeline cards; the tooltip keeps the series
             "type": "line",
             "stack": "ledger",
             "areaStyle": {},
@@ -152,6 +212,29 @@ def ledger_timeline_view(
     }
 
 
+def _minutes(value: Any) -> str:
+    """An ISO timestamp cut to minutes for display (the raw value keeps microseconds)."""
+    if not value:
+        return "-"
+    try:
+        return datetime.fromisoformat(str(value)).isoformat(timespec="minutes")
+    except ValueError:
+        return str(value)
+
+
+async def _default_bank_id() -> str:
+    """The first real bank id from the fleet, so the ledger timeline opens on a bank that exists (the
+    old fixed placeholder `BANK-0001` matched nothing live). Falls back to the placeholder if the fleet
+    read fails; the screen then shows its degraded banner from the ledger call as before."""
+    try:
+        raw = await get_json("/og/api/fleet/hubs")
+    except ApiUnavailable:
+        return _DEFAULT_BANK_ID
+    hubs = raw.get("items", []) if isinstance(raw, dict) else []
+    bank_ids = sorted({str(h["bank_id"]) for h in hubs if h.get("bank_id")})
+    return bank_ids[0] if bank_ids else _DEFAULT_BANK_ID
+
+
 def plan_view(plan: dict[str, Any] | None) -> dict[str, Any]:
     """Latest selector plan panel: LP mode vs rule-fallback baseline, solver diagnostics (02b S8
     screen 3)."""
@@ -168,6 +251,7 @@ def plan_view(plan: dict[str, Any] | None) -> dict[str, Any]:
         "gate_kind": plan.get("gate_kind"),
         "horizon_start": plan.get("horizon_start"),
         "horizon_end": plan.get("horizon_end"),
+        "horizon_display": f"{_minutes(plan.get('horizon_start'))} to {_minutes(plan.get('horizon_end'))}",
         "solver_status": plan.get("solver_status"),
         "solver_gap_pct": float(solver_gap) * 100 if solver_gap is not None else None,
         "solver_time_ms": plan.get("solver_time_ms"),
@@ -235,9 +319,10 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
 
 
 @router.get("", response_class=HTMLResponse)
-async def dispatch_page(request: Request, bank_id: str = Query(default=_DEFAULT_BANK_ID)) -> HTMLResponse:
+async def dispatch_page(request: Request, bank_id: str | None = Query(default=None)) -> HTMLResponse:
     """Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S)."""
     now = datetime.now(tz=UTC)
+    bank_id = bank_id or await _default_bank_id()
     degraded: str | None = None
     obligations: list[dict[str, Any]] = []
     plan: dict[str, Any] | None = None

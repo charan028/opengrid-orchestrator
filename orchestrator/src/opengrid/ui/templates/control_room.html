@@ -2,54 +2,86 @@
 {% block title %}Control room -- OpenGrid Orchestrator{% endblock %}
 {% block header_title %}Control room{% endblock %}
 {% block header_actions %}
-<span class="stale-badge" id="control-room-updated" data-stale="false">live</span>
+<span class="stale-badge" id="control-room-updated" role="status" data-stale="false">live</span>
 {% endblock %}
 
 {% block content %}
-<section class="og-grid" aria-label="Key performance indicators">
-  {% with label='Fleet power', value=health.fleet_mw|default('--'), unit='MW', since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-fleet-mw' %}
+{% if story %}
+<section class="og-story" aria-label="Fleet status in one line">
+  <p>
+    <strong>{{ story.hubs_online }}</strong> of {{ story.hubs_total }} hubs online &middot;
+    <strong>{{ story.live_obligations }}</strong> obligation{{ '' if story.live_obligations == 1 else 's' }} promised to
+    <strong>{{ story.buyers }}</strong> buyer{{ '' if story.buyers == 1 else 's' }}{% if story.next_window %}, next window <strong>{{ story.next_window }}</strong>{% endif %} &middot;
+    <strong>{{ '%.0f'|format(story.promised_kw) }} kW</strong> committed{% if story.delivering %} &middot; <strong>{{ story.delivering }}</strong> delivering now{% endif %} &middot;
+    {% if story.promises_broken == 0 %}<strong class="is-good">0 promises broken today</strong>{% else %}<strong class="is-critical">{{ story.promises_broken }} promise{{ '' if story.promises_broken == 1 else 's' }} broken today</strong>{% endif %}
+  </p>
+  <p class="og-story-why">One fleet of home batteries, sold to many buyers at once. The job is to never sell the same kWh twice, never pull a home below its reserve, and never drop a customer for a better price.</p>
+</section>
+{% endif %}
+
+<section class="og-panel og-promises" aria-label="Promises kept">
+  <h2>Promises kept</h2>
+  <p>The three invariants the orchestrator enforces every 2-second cycle. Each must read 0; every value is backed by the trace chain on Billing &amp; audit.</p>
+  <div class="og-kpis">
+    <div>
+      {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-reserve-breaches', live_region=true %}
+        {% include "_partials/kpi_tile.html" %}
+      {% endwith %}
+      <p class="og-promise-why">No home was ever pulled below the reserve kept for its own outage.</p>
+    </div>
+    <div>
+      {% with label='kWh sold twice', value=health.double_sold_kwh|default(0), severity=('critical' if health.double_sold_kwh else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-double-sold', live_region=true %}
+        {% include "_partials/kpi_tile.html" %}
+      {% endwith %}
+      <p class="og-promise-why">Every kWh has exactly one buyer; the ledger refuses a second reservation.</p>
+    </div>
+    <div>
+      {% with label='Commitment switches', value=health.commitment_switches|default(0), severity=('critical' if health.commitment_switches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+        {% include "_partials/kpi_tile.html" %}
+      {% endwith %}
+      <p class="og-promise-why">No committed customer was dropped when a better price appeared.</p>
+    </div>
+  </div>
+</section>
+
+<section class="og-kpis" aria-label="Key performance indicators">
+  {% with label='Fleet power', value=(health.fleet_mw if health.fleet_mw is not none else '--'), unit='MW', since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-fleet-mw' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label='Fleet energy', value=health.fleet_mwh|default('--'), unit='MWh', since_iso=health.as_of|default(none), stale_after_s=10 %}
+  {% with label='Fleet energy', value=(health.fleet_mwh if health.fleet_mwh is not none else '--'), unit='MWh', since_iso=health.as_of|default(none), stale_after_s=10 %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label='Active commitments', value=health.active_commitments|default('--'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-active-commitments' %}
+  {% with label='Active commitments', value=(health.active_commitments if health.active_commitments is not none else '--'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-active-commitments' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label="Today's net margin", value=health.net_margin_usd|default('--'), unit='USD', since_iso=health.as_of|default(none), stale_after_s=30 %}
-    {% include "_partials/kpi_tile.html" %}
-  {% endwith %}
-  {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-reserve-breaches' %}
-    {% include "_partials/kpi_tile.html" %}
-  {% endwith %}
-  {% with label='kWh sold twice', value=health.double_sold_kwh|default(0), severity=('critical' if health.double_sold_kwh else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-double-sold' %}
-    {% include "_partials/kpi_tile.html" %}
-  {% endwith %}
-  {% with label='Commitment switches', value=health.commitment_switches|default(0), severity=('critical' if health.commitment_switches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+  {% with label="Today's net margin", value=(health.net_margin_usd if health.net_margin_usd is not none else '--'), unit='USD', since_iso=health.as_of|default(none), stale_after_s=30 %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
 </section>
 
 <section class="og-panel" aria-label="Fleet map">
   <h2>Fleet map</h2>
+  <p>Load zones sized by hubs reporting and coloured by their worst hub state. Hover a zone for the breakdown.</p>
   <div id="fleet-map" class="og-map"
        data-hubs='{{ hubs|tojson }}'
-       role="img" aria-label="Map of fleet banks coloured by loading"></div>
+       role="img" aria-label="Map of ERCOT load zones with hub counts by health"></div>
 </section>
 
 <section class="og-grid">
   <div class="og-panel" aria-label="ERCOT price, load, wind, solar">
     <h2>Market ticker</h2>
+    <p>Wholesale price per load zone. This is the signal the optimizer sells into; a spike here is the moment it must keep its promises anyway.</p>
     <div id="market-ticker-chart" style="height: 220px;"></div>
-    <div class="stale-badge" data-since="{{ health.as_of|default('') }}" data-stale-after="600">age: unknown</div>
+    <div class="stale-badge" data-since="{{ ticker.latest_ts or '' }}" data-stale-after="1800">age: unknown</div>
   </div>
   <div class="og-panel" aria-label="Open alerts">
     <h2>Open alerts</h2>
-    {% with columns=[{"key": "id", "label": "ID"}, {"key": "severity", "label": "Severity"}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=health.alerts|default([]), empty_message='No open alerts' %}
+    <p>What needs a human: stale feeds, missing heartbeats, hubs offline. Acknowledge to clear.</p>
+    {% with columns=[{"key": "id", "label": "ID"}, {"key": "severity_badge", "label": "Severity", "html": true}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=alert_rows, empty_message='No open alerts' %}
       {% include "_partials/data_table.html" %}
     {% endwith %}
     {% if is_operator %}
-    <form hx-post="{{ base_path }}/alerts/ack" hx-target="#control-room-ack-result">
+    <form class="og-form-inline" hx-post="{{ base_path }}/alerts/ack" hx-target="#control-room-ack-result">
       <label>Alert id <input type="number" name="alert_id" min="1" required></label>
       <button class="btn" type="submit">Acknowledge</button>
     </form>
@@ -64,21 +96,84 @@
   document.addEventListener("DOMContentLoaded", function () {
     var mapEl = document.getElementById("fleet-map");
     var hubs = JSON.parse(mapEl.dataset.hubs || "[]");
-    var map = L.map(mapEl).setView([31.0, -99.0], 6); // ERCOT-ish default center
+    var map = L.map(mapEl, { zoomAnimation: !og.reducedMotion(), fadeAnimation: !og.reducedMotion() }).setView([31.0, -99.0], 6); // ERCOT-ish default center
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap" }).addTo(map);
+
+    // Hub state vocabulary (health/rules.py classify_hub_health) -> reserved severity tokens; the order is
+    // the severity ranking used to colour a zone by its worst hub.
+    var STATES = [
+      { key: "fault", label: "Fault", token: "--status-critical" },
+      { key: "offline", label: "Offline", token: "--status-neutral" },
+      { key: "stale", label: "Stale", token: "--status-caution" },
+      { key: "online", label: "Online", token: "--status-good" },
+    ];
+    function tokenFor(health) {
+      var s = STATES.filter(function (x) { return x.key === health; })[0];
+      return og.token(s ? s.token : "--status-neutral");
+    }
+
+    // Per-hub markers, for hubs that carry coordinates (none do on the current stack: og.hub.lat/lon are
+    // null for every seeded hub, tests-e2e/ui/NEEDS_FROM_OTHER_OWNERS.md item 13).
     hubs.forEach(function (h) {
       if (h.lat == null || h.lon == null) { return; }
-      var color = h.health === "online" ? "#1baf7a" : h.health === "fault" ? "#e34948" : "#eda100";
-      L.circleMarker([h.lat, h.lon], { radius: 4, color: color }).addTo(map).bindPopup(h.hub_id);
+      var color = tokenFor(h.health);
+      L.circleMarker([h.lat, h.lon], { radius: 6, color: color, weight: 2, fillColor: color, fillOpacity: 0.35 }).addTo(map).bindPopup(h.hub_id);
     });
 
-    og.chart("#market-ticker-chart", {
-      grid: { left: 40, right: 10, top: 10, bottom: 20 },
-      xAxis: { type: "category", data: [] },
-      yAxis: { type: "value", name: "usd/mwh" },
-      series: [{ type: "line", data: [], showSymbol: false, lineStyle: { width: 2 } }],
+    // The spec's simple map (UI-UX spec UI-MAP-09): load zones with hub counts by connectivity. Zones are
+    // placed at their ERCOT centroids. ponytail: fixed centroids until hubs/banks carry coordinates.
+    var ZONES = {
+      LZ_NORTH: [32.85, -97.0],
+      LZ_WEST: [31.9, -102.3],
+      LZ_HOUSTON: [29.76, -95.37],
+      LZ_SOUTH: [29.4, -98.5],
+    };
+    var byZone = {};
+    hubs.forEach(function (h) {
+      var z = byZone[h.zone] || (byZone[h.zone] = { total: 0, banks: {}, counts: { online: 0, stale: 0, offline: 0, fault: 0 } });
+      z.total += 1;
+      z.banks[h.bank_id] = true;
+      if (z.counts[h.health] !== undefined) { z.counts[h.health] += 1; }
     });
+    var bounds = [];
+    Object.keys(byZone).forEach(function (zone) {
+      var at = ZONES[zone];
+      if (!at) { return; }
+      var z = byZone[zone];
+      var worst = STATES.filter(function (s) { return z.counts[s.key] > 0; })[0] || STATES[3];
+      var color = og.token(worst.token);
+      var radius = Math.max(14, Math.min(44, Math.round(6 * Math.sqrt(z.total))));
+      var marker = L.circleMarker(at, { radius: radius, color: color, weight: 2, fillColor: color, fillOpacity: 0.28 }).addTo(map);
+      marker.bindTooltip(zone.replace("LZ_", "") + " · " + z.total, { permanent: true, direction: "center", className: "og-zone-label" });
+      marker.bindPopup(
+        "<strong>" + zone + "</strong><br>" + z.total + " hubs · " + Object.keys(z.banks).length + " banks<br>" +
+        STATES.slice().reverse().map(function (s) { return s.label + " " + z.counts[s.key]; }).join(" · ")
+      );
+      bounds.push(at);
+    });
+    if (bounds.length > 1) { map.fitBounds(bounds, { padding: [40, 40] }); }
 
+    // Legend: colour + text, never colour alone.
+    var legend = L.control({ position: "bottomleft" });
+    legend.onAdd = function () {
+      var div = L.DomUtil.create("div", "og-map-legend");
+      STATES.slice().reverse().forEach(function (s) {
+        var row = document.createElement("span");
+        var dot = document.createElement("i");
+        dot.style.background = og.token(s.token);
+        row.appendChild(dot);
+        row.appendChild(document.createTextNode(s.label));
+        div.appendChild(row);
+      });
+      var size = document.createElement("span");
+      size.className = "og-map-legend-note";
+      size.textContent = "bubble size = hubs reporting";
+      div.appendChild(size);
+      return div;
+    };
+    legend.addTo(map);
+
+    og.chart("#market-ticker-chart", {{ ticker.chart_option | tojson }});
     function setKpiValue(tileId, value) {
       var tile = document.getElementById(tileId);
       if (!tile) { return; }

@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-26T00:00:00Z",
+  "title": "Design System: OpenGrid Orchestrator UI",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Console Blue", "canonical": "#7cc4ff", "lightTheme": "#1a5fc4" },
+      "bg": { "role": "neutral", "displayName": "Ground", "canonical": "#0a0c10", "lightTheme": "#f4f6fa" },
+      "panel": { "role": "neutral", "displayName": "Panel", "canonical": "#12151b", "lightTheme": "#ffffff" },
+      "panel-2": { "role": "neutral", "displayName": "Panel 2", "canonical": "#191d25", "lightTheme": "#eef1f6" },
+      "border": { "role": "neutral", "displayName": "Hairline", "canonical": "#262b36", "lightTheme": "#dde2ea" },
+      "text": { "role": "neutral", "displayName": "Text", "canonical": "#e8ebf1", "lightTheme": "#14171d" },
+      "muted": { "role": "neutral", "displayName": "Muted", "canonical": "#98a1b3", "lightTheme": "#5b6172" },
+      "status-good": { "role": "severity", "displayName": "Good", "canonical": "#1baf7a", "lightTheme": "#147a52", "fixedBy": "UI-UX spec S5" },
+      "status-info": { "role": "severity", "displayName": "Info", "canonical": "#7cc4ff", "lightTheme": "#1861c7", "fixedBy": "UI-UX spec S5" },
+      "status-caution": { "role": "severity", "displayName": "Caution", "canonical": "#eda100", "lightTheme": "#8f5f00", "fixedBy": "UI-UX spec S5" },
+      "status-critical": { "role": "severity", "displayName": "Critical", "canonical": "#ee6160", "lightTheme": "#ab2e2d", "fixedBy": "UI-UX spec S5" },
+      "status-neutral": { "role": "severity", "displayName": "Neutral", "canonical": "#98a1b3", "lightTheme": "#5b6172", "fixedBy": "UI-UX spec S5" }
+    },
+    "typographyMeta": {
+      "kpi-value": { "displayName": "KPI value", "purpose": "One per tile; the largest type on screen." },
+      "page-title": { "displayName": "Page title", "purpose": "The single h1 in the sticky header." },
+      "column-header": { "displayName": "Column header", "purpose": "Table th and kanban column headings; uppercase, muted." },
+      "badge": { "displayName": "Badge", "purpose": "Status pills; uppercase." }
+    },
+    "shadows": [
+      { "name": "shadow", "value": "0 1px 2px rgba(0,0,0,0.4), 0 16px 40px -24px rgba(0,0,0,0.8)", "light": "0 1px 2px rgba(20,23,29,0.05), 0 16px 40px -28px rgba(20,23,29,0.25)", "purpose": "Ambient: panels, standalone KPI tiles, kanban cards. Paired with inset 0 1px 0 var(--edge) on panels and tiles." },
+      { "name": "shadow-pop", "value": "0 4px 12px -4px rgba(0,0,0,0.6), 0 32px 80px -32px rgba(0,0,0,0.9)", "light": "0 4px 12px -4px rgba(20,23,29,0.12), 0 32px 80px -32px rgba(20,23,29,0.35)", "purpose": "Confirm dialog only." },
+      { "name": "accent-lift", "value": "0 6px 16px -10px color-mix(in srgb, var(--accent) 90%, transparent)", "purpose": "Primary button; nav mark uses -8px / 80%." },
+      { "name": "edge", "value": "rgba(255,255,255,0.045)", "light": "rgba(255,255,255,0.9)", "purpose": "Top-edge catch-light, applied as inset 0 1px 0 on layered surfaces." }
+    ],
+    "motion": [
+      { "name": "ease", "value": "cubic-bezier(0.32, 0.72, 0, 1)", "purpose": "160ms state transitions on nav, buttons, inputs." },
+      { "name": "settle", "value": "og-settle 180ms cubic-bezier(0.16, 1, 0.3, 1) backwards; stagger 30ms per child, max 150ms", "purpose": "The one authored moment: sections settle in on first paint (opacity 0->1, translateY 6px->0). Dialog reuses it at 160ms both." },
+      { "name": "reduced-motion", "value": "0.01ms", "purpose": "All animation/transition durations under prefers-reduced-motion; og.js also sets chart animation=false." }
+    ],
+    "breakpoints": [
+      { "name": "kanban-wrap", "value": "1100px" },
+      { "name": "mobile", "value": "900px" }
+    ],
+    "glow": { "dark": "10%", "light": "7%", "purpose": "Accent mix for the two body::before radial gradients." }
+  },
+  "components": [
+    {
+      "name": "Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "Default action; panel-2 fill with a hairline.",
+      "html": "<button class=\"ds-btn\">Cancel</button>",
+      "css": ".ds-btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; font:500 13px/1.5 Geist, Inter, system-ui, sans-serif; padding:7px 14px; min-height:34px; border-radius:8px; border:1px solid var(--border,#262b36); background:var(--panel-2,#191d25); color:var(--text,#e8ebf1); cursor:pointer; white-space:nowrap; transition:background 160ms cubic-bezier(.32,.72,0,1), border-color 160ms cubic-bezier(.32,.72,0,1), transform 160ms cubic-bezier(.32,.72,0,1); } .ds-btn:hover { border-color:color-mix(in srgb, var(--muted,#98a1b3) 45%, var(--border,#262b36)); background:color-mix(in srgb, var(--panel-2,#191d25) 80%, var(--text,#e8ebf1) 4%); } .ds-btn:active { transform:scale(.98); } .ds-btn:focus-visible { outline:2px solid var(--focus-ring,#7cc4ff); outline-offset:2px; } .ds-btn:disabled { opacity:.5; cursor:not-allowed; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Solid accent; the one blue action on a screen.",
+      "html": "<button class=\"ds-btn-primary\">Propose (step 1 of 2)</button>",
+      "css": ".ds-btn-primary { display:inline-flex; align-items:center; justify-content:center; gap:8px; font:600 13px/1.5 Geist, Inter, system-ui, sans-serif; padding:7px 14px; min-height:34px; border-radius:8px; border:1px solid var(--accent,#7cc4ff); background:var(--accent,#7cc4ff); color:var(--accent-ink,#0a0c10); cursor:pointer; box-shadow:0 6px 16px -10px color-mix(in srgb, var(--accent,#7cc4ff) 90%, transparent); transition:background 160ms cubic-bezier(.32,.72,0,1), transform 160ms cubic-bezier(.32,.72,0,1); } .ds-btn-primary:hover { background:color-mix(in srgb, var(--accent,#7cc4ff) 88%, white); border-color:color-mix(in srgb, var(--accent,#7cc4ff) 88%, white); } .ds-btn-primary:active { transform:scale(.98); } .ds-btn-primary:focus-visible { outline:2px solid var(--focus-ring,#7cc4ff); outline-offset:2px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Outlined critical; confirm step of a destructive action.",
+      "html": "<button class=\"ds-btn-danger\">Confirm</button>",
+      "css": ".ds-btn-danger { display:inline-flex; align-items:center; justify-content:center; gap:8px; font:600 13px/1.5 Geist, Inter, system-ui, sans-serif; padding:7px 14px; min-height:34px; border-radius:8px; border:1px solid color-mix(in srgb, var(--status-critical,#ee6160) 60%, var(--border,#262b36)); background:transparent; color:var(--status-critical,#ee6160); cursor:pointer; transition:background 160ms cubic-bezier(.32,.72,0,1), border-color 160ms cubic-bezier(.32,.72,0,1); } .ds-btn-danger:hover { background:color-mix(in srgb, var(--status-critical,#ee6160) 10%, transparent); border-color:var(--status-critical,#ee6160); } .ds-btn-danger:focus-visible { outline:2px solid var(--focus-ring,#7cc4ff); outline-offset:2px; }"
+    },
+    {
+      "name": "Safe-stop Button",
+      "kind": "button",
+      "refersTo": "button-safestop",
+      "description": "Scoped safe-stop control; must stay visually distinct and hard to hit by accident.",
+      "html": "<button class=\"ds-btn-safestop\">Safe stop</button>",
+      "css": ".ds-btn-safestop { display:inline-flex; align-items:center; justify-content:center; gap:8px; font:700 13px/1.5 Geist, Inter, system-ui, sans-serif; text-transform:uppercase; letter-spacing:.04em; padding:9px 18px; min-height:34px; border-radius:8px; border:2px solid var(--status-critical,#ee6160); background:color-mix(in srgb, var(--status-critical,#ee6160) 12%, var(--panel,#12151b)); color:var(--status-critical,#ee6160); cursor:pointer; white-space:nowrap; transition:background 160ms cubic-bezier(.32,.72,0,1); } .ds-btn-safestop:hover { background:color-mix(in srgb, var(--status-critical,#ee6160) 18%, var(--panel,#12151b)); } .ds-btn-safestop:focus-visible { outline:2px solid var(--focus-ring,#7cc4ff); outline-offset:2px; }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Stacked label above a panel-2 field; accent border and halo on focus.",
+      "html": "<label class=\"ds-label\">Setpoint (kW)<input class=\"ds-input\" type=\"text\" placeholder=\"5.0\"></label>",
+      "css": ".ds-label { display:flex; flex-direction:column; align-items:flex-start; gap:6px; font:500 12px/1.5 Geist, Inter, system-ui, sans-serif; color:var(--muted,#98a1b3); } .ds-input { width:100%; font:400 14px/1.5 Geist, Inter, system-ui, sans-serif; color:var(--text,#e8ebf1); background:var(--panel-2,#191d25); border:1px solid var(--border,#262b36); border-radius:8px; padding:7px 11px; min-height:36px; transition:border-color 160ms cubic-bezier(.32,.72,0,1), box-shadow 160ms cubic-bezier(.32,.72,0,1); } .ds-input::placeholder { color:color-mix(in srgb, var(--muted,#98a1b3) 80%, transparent); } .ds-input:hover { border-color:color-mix(in srgb, var(--muted,#98a1b3) 45%, var(--border,#262b36)); } .ds-input:focus-visible { outline:none; border-color:var(--accent,#7cc4ff); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent,#7cc4ff) 25%, transparent); }"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Top-level content surface with title and muted intro.",
+      "html": "<section class=\"ds-panel\"><h2>Fleet summary</h2><p>Aggregated across all hubs.</p><dl><dt>Hubs</dt><dd>12</dd><dt>Online</dt><dd>11</dd></dl></section>",
+      "css": ".ds-panel { background:var(--panel,#12151b); border:1px solid var(--border,#262b36); border-radius:12px; padding:20px 22px; box-shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 40px -24px rgba(0,0,0,.8), inset 0 1px 0 var(--edge,rgba(255,255,255,.045)); color:var(--text,#e8ebf1); font:400 14px/1.5 Geist, Inter, system-ui, sans-serif; } .ds-panel h2 { font-size:15px; font-weight:600; letter-spacing:-.01em; margin:0 0 14px; } .ds-panel > p:first-of-type { color:var(--muted,#98a1b3); font-size:13px; margin:-8px 0 16px; } .ds-panel dl { display:grid; grid-template-columns:max-content 1fr; gap:8px 20px; margin:0; font-size:13px; } .ds-panel dt { color:var(--muted,#98a1b3); } .ds-panel dd { margin:0; font-variant-numeric:tabular-nums; }"
+    },
+    {
+      "name": "KPI Tile",
+      "kind": "card",
+      "refersTo": "kpi-tile",
+      "description": "Label, tabular value with unit, stale badge; severity colours the value only.",
+      "html": "<div class=\"ds-kpi\" data-severity=\"caution\"><div class=\"ds-kpi-label\">Fleet SoC</div><div class=\"ds-kpi-value\">62.4<span class=\"ds-kpi-unit\">%</span></div><span class=\"ds-stale\" data-stale=\"true\">age: 95s</span></div>",
+      "css": ".ds-kpi { background:var(--panel,#12151b); border:1px solid var(--border,#262b36); border-radius:12px; padding:16px 18px 14px; display:flex; flex-direction:column; gap:8px; box-shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 40px -24px rgba(0,0,0,.8), inset 0 1px 0 var(--edge,rgba(255,255,255,.045)); color:var(--text,#e8ebf1); font-family:Geist, Inter, system-ui, sans-serif; } .ds-kpi-label { font-size:12px; font-weight:500; color:var(--muted,#98a1b3); } .ds-kpi-value { font-size:26px; font-weight:600; letter-spacing:-.02em; line-height:1.1; font-variant-numeric:tabular-nums; display:flex; align-items:baseline; gap:6px; } .ds-kpi-unit { font-size:12px; font-weight:500; letter-spacing:0; color:var(--muted,#98a1b3); } .ds-kpi[data-severity=critical] .ds-kpi-value { color:var(--status-critical,#ee6160); } .ds-kpi[data-severity=caution] .ds-kpi-value { color:var(--status-caution,#eda100); } .ds-kpi[data-severity=good] .ds-kpi-value { color:var(--status-good,#1baf7a); } .ds-stale { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:500; color:var(--muted,#98a1b3); font-variant-numeric:tabular-nums; margin-top:auto; } .ds-stale::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--status-good,#1baf7a); } .ds-stale[data-stale=true] { color:var(--status-caution,#eda100); font-weight:600; } .ds-stale[data-stale=true]::before { background:var(--status-caution,#eda100); } .ds-stale[data-stale=true]::after { content:'\\00b7\\00a0stale'; font-weight:500; }"
+    },
+    {
+      "name": "Status Badge",
+      "kind": "chip",
+      "refersTo": "status-badge",
+      "description": "Colour + dot + drawn icon + text; never colour alone.",
+      "html": "<span class=\"ds-badge ds-badge-good\"><span class=\"ds-dot\"></span><svg class=\"ds-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M20 6 9 17l-5-5\"/></svg>online</span> <span class=\"ds-badge ds-badge-caution\"><span class=\"ds-dot\"></span><svg class=\"ds-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z\"/><path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/></svg>stale</span> <span class=\"ds-badge ds-badge-critical\"><span class=\"ds-dot\"></span><svg class=\"ds-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z\"/><path d=\"M12 8v4\"/><path d=\"M12 16h.01\"/></svg>fault</span>",
+      "css": ".ds-badge { display:inline-flex; align-items:center; gap:5px; padding:2px 8px 2px 7px; border-radius:999px; font:600 11px/18px Geist, Inter, system-ui, sans-serif; text-transform:uppercase; letter-spacing:.03em; border:1px solid transparent; white-space:nowrap; } .ds-dot { width:6px; height:6px; border-radius:50%; background:currentColor; } .ds-icon { width:12px; height:12px; stroke:currentColor; fill:none; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; } .ds-badge-good { color:var(--status-good,#1baf7a); background:color-mix(in srgb, var(--status-good,#1baf7a) 12%, transparent); } .ds-badge-caution { color:var(--status-caution,#eda100); background:color-mix(in srgb, var(--status-caution,#eda100) 12%, transparent); } .ds-badge-critical { color:var(--status-critical,#ee6160); background:color-mix(in srgb, var(--status-critical,#ee6160) 12%, transparent); }"
+    },
+    {
+      "name": "Nav Item",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Rail item: muted at rest, panel-2 on hover, 14% accent tint when active.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item\" href=\"#\"><svg class=\"ds-nav-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect x=\"3\" y=\"3\" width=\"7\" height=\"9\" rx=\"1\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"5\" rx=\"1\"/><rect x=\"14\" y=\"12\" width=\"7\" height=\"9\" rx=\"1\"/><rect x=\"3\" y=\"16\" width=\"7\" height=\"5\" rx=\"1\"/></svg>Control room</a><a class=\"ds-nav-item active\" href=\"#\" aria-current=\"page\"><svg class=\"ds-nav-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect x=\"2\" y=\"7\" width=\"16\" height=\"10\" rx=\"2\"/><path d=\"M22 11v2\"/><path d=\"M6 11v2\"/><path d=\"M10 11v2\"/></svg>Fleet</a></nav>",
+      "css": ".ds-nav { display:flex; flex-direction:column; gap:2px; width:212px; padding:6px; background:var(--panel,#12151b); border:1px solid var(--border,#262b36); border-radius:12px; font:500 14px/1.5 Geist, Inter, system-ui, sans-serif; } .ds-nav-item { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; color:var(--muted,#98a1b3); text-decoration:none; transition:background 160ms cubic-bezier(.32,.72,0,1), color 160ms cubic-bezier(.32,.72,0,1); } .ds-nav-icon { width:18px; height:18px; flex:none; stroke:currentColor; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; opacity:.85; } .ds-nav-item:hover { background:var(--panel-2,#191d25); color:var(--text,#e8ebf1); } .ds-nav-item.active { background:color-mix(in srgb, var(--accent,#7cc4ff) 14%, transparent); color:var(--text,#e8ebf1); font-weight:600; } .ds-nav-item.active .ds-nav-icon { color:var(--accent,#7cc4ff); opacity:1; } .ds-nav-item:focus-visible { outline:2px solid var(--focus-ring,#7cc4ff); outline-offset:2px; }"
+    },
+    {
+      "name": "Confirm Dialog",
+      "kind": "custom",
+      "refersTo": "confirm-dialog",
+      "description": "Step 2 of every grid-changing action: title, summary, countdown, Cancel + danger/safe-stop Confirm.",
+      "html": "<div class=\"ds-dialog\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"ds-dlg-t\"><h2 id=\"ds-dlg-t\">Confirm setpoint</h2><p>bank-01 to 5.0 kW. This is step 2 of 2.</p><p class=\"ds-countdown\">Expires in 42s</p><div class=\"ds-dialog-actions\"><button class=\"ds-btn\">Cancel</button><button class=\"ds-btn-danger\">Confirm</button></div></div>",
+      "css": ".ds-dialog { background:var(--panel,#12151b); border:1px solid var(--border,#262b36); border-radius:16px; padding:24px 26px 22px; max-width:460px; box-shadow:0 4px 12px -4px rgba(0,0,0,.6), 0 32px 80px -32px rgba(0,0,0,.9); color:var(--text,#e8ebf1); font:400 14px/1.5 Geist, Inter, system-ui, sans-serif; } .ds-dialog h2 { margin:0 0 8px; font-size:16px; font-weight:650; letter-spacing:-.01em; } .ds-dialog > p { margin:0 0 12px; color:var(--muted,#98a1b3); font-size:13px; } .ds-countdown { color:var(--text,#e8ebf1) !important; font-variant-numeric:tabular-nums; } .ds-dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; } .ds-btn, .ds-btn-danger { display:inline-flex; align-items:center; justify-content:center; font:500 13px/1.5 Geist, Inter, system-ui, sans-serif; padding:7px 14px; min-height:34px; border-radius:8px; cursor:pointer; } .ds-btn { border:1px solid var(--border,#262b36); background:var(--panel-2,#191d25); color:var(--text,#e8ebf1); } .ds-btn-danger { font-weight:600; border:1px solid color-mix(in srgb, var(--status-critical,#ee6160) 60%, var(--border,#262b36)); background:transparent; color:var(--status-critical,#ee6160); } .ds-btn-danger:hover { background:color-mix(in srgb, var(--status-critical,#ee6160) 10%, transparent); border-color:var(--status-critical,#ee6160); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Calm Console",
+    "overview": "A control room that stays quiet until something needs attention. Layered near-black surfaces, one cool blue for everything interactive, fixed severity and chart palettes, tabular numerals, Lucide outlines at 1.5 stroke, roomy Operate-mode density, one settle-in moment. Dark is default; light mirrors every token.",
+    "keyCharacteristics": [
+      "One accent, many severities",
+      "Status is colour + icon + text, never colour alone",
+      "Every value shows its age",
+      "Tonal layering plus hairline and catch-light; shadows are ambient only",
+      "All text tokens >= 4.5:1 on bg, panel, panel-2 in both themes (enforced by tests-e2e/ui/test_a11y.py)"
+    ],
+    "rules": [
+      { "name": "The One Blue Rule", "body": "If it is blue and not a status badge or the first chart series, it is interactive.", "section": "colors" },
+      { "name": "The Never-Colour-Alone Rule", "body": "A state is colour + dot + drawn icon + text.", "section": "colors" },
+      { "name": "The Same-Roles Rule", "body": "Light theme changes values, never roles; add a colour to both blocks or neither.", "section": "colors" },
+      { "name": "The Tabular Rule", "body": "Anything that can hold a number sets tabular-nums and right-aligns in tables.", "section": "typography" },
+      { "name": "The Uppercase-Is-Structural Rule", "body": "Uppercase only for column headers, kanban headings, badges, safe-stop. No eyebrows or kickers.", "section": "typography" },
+      { "name": "The Twenty Rule", "body": "Sections 20px apart, panels padded 20px; tighter is inside a component, looser is a page margin.", "section": "layout" },
+      { "name": "The Nested-Goes-Flat Rule", "body": "A KPI tile inside a panel drops shadow and border and sits on panel-2.", "section": "elevation" },
+      { "name": "The Soft-Only Rule", "body": "Shadows are large-blur, negative-spread, black-alpha; the only coloured shadow is the accent lift.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do take every colour from a token (var(--x) in CSS, token:--x@alpha in chart options).",
+      "Do add new text tokens to both themes at >= 4.5:1 on bg, panel, panel-2.",
+      "Do keep --kicker a literal hex equal to --accent in both themes.",
+      "Do keep severity and the seven series tokens at their spec values and order.",
+      "Do render state with status_badge.html and attach stale_badge.html to displayed values.",
+      "Do route grid-changing operator actions through the two-step confirm dialog."
+    ],
+    "donts": [
+      "Don't restyle .btn-safestop toward the primary or danger variants.",
+      "Don't use accent on static text or decoration.",
+      "Don't add uppercase intro lines or eyebrows above headings.",
+      "Don't add motion beyond the settle-in and 160ms transitions; never bypass prefers-reduced-motion.",
+      "Don't add hard-offset or coloured shadows, icon fonts, glyph icons, or a second icon stroke weight.",
+      "Don't let a grid child set its own min-width or overflow."
+    ]
+  }
+}

@@ -437,17 +437,11 @@ class PgStore:
         return [Grant(**row) for row in rows]
 
     async def _fetch_by_uuid_bank_id(self, sql: str, bank_id: str) -> list[dict[str, Any]]:
-        """`og.reservation`/`og.grant`'s `bank_id` column is `uuid` while the fleet twin's bank
-        identifiers are text codes like `"bank-01"` (`og.bank.bank_id TEXT`, 02b S4.2) -- a pre-existing
-        schema/model mismatch outside `api`'s ownership (see the package README). A path `bank_id` that
-        is not a UUID can therefore never match a row; returning an empty timeline for it is the
-        correct read (not a guess) until the two identifier spaces are reconciled, so this catches only
-        that one specific, already-diagnosed error rather than swallowing failures broadly.
-        """
-        try:
-            UUID(bank_id)
-        except ValueError:
-            return []
+        """`og.reservation`/`og.grant.bank_id` are TEXT since `migrations/0004_bank_id_text.sql`, matching
+        the fleet twin's `"bank-000"` codes. The earlier "not a UUID -> return []" short-circuit outlived
+        that migration and hid every reservation and grant from the Dispatch ledger timeline (seen live
+        2026-09-26: 22 rows in og.reservation for bank-007, `/og/api/ledger/bank-007/timeline` returned
+        none)."""
         return await self._fetch(sql, (bank_id,))
 
     async def list_commitments(self, *, limit: int = 200) -> list[Commitment]:

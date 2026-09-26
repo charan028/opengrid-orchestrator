@@ -1,0 +1,15 @@
+name: demo-05-energy-runs-low
+description: >
+  DEMO step 21 (docs/demo/README.md): home load on every hub in LZ_NORTH is
+  raised to 10 kW for 5 minutes, close to the 11 kW single-unit inverter,
+  so committed deliveries on bank-012 drain toward the 20% reserve. Proves
+  K1/K13 on energy (NOTICES 2026-09-25): AT_RISK, substitution to hubs with
+  charge left, ALR-ENERGY-SHORTFALL-RISK, and never a discharge below
+  reserve. Runs 300 s and clears on its own. To end early:
+  DELETE /api/anomalies/demo-05-energy-runs-low:reserve_floor_pressure:0.
+steps:
+  - at_s: 0
+    type: reserve_floor_pressure
+    target: LZ_NORTH
+    params: {home_load_kw: 10}
+    duration: 300

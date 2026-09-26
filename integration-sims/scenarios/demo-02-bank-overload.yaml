@@ -1,0 +1,15 @@
+name: demo-02-bank-overload
+description: >
+  DEMO step 9-10 (docs/demo/README.md): SCADA reports bank-012 (LZ_NORTH,
+  600 kVA feeder-segment rating) at 25% over rating, i.e. 750 kVA. 25% is above the
+  health rule's critical threshold (120%), so ALR-SCADA-OVERLOAD:bank-012
+  lands as critical, and the DIST_DEFERRAL PI loop reduces the bank's grant
+  (reason R-GRANT-DIST-DEFERRAL-PI) without touching any committed
+  quantity. Runs 300 s and clears on its own. To end early:
+  DELETE /api/anomalies/demo-02-bank-overload:bank_overload:0.
+steps:
+  - at_s: 0
+    type: bank_overload
+    target: bank-012
+    params: {kva_over_rating_pct: 25}
+    duration: 300

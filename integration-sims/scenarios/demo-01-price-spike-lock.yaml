@@ -1,0 +1,22 @@
+name: demo-01-price-spike-lock
+description: >
+  DEMO step 7-8 (docs/demo/README.md): a $5,000/MWh price spike on the
+  wholesale settlement point plus an RRS ancillary-service jump, while
+  several customers are COMMITTED/DELIVERING on bank-012 (LZ_NORTH). Shows
+  the commitment lock (K13/G-19) holding: no Commitment-lock event, the
+  "Commitment switches" tile stays 0, and Profitability books the spike as
+  "Forgone upside (lock)". Both steps run 300 s and clear on their own. To
+  end early, cancel both anomaly ids (they are deterministic):
+  DELETE /api/anomalies/demo-01-price-spike-lock:price_spike:0 and
+  DELETE /api/anomalies/demo-01-price-spike-lock:as_price_jump:0.
+steps:
+  - at_s: 0
+    type: price_spike
+    target: np6-905-cd
+    params: {value_usd_per_mwh: 5000}
+    duration: 300
+  - at_s: 0
+    type: as_price_jump
+    target: np4-188-cd
+    params: {service: RRS, value_usd_per_mwh: 800}
+    duration: 300

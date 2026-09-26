@@ -1,5 +1,5 @@
 {# billing_audit_verify_result.html -- chain-verify HTMX fragment. Params: result (chain_verify_result_view). #}
-<div id="verify-result" role="status">
+<div id="verify-result" role="{{ 'status' if result.passed else 'alert' }}">
   {% if result.passed %}
   <p>{% with status='ok', label='PASS' %}{% include "_partials/status_badge.html" %}{% endwith %} {{ result.checked }} events checked.</p>
   {% else %}

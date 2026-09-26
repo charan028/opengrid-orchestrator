@@ -2,7 +2,7 @@
 {% block title %}Health -- OpenGrid Orchestrator{% endblock %}
 {% block header_title %}Health{% endblock %}
 {% block header_actions %}
-<span class="stale-badge" id="health-updated" data-stale="false">live</span>
+<span class="stale-badge" id="health-updated" role="status" data-stale="false">live</span>
 {% endblock %}
 
 {% block content %}
@@ -12,6 +12,7 @@
 
 <section class="og-panel" aria-label="Process status">
   <h2>Processes</h2>
+  <p>Heartbeat of each orchestrator process. A missing heartbeat raises a critical alert within 15 seconds.</p>
   <p>Data {% with since_iso=rendered_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
   {% with columns=[{"key": "process", "label": "Process"}, {"key": "status_badge", "label": "Status", "html": true}, {"key": "since_display", "label": "Since"}], rows=process_rows, empty_message='No heartbeat data' %}
     {% include "_partials/data_table.html" %}
@@ -21,28 +22,36 @@
 <section class="og-grid">
   <div class="og-panel" aria-label="Feed freshness">
     <h2>Feed freshness</h2>
+    <p>Age of each market and weather input. Stale inputs are the commonest way an optimizer goes wrong, so they are watched here.</p>
     {% with columns=[{"key": "source", "label": "Source"}, {"key": "product", "label": "Product"}, {"key": "quality_badge", "label": "Quality", "html": true}, {"key": "age_display", "label": "Age", "numeric": true}], rows=feed_rows, empty_message='No feed data' %}
       {% include "_partials/data_table.html" %}
     {% endwith %}
   </div>
-  <div class="og-panel" aria-label="Hub health histogram">
-    <h2>Hub health by zone</h2>
-    <div id="hub-health-chart" style="height: 220px;"></div>
+  <div class="og-panel" aria-label="Hub health">
+    <h2>Hub health</h2>
+    <p>Connectivity of the fleet. Only online hubs count toward sellable capacity.</p>
+    {# Part-to-whole state composition: a headline total, one segmented strip in the reserved status
+       colours, and a legend with every state's count (so an absent state reads as 0, not as missing).
+       Rendered by renderHubHealth() below from `hub_health_counts`, at first paint and on every stream frame. #}
+    <div id="hub-health-chart" class="hub-health" data-counts='{{ hub_counts|tojson }}' aria-live="polite" aria-atomic="true"></div>
   </div>
 </section>
 
 <section class="og-grid">
   <div class="og-panel" aria-label="Cycle latency">
     <h2>Cycle latency (p50/p99)</h2>
-    <div id="cycle-latency-chart" style="height: 200px;"></div>
+    <p>How long each 2-second control cycle takes. A slow loop means late commands.</p>
+    <div id="cycle-latency-chart" style="height: 140px;" data-empty="No samples yet: the engine does not export cycle metrics on this stack."></div>
+    <p class="og-card-meta">No cycle-latency samples in the health payload yet (og-engine exports no metrics).</p>
   </div>
-  <div class="og-panel" aria-label="Alerts">
+  <div class="og-panel" aria-label="Alerts" aria-live="polite" aria-relevant="additions removals">
     <h2>Alerts</h2>
+    <p>Open alerts with severity. Warnings are stale data; criticals are a process or hub outage.</p>
     {% with columns=[{"key": "id", "label": "ID"}, {"key": "severity_badge", "label": "Severity", "html": true}, {"key": "summary", "label": "Summary"}, {"key": "opened_at", "label": "Opened"}], rows=alert_rows, empty_message='No alerts' %}
       {% include "_partials/data_table.html" %}
     {% endwith %}
     {% if is_operator %}
-    <form hx-post="{{ base_path }}/health/alerts/ack" hx-target="#ack-result">
+    <form class="og-form-inline" hx-post="{{ base_path }}/health/alerts/ack" hx-target="#ack-result">
       <label>Alert id <input type="number" name="alert_id" min="1" required></label>
       <button class="btn" type="submit">Acknowledge</button>
     </form>
@@ -55,12 +64,67 @@
 {% block scripts %}
 <script>
   document.addEventListener("DOMContentLoaded", function () {
-    og.chart("#hub-health-chart", {
-      grid: { left: 40, right: 10, top: 10, bottom: 30 },
-      xAxis: { type: "category", data: [] },
-      yAxis: { type: "value", name: "hubs" },
-      series: [{ type: "bar", data: [] }],
-    });
+    // Fixed state order (health/rules.py classify_hub_health) mapped onto the reserved severity tokens.
+    var HUB_STATES = [
+      { key: "online", label: "Online", tone: "good" },
+      { key: "stale", label: "Stale", tone: "caution" },
+      { key: "offline", label: "Offline", tone: "neutral" },
+      { key: "fault", label: "Fault", tone: "critical" },
+    ];
+    function renderHubHealth(counts) {
+      var root = document.getElementById("hub-health-chart");
+      root.textContent = "";
+      counts = counts || {};
+      var total = HUB_STATES.reduce(function (n, s) { return n + (Number(counts[s.key]) || 0); }, 0);
+      if (!total) {
+        var empty = document.createElement("p");
+        empty.className = "og-empty";
+        empty.textContent = "No hub telemetry yet";
+        root.appendChild(empty);
+        return;
+      }
+      var head = document.createElement("div");
+      head.className = "hub-health-total";
+      var n = document.createElement("span");
+      n.className = "hub-health-n";
+      n.textContent = total.toLocaleString();
+      head.appendChild(n);
+      head.appendChild(document.createTextNode(" hubs reporting"));
+      root.appendChild(head);
+
+      var bar = document.createElement("div");
+      bar.className = "hub-health-bar";
+      bar.setAttribute("aria-hidden", "true");
+      var legend = document.createElement("ul");
+      legend.className = "hub-health-legend";
+      HUB_STATES.forEach(function (s) {
+        var count = Number(counts[s.key]) || 0;
+        if (count > 0) {
+          var seg = document.createElement("span");
+          seg.className = "hub-health-seg tone-" + s.tone;
+          seg.style.flexGrow = String(count);
+          seg.title = s.label + ": " + count;
+          bar.appendChild(seg);
+        }
+        var li = document.createElement("li");
+        li.className = "tone-" + s.tone + (count ? "" : " is-zero");
+        var dot = document.createElement("span");
+        dot.className = "status-dot";
+        li.appendChild(dot);
+        li.appendChild(document.createTextNode(s.label + " "));
+        var b = document.createElement("b");
+        b.textContent = count.toLocaleString();
+        li.appendChild(b);
+        var pct = document.createElement("small");
+        pct.textContent = Math.round((count / total) * 100) + "%";
+        li.appendChild(pct);
+        legend.appendChild(li);
+      });
+      root.appendChild(bar);
+      root.appendChild(legend);
+    }
+    // First paint from the same `hub_health_counts` the stream re-sends (was empty until the first frame).
+    renderHubHealth(JSON.parse(document.getElementById("hub-health-chart").dataset.counts || "{}"));
     og.chart("#cycle-latency-chart", {
       grid: { left: 50, right: 10, top: 10, bottom: 20 },
       legend: { data: ["p50", "p99"] },
@@ -79,13 +143,7 @@
       document.getElementById("health-updated").textContent = "live";
       document.getElementById("health-updated").dataset.stale = "false";
       if (data && data.hub_health_counts && typeof data.hub_health_counts === "object") {
-        var counts = data.hub_health_counts;
-        og.chart("#hub-health-chart", {
-          grid: { left: 40, right: 10, top: 10, bottom: 30 },
-          xAxis: { type: "category", data: Object.keys(counts) },
-          yAxis: { type: "value", name: "hubs" },
-          series: [{ type: "bar", data: Object.keys(counts).map(function (k) { return counts[k]; }) }],
-        });
+        renderHubHealth(data.hub_health_counts);
       }
     }, {
       onError: function () {

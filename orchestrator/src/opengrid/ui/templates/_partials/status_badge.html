@@ -4,12 +4,15 @@
 {% set _s = status|lower %}
 <span class="status-badge status-{{ _s }}">
   <span class="status-dot" aria-hidden="true"></span>
-  <span class="status-icon" aria-hidden="true">
-    {%- if _s in ['online', 'good', 'ok', 'closed', 'acked'] -%}&check;
-    {%- elif _s in ['stale', 'warning', 'caution', 'degraded', 'info', 'dispatching'] -%}&#9650;
-    {%- elif _s in ['offline', 'fault', 'critical', 'breach'] -%}&#9632;
-    {%- else -%}&ndash;
+  {#- drawn icons; the shapes are inlined (not <use>d) so badges pre-rendered into table cells and
+      HTMX fragments carry their own geometry -#}
+  <svg class="og-icon status-icon" aria-hidden="true" viewBox="0 0 24 24">
+    {%- if _s in ['online', 'good', 'ok', 'closed', 'acked'] -%}<path d="M20 6 9 17l-5-5"/>
+    {%- elif _s in ['info', 'dispatching'] -%}<circle cx="12" cy="12" r="3"/><path d="M12 2v4"/><path d="M12 18v4"/><path d="M2 12h4"/><path d="M18 12h4"/>
+    {%- elif _s in ['stale', 'warning', 'caution', 'degraded'] -%}<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>
+    {%- elif _s in ['offline', 'fault', 'critical', 'breach'] -%}<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+    {%- else -%}<path d="M5 12h14"/>
     {%- endif -%}
-  </span>
-  <span class="status-text">{{ label|default(status) }}</span>
+  </svg>
+  <span class="status-text">{{ label if label else status }}</span>
 </span>

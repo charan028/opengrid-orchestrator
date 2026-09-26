@@ -51,13 +51,35 @@ def _process_row(process: str, entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def format_age(age_s: float | None) -> str:
+    """`5s`, `34m`, `1h 34m`: day-ahead feeds are legitimately hours old and `5675s` reads as a fault."""
+    if age_s is None:
+        return "unknown"
+    total = int(age_s)
+    if total < 60:
+        return f"{total}s"
+    hours, minutes = divmod(total // 60, 60)
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+
+def ack_message(exc: ApiUnavailable, alert_id: int) -> str:
+    """Operator-readable outcome of a failed acknowledge (live: a 404 rendered the raw httpx text with a
+    Mozilla docs link)."""
+    if exc.status_code == status.HTTP_404_NOT_FOUND:
+        return f"No open alert with id {alert_id}."
+    if exc.status_code == status.HTTP_403_FORBIDDEN:
+        return "Operator role required to acknowledge alerts."
+    if exc.status_code is not None:
+        return f"Alert {alert_id} could not be acknowledged (API returned {exc.status_code})."
+    return f"Alert {alert_id} could not be acknowledged: the API is unreachable."
+
+
 def _feed_row(entry: dict[str, Any]) -> dict[str, Any]:
-    age = _age_s(entry.get("last_value_at"))
     return {
         "source": entry.get("source", "-"),
         "product": entry.get("product", "-"),
         "quality_badge": render_status_badge(entry.get("quality", "unknown")),
-        "age_display": f"{age:.0f}s" if age is not None else "unknown",
+        "age_display": format_age(_age_s(entry.get("last_value_at"))),
     }
 
 
@@ -96,6 +118,7 @@ async def health_screen(request: Request) -> HTMLResponse:
             "process_rows": [_process_row(name, entry) for name, entry in processes.items()],
             "feed_rows": [_feed_row(entry) for entry in feeds],
             "alert_rows": [_alert_row(entry) for entry in alerts],
+            "hub_counts": health.get("hub_health_counts") or {},
             "degraded": degraded,
             "rendered_at": datetime.now(UTC).isoformat(),
         },
@@ -112,5 +135,7 @@ async def ack_alert(request: Request, alert_id: int = Form(...)) -> HTMLResponse
         alert = await post_json(f"/og/api/alerts/{alert_id}/ack", {}, remote_user=remote_user(request))
     except ApiUnavailable as exc:
         logger.warning("health alert ack failed for alert_id=%s: %s", alert_id, exc)
-        return templates.TemplateResponse(request, "_partials/alert_ack_result.html", {"message": str(exc)})
+        return templates.TemplateResponse(
+            request, "_partials/alert_ack_result.html", {"message": ack_message(exc, alert_id)}
+        )
     return templates.TemplateResponse(request, "_partials/alert_ack_result.html", {"alert": alert})

@@ -49,7 +49,8 @@ to pass params):
   result of a step-1 propose call with `open_default=true, show_trigger=false` so the dialog appears
   already open, instead of behind its own trigger button, per the data path above). `variant="safestop"`
   is the visually distinct, hard-to-hit scoped safe-stop button style (`.btn-safestop` in `og.css`).
-  Opening moves focus to Cancel; closing (Escape or Cancel) returns focus to the trigger button.
+  Opening moves focus to Cancel; closing (Escape or Cancel) returns focus to the trigger button, or,
+  when rendered already open, to the element that had focus when it appeared (the step-1 submit button).
 - `stale_badge.html` -- params `age_s`, `since_iso` (ISO-8601, preferred: lets `og.js` tick the age live
   client-side), `stale_after_s`. **Every value on every screen must include one of these** (BUILD.md UI
   brief); `tests/unit/ui/test_static_staleness.py` enforces it statically.

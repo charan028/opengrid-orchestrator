@@ -29,14 +29,15 @@ def _csrf_context(request: Request) -> dict[str, Any]:
     return {"csrf_token": getattr(request.state, "csrf_token", ""), "csrf_header_name": CSRF_HEADER_NAME}
 
 
+# `icon` names a `<symbol id="i-...">` in base.html's inline icon sheet.
 NAV_SCREENS: tuple[dict[str, str], ...] = (
-    {"label": "Control room", "path": f"{BASE_PATH}/"},
-    {"label": "Fleet", "path": f"{BASE_PATH}/fleet"},
-    {"label": "Dispatch", "path": f"{BASE_PATH}/dispatch"},
-    {"label": "Markets", "path": f"{BASE_PATH}/markets"},
-    {"label": "Health", "path": f"{BASE_PATH}/health"},
-    {"label": "Profitability", "path": f"{BASE_PATH}/profitability"},
-    {"label": "Billing & audit", "path": f"{BASE_PATH}/billing"},
+    {"label": "Control room", "path": f"{BASE_PATH}/", "icon": "dashboard"},
+    {"label": "Fleet", "path": f"{BASE_PATH}/fleet", "icon": "battery"},
+    {"label": "Dispatch", "path": f"{BASE_PATH}/dispatch", "icon": "branch"},
+    {"label": "Markets", "path": f"{BASE_PATH}/markets", "icon": "trend"},
+    {"label": "Health", "path": f"{BASE_PATH}/health", "icon": "pulse"},
+    {"label": "Profitability", "path": f"{BASE_PATH}/profitability", "icon": "dollar"},
+    {"label": "Billing & audit", "path": f"{BASE_PATH}/billing", "icon": "scroll"},
 )
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[_csrf_context])

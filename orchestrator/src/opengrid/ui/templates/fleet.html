@@ -2,17 +2,17 @@
 {% block title %}Fleet -- OpenGrid Orchestrator{% endblock %}
 {% block header_title %}Fleet monitoring & control{% endblock %}
 {% block header_actions %}
-<span class="stale-badge" id="fleet-updated" data-stale="false">live</span>
+<span class="stale-badge" id="fleet-updated" role="status" data-stale="false">live</span>
 {% endblock %}
 
 {% block content %}
 <section class="og-panel" aria-label="Filters">
-  <form method="get" action="{{ base_path }}/fleet" class="og-grid" style="grid-template-columns: repeat(4, auto);">
+  <form method="get" action="{{ base_path }}/fleet" class="og-form">
     <label>Zone
-      <input type="text" name="zone" value="{{ filters.zone|default('') }}">
+      <input type="text" name="zone" value="{{ filters.zone or '' }}">
     </label>
     <label>Bank
-      <input type="text" name="bank" value="{{ filters.bank|default('') }}">
+      <input type="text" name="bank" value="{{ filters.bank or '' }}">
     </label>
     <label>Health
       <select name="health">
@@ -29,9 +29,9 @@
 {% if is_operator %}
 <section class="og-panel" aria-label="Fleet-wide safe stop">
   <h2>Scoped safe stop</h2>
-  <p class="stale-badge">Stops new dispatch for the chosen scope. Never force-discharges below reserve.
+  <p>Stops new dispatch for the chosen scope. Never force-discharges below reserve.
     Requires a two-step confirmation: propose, then confirm the exact summary the API returns.</p>
-  <form id="safestop-propose-form" class="og-grid" style="grid-template-columns: repeat(4, auto);"
+  <form id="safestop-propose-form" class="og-form"
         hx-post="{{ base_path }}/fleet/safestop/propose" hx-target="#safestop-propose-result" hx-swap="innerHTML">
     <label>Scope
       <select name="scope">
@@ -77,20 +77,23 @@
 
 <section class="og-panel" aria-label="Bank / hub table">
   <h2>Hubs</h2>
+  <p>Every home battery in the fleet with its charge, power and telemetry age. Click a row for its lease and last command.</p>
   <p>Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match the current filter', row_id_key='hub_id' %}
+  {% with columns=[{"key": "hub_id", "label": "Hub"}, {"key": "bank_id", "label": "Bank"}, {"key": "zone", "label": "Zone"}, {"key": "health_badge", "label": "Health", "html": true}, {"key": "soc_kwh", "label": "SoC (kWh)", "numeric": true}, {"key": "p_kw", "label": "P (kW)", "numeric": true}, {"key": "age_badge", "label": "Age", "html": true}], rows=table_rows, empty_message='No hubs match this filter. Clear the zone, bank or health filter to see the fleet.', row_id_key='hub_id' %}
     {% include "_partials/data_table.html" %}
   {% endwith %}
 </section>
 
 <section class="og-panel" id="hub-drilldown-container" aria-label="Hub detail" aria-live="polite">
-  <p class="stale-badge">Select a hub row to see its drill-down (SoC, P, health, lease, last command, telemetry).</p>
+  <h2>Hub detail</h2>
+  <p class="og-empty">Select a hub row above to see its drill-down: SoC, power, health, lease, last command and telemetry.</p>
 </section>
 
 {% if is_operator %}
 <section class="og-panel" aria-label="Manual command">
   <h2>Manual command</h2>
-  <form id="manual-command-form" class="og-grid" style="grid-template-columns: repeat(5, auto);"
+  <p>Set one hub's power directly. Two steps, and the guardian can still veto it; the result carries a trace id.</p>
+  <form id="manual-command-form" class="og-form"
         hx-post="{{ base_path }}/fleet/command/propose" hx-target="#command-propose-result" hx-swap="innerHTML">
     <label>Bank id <input type="text" name="bank_id"></label>
     <label>Hub id <input type="text" name="hub_id"></label>
@@ -120,12 +123,12 @@
       });
     });
 
-    // Live updates (02b S7.2): the fleet stream emits `{"hubs": [{hub_id, health, soc_kwh, p_kw}, ...]}`
-    // roughly once a second -- refresh the matching table row's numeric cells in place rather than
-    // re-fetching the whole screen. The stream payload has no bank_id/zone/last_seen_at, so those
-    // columns (and the age badge, which needs a fresh timestamp the API doesn't send here) stay as of
-    // first paint until the operator reloads or re-filters.
-    og.sse("{{ base_path }}/api/stream/fleet", function (data) {
+    // Live updates (02b S7.2). `opengrid.api` serves no `/api/stream/fleet` (404 on the live stack, U1), so
+    // the `live` badge follows the health stream (~2 s, same cadence). If a frame ever carries
+    // `{"hubs": [{hub_id, soc_kwh, p_kw}, ...]}` the matching rows' numeric cells refresh in place; until
+    // the api owner adds that payload (tests-e2e/ui/NEEDS_FROM_OTHER_OWNERS.md) the table stays as of
+    // first paint and the operator reloads or re-filters.
+    og.sse("{{ base_path }}/api/stream/health", function (data) {
       document.getElementById("fleet-updated").textContent = "live";
       document.getElementById("fleet-updated").dataset.stale = "false";
       if (!data || !Array.isArray(data.hubs)) {

@@ -3,7 +3,7 @@
        both a PASS *and* a 409 veto, since the API's 409 body is itself a CommandConfirmResult
      status_code: int|None (the API's status code when `result` is unavailable: 503 timeout, 410/404)
      message: str|None (failure detail) #}
-<div id="command-confirm-result" role="status">
+<div id="command-confirm-result" role="{{ 'status' if (result and result.outcome == 'PASS') else 'alert' }}">
   {% if result and result.outcome == "PASS" %}
   <p>{% with status='ok', label='PASS' %}{% include "_partials/status_badge.html" %}{% endwith %}
     Command accepted. Trace {{ result.trace_id|default('-') }}.</p>

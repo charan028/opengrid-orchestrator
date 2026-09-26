@@ -3,35 +3,26 @@
 {% block header_title %}Dispatch & commitments{% endblock %}
 
 {% block header_actions %}
-<form method="get" action="{{ base_path }}/dispatch" aria-label="Select bank for ledger timeline" style="display:flex; gap:6px; align-items:center;">
+<form method="get" action="{{ base_path }}/dispatch" aria-label="Select bank for ledger timeline" class="og-toolbar">
   <label for="bank_id">Bank</label>
   <input type="text" id="bank_id" name="bank_id" value="{{ bank_id }}">
   <button class="btn" type="submit">View</button>
 </form>
-<span class="stale-badge" id="dispatch-updated" data-stale="false">live</span>
+<span class="stale-badge" id="dispatch-updated" role="status" data-stale="false">live</span>
 {% endblock %}
 
 {% block content %}
-<style>
-  .og-kanban { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
-  .og-kanban-column { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; min-height: 80px; }
-  .og-kanban-column h3 { font-size: 11px; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; display: flex; justify-content: space-between; }
-  .og-kanban-card { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; font-size: 12px; }
-  .og-kanban-card.og-at-risk { border-color: var(--status-caution); }
-  .og-card-meta { color: var(--muted); font-size: 11px; }
-  @media (max-width: 900px) { .og-kanban { grid-template-columns: 1fr; } }
-</style>
-
 <section class="og-panel" aria-labelledby="pipeline-heading">
-  <h2 id="pipeline-heading">Opportunity pipeline ({{ pipeline.customer_count }} customers, {{ pipeline.total }} obligations)</h2>
+  <p class="og-panel-lead">Every market offer travels left to right: offered by a buyer, selected by the optimizer, locked as a commitment, delivered, then verified. Each card says why it sits where it does.</p>
+  <h2 id="pipeline-heading">Opportunity pipeline ({{ pipeline.customer_count }} customers, {{ pipeline.open }} open{% if pipeline.closed %}, {{ pipeline.closed }} expired or rejected{% endif %})</h2>
   <p>{% with since_iso=pipeline.generated_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
   <div class="og-kanban">
     {% for column in pipeline.columns %}
     <div class="og-kanban-column" data-state="{{ column.state }}">
       <h3>{{ column.label }} <span>{{ column.count }}</span></h3>
-      {% for item in column.items %}
+      {% for item in column["items"] %}
       <div class="og-kanban-card{% if item.at_risk %} og-at-risk{% endif %}">
-        <div>{{ item.obligation_id }}</div>
+        <div title="{{ item.obligation_id }}">{{ (item.obligation_id or '')[:8] }}</div>
         <div class="og-card-meta">{{ item.service_type }} &middot; {{ item.tier }} &middot; {{ item.committed_qty_kw }} kW</div>
         <div class="og-card-meta">customer {{ item.customer_id }}</div>
         {% if item.raw_state in ("COMMITTED", "DELIVERING") %}
@@ -41,6 +32,7 @@
         </div>
         {% endif %}
         {% if item.reason_code %}<div class="og-card-meta">{{ item.reason_code }}</div>{% endif %}
+        {% if item.decision %}<div class="og-decision">{{ item.decision }}</div>{% endif %}
       </div>
       {% else %}
       <p class="og-card-meta">none</p>
@@ -54,17 +46,18 @@
   <h2 id="ledger-heading">Ledger timeline &mdash; bank {{ ledger.bank_id }}</h2>
   <p>{{ ledger.obligation_count }} committed obligations plotted, plus free headroom.
     {% with since_iso=ledger.generated_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  <div id="ledger-chart" style="height: 280px;" role="img" aria-label="Stacked area chart of committed capacity and free headroom over time"></div>
+  <div id="ledger-chart" style="height: 280px;" role="img" aria-label="Stacked area chart of committed capacity and free headroom over time" data-empty="No capacity reserved on this bank yet. The selector reserves at the next quarter-hour gate."></div>
 </section>
 
 <section class="og-grid">
   <div class="og-panel" aria-labelledby="plan-heading">
     <h2 id="plan-heading">Latest selector plan</h2>
+    <p>The optimizer's most recent run: a linear program over 96 quarter-hours and three price scenarios. The objective is expected margin in USD; OPTIMAL means it proved no better plan exists.</p>
     {% if plan.has_plan %}
     <dl>
       <dt>Mode</dt><dd>{{ plan.mode_label }} ({{ plan.plan_mode }})</dd>
       <dt>Gate</dt><dd>{{ plan.gate_kind }}</dd>
-      <dt>Horizon</dt><dd>{{ plan.horizon_start }} &ndash; {{ plan.horizon_end }}</dd>
+      <dt>Horizon</dt><dd>{{ plan.horizon_display }}</dd>
       <dt>Solver status</dt><dd>{{ plan.solver_status }}</dd>
       {% if plan.solver_gap_pct is not none %}<dt>Solver gap</dt><dd>{{ "%.2f"|format(plan.solver_gap_pct) }}%</dd>{% endif %}
       {% if plan.solver_time_ms is not none %}<dt>Solve time</dt><dd>{{ plan.solver_time_ms }} ms</dd>{% endif %}
@@ -78,7 +71,8 @@
 
   <div class="og-panel" aria-labelledby="lock-heading">
     <h2 id="lock-heading">Commitment-lock events (K13)</h2>
-    {% with columns=[{"key": "obligation_id", "label": "Obligation"}, {"key": "reason_code", "label": "Reason"}, {"key": "supersedes", "label": "Supersedes"}, {"key": "committed_kw", "label": "kW", "numeric": true}, {"key": "interval_start", "label": "Interval start"}], rows=lock_events, empty_message='No lock events' %}
+    <p>Each row is a time the system refused to break a locked commitment for a better-priced offer.</p>
+    {% with columns=[{"key": "obligation_id", "label": "Obligation"}, {"key": "reason_code", "label": "Reason"}, {"key": "supersedes", "label": "Supersedes"}, {"key": "committed_kw", "label": "kW", "numeric": true}, {"key": "interval_start", "label": "Interval start"}], rows=lock_events, empty_message='No lock events yet. One appears the first time a committed customer is kept ahead of a better-priced offer.' %}
       {% include "_partials/data_table.html" %}
     {% endwith %}
   </div>
@@ -86,7 +80,8 @@
 
 <section class="og-panel" aria-labelledby="grants-heading">
   <h2 id="grants-heading">Real-time grants & substitutions</h2>
-  {% with columns=[{"key": "cycle_id", "label": "Cycle"}, {"key": "obligation_id", "label": "Obligation"}, {"key": "bank_id", "label": "Bank"}, {"key": "granted_kw", "label": "Granted kW", "numeric": true}, {"key": "kind", "label": "Kind"}], rows=grants, empty_message='No grants yet this cycle' %}
+  <p>The 2-second allocation cycle: which bank actually served each obligation, and when a substitute bank stepped in.</p>
+  {% with columns=[{"key": "cycle_id", "label": "Cycle"}, {"key": "obligation_id", "label": "Obligation"}, {"key": "bank_id", "label": "Bank"}, {"key": "granted_kw", "label": "Granted kW", "numeric": true}, {"key": "kind", "label": "Kind"}], rows=grants, empty_message='No grants yet. The allocator issues one per obligation per 2-second cycle once delivery starts.' %}
     {% include "_partials/data_table.html" %}
   {% endwith %}
 </section>
@@ -98,6 +93,37 @@
     og.chart("#ledger-chart", {{ ledger.chart_option | tojson }});
 
     var PIPELINE_STATES = ["OFFERED", "SELECTED", "COMMITTED", "DELIVERING", "FULFILLED_OR_SHORTFALL"];
+    // Same sentence the server renders (routes/dispatch.py decision_line), for cards the stream rebuilds.
+    function decisionLine(row) {
+      var num = function (v) { var n = parseFloat(v); return isNaN(n) ? null : n; };
+      var value = num(row.value_per_mwh);
+      var degradationMwh = num(row.degradation_cost) != null ? num(row.degradation_cost) * 1000 : null;
+      var kw = num(row.committed_qty_kw) || num(row.requested_kw) || 0;
+      var hours = 0;
+      var start = Date.parse(row.window_start), end = Date.parse(row.window_end);
+      if (!isNaN(start) && !isNaN(end)) { hours = Math.max((end - start) / 3600000, 0); }
+      var money = function (x) { return "$" + Math.round(x).toLocaleString(); };
+      switch (row.state) {
+        case "SELECTED":
+          if (value != null && degradationMwh != null) {
+            return "Selected: " + value.toFixed(0) + " $/MWh clears " + degradationMwh.toFixed(0) + " $/MWh degradation, est. margin "
+              + money((value - degradationMwh) / 1000 * kw * hours) + " for the window";
+          }
+          return "Selected by the optimizer, capacity reserved on the ledger";
+        case "COMMITTED": case "DELIVERING": return "Locked: this promise is kept even if a better price appears (K13)";
+        case "FULFILLED": return "Delivered and verified";
+        case "SHORTFALL": return "Delivered short; penalty applies";
+        case "EXPIRED": return "Window started before a gate could commit it";
+        case "OFFERED":
+          if (value == null) { return "Awaiting the next gate; no price on this offer yet"; }
+          if (degradationMwh != null && value < degradationMwh) {
+            return "Declined so far: " + value.toFixed(2) + " $/MWh does not cover " + degradationMwh.toFixed(0) + " $/MWh degradation";
+          }
+          if (row.decided_at) { return "Evaluated at " + value.toFixed(0) + " $/MWh; waiting for headroom at the next gate"; }
+          return "Offered at " + value.toFixed(0) + " $/MWh; awaiting the next quarter-hour gate";
+        default: return "";
+      }
+    }
     function pipelineColumnFor(state) {
       return (state === "FULFILLED" || state === "SHORTFALL") ? "FULFILLED_OR_SHORTFALL" : state;
     }
@@ -141,7 +167,8 @@
           var card = document.createElement("div");
           card.className = "og-kanban-card" + (item.at_risk ? " og-at-risk" : "");
           var idLine = document.createElement("div");
-          idLine.textContent = item.obligation_id || "";
+          idLine.textContent = (item.obligation_id || "").slice(0, 8);
+          idLine.title = item.obligation_id || "";
           card.appendChild(idLine);
           var metaLine = document.createElement("div");
           metaLine.className = "og-card-meta";
@@ -151,6 +178,13 @@
             (item.committed_qty_kw != null ? item.committed_qty_kw : item.requested_kw) + " kW",
           ].filter(Boolean).join(" · ");
           card.appendChild(metaLine);
+          var decisionText = item.decision || decisionLine(item);
+          if (decisionText) {
+            var decisionEl = document.createElement("div");
+            decisionEl.className = "og-decision";
+            decisionEl.textContent = decisionText;
+            card.appendChild(decisionEl);
+          }
           if (state === "COMMITTED" || state === "DELIVERING") {
             var energyLine = document.createElement("div");
             energyLine.className = "og-card-meta";
