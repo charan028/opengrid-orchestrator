@@ -38,6 +38,7 @@ from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine.background import BackgroundIngest
 from opengrid.engine.escalation import ShortfallEscalator, merge_signals
 from opengrid.engine.gates import run_due_gates
 from opengrid.engine.latency import CycleLatencyWindow
@@ -633,16 +634,19 @@ async def main(cfg: Config) -> None:
         async with build_client(
             cfg, username="og_engine", password=mqtt_password, client_id="og-engine"
         ) as client:
-            ingest_task = asyncio.create_task(_mqtt_ingest_loop(client, cfg))
+            raw_worker = BackgroundIngest("pq-raw", pq_mod.ingest_raw_capture)
+            raw_task = asyncio.create_task(raw_worker.run())
+            ingest_task = asyncio.create_task(_mqtt_ingest_loop(client, cfg, raw_worker))
             ingest_task.add_done_callback(_log_ingest_exit)
             try:
                 await run_forever(
                     lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
-                ingest_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await ingest_task
+                for task in (ingest_task, raw_task):
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
     finally:
         await pool.close()
 
@@ -656,7 +660,7 @@ def _log_ingest_exit(task: asyncio.Task[None]) -> None:
     logger.error("mqtt ingest loop exited", exc_info=exc)
 
 
-async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config) -> None:
+async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config, raw_worker: BackgroundIngest) -> None:
     """Subscribe to `<root>/tel/#`, `<root>/scada/#`, `<root>/scada/instruction/#` (topics.md) and route
     validated payloads into the fleet twin. Split out of `main` so it runs concurrently with the 2 s
     driving tick as one cancellable task (graceful shutdown, 02b S1.1-S1.3). `client` is already entered
@@ -686,7 +690,7 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config) -> None:
                 await pq_ingest.ingest_summary(payload)
             elif message.topic.matches(wave_raw_topic):
                 validate_payload("pq_waveform_raw", payload)
-                await pq_ingest.ingest_raw_capture(payload)
+                raw_worker.submit(payload)  # blob write + index insert off the ingest path
             elif message.topic.matches(ack_topic):
                 validate_payload("ack", payload)
                 await fleet.ingest_ack(payload)
