@@ -1,0 +1,13 @@
+{
+  "_note": "Per-load-zone map centroids for GET /og/api/fleet/map. A hub whose og.hub.lat/lon is NULL is drawn at a deterministic point inside its zone's disc (centroid + radius_km, jittered by a hash of hub_id). As soon as og.hub carries real coordinates the API uses them instead, with no change here. The four ERCOT load zones use the load-weighted mean of their mapped weather zones in grid_map_data.json (forecast.service.DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE); the regulated-utility zones use the utility's main city. These are display positions, not asset locations.",
+  "zones": {
+    "LZ_HOUSTON": {"lat": 29.760, "lon": -95.370, "radius_km": 35, "basis": "weather zone coast"},
+    "LZ_NORTH": {"lat": 32.869, "lon": -96.934, "radius_km": 40, "basis": "load-weighted north + northC"},
+    "LZ_SOUTH": {"lat": 29.213, "lon": -97.938, "radius_km": 60, "basis": "load-weighted southern + southC"},
+    "LZ_WEST": {"lat": 31.920, "lon": -101.927, "radius_km": 60, "basis": "load-weighted west + farWest"},
+    "LZ_AEN": {"lat": 30.267, "lon": -97.743, "radius_km": 15, "basis": "Austin city centre (Austin Energy)"},
+    "LZ_CPS": {"lat": 29.424, "lon": -98.494, "radius_km": 18, "basis": "San Antonio city centre (CPS Energy)"},
+    "LZ_LCRA": {"lat": 29.950, "lon": -97.550, "radius_km": 40, "basis": "approximate Central Texas (LCRA)"},
+    "LZ_RAYBN": {"lat": 33.198, "lon": -96.615, "radius_km": 30, "basis": "McKinney (Rayburn Country EC)"}
+  }
+}

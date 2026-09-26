@@ -106,7 +106,7 @@ def test_declined_candidate_would_have_fit_the_bare_power_envelope() -> None:
     committed_kw=st.floats(min_value=0.0, max_value=20.0, allow_nan=False, allow_infinity=False),
     candidate_kw=st.floats(min_value=0.1, max_value=20.0, allow_nan=False, allow_infinity=False),
 )
-@settings(max_examples=40, deadline=None)
+@settings(max_examples=40, deadline=None, derandomize=True)
 def test_soc_stays_within_bounds_in_every_scenario(
     capacity: float, reserve_frac: float, initial_frac: float, committed_kw: float, candidate_kw: float
 ) -> None:

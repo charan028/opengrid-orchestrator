@@ -114,6 +114,80 @@ def test_widening_widens_band_and_sets_not_for_firm():
     assert stale.p10 <= stale.p50 <= stale.p90
 
 
+# Production's cold start: ERCOT history begins Thu 2026-09-24 00:00 CT; now is Sat 2026-09-26 16:30 CT.
+_HISTORY_START_CT = datetime(2026, 9, 24, 5, 0, tzinfo=UTC)  # 00:00 CDT
+_SAT_NOW = datetime(2026, 9, 26, 21, 30, tzinfo=UTC)  # 16:30 CDT, Saturday
+
+
+def _every_15_min(start: datetime, end: datetime, value: float = 30.0) -> list[tuple[datetime, float]]:
+    out: list[tuple[datetime, float]] = []
+    ts = start
+    while ts < end:
+        out.append((ts, value + (ts.hour % 5)))
+        ts += timedelta(minutes=15)
+    return out
+
+
+def test_saturday_on_history_since_sep_24_is_firm_pooled():
+    """Target Sun 10:00 CT: no Sunday samples and one Saturday (weekend) sample, but Thu/Fri/Sat pooled
+    give 3 -- firm, via the pooled relaxation, not the strict rule."""
+    history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
+    target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)  # Sun 10:00 CDT
+    slot = compute_slot_quantiles(history, target, stale=False)
+    assert slot.basis == "POOLED"
+    assert slot.firm_fitness == "FIRM_OK"
+    assert slot.sample_count == 3
+
+
+def test_pooled_still_short_falls_back_not_for_firm():
+    """Target Sun 20:00 CT: only Thu/Fri have that time-of-day before Sat 16:30 -- 2 pooled samples,
+    still short, so the diurnal fallback and NOT_FOR_FIRM stand."""
+    history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
+    target = datetime(2026, 9, 28, 1, 0, tzinfo=UTC)  # Sun 20:00 CDT
+    slot = compute_slot_quantiles(history, target, stale=False)
+    assert slot.basis == "FALLBACK"
+    assert slot.firm_fitness == "NOT_FOR_FIRM"
+
+
+def test_pooling_disabled_keeps_strict_rule():
+    history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
+    target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
+    slot = compute_slot_quantiles(history, target, stale=False, pool_day_types_when_short=False)
+    assert slot.basis == "FALLBACK"
+    assert slot.firm_fitness == "NOT_FOR_FIRM"
+
+
+def test_strict_data_uses_strict_path_even_with_pooling_on():
+    """Enough same-day-type samples: the strict rule applies automatically and the pool excludes the
+    other day type (weekday values of 999 would otherwise drag the quantiles)."""
+    history = _weekday_type_samples(_SATURDAY, count=3, value_fn=lambda i: 10.0 + i)
+    history += [(_SATURDAY - timedelta(days=d), 999.0) for d in (1, 2, 3, 4, 5)]  # Fri..Mon
+    slot = compute_slot_quantiles(history, _SATURDAY, stale=False)
+    assert slot.basis == "STRICT"
+    assert slot.firm_fitness == "FIRM_OK"
+    assert slot.sample_count == 3
+    assert slot.p90 < 999.0
+
+
+def test_pooled_spread_cap_rejects_wide_pool():
+    history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
+    history = [(ts, v * (1 + 10 * (ts.day % 2))) for ts, v in history]  # alternate days wildly apart
+    target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
+    capped = compute_slot_quantiles(history, target, stale=False, pooled_max_spread=1.0)
+    assert capped.basis == "FALLBACK"
+    assert capped.firm_fitness == "NOT_FOR_FIRM"
+    uncapped = compute_slot_quantiles(history, target, stale=False)
+    assert uncapped.basis == "POOLED"
+
+
+def test_pooled_slot_still_not_for_firm_when_stale():
+    history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
+    target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
+    slot = compute_slot_quantiles(history, target, stale=True)
+    assert slot.basis == "POOLED"
+    assert slot.firm_fitness == "NOT_FOR_FIRM"
+
+
 def test_widen_factor_must_be_positive():
     with pytest.raises(ValueError, match="positive"):
         widen((1.0, 2.0, 3.0), factor=0)

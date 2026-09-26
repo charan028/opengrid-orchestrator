@@ -8,6 +8,15 @@ rows (`migrations/0010_service_profile.sql`, `interfaces/contracts/service_profi
 | File | Profile | Status |
 |---|---|---|
 | `data_center.toml` | `DATA_CENTER` v1 (§4.b): firm bridging capacity in a tight PQ envelope | Defined and tested (WP-F); not yet registered as a service type |
+| `pjm_capacity.toml` | `PJM_CAPACITY` v1: simulated PJM RPM-style capacity commitment, emergency performance hours, non-performance charge, grid-code-minimum PQ (§4.c pattern) | Defined and tested (owner decision 2026-09-26); `ServiceType` registered (migration 0025), `settle`/`selector` wiring pending -- see `docs/orchestrator/07-delivery/14-additional-services.md` |
+| `mobile_storage.toml` | `MOBILE_STORAGE` v1: a trailer/mobile battery deployed to a site for a window; `site_id` (and its M&V point) change per deployment | Defined and tested (owner decision 2026-09-26); `ServiceType` registered (migration 0025), `settle`/`selector` wiring pending |
+| `large_load.toml` | `LARGE_LOAD` v1: firming/ride-through for a large flexible load (crypto/data load curtailment, ERCOT large-load interconnection); load-following schedule, grid-code-minimum PQ (explicit §4.b contrast with `DATA_CENTER`) | Defined and tested (owner decision 2026-09-26); `ServiceType` registered (migration 0025), `settle`/`selector` wiring pending |
+
+PJM stays fully simulated in this increment: there is no real PJM membership, market feed or settlement
+connection, and none is planned by this work package. `PJM_CAPACITY`'s `ISO_INSTRUCTION` setpoint source
+is always a scenario-declared event (`integration-sims/scenarios/svc-pjm-capacity.yaml`), never a real
+eRPM/eDART call -- see `docs/orchestrator/07-delivery/14-additional-services.md` for what real-market
+onboarding (PJM membership, capacity market registration, etc.) would still require.
 
 ## File layout
 

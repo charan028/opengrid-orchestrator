@@ -65,6 +65,40 @@ class ZoneBlockConfig:
     enabled: bool = False
 
 
+#: Substation battery-set default rating (09-optimizer-dispatcher-update.md D11: "A new asset class
+#: SUBSTATION_BESS has its own SoC, PCS rating, POI and transformer limits, ramp and wear. The default
+#: is 20 MW / 2 h (40 MWh), RTE 0.88 and a 20% floor, with 4 h as a sensitivity").
+SUBSTATION_RATED_MW_DEFAULT: float = 20.0
+SUBSTATION_DURATION_H_DEFAULT: float = 2.0
+SUBSTATION_RESERVE_FRAC_DEFAULT: float = 0.20
+#: One-way efficiency from the round-trip figure (D11's RTE 0.88; `core/physics.py` uses one-way eta_c/
+#: eta_d, same split as homes' 0.9487 -- see 09 S1.2's table: "substation sqrt(0.88)=0.938").
+SUBSTATION_ETA_DEFAULT: float = 0.88**0.5
+
+
+@dataclass(frozen=True)
+class SubstationAssetConfig:
+    """One optional substation-sited battery-set asset (build phase, 2026-09-26: FLEET-SIM
+    reassignment; 09-optimizer-dispatcher-update.md D11 `SUBSTATION_BESS`), simulated by
+    `ogsim.fleet` alongside home hubs: it publishes telemetry, accepts signed command batches and
+    leases exactly like a hub (`ogsim.fleet.state.build_fleet_state` appends it as a one-hub "bank" of
+    its own, so `ogsim.fleet.commands`/`lease`/`stop`/`runtime` all handle it for free -- see
+    `build_fleet_state`'s docstring) -- only its rated power/energy and lack of home load are
+    different. Configurable and OFF by default (`enabled=False`); coordinate `asset_id` with the
+    MARKET-MODEL agent's `og.asset` model (see the FLEET-SIM build report) before wiring the
+    orchestrator side to it.
+
+    Known simplification: the substation "hub" still runs through the same per-hub household load
+    model as a home (a few kW of simulated diurnal load), which is negligible (< 0.02%) against a
+    20 MW rating and not worth a special-cased zero for a first cut."""
+
+    asset_id: str  # e.g. "sub-LZ_AEN-00"; a distinct namespace from "hub-NNNNN"/"bank-NNN"
+    zone: str
+    rated_mw: float = SUBSTATION_RATED_MW_DEFAULT
+    duration_h: float = SUBSTATION_DURATION_H_DEFAULT
+    enabled: bool = False
+
+
 def bank_topology(
     bank_count: int, zones: tuple[str, ...], zone_blocks: tuple[ZoneBlockConfig, ...]
 ) -> tuple[list[str], list[str]]:
@@ -220,6 +254,13 @@ class FleetConfig:
     # after hub-{hub_count-1}/bank-{bank_count-1} in config order; empty/all-disabled by default, so
     # the base fleet is unchanged (see `ZoneBlockConfig`'s docstring).
     zone_blocks: tuple[ZoneBlockConfig, ...] = ()
+    # S1.9 F5 (09-optimizer-dispatcher-update.md): the per-hub above-continuous peak budget B_i, in
+    # seconds of P_cont-equivalent (kW*s = p_kw_limit * this). "Peak = continuous" until Base confirms
+    # (OQ-10), so this is 0.0 by default -- no reported peak headroom, matching F5's "inactive" status.
+    peak_power_budget_s_default: float = 0.0
+    # Optional substation-sited battery-set assets (D11 SUBSTATION_BESS, `SubstationAssetConfig`'s
+    # docstring); empty by default, so no substation asset is simulated unless explicitly configured.
+    substation_assets: tuple[SubstationAssetConfig, ...] = ()
     guardian_public_key_path: str = "/etc/opengrid/guardian_ed25519.pub"
     guardian_public_key_path_dev: str = ""
     safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
@@ -301,6 +342,10 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         ),
         bank_kva_rating_default=float(raw.get("bank_kva_rating_default", defaults.bank_kva_rating_default)),
         zone_blocks=_zone_blocks_from_raw(raw.get("zone_blocks", [])),
+        peak_power_budget_s_default=float(
+            raw.get("peak_power_budget_s_default", defaults.peak_power_budget_s_default)
+        ),
+        substation_assets=_substation_assets_from_raw(raw.get("substation_assets", [])),
         guardian_public_key_path=str(raw.get("guardian_public_key_path", defaults.guardian_public_key_path)),
         guardian_public_key_path_dev=str(
             os.environ.get("OGSIM_GUARDIAN_PUBLIC_KEY_PATH") or raw.get("guardian_public_key_path_dev", "")
@@ -334,6 +379,28 @@ def _zone_blocks_from_raw(raw_blocks: Any) -> tuple[ZoneBlockConfig, ...]:
             )
         )
     return tuple(blocks)
+
+
+def _substation_assets_from_raw(raw_assets: Any) -> tuple[SubstationAssetConfig, ...]:
+    """Reads the optional `substation_assets:` YAML list (`SubstationAssetConfig`'s docstring); a
+    missing key, non-list value, or non-mapping entry parses to "no substation assets" (same
+    permissive-default policy as `_zone_blocks_from_raw`)."""
+    if not isinstance(raw_assets, list):
+        return ()
+    assets = []
+    for asset in raw_assets:
+        if not isinstance(asset, dict):
+            continue
+        assets.append(
+            SubstationAssetConfig(
+                asset_id=str(asset["asset_id"]),
+                zone=str(asset["zone"]),
+                rated_mw=float(asset.get("rated_mw", SUBSTATION_RATED_MW_DEFAULT)),
+                duration_h=float(asset.get("duration_h", SUBSTATION_DURATION_H_DEFAULT)),
+                enabled=bool(asset.get("enabled", False)),
+            )
+        )
+    return tuple(assets)
 
 
 def _inverter_pq_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:
@@ -430,6 +497,7 @@ __all__ = [
     "FleetConfig",
     "MqttSettings",
     "ScadaConfig",
+    "SubstationAssetConfig",
     "WorkspaceConfigError",
     "ZoneBlockConfig",
     "bank_topology",

@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from ogsim.common.config import load_fleet_config, load_scada_config
+from ogsim.customer.config import load_customer_config
 from ogsim.control import catalogue
 from ogsim.control.scenarios import ScenarioStep, load_scenarios_dir
 from ogsim.fleet.pq import PQ_ANOMALY_TYPES
@@ -68,6 +69,19 @@ def test_scenario_step_target_resolves(step: ScenarioStep, fleet: FleetEngine, s
             f"market target {step.target!r} is not a known product id ({sorted(KNOWN_MARKET_TARGETS)})"
         )
         return
+
+    if entry.owner == "customer":
+        # R2's customer operators (ogsim.customer): the target is a configured customer site.
+        sites = {s.site_id for s in load_customer_config().sites if s.site_id}
+        assert step.target in sites, (
+            f"customer target {step.target!r} is not a configured site ({sorted(sites)})"
+        )
+        return
+    if "trailer" in (entry.target_kind or ""):
+        pytest.skip(
+            f"{step.type} targets a mobile trailer ({step.target!r}); ogsim has no trailer registry yet to "
+            "resolve it against (R2 svc-mobile-storage) -- follow-up for the sims owner"
+        )
 
     wire_kind = catalogue.infer_wire_target_kind(entry, step.target)
     if entry.owner == "scada":

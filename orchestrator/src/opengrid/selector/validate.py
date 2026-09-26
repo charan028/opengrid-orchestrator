@@ -6,9 +6,15 @@ hide itself from the check. Defense-in-depth for K1/K2/K13/C16/product-rule feas
 from __future__ import annotations
 
 from opengrid.selector.types import CandidateOpportunity, ExtractedPlan, ModelInputs
+from opengrid.selector.value import kw_by_obligation_interval
 
 _TOL_KW = 1e-6
 _STEP_REL_TOL = 1e-4  # fraction of one increment step; absorbs float noise, not a real mis-quantization
+#: SoC re-derivation tolerance (kWh; 0.1 Wh, physically nil). HiGHS accepts a MIP incumbent with row
+#: residuals up to `mip_feasibility_tolerance` (1e-6) EACH, and the C1 recurrence accumulates them over
+#: up to 96 steps, so the 1e-6 kW tolerance used for single rows spuriously rejected valid MIP plans
+#: (Frank's flaky `test_soc_stays_within_bounds_in_every_scenario`; in production: a needless F2 fallback).
+_TOL_SOC_KWH = 1e-4
 
 
 def validate_plan(inputs: ModelInputs, plan: ExtractedPlan) -> tuple[bool, tuple[str, ...]]:
@@ -22,24 +28,18 @@ def validate_plan(inputs: ModelInputs, plan: ExtractedPlan) -> tuple[bool, tuple
     return not violations, tuple(violations)
 
 
-def _bank_cap(inputs: ModelInputs, bank_id: str, t: int) -> float:
-    for bank in inputs.banks:
-        if bank.bank_id == bank_id:
-            return bank.max_discharge_kw.get(t, 0.0)
-    return 0.0
+def _caps(inputs: ModelInputs) -> dict[str, dict[int, float]]:
+    return {bank.bank_id: bank.max_discharge_kw for bank in inputs.banks}
 
 
 def _check_commitment_lock(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
     """K13/C24: the frozen total for every committed obligation/interval must be reproduced exactly
     by the plan's bank allocation (an equality, never a reduction)."""
     violations = []
+    by_oid_t = kw_by_obligation_interval(plan)
     for co in inputs.committed:
         for t, frozen_kw in co.committed_kw_by_interval.items():
-            delivered = sum(
-                kw
-                for (oid, _b, ti), kw in plan.bank_interval_allocation.items()
-                if oid == co.obligation_id and ti == t
-            )
+            delivered = by_oid_t.get((co.obligation_id, t), 0.0)
             if delivered < frozen_kw - _TOL_KW:
                 violations.append(
                     f"K13: obligation {co.obligation_id} interval {t} delivered {delivered:.3f}kW "
@@ -54,8 +54,9 @@ def _check_one_buyer(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
     demand: dict[tuple[str, int], float] = {}
     for (_oid, bank_id, t), kw in plan.bank_interval_allocation.items():
         demand[bank_id, t] = demand.get((bank_id, t), 0.0) + kw
+    caps = _caps(inputs)
     for (bank_id, t, _scenario), kw in plan.headroom_schedule.items():
-        cap = _bank_cap(inputs, bank_id, t)
+        cap = caps.get(bank_id, {}).get(t, 0.0)
         total = demand.get((bank_id, t), 0.0) + kw
         if total > cap + _TOL_KW:
             violations.append(
@@ -66,10 +67,11 @@ def _check_one_buyer(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
 
 def _check_bank_bounds(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
     violations = []
+    caps = _caps(inputs)
     for (_oid, bank_id, t), kw in plan.bank_interval_allocation.items():
         if kw < -_TOL_KW:
             violations.append(f"bound: negative allocation {kw:.3f}kW on bank {bank_id} interval {t}")
-        cap = _bank_cap(inputs, bank_id, t)
+        cap = caps.get(bank_id, {}).get(t, 0.0)
         if kw > cap + _TOL_KW:
             violations.append(
                 f"bound: allocation {kw:.3f}kW on bank {bank_id} interval {t} exceeds capability {cap:.3f}kW"
@@ -86,6 +88,10 @@ def _check_soc_dynamics(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
     (02a S3.8's "re-derives the constraints from raw numbers")."""
     violations = []
     held = set(inputs.energy_hold_hours())  # ERCOT_AS holds lock energy, they do not drain it
+    drain_by_bt: dict[tuple[str, int], float] = {}
+    for (oid, b, ti), kw in plan.bank_interval_allocation.items():
+        if oid not in held:
+            drain_by_bt[b, ti] = drain_by_bt.get((b, ti), 0.0) + kw
     for bank in inputs.banks:
         if not bank.models_soc:
             continue
@@ -94,22 +100,22 @@ def _check_soc_dynamics(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
             expected_soc = bank.initial_soc_kwh
             for t in intervals:
                 reported = plan.soc_by_bank_interval_scenario.get((bank.bank_id, t, scenario))
-                if reported is not None and abs(reported - expected_soc) > _TOL_KW:
+                if reported is not None and abs(reported - expected_soc) > _TOL_SOC_KWH:
                     violations.append(
                         f"C1: bank {bank.bank_id} interval {t} scenario {scenario} SoC {reported:.3f}kWh "
                         f"!= balance-derived {expected_soc:.3f}kWh"
                     )
-                if not (bank.reserve_kwh - _TOL_KW <= expected_soc <= bank.capacity_kwh + _TOL_KW):
+                if not (bank.reserve_kwh - _TOL_SOC_KWH <= expected_soc <= bank.capacity_kwh + _TOL_SOC_KWH):
                     violations.append(
                         f"C2: bank {bank.bank_id} interval {t} scenario {scenario} SoC "
                         f"{expected_soc:.3f}kWh outside [{bank.reserve_kwh}, {bank.capacity_kwh}]kWh"
                     )
-                discharge_total = sum(
-                    kw
-                    for (oid, b, ti), kw in plan.bank_interval_allocation.items()
-                    if b == bank.bank_id and ti == t and oid not in held
-                ) + plan.headroom_schedule.get((bank.bank_id, t, scenario), 0.0)
-                charge = plan.charge_by_bank_interval_scenario.get((bank.bank_id, t, scenario), 0.0)
+                discharge_total = drain_by_bt.get((bank.bank_id, t), 0.0) + plan.headroom_schedule.get(
+                    (bank.bank_id, t, scenario), 0.0
+                )
+                charge = plan.charge_by_bank_interval_scenario.get(
+                    (bank.bank_id, t, scenario), 0.0
+                ) + plan.solar_charge_by_bank_interval_scenario.get((bank.bank_id, t, scenario), 0.0)
                 dt_h = inputs.interval_hours
                 expected_soc = (
                     expected_soc
@@ -144,6 +150,7 @@ def _check_product_rules(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
     from), which would make this independent check flag a perfectly valid plan.
     """
     violations = []
+    by_oid_t = kw_by_obligation_interval(plan)
     for c in inputs.candidates:
         if c.variable_kind == "BINARY":
             selected = plan.selected_x.get(c.opportunity_id, False)
@@ -158,11 +165,7 @@ def _check_product_rules(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
             )
 
         for t in c.window_intervals:
-            delivered = sum(
-                kw
-                for (oid, _b, ti), kw in plan.bank_interval_allocation.items()
-                if oid == c.opportunity_id and ti == t
-            )
+            delivered = by_oid_t.get((c.opportunity_id, t), 0.0)
             if abs(delivered - expected) > _TOL_KW:
                 violations.append(
                     f"product-rule: opportunity {c.opportunity_id} interval {t} delivered "

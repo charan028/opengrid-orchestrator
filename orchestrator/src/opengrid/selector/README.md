@@ -21,23 +21,29 @@ or a failed validation. F2 also serves as the KPI-22 rule-baseline.
 |---|---|
 | `types` | Pure dataclasses shared by every piece below (no I/O). |
 | `model` | Pure function: `ModelInputs` -> a highspy `Highs` model (`build_mode_o_model`). |
-| `solve` | Runs the model with a time limit/warm start; recovers price-of-firmness duals (`highs_solve`). |
+| `solve` | Runs the model (two lexicographic stages when a regulated candidate exists, 09 D3); recovers the price-of-firmness and stored-energy duals (`highs_solve`). |
 | `extract` | Turns a solved model into an `ExtractedPlan` (`extract_plan`). |
 | `validate` | Independent re-derivation of K1/K2/K13/product-rule constraints from raw numbers (`validate_plan`). |
-| `rule_fallback` | F2: firm-then-AS-then-market greedy selector; also the KPI-22 baseline (`rule_fallback_f2`). |
-| `db` | Selector's own read-only queries against `og.commitment` et al. |
-| `gate` | Orchestration: `run_gate`/`solve_gate`, the horizon/loader plumbing, `persist_plan`. |
+| `rule_fallback` | F2: firm-then-AS-then-market greedy selector; also the KPI-22 baseline, run on every gate (`rule_fallback_f2`). |
+| `value` | One net-value evaluator for the LP and rule plans (wear via `core.economics.wear_cost`, M1), and the ES05-S07 shadow comparison. |
+| `energy_value` | 09 D7 stored-energy value per bank/interval and the DISPATCH read API (`discharge_threshold_usd_per_mwh`). |
+| `db` | Selector's read-only queries against `og.commitment` et al., and its own analytics tables (migration 0030). |
+| `gate` | Orchestration: `run_gate`/`solve_gate`, the horizon/loader plumbing, market terms and K15 territory via `opengrid.market.MarketModel`, `persist_plan`. |
+
+## Economics (09 S1.5)
+
+- Each bank is priced at its own load zone's forecast (`ScenarioPrice.price_by_bank`; load rows ignored).
+- Wear (D8) on every discharged kWh -- deliveries and headroom alike -- at the bank's asset-class rate;
+  never on holds (AS awards, regulated need-basis reserves) or charging.
+- Charging: zone price + the TDSP's M1 in the ERCOT competitive area; the utility's own charging terms
+  (TOU, solar floor) in a regulated territory, no M1. Exports never recover M1.
+- Regulated candidates are selected first (stage R), then the full net value on the remainder (stage F).
 
 ## Known gaps (see the build's final report for detail)
 
-- Full physics (SoC dynamics, charge-side constraints C7-C9/C14/C15/C18) is deliberately left on the
-  `fleet.capability`/`forecast.scenarios` side of the interface boundary -- see `model.py`'s module
-  docstring.
-- `gate.load_candidates`/`load_committed`'s bank-eligibility and `_configured_bank_ids` are placeholders
-  until `contracts` exposes an opportunity-listing query and the platform config schema defines
-  `[banks]` (both outside this package's ownership).
-- `db.py`/`gate.persist_plan` are correct against the `02a` §1 DDL but unexercised against a live
-  database locally (no migrations exist yet, per BUILD.md §5's architect-owned `migrations/`).
+- Charge-side constraints C7-C9/C14/C18, the PV/grid charging split (C27), home load (F2) and the flow
+  families F1-F7 are not modelled yet; all charging is treated as grid-drawn.
+- The AS expected-deployment wear (`psi * r`) is 0: no deployment share is modelled.
 
 ## How to test
 

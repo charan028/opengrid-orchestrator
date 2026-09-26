@@ -1,0 +1,37 @@
+{
+  "proposal_id": "fc038bc1-ac6d-4c90-b30e-845fbb777d63",
+  "summary": "Set 3 hub(s) to 0.0 kW (feeder work)",
+  "expires_in_s": 60.0,
+  "hub_count": 3,
+  "requires_double_confirm": true,
+  "confirmations_required": 2,
+  "reason_counts": {
+    "SERVES_COMMITTED_OBLIGATION": 1,
+    "HUB_FAULT": 1
+  },
+  "double_confirm_reasons": [
+    {
+      "hub_id": "hub-00000",
+      "reasons": [
+        "SERVES_COMMITTED_OBLIGATION"
+      ],
+      "obligations": [
+        {
+          "obligation_id": "00000000-0000-7000-8000-00000000a001",
+          "service_type": "ERCOT_ENERGY",
+          "state": "DELIVERING",
+          "tier": "T2"
+        }
+      ]
+    },
+    {
+      "hub_id": "hub-00003",
+      "reasons": [
+        "HUB_FAULT"
+      ],
+      "obligations": []
+    }
+  ],
+  "warnings": [],
+  "trace_id": "78008670-83ba-49b3-9e7d-cba59050aeea"
+}

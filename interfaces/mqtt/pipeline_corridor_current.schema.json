@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/pipeline_corridor_current.schema.json",
+  "title": "PipelineCorridorCurrent",
+  "description": "Customer operator -> orchestrator, published on <root>/corridor/<customer_id>/<corridor_id>/current, QoS 0, every 2s. The PIPELINE_AC service profile's closed-loop signal (06-service-profiles-and-power-quality.md): the AC current induced on the pipe by nearby transmission, versus the customer's mitigation limit, that the orchestrator's PIPELINE_AC controller holds below limit_a.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["corridor_id", "line_id", "customer_id", "ts", "i_ac_a", "limit_a", "quality"],
+  "properties": {
+    "corridor_id": { "type": "string", "minLength": 1 },
+    "line_id": { "type": "string", "minLength": 1 },
+    "customer_id": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time", "description": "ISO-8601 UTC." },
+    "i_ac_a": { "type": "number", "minimum": 0, "description": "Induced AC current measured on the pipe (test-lead/coupon reading)." },
+    "limit_a": { "type": "number", "minimum": 0, "description": "The customer's mitigation limit (e.g. NACE SP0177 15 A rms guidance) for this corridor." },
+    "quality": { "type": "string", "enum": ["GOOD", "SUSPECT", "BAD"] }
+  }
+}

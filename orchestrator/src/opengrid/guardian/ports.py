@@ -10,12 +10,14 @@ any I/O import, per BUILD.md S5a "pure logic separated from I/O".
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
 
+from opengrid.core.models.market import UtilityId
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.guardian.pq_ports import (
     CalibrationHistoryPort,
@@ -76,6 +78,28 @@ class L2Instruction:
 
 
 @dataclass(frozen=True, slots=True)
+class Reading:
+    """One telemetry value the guardian itself received, and how old it is now."""
+
+    value: float
+    age_s: float
+
+
+@dataclass(frozen=True, slots=True)
+class HubFlowTelemetry:
+    """The hub telemetry the flow-limit checks read (09 S2.6, additive telemetry fields). A field is None
+    when this hub has never reported it (the static limits apply until it does, unless
+    `flow_telemetry_required`); a reported value older than the limit is stale (fail closed)."""
+
+    meter_kw: Reading | None = None  # meter net import, + = import
+    pv_kw: Reading | None = None
+    cell_temp_c: Reading | None = None
+    p_dis_max_kw: Reading | None = None  # BMS discharge limit (magnitude)
+    p_ch_max_kw: Reading | None = None
+    peak_budget_kws: Reading | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HubSnapshot:
     """Guardian's own, independently-read view of one hub: its physical params and the last
     hub-reported telemetry (never the allocator's planning-time assumption)."""
@@ -84,6 +108,93 @@ class HubSnapshot:
     soc_kwh: float
     prev_p_kw: float
     health: Literal["online", "stale", "offline", "fault"]
+    flow: HubFlowTelemetry = HubFlowTelemetry()
+
+
+@dataclass(frozen=True, slots=True)
+class HubSite:
+    """Static premise data for one hub (og.hub / the interconnection agreement), read by the guardian."""
+
+    export_limit_kw: float | None  # X_exp; None = unknown (0: discharge only to the measured load)
+    service_kw: float | None  # S_svc; None = unknown (the configured default service rating)
+    pv_rated_kw: float
+    peak_kw: float | None  # P_pk; None = no peak allowance
+    tau_peak_s: float | None
+    transformer_id: str | None  # None = unmapped (a group of one at the default per-home rating)
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTransformer:
+    transformer_id: str
+    rating_kva: float
+    members: tuple[str, ...]  # every hub behind it, not only the batch's
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateFlow:
+    """A feeder head, substation transformer or territory boundary: the guardian's own reading of its flow
+    (import-positive, None = no reading) and its limits (None = unknown: any increase is vetoed)."""
+
+    ref: str
+    flow_kw: float | None
+    age_s: float
+    lower_kw: float | None  # -R_rev
+    upper_kw: float | None  # rho * rating
+    banks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PoiLimit:
+    """A substation asset's interconnection limit (og.asset, migration 0025), both directions."""
+
+    asset_id: str
+    import_kw: float
+    export_kw: float
+
+
+class GridTopologyPort(Protocol):
+    """09 S2.6: static premise, transformer, feeder and substation data plus the guardian's own flow reads."""
+
+    async def hub_site(self, hub_id: str) -> HubSite | None: ...
+
+    async def transformer(self, transformer_id: str) -> ServiceTransformer | None: ...
+
+    async def feeder_flow(self, feeder_id: str) -> AggregateFlow | None: ...
+
+    async def substation_flow(self, bank_id: str) -> AggregateFlow | None:
+        """The substation transformer the bank sits under; None when no substation is configured for it."""
+        ...
+
+    async def territory_flow(self, bank_id: str) -> AggregateFlow | None:
+        """The regulated-territory boundary the bank sits inside (R_rev = 0, K15); None if competitive."""
+        ...
+
+    async def poi_limit(self, bank_id: str) -> PoiLimit | None:
+        """A SUBSTATION asset dispatched as this bank; None for home banks."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ObligationMarket:
+    """The obligation's contract market as the guardian reads it (og.contract.market / utility_id)."""
+
+    market: str | None
+    utility_id: str | None
+    service_type: str | None
+
+
+class TerritoryPort(Protocol):
+    """K15/G-33 reads: the obligation's market and the zone -> territory table."""
+
+    def zone_territory(self) -> Mapping[str, UtilityId]: ...
+
+    async def hub_zone(self, hub_id: str) -> str | None:
+        """The settlement zone of the hub's bank (og.bank.zone): its territory via `territory_of_zone`."""
+        ...
+
+    async def obligation_market(self, obligation_id: UUID) -> ObligationMarket | None: ...
+
+    async def free_access(self, utility_id: str) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +249,11 @@ class BankMembersPort(Protocol):
         """Guardian's own telemetry snapshot of EVERY hub on `bank_id` (membership from `og.hub`
         configuration), used to re-derive the bank's deliverable capability independently of the
         engine (G-19's check of an `R-COMMIT-LOCK-INFEASIBLE`/`-L0`/`-L1` override)."""
+        ...
+
+    async def member_hub_ids(self, bank_id: str) -> list[str]:
+        """The configured hub ids on `bank_id` (`og.hub`), for per-hub reads such as G-24's asset state in
+        G-19's PQ-eligible capability evidence."""
         ...
 
 
@@ -334,3 +450,8 @@ class GuardianPorts:
     as_awards: AsAwardPort | None = None
     # None: no operator alerts (e.g. ALR-CLOCK-QUALITY); decisions are unaffected.
     alerts: AlertPort | None = None
+    # None: the 09 S2.6 flow-limit checks (G-26..G-32) are not wired (tests that predate them). Production
+    # always wires it (`repo.build_pg_ports`).
+    topology: GridTopologyPort | None = None
+    # None: G-33 (K15 territory) is not wired. Production always wires it.
+    territory: TerritoryPort | None = None

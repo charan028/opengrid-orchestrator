@@ -44,6 +44,48 @@ async def test_latest_action_returns_the_row_value():
     assert await backend.latest_action("BANK", "bank-07") == "ENGAGE"
 
 
+async def test_retry_trace_conflict_retries_unique_violation_then_succeeds():
+    import psycopg
+
+    from opengrid.safestop.pg_backend import retry_trace_conflict
+
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise psycopg.errors.UniqueViolation("ux_trace_stream_seq")
+        return "ok"
+
+    assert await retry_trace_conflict(op) == "ok"
+    assert calls == 3
+
+
+async def test_retry_trace_conflict_gives_up_and_does_not_retry_other_errors():
+    import psycopg
+    import pytest
+
+    from opengrid.safestop.pg_backend import retry_trace_conflict
+
+    async def always_conflict() -> None:
+        raise psycopg.errors.UniqueViolation("ux_trace_stream_seq")
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        await retry_trace_conflict(always_conflict, attempts=2)
+
+    calls = 0
+
+    async def other() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("publish failed")
+
+    with pytest.raises(RuntimeError):
+        await retry_trace_conflict(other)
+    assert calls == 1
+
+
 class _FakeNotify:
     def __init__(self, payload: str) -> None:
         self.payload = payload

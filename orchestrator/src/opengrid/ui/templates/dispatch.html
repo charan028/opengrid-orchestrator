@@ -3,9 +3,19 @@
 {% block header_title %}Dispatch & commitments{% endblock %}
 
 {% block header_actions %}
-<form method="get" action="{{ base_path }}/dispatch" aria-label="Select bank for ledger timeline" class="og-toolbar">
-  <label for="bank_id">Bank</label>
-  <input type="text" id="bank_id" name="bank_id" value="{{ bank_id }}">
+<form method="get" action="{{ base_path }}/dispatch" aria-label="Select ledger scope" class="og-toolbar">
+  <label for="ledger-level">Ledger</label>
+  <select id="ledger-level" name="level">
+    <option value="fleet" {% if scope.level == 'fleet' %}selected{% endif %}>Fleet</option>
+    <option value="zone" {% if scope.level == 'zone' %}selected{% endif %}>Zone</option>
+    <option value="bank" {% if scope.level in ('bank', 'hub') %}selected{% endif %}>Feeder segment (bank)</option>
+  </select>
+  <label for="ledger-id">Which</label>
+  <select id="ledger-id" name="id">
+    <option value="" {% if not scope.id %}selected{% endif %}>whole fleet</option>
+    {% for z in scope.zones %}<option value="{{ z }}" {% if scope.level == 'zone' and scope.id == z %}selected{% endif %}>zone {{ z }}</option>{% endfor %}
+    {% for b in scope.all_banks %}<option value="{{ b }}" {% if scope.level in ('bank', 'hub') and scope.banks and scope.banks[0] == b %}selected{% endif %}>{{ b }}</option>{% endfor %}
+  </select>
   <button class="btn" type="submit">View</button>
 </form>
 <span class="stale-badge" id="dispatch-updated" role="status" data-stale="false">live</span>
@@ -42,11 +52,85 @@
   </div>
 </section>
 
+<section class="og-panel" aria-labelledby="as-heading">
+  <div class="og-section-heading">
+    <div>
+      <p class="eyebrow">ERCOT ancillary services</p>
+      <h2 id="as-heading">AS awards &amp; deployment</h2>
+    </div>
+    <span class="status-badge status-info">held energy protected</span>
+  </div>
+  <p class="og-panel-lead">Awards stay at 0 kW until an operator deploys them. Deployment draws only against the held energy reserve; ECRS requires 1 hour and Non-Spin requires 4 hours.</p>
+  {% if as_awards %}
+  <div class="data-table-wrap">
+    <table class="data-table" aria-label="ERCOT ancillary service awards">
+      <thead><tr><th>Obligation</th><th>Product</th><th>Committed</th><th>Energy held</th><th>State</th><th>Risk</th><th>Action</th></tr></thead>
+      <tbody>
+      {% for award in as_awards %}
+        <tr>
+          <td><code>{{ award.obligation_id[:8] }}</code></td>
+          <td>{{ award.product }}{% if award.required_hours %} · {{ award.required_hours }} h hold{% endif %}</td>
+          <td>{{ award.committed_kw or '--' }} kW</td>
+          <td>{{ '%.1f'|format(award.energy_held_kwh) if award.energy_held_kwh is not none else '--' }} / {{ '%.1f'|format(award.required_energy_kwh) if award.required_energy_kwh is not none else '--' }} kWh</td>
+          <td><span class="status-badge {{ 'status-dispatching' if award.state == 'deployed' else 'status-info' }}">{{ award.state }}</span></td>
+          <td>{% if award.at_risk %}<span class="status-badge status-caution">AT_RISK</span>{% else %}<span class="status-badge status-good">OK</span>{% endif %}</td>
+          <td>
+            {% if award.state == 'deployed' and is_operator %}
+            <form hx-post="{{ base_path }}/dispatch/as-deployments/{{ award.deployment_id }}/stop-propose" hx-target="#as-action-result" hx-swap="innerHTML">
+              <button class="btn btn-danger" type="submit">Stop deploy</button>
+            </form>
+            {% elif is_operator %}
+            <form hx-post="{{ base_path }}/dispatch/as-deployments/propose" hx-target="#as-action-result" hx-swap="innerHTML">
+              <input type="hidden" name="obligation_id" value="{{ award.obligation_id }}">
+              <input type="hidden" name="duration_minutes" value="15">
+              <input type="hidden" name="reason" value="Operator ERCOT AS deployment">
+              <button class="btn btn-primary" type="submit">Deploy</button>
+            </form>
+            {% else %}--{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty-state">No active ERCOT_AS awards are visible.</p>
+  {% endif %}
+  {% if is_operator %}
+  <form id="as-deployment-form" class="og-form-inline as-deployment-form" hx-post="{{ base_path }}/dispatch/as-deployments/propose" hx-target="#as-action-result" hx-swap="innerHTML">
+    <label>Deploy <select name="obligation_id"><option value="">all held AS awards</option>{% for award in as_awards if award.state == 'held' %}<option value="{{ award.obligation_id }}">{{ award.obligation_id[:8] }} · {{ award.product }}</option>{% endfor %}</select></label>
+    <label>Duration <input type="number" name="duration_minutes" value="15" min="1" max="240" required> min</label>
+    <label>Reason <input type="text" name="reason" value="Operator ERCOT AS deployment" maxlength="200" required></label>
+    <button class="btn btn-primary" type="submit">Propose deployment</button>
+  </form>
+  {% endif %}
+  <div id="as-action-result" role="status" aria-live="polite"></div>
+</section>
+
 <section class="og-panel" aria-labelledby="ledger-heading">
-  <h2 id="ledger-heading">Ledger timeline &mdash; bank {{ ledger.bank_id }}</h2>
-  <p>{{ ledger.obligation_count }} committed obligations plotted, plus free headroom.
+  {# a div, not a second <nav>: the page keeps one landmark navigation (tests-e2e/ui/test_a11y.py) #}
+  <div class="og-crumbs">
+    <span class="og-crumbs-label">Scope</span>
+    {% for c in scope.crumbs %}
+      {% if not loop.last %}<a href="{{ base_path }}/dispatch?level={{ c.level }}&amp;id={{ c.id }}">{{ c.label }}</a><span aria-hidden="true">&rsaquo;</span>{% else %}<span aria-current="location">{{ c.label }}</span>{% endif %}
+    {% endfor %}
+  </div>
+  <h2 id="ledger-heading">Ledger timeline &mdash; {{ ledger.bank_id }}</h2>
+  <p>Committed kW per obligation, stacked, against the scope's {{ '%.0f'|format(ledger.capacity_kw) }} kW of sellable capacity; the dashed remainder is capacity nobody has bought yet.
+    {% if scope.level == 'fleet' %}Aggregate of every feeder segment; pick a zone or a segment to drill down.{% elif scope.level == 'zone' %}Aggregate of the zone's feeder segments.{% elif scope.level == 'bank' %}A bank is a feeder segment aggregating its homes ({{ scope.hubs_in_scope or 50 }} hubs, one 600 kVA rating), not a single hub.{% else %}Hubs share their segment's ledger; this is {{ scope.banks[0] }}'s.{% endif %}
+    {{ ledger.obligation_count }} {{ ledger.series_noun|default('obligation') }}{{ '' if ledger.obligation_count == 1 else 's' }} plotted{% if ledger.available_hub_count is not none and ledger.hub_count %} ({{ ledger.available_hub_count }} of {{ ledger.hub_count }} homes available){% endif %}.
+    {% if scope.banks_unavailable %}<span class="stale-badge" data-stale="true">{{ scope.banks_unavailable|length }} of {{ scope.banks|length }} segments unavailable</span>{% endif %}
     {% with since_iso=ledger.generated_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  <div id="ledger-chart" style="height: 280px;" role="img" aria-label="Stacked area chart of committed capacity and free headroom over time" data-empty="No capacity reserved on this bank yet. The selector reserves at the next quarter-hour gate."></div>
+  {% if scope.level == 'fleet' and scope.zones %}
+  <p class="og-drill">Drill down:
+    {% for z in scope.zones %}<a href="{{ base_path }}/dispatch?level=zone&amp;id={{ z }}">{{ z }}</a>{% if not loop.last %} &middot; {% endif %}{% endfor %}
+  </p>
+  {% elif scope.level == 'zone' %}
+  <p class="og-drill">Feeder segments:
+    {% for b in scope.banks %}<a href="{{ base_path }}/dispatch?level=bank&amp;id={{ b }}">{{ b }}</a>{% if not loop.last %} &middot; {% endif %}{% endfor %}
+  </p>
+  {% endif %}
+  <div id="ledger-chart" style="height: 300px;" role="img" aria-label="Stacked area chart of committed capacity per obligation and uncommitted capacity over time" data-empty="No capacity reserved in this scope yet. The selector reserves at the next quarter-hour gate."></div>
 </section>
 
 <section class="og-grid">

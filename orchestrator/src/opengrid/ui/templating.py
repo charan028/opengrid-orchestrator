@@ -35,11 +35,25 @@ NAV_SCREENS: tuple[dict[str, str], ...] = (
     {"label": "Fleet", "path": f"{BASE_PATH}/fleet", "icon": "battery"},
     {"label": "Dispatch", "path": f"{BASE_PATH}/dispatch", "icon": "branch"},
     {"label": "Markets", "path": f"{BASE_PATH}/markets", "icon": "trend"},
-    {"label": "Health", "path": f"{BASE_PATH}/health", "icon": "pulse"},
+    {"label": "System Health", "path": f"{BASE_PATH}/health", "icon": "pulse"},
     {"label": "Profitability", "path": f"{BASE_PATH}/profitability", "icon": "dollar"},
     {"label": "Billing & audit", "path": f"{BASE_PATH}/billing", "icon": "scroll"},
+    {"label": "Power quality", "path": f"{BASE_PATH}/pq", "icon": "wave"},
+)
+
+#: Links out of the console, shown under the screens. `/ogsim/` is the integration-sims control plane
+#: (scenarios, anomalies), proxied by Apache with its own sign-in (deploy/apache/opengrid.conf).
+SCENARIOS_PATH = "/ogsim/"
+NAV_TOOLS: tuple[dict[str, str], ...] = (
+    {
+        "label": "Scenarios",
+        "path": SCENARIOS_PATH,
+        "icon": "play",
+        "title": "Simulator scenarios and anomalies (opens the sims control plane; separate sign-in)",
+    },
 )
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[_csrf_context])
 templates.env.globals["nav_screens"] = NAV_SCREENS
+templates.env.globals["nav_tools"] = NAV_TOOLS
 templates.env.globals["base_path"] = BASE_PATH

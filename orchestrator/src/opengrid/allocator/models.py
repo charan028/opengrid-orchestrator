@@ -10,12 +10,18 @@ Units: power in kW, apparent power in kVA, money in $/MWh, time in seconds unles
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from opengrid.core.models.engine import ServiceType
+from opengrid.core.models.market import Territory
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
+from opengrid.market.territory import FREE, MarketRef
+
+if TYPE_CHECKING:
+    from opengrid.allocator.pq_eligibility import EligibilityResult
 
 Tier = Literal["T1", "T2", "T3", "T4"]
 TIER_ORDER: tuple[Tier, ...] = ("T1", "T2", "T3", "T4")
@@ -55,10 +61,22 @@ class HubSnapshot:
     meter_kw: float | None = None  # net import at the home meter (+ import, - export)
     export_limit_kw: float | None = None  # interconnection export limit at the meter
     xfmr_id: str | None = None  # service transformer the home hangs off
+    units: int | None = None  # battery/inverter units in the home (og.hub.units, migration 0032)
 
     @property
     def is_healthy(self) -> bool:
         return self.health == "OK"
+
+    def evolve(self, **changes: Any) -> HubSnapshot:
+        """`dataclasses.replace` for the 2 s hot path: the same copy-with-changes, without re-running
+        field introspection and the frozen `__init__` (several times cheaper per call at 2,000 hubs)."""
+        new = object.__new__(HubSnapshot)
+        for name in _HUB_SLOTS:
+            object.__setattr__(new, name, changes[name] if name in changes else getattr(self, name))
+        return new
+
+
+_HUB_SLOTS: tuple[str, ...] = HubSnapshot.__slots__
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +94,7 @@ class BankSnapshot:
     substation_id: str | None = None  # 09 F3 per-cycle substation budget
     #: K15 territory (`opengrid.market.territory_of_zone`): a regulated utility id, `ERCOT_COMPETITIVE`, or
     #: `None` = unknown (fail closed when territory is enforced).
-    territory: str | None = None
+    territory: Territory | None = None
     #: K15(b): the territory's utility grants wholesale (FREE) access. Ignored for competitive-area banks.
     free_access: bool = False
 
@@ -104,6 +122,12 @@ class ObligationCall:
     #: CAPACITY HOLD: undeployed it is granted 0 kW discharge with its reservation kept (K13), and
     #: discharges up to `committed_kw` only while deployed.
     as_deployed: bool = False
+    #: ERCOT_AS only: the product's full-deployment duration (NSPIN 4 h, ECRS 1 h; `product_rule.
+    #: duration_minutes`). `None`: `energy_hold.DEFAULT_AS_DEPLOYMENT_H`.
+    hold_duration_h: float | None = None
+    #: K15: the obligation's market (its contract's `market`/`utility_id`). `None` = unknown or
+    #: inconsistent market data: never served while territory is enforced (fail closed).
+    market_ref: MarketRef | None = FREE
 
     @property
     def is_as_hold(self) -> bool:
@@ -233,3 +257,89 @@ class CycleResult:
     substitutions: tuple[SubstitutionEvent, ...] = field(default_factory=tuple)
     #: ERCOT_AS obligations held this cycle (undeployed capacity hold: 0 kW, reservation kept).
     held: tuple[str, ...] = field(default_factory=tuple)
+    #: Per-hub realization of PQ-sensitive obligations (the engine builds their hub items from these, so
+    #: only PQ-eligible hubs deliver them).
+    hub_allocations: tuple[HubAllocation, ...] = field(default_factory=tuple)
+    #: PQ eligibility left an obligation less capability than it needs this cycle (trace PQ_CAPABILITY_REDUCED).
+    pq_reductions: tuple[PqCapabilityReduction, ...] = field(default_factory=tuple)
+    #: Obligations a K15 territory check kept off a bank this cycle.
+    territory_blocks: tuple[TerritoryBlock, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class HubAllocation:
+    """One obligation's water-filled per-hub kW on one bank this cycle."""
+
+    obligation_id: str
+    bank_id: str
+    per_hub_kw: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PqCapabilityReduction:
+    """PQ eligibility (S5.2) shrank what an obligation's hubs can deliver below what it needs this cycle."""
+
+    obligation_id: str
+    bank_id: str
+    needed_kw: float
+    capability_before_kw: float
+    capability_after_kw: float
+    excluded_hub_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TerritoryBlock:
+    """K15: an obligation (or the bank's FREE headroom, `obligation_id=None`) not served on a bank."""
+
+    bank_id: str
+    obligation_id: str | None
+    reason_code: str
+
+
+@dataclass(frozen=True, slots=True)
+class PqDispatchContext:
+    """S5.2/S5.4 real-time PQ inputs for one cycle.
+
+    - `results_by_service`: the S5.2 eligibility verdicts per PQ-sensitive service type (hubs not listed
+      are ineligible for it);
+    - `phase_by_hub_id`: each hub's phase connection, for the phase-balance weight;
+    - `excluded_by_obligation`: hubs the S5.4 ladder took off an obligation (SUBSTITUTE_HUBS/EXCLUDE_HUB);
+      they are passed to substitution as unhealthy, so the swap is recorded with R-SUBSTITUTION."""
+
+    results_by_service: Mapping[str, EligibilityResult] = field(default_factory=dict)
+    phase_by_hub_id: Mapping[str, str] = field(default_factory=dict)
+    excluded_by_obligation: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class FlowLimits:
+    """09 S1.9 dispatch-side flow limits (F1-F3). Each applies only where its data exists; missing data
+    keeps the static limits (rated power, bank kVA) -- never an optimistic guess.
+
+    - F1: `P_max(SoC, T)` derating, capped by the hub's BMS limit when reported;
+    - F2: home load first, then the meter export limit (`default_export_limit_kw` when a hub reports none);
+    - F3: service-transformer group caps (`xfmr_kva`), per-cycle feeder and substation discharge budgets
+      (`feeder_budget_kw`/`substation_budget_kw`: the static ratings, or rating minus measured flow)."""
+
+    enabled: bool = False
+    default_export_limit_kw: float | None = None
+    xfmr_kva: Mapping[str, float] = field(default_factory=dict)
+    feeder_budget_kw: Mapping[str, float] = field(default_factory=dict)
+    substation_budget_kw: Mapping[str, float] = field(default_factory=dict)
+    #: Registry topology (migration 0029) for snapshots that do not carry it: hub -> service transformer,
+    #: hub -> meter export limit, bank -> feeder, bank -> substation.
+    xfmr_by_hub: Mapping[str, str] = field(default_factory=dict)
+    export_limit_by_hub: Mapping[str, float] = field(default_factory=dict)
+    feeder_by_bank: Mapping[str, str] = field(default_factory=dict)
+    substation_by_bank: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CycleExtras:
+    """Optional per-cycle inputs beyond S1-S7's core (all default off): closed-loop caps (S4.a/b), PQ
+    context (S5.2/S5.4), K15 territory enforcement, and flow limits (09 S1.9)."""
+
+    closed_loop_caps: Mapping[tuple[str, str], float] = field(default_factory=dict)
+    pq: PqDispatchContext | None = None
+    enforce_territory: bool = False
+    flow_limits: FlowLimits = field(default_factory=FlowLimits)

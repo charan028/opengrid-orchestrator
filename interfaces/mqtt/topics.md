@@ -22,6 +22,8 @@ Everywhere below, `<root>` stands for that configured prefix.
 | `<root>/scada/wave/<zone>/<bank_id>/<hub_id>/request` | orchestrator → hub | 1 | No | `og_api` / `og_engine` (on-demand capture trigger) | `og_sim` | `waveform_capture_request.schema.json` |
 | `<root>/cmd/cal/<hub_id>` | guardian → hub | 1 | No | `og_guardian` | `og_sim` hub task for that hub | `calibration_command.schema.json` |
 | `<root>/ack/cal/<hub_id>` | hub → orchestrator | 1 | No | `og_sim` (or a real hub) | `og_engine`, `og_guardian` | `calibration_ack.schema.json` |
+| `<root>/site/<customer_id>/<site_id>/meter` | customer operator → orchestrator | 0 | No | `og_sim_customer` (or a real customer meter) | `og_engine` (DATA_CENTER closed-loop controller) | `customer_site_meter.schema.json` |
+| `<root>/corridor/<customer_id>/<corridor_id>/current` | customer operator → orchestrator | 0 | No | `og_sim_customer` (or a real corridor monitor) | `og_engine` (PIPELINE_AC closed-loop controller) | `pipeline_corridor_current.schema.json` |
 
 `<scope>` for `<root>/stop/*` is one of `fleet`, `zone/<zone>`, `bank/<bank_id>`; `<id>` is the `stop_event`
 UUID. Stop state changes **only** through a signature-verified `StopEvent` (crypto.md §2.3): `ENGAGE` signed
@@ -47,13 +49,14 @@ releases or otherwise changes a stop (K8: an unsigned message must not be able t
 ## Client identities and ACLs
 
 One MQTT user per process that touches the broker: `og_engine`, `og_guardian`, `og_safestop`, `og_sim`,
-`og_api`. `feeds` and `settle` never touch MQTT. Each user's ACL is scoped to exactly the rows above (e.g.
-`og_guardian` may publish `cmd/#` and `lease/#`, subscribe to nothing; `og_sim` may publish `tel/#`,
-`ack/#`, `scada/#` (including `scada/wave/#`) and `ack/cal/#`, and subscribe to `cmd/#` (including
-`cmd/cal/#`), `stop/#`, `lease/#`, `scenario/cmd` and `scada/wave/+/+/+/request`). No anonymous access, no
-wildcard publish outside the configured root. `og_guardian`'s existing `cmd/#` publish scope already covers
-`cmd/cal/<hub_id>` -- no new ACL grant is needed for the calibration command itself, only for the new
-`scada/wave/#` / `ack/cal/#` topics.
+`og_sim_customer`, `og_api`. `feeds` and `settle` never touch MQTT. Each user's ACL is scoped to exactly the
+rows above (e.g. `og_guardian` may publish `cmd/#` and `lease/#`, subscribe to nothing; `og_sim` may publish
+`tel/#`, `ack/#`, `scada/#` (including `scada/wave/#`) and `ack/cal/#`, and subscribe to `cmd/#` (including
+`cmd/cal/#`), `stop/#`, `lease/#`, `scenario/cmd` and `scada/wave/+/+/+/request`; `og_sim_customer` (the
+customer-operator simulators, `integration-sims/src/ogsim/customer/`) may publish `site/#` and `corridor/#`
+only, and subscribes to nothing). No anonymous access, no wildcard publish outside the configured root.
+`og_guardian`'s existing `cmd/#` publish scope already covers `cmd/cal/<hub_id>` -- no new ACL grant is
+needed for the calibration command itself, only for the new `scada/wave/#` / `ack/cal/#` topics.
 
 ## Command freshness fields (K6)
 

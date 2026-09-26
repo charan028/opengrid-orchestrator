@@ -57,8 +57,10 @@ async def _insert_fixture(pool, *, committed_kw: Decimal) -> tuple:
     contract_id = uuid4()
     opportunity_id = uuid4()
     obligation_id = uuid4()
-    bank_id = "bank-settle-it"
-    hub_id = "hub-settle-it"
+    # Unique per test run: a shared bank/hub let an earlier run's telemetry and grants in overlapping
+    # minutes leak into this run's metering.
+    bank_id = f"bank-settle-it-{uuid4().hex[:8]}"
+    hub_id = f"hub-settle-it-{uuid4().hex[:8]}"
 
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
@@ -240,6 +242,115 @@ async def _insert_telemetry(
             )
 
 
+async def _insert_grants(pool, obligation_id, hub_id: str, interval_start: datetime, kw: Decimal) -> None:
+    """One og.grant per minute giving the obligation the whole bank grant: `_FETCH_TELEMETRY_SQL`
+    attributes a bank's measured discharge to an obligation by its share of that minute's grants, so an
+    interval with no grant meters 0 kWh however much the hubs discharged."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        for i in range(15):
+            await cur.execute(
+                """INSERT INTO og.grant
+                    (grant_id, cycle_id, obligation_id, bank_id, granted_kw, ledger_version, created_at)
+                   SELECT %s, %s, %s, bank_id, %s, 1, %s FROM og.hub WHERE hub_id = %s""",
+                (
+                    uuid4(),
+                    f"it-{uuid4().hex[:8]}",
+                    obligation_id,
+                    kw,
+                    interval_start + timedelta(minutes=i),
+                    hub_id,
+                ),
+            )
+
+
+async def _insert_as_fixture(pool, *, committed_kw: Decimal, mcpc_usd_per_mwh: Decimal) -> tuple:
+    """An ERCOT_AS obligation held at 0 kW (no deployment) -- the live-bug fixture (2026-09-26): every
+    AS settlement wrote `og.performance.compliance_pct = NULL`, violating that column's NOT NULL
+    constraint (0001_init.sql), so no AS interval settled from the 13:00 deploy onward."""
+    contract_id, opportunity_id, obligation_id = uuid4(), uuid4(), uuid4()
+    bank_id = f"bank-as-it-{uuid4().hex[:8]}"
+    hub_id = f"hub-as-it-{uuid4().hex[:8]}"
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """INSERT INTO og.contract
+                (contract_id, customer_id, service_type, tier, profile_ref, start_at,
+                 penalty_alpha, penalty_beta, penalty_theta, degradation_cost)
+               VALUES (%s, %s, 'ERCOT_AS', 'T2', 'it-profile@1', now(), 0.02, 0.30, 0.10, 0.03)""",
+            (contract_id, uuid4()),
+        )
+        await cur.execute(
+            """INSERT INTO og.opportunity
+                (opportunity_id, contract_id, window_start, window_end, requested_kw, value_per_mwh)
+               VALUES (%s, %s, now() - interval '1 hour', now() + interval '3 hours', %s, %s)""",
+            (opportunity_id, contract_id, committed_kw, mcpc_usd_per_mwh),
+        )
+        await cur.execute(
+            """INSERT INTO og.obligation
+                (obligation_id, opportunity_id, contract_id, service_type, tier, window_start,
+                 window_end, committed_qty_kw, state)
+               VALUES (%s, %s, %s, 'ERCOT_AS', 'T2', now() - interval '1 hour',
+                       now() + interval '3 hours', %s, 'DELIVERING')""",
+            (obligation_id, opportunity_id, contract_id, committed_kw),
+        )
+        await cur.execute(
+            "INSERT INTO og.bank (bank_id, zone, kva_rating) VALUES (%s, 'zone-as-it', 500)", (bank_id,)
+        )
+        await cur.execute(
+            """INSERT INTO og.hub (hub_id, bank_id, zone, e_kwh, r_kwh, p_kw)
+               VALUES (%s, %s, 'zone-as-it', 39.2, 7.84, 11)""",
+            (hub_id, bank_id),
+        )
+        await cur.execute(
+            """INSERT INTO og.reservation
+                (reservation_id, obligation_id, bank_id, kind, amount, interval_start, interval_end,
+                 ledger_version)
+               VALUES (%s, %s, %s, 'POWER_KW', %s, now() - interval '1 hour', now() + interval '3 hours', 1)""",
+            (uuid4(), obligation_id, bank_id, committed_kw),
+        )
+    return obligation_id, hub_id
+
+
+async def test_ercot_as_held_writes_numeric_compliance_pct_not_null(pg_pool):
+    """Regression for the live bug (2026-09-26, obligation 8e1cdcde's 12:45 interval and every AS
+    interval since the 13:00 deploy): a held-not-deployed AS interval (zero telemetry, delivered_kwh
+    = 0) must still write a NUMERIC `og.performance.compliance_pct` -- the column is NOT NULL -- or
+    `settle()` raises and no AS obligation ever settles again."""
+    obligation_id, _hub_id = await _insert_as_fixture(
+        pg_pool, committed_kw=Decimal("500"), mcpc_usd_per_mwh=Decimal("8.50")
+    )
+    interval_start = _quarter(20)
+    interval_end = interval_start + timedelta(minutes=15)
+    # No telemetry inserted at all: held, never deployed this interval (delivered_kwh settles as 0).
+
+    settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
+    await settle(obligation_id, interval_start, interval_end)  # must not raise (the live bug did)
+
+    async with pg_pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT compliance_pct, passed_threshold FROM og.performance WHERE obligation_id = %s",
+            (obligation_id,),
+        )
+        compliance_pct, passed_threshold = await cur.fetchone()
+        await cur.execute(
+            "SELECT revenue, penalty FROM og.pnl WHERE obligation_id = %s AND superseded_by IS NULL",
+            (obligation_id,),
+        )
+        revenue, penalty = await cur.fetchone()
+        await cur.execute(
+            "SELECT amount FROM og.invoice_line WHERE obligation_id = %s AND line_type = 'CAPACITY_PAYMENT'",
+            (obligation_id,),
+        )
+        (capacity_amount,) = await cur.fetchone()
+
+    assert compliance_pct is not None
+    assert compliance_pct == Decimal("1.0000")
+    assert passed_threshold is True
+    assert penalty == Decimal("0")
+    # committed_kwh = 500 kW * 0.25 h = 125 kWh; MCPC $8.50/MWh = $0.0085/kWh -> 125 * 0.0085 = 1.0625.
+    assert revenue == Decimal("1.0625")
+    assert capacity_amount == Decimal("1.0625")
+
+
 async def test_settle_persists_meter_performance_invoice_and_pnl(pg_pool):
     obligation_id, hub_id = await _insert_fixture(pg_pool, committed_kw=Decimal("4"))
     interval_start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=20)
@@ -290,10 +401,14 @@ async def test_rerunning_settle_is_idempotent_no_duplicate_rows(pg_pool):
 
 
 async def test_correction_supersedes_the_original_meter_interval(pg_pool):
+    """A telemetry correction re-meters the interval. Discharge is NEGATIVE p_kw and is attributed by the
+    obligation's og.grant share (`_FETCH_TELEMETRY_SQL`): the old fixture wrote positive (charging) kW and no
+    grants, so both runs metered 0 kWh, nothing changed, and no correction row was ever written."""
     obligation_id, hub_id = await _insert_fixture(pg_pool, committed_kw=Decimal("4"))
     interval_start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=60)
     interval_end = interval_start + timedelta(minutes=15)
-    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
+    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("-4"))
+    await _insert_grants(pg_pool, obligation_id, hub_id, interval_start, Decimal("4"))
 
     settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
@@ -301,16 +416,18 @@ async def test_correction_supersedes_the_original_meter_interval(pg_pool):
     # a correction: replace telemetry with a different value and re-settle
     async with pg_pool.connection() as conn, conn.cursor() as cur:
         await cur.execute("DELETE FROM og.telemetry WHERE hub_id = %s", (hub_id,))
-    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("6"))
+    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("-6"))
     await settle(obligation_id, interval_start, interval_end)
 
     async with pg_pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            "SELECT version, superseded_by FROM og.meter_interval WHERE obligation_id = %s ORDER BY version",
+            "SELECT version, superseded_by, delivered_kwh FROM og.meter_interval WHERE obligation_id = %s "
+            "ORDER BY version",
             (obligation_id,),
         )
         rows = await cur.fetchall()
 
+    assert [r[2] for r in rows] == [Decimal("1.000000"), Decimal("1.500000")]  # 4 kW then 6 kW x 0.25 h
     assert len(rows) == 2
     assert rows[0][1] is not None  # the original is now superseded
     assert rows[1][1] is None  # the correction is the active row
@@ -321,16 +438,19 @@ async def test_correction_supersedes_the_original_pnl_row(pg_pool):
     (migration 0006): a corrected net_value adds a new versioned row and supersedes the original,
     never mutating it in place and never leaving two active rows."""
     obligation_id, hub_id = await _insert_fixture(pg_pool, committed_kw=Decimal("4"))
-    interval_start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=80)
+    # Inside the fixture's reservation (now - 1 h .. now + 1 h): 80 minutes ago lay before it, so the
+    # obligation had no bank that interval and metered 0 kWh on both runs (no correction to write).
+    interval_start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=45)
     interval_end = interval_start + timedelta(minutes=15)
-    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("4"))
+    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("-4"))  # discharge is negative p_kw
+    await _insert_grants(pg_pool, obligation_id, hub_id, interval_start, Decimal("4"))
 
     settle_module.configure(PgSettleBackend(pg_pool), TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
     await settle(obligation_id, interval_start, interval_end)
 
     async with pg_pool.connection() as conn, conn.cursor() as cur:
         await cur.execute("DELETE FROM og.telemetry WHERE hub_id = %s", (hub_id,))
-    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("6"))
+    await _insert_telemetry(pg_pool, hub_id, interval_start, Decimal("-6"))
     await settle(obligation_id, interval_start, interval_end)
 
     async with pg_pool.connection() as conn, conn.cursor() as cur:

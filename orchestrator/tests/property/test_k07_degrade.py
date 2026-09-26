@@ -78,30 +78,40 @@ _tick_ratios = st.lists(
 @settings(max_examples=300)
 @given(_tick_ratios)
 def test_k07_vetoes_degrade_to_conservative_and_only_ever_request_a_stop(ticks):
-    """ES06-S04 / TS-06-04: for any sequence of ticks, a scope is CONSERVATIVE exactly after a tick with more
-    than 5 % vetoed (until a tick at or under 5 % clears it); a safe stop is requested only on the 3rd
-    consecutive CONSERVATIVE tick, at most once per episode; and the counter itself can only request."""
+    """ES06-S04 / TS-06-04 with hysteresis: a scope is CONSERVATIVE after any tick with more than 5 % vetoed
+    and clears only after 3 consecutive good ticks (<= 2.5 %); every bad tick raises the escalation count,
+    which decays by one per good tick once NORMAL (never resets); a safe stop is requested when that count
+    reaches 3, at most once per episode; and the counter itself can only request."""
     tracker = EscalationTracker(idle_clear_ticks=10_000)
     scope = ("BANK", "bank-000")
-    streak = 0
-    requested_this_episode = False
+    conservative, count, good_streak, requested = False, 0, 0, False
     for vetoed, extra in ticks:
         commands = vetoed + extra
         transitions = tracker.observe_tick(
             [BatchOutcome("bank-000", commands, vetoed)] if commands else [], zone_by_bank={}
         )
         kinds = [t.kind for t in transitions]
+        assert set(kinds) <= {"ENTER_CONSERVATIVE", "STAY_CONSERVATIVE", "REQUEST_SAFE_STOP", "CLEAR"}
         if commands == 0:
             assert kinds == []
             continue
-        if vetoed / commands > 0.05:
-            streak += 1
-            assert tracker.posture(scope) == "CONSERVATIVE"
-            expect_request = streak >= 3 and not requested_this_episode
+        ratio = vetoed / commands
+        if ratio > 0.05:
+            conservative, count, good_streak = True, count + 1, 0
+            expect_request = count >= 3 and not requested
             assert ("REQUEST_SAFE_STOP" in kinds) == expect_request
-            requested_this_episode = requested_this_episode or expect_request
+            requested = requested or expect_request
+        elif not conservative:
+            assert kinds == []
+            count = max(count - 1, 0) if ratio <= 0.025 else count
+        elif ratio > 0.025:
+            assert kinds == []  # between the thresholds: neither recovered nor worse
+            good_streak = 0
         else:
-            assert tracker.posture(scope) == "NORMAL"
-            assert kinds == (["CLEAR"] if streak else [])
-            streak, requested_this_episode = 0, False
-        assert set(kinds) <= {"ENTER_CONSERVATIVE", "STAY_CONSERVATIVE", "REQUEST_SAFE_STOP", "CLEAR"}
+            good_streak += 1
+            clears = good_streak >= 3
+            assert kinds == (["CLEAR"] if clears else [])
+            if clears:
+                conservative, count, good_streak, requested = False, max(count - 1, 0), 0, False
+        assert tracker.posture(scope) == ("CONSERVATIVE" if conservative else "NORMAL")
+        assert tracker.escalation_count(scope) == count

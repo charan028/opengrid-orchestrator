@@ -132,10 +132,17 @@ def _include_routers(app: FastAPI) -> None:
         billing,
         contracts,
         dispatch,
+        dispatch_ledger,
         fleet,
+        fleet_bulk,
+        fleet_map,
+        grid_layers,
         health,
         markets,
+        markets_funnel,
+        pq,
         profitability,
+        profitability_kw,
         retention,
         safestop,
         scenario,
@@ -144,9 +151,16 @@ def _include_routers(app: FastAPI) -> None:
     for router_module in (
         health,
         fleet,
+        fleet_map,
+        fleet_bulk,
+        grid_layers,
         markets,
+        markets_funnel,
         dispatch,
+        dispatch_ledger,
         profitability,
+        pq,
+        profitability_kw,
         billing,
         contracts,
         retention,
@@ -155,6 +169,25 @@ def _include_routers(app: FastAPI) -> None:
         scenario,
     ):
         app.include_router(router_module.router)
+
+    from opengrid.api import views_settlement  # ui-owned read-only settlement view (Profitability, Billing)
+
+    app.include_router(views_settlement.router)
+
+    if customer_api_enabled():
+        from opengrid import customer_api
+
+        app.include_router(customer_api.router)
+        app.include_router(customer_api.operator_router)
+
+
+def customer_api_enabled() -> bool:
+    """`[api.customer_api].enabled` (default false): the customer API (`opengrid.customer_api`) is only
+    mounted when switched on, so it can ship dark. Read defensively like `_mount_ui`'s base path."""
+    try:
+        return bool(load_config().get("api.customer_api.enabled", False))
+    except ConfigError:
+        return False
 
 
 _DEFAULT_UI_BASE_PATH = "/og"

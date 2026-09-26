@@ -29,6 +29,40 @@
     <div id="forecast-chart" style="height: 260px;" role="img" aria-label="Forecast quantile band chart"></div>
   </section>
 
+  {# Bid funnel (CR #19 item 4). Each bar's width is its share of what ERCOT made available, so the four
+     read as one narrowing funnel; the inline width is the only style here because the percentage is data,
+     not design. `bid_funnel.has_data` is false until the API lands, and the panel says so. #}
+  <section class="og-panel" aria-labelledby="funnel-heading">
+    <h2 id="funnel-heading">Bid funnel</h2>
+    <p>How many ERCOT opportunities we saw in the last 24 hours, how many we bid on and how many we won. The gap from available to submitted is capacity we never offered; the gap from submitted to won is offers the market priced out.</p>
+    {% if bid_funnel.has_data %}
+    <ol class="og-funnel">
+      {% for stage in bid_funnel.stages %}
+      <li class="og-funnel-stage" data-stage="{{ stage.key }}">
+        <div class="og-funnel-head"><span class="og-funnel-label">{{ stage.label }}</span><span class="og-funnel-count">{{ stage.count }}</span><span class="og-funnel-pct">{{ stage.pct }}%</span></div>
+        {# Decorative: the head above already states the count and the percentage in text. #}
+        <div class="og-funnel-bar" aria-hidden="true"><span style="width: {{ stage.pct }}%"></span></div>
+      </li>
+      {% endfor %}
+    </ol>
+
+    {% with columns=[{"key": "product", "label": "Product"}, {"key": "available", "label": "Available", "numeric": true}, {"key": "submitted", "label": "Submitted", "numeric": true}, {"key": "awarded", "label": "Awarded", "numeric": true}, {"key": "rejected", "label": "Rejected", "numeric": true}, {"key": "win_rate_pct", "label": "Win rate (%)", "numeric": true}], rows=bid_funnel.rows, empty_message='No bids in this window for any product.' %}
+      {% include "_partials/data_table.html" %}
+    {% endwith %}
+
+    {% if bid_funnel.reasons %}
+    <h3>Why our bids were rejected</h3>
+    <ul class="og-funnel-reasons">
+      {% for reason in bid_funnel.reasons %}
+      <li><span class="og-funnel-reason">{{ reason.label }}</span><span class="og-funnel-reason-count">{{ reason.count }}</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% else %}
+    <p class="og-empty">No bid funnel yet: the market adapter does not report its bid activity to the console yet (GET /og/api/markets/bid-funnel is still being built). Counts appear per product once it records each opportunity ERCOT publishes, each bid we submit, and the award or rejection that comes back.</p>
+    {% endif %}
+  </section>
+
   <section class="og-panel" aria-labelledby="freshness-heading">
     <h2 id="freshness-heading">Freshness & source status</h2>
     <p>Whether each feed is live or in fallback, its age and circuit-breaker state.</p>

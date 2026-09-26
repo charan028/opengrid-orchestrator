@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/customer_site_meter.schema.json",
+  "title": "CustomerSiteMeter",
+  "description": "Customer operator -> orchestrator, published on <root>/site/<customer_id>/<site_id>/meter, QoS 0, every 2s. The DATA_CENTER service profile's closed-loop site meter at the point of common coupling (06-service-profiles-and-power-quality.md): real/reactive power and per-phase PQ readings the orchestrator's DATA_CENTER controller uses to hold a firm-bridging setpoint against the site's actual draw.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "site_id", "customer_id", "ts", "p_kw", "q_kvar",
+    "v_rms_a_v", "v_rms_b_v", "v_rms_c_v",
+    "i_rms_a_a", "i_rms_b_a", "i_rms_c_a",
+    "freq_hz", "pf", "thd_v_pct", "thd_i_pct", "quality"
+  ],
+  "properties": {
+    "site_id": { "type": "string", "minLength": 1 },
+    "customer_id": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time", "description": "ISO-8601 UTC." },
+    "p_kw": { "type": "number", "description": "Signed real power at the point of common coupling; positive = import from the grid, negative = export/backfeed." },
+    "q_kvar": { "type": "number" },
+    "v_rms_a_v": { "type": "number", "minimum": 0 },
+    "v_rms_b_v": { "type": "number", "minimum": 0 },
+    "v_rms_c_v": { "type": "number", "minimum": 0 },
+    "i_rms_a_a": { "type": "number", "minimum": 0 },
+    "i_rms_b_a": { "type": "number", "minimum": 0 },
+    "i_rms_c_a": { "type": "number", "minimum": 0 },
+    "freq_hz": { "type": "number", "minimum": 0 },
+    "pf": { "type": "number", "minimum": -1, "maximum": 1 },
+    "thd_v_pct": { "type": "number", "minimum": 0 },
+    "thd_i_pct": { "type": "number", "minimum": 0 },
+    "quality": { "type": "string", "enum": ["GOOD", "SUSPECT", "BAD"] }
+  }
+}

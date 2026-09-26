@@ -1,0 +1,166 @@
+{
+  "generated_at": "2026-09-26T19:35:14.531716+00:00",
+  "count": 2000,
+  "activity_counts": {
+    "DELIVERING": 50,
+    "IDLE": 1795,
+    "HOME_USE": 50,
+    "CHARGING": 50,
+    "FAULT": 5,
+    "OFFLINE": 50
+  },
+  "coord_sources": {
+    "zone_centroid": 2000
+  },
+  "warnings": [],
+  "hubs": [
+    {
+      "hub_id": "hub-00000",
+      "bank_id": "bank-000",
+      "zone": "LZ_NORTH",
+      "lat": 32.682638,
+      "lon": -96.959505,
+      "coord_source": "zone_centroid",
+      "health": "online",
+      "activity": "DELIVERING",
+      "kw": 5.0,
+      "soc_kwh": 20.0,
+      "soc_pct": 51.0,
+      "reserve_kwh": 7.84,
+      "rated_kw": 11.0,
+      "home_load_kw": null,
+      "meter_kw": null,
+      "pv_kw": null,
+      "fault_code": null,
+      "last_seen_at": "2026-09-26T19:35:13.869496+00:00",
+      "serving_obligations": [
+        {
+          "obligation_id": "00000000-0000-7000-8000-00000000a001",
+          "service_type": "ERCOT_ENERGY",
+          "state": "DELIVERING",
+          "tier": "T2"
+        }
+      ],
+      "can_serve_services": [
+        "ERCOT_ENERGY"
+      ]
+    },
+    {
+      "hub_id": "hub-00001",
+      "bank_id": "bank-001",
+      "zone": "LZ_SOUTH",
+      "lat": 29.751567,
+      "lon": -97.947649,
+      "coord_source": "zone_centroid",
+      "health": "online",
+      "activity": "CHARGING",
+      "kw": -4.0,
+      "soc_kwh": 20.0,
+      "soc_pct": 51.0,
+      "reserve_kwh": 7.84,
+      "rated_kw": 11.0,
+      "home_load_kw": null,
+      "meter_kw": null,
+      "pv_kw": null,
+      "fault_code": null,
+      "last_seen_at": "2026-09-26T19:35:13.869496+00:00",
+      "serving_obligations": [],
+      "can_serve_services": [
+        "ERCOT_ENERGY"
+      ]
+    },
+    {
+      "hub_id": "hub-00002",
+      "bank_id": "bank-002",
+      "zone": "LZ_HOUSTON",
+      "lat": 29.782271,
+      "lon": -95.606188,
+      "coord_source": "zone_centroid",
+      "health": "online",
+      "activity": "HOME_USE",
+      "kw": 3.0,
+      "soc_kwh": 20.0,
+      "soc_pct": 51.0,
+      "reserve_kwh": 7.84,
+      "rated_kw": 11.0,
+      "home_load_kw": null,
+      "meter_kw": null,
+      "pv_kw": null,
+      "fault_code": null,
+      "last_seen_at": "2026-09-26T19:35:13.869496+00:00",
+      "serving_obligations": [],
+      "can_serve_services": [
+        "ERCOT_ENERGY"
+      ]
+    },
+    {
+      "hub_id": "hub-00003",
+      "bank_id": "bank-003",
+      "zone": "LZ_WEST",
+      "lat": 32.214212,
+      "lon": -101.822593,
+      "coord_source": "zone_centroid",
+      "health": "fault",
+      "activity": "FAULT",
+      "kw": 0.0,
+      "soc_kwh": 20.0,
+      "soc_pct": 51.0,
+      "reserve_kwh": 7.84,
+      "rated_kw": 11.0,
+      "home_load_kw": null,
+      "meter_kw": null,
+      "pv_kw": null,
+      "fault_code": null,
+      "last_seen_at": "2026-09-26T19:35:13.869496+00:00",
+      "serving_obligations": [],
+      "can_serve_services": []
+    },
+    {
+      "hub_id": "hub-00004",
+      "bank_id": "bank-004",
+      "zone": "LZ_NORTH",
+      "lat": 32.982417,
+      "lon": -96.821411,
+      "coord_source": "zone_centroid",
+      "health": "offline",
+      "activity": "OFFLINE",
+      "kw": null,
+      "soc_kwh": 20.0,
+      "soc_pct": 51.0,
+      "reserve_kwh": 7.84,
+      "rated_kw": 11.0,
+      "home_load_kw": null,
+      "meter_kw": null,
+      "pv_kw": null,
+      "fault_code": null,
+      "last_seen_at": "2026-09-26T19:35:13.869496+00:00",
+      "serving_obligations": [],
+      "can_serve_services": []
+    },
+    {
+      "hub_id": "hub-00005",
+      "bank_id": "bank-005",
+      "zone": "LZ_SOUTH",
+      "lat": 28.956169,
+      "lon": -97.621562,
+      "coord_source": "zone_centroid",
+      "health": "online",
+      "activity": "IDLE",
+      "kw": 0.1,
+      "soc_kwh": 20.0,
+      "soc_pct": 51.0,
+      "reserve_kwh": 7.84,
+      "rated_kw": 11.0,
+      "home_load_kw": null,
+      "meter_kw": null,
+      "pv_kw": null,
+      "fault_code": null,
+      "last_seen_at": "2026-09-26T19:35:13.869496+00:00",
+      "serving_obligations": [],
+      "can_serve_services": [
+        "ERCOT_ENERGY"
+      ]
+    }
+  ],
+  "_sample_note": "hubs[] trimmed to 6 of 2000 (one per activity)"
+}

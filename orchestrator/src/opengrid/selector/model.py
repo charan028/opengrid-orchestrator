@@ -41,8 +41,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import highspy
+import numpy as np
 
 from opengrid.selector.types import ModelInputs
+from opengrid.selector.value import wear_usd_per_kwh
 
 _EPS = 1e-9
 #: C15 terminal-energy shortfall cost ($/kWh below the next-day floor, i.e. $1,000/MWh): above every
@@ -51,6 +53,9 @@ TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH = 1.0
 #: An ERCOT_AS energy hold keeps this fraction of the bank's capacity above reserve too: the guardian's
 #: G-01-ENERGY floor at lease end (else the last leases of a full deployment are vetoed).
 AS_HOLD_FLOOR_FRACTION = 0.01
+#: 09 S1.2 M^sol: price of each kWh of solar-share shortfall below a regulated contract's floor (the
+#: contract's green premium; default $0.50/kWh): the floor binds unless solar is unavailable.
+SOLAR_FLOOR_SLACK_USD_PER_KWH = 0.50
 _MIN_MEANINGFUL_KW = 1e-6  # below this, treat capacity as exactly 0 -- avoids HiGHS "tiny coefficient"
 # numerical errors on pathologically small (but nonzero) capacity readings.
 
@@ -72,13 +77,59 @@ class BuiltModel:
     n_vars: dict[str, highspy.highs_var]
     ybar_vars: dict[tuple[str, str, int], highspy.highs_var]
     h_vars: dict[tuple[str, int, str], highspy.highs_var]
-    capacity_rows: dict[tuple[str, int, str], highspy.highs_cons]
+    capacity_rows: dict[tuple[str, int, str], int]
+    """Row index of each shared-capacity row (C1/C13), for the price-of-firmness duals."""
     lock_rows: dict[tuple[str, int], highspy.highs_cons]
     integer_vars: list[highspy.highs_var] = field(default_factory=list)
     soc_vars: dict[tuple[str, int, str], highspy.highs_var] = field(default_factory=dict)
     charge_vars: dict[tuple[str, int, str], highspy.highs_var] = field(default_factory=dict)
-    soc_balance_rows: dict[tuple[str, int, str], highspy.highs_cons] = field(default_factory=dict)
+    soc_balance_rows: dict[tuple[str, int, str], int] = field(default_factory=dict)
+    """Row index of each C1 SoC-balance row, for the stored-energy value (09 D7)."""
+    solar_charge_vars: dict[tuple[str, int, str], highspy.highs_var] = field(default_factory=dict)
     terminal_soc_rows: dict[tuple[str, str], highspy.highs_cons] = field(default_factory=dict)
+    costs: dict[int, float] = field(default_factory=dict)
+    """Stage-F objective (09 S1.5) as column index -> coefficient (maximised)."""
+    stage_r_costs: dict[int, float] = field(default_factory=dict)
+    """Stage-R objective (09 D3): regulated candidates' capacity value only. Empty = single stage."""
+
+
+class _RowBuffer:
+    """Linear rows collected in CSR form and added in ONE `addRows` call. highspy's expression API costs
+    ~0.5 ms of numpy bookkeeping per row; the two large families (capacity, SoC balance: ~23k rows at
+    40 banks x 96 intervals x 3 scenarios) were most of the model build time."""
+
+    def __init__(self) -> None:
+        self._lower: list[float] = []
+        self._upper: list[float] = []
+        self._starts: list[int] = []
+        self._index: list[int] = []
+        self._value: list[float] = []
+
+    def add(self, lower: float, upper: float, terms: list[tuple[highspy.highs_var, float]]) -> int:
+        """Buffer `lower <= sum(coef * var) <= upper`; returns its position (see `flush`)."""
+        position = len(self._lower)
+        self._lower.append(lower)
+        self._upper.append(upper)
+        self._starts.append(len(self._index))
+        for var, coefficient in terms:
+            self._index.append(var.index)
+            self._value.append(coefficient)
+        return position
+
+    def flush(self, highs: highspy.Highs) -> int:
+        """Add every buffered row; returns the row index of position 0 (the rest follow in order)."""
+        base = int(highs.getNumRow())
+        if self._lower:
+            highs.addRows(
+                len(self._lower),
+                np.array(self._lower, dtype=np.float64),
+                np.array(self._upper, dtype=np.float64),
+                len(self._index),
+                np.array(self._starts, dtype=np.int32),
+                np.array(self._index, dtype=np.int32),
+                np.array(self._value, dtype=np.float64),
+            )
+        return base
 
 
 def _semi_continuous_bounds(min_qty_kw: float, increment_kw: float, max_kw: float) -> tuple[float, int]:
@@ -163,7 +214,8 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
 
     # --- h[b,t,w] free-headroom spot schedule + shared bank-capacity rows (K2 one-buyer, C1/C13) ----
     h_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
-    capacity_rows: dict[tuple[str, int, str], highspy.highs_cons] = {}
+    rows = _RowBuffer()
+    capacity_positions: dict[tuple[str, int, str], int] = {}
     consumers_by_bt: dict[tuple[str, int], list[highspy.highs_var]] = {}
     for (_obligation_id, bank_id, t), var in ybar_vars.items():
         consumers_by_bt.setdefault((bank_id, t), []).append(var)
@@ -171,12 +223,15 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
     for bank in inputs.banks:
         for t, raw_cap_kw in bank.max_discharge_kw.items():
             cap_kw = _clamped(raw_cap_kw)
+            # K15(b): no FREE (ERCOT) headroom from a regulated-territory bank without wholesale access.
+            headroom_cap_kw = cap_kw if bank.free_market_access else 0.0
             consumers = consumers_by_bt.get((bank.bank_id, t), [])
             for scenario in inputs.scenarios:
-                h = highs.addVariable(lb=0.0, ub=cap_kw)
+                h = highs.addVariable(lb=0.0, ub=headroom_cap_kw)
                 h_vars[bank.bank_id, t, scenario.scenario] = h
-                lhs = highs.qsum([*consumers, h])
-                capacity_rows[bank.bank_id, t, scenario.scenario] = highs.addConstr(lhs <= cap_kw)
+                capacity_positions[bank.bank_id, t, scenario.scenario] = rows.add(
+                    -highspy.kHighsInf, cap_kw, [(v, 1.0) for v in (*consumers, h)]
+                )
 
     # --- SoC dynamics (02a S3.2/S3.3 C1 energy balance, C2 SOC bounds, C15 terminal energy) --------
     # Per-bank, per-scenario energy state, added only for banks carrying an energy envelope
@@ -201,10 +256,19 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
         else:
             drain_by_bt.setdefault((bank_id, t), []).append(var)
     hold_slack_vars: list[tuple[str, highspy.highs_var]] = []
+    # 09 C7(b)' / D13 no wash trade: REGULATED deliveries on each (bank, t), which bar charging there.
+    regulated_ids = inputs.regulated_obligation_ids()
+    regulated_by_bt: dict[tuple[str, int], list[highspy.highs_var]] = {}
+    for (obligation_id, bank_id, t), var in ybar_vars.items():
+        if obligation_id in regulated_ids:
+            regulated_by_bt.setdefault((bank_id, t), []).append(var)
+    # 09 C27 solar share floor, per (territory, scenario): terms of sum(g_sol - phi * (g_sol + g_grid)).
+    solar_floor_terms: dict[tuple[str, str], list[tuple[highspy.highs_var, float]]] = {}
 
     soc_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
     charge_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
-    soc_balance_rows: dict[tuple[str, int, str], highspy.highs_cons] = {}
+    solar_charge_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
+    soc_balance_positions: dict[tuple[str, int, str], int] = {}
     terminal_soc_rows: dict[tuple[str, str], highspy.highs_cons] = {}
     terminal_shortfall_vars: dict[tuple[str, str], highspy.highs_var] = {}
 
@@ -222,14 +286,47 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
             highs.addConstr(soc_vars[bank.bank_id, first_t, scenario.scenario] == bank.initial_soc_kwh)
 
             for t in intervals:
-                charge = highs.addVariable(lb=0.0, ub=_clamped(bank.max_charge_kw.get(t, 0.0)))
+                charge_cap_kw = _clamped(bank.max_charge_kw.get(t, 0.0))
+                charge = highs.addVariable(lb=0.0, ub=charge_cap_kw if bank.grid_charge_allowed(t) else 0.0)
                 charge_vars[bank.bank_id, t, scenario.scenario] = charge
-                discharge_total = highs.qsum(
-                    [
-                        *drain_by_bt.get((bank.bank_id, t), []),
-                        h_vars[bank.bank_id, t, scenario.scenario],
-                    ]
-                )
+                charging: list[tuple[highspy.highs_var, float]] = [(charge, 1.0)]
+                solar_kw = min(_clamped(bank.solar_charge_kw.get(t, 0.0)), charge_cap_kw)
+                if solar_kw > 0.0:
+                    # 09 C27: g = g_sol + g_grid, both within the one charge envelope.
+                    solar = highs.addVariable(lb=0.0, ub=solar_kw)
+                    solar_charge_vars[bank.bank_id, t, scenario.scenario] = solar
+                    charging.append((solar, 1.0))
+                    rows.add(-highspy.kHighsInf, charge_cap_kw, charging)
+                if bank.solar_share_floor > 0.0 and bank.territory is not None:
+                    phi = bank.solar_share_floor
+                    terms = solar_floor_terms.setdefault((bank.territory, scenario.scenario), [])
+                    terms.append((charge, -phi * dt_h))
+                    if solar_kw > 0.0:
+                        terms.append(
+                            (solar_charge_vars[bank.bank_id, t, scenario.scenario], (1.0 - phi) * dt_h)
+                        )
+                headroom = h_vars[bank.bank_id, t, scenario.scenario]
+                cap_kw = _bank_cap_at(bank.bank_id, t)
+                headroom_cap_kw = cap_kw if bank.free_market_access else 0.0
+                if charge_cap_kw > 0.0 and headroom_cap_kw > 0.0:
+                    # No arbitrage wash (owner rule): grid charging and headroom sale in the same
+                    # interval share one envelope -- selling what is bought in the same interval and
+                    # market only burns losses, M1 and wear.
+                    rows.add(
+                        -highspy.kHighsInf,
+                        1.0,
+                        [(charge, 1.0 / charge_cap_kw), (headroom, 1.0 / headroom_cap_kw)],
+                    )
+                if charge_cap_kw > 0.0 and cap_kw > 0.0:
+                    for delivery in regulated_by_bt.get((bank.bank_id, t), []):
+                        # C7(b)' (D13): no charging while this bank delivers a regulated obligation; a
+                        # partial delivery leaves the proportional rest of the charge envelope.
+                        rows.add(
+                            -highspy.kHighsInf,
+                            charge_cap_kw,
+                            [*charging, (delivery, charge_cap_kw / cap_kw)],
+                        )
+                discharging = [*drain_by_bt.get((bank.bank_id, t), []), headroom]
                 holds = hold_by_bt.get((bank.bank_id, t), [])
                 if holds:
                     # Energy hold: SoC at the start of t covers every held award's full deployment. A
@@ -256,12 +353,17 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     )
                 next_e = highs.addVariable(lb=bank.reserve_kwh, ub=bank.capacity_kwh)
                 soc_vars[bank.bank_id, t + 1, scenario.scenario] = next_e
-                soc_balance_rows[bank.bank_id, t, scenario.scenario] = highs.addConstr(
-                    next_e
-                    == soc_vars[bank.bank_id, t, scenario.scenario]
-                    + bank.eta_c * charge * dt_h
-                    - (dt_h / bank.eta_d) * discharge_total
-                    - bank.self_discharge_kwh_per_h * dt_h
+                # next_e == e + eta_c*g*dt - (dt/eta_d)*discharge - self_discharge*dt, as one buffered row.
+                rhs = -bank.self_discharge_kwh_per_h * dt_h
+                soc_balance_positions[bank.bank_id, t, scenario.scenario] = rows.add(
+                    rhs,
+                    rhs,
+                    [
+                        (next_e, 1.0),
+                        (soc_vars[bank.bank_id, t, scenario.scenario], -1.0),
+                        *((var, -bank.eta_c * dt_h) for var, _unit in charging),
+                        *((var, dt_h / bank.eta_d) for var in discharging),
+                    ],
                 )
 
             # C15 as a penalized target, not a hard floor: `terminal SoC >= initial` was infeasible
@@ -277,65 +379,70 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                 >= bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh
             )
 
-    # --- objective (02a S3.4, MVP-S subset) ---------------------------------------------------------
-    vars_by_obligation: dict[str, list[highspy.highs_var]] = {}
-    for (obligation_id, _bank_id, _t), var in ybar_vars.items():
-        vars_by_obligation.setdefault(obligation_id, []).append(var)
+    # C27 soft solar floor: per territory and scenario, over the horizon (month-to-date carry-in is not
+    # modelled yet). The slack is priced at the contract's green premium.
+    solar_floor_slacks: list[tuple[str, highspy.highs_var]] = []
+    for (_territory, scenario_name), terms in solar_floor_terms.items():
+        slack = highs.addVariable(lb=0.0)
+        solar_floor_slacks.append((scenario_name, slack))
+        rows.add(0.0, highspy.kHighsInf, [*terms, (slack, 1.0)])
 
-    obj_terms = []
-    for c in inputs.candidates:
-        obligation_vars = vars_by_obligation.get(c.opportunity_id, [])
-        if not obligation_vars:
-            continue
-        total_kw = highs.qsum(obligation_vars)
-        # `degradation_cost_per_kwh` (02a S3.4's c_deg) prices the wear of actually *cycling* the
-        # battery -- it belongs on `MARKET` candidates (ERCOT_ENERGY spot arbitrage: charge low,
-        # discharge high, real round-trip throughput every interval). `FIRM` (HOME/DIST_DEFERRAL/
-        # PARTNER_CAPACITY) and `AS` (ERCOT_AS) candidates are *capacity holds* -- their value
-        # (`value_per_mwh`: a capacity payment or MCPC, not an energy-arbitrage spread) is priced per
-        # 02a S1's C3 as its own additive floor, separate from the cycling economics (spec line "C3 |
-        # The ONE additive floor (AS hold + robust firm energy)"). Charging them the full per-kWh
-        # cycling degradation anyway made every low-$/MWh capacity-hold candidate's objective
-        # coefficient strictly negative (e.g. a $5.37/MWh AS MCPC minus a $30/MWh-equivalent
-        # degradation cost) regardless of available headroom -- `x_o=0`/`q_o=0` was the solver's
-        # correct answer given that flawed input, identical in kind to the DIST_DEFERRAL
-        # `value_per_mwh=None` bug this same objective already had (`qa/merge-notes.md` S15).
-        degradation_usd_per_kwh = c.degradation_cost_per_kwh if c.category == "MARKET" else 0.0
-        obj_terms.append((c.value_per_mwh / 1000.0 - degradation_usd_per_kwh) * dt_h * total_kw)
-    for co in inputs.committed:
-        obligation_vars = vars_by_obligation.get(co.obligation_id, [])
-        if not obligation_vars:
-            continue
-        total_kw = highs.qsum(obligation_vars)
-        obj_terms.append(-co.degradation_cost_per_kwh * dt_h * total_kw)
+    base_row = rows.flush(highs)
+    capacity_rows = {key: base_row + position for key, position in capacity_positions.items()}
+    soc_balance_rows = {key: base_row + position for key, position in soc_balance_positions.items()}
+
+    # --- objective (02a S3.4 / 09 S1.5 stage F) -----------------------------------------------------
+    # Set as column costs, never by summing expressions: `expr + term` copies the whole expression, so
+    # the old accumulation was quadratic (44 of 52 s of a 40-bank/96-interval build, KPI 30 s).
+    costs: dict[int, float] = {}
+    stage_r_costs: dict[int, float] = {}
+
+    def _add_cost(target: dict[int, float], var: highspy.highs_var, cost: float) -> None:
+        target[var.index] = target.get(var.index, 0.0) + cost
+
+    value_per_kwh = {c.opportunity_id: c.value_per_mwh / 1000.0 for c in inputs.candidates}
+    regulated_candidate_ids = {c.opportunity_id for c in inputs.candidates if c.is_regulated}
+    deployment_share = inputs.expected_deployment_shares()
+    for (obligation_id, bank_id, _t), var in ybar_vars.items():
+        value = value_per_kwh.get(obligation_id, 0.0)  # committed: sunk value, locked by C24 anyway
+        # 09 D8 (Frank #7): wear on every kWh a delivery DISCHARGES, whatever the service. A capacity hold
+        # (AS award, regulated need-basis reserve) discharges only its expected deployment (psi * r).
+        discharged_share = deployment_share.get(obligation_id, 0.0) if obligation_id in hold_h_by_id else 1.0
+        wear = discharged_share * wear_usd_per_kwh(bank_by_id[bank_id])
+        _add_cost(costs, var, (value - wear) * dt_h)
+        if obligation_id in regulated_candidate_ids:
+            _add_cost(stage_r_costs, var, value * dt_h)  # 09 D3 stage R: regulated capacity value only
     for scenario in inputs.scenarios:
         for bank in inputs.banks:
+            wear = wear_usd_per_kwh(bank)
             for t in bank.max_discharge_kw:
                 price = scenario.price_at(bank.bank_id, t)
-                h = h_vars[bank.bank_id, t, scenario.scenario]
-                obj_terms.append(scenario.probability * dt_h * (price / 1000.0) * h)
+                weight = scenario.probability * dt_h
+                _add_cost(costs, h_vars[bank.bank_id, t, scenario.scenario], weight * (price / 1000.0 - wear))
                 charge = charge_vars.get((bank.bank_id, t, scenario.scenario))
                 if charge is not None:
-                    # Charging draws from the grid at the same price signal (02a S3.4's -(v^E+w_b)*g;
-                    # w_b, a per-bank wheeling tariff, is not yet a modeled parameter anywhere in this
-                    # codebase -- see the module's final-report note).
-                    obj_terms.append(-scenario.probability * dt_h * (price / 1000.0) * charge)
+                    # 09 C27/D5: a grid-drawn kWh costs the zone price + M1 in the competitive area, the
+                    # utility's grid charging rate in a regulated territory (no M1). Exports never
+                    # recover M1 (no credit on `h`).
+                    _add_cost(costs, charge, -weight * bank.charge_cost_usd_per_kwh(price, t))
+                solar = solar_charge_vars.get((bank.bank_id, t, scenario.scenario))
+                if solar is not None:
+                    # Solar never pays M1: the utility's solar price, or the forgone PV export credit.
+                    solar_cost = bank.solar_cost_usd_per_kwh
+                    _add_cost(costs, solar, -weight * (price / 1000.0 if solar_cost is None else solar_cost))
 
     probability_by_scenario: dict[str, float] = {s.scenario: s.probability for s in inputs.scenarios}
+    for scenario_name, slack in solar_floor_slacks:
+        _add_cost(costs, slack, -probability_by_scenario[scenario_name] * SOLAR_FLOOR_SLACK_USD_PER_KWH)
     for scenario_name, slack in hold_slack_vars:
-        obj_terms.append(
-            -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH * slack
+        _add_cost(
+            costs, slack, -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH
         )
     for (_bank_id, scenario_name), shortfall in terminal_shortfall_vars.items():
-        obj_terms.append(
-            -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH * shortfall
+        _add_cost(
+            costs, shortfall, -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH
         )
-
-    if obj_terms:
-        objective = obj_terms[0]
-        for term in obj_terms[1:]:
-            objective = objective + term
-        highs.setObjective(objective)
+    set_column_costs(highs, costs)
 
     return BuiltModel(
         highs=highs,
@@ -352,5 +459,17 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
         soc_vars=soc_vars,
         charge_vars=charge_vars,
         soc_balance_rows=soc_balance_rows,
+        solar_charge_vars=solar_charge_vars,
         terminal_soc_rows=terminal_soc_rows,
+        costs=costs,
+        stage_r_costs=stage_r_costs,
     )
+
+
+def set_column_costs(highs: highspy.Highs, costs: dict[int, float]) -> None:
+    """Replace the objective with `costs` (column index -> coefficient); columns not named cost 0."""
+    n_cols = highs.getNumCol()
+    dense = np.zeros(n_cols, dtype=np.float64)
+    for index, cost in costs.items():
+        dense[index] = cost
+    highs.changeColsCost(n_cols, np.arange(n_cols, dtype=np.int32), dense)

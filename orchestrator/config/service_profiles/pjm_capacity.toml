@@ -1,0 +1,87 @@
+# PJM_CAPACITY service profile, version 1 (owner decision 2026-09-26: build PJM_CAPACITY, MOBILE_STORAGE
+# and LARGE_LOAD; PJM stays simulated -- no real PJM membership/settlement feed exists or is planned for
+# this increment).
+# Spec: docs/orchestrator/07-delivery/06-service-profiles-and-power-quality.md S1.3-1.5 (ServiceProfile
+# fields), S2 (PowerQualityEnvelope), S4.c (the "grid-code minimum" contrast pattern this profile follows,
+# same shape as ERCOT_ENERGY), S5.5.3 (asset-state eligibility); 02-architecture/03-decision-engine.md
+# S2.6 front-matter note ("PJM_CAPACITY dispatches toward meter net load and is non-firm by default") and
+# S2.7 activation gate; docs/orchestrator/07-delivery/14-additional-services.md (this profile's simulated
+# vs. real-market scope).
+#
+# This file is a template; see config/service_profiles/README.md for the row-instantiation rules shared
+# with data_center.toml. PJM's Reliability Pricing Model (RPM) capacity-performance construct is
+# approximated here: a capacity commitment, a small number of declared emergency performance hours per
+# planning year, and a non-performance charge for shortfall during one of those hours
+# (orchestrator/src/opengrid/settle/services_extra.py::pjm_non_performance_charge computes the charge;
+# routine, non-emergency hours settle through the ordinary CAPACITY_PAYMENT x performance_factor line
+# like every other capacity profile, never doubled).
+#
+# Wired: PJM_CAPACITY is a registered ServiceType (core/models/engine.py, migration 0025, MARKET-MODEL
+# owned) and an allowed og.contract.service_type. NOT yet wired (wiring lines in the SERVICES agent's
+# 2026-09-26 report): opengrid.settle.baselines.METER_SOURCE_BY_SERVICE (settle owner) and
+# opengrid.selector.gate._CATEGORY_BY_SERVICE_TYPE (optimizer owner) both need a "PJM_CAPACITY" entry.
+
+[profile]
+service_type = "PJM_CAPACITY"
+profile_ref = "pjm-capacity-profile@1"     # "<name>@<version>"
+version = 1
+variant = "RPM_CAPACITY_PERFORMANCE"       # RPM-style capacity commitment (task brief); simulated PJM
+tier = "T3"                                # non-firm by default (03 S2.6 front matter)
+
+[service_profile]
+control_primitive = "CAPACITY_HOLD"            # reserve power against a call that may or may not arrive
+target_quantity = "KW"
+target_scope = "SITE_METER"                    # "dispatches toward meter net load" (03 S2.6)
+setpoint_source = "ISO_INSTRUCTION"            # simulated PJM declares the emergency performance hour
+# No feedback_signal_ref: only required when setpoint_source = MEASURED_FEEDBACK (service_profile.
+# schema.json's allOf), and PJM_CAPACITY's target is driven by the (simulated) ISO instruction, not a
+# closed feedback loop -- metering for M&V/settlement still happens via mv_method = DIRECT_HUB_METER
+# below, independent of this field. Lead fix 2026-09-26: a prior draft set this to a non-existent
+# "p_kw_net" site-meter field, which failed resolution as malformed; removing it (rather than pointing
+# it at the real "p_kw" field) is the more correct fix given this profile has no measured feedback loop.
+response_time_s = 600.0                        # PJM Capacity Performance: full output within 10 min of call
+ramp_limit_unit = "kw_per_min"
+priority_tier = "T3"                           # must equal [profile].tier (S1.3 conformance check)
+mv_method = "DIRECT_HUB_METER"
+settlement_metric = "capacity_payment_x_pf"
+failure_behaviour = "HOLD_THEN_SCHEDULE"       # S2.5 element-8 library value; no PJM membership to fail out of
+
+[control]
+# PJM is simulated: the "ISO_INSTRUCTION" is a scenario-declared emergency performance event
+# (integration-sims/scenarios/svc-pjm-capacity.yaml), never a real PJM eRPM/eDART feed.
+hold_mode = "RING_FENCE"                       # matches ERCOT_AS's CAPACITY_HOLD ring-fence shape (03 S2.6)
+emergency_call_source = "SIMULATED_ISO_INSTRUCTION"
+non_performance_charge_applies_during = "DECLARED_EMERGENCY_PERFORMANCE_HOUR_ONLY"
+
+[instantiation]
+# ramp_limit (kW/min) = committed_kw * 60 / response_time_s, so committed kW is reachable within the
+# 10-minute Capacity Performance deadline.
+ramp_limit_per_committed_kw_per_min = 0.1
+accuracy_tolerance_fraction_of_committed = 0.05   # per contract; looser than DATA_CENTER (non-firm, T3)
+deadband_fraction_of_committed = 0.02             # per contract
+sustain_duration_required = true                  # the contract must state the emergency-hour duration
+
+[eligibility]
+# Grid-code-minimum profile (S4.c pattern): PJM_CAPACITY does not compete with DATA_CENTER/PIPELINE_AC
+# for the fleet's highest-quality inverters (S4.c, S5.2 diversity objective).
+min_quality_score = 0.5
+required_ride_through_class = "CATEGORY_III"
+eligible_asset_states = ["OK", "WATCH", "DEGRADED"]     # S5.5.3 "grid-code minimum" row
+excluded_asset_states = ["QUARANTINED", "AWAITING_REPLACEMENT", "RECOMMISSIONING"]
+pq_aware_selection = false                        # S4.c: grid-code minimum only, no PQ-aware filter
+
+[pq_envelope]
+# Grid-code minimum only (S4.c): only phase_config is set here, every other field takes the fleet-default
+# (PowerQualityEnvelope model default) value, same pattern ERCOT_ENERGY uses.
+phase_config = "3P"
+
+[settlement]
+performance_factor = "pf_kw"                      # kW compliance only -- no PQ compliance line (S4.c)
+
+[[settlement.lines]]
+name = "capacity_payment_x_pf"
+mv_output = "delivered_kw_vs_committed_per_interval"
+
+[[settlement.lines]]
+name = "nonperformance_charge"
+mv_output = "shortfall_kw_during_declared_emergency_performance_hour"

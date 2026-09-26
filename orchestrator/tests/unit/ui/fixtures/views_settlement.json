@@ -1,0 +1,29 @@
+{
+  "as_of": "2026-09-26T19:00:00+00:00",
+  "period": {"from": "2026-08-27", "to_exclusive": "2026-09-27"},
+  "last_updated": {
+    "pnl": "2026-09-26T17:45:50+00:00",
+    "invoice_line": "2026-09-26T17:45:55+00:00",
+    "meter_interval": "2026-09-26T19:01:00+00:00"
+  },
+  "contracts": [
+    {"contract_id": "00000000-0000-7000-8000-000000000d03", "short": "d03", "label": "ERCOT_AS · d03", "service_type": "ERCOT_AS", "variant": "ECRS", "tier": "T2", "customer_id": "00000000-0000-7000-8000-000000000c03", "customer_label": "og-cust-ercot"},
+    {"contract_id": "00000000-0000-7000-8000-000000000d05", "short": "d05", "label": "PARTNER_CAPACITY · d05", "service_type": "PARTNER_CAPACITY", "variant": "EVENT", "tier": "T3", "customer_id": "00000000-0000-7000-8000-000000000c05", "customer_label": "c05"}
+  ],
+  "obligations": {
+    "8e1cdcde-299a-4143-8234-f56c0ac6192c": {"obligation_id": "8e1cdcde-299a-4143-8234-f56c0ac6192c", "contract_id": "00000000-0000-7000-8000-000000000d03", "state": "SETTLED", "label": "Sep 26 12:00–13:00 ECRS 500 kW"},
+    "1ef1bee1-3e99-44ba-b3a6-99db12665bc2": {"obligation_id": "1ef1bee1-3e99-44ba-b3a6-99db12665bc2", "contract_id": "00000000-0000-7000-8000-000000000d05", "state": "SETTLED", "label": "Sep 26 10:00–11:00 EVENT 200 kW"}
+  },
+  "pnl_rows": [
+    {"pnl_id": "aaaaaaaa-0000-0000-0000-000000000001", "obligation_id": "8e1cdcde-299a-4143-8234-f56c0ac6192c", "contract_id": "00000000-0000-7000-8000-000000000d03", "interval_start": "2026-09-26T17:15:00+00:00", "interval_end": "2026-09-26T17:30:00+00:00", "revenue": "0.167508", "energy_cost": "1.200000", "degradation_cost": "0.300000", "penalty": "24.571333", "net_value": "-25.903825", "rule_baseline_value": "-30.000000", "forgone_upside": "0", "delivery_charge": "0", "version": 1, "superseded_by": null, "created_at": "2026-09-26T17:45:50+00:00"},
+    {"pnl_id": "aaaaaaaa-0000-0000-0000-000000000002", "obligation_id": "8e1cdcde-299a-4143-8234-f56c0ac6192c", "contract_id": "00000000-0000-7000-8000-000000000d03", "interval_start": "2026-09-26T17:00:00+00:00", "interval_end": "2026-09-26T17:15:00+00:00", "revenue": "0.286027", "energy_cost": "1.000000", "degradation_cost": "0.200000", "penalty": "19.267077", "net_value": "-20.181050", "rule_baseline_value": null, "forgone_upside": "0", "delivery_charge": "0", "version": 2, "superseded_by": null, "created_at": "2026-09-26T17:30:00+00:00"},
+    {"pnl_id": "aaaaaaaa-0000-0000-0000-000000000003", "obligation_id": "8e1cdcde-299a-4143-8234-f56c0ac6192c", "contract_id": "00000000-0000-7000-8000-000000000d03", "interval_start": "2026-09-26T17:00:00+00:00", "interval_end": "2026-09-26T17:15:00+00:00", "revenue": "0.100000", "energy_cost": "1.000000", "degradation_cost": "0.200000", "penalty": "30.000000", "net_value": "-31.100000", "rule_baseline_value": null, "forgone_upside": "0", "delivery_charge": "0", "version": 1, "superseded_by": "aaaaaaaa-0000-0000-0000-000000000002", "created_at": "2026-09-26T17:16:00+00:00"},
+    {"pnl_id": "aaaaaaaa-0000-0000-0000-000000000004", "obligation_id": "1ef1bee1-3e99-44ba-b3a6-99db12665bc2", "contract_id": "00000000-0000-7000-8000-000000000d05", "interval_start": "2026-09-26T15:00:00+00:00", "interval_end": "2026-09-26T15:15:00+00:00", "revenue": "12.500000", "energy_cost": "2.000000", "degradation_cost": "0.500000", "penalty": "0", "net_value": "10.000000", "rule_baseline_value": "8.000000", "forgone_upside": "1.250000", "delivery_charge": "0", "version": 1, "superseded_by": null, "created_at": "2026-09-26T15:31:00+00:00"}
+  ],
+  "invoice_lines": [
+    {"invoice_line_id": "bbbbbbbb-0000-0000-0000-000000000001", "contract_id": "00000000-0000-7000-8000-000000000d03", "obligation_id": "8e1cdcde-299a-4143-8234-f56c0ac6192c", "period_start": "2026-09-26", "period_end": "2026-09-26", "line_type": "LD_PENALTY", "quantity": "0.25", "unit": "h", "rate": "-98.28", "amount": "-24.571333", "status": "PROVISIONAL", "supersedes": null, "version": 1, "created_at": "2026-09-26T17:45:55+00:00", "superseded_by": null},
+    {"invoice_line_id": "bbbbbbbb-0000-0000-0000-000000000002", "contract_id": "00000000-0000-7000-8000-000000000d03", "obligation_id": "8e1cdcde-299a-4143-8234-f56c0ac6192c", "period_start": "2026-09-26", "period_end": "2026-09-26", "line_type": "CAPACITY_PAYMENT", "quantity": "500", "unit": "kW", "rate": "0.0003", "amount": "0.167508", "status": "PROVISIONAL", "supersedes": null, "version": 1, "created_at": "2026-09-26T17:45:55+00:00", "superseded_by": "bbbbbbbb-0000-0000-0000-000000000003"},
+    {"invoice_line_id": "bbbbbbbb-0000-0000-0000-000000000003", "contract_id": "00000000-0000-7000-8000-000000000d03", "obligation_id": "8e1cdcde-299a-4143-8234-f56c0ac6192c", "period_start": "2026-09-26", "period_end": "2026-09-26", "line_type": "CAPACITY_PAYMENT", "quantity": "500", "unit": "kW", "rate": "0.0004", "amount": "0.200000", "status": "CORRECTED", "supersedes": "bbbbbbbb-0000-0000-0000-000000000002", "version": 2, "created_at": "2026-09-26T17:50:00+00:00", "superseded_by": null},
+    {"invoice_line_id": "bbbbbbbb-0000-0000-0000-000000000004", "contract_id": "00000000-0000-7000-8000-000000000d05", "obligation_id": "1ef1bee1-3e99-44ba-b3a6-99db12665bc2", "period_start": "2026-09-26", "period_end": "2026-09-26", "line_type": "CAPACITY_PAYMENT", "quantity": "200", "unit": "kW", "rate": "0.0625", "amount": "12.500000", "status": "PROVISIONAL", "supersedes": null, "version": 1, "created_at": "2026-09-26T15:31:00+00:00", "superseded_by": null}
+  ]
+}

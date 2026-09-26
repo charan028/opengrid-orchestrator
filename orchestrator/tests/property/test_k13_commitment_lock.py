@@ -54,7 +54,8 @@ def test_k13_guardian_vetoes_a_batch_that_omits_any_committed_obligation(frozen,
         ProposedItem(HUB_ID, 1.0, "SELECTOR", ids[i], frozen[i]) for i in sorted(included)
     ]
     world = passing_world(items)
-    world.hub = make_hub(prev_p_kw=1.0)
+    # The hub executes the SUM of its items: that is its unchanged prior setpoint (no ramp).
+    world.hub = make_hub(prev_p_kw=sum(item.p_kw_setpoint for item in items))
     world.active = [ActiveObligation(oid, kw) for oid, kw in zip(ids, frozen, strict=True)]
 
     verdict = evaluate(world, SIGNER)

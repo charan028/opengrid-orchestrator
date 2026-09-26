@@ -15,6 +15,7 @@ WRITE_ACTIONS: tuple[tuple[str, str], ...] = (
     (f"{BASE_PATH}/fleet", "#manual-command-form"),
     (f"{BASE_PATH}/", 'form[hx-post$="/alerts/ack"]'),
     (f"{BASE_PATH}/health", 'form[hx-post$="/alerts/ack"]'),
+    (f"{BASE_PATH}/dispatch", "#as-deployment-form"),
 )
 
 

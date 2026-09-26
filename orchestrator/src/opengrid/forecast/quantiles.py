@@ -8,6 +8,7 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
 import numpy as np
 
@@ -53,10 +54,14 @@ def same_slot_pool(
     *,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     resolution_min: int = DEFAULT_RESOLUTION_MIN,
+    any_day_type: bool = False,
 ) -> list[float]:
     """02b S3's pool: values at the same time-of-day and day-type as `target_start_utc`, drawn from
     up to `lookback_days` of history strictly before it. `history` is `(ts_utc, value)` pairs so this
-    module never depends on `FeedObs`/DB shapes -- callers project their rows down to this."""
+    module never depends on `FeedObs`/DB shapes -- callers project their rows down to this.
+
+    `any_day_type=True` drops the day-type match (weekday and weekend pooled for the same time-of-day
+    slot) -- the short-history relaxation `compute_slot_quantiles` applies before the diurnal fallback."""
     cutoff = target_start_utc - timedelta(days=lookback_days)
     target_slot = _slot_of_day(target_start_utc, resolution_min)
     target_day_type = _day_type(target_start_utc)
@@ -65,7 +70,7 @@ def same_slot_pool(
         for ts, value in history
         if cutoff <= ts < target_start_utc
         and _slot_of_day(ts, resolution_min) == target_slot
-        and _day_type(ts) == target_day_type
+        and (any_day_type or _day_type(ts) == target_day_type)
     ]
 
 
@@ -125,13 +130,27 @@ def widen(
     return p50 - (p50 - p10) * factor, p50, p50 + (p90 - p50) * factor
 
 
+#: How a slot's quantiles were derived -- the audit trail for its `firm_fitness`:
+#: - `STRICT`: >= `min_slot_samples` same-slot/**same-day-type** samples (the 02b S3 rule).
+#: - `POOLED`: too few same-day-type samples, but weekday+weekend pooled for that time-of-day slot had
+#:   enough (and was within the dispersion cap, if one is set) -- firm, at weaker confidence. Logged
+#:   with reason code `FIRM_POOLED` (`og.forecast.firm_fitness` is CHECK-constrained to
+#:   FIRM_OK/NOT_FOR_FIRM, so the basis is not a column value).
+#: - `FALLBACK`: the diurnal-profile fallback fired -- never firm.
+FirmBasis = Literal["STRICT", "POOLED", "FALLBACK"]
+
+#: Reason code logged for slots admitted as firm via the pooled-day-type relaxation.
+FIRM_POOLED = "FIRM_POOLED"
+
+
 @dataclass(frozen=True, slots=True)
 class SlotQuantiles:
     p10: float
     p50: float
     p90: float
     firm_fitness: FirmFitness
-    sample_count: int  # same-slot/day-type samples actually used (0 if the diurnal fallback fired)
+    sample_count: int  # samples in the pool actually used (same-day-type, or pooled when basis=POOLED)
+    basis: FirmBasis = "STRICT"
 
 
 def compute_slot_quantiles(
@@ -143,17 +162,40 @@ def compute_slot_quantiles(
     resolution_min: int = DEFAULT_RESOLUTION_MIN,
     min_slot_samples: int = MIN_SLOT_SAMPLES,
     widen_factor: float = STALE_WIDEN_FACTOR,
+    pool_day_types_when_short: bool = True,
+    pooled_max_spread: float | None = None,
 ) -> SlotQuantiles:
     """The full 02b S3 method for one (series, interval) slot: same-slot/day-type pool -> percentile,
     falling back to the diurnal profile below `min_slot_samples`, then widening x`widen_factor` and
     flagging `NOT_FOR_FIRM` if `stale` is set (the caller passes LGV-extended `history` when stale, per
     spec). `NOT_FOR_FIRM` is also set on the fallback path, since a diurnal estimate is inherently
-    lower-confidence than a direct same-slot pool."""
+    lower-confidence than a direct same-slot pool.
+
+    Short-history relaxation (`pool_day_types_when_short`, `[forecast].pool_day_types_when_short`):
+    when the same-day-type pool is short, weekday and weekend samples for the same time-of-day slot are
+    pooled; if that pool reaches `min_slot_samples` (and its P90-P10 spread is <= `pooled_max_spread`,
+    when one is configured) the slot is firm with `basis="POOLED"`. The strict rule wins automatically
+    as soon as the same-day-type pool alone is large enough -- pooling is only ever tried when it is not."""
     pool = same_slot_pool(
         history, target_start_utc, lookback_days=lookback_days, resolution_min=resolution_min
     )
+    basis: FirmBasis = "STRICT"
+    if len(pool) < min_slot_samples and pool_day_types_when_short:
+        pooled = same_slot_pool(
+            history,
+            target_start_utc,
+            lookback_days=lookback_days,
+            resolution_min=resolution_min,
+            any_day_type=True,
+        )
+        if len(pooled) >= min_slot_samples:
+            pooled_q = sample_quantiles(pooled)
+            if pooled_max_spread is None or pooled_q[2] - pooled_q[0] <= pooled_max_spread:
+                pool, basis = pooled, "POOLED"
+
     low_confidence = len(pool) < min_slot_samples
     if low_confidence:
+        basis = "FALLBACK"
         p10, p50, p90 = diurnal_fallback_quantiles(history, target_start_utc, resolution_min=resolution_min)
     else:
         p10, p50, p90 = sample_quantiles(pool)
@@ -162,4 +204,6 @@ def compute_slot_quantiles(
     if stale:
         p10, p50, p90 = widen((p10, p50, p90), widen_factor)
 
-    return SlotQuantiles(p10=p10, p50=p50, p90=p90, firm_fitness=firm_fitness, sample_count=len(pool))
+    return SlotQuantiles(
+        p10=p10, p50=p50, p90=p90, firm_fitness=firm_fitness, sample_count=len(pool), basis=basis
+    )

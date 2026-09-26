@@ -19,9 +19,12 @@ functions with no wall-clock or asyncio dependency. Only `RandomEngine.run`
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -31,6 +34,54 @@ from ogsim.control.random_config import ParamRange, RandomEngineConfig, TypeRand
 
 SECONDS_PER_HOUR = 3600.0
 MAX_ARRIVALS_PER_PLAN = 100_000  # guards against a pathological rate_per_hour input
+
+# Demo gap #16, 2026-09-26: pause/resume was held only in `config.paused` (an in-memory dataclass
+# field), so a control-plane restart forgot an operator's pause and random mode silently resumed --
+# exactly the "quiet hours" switch BUILD.md S3 promises, undone by a restart. Persisted the same way
+# `ogsim.control.log.AnomalyLog` persists its JSONL log: a preferred path under the sim's data dir,
+# falling back to the working directory when that isn't writable (local dev), both overridable by env
+# var for tests and operators.
+PAUSE_STATE_PREFERRED_PATH = "/var/lib/opengrid/sim/random_pause_state.json"
+PAUSE_STATE_FALLBACK_PATH = "./random_pause_state.json"
+PAUSE_STATE_PATH_ENV_VAR = "OGSIM_RANDOM_PAUSE_STATE_PATH"
+
+
+def _resolve_pause_state_path(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit)
+    env_override = os.environ.get(PAUSE_STATE_PATH_ENV_VAR)
+    if env_override:
+        return Path(env_override)
+    preferred = Path(PAUSE_STATE_PREFERRED_PATH)
+    try:
+        preferred.parent.mkdir(parents=True, exist_ok=True)
+        probe = preferred.parent / ".ogsim_write_probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return preferred
+    except OSError:
+        return Path(PAUSE_STATE_FALLBACK_PATH)
+
+
+def load_persisted_paused(path: Path) -> bool | None:
+    """The last explicitly-persisted pause state, or `None` if the file is absent/unreadable (never
+    raises -- a corrupt or missing state file just means "no persisted override," not a crash)."""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = data.get("paused")
+    return bool(value) if isinstance(value, bool) else None
+
+
+def save_persisted_paused(path: Path, paused: bool) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump({"paused": paused}, f)
+    except OSError:
+        pass  # best-effort: a write failure here must never crash pause()/resume() itself
 
 
 def plan_arrivals(rng: np.random.Generator, rate_per_hour: float, window_s: float) -> list[float]:
@@ -80,6 +131,7 @@ class RandomEngine:
         config: RandomEngineConfig,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        pause_state_path: str | None = None,
     ):
         self.injector = injector
         self.config = config
@@ -87,13 +139,22 @@ class RandomEngine:
         self._sleep = sleep
         self._rng = np.random.default_rng(config.seed)
         self._tasks: list[asyncio.Task[None]] = []
+        self._pause_state_path = _resolve_pause_state_path(pause_state_path)
+        # Demo gap #16: a persisted pause/resume from a PRIOR process wins over whatever
+        # config/random.yaml's own `paused:` says -- the operator's last explicit action is the
+        # source of truth across a restart, not the shipped default.
+        persisted = load_persisted_paused(self._pause_state_path)
+        if persisted is not None:
+            self.config.paused = persisted
 
     # ---- runtime controls (REST/CLI/UI all call these) --------------------
     def pause(self) -> None:
         self.config.paused = True
+        save_persisted_paused(self._pause_state_path, True)
 
     def resume(self) -> None:
         self.config.paused = False
+        save_persisted_paused(self._pause_state_path, False)
 
     def set_profile(self, profile: str) -> None:
         if profile not in self.config.profiles:

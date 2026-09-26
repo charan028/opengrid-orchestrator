@@ -61,7 +61,7 @@ def test_confirm_dialog_shows_countdown_and_disables_confirm_at_expiry() -> None
     )
     assert "remaining: 60.0" in html
     assert "Expires in" in html
-    assert ':disabled="busy || (remaining !== null && remaining <= 0)"' in html
+    assert ':disabled="busy || !acked || (remaining !== null && remaining <= 0)"' in html
 
 
 def test_confirm_dialog_open_default_renders_already_open_with_no_trigger() -> None:

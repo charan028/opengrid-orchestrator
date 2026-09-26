@@ -1,0 +1,73 @@
+# LARGE_LOAD service profile, version 1 (owner decision 2026-09-26).
+# Spec: docs/orchestrator/07-delivery/06-service-profiles-and-power-quality.md S4.b ("LARGE_LOAD ... is a
+# load-offset EVENT profile with no PQ obligation beyond grid-code minimum" -- the explicit contrast case
+# for DATA_CENTER); 02-architecture/03-decision-engine.md S2.6 ("LARGE_LOAD contracted stress events from
+# the customer's signal", S8.6.3); 07-delivery/14-additional-services.md.
+#
+# Firming or ride-through support for a large flexible load (a crypto or data load curtailing with battery
+# support, or an ERCOT large-load interconnection) that follows a load-following schedule: the customer's
+# own curtailment/ride-through signal drives the target (setpoint_source = CUSTOMER_API), the fleet tracks
+# it to a compliance band, and the PQ envelope stays at grid-code minimum -- this is exactly the S4.b
+# contrast that keeps LARGE_LOAD a distinct profile from DATA_CENTER rather than a variant of it.
+#
+# Wired: LARGE_LOAD is a registered ServiceType (core/models/engine.py, migration 0025, MARKET-MODEL
+# owned). NOT yet wired (wiring lines in the SERVICES agent's 2026-09-26 report): opengrid.settle.
+# baselines.METER_SOURCE_BY_SERVICE (settle owner) and opengrid.selector.gate._CATEGORY_BY_SERVICE_TYPE
+# (optimizer owner) both need a "LARGE_LOAD" entry.
+
+[profile]
+service_type = "LARGE_LOAD"
+profile_ref = "large-load-profile@1"
+version = 1
+variant = "LOAD_FOLLOWING_FIRMING"         # distinct from DATA_CENTER's BRIDGING variant (S4.b)
+tier = "T2"                                # committed firming capacity, not top firm tier
+
+[service_profile]
+control_primitive = "EVENT_SCHEDULE_TRACKING"  # track the declared load-following/ride-through schedule
+target_quantity = "KW"
+target_scope = "SITE_METER"                    # the large load's site meter
+setpoint_source = "CUSTOMER_API"               # "contracted stress events from the customer's signal" (03)
+feedback_signal_ref = "site_meter:{site_id}:p_kw"  # {site_id} filled at instantiation; M&V point
+response_time_s = 5.0                          # battery-support ride-through: fast, event-triggered
+ramp_limit_unit = "kw_per_min"
+priority_tier = "T2"                           # must equal [profile].tier (S1.3 conformance check)
+mv_method = "DIRECT_HUB_METER"
+settlement_metric = "capacity_payment_x_performance"
+failure_behaviour = "HOLD_THEN_SCHEDULE"       # S2.5 element-8 library value
+
+[control]
+# Load-following/ride-through tracking, same compliance-band shape as PARTNER_CAPACITY's EVENT variant
+# (03 S2.6); no PQ envelope tightening (S4.b's explicit DATA_CENTER contrast) -- grid-code minimum only.
+tracking_mode = "COMPLIANCE_BAND"
+compliance_band_pct = 90.0                     # looser band than MOBILE_STORAGE's 95% (non-PQ-sensitive)
+
+[instantiation]
+# ramp_limit (kW/min) = committed_kw * 60 / response_time_s, so committed kW is reachable within
+# response_time_s of a declared event.
+ramp_limit_per_committed_kw_per_min = 12.0
+accuracy_tolerance_fraction_of_committed = 0.02   # per contract
+deadband_fraction_of_committed = 0.01             # per contract
+sustain_duration_required = true                  # the contract must state the event/ride-through duration
+
+[eligibility]
+# Grid-code-minimum profile (S4.b's explicit contrast with DATA_CENTER): still requires Category III
+# ride-through (must not trip during the grid event that likely triggered the curtailment), but no
+# PQ-aware inverter-quality weighting -- it does not compete with DATA_CENTER/PIPELINE_AC for the
+# fleet's highest-quality units (S4.c pattern, same rationale as PJM_CAPACITY).
+min_quality_score = 0.5
+required_ride_through_class = "CATEGORY_III"
+eligible_asset_states = ["OK", "WATCH", "DEGRADED"]     # S5.5.3 "grid-code minimum" row
+excluded_asset_states = ["QUARANTINED", "AWAITING_REPLACEMENT", "RECOMMISSIONING"]
+pq_aware_selection = false
+
+[pq_envelope]
+# Grid-code minimum only (S4.b: "no PQ obligation beyond grid-code minimum"); only phase_config is set
+# here, every other field takes the fleet-default (PowerQualityEnvelope model default) value.
+phase_config = "3P"
+
+[settlement]
+performance_factor = "pf_kw"                      # kW compliance only -- no PQ compliance line (S4.b)
+
+[[settlement.lines]]
+name = "capacity_payment_x_performance"
+mv_output = "delivered_kw_vs_scheduled_kw_per_event_interval"

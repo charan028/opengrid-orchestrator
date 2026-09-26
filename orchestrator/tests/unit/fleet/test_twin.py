@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from opengrid import fleet
+from opengrid.core.models.mqtt import FLOW_TELEMETRY_FIELDS
 from opengrid.core.models.platform import Bank, Hub, HubState
 from opengrid.platform.config import Config
 
@@ -105,6 +106,59 @@ async def test_ingest_telemetry_updates_in_memory_state_and_buffers_a_row() -> N
     assert stats.telemetry_rows == 1
     assert stats.hub_states == 1
     assert backend.copied_rows[0].hub_id == "h1"
+
+
+async def test_discharge_flow_telemetry_reaches_the_snapshot_hub_state_and_telemetry_row() -> None:
+    """Migration 0027 wiring: the optional flow fields (BMS limits, cell temperature, meter/home/PV) are
+    carried to `hub_capabilities` (dispatch derating), the persisted hub_state and the telemetry row;
+    a hub on the old wire schema leaves them None."""
+    backend = FakeFleetBackend(hubs=[_hub("h1"), _hub("h2")], banks=[_bank()])
+    await _seed(backend)
+    base = {"bank_id": "bank-1", "zone": "LZ_NORTH", "soc_kwh": 10.0, "p_kw": -2.0, "health": "online"}
+    now = datetime.now(UTC).isoformat()
+    await fleet.ingest_telemetry(
+        {
+            **base,
+            "hub_id": "h1",
+            "ts": now,
+            "seq": 1,
+            "epoch": 1,
+            "cell_temp_c": 41.5,
+            "p_dis_max_kw": 7.0,
+            "meter_kw": 1.2,
+            "home_load_kw": 3.4,
+            "pv_kw": 0.0,
+            "p_ch_max_kw": 6.0,
+            "peak_power_budget_kws": 900.0,
+        }
+    )
+    await fleet.ingest_telemetry({**base, "hub_id": "h2", "ts": now, "seq": 1, "epoch": 1})
+
+    snaps = {s.hub_id: s for s in fleet.hub_capabilities("bank-1")}
+    assert snaps["h1"].cell_temp_c == 41.5 and snaps["h1"].p_dis_max_kw == 7.0
+    assert snaps["h2"].cell_temp_c is None and snaps["h2"].p_dis_max_kw is None
+
+    await fleet.flush()
+    states = {s.hub_id: s for s in backend.upserted}
+    assert states["h1"].meter_kw == 1.2 and states["h1"].peak_power_budget_kws == 900.0
+    assert states["h2"].meter_kw is None
+    row = next(r for r in backend.copied_rows if r.hub_id == "h1")
+    assert dict(zip(FLOW_TELEMETRY_FIELDS, row.flow, strict=True))["home_load_kw"] == 3.4
+
+
+async def test_bank_feeder_reports_the_banks_feeder_or_none() -> None:
+    backend = FakeFleetBackend(
+        hubs=[],
+        banks=[
+            Bank(bank_id="bank-1", zone="LZ_NORTH", kva_rating=600.0, feeder_id="feeder-LZ_NORTH-00"),
+            _bank("bank-2"),
+        ],
+    )
+    await _seed(backend)
+    assert fleet.bank_feeder("bank-1") == "feeder-LZ_NORTH-00"
+    assert fleet.bank_feeder("bank-2") is None
+    with pytest.raises(LookupError):
+        fleet.bank_feeder("bank-9")
 
 
 async def test_ingest_telemetry_for_unknown_hub_is_logged_and_skipped() -> None:

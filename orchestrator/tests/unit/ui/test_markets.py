@@ -11,7 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from opengrid.ui.routes.markets import forecast_band_view, freshness_table_view, series_chart_view
+from opengrid.ui.routes.markets import (
+    bid_funnel_view,
+    forecast_band_view,
+    freshness_table_view,
+    series_chart_view,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _NOW = datetime(2026, 9, 25, 18, 10, tzinfo=UTC)
@@ -68,3 +73,88 @@ def test_freshness_table_view_reports_age_mode_and_breaker() -> None:
     assert by_source["sim"]["mode"] == "SIM"
     assert by_source["eia"]["breaker_open"] is True
     assert by_source["eia"]["consecutive_failures"] == 4
+
+
+def test_bid_funnel_view_totals_stages_and_percentages_of_available() -> None:
+    payload = _load("markets_bid_funnel.json")
+
+    view = bid_funnel_view(payload, now=_NOW)
+
+    assert view["has_data"] is True
+    assert view["totals"] == {"available": 108, "submitted": 69, "awarded": 44, "rejected": 25}
+    # Fixed stage order, and every percentage is of `available` so the four bars narrow as one funnel.
+    assert [(s["key"], s["count"], s["pct"]) for s in view["stages"]] == [
+        ("available", 108, 100.0),
+        ("submitted", 69, 63.9),
+        ("awarded", 44, 40.7),
+        ("rejected", 25, 23.1),
+    ]
+    assert [s["label"] for s in view["stages"]] == [
+        "Made available by ERCOT",
+        "We submitted",
+        "We won",
+        "Rejected",
+    ]
+
+
+def test_bid_funnel_view_reports_win_rate_of_submitted_per_product() -> None:
+    payload = _load("markets_bid_funnel.json")
+
+    view = bid_funnel_view(payload, now=_NOW)
+
+    # awarded / submitted, not awarded / available: opportunities we skipped were a decision, not a loss.
+    assert [(row["product"], row["win_rate_pct"]) for row in view["rows"]] == [
+        ("energy", 70.0),
+        ("RRS", 60.0),
+        ("ECRS", 50.0),
+        ("NSPIN", 61.1),
+    ]
+    by_product = {row["product"]: row for row in view["rows"]}
+    assert by_product["NSPIN"]["available"] == 24
+    assert by_product["NSPIN"]["submitted"] == 18
+    assert by_product["NSPIN"]["awarded"] == 11
+    assert by_product["NSPIN"]["rejected"] == 7
+
+
+def test_bid_funnel_view_aggregates_rejection_reasons_across_products() -> None:
+    payload = _load("markets_bid_funnel.json")
+
+    view = bid_funnel_view(payload, now=_NOW)
+
+    # PRICE_ABOVE_CLEARING is 6+4+5 across three products; the two four-count reasons tie and break on
+    # the code so the list cannot reshuffle between 30 s polls. Humanised label, raw code kept alongside.
+    assert [(r["reason"], r["label"], r["count"], r["pct_of_rejected"]) for r in view["reasons"]] == [
+        ("PRICE_ABOVE_CLEARING", "Price above clearing", 15, 60.0),
+        ("INSUFFICIENT_CAPACITY", "Insufficient capacity", 4, 16.0),
+        ("TELEMETRY_GAP", "Telemetry gap", 4, 16.0),
+        ("LATE_SUBMISSION", "Late submission", 2, 8.0),
+    ]
+    # The reasons account for every rejection, so the panel never implies an unexplained remainder.
+    assert sum(r["count"] for r in view["reasons"]) == view["totals"]["rejected"]
+
+
+def test_bid_funnel_view_empty_state_when_endpoint_returns_nothing() -> None:
+    # The endpoint 404s today, so the route passes None; the template needs `has_data` false and lists it
+    # can still iterate over rather than a KeyError mid-render.
+    view = bid_funnel_view(None, now=_NOW)
+
+    assert view["has_data"] is False
+    assert view["stages"] == []
+    assert view["rows"] == []
+    assert view["reasons"] == []
+    assert view["totals"] == {"available": 0, "submitted": 0, "awarded": 0, "rejected": 0}
+    assert bid_funnel_view({}, now=_NOW)["has_data"] is False
+    assert bid_funnel_view({"products": []}, now=_NOW)["has_data"] is False
+
+
+def test_bid_funnel_view_reports_zero_percent_for_a_quiet_window() -> None:
+    # A window where ERCOT offered nothing and we bid on nothing is a quiet hour, not a division error.
+    view = bid_funnel_view(
+        {"products": [{"product": "RegDn", "available": 0, "submitted": 0, "awarded": 0, "rejected": 0}]},
+        now=_NOW,
+    )
+
+    assert view["has_data"] is True
+    assert [s["pct"] for s in view["stages"]] == [0.0, 0.0, 0.0, 0.0]
+    assert view["rows"][0]["win_rate_pct"] == 0.0
+    assert view["reasons"] == []

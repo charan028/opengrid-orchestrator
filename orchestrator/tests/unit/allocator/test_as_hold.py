@@ -56,11 +56,29 @@ def _as_call(*, deployed: bool, kw: float = 40.0) -> ObligationCall:
 
 
 # A high price: an unheld bank would export its free headroom.
-_PRICED = Schedule(prices=(PriceSignal(bank_id="b1", price_usd_per_mwh=500.0),))
+_PRICED = Schedule(prices=(PriceSignal(bank_id="b1", price_usd_per_mwh=500.0, threshold_usd_per_mwh=80.0),))
+
+
+def _hold_tight_fleet() -> FleetState:
+    """Stored energy above reserve exactly covers the 40 kW x 1 h hold / eta_d plus the 1 % margin."""
+    per_hub_above_reserve = (40.0 * 1.0 / 0.9487 + 0.01 * 39.2 * 10) / 10
+    hubs = tuple(
+        HubSnapshot(
+            hub_id=f"h{i}",
+            bank_id="b1",
+            free_discharge_kw=10.0,
+            health="OK",
+            soc_kwh=7.84 + per_hub_above_reserve,
+            reserve_kwh=7.84,
+            e_kwh=39.2,
+        )
+        for i in range(10)
+    )
+    return FleetState(hubs=hubs, banks=(BankSnapshot(bank_id="b1", capability_kw=100.0, kva_rating=100.0),))
 
 
 def test_an_undeployed_as_award_is_held_at_zero_with_no_shortfall_and_no_headroom_export():
-    result = cycle(T, _fleet(), LedgerView(calls=(_as_call(deployed=False),)), _PRICED, {}, ())
+    result = cycle(T, _hold_tight_fleet(), LedgerView(calls=(_as_call(deployed=False),)), _PRICED, {}, ())
 
     assert result.held == (AS_ID,)
     # Present at 0 kW with R-GRANT-AS-HOLD: the guardian's G-19 needs the hold's reason in the batch.

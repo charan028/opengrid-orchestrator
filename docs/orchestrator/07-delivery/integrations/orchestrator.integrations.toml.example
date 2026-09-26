@@ -19,7 +19,7 @@ longitude = 0.0     # <lon>
 
 [feeds.staleness]   # seconds until a series is flagged STALE
 ercot_price_fresh_s = 600
-ercot_load_fresh_s = 1800
+ercot_load_fresh_s = 7200  # NP6-345-CD polls hourly; must exceed the poll interval itself
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800

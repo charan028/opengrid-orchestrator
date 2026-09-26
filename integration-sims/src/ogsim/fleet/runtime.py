@@ -19,7 +19,7 @@ from ogsim.common.config import FleetConfig
 from ogsim.common.crypto import load_public_key
 from ogsim.common.mqtt_client import SimMqttClient
 from ogsim.common.scenario import ScenarioCommand, parse_scenario_cmd, utc_timestamp
-from ogsim.fleet import household, physics
+from ogsim.fleet import battery_limits, household, physics
 from ogsim.fleet.anomalies import FLEET_ANOMALY_TYPES, FleetAnomalyManager
 from ogsim.fleet.calibration import (
     CalibrationOutcome,
@@ -40,7 +40,7 @@ from ogsim.fleet.pq import (
 )
 from ogsim.fleet.pq import inverter_state as pq_inverter_state
 from ogsim.fleet.state import FleetState, build_fleet_state
-from ogsim.fleet.stop import StopRegistry, ramp_toward_zero, verify_stop_event
+from ogsim.fleet.stop import StopRampTracker, StopRegistry, verify_stop_event
 from ogsim.fleet.wave import (
     HarmonicDetailScheduler,
     RotatingAuditSampler,
@@ -83,6 +83,7 @@ class FleetEngine:
         self._summary_gate = SummaryScheduler(config.wave_summary_interval_s, config.wave_summary_delta_pct)
         self._wave_audit = RotatingAuditSampler(self.wave_config.raw_audit_sample_pct_per_min)
         self.stops = StopRegistry()
+        self.stop_ramps = StopRampTracker()
         self.holds = HoldTracker(config.lease_hold_after_expiry_s)
         self._last_tick_at: float | None = None
 
@@ -255,6 +256,15 @@ class FleetEngine:
     def handle_command_batch(
         self, batch: dict[str, Any], public_key: Ed25519PublicKey, now: float
     ) -> list[CommandVerdict]:
+        """Live bug fix (2026-09-26, FLEET-SIM): a hub serving two obligations/grants in the same
+        batch previously delivered only the LAST item's setpoint (each verdict overwrote
+        `p_kw_commanded` in turn). All verified (accepted) items for a hub in this batch are now
+        SUMMED into one setpoint before it is written once -- the per-item `CommandVerdict`/ack
+        contract is unchanged (still one verdict, and one ack, per item), only the physical setpoint
+        the hub actually commands changes. Clipping by the hub's own physics (rated `p_kw`, SoC/
+        reserve floor) still happens exactly as before, in `tick`'s `physics.tick` call, against this
+        one summed (not per-item) commanded value -- the guardian-side per-hub-total check is a
+        separate fix, not this sim's."""
         last_accepted = {
             hub_id: (int(self.state.last_epoch[i]), int(self.state.last_seq[i]))
             for hub_id, i in self.state.hub_index.items()
@@ -263,15 +273,23 @@ class FleetEngine:
         epoch = int(batch.get("epoch", -1))
         seq = int(batch.get("seq", -1))
         lease = batch.get("lease")
+
+        summed_setpoint_kw: dict[str, float] = {}
         for verdict in verdicts:
-            idx = self.state.hub_index.get(verdict.hub_id)
-            if idx is None or not verdict.accepted or verdict.requested_p_kw_setpoint is None:
+            if not verdict.accepted or verdict.requested_p_kw_setpoint is None:
+                continue
+            summed_setpoint_kw[verdict.hub_id] = (
+                summed_setpoint_kw.get(verdict.hub_id, 0.0) + verdict.requested_p_kw_setpoint
+            )
+        for hub_id, total_setpoint_kw in summed_setpoint_kw.items():
+            idx = self.state.hub_index.get(hub_id)
+            if idx is None:
                 continue
             self.state.last_epoch[idx] = epoch
             self.state.last_seq[idx] = seq
-            self.state.p_kw_commanded[idx] = verdict.requested_p_kw_setpoint
+            self.state.p_kw_commanded[idx] = total_setpoint_kw
             if lease and isinstance(lease, dict) and "expires_at" in lease:
-                self.handle_lease_message(verdict.hub_id, lease["expires_at"])
+                self.handle_lease_message(hub_id, lease["expires_at"])
         return verdicts
 
     def tick(self, now: float) -> None:
@@ -283,7 +301,9 @@ class FleetEngine:
         tick_ambient_drift(self.pq, dt_s, self.rng)
 
         state = self.state
-        home_net = household.net_home_load_kw(now, state.phase_offset_s, state.pv_capacity_kw, self.rng)
+        hour_of_day = household.hour_of_day_for(now, state.phase_offset_s)
+        home_load_kw, pv_kw = household.load_and_pv_kw(hour_of_day, state.pv_capacity_kw, self.rng)
+        home_net = home_load_kw - pv_kw
         forced = self.anomalies.modifiers.forced_home_load_kw
         home_net = np.where(np.isnan(forced), home_net, forced)
 
@@ -299,9 +319,22 @@ class FleetEngine:
             if hold_state.local_autonomy:
                 effective_commanded[i] = 0.0
             if self.stops.is_stopped(zone, bank_id):
-                effective_commanded[i] = ramp_toward_zero(
-                    float(effective_commanded[i]), dt_s, self.config.stop_ramp_s, float(state.p_kw_limit[i])
+                # Live bug fix, 2026-09-26 (FLEET-SIM/R3): ramp from the hub's own previous step (or
+                # its actual last output, on the first stopped tick), never from the still-full
+                # `effective_commanded[i]` rebuilt fresh from `state.p_kw_commanded` every tick -- that
+                # made the ramp take one step and then sit there for as long as the hub stayed stopped.
+                effective_commanded[i] = self.stop_ramps.step(
+                    hub_id,
+                    actual_p_kw=float(state.p_kw_applied[i]),
+                    dt_s=dt_s,
+                    ramp_time_s=self.config.stop_ramp_s,
+                    p_kw_limit=float(state.p_kw_limit[i]),
                 )
+            else:
+                # Cleared on the very tick a hub is no longer stopped (a verified RELEASE, or it was
+                # never stopped): normal command following resumes immediately, and a later ENGAGE
+                # starts a fresh ramp rather than continuing a stale one.
+                self.stop_ramps.clear(hub_id)
             if i in self.anomalies.modifiers.force_lease_expire:
                 state.lease_expires_at[i] = now - 1.0
                 self.anomalies.modifiers.force_lease_expire.discard(i)
@@ -320,6 +353,33 @@ class FleetEngine:
         )
         state.soc_kwh = new_soc
         state.p_kw_applied = applied
+
+        # S1.9/G11 discharge-flow-limit telemetry fields, recomputed every tick (peak_power_budget_kws
+        # is the one exception -- a per-hub constant set once at build time, S1.9 F5). `home_load_kw`/
+        # `pv_kw` are the un-forced modeled split even when an anomaly forces `home_net` directly (the
+        # forced-load anomaly catalogue targets the net battery-facing figure, not this split).
+        state.home_load_kw = home_load_kw
+        state.pv_kw = pv_kw
+        # F2: M_i = L_net_i + p_i (site meter, +import), using the actually-applied (clipped) battery
+        # power so the published meter figure is internally consistent with `p_kw`.
+        state.meter_kw = home_net + applied
+        noise = self.rng.normal(0.0, 1.0, size=len(state.hub_ids))
+        state.cell_temp_c = battery_limits.cell_temperature_c(
+            hour_of_day, state.p_kw_applied, state.p_kw_limit, noise
+        )
+        soc_frac = np.where(state.e_kwh > 0, state.soc_kwh / state.e_kwh, 0.0)
+        state.p_dis_max_kw = battery_limits.p_dis_max_kw(state.p_kw_limit, soc_frac, state.cell_temp_c)
+        state.p_ch_max_kw = battery_limits.p_ch_max_kw(state.p_kw_limit, soc_frac, state.cell_temp_c)
+
+        # Charging-source split (owner decision D-28, 2026-09-26): PV surplus after home load charges
+        # first, the rest comes from the grid. `total_p_kw` is the same figure `physics.tick` feeds its
+        # SoC step internally (applied battery command + home's own PV-surplus/deficit), so this is the
+        # hub's actual total charging power, not just the market-commanded share of it.
+        total_p_kw = applied - home_net
+        charge_total_kw = np.maximum(total_p_kw, 0.0)
+        pv_surplus_kw = np.maximum(-home_net, 0.0)
+        state.charge_pv_kw = np.minimum(charge_total_kw, pv_surplus_kw)
+        state.charge_grid_kw = charge_total_kw - state.charge_pv_kw
 
     def _pq_dispatch_bias_by_hub(self) -> np.ndarray:
         """Aggregates `phase_imbalance_injection`'s per-unit `dispatch_bias_kw`
@@ -362,6 +422,22 @@ class FleetEngine:
                         "seq": int(state.last_seq[i]) if state.last_seq[i] >= 0 else 0,
                         "epoch": int(state.last_epoch[i]) if state.last_epoch[i] >= 0 else 0,
                         "fault_code": state.fault_code[i],
+                        # S1.9/G11 discharge-flow-limit fields (additive; interfaces/mqtt/
+                        # telemetry.schema.json). +import for meter_kw (F2's M_i); home_load_kw/pv_kw
+                        # are both >= 0.
+                        "home_load_kw": round(float(state.home_load_kw[i]), 4),
+                        "pv_kw": round(float(state.pv_kw[i]), 4),
+                        "meter_kw": round(float(state.meter_kw[i]), 4),
+                        "cell_temp_c": round(float(state.cell_temp_c[i]), 2),
+                        "p_dis_max_kw": round(float(state.p_dis_max_kw[i]), 4),
+                        "p_ch_max_kw": round(float(state.p_ch_max_kw[i]), 4),
+                        "peak_power_budget_kws": round(float(state.peak_power_budget_kws[i]), 4),
+                        # Deterministic per-hub geography (owner UI request, 2026-09-26, #19).
+                        "lat": round(float(state.lat_deg[i]), 6),
+                        "lon": round(float(state.lon_deg[i]), 6),
+                        # Charging-source split (owner decision D-28, 2026-09-26).
+                        "charge_pv_kw": round(float(state.charge_pv_kw[i]), 4),
+                        "charge_grid_kw": round(float(state.charge_grid_kw[i]), 4),
                     },
                 )
             )

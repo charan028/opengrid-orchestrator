@@ -213,6 +213,27 @@ def _nws_override(anomalies: AnomalyStore, now: datetime) -> dict[str, Any] | No
     return None
 
 
+def active_as_deployment(anomalies: AnomalyStore, now: datetime) -> dict[str, Any] | None:
+    """Build phase, 2026-09-26 (FLEET-SIM): the currently-active simulated ERCOT AS deployment, if
+    any -- randomly injected (`ogsim.control.random_engine`) or manually/via scenario
+    (`ogsim.control.injector`), target is an AS product (or `*`). Returns `None` when no
+    `as_deployment` anomaly is active, so a poller sees "nothing declared" rather than a stale value.
+    `recall: true` in `params` marks this deployment as already ended (the engine/DISPATCH side should
+    treat it exactly like an operator recall of an `og.as_deployment` row) -- the anomaly itself keeps
+    running for its `duration` regardless, since `AnomalyStore` has no separate "ended early" state;
+    `recall` is carried through as a field for the poller to act on instead."""
+    for a in anomalies.active(None, now.timestamp()):
+        if a.type == "as_deployment":
+            return {
+                "id": a.id,
+                "service": a.params.get("service", "RRS"),
+                "deployed_mw": float(a.params.get("deployed_mw", 50.0)),
+                "recall": bool(a.params.get("recall", False)),
+                "declared_at": datetime.fromtimestamp(a.start, tz=UTC).isoformat(),
+            }
+    return None
+
+
 class MarketData:
     def __init__(self, cfg: MarketConfig, anomalies: AnomalyStore):
         self.cfg = cfg

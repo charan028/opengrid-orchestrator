@@ -13,7 +13,13 @@ import pytest
 import opengrid.forecast as forecast
 from opengrid.core.models.platform import FeedObs
 from opengrid.forecast.models import ForecastRow
-from opengrid.forecast.service import compute_and_persist, rows_to_scenario_points
+from opengrid.forecast.service import (
+    DEFAULT_PRICE_SERIES,
+    DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE,
+    compute_and_persist,
+    rows_to_scenario_points,
+)
+from opengrid.forecast.solar import clear_sky_shape
 from opengrid.platform.config import Config
 
 _NOW = datetime(2026, 7, 20, 12, 3, tzinfo=UTC)  # a Monday, mid-slot -- exercises floor_to_interval
@@ -124,11 +130,38 @@ async def test_compute_and_persist_flags_not_for_firm_on_short_history():
     horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
     history = FakeHistory({"HB_TEST": _short_history("HB_TEST", horizon_start)}, quality="GOOD")
     backend = FakeBackend()
-    rows = await compute_and_persist(_cfg(load_series=[]), history, backend, now=_NOW)
+    cfg = _cfg(load_series=[], pool_day_types_when_short=False)
+    rows = await compute_and_persist(cfg, history, backend, now=_NOW)
 
     assert len(rows) == 96
     assert all(r.firm_fitness == "NOT_FOR_FIRM" for r in rows)
     assert all(r.p10 <= r.p50 <= r.p90 for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_compute_and_persist_pools_day_types_on_short_history(caplog: pytest.LogCaptureFixture):
+    """Short history, pooling on (the default): slots with >= 3 samples across Sat/Sun/Mon at that
+    time-of-day are FIRM_OK (audited as FIRM_POOLED); slots below that stay NOT_FOR_FIRM."""
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory({"HB_TEST": _short_history("HB_TEST", horizon_start)}, quality="GOOD")
+    with caplog.at_level("WARNING", logger="opengrid.forecast.service"):
+        rows = await compute_and_persist(_cfg(load_series=[]), history, FakeBackend(), now=_NOW)
+
+    firm = [r for r in rows if r.firm_fitness == "FIRM_OK"]
+    assert firm and len(firm) < len(rows)
+    pooled_logs = [r for r in caplog.records if getattr(r, "reason_code", None) == "FIRM_POOLED"]
+    assert len(pooled_logs) == 1
+    assert pooled_logs[0].pooled_slots == len(firm)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_compute_and_persist_min_samples_firm_is_config_driven():
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory({"HB_TEST": _short_history("HB_TEST", horizon_start)}, quality="GOOD")
+    rows = await compute_and_persist(
+        _cfg(load_series=[], min_samples_firm=4), history, FakeBackend(), now=_NOW
+    )
+    assert all(r.firm_fitness == "NOT_FOR_FIRM" for r in rows)  # only 3 days exist: never 4 samples
 
 
 @pytest.mark.asyncio
@@ -174,6 +207,25 @@ async def test_load_zone_load_is_summed_from_its_weather_zones():
 
 
 @pytest.mark.asyncio
+async def test_austin_load_zone_sums_its_approximate_weather_zone():
+    """Build phase, 2026-09-26 (market-model-two-markets.md): `LZ_AEN` (Austin Energy) has no ERCOT
+    weather-zone definition of its own, so `DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE` maps it to the
+    approximate `southC` weather zone (documented as approximate, pending an authoritative mapping).
+    Once an operator adds "LZ_AEN" to `[fleet].zones`/`load_series`, it must compute like any other
+    load zone -- summed from its mapped weather zone(s), never silently empty."""
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory({"southC": [_obs("southC", horizon_start - timedelta(days=1), 42.0)]})
+    backend = FakeBackend()
+    cfg = _cfg(price_series=[], load_series=["LZ_AEN"])
+
+    rows = await compute_and_persist(cfg, history, backend, now=_NOW)
+
+    assert len(rows) == 96
+    assert all(r.series_key == "LZ_AEN" and r.kind == "load" for r in rows)
+    assert all(r.p50 == pytest.approx(42.0) for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_load_zone_without_weather_mapping_logs_and_falls_back(caplog: pytest.LogCaptureFixture):
     """An unmapped load zone falls back to reading its own code directly (the pre-fix behaviour) but
     must say so loudly (BUILD.md S5a "no silent fallbacks"), not just silently produce zero rows."""
@@ -187,6 +239,61 @@ async def test_load_zone_without_weather_mapping_logs_and_falls_back(caplog: pyt
 
     assert len(rows) == 96  # still computed, via the direct-key fallback
     assert any("weather-zone mapping" in record.message for record in caplog.records)
+
+
+def test_default_price_series_includes_the_four_market_only_zones() -> None:
+    """D-24 build task: LZ_AEN/LZ_CPS/LZ_LCRA/LZ_RAYBN forecast price even though OpenGrid has no
+    dispatchable hubs in them yet (market intelligence only, no dispatch impact)."""
+    for zone in ("LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"):
+        assert zone in DEFAULT_PRICE_SERIES
+
+
+def test_lcra_and_raybn_have_a_documented_weather_zone_mapping() -> None:
+    assert DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE["LZ_LCRA"]
+    assert DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE["LZ_RAYBN"]
+
+
+@pytest.mark.asyncio
+async def test_solar_shape_pulls_midday_price_down_and_lifts_evening_ramp():
+    """D-24: with an ERCOT solar-forecast signal available, the midday price slot must come out lower,
+    and the post-sunset evening-ramp slot higher, than the plain quantile-persistence baseline computed
+    from the exact same price history with no solar signal at all."""
+    horizon_start = datetime(2026, 7, 20, 5, 0, tzinfo=UTC)  # 00:00 local (America/Chicago, UTC-5 in July)
+    price_history = _rich_history("HB_TEST", horizon_start)
+
+    # A diurnal ERCOT solar-forecast series covering the whole horizon: peaks at local solar noon,
+    # zero at night -- exactly the `forecast.solar.clear_sky_shape` curve, scaled to "MW".
+    solar_obs = [
+        _obs(
+            "solar_forecast",
+            horizon_start + timedelta(minutes=15 * step),
+            1000.0 * clear_sky_shape(horizon_start + timedelta(minutes=15 * step)),
+        )
+        for step in range(96)
+    ]
+
+    baseline_rows = await compute_and_persist(
+        _cfg(price_series=["HB_TEST"], load_series=[]),
+        FakeHistory({"HB_TEST": price_history}),
+        FakeBackend(),
+        now=horizon_start,
+    )
+    shaped_rows = await compute_and_persist(
+        _cfg(price_series=["HB_TEST"], load_series=[]),
+        FakeHistory({"HB_TEST": price_history, "solar_forecast": solar_obs}),
+        FakeBackend(),
+        now=horizon_start,
+    )
+
+    baseline_by_step = {r.horizon_step: r for r in baseline_rows}
+    shaped_by_step = {r.horizon_step: r for r in shaped_rows}
+
+    midday_step = 48  # horizon_start (00:00 local) + 12h = solar noon
+    evening_ramp_step = 78  # horizon_start + 19h30m local = just past SUNSET_HOUR
+
+    assert shaped_by_step[midday_step].p50 < baseline_by_step[midday_step].p50
+    assert shaped_by_step[evening_ramp_step].p50 > baseline_by_step[evening_ramp_step].p50
+    assert all(r.p10 <= r.p50 <= r.p90 for r in shaped_rows)
 
 
 @pytest.mark.asyncio

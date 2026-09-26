@@ -1,0 +1,73 @@
+# ogsim.fleet 10k load-test preset (scale-test plan, docs/orchestrator/07-delivery/12-scale-test-plan.md).
+#
+# Same physics constants and id/zone/dual-unit scheme as `fleet.yaml` (02b §4 hub/bank physics), scaled
+# from 2,000 hubs / 40 banks to 10,000 hubs / 200 banks (200 banks x 50 homes/bank, same 4 zones -> 50
+# banks/zone instead of 10) -- `build_topology`/`build_fleet_state`'s round-robin scheme is generic in
+# hub_count/bank_count, so this is a plain scale-up, not a new code path. `dual_unit_share: 0.2` still
+# yields exactly 10 dual-unit homes per bank (floor(50 * 0.2) = 10), all 200 banks.
+#
+# Point OGSIM_FLEET_CONFIG (fleet sim) and OG_FLEET_SIM_CONFIG (orchestrator's `opengrid.fleet.seed`,
+# see its module docstring) at this file for a 10k load-test workspace. Use your own workspace's MQTT
+# user (`ogw_<ws>`, see BUILD.md S5/S6) -- NEVER run this against the shared broker or in production;
+# it is a separate, isolated workspace database (`og_t_<ws>`) and topic root (`ogtest/<ws>`) only. Do
+# not run this file's seed/sim against the shared broker or database (12-scale-test-plan.md §2).
+
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+  topic_root: og/v1
+
+hub_count: 10000
+bank_count: 200
+zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
+
+telemetry_interval_s: 2.0
+lease_ttl_s: 30.0
+lease_hold_after_expiry_s: 5.0
+stop_ramp_s: 4.0
+
+e_kwh_default: 39.2  # Base Power home battery, usable kWh (confirmed by Base, 2026-09-25).
+reserve_frac_default: 0.20
+p_kw_default: 11.0  # Base Power inverter, kW per battery unit (confirmed by Base, 2026-09-25); 2-unit homes = 20 kW
+eta_c: 0.9487
+eta_d: 0.9487
+self_discharge_kwh_per_h: 0.0005
+# feeder segment (~50 homes), not a single distribution transformer.
+bank_kva_rating_default: 600.0
+
+# Dual-unit homes: see fleet.yaml's own comment for the deterministic per-bank-offset rule (identical
+# here; only hub_count/bank_count differ).
+dual_unit_share: 0.2
+e_kwh_dual_unit: 78.4  # Dual-unit home usable kWh (2 Base Power battery units).
+p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
+
+# No extra zone blocks in the 10k load-test preset: it is purely a fleet-SIZE scale test (build item 2),
+# independent of the Austin/CPS market-model work (build item 1). A combined 10k-plus-Austin config can
+# add a `zone_blocks:` list identical in shape to fleet.yaml's, if a future load test needs it.
+zone_blocks: []
+
+guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
+guardian_public_key_path_dev: ""
+
+# Per-inverter power-quality imperfection model -- identical to fleet.yaml (02b §4 physics are scale-
+# independent; only the fleet size differs in this preset).
+inverter_pq:
+  freq_offset_std_hz: 0.01
+  voltage_offset_std_pct: 0.5
+  thd_current_median_pct: 2.0
+  thd_current_p95_pct: 4.5
+  harmonic_phase_lock: false
+  ride_through_class_default: CATEGORY_III
+  calibration_rate_limit_s: 86400.0
+
+# Waveform summary/raw generation -- at 10,000 hubs the summary message rate is ~1,000 msg/s at the
+# default 10s summary_interval_s (see fleet.yaml's comment on the wave-2 bandwidth fix); the scale-test
+# plan measures this directly (telemetry write rate) rather than assuming it holds at 5x scale.
+wave:
+  harmonic_detail_interval_s: 30.0
+  harmonic_detail_delta_pct: 1.0
+  raw_audit_sample_pct_per_min: 1.0
+  sync_source: ptp
+  sync_quality_ns: 50.0
+  summary_interval_s: 10.0
+  summary_delta_pct: 1.0
