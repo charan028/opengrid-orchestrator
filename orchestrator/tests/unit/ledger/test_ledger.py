@@ -194,6 +194,69 @@ async def test_substitution_refuses_to_exceed_target_bank_capability(
     assert backend.rows[reservation_id].is_active
 
 
+T2 = datetime(2026, 9, 26, 18, 30, tzinfo=UTC)
+
+
+async def test_ts_05_03_reserve_writes_one_commitment_row_per_interval(ledger: ReservationLedger, backend):
+    """Regression (live 2026-09-26): `reserve()` wrote reservations but never the equality-freeze
+    `og.commitment` rows (02a S2.1 `SELECTED -> COMMITTED`), so no obligation was ever frozen for the
+    next gate (C24) and the same OFFERED candidate was re-reserved every gate until K2 tripped."""
+    obligation_id, plan_id = uuid4(), uuid4()
+    profile = {
+        encode_interval_key("bank-1", T0, T1): Decimal(30),
+        encode_interval_key("bank-2", T0, T1): Decimal(20),
+        encode_interval_key("bank-1", T1, T2): Decimal(50),
+    }
+
+    await ledger.reserve(obligation_id, profile, plan_id, variable_kind="BINARY")
+
+    by_start = {c.interval_start: c for c in backend.commitments.values()}
+    assert set(by_start) == {T0, T1}
+    assert by_start[T0].committed_kw == Decimal(50)  # summed across banks for the interval
+    assert by_start[T0].interval_end == T1
+    assert by_start[T1].committed_kw == Decimal(50)
+    assert all(c.plan_id == plan_id and c.obligation_id == obligation_id for c in by_start.values())
+    assert all(c.variable_kind == "BINARY" for c in by_start.values())
+
+
+async def test_ts_05_03_failed_reserve_writes_no_commitment(ledger: ReservationLedger, backend, capability):
+    capability.default_kw = Decimal(10)
+    with pytest.raises(ReservationError):
+        await ledger.reserve(uuid4(), {_key(): Decimal(20)}, uuid4())
+    assert backend.commitments == {}
+    assert backend.rows == {}
+
+
+async def test_ts_05_07_second_reserve_for_same_obligation_is_refused(ledger: ReservationLedger, backend):
+    """K13: an obligation already committed for an interval cannot be re-reserved on top (the DB's
+    `ux_commitment_active` index); the ledger surfaces it as a reservation error, not a crash."""
+    obligation_id = uuid4()
+    await ledger.reserve(obligation_id, {_key(): Decimal(10)}, uuid4())
+    with pytest.raises(ReservationError, match="ALREADY-COMMITTED"):
+        await ledger.reserve(obligation_id, {_key("bank-2"): Decimal(10)}, uuid4())
+    assert len(backend.rows) == 1
+
+
+async def test_release_uncommitted_frees_orphan_reservations(ledger: ReservationLedger, backend):
+    """Legacy rows from before commitments were written (live 2026-09-26: 9,991 active reservations on
+    OFFERED obligations) must not keep consuming K2 headroom."""
+    orphan_id = uuid4()
+    await ledger.reserve(uuid4(), {_key(): Decimal(10)}, uuid4())  # committed, must survive
+    await ledger.reserve(orphan_id, {_key("bank-2"): Decimal(10)}, uuid4())
+    for commitment_id, commitment in list(backend.commitments.items()):
+        if commitment.obligation_id == orphan_id:
+            del backend.commitments[commitment_id]
+
+    released = await ledger.release_uncommitted()
+
+    assert released == 1
+    active = [r for r in backend.rows.values() if r.is_active]
+    assert len(active) == 1
+    assert active[0].obligation_id != orphan_id
+    orphan = next(r for r in backend.rows.values() if r.obligation_id == orphan_id)
+    assert orphan.release_reason == "R-COMMIT-LOCK-INFEASIBLE"
+
+
 async def test_module_level_functions_require_configure():
     import opengrid.ledger as ledger_module
 

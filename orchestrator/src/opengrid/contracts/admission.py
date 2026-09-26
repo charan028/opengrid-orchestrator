@@ -145,7 +145,7 @@ async def admit_priced(
         window_end=window_end,
         requested_kw=admitted_kw,
         value_per_mwh=value_per_mwh,
-        scenario_basis=scenario_basis,  # type: ignore[arg-type]
+        scenario_basis=scenario_basis,
         state="OFFERED",
         admitted_at=now,
     )

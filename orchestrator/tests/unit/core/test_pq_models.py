@@ -48,7 +48,11 @@ def test_pq_waveform_summary_row_allows_partial_fast_block():
 
 def test_pq_waveform_raw_index_defaults():
     idx = pq.PqWaveformRawIndex(
-        capture_id=uuid4(), hub_id="hub-1", ts=NOW, trigger_reason="ROTATING_AUDIT", blob_ref="s3://bucket/key",
+        capture_id=uuid4(),
+        hub_id="hub-1",
+        ts=NOW,
+        trigger_reason="ROTATING_AUDIT",
+        blob_ref="s3://bucket/key",
         channels=6,
     )
     assert idx.sample_rate_hz == Decimal("7680")
@@ -58,8 +62,12 @@ def test_pq_waveform_raw_index_defaults():
 
 def test_calibration_attempt_defaults_pending():
     attempt = pq.CalibrationAttempt(
-        calibration_id=uuid4(), hub_id="hub-1", requested_at=NOW,
-        reference_phase_deg=Decimal("0"), reference_freq_hz=Decimal("60"), reference_amplitude_v=Decimal("240"),
+        calibration_id=uuid4(),
+        hub_id="hub-1",
+        requested_at=NOW,
+        reference_phase_deg=Decimal("0"),
+        reference_freq_hz=Decimal("60"),
+        reference_amplitude_v=Decimal("240"),
     )
     assert attempt.outcome == "PENDING"
     assert attempt.command_batch_id is None
@@ -67,14 +75,21 @@ def test_calibration_attempt_defaults_pending():
 
 def test_maintenance_work_order_and_asset_event():
     work_order = pq.MaintenanceWorkOrder(
-        work_order_id=uuid4(), hub_id="hub-1", severity="HIGH",
-        evidence={"calibration_attempt_ids": [str(uuid4())]}, opened_at=NOW,
+        work_order_id=uuid4(),
+        hub_id="hub-1",
+        severity="HIGH",
+        evidence={"calibration_attempt_ids": [str(uuid4())]},
+        opened_at=NOW,
     )
     assert work_order.status == "OPEN"
 
     event = pq.AssetEvent(
-        asset_event_id=uuid4(), hub_id="hub-1", work_order_id=work_order.work_order_id,
-        event_type="INVERTER_REPLACED", old_inverter_serial="SN-OLD-1", new_inverter_serial="SN-NEW-1",
+        asset_event_id=uuid4(),
+        hub_id="hub-1",
+        work_order_id=work_order.work_order_id,
+        event_type="INVERTER_REPLACED",
+        old_inverter_serial="SN-OLD-1",
+        new_inverter_serial="SN-NEW-1",
         occurred_at=NOW,
     )
     assert event.event_type == "INVERTER_REPLACED"
@@ -85,13 +100,23 @@ def test_decision_type_gains_asset_health_values():
     from opengrid.core.models import engine
 
     row = engine.TraceRow(
-        trace_id=uuid4(), decision_type="ASSET_STATE_TRANSITION", event_class="ASSET_STATE_TRANSITION",
-        stream_id="s1", seq=0, payload={"hub_id": "hub-1", "to_state": "WATCH"}, hash="h",
+        trace_id=uuid4(),
+        decision_type="ASSET_STATE_TRANSITION",
+        event_class="ASSET_STATE_TRANSITION",
+        stream_id="s1",
+        seq=0,
+        payload={"hub_id": "hub-1", "to_state": "WATCH"},
+        hash="h",
     )
     assert row.decision_type == "ASSET_STATE_TRANSITION"
 
     calib_row = engine.TraceRow(
-        trace_id=uuid4(), decision_type="CALIBRATION_ATTEMPT", event_class="CALIBRATION_ATTEMPT",
-        stream_id="s1", seq=1, payload={"hub_id": "hub-1"}, hash="h2",
+        trace_id=uuid4(),
+        decision_type="CALIBRATION_ATTEMPT",
+        event_class="CALIBRATION_ATTEMPT",
+        stream_id="s1",
+        seq=1,
+        payload={"hub_id": "hub-1"},
+        hash="h2",
     )
     assert calib_row.decision_type == "CALIBRATION_ATTEMPT"

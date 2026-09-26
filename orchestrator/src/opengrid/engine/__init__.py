@@ -36,6 +36,7 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
 from opengrid.platform.config import Config
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.process import run_forever
@@ -97,6 +98,9 @@ class GateScheduler:
 
     def __init__(self) -> None:
         self._last_scheduled_slot: datetime | None = None
+        # contract_id -> slot of its last ADMISSION gate: an offer the gate did not select stays
+        # pending, and re-solving it every 2 s tick would starve the allocator.
+        self._admitted_slot: dict[UUID, datetime] = {}
 
     def due_triggers(
         self,
@@ -110,7 +114,10 @@ class GateScheduler:
         if current_slot != self._last_scheduled_slot:
             self._last_scheduled_slot = current_slot
             triggers.append(GateTrigger("SCHEDULED_15MIN"))
-        triggers.extend(GateTrigger("ADMISSION", cid) for cid in pending_admission_contract_ids)
+        for cid in pending_admission_contract_ids:
+            if self._admitted_slot.get(cid) != current_slot:
+                self._admitted_slot[cid] = current_slot
+                triggers.append(GateTrigger("ADMISSION", cid))
         triggers.extend(GateTrigger("RENOMINATION", cid) for cid in due_renomination_contract_ids)
         return triggers
 
@@ -274,6 +281,7 @@ class _EngineState:
     scada_gateway: ScadaGateway
     schedule_gateway: ScheduleGateway
     energy_sufficiency_gateway: EnergySufficiencyGateway | None = None
+    lifecycle_backend: LifecycleBackend | None = None
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S
     cycle_seq: int = 0
     # MVP-S simplification: a single static epoch for the process lifetime (00-invariants.md K6's
@@ -321,7 +329,23 @@ async def _engine_tick(state: _EngineState) -> None:
                 "intake failed ahead of gate -- running the gate anyway with whatever candidates exist",
                 extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope},
             )
-        await selector.run_gate(trigger.gate_kind, trigger.contract_scope)
+        # K7 degrade, don't trip: a failed gate must not skip this tick's allocator cycle, which serves
+        # obligations that are already committed.
+        try:
+            await selector.run_gate(trigger.gate_kind, trigger.contract_scope)
+        except Exception:
+            logger.exception(
+                "selector gate failed",
+                extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope},
+            )
+
+    if state.lifecycle_backend is not None:
+        try:
+            await advance_obligations(
+                state.lifecycle_backend, contracts.transition_obligation, contracts.expire_unselected, now
+            )
+        except Exception:
+            logger.exception("obligation lifecycle step failed", extra={"cycle_id": cycle_id})
 
     grants = await allocator.run_cycle(
         cycle_id,
@@ -367,8 +391,6 @@ async def _engine_tick(state: _EngineState) -> None:
             lease_ttl_s=state.lease_ttl_s,
         )
 
-    _ = contracts  # imported for process-wiring completeness; admission itself is api/contracts' own path
-
 
 async def main(cfg: Config) -> None:
     """Entry point for `python -m opengrid.engine.main`: opens the DB pool and MQTT client, rehydrates
@@ -378,6 +400,7 @@ async def main(cfg: Config) -> None:
     itself (it is the only module that knows which series matters per contract, 02b S6.5); an
     unavailable guardian is enforced here (`guardian_is_available`, "hold, don't pile up batches").
     """
+    import opengrid.contracts as contracts_mod
     import opengrid.feeds as feeds_mod
     import opengrid.fleet as fleet_mod
     import opengrid.ledger as ledger_mod
@@ -436,12 +459,18 @@ async def main(cfg: Config) -> None:
         # One TraceStore instance for this process (shared with intake) -- `propose_batch_to_guardian`
         # writes each cycle's RT_ALLOCATION pre-image through this same store (qa/merge-notes.md S17).
         trace_store = TraceStore(PgTraceBackend(pool))
+        contracts_repo = PgContractsRepo(pool)
         configure_intake(
-            PgContractsRepo(pool),
+            contracts_repo,
             trace_store,
             PgMarketDataPort(pool),
             forecast_scenarios=forecast_scenarios,
         )
+        # The selector's commit step and the lifecycle step transition obligations through
+        # `opengrid.contracts` in this process, so its module facade needs the same repo/trace pair.
+        contracts_mod.configure(contracts_repo, trace_store)
+        released = await ledger_mod.release_uncommitted()
+        logger.info("released uncommitted reservations at start-up", extra={"released_count": released})
 
         backend = PgEngineBackend(pool)
         fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool)
@@ -460,6 +489,7 @@ async def main(cfg: Config) -> None:
             scada_gateway=scada_gateway,
             schedule_gateway=schedule_gateway,
             energy_sufficiency_gateway=EnergySufficiencyGateway(pool, trace_store),
+            lifecycle_backend=backend,
             lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
         )
 

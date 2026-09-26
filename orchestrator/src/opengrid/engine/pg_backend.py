@@ -12,9 +12,23 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.engine import CommandBatchRow
+from opengrid.engine.lifecycle import ClosingObligation
 
 _PENDING_ADMISSION_SQL = """
-SELECT DISTINCT contract_id FROM og.opportunity WHERE state = 'OFFERED' AND gate_id IS NULL
+SELECT DISTINCT op.contract_id
+FROM og.opportunity op
+JOIN og.obligation ob ON ob.opportunity_id = op.opportunity_id
+WHERE op.state = 'OFFERED' AND op.gate_id IS NULL AND ob.state = 'OFFERED'
+"""
+_DUE_FOR_DELIVERY_SQL = """
+SELECT obligation_id FROM og.obligation WHERE state = 'COMMITTED' AND window_start <= %(now)s
+"""
+_DUE_FOR_CLOSE_SQL = """
+SELECT o.obligation_id,
+       EXISTS (SELECT 1 FROM og.performance p
+               WHERE p.obligation_id = o.obligation_id AND NOT p.passed_threshold) AS any_failed
+FROM og.obligation o
+WHERE o.state = 'DELIVERING' AND o.window_end <= %(now)s
 """
 _DUE_RENOMINATION_SQL = """
 SELECT DISTINCT contract_id FROM og.renomination_point
@@ -42,6 +56,18 @@ class PgEngineBackend:
             await cur.execute(_PENDING_ADMISSION_SQL)
             rows = await cur.fetchall()
         return [row[0] for row in rows]
+
+    async def obligations_due_for_delivery(self, now: datetime) -> list[UUID]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_DUE_FOR_DELIVERY_SQL, {"now": now})
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
+    async def obligations_due_for_close(self, now: datetime) -> list[ClosingObligation]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_DUE_FOR_CLOSE_SQL, {"now": now})
+            rows = await cur.fetchall()
+        return [ClosingObligation(obligation_id=row[0], any_interval_failed=bool(row[1])) for row in rows]
 
     async def due_renomination_contract_ids(self, now: datetime) -> list[UUID]:
         async with self._pool.connection() as conn, conn.cursor() as cur:

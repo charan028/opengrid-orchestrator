@@ -134,6 +134,26 @@ def test_multiple_pending_admissions_each_get_their_own_trigger() -> None:
     assert admission_scopes == ids
 
 
+def test_admission_gate_runs_at_most_once_per_contract_per_slot() -> None:
+    """Regression (live 2026-09-26): an OFFERED opportunity the gate did not select stays pending, so
+    the same contract's ADMISSION gate (a full 24 h solve) re-ran on every 2 s tick, starving the
+    allocator. Unselected offers wait for the next scheduled gate instead."""
+    scheduler = engine.GateScheduler()
+    contract = uuid4()
+    t0 = datetime(2026, 9, 26, 12, 1, tzinfo=UTC)
+
+    def _admissions(now: datetime) -> list[UUID | None]:
+        triggers = scheduler.due_triggers(
+            now, pending_admission_contract_ids=[contract], due_renomination_contract_ids=[]
+        )
+        return [t.contract_scope for t in triggers if t.gate_kind == "ADMISSION"]
+
+    assert _admissions(t0) == [contract]
+    assert _admissions(t0 + timedelta(seconds=2)) == []
+    assert _admissions(t0 + timedelta(minutes=13)) == []
+    assert _admissions(t0 + timedelta(minutes=14)) == [contract]  # next slot (12:15)
+
+
 # --- command-batch build / guardian handoff -------------------------------------------------------
 
 

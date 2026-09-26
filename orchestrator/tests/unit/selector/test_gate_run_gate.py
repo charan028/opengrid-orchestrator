@@ -6,13 +6,16 @@ without a live Postgres or the sibling stub modules other agents own.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
 
+import opengrid.ledger as ledger_module
 from opengrid.ledger import decode_interval_key
-from opengrid.selector import gate
+from opengrid.selector import commit, gate
 from opengrid.selector.types import CandidateOpportunity
 from unit.selector.factories import make_bank, zero_price_scenario
 
@@ -73,14 +76,103 @@ def _wired(monkeypatch):
 
     reserved = {}
 
-    async def _fake_reserve(obligation_id, selected_kw, plan_id):
+    async def _fake_reserve(obligation_id, selected_kw, plan_id, *, variable_kind="CONTINUOUS"):
         reserved["obligation_id"] = obligation_id
         reserved["selected_kw"] = selected_kw
         reserved["plan_id"] = plan_id
+        reserved["variable_kind"] = variable_kind
 
-    monkeypatch.setattr(gate.ledger, "reserve", _fake_reserve)
+    monkeypatch.setattr(commit.ledger, "reserve", _fake_reserve)
+    monkeypatch.setattr(commit.contracts, "transition_obligation", _RecordingTransitions())
 
     return persisted, reserved
+
+
+class _RecordingTransitions:
+    """Fake `contracts.transition_obligation`: records `(obligation_id, to_state, reason_code)`."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[UUID, str, str | None]] = []
+
+    async def __call__(self, obligation_id, to_state, *, reason_code, payload=None, at_risk=None):
+        self.calls.append((obligation_id, to_state, reason_code))
+
+
+async def test_ts_05_03_run_gate_commits_the_selected_obligation(_wired):
+    """Regression (live 2026-09-26): the gate reserved but never moved the obligation through
+    `OFFERED -> SELECTED -> COMMITTED`, so it stayed OFFERED and was re-reserved every gate until
+    `ledger.reserve()` failed K2 with `R-COMMIT-LOCK-INFEASIBLE` and crashed the engine tick."""
+    _persisted, reserved = _wired
+    transitions = commit.contracts.transition_obligation
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    obligation_id = UUID(OBLIGATION_ID)
+    assert transitions.calls == [
+        (obligation_id, "SELECTED", "R-GATE-SELECT"),
+        (obligation_id, "COMMITTED", "R-COMMIT-LOCK-ENTER"),
+    ]
+    assert reserved["variable_kind"] == "BINARY"
+
+
+async def test_ts_05_03_infeasible_reserve_rejects_the_obligation_without_crashing_the_gate(
+    monkeypatch, _wired
+):
+    """02a S2.1 `SELECTED -> REJECTED`: a K2 refusal (live capability shrank since the snapshot) with no
+    live-headroom substitute rejects that one obligation; the gate still returns its plan."""
+    transitions = commit.contracts.transition_obligation
+
+    async def _refuse(obligation_id, selected_kw, plan_id, *, variable_kind="CONTINUOUS"):
+        raise ledger_module.ReservationError("R-COMMIT-LOCK-INFEASIBLE")
+
+    async def _no_headroom(bank_id, interval_start):
+        return Decimal(0)
+
+    monkeypatch.setattr(commit.ledger, "reserve", _refuse)
+    monkeypatch.setattr(commit.ledger, "free_headroom", _no_headroom)
+
+    plan = await gate.run_gate("SCHEDULED_15MIN")
+
+    obligation_id = UUID(OBLIGATION_ID)
+    assert plan.solver_status == "OPTIMAL"
+    assert transitions.calls == [
+        (obligation_id, "SELECTED", "R-GATE-SELECT"),
+        (obligation_id, "REJECTED", "R-COMMIT-LOCK-INFEASIBLE"),
+    ]
+
+
+async def test_ts_05_03_infeasible_reserve_retries_on_live_headroom(monkeypatch, _wired):
+    """Substitute before rejecting: when the planned bank no longer has the capacity, the obligation's
+    per-interval total is re-placed on banks with live free headroom and reserved once more."""
+    transitions = commit.contracts.transition_obligation
+    attempts: list[dict[str, Decimal]] = []
+
+    async def _refuse_first(obligation_id, selected_kw, plan_id, *, variable_kind="CONTINUOUS"):
+        attempts.append(selected_kw)
+        if len(attempts) == 1:
+            raise ledger_module.ReservationError("R-COMMIT-LOCK-INFEASIBLE")
+
+    async def _headroom(bank_id, interval_start):
+        return Decimal(4) if bank_id == "B1" else Decimal(100)
+
+    async def _two_banks(horizon_start, horizon_end, bank_ids):
+        return (make_bank("B1", 10.0, range(1)), make_bank("B2", 0.0, range(1)))
+
+    async def _two_bank_candidate(horizon_start, horizon_end, bank_ids, contract_scope):
+        (candidate,) = await _fake_load_candidates(horizon_start, horizon_end, bank_ids, contract_scope)
+        return (dataclasses.replace(candidate, eligible_bank_ids=("B1", "B2")),)
+
+    monkeypatch.setattr(commit.ledger, "reserve", _refuse_first)
+    monkeypatch.setattr(commit.ledger, "free_headroom", _headroom)
+    monkeypatch.setattr(gate, "load_banks", _two_banks)
+    monkeypatch.setattr(gate, "load_candidates", _two_bank_candidate)
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    assert len(attempts) == 2
+    retry = {decode_interval_key(k)[0]: v for k, v in attempts[1].items()}
+    assert retry == {"B1": Decimal(4), "B2": Decimal(6)}
+    assert transitions.calls[-1][1] == "COMMITTED"
 
 
 async def test_run_gate_persists_and_reserves_the_selected_candidate(_wired):
@@ -159,6 +251,16 @@ async def test_compute_horizon_is_24h():
     now = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
     start, end = await gate.compute_horizon("SCHEDULED_15MIN", now)
     assert start == now
+    assert (end - start).total_seconds() == 24 * 3600
+
+
+async def test_compute_horizon_is_aligned_to_the_15_minute_interval():
+    """Regression (live 2026-09-26): the horizon started at `now` (e.g. 23:56:58.95), so each gate's
+    interval keys were unique -- K2's per-interval check never saw another gate's reservations and
+    `load_committed` never matched a commitment to the horizon."""
+    now = datetime(2026, 9, 26, 4, 56, 58, 953921, tzinfo=UTC)
+    start, end = await gate.compute_horizon("ADMISSION", now)
+    assert start == datetime(2026, 9, 26, 4, 45, tzinfo=UTC)
     assert (end - start).total_seconds() == 24 * 3600
 
 

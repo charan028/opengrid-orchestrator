@@ -237,7 +237,9 @@ class PqWaveformRawIndex(_Row):
     retain_until: datetime | None = None
 
 
-CalibrationOutcome = Literal["PENDING", "IMPROVED", "CORRECTED", "NO_CHANGE", "WORSE_ROLLED_BACK", "FAILED_NO_ACK"]
+CalibrationOutcome = Literal[
+    "PENDING", "IMPROVED", "CORRECTED", "NO_CHANGE", "WORSE_ROLLED_BACK", "FAILED_NO_ACK"
+]
 
 
 class CalibrationAttempt(_Row):

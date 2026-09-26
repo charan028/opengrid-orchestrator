@@ -14,12 +14,14 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
-from opengrid import forecast, ledger
+from opengrid import forecast
 from opengrid.core.models.engine import Plan
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
+from opengrid.core.timeutil import floor_to_interval
 from opengrid.fleet import capability as fleet_capability
 from opengrid.fleet import hub_capabilities as fleet_hub_capabilities
 from opengrid.selector import db
+from opengrid.selector.commit import commit_candidate, selected_kw_by_interval_key
 from opengrid.selector.extract import extract_plan
 from opengrid.selector.model import build_mode_o_model
 from opengrid.selector.rule_fallback import rule_fallback_f2
@@ -56,10 +58,13 @@ _last_hint_q: dict[str, float] = {}
 
 
 async def compute_horizon(gate_kind: GateKind, now: datetime) -> tuple[datetime, datetime]:
-    """24h horizon for `SCHEDULED_15MIN`/`ADMISSION`; `RENOMINATION` narrows to the obligation's own
-    window in `run_gate` once its `contract_scope` is resolved (02a S3.1's scope-of-re-optimization
-    column), so this returns the same 24h default for all three and the caller trims it."""
-    return now, now + timedelta(hours=24)
+    """24h horizon starting at the 15-min interval containing `now` (02a S3.2: fixed 96 market
+    intervals). Aligning is what makes interval keys comparable across gates: reservations (K2) and
+    commitments (C24) of an earlier gate are only found by an exact interval-start match.
+    `RENOMINATION` narrows to the obligation's own window in `run_gate` (02a S3.1), so this returns the
+    same default for all three gate kinds."""
+    start = floor_to_interval(now, int(INTERVAL_MINUTES))
+    return start, start + timedelta(hours=24)
 
 
 def _bank_energy_envelope(bank_id: str) -> tuple[float, float, float, float, float]:
@@ -322,32 +327,13 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         selected = (
             result.selected_x.get(c.opportunity_id, False) or result.selected_q.get(c.opportunity_id, 0.0) > 0
         )
-        if selected:
-            # Bug fix (combined-deploy pass): this used to key `selected_kw` by the bare interval index
-            # `str(t)`, but `opengrid.ledger.reserve()` requires each key to be
-            # `encode_interval_key(bank_id, interval_start, interval_end)` -- `decode_interval_key`
-            # raises `ValueError` on anything else (confirmed live: every ADMISSION/SCHEDULED_15MIN gate
-            # that actually selected a candidate crashed the whole tick with
-            # "malformed reservation interval key: '6'"). Also fixes a second, silent bug the old key
-            # shape hid: keying by `t` alone collides across banks sharing the same interval index, so a
-            # candidate split across two banks would have silently kept only the last bank's amount.
-            selected_kw = {
-                ledger.encode_interval_key(
-                    b,
-                    horizon_start + timedelta(minutes=INTERVAL_MINUTES * t),
-                    horizon_start + timedelta(minutes=INTERVAL_MINUTES * (t + 1)),
-                ): Decimal(str(result.bank_interval_allocation[(c.opportunity_id, b, t)]))
-                for t in c.window_intervals
-                for b in c.eligible_bank_ids
-                if (c.opportunity_id, b, t) in result.bank_interval_allocation
-                and result.bank_interval_allocation[(c.opportunity_id, b, t)] > 0
-            }
-            # Bug fix (combined-deploy pass): `og.reservation.obligation_id` FK-references
-            # `og.obligation`, not `og.opportunity` -- `opengrid.contracts.admit`/`admit_priced` mint a
-            # fresh `obligation_id` distinct from `opportunity_id` for the OFFERED obligation created
-            # alongside the opportunity (`admission.py`). Passing `c.opportunity_id` here raised
-            # `ForeignKeyViolation` the moment a candidate was actually selected (confirmed live).
-            await ledger.reserve(UUID(c.obligation_id), selected_kw, plan_id)
+        if not selected:
+            continue
+        # Keys are `encode_interval_key(bank, start, end)` per bank (a bare interval index collided
+        # across banks), and the obligation -- not the opportunity -- owns the reservation (FK).
+        selected_kw = selected_kw_by_interval_key(c, result, horizon_start, INTERVAL_MINUTES)
+        if selected_kw:
+            await commit_candidate(c, selected_kw, plan_id)
 
     return Plan(
         plan_id=plan_id,

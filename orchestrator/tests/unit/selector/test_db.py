@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 from opengrid.selector import db
@@ -11,6 +11,21 @@ from opengrid.selector import db
 def test_interval_key_uses_isoformat_for_datetimes():
     ts = datetime(2026, 9, 26, 12, 15, tzinfo=UTC)
     assert db._interval_key(ts) == ts.isoformat()
+
+
+def test_interval_key_normalizes_to_utc():
+    """Regression (live 2026-09-26): Postgres returns `timestamptz` in the session zone
+    (America/Chicago), while `gate.load_committed` indexes intervals by UTC ISO strings -- a
+    `-05:00` key never matched, so every committed obligation silently vanished from the model (C24)."""
+    chicago = timezone(timedelta(hours=-5))
+    ts = datetime(2026, 9, 26, 7, 15, tzinfo=chicago)
+    assert db._interval_key(ts) == datetime(2026, 9, 26, 12, 15, tzinfo=UTC).isoformat()
+
+
+def test_offered_candidates_exclude_obligations_already_decided():
+    """Regression (live 2026-09-26): candidates were selected by `opportunity.state` alone, so an
+    obligation already SELECTED/COMMITTED/REJECTED was re-offered (and re-reserved) at every gate."""
+    assert "ob.state = 'OFFERED'" in db._OFFERED_OPPORTUNITIES_SQL
 
 
 def test_interval_key_falls_back_to_str_for_non_datetime():
