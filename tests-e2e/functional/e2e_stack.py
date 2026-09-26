@@ -386,6 +386,48 @@ class Stack:
             timeout=180,
         )
 
+    def metric(self, service: str, port: int, name: str) -> float | None:
+        """Sum of a Prometheus counter/gauge `name` scraped from a dev-stack container's loopback-only
+        `/metrics` (via `docker compose exec`, since the endpoint never binds a published port). `None` when
+        the endpoint or the series is absent."""
+        docker = shutil.which("docker")
+        if docker is None:
+            pytest.skip("docker CLI not available to scrape a loopback metrics endpoint")
+        script = (
+            "import urllib.request; "
+            f"print(urllib.request.urlopen('http://127.0.0.1:{port}/metrics', timeout=5).read().decode())"
+        )
+        compose_file = str(REPO_ROOT / "dev" / "docker-compose.yml")
+        done = subprocess.run(  # noqa: S603 -- fixed argv, test-authored service name and script
+            [docker, "compose", "-f", compose_file, "exec", "-T", service, "python", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if done.returncode != 0:
+            return None
+        values = [
+            float(line.rsplit(" ", 1)[1])
+            for line in done.stdout.splitlines()
+            if line.startswith(name) and not line.startswith("#")
+        ]
+        return sum(values) if values else None
+
+    def restart_count(self, service: str) -> int:
+        """How many times Docker has restarted a dev-stack service's container (the systemd-restart analogue)."""
+        docker = shutil.which("docker")
+        if docker is None:
+            pytest.skip("docker CLI not available")
+        done = subprocess.run(  # noqa: S603 -- fixed argv
+            [docker, "inspect", "-f", "{{.RestartCount}}", f"dev-{service}-1"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        return int(done.stdout.strip() or 0)
+
     def heartbeat_age_s(self, process: str) -> float | None:
         found = self.rows(
             "SELECT extract(epoch FROM now() - ts) AS age FROM og.heartbeat WHERE process = %(p)s",
