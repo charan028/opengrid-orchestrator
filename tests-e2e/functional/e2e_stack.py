@@ -327,7 +327,9 @@ class Stack:
         return self.post(f"/fleet/command/{proposed.json()['proposal_id']}/confirm", user=user)
 
     def online_hub(self, *, exclude_banks: tuple[str, ...] = (), idle: bool = False) -> dict[str, Any]:
-        """An online hub (params + live state), outside `exclude_banks`, optionally one currently at 0 kW."""
+        """An online hub (params + live state), outside `exclude_banks`. `idle=True` wants one at 0 kW, i.e.
+        not currently driven by the engine, and skips the test when every hub is being dispatched (the
+        engine also dispatches uncommitted headroom, so on a busy stack there may be none)."""
         found = self.rows(
             """SELECT h.hub_id, h.bank_id, h.p_kw AS p_limit_kw, h.e_kwh, h.r_kwh, s.soc_kwh, s.p_kw
                FROM og.hub h JOIN og.hub_state s USING (hub_id)
@@ -336,6 +338,8 @@ class Stack:
                ORDER BY s.soc_kwh DESC LIMIT 1""",
             {"x": list(exclude_banks), "idle": idle},
         )
+        if not found and idle:
+            pytest.skip("every online hub is currently dispatched by the engine; no idle hub to command")
         assert found, "no online hub available"
         return found[0]
 
@@ -355,9 +359,11 @@ class Stack:
     def free_window(
         self, intervals: int, *, first_offset: int = 3, last_offset: int = 88
     ) -> tuple[datetime, datetime]:
-        """The earliest run of `intervals` consecutive 15-minute intervals (inside the selector's 24 h horizon)
+        """The latest run of `intervals` consecutive 15-minute intervals (inside the selector's 24 h horizon)
         with no live commitment at all, so a scenario's capacity is never taken by an earlier run's (still
-        locked, K13) obligations."""
+        locked, K13) obligations. Latest, not earliest: a gate-only scenario's commitments (a rival may take
+        the whole fleet) then deliver many hours later, never during a session's delivery or manual-command
+        scenarios."""
         base = quarter(0)
         taken = {
             row["interval_start"]
@@ -368,7 +374,7 @@ class Stack:
                 {"a": base},
             )
         }
-        for offset in range(first_offset, last_offset - intervals):
+        for offset in range(last_offset - intervals, first_offset - 1, -1):
             window = [base + INTERVAL * (offset + i) for i in range(intervals)]
             if not taken.intersection(window):
                 return window[0], window[-1] + INTERVAL
