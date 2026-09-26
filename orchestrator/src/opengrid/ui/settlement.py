@@ -1,6 +1,6 @@
 """Shared view model for the Profitability and Billing & audit screens. Owner: ui (MERGE).
 
-Both screens read ONE payload, `GET /og/api/views/settlement` (`opengrid.api.views_ext`), so a contract
+Both screens read ONE payload, `GET /og/api/views/settlement` (`opengrid.api.views_settlement`), so a contract
 carries the same label on both (`ERCOT_AS · d03`, from the single `contract_id -> og.contract` join), an
 obligation reads as its window and product instead of a UUID, and a row superseded by a settlement
 correction is shown struck through and left out of every total. Full UUIDs stay available on hover.

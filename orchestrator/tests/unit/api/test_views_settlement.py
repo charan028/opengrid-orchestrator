@@ -1,4 +1,4 @@
-"""`opengrid.api.views_ext`: labels and assembly of the read-only settlement view (pure parts), plus auth."""
+"""`opengrid.api.views_settlement`: labels and assembly of the read-only settlement view (pure parts), plus auth."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from opengrid.api import views_ext
-from opengrid.api.views_ext import (
+from opengrid.api import views_settlement
+from opengrid.api.views_settlement import (
     _period,
     build_view,
     contract_label,
@@ -121,7 +121,7 @@ def test_build_view_labels_both_screens_from_one_contract_join() -> None:
 def test_settlement_view_requires_a_proxy_asserted_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OG_API_PROXY_SECRET", "s3cret")
     app = FastAPI()
-    app.include_router(views_ext.router)
+    app.include_router(views_settlement.router)
     app.state.config = Config({"api": {"roles": {"viewer": ["viewer"]}}})
     client = TestClient(app)
     assert client.get("/og/api/views/settlement").status_code == 401
