@@ -72,8 +72,9 @@ DEFAULT_AS_HOLD_MINUTES = 60.0
 def as_energy_hold_h(service_type: object, duration_minutes: object) -> float:
     """Energy-hold hours for the selector's SoC model: an ERCOT_AS award is a capacity hold that must be
     deployable for its product's full duration (Non-Spin 4 h, ECRS 1 h, NPRR1282); 0 for every other
-    service (those discharge their profile)."""
-    if service_type != "ERCOT_AS":
+    service (those discharge their profile). Keyed on the service's AS category, so any AS service type
+    added to `_CATEGORY_BY_SERVICE_TYPE` is held too (from ftbrown's #13)."""
+    if not isinstance(service_type, str) or _CATEGORY_BY_SERVICE_TYPE.get(service_type) != "AS":
         return 0.0
     minutes = float(str(duration_minutes)) if duration_minutes else DEFAULT_AS_HOLD_MINUTES
     return minutes / 60.0
