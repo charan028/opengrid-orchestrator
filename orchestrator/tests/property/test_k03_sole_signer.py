@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC
 from uuid import uuid4
 
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from opengrid.core.crypto import verify_payload
@@ -69,6 +69,7 @@ def _signed_payload(verdict: Verdict) -> dict[str, object]:
     }
 
 
+@settings(max_examples=1000)
 @given(st.sets(st.sampled_from(sorted(FAULTS))))
 def test_k03_signature_exists_if_and_only_if_no_check_failed(faults):
     world = passing_world()
@@ -82,6 +83,7 @@ def test_k03_signature_exists_if_and_only_if_no_check_failed(faults):
     assert (verdict.signed_at is not None) == (verdict.outcome == "PASS")
 
 
+@settings(max_examples=1000)
 @given(st.integers(min_value=0, max_value=3))
 def test_k03_a_pass_signature_verifies_only_for_its_own_payload_and_key(tampered_field):
     verdict = evaluate(passing_world(), SIGNER)

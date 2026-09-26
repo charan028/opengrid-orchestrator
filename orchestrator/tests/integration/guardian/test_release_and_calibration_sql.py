@@ -49,3 +49,50 @@ async def test_service_profile_query_runs(pool):
     from uuid import uuid4
 
     assert await repo.PgServiceProfilePort(pool).setpoint_source(uuid4()) is None
+
+
+async def test_as_award_queries_follow_the_engine_coverage_rule(pool):
+    """R-GRANT-AS-HOLD reads: an all-AS deployment (obligation_id NULL) covering now counts for any award;
+    a cancelled one does not."""
+    from uuid import uuid4
+
+    port = repo.PgAsAwardPort(pool)
+    award = uuid4()
+    assert await port.service_type(award) is None
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO og.as_deployment (obligation_id, start_at, end_at, source, reason)"
+            " VALUES (NULL, now() - interval '1 minute', now() + interval '5 minutes', 'SCENARIO', 'it-guard')"
+            " RETURNING deployment_id"
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        await conn.commit()
+    try:
+        assert await port.deployment_active(award) is True
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE og.as_deployment SET cancelled_at = now() WHERE deployment_id = %s", (row[0],)
+            )
+            await conn.commit()
+        assert await port.deployment_active(award) is False
+    finally:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("DELETE FROM og.as_deployment WHERE deployment_id = %s", (row[0],))
+            await conn.commit()
+
+
+async def test_scope_posture_and_zone_queries_run(pool):
+    port = repo.PgScopePosturePort(pool)
+    await port.set_posture(
+        "BANK", "it-guard-bank", posture="CONSERVATIVE", veto_ratio=0.5, consecutive=1, stop_requested=False
+    )
+    await port.set_posture(
+        "BANK", "it-guard-bank", posture="NORMAL", veto_ratio=0.0, consecutive=0, stop_requested=False
+    )
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT posture FROM og.scope_posture WHERE scope_ref = 'it-guard-bank'")
+        assert (await cur.fetchone()) == ("NORMAL",)
+        await cur.execute("DELETE FROM og.scope_posture WHERE scope_ref = 'it-guard-bank'")
+        await conn.commit()
+    assert isinstance(await repo.load_zones_by_bank(pool), dict)

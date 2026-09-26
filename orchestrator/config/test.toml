@@ -48,6 +48,9 @@ wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800
 
+[contracts.activation]
+data_center = false
+
 [forecast]
 horizon_hours = 24
 resolution_min = 15

@@ -124,6 +124,7 @@ class FakeWorkOrders:
     def __init__(self) -> None:
         self.open_orders: dict[str, MaintenanceWorkOrder] = {}
         self.closed: list[UUID] = []
+        self.closed_status: dict[UUID, str] = {}
 
     async def open(
         self, hub_id: str, *, severity: str, evidence: dict[str, object], opened_at: datetime
@@ -139,8 +140,16 @@ class FakeWorkOrders:
         )
         return work_order_id
 
-    async def close(self, work_order_id: UUID, *, closed_at: datetime, technician_notes: str | None) -> None:
+    async def close(
+        self,
+        work_order_id: UUID,
+        *,
+        closed_at: datetime,
+        technician_notes: str | None,
+        status: str = "CLOSED",
+    ) -> None:
         self.closed.append(work_order_id)
+        self.closed_status[work_order_id] = status
         for hub_id, order in list(self.open_orders.items()):
             if order.work_order_id == work_order_id:
                 del self.open_orders[hub_id]

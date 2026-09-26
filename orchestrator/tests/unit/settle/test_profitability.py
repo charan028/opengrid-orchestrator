@@ -10,6 +10,7 @@ from opengrid.settle.profitability import (
     compute_forgone_upside,
     compute_penalty,
     compute_pnl,
+    compute_revenue,
     compute_value_added_by_lp,
 )
 
@@ -36,7 +37,7 @@ def test_penalty_zero_when_no_penalty_params():
 
 def test_pnl_net_margin_hand_computed():
     """TS-08-06 worked example:
-    delivered_kwh = 100, price_per_kwh = 0.10, wholesale_price_per_kwh = 0.03, eta_d = 0.5,
+    delivered_kwh = 100, price_per_kwh = 0.10, charging_cost_per_kwh = 0.03, eta_d = 0.5,
     degradation_cost_per_kwh = 0.03, shortfall_kwh = 20, committed_kwh = 100,
     penalty(alpha=0.01, beta=0.5, theta=0.05).
 
@@ -48,9 +49,11 @@ def test_pnl_net_margin_hand_computed():
     """
     penalty = PenaltyParams(alpha=Decimal("0.01"), beta=Decimal("0.5"), theta=Decimal("0.05"))
     result = compute_pnl(
+        service_type="ERCOT_ENERGY",
         delivered_kwh=Decimal("100"),
         price_per_kwh=Decimal("0.10"),
-        wholesale_price_per_kwh=Decimal("0.03"),
+        charging_cost_per_kwh=Decimal("0.03"),
+        discharge_spp_per_kwh=Decimal("0"),
         eta_d=Decimal("0.5"),
         degradation_cost_per_kwh=Decimal("0.03"),
         shortfall_kwh=Decimal("20"),
@@ -68,9 +71,11 @@ def test_pnl_net_margin_hand_computed():
 
 def test_pnl_no_penalty_configured_and_no_shortfall():
     result = compute_pnl(
+        service_type="ERCOT_ENERGY",
         delivered_kwh=Decimal("50"),
         price_per_kwh=Decimal("0.20"),
-        wholesale_price_per_kwh=Decimal("0.04"),
+        charging_cost_per_kwh=Decimal("0.04"),
+        discharge_spp_per_kwh=Decimal("0"),
         eta_d=Decimal("0.9487"),
         degradation_cost_per_kwh=Decimal("0.03"),
         shortfall_kwh=Decimal("0"),
@@ -79,6 +84,72 @@ def test_pnl_no_penalty_configured_and_no_shortfall():
     )
     assert result.penalty == Decimal("0")
     assert result.net_value == result.revenue - result.energy_cost - result.degradation_cost
+
+
+# -- ERCOT_AS revenue: capacity held, not energy delivered (2026-09-26 live-soak correction) --------
+
+
+def test_ercot_as_revenue_is_mcpc_times_committed_capacity_held():
+    """Realistic NSPIN MCPC ~$8.50/MW-h (NPRR1282-era range): a 500 kW award held for a full 15-min
+    (0.25 h) interval, never deployed (delivered_kwh = 0).
+    committed_kwh = 500 kW * 0.25 h = 125 kWh; price_per_kwh = $8.50/MWh / 1000 = $0.0085/kWh.
+    revenue = 125 * 0.0085 + 0 (nothing deployed) = 1.0625, not 0 (delivered_kwh * price_per_kwh)."""
+    revenue = compute_revenue(
+        service_type="ERCOT_AS",
+        delivered_kwh=Decimal("0"),
+        committed_kwh=Decimal("125"),
+        price_per_kwh=Decimal("0.0085"),
+        discharge_spp_per_kwh=Decimal("0.030"),
+    )
+    assert revenue == Decimal("1.0625")
+
+
+def test_ercot_as_revenue_adds_energy_value_only_for_kwh_actually_deployed():
+    """Same 500 kW/125 kWh NSPIN award, but ERCOT calls a deployment and 20 kWh is actually
+    discharged this interval at a realistic real-time SPP of $0.045/kWh ($45/MWh).
+    revenue = capacity (125 * 0.0085 = 1.0625) + energy (20 * 0.045 = 0.90) = 1.9625."""
+    revenue = compute_revenue(
+        service_type="ERCOT_AS",
+        delivered_kwh=Decimal("20"),
+        committed_kwh=Decimal("125"),
+        price_per_kwh=Decimal("0.0085"),
+        discharge_spp_per_kwh=Decimal("0.045"),
+    )
+    assert revenue == Decimal("1.9625")
+
+
+def test_non_as_revenue_is_unchanged_price_times_delivered():
+    assert compute_revenue(
+        service_type="ERCOT_ENERGY",
+        delivered_kwh=Decimal("100"),
+        committed_kwh=Decimal("100"),
+        price_per_kwh=Decimal("0.10"),
+        discharge_spp_per_kwh=Decimal("0.999"),  # must be ignored for a non-AS service
+    ) == Decimal("10.00")
+
+
+def test_ercot_as_pnl_held_not_deployed_has_no_shortfall_penalty_and_wear_only_on_discharge():
+    """Full pnl worked example for a held-but-not-deployed AS interval: revenue is the capacity
+    payment only, energy_cost and degradation are both zero (delivered_kwh = 0, so no discharge to
+    price or wear), and shortfall_kwh = 0 (the caller, opengrid.settle, never derives a shortfall
+    from AS non-discharge -- this test exercises compute_pnl with that same shortfall_kwh=0 input)."""
+    result = compute_pnl(
+        service_type="ERCOT_AS",
+        delivered_kwh=Decimal("0"),
+        price_per_kwh=Decimal("0.0085"),
+        charging_cost_per_kwh=Decimal("0.06"),
+        discharge_spp_per_kwh=Decimal("0.030"),
+        eta_d=Decimal("0.9487"),
+        degradation_cost_per_kwh=Decimal("0.03"),
+        shortfall_kwh=Decimal("0"),
+        committed_kwh=Decimal("125"),
+        penalty=PenaltyParams(alpha=Decimal("0.02"), beta=Decimal("0.30"), theta=Decimal("0.10")),
+    )
+    assert result.revenue == Decimal("1.0625")
+    assert result.energy_cost == Decimal("0")
+    assert result.degradation_cost == Decimal("0")
+    assert result.penalty == Decimal("0")
+    assert result.net_value == Decimal("1.0625")
 
 
 def test_value_added_by_lp_hand_computed():

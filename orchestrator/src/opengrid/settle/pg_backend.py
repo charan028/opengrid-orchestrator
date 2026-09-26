@@ -36,19 +36,54 @@ from opengrid.settle.models import (
 _FETCH_CONTEXT_SQL = """
 SELECT
     o.obligation_id, o.contract_id, o.service_type, o.committed_qty_kw,
-    c.penalty_alpha, c.penalty_beta, c.penalty_theta, c.degradation_cost,
-    opp.value_per_mwh
+    c.penalty_alpha, c.penalty_beta, c.penalty_theta, c.degradation_cost, c.customer_id,
+    opp.value_per_mwh,
+    COALESCE(
+        (SELECT sp.setpoint_source FROM og.service_profile sp
+         WHERE sp.contract_id = o.contract_id
+         ORDER BY sp.version DESC LIMIT 1) = 'MEASURED_FEEDBACK',
+        false
+    ) AS is_need_basis,
+    (SELECT b.zone
+     FROM og.reservation r JOIN og.bank b ON b.bank_id = r.bank_id::text
+     WHERE r.obligation_id = o.obligation_id
+     GROUP BY b.zone
+     ORDER BY sum(r.amount) DESC, b.zone
+     LIMIT 1) AS zone
 FROM og.obligation o
 JOIN og.contract c ON c.contract_id = o.contract_id
 JOIN og.opportunity opp ON opp.opportunity_id = o.opportunity_id
 WHERE o.obligation_id = %(obligation_id)s
 """
 
-#: The obligation's load zone (the zone of its reserved banks: banks overlapping the interval first,
-#: then the most reserved kW) and that zone's ERCOT real-time SPP (NP6-905-CD, `ts` = the 15-minute
-#: interval start) for the interval, else the nearest earlier value within 1 h.
-_FETCH_WHOLESALE_SPP_SQL = """
-WITH zone AS (
+_FETCH_CUSTOMER_ID_SQL = """
+SELECT c.customer_id FROM og.obligation o JOIN og.contract c ON c.contract_id = o.contract_id
+WHERE o.obligation_id = %(obligation_id)s
+"""
+
+#: D-18 need-basis settlement: the customer's measured site demand for the interval (migration 0015's
+#: `og.customer_site_meter_reading`), summed across the customer's site(s) per timestamp (a customer
+#: with more than one DATA_CENTER site would otherwise undercount its true need) then averaged over
+#: the interval. `customer_site_meter_reading.customer_id` is text (an external site-ingest key), so
+#: this joins against `og.contract.customer_id::text` -- MVP-S has no per-obligation site_id column to
+#: join on more precisely (a documented gap, same class as `opengrid.invariants.checks.classify_dip`'s
+#: own deferred-scope note).
+_FETCH_MEASURED_NEED_SQL = """
+WITH per_ts AS (
+    SELECT ts, sum(p_kw) AS site_kw
+    FROM og.customer_site_meter_reading
+    WHERE customer_id = %(customer_id)s
+      AND ts >= %(interval_start)s AND ts < %(interval_end)s
+      AND quality = 'GOOD'
+    GROUP BY ts
+)
+SELECT avg(site_kw) AS avg_kw, count(*) AS sample_count FROM per_ts
+"""
+
+#: The obligation's load zone: banks overlapping the interval first, then the most reserved kW.
+#: Shared by both the (informational) discharge-interval SPP lookup and the charging-cost proxy, so
+#: the two queries can never disagree about which zone an obligation belongs to.
+_ZONE_FOR_OBLIGATION_CTE = """
     SELECT b.zone
     FROM og.reservation r JOIN og.bank b ON b.bank_id = r.bank_id::text
     WHERE r.obligation_id = %(obligation_id)s
@@ -57,7 +92,14 @@ WITH zone AS (
                      AND r.interval_end > %(interval_start)s) DESC,
              sum(r.amount) DESC, b.zone
     LIMIT 1
-)
+"""
+
+#: The obligation's zone (see `_ZONE_FOR_OBLIGATION_CTE`) and that zone's ERCOT real-time SPP
+#: (NP6-905-CD, `ts` = the 15-minute interval start) for the interval, else the nearest earlier value
+#: within 1 h. Informational only (`ObligationSettlementContext.wholesale_price_per_kwh`) -- it no
+#: longer prices `energy_cost` (see `_FETCH_CHARGING_COST_PROXY_SQL`).
+_FETCH_WHOLESALE_SPP_SQL = f"""
+WITH zone AS ({_ZONE_FOR_OBLIGATION_CTE})
 SELECT z.zone, f.ts, f.value
 FROM zone z
 LEFT JOIN LATERAL (
@@ -67,7 +109,27 @@ LEFT JOIN LATERAL (
     ORDER BY ts DESC, recorded_at DESC
     LIMIT 1
 ) f ON true
-"""
+"""  # noqa: S608 -- _ZONE_FOR_OBLIGATION_CTE is a fixed module-level literal, never interpolated input
+
+#: Documented proxy for "what was paid to charge" (09-optimizer-dispatcher-update.md S0.2 finding G4,
+#: settle/profitability.py's module docstring): the trailing 24h off-peak average ERCOT real-time SPP
+#: for the obligation's bank zone. MVP-S has no per-obligation charging-interval attribution yet (the
+#: allocator does not record which cycles charged which obligation's energy), so this average is the
+#: best available stand-in for "the price paid when this energy was actually stored" until that
+#: attribution exists -- an assumption, not a measurement, hence "PROXY" in its flag.
+#:
+#: Off-peak hours (22:00-06:59 America/Chicago, `_OFF_PEAK_HOURS_LOCAL`) approximate typical ERCOT
+#: overnight charging windows; not a specific TOU tariff's own definition.
+_FETCH_CHARGING_COST_PROXY_SQL = f"""
+WITH zone AS ({_ZONE_FOR_OBLIGATION_CTE})
+SELECT z.zone, avg(f.value) AS avg_value, count(f.value) AS sample_count
+FROM zone z
+LEFT JOIN og.feed_obs f
+    ON f.source = 'ERCOT' AND f.product = 'np6-905-cd' AND f.series = z.zone
+   AND f.ts >= %(interval_start)s - interval '24 hours' AND f.ts < %(interval_start)s
+   AND extract(hour FROM f.ts AT TIME ZONE 'America/Chicago')::int = ANY(%(off_peak_hours_local)s)
+GROUP BY z.zone
+"""  # noqa: S608 -- _ZONE_FOR_OBLIGATION_CTE is a fixed module-level literal, never interpolated input
 
 #: One 1-minute sample per minute of the interval: the kW the obligation actually received. Per bank the
 #: hubs' measured discharge (-sum of p_kw, 2 s telemetry averaged per hub per minute; charging counts as
@@ -221,26 +283,62 @@ LIMIT 200
 _INSERT_PNL_SQL = """
 INSERT INTO og.pnl
     (pnl_id, obligation_id, interval_start, interval_end, revenue, energy_cost, degradation_cost,
-     penalty, net_value, rule_baseline_value, forgone_upside, version)
+     penalty, delivery_charge, net_value, rule_baseline_value, forgone_upside, version)
 VALUES (%(id)s, %(obligation_id)s, %(interval_start)s, %(interval_end)s, %(revenue)s, %(energy_cost)s,
-        %(degradation_cost)s, %(penalty)s, %(net_value)s, %(rule_baseline_value)s, %(forgone_upside)s,
-        %(version)s)
+        %(degradation_cost)s, %(penalty)s, %(delivery_charge)s, %(net_value)s, %(rule_baseline_value)s,
+        %(forgone_upside)s, %(version)s)
 """
+
+#: 09 D5's M1 delivery charge: kWh actually drawn from the grid to charge this interval, for the
+#: obligation's bank(s). MVP-S has no per-obligation charging-interval attribution yet (the allocator
+#: does not record which cycles charged which obligation's energy, nor which charging kWh was solar
+#: vs grid) -- documented gap, same class as `_FETCH_CHARGING_COST_PROXY_SQL`'s. Always 0 today.
+_GRID_CHARGED_KWH_NOT_YET_ATTRIBUTED = Decimal("0")
 
 
 _logger = logging.getLogger(__name__)
 _ZERO = Decimal("0")
 _KWH_PER_MWH = Decimal("1000")
 
+#: 22:00-06:59 America/Chicago -- see `_FETCH_CHARGING_COST_PROXY_SQL`'s docstring.
+_OFF_PEAK_HOURS_LOCAL: tuple[int, ...] = (22, 23, 0, 1, 2, 3, 4, 5, 6)
+
 
 def wholesale_from_spp(spp: Mapping[str, Any] | None, interval_start: datetime | None) -> tuple[Decimal, str]:
     """`(wholesale $/kWh, flag)` from a `_FETCH_WHOLESALE_SPP_SQL` row: "SPP" when the price is for
     `interval_start` itself, "SPP_PRIOR" for an earlier value within 1 h, "MISSING" (0 $/kWh) when
-    there is none -- no zone, no interval, or no SPP in the last hour."""
+    there is none -- no zone, no interval, or no SPP in the last hour. Informational only -- see
+    `charging_cost_from_proxy` for what actually prices `energy_cost`."""
     if spp is None or interval_start is None or spp.get("value") is None:
         return _ZERO, "MISSING"
     price = Decimal(str(spp["value"])) / _KWH_PER_MWH
     return price, "SPP" if spp["ts"] == interval_start else "SPP_PRIOR"
+
+
+def charging_cost_from_proxy(row: Mapping[str, Any] | None) -> tuple[Decimal, str]:
+    """`(charging cost $/kWh, flag)` from a `_FETCH_CHARGING_COST_PROXY_SQL` row:
+    "TRAILING_24H_OFFPEAK_PROXY" when at least one off-peak SPP observation exists in the trailing
+    24h for the obligation's zone, "MISSING" (0 $/kWh, logged) when there is none -- no zone, or no
+    off-peak SPP observation in that window.
+
+    There is deliberately no "OBLIGATION_CHARGE" branch here yet: that requires per-obligation
+    charging-interval attribution `opengrid.settle` does not have (09 S0.2's "where known" clause) --
+    when it exists, its caller resolves it BEFORE falling back to this proxy, rather than this
+    function guessing at it."""
+    if row is None or row.get("avg_value") is None:
+        return _ZERO, "MISSING"
+    price = Decimal(str(row["avg_value"])) / _KWH_PER_MWH
+    return price, "TRAILING_24H_OFFPEAK_PROXY"
+
+
+def measured_need_kwh_from_row(row: Mapping[str, Any] | None, duration_hours: Decimal) -> Decimal | None:
+    """D-18: the customer's measured need (kWh) for the interval from a `_FETCH_MEASURED_NEED_SQL`
+    row -- average site import kW over the interval x its duration -- or `None` when there is no
+    `GOOD`-quality reading in the interval at all (`performance.is_need_basis_compliant` then treats
+    the dip as compliant by default, per its own docstring)."""
+    if row is None or row.get("avg_kw") is None:
+        return None
+    return Decimal(str(row["avg_kw"])) * duration_hours
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +352,7 @@ class PgSettleBackend:
         self, obligation_id: UUID, interval_start: datetime | None = None
     ) -> ObligationSettlementContext:
         spp: dict[str, Any] | None = None
+        charging_proxy: dict[str, Any] | None = None
         async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(_FETCH_CONTEXT_SQL, {"obligation_id": obligation_id})
             row = await cur.fetchone()
@@ -263,6 +362,15 @@ class PgSettleBackend:
                     {"obligation_id": obligation_id, "interval_start": interval_start},
                 )
                 spp = await cur.fetchone()
+                await cur.execute(
+                    _FETCH_CHARGING_COST_PROXY_SQL,
+                    {
+                        "obligation_id": obligation_id,
+                        "interval_start": interval_start,
+                        "off_peak_hours_local": list(_OFF_PEAK_HOURS_LOCAL),
+                    },
+                )
+                charging_proxy = await cur.fetchone()
         if row is None:
             raise LookupError(f"obligation not found: {obligation_id}")
         if row["value_per_mwh"] is None and row["service_type"] != "HOME":
@@ -279,17 +387,31 @@ class PgSettleBackend:
                 theta=row["penalty_theta"] or Decimal("0"),
             )
         price_per_kwh = (row["value_per_mwh"] or Decimal("0")) / Decimal("1000")
-        # Wholesale basis = the bank zone's real-time SPP for the interval, never the contract price
-        # (mirroring it made energy_cost = revenue / eta_d > revenue: every delivery settled negative).
-        wholesale_price_per_kwh, flag = wholesale_from_spp(spp, interval_start)
-        if flag != "SPP":
-            _logger.warning(
-                "settle wholesale price is %s for this interval",
-                flag,
+        # Informational only: the bank zone's real-time SPP AT the discharge interval (kept for the
+        # settlement trace/audit trail). It no longer prices energy_cost -- see charging_cost below
+        # (09-optimizer-dispatcher-update.md S0.2 finding G4).
+        wholesale_price_per_kwh, wholesale_flag = wholesale_from_spp(spp, interval_start)
+        if wholesale_flag != "SPP":
+            _logger.info(
+                "settle discharge-interval SPP (informational) is %s for this interval",
+                wholesale_flag,
                 extra={
                     "obligation_id": str(obligation_id),
                     "interval_start": interval_start.isoformat() if interval_start else None,
                     "zone": spp["zone"] if spp else None,
+                },
+            )
+        # What was actually paid to CHARGE this energy -- the documented proxy until per-obligation
+        # charging-interval attribution exists (module/profitability.py docstrings).
+        charging_cost_per_kwh, charging_flag = charging_cost_from_proxy(charging_proxy)
+        if charging_flag == "MISSING":
+            _logger.warning(
+                "settle charging-cost proxy has no off-peak SPP observation in the trailing 24h: "
+                "energy cost settles as 0 (flagged)",
+                extra={
+                    "obligation_id": str(obligation_id),
+                    "interval_start": interval_start.isoformat() if interval_start else None,
+                    "zone": charging_proxy["zone"] if charging_proxy else None,
                 },
             )
         today = datetime.now(UTC).date()  # MVP-S: daily billing period, UTC calendar date
@@ -299,14 +421,38 @@ class PgSettleBackend:
             service_type=row["service_type"],
             committed_kw=row["committed_qty_kw"],
             price_per_kwh=price_per_kwh,
-            wholesale_price_per_kwh=wholesale_price_per_kwh,
+            charging_cost_per_kwh=charging_cost_per_kwh,
             eta_d=Decimal("0.9487"),
             degradation_cost_per_kwh=row["degradation_cost"],
             penalty=penalty,
             period_start=today,
             period_end=today,
-            wholesale_price_flag=flag,
+            is_need_basis=bool(row["is_need_basis"]),
+            charging_cost_flag=charging_flag,
+            wholesale_price_per_kwh=wholesale_price_per_kwh,
+            wholesale_price_flag=wholesale_flag,
+            zone=row["zone"],
         )
+
+    async def fetch_measured_need_kwh(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal | None:
+        duration_hours = Decimal(str((interval_end - interval_start).total_seconds())) / Decimal("3600")
+        async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_FETCH_CUSTOMER_ID_SQL, {"obligation_id": obligation_id})
+            customer_row = await cur.fetchone()
+            if customer_row is None:
+                return None
+            await cur.execute(
+                _FETCH_MEASURED_NEED_SQL,
+                {
+                    "customer_id": str(customer_row["customer_id"]),
+                    "interval_start": interval_start,
+                    "interval_end": interval_end,
+                },
+            )
+            need_row = await cur.fetchone()
+        return measured_need_kwh_from_row(need_row, duration_hours)
 
     async def fetch_power_samples(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
@@ -480,6 +626,7 @@ class PgSettleBackend:
         energy_cost: Decimal,
         degradation_cost: Decimal,
         penalty: Decimal,
+        delivery_charge: Decimal,
         net_value: Decimal,
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
@@ -502,6 +649,7 @@ class PgSettleBackend:
                     "energy_cost": energy_cost,
                     "degradation_cost": degradation_cost,
                     "penalty": penalty,
+                    "delivery_charge": delivery_charge,
                     "net_value": net_value,
                     "rule_baseline_value": rule_baseline_value,
                     "forgone_upside": forgone_upside,
@@ -517,6 +665,18 @@ class PgSettleBackend:
         # publishes its own shadow-grant table, settle reports no LP-vs-rule-baseline comparison for
         # this interval rather than fabricate one (BUILD.md S5a: "no silent fallbacks").
         return None
+
+    async def fetch_grid_charged_kwh(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal:
+        # See `_GRID_CHARGED_KWH_NOT_YET_ATTRIBUTED`'s docstring: no per-obligation charging
+        # attribution exists yet, so M1 never overcharges by guessing -- it settles as 0 (logged) until
+        # that attribution lands, rather than silently assuming some fraction of fleet charging.
+        _logger.info(
+            "settle M1 delivery charge: no per-obligation charging-kWh attribution yet, settling as 0",
+            extra={"obligation_id": str(obligation_id), "interval_start": interval_start.isoformat()},
+        )
+        return _GRID_CHARGED_KWH_NOT_YET_ATTRIBUTED
 
     async def fetch_best_competing_value_per_kwh(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

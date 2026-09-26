@@ -177,19 +177,52 @@ def _dip(*, kw: float = 40.0, at: datetime = NOW, cycle_id: str | None = None, i
     return checks.DipResult(kw=kw, at=at, cycle_id=cycle_id, is_gap=is_gap)
 
 
+def _covered(
+    dip, *, earliest_covering_at, covered_cycle_ids=frozenset(), committed_kw=100.0, shortfall_events=None
+):
+    return checks._dip_is_covered(
+        dip,
+        earliest_covering_at=earliest_covering_at,
+        covered_cycle_ids=covered_cycle_ids,
+        committed_kw=committed_kw,
+        shortfall_events=shortfall_events or [],
+    )
+
+
 def test_dip_is_covered_by_timestamp_at_or_before() -> None:
     dip = _dip(at=NOW)
-    assert checks._dip_is_covered(dip, earliest_covering_at=None, covered_cycle_ids=frozenset()) is False
-    assert checks._dip_is_covered(dip, earliest_covering_at=NOW, covered_cycle_ids=frozenset()) is True
+    assert _covered(dip, earliest_covering_at=None) is False
+    assert _covered(dip, earliest_covering_at=NOW) is True
+    assert _covered(dip, earliest_covering_at=NOW - timedelta(seconds=1)) is True
+    assert _covered(dip, earliest_covering_at=NOW + timedelta(seconds=1)) is False
+
+
+def test_dip_is_covered_by_shortfall_requires_matching_feasible_remainder() -> None:
+    """Owner decision 2026-09-26 (best-effort shortfall): a shortfall-sourced cover is compliant only if
+    delivery actually reached that moment's feasible remainder, not just any lower value."""
+    dip_at = NOW
+    shortfall_events = [
+        checks.ShortfallEvent(at=NOW - timedelta(seconds=10), shortfall_kw=40.0, cycle_id=None)
+    ]
+    # committed 100, shortfall 40 -> feasible remainder 60. Delivered exactly 60: compliant.
+    dip_ok = _dip(kw=60.0, at=dip_at)
     assert (
-        checks._dip_is_covered(
-            dip, earliest_covering_at=NOW - timedelta(seconds=1), covered_cycle_ids=frozenset()
+        _covered(
+            dip_ok,
+            earliest_covering_at=NOW - timedelta(seconds=10),
+            committed_kw=100.0,
+            shortfall_events=shortfall_events,
         )
         is True
     )
+    # Delivered only 10 (well under the 60 kW feasible remainder): NOT compliant.
+    dip_short = _dip(kw=10.0, at=dip_at)
     assert (
-        checks._dip_is_covered(
-            dip, earliest_covering_at=NOW + timedelta(seconds=1), covered_cycle_ids=frozenset()
+        _covered(
+            dip_short,
+            earliest_covering_at=NOW - timedelta(seconds=10),
+            committed_kw=100.0,
+            shortfall_events=shortfall_events,
         )
         is False
     )
@@ -203,16 +236,11 @@ def test_dip_is_covered_by_same_cycle_id_epsilon() -> None:
     dip_at = NOW
     covering_at = NOW + timedelta(milliseconds=5)  # trace written moments AFTER the grant, same cycle
     dip = _dip(at=dip_at, cycle_id="cyc-1")
-    assert (
-        checks._dip_is_covered(dip, earliest_covering_at=covering_at, covered_cycle_ids=frozenset({"cyc-1"}))
-        is True
-    )
+    assert _covered(dip, earliest_covering_at=covering_at, covered_cycle_ids=frozenset({"cyc-1"})) is True
     # A different cycle_id, same late timestamp, is NOT excused by the epsilon -- only by "at or before".
     dip_other_cycle = _dip(at=dip_at, cycle_id="cyc-2")
     assert (
-        checks._dip_is_covered(
-            dip_other_cycle, earliest_covering_at=covering_at, covered_cycle_ids=frozenset({"cyc-1"})
-        )
+        _covered(dip_other_cycle, earliest_covering_at=covering_at, covered_cycle_ids=frozenset({"cyc-1"}))
         is False
     )
 
@@ -244,7 +272,9 @@ def test_classify_lock_rows_need_basis_obligation_never_flagged() -> None:
             _dip(kw=0.0, at=start + timedelta(minutes=1), cycle_id=None, is_gap=True),
             None,
             frozenset(),
+            [],
             True,  # is_need_basis
+            False,  # measured_need_is_unmet -- no measured need shown, so compliant
         ),
         (
             "ob-fixed",
@@ -254,12 +284,38 @@ def test_classify_lock_rows_need_basis_obligation_never_flagged() -> None:
             _dip(kw=0.0, at=start + timedelta(minutes=1), cycle_id=None, is_gap=True),
             None,
             frozenset(),
+            [],
+            False,
             False,
         ),
     ]
     lock_violations, outage_gaps = checks.classify_lock_rows(rows)
     assert lock_violations == []
     assert [v.scope["obligation_id"] for v in outage_gaps] == ["ob-fixed"]
+
+
+def test_classify_lock_rows_need_basis_flagged_when_measured_need_unmet() -> None:
+    """K13 need-basis violation (b): a need-basis dip with real measured need and no override IS flagged
+    (as a lock_violation or outage_gap, per the usual is_gap split)."""
+    start = NOW
+    end = NOW + timedelta(minutes=15)
+    rows = [
+        (
+            "ob-need-basis",
+            start,
+            end,
+            100.0,
+            _dip(kw=0.0, at=start + timedelta(minutes=1), cycle_id=None, is_gap=True),
+            None,
+            frozenset(),
+            [],
+            True,
+            True,  # measured_need_is_unmet
+        ),
+    ]
+    lock_violations, outage_gaps = checks.classify_lock_rows(rows)
+    assert lock_violations == []
+    assert [v.scope["obligation_id"] for v in outage_gaps] == ["ob-need-basis"]
 
 
 def test_classify_dip_covered_lock_violation_and_outage_gap() -> None:
@@ -291,6 +347,8 @@ def test_classify_lock_rows_splits_into_lock_violations_and_outage_gaps() -> Non
             _dip(kw=40.0, at=start + timedelta(minutes=1), cycle_id="cyc-1", is_gap=False),
             None,
             frozenset(),
+            [],
+            False,
             False,
         ),
         (
@@ -301,6 +359,8 @@ def test_classify_lock_rows_splits_into_lock_violations_and_outage_gaps() -> Non
             _dip(kw=0.0, at=start + timedelta(minutes=2), cycle_id=None, is_gap=True),
             None,
             frozenset(),
+            [],
+            False,
             False,
         ),
         (
@@ -311,12 +371,121 @@ def test_classify_lock_rows_splits_into_lock_violations_and_outage_gaps() -> Non
             _dip(kw=0.0, at=start + timedelta(minutes=3), cycle_id="cyc-3", is_gap=True),
             start + timedelta(minutes=3),
             frozenset(),
+            [],
+            False,
             False,
         ),
     ]
     lock_violations, outage_gaps = checks.classify_lock_rows(rows)
     assert [v.scope["obligation_id"] for v in lock_violations] == ["ob-lock"]
     assert [v.scope["obligation_id"] for v in outage_gaps] == ["ob-gap"]
+
+
+# --- K13 best-effort shortfall / restore-lag ------------------------------------------------------------
+
+
+def test_feasible_remainder_kw() -> None:
+    assert checks.feasible_remainder_kw(100.0, 40.0) == 60.0
+    assert checks.feasible_remainder_kw(100.0, 0.0) == 100.0
+    assert checks.feasible_remainder_kw(100.0, 150.0) == 0.0  # never negative
+    assert checks.feasible_remainder_kw(100.0, -10.0) == 100.0  # a negative shortfall is not a surplus
+
+
+def test_find_restore_lag_violations_flags_not_restored_within_two_cycles() -> None:
+    start = NOW
+    end = NOW + timedelta(minutes=15)
+    cleared_at = start + timedelta(minutes=1)
+    shortfall_events = [
+        checks.ShortfallEvent(at=start, shortfall_kw=40.0, cycle_id="cyc-0"),
+        checks.ShortfallEvent(at=cleared_at, shortfall_kw=0.0, cycle_id="cyc-1"),  # constraint clears
+    ]
+    # Two cycles after the clear, still not back to the full 100 kW commitment.
+    cycles = [
+        (cleared_at + timedelta(seconds=2), 60.0, "cyc-2"),
+        (cleared_at + timedelta(seconds=4), 60.0, "cyc-3"),
+    ]
+    rows = [("ob-1", start, end, 100.0, cycles, shortfall_events)]
+    violations = checks.find_restore_lag_violations(rows)
+    assert len(violations) == 1
+    assert violations[0].scope["obligation_id"] == "ob-1"
+    assert violations[0].detail["cleared_at"] == cleared_at.isoformat()
+
+
+def test_find_restore_lag_violations_clean_when_restored_in_time() -> None:
+    start = NOW
+    end = NOW + timedelta(minutes=15)
+    cleared_at = start + timedelta(minutes=1)
+    shortfall_events = [checks.ShortfallEvent(at=cleared_at, shortfall_kw=0.0, cycle_id=None)]
+    cycles = [
+        (cleared_at + timedelta(seconds=2), 60.0, "cyc-1"),
+        (cleared_at + timedelta(seconds=4), 100.0, "cyc-2"),  # restored within 2 cycles
+    ]
+    rows = [("ob-1", start, end, 100.0, cycles, shortfall_events)]
+    assert checks.find_restore_lag_violations(rows) == []
+
+
+def test_find_restore_lag_violations_waits_for_enough_cycles_to_elapse() -> None:
+    """Only one cycle has landed since the clear -- not enough evidence yet, no false positive."""
+    start = NOW
+    end = NOW + timedelta(minutes=15)
+    cleared_at = start + timedelta(minutes=1)
+    shortfall_events = [checks.ShortfallEvent(at=cleared_at, shortfall_kw=0.0, cycle_id=None)]
+    cycles = [(cleared_at + timedelta(seconds=2), 60.0, "cyc-1")]
+    rows = [("ob-1", start, end, 100.0, cycles, shortfall_events)]
+    assert checks.find_restore_lag_violations(rows) == []
+
+
+def test_find_restore_lag_violations_ignores_non_clear_events() -> None:
+    """A shortfall event that never reports shortfall_kw==0 (still active) has nothing to restore from."""
+    start = NOW
+    end = NOW + timedelta(minutes=15)
+    shortfall_events = [checks.ShortfallEvent(at=start, shortfall_kw=40.0, cycle_id=None)]
+    cycles = [
+        (start + timedelta(seconds=2), 60.0, "cyc-1"),
+        (start + timedelta(seconds=4), 60.0, "cyc-2"),
+    ]
+    rows = [("ob-1", start, end, 100.0, cycles, shortfall_events)]
+    assert checks.find_restore_lag_violations(rows) == []
+
+
+# --- K13 need-basis measured-need violation (b) -----------------------------------------------------
+
+
+def test_measured_need_unmet_none_or_non_good_sample_is_never_a_violation() -> None:
+    assert checks.measured_need_unmet(None, delivered_kw=0.0) is False
+    suspect = checks.MeasuredNeedSample(
+        kind="site_meter", field="p_kw", value=50.0, limit=None, quality="SUSPECT"
+    )
+    assert checks.measured_need_unmet(suspect, delivered_kw=0.0) is False
+
+
+def test_measured_need_unmet_data_center_site_meter() -> None:
+    # Site still importing 50 kW, only 10 kW delivered -- real unmet need.
+    importing = checks.MeasuredNeedSample(
+        kind="site_meter", field="p_kw", value=50.0, limit=None, quality="GOOD"
+    )
+    assert checks.measured_need_unmet(importing, delivered_kw=10.0) is True
+    # Site not importing (balanced/exporting) -- no need, the low delivery is expected.
+    balanced = checks.MeasuredNeedSample(
+        kind="site_meter", field="p_kw", value=0.2, limit=None, quality="GOOD"
+    )
+    assert checks.measured_need_unmet(balanced, delivered_kw=0.0) is False
+    # Delivery already matches/exceeds the import -- served.
+    served = checks.MeasuredNeedSample(
+        kind="site_meter", field="p_kw", value=50.0, limit=None, quality="GOOD"
+    )
+    assert checks.measured_need_unmet(served, delivered_kw=50.0) is False
+
+
+def test_measured_need_unmet_pipeline_ac_corridor() -> None:
+    # Induced current at 95% of the corridor limit, nothing delivered -- real unmet need.
+    near_limit = checks.MeasuredNeedSample(
+        kind="corridor", field="i_ac_a", value=95.0, limit=100.0, quality="GOOD"
+    )
+    assert checks.measured_need_unmet(near_limit, delivered_kw=0.0) is True
+    # Comfortably below the limit -- no real need.
+    low = checks.MeasuredNeedSample(kind="corridor", field="i_ac_a", value=20.0, limit=100.0, quality="GOOD")
+    assert checks.measured_need_unmet(low, delivered_kw=0.0) is False
 
 
 # --- orphan reservations / commitments ----------------------------------------------------------------

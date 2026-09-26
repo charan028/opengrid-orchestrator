@@ -42,6 +42,16 @@ DEFAULT_CALIBRATION_LEASE_TTL_S = 30.0
 #: order` retriages from evidence; the sweep itself has no basis to distinguish LOW/MEDIUM/URGENT.
 DEFAULT_WORK_ORDER_SEVERITY = "HIGH"
 
+#: SWEEP DISABLED (R2 incident, 2026-09-26): `PgDriftObservationRepo` fed the OLDEST summary in the
+#: window as "the latest measured offset" (rows come back newest-first; see `repo.py`'s "LIVE BUG FIX"
+#: comment) -- hub-01996 measured 0.017 Hz against a real 0.2 Hz drift, the resulting correction was
+#: wrong, the post-check read `WORSE_ROLLED_BACK`, and the hub was quarantined. The same ordering bug
+#: produced 161 `NO_CHANGE` outcomes fleet-wide -- false positives, not real hardware faults. The
+#: ordering bug itself is fixed (`repo.py`), but the sweep stays OFF until the owner or lead explicitly
+#: re-enables it (`enabled=True`) -- do not flip this default without that sign-off, and prefer passing
+#: `min_consecutive_exceedances=PROPOSED_MIN_CONSECUTIVE_EXCEEDANCES` (`service.py`) when it is re-enabled.
+DRIFT_SWEEP_ENABLED_DEFAULT = False
+
 
 @dataclass(frozen=True, slots=True)
 class RunOnceResult:
@@ -60,6 +70,8 @@ async def run_once(
     now: datetime,
     bounds: CalibrationBounds = DEFAULT_CALIBRATION_BOUNDS,
     lease_ttl_s: float = DEFAULT_CALIBRATION_LEASE_TTL_S,
+    enabled: bool = DRIFT_SWEEP_ENABLED_DEFAULT,
+    min_consecutive_exceedances: int | None = None,
 ) -> RunOnceResult:
     """One drift-evaluation sweep over every hub with a characterization row (`og.hub_inverter_pq`):
     `evaluate_drift` -> (`WATCH`: `request_calibration`, S5.4 step 3/S5.5.4) -> (`DEGRADED` with no open
@@ -67,13 +79,27 @@ async def run_once(
     asynchronously as `CalibrationAck`s arrive (`opengrid.assets.calibration_ack.handle_calibration_
     ack`), not in this sweep -- `request_calibration` only builds and durably records the candidate
     (`og.calibration_attempt`, outcome `PENDING`) for the guardian to sign; it never publishes anything
-    itself (K3: only the guardian signs)."""
+    itself (K3: only the guardian signs).
+
+    `enabled` defaults to `DRIFT_SWEEP_ENABLED_DEFAULT` (currently `False` -- see that constant's own
+    docstring, R2 incident 2026-09-26): a caller relying on the default gets a safe, immediate no-op
+    (logged once) rather than the sweep silently resuming the moment this module is redeployed. Passing
+    `enabled=True` explicitly is how the owner/lead re-enables it once ready."""
+    if not enabled:
+        logger.warning(
+            "asset drift sweep is disabled (DRIFT_SWEEP_ENABLED_DEFAULT=False, R2 incident 2026-09-26); "
+            "run_once() is a no-op until re-enabled with enabled=True"
+        )
+        return RunOnceResult(evaluated=0, calibrations_requested=0, work_orders_opened=0, errors=0)
+
     hub_ids = await service.ports.asset_health.list_hub_ids()
     evaluated = requested = opened = errors = 0
 
     for hub_id in hub_ids:
         try:
-            state = await service.evaluate_drift(hub_id, now=now)
+            state = await service.evaluate_drift(
+                hub_id, now=now, min_consecutive_exceedances=min_consecutive_exceedances
+            )
         except Exception:
             errors += 1
             logger.exception("asset drift evaluation failed", extra={"hub_id": hub_id})

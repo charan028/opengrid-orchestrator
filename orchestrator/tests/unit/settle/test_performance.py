@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from opengrid.settle.performance import compute_compliance_pct, compute_performance, passes_threshold
+from opengrid.settle.performance import (
+    compute_compliance_pct,
+    compute_performance,
+    is_need_basis_compliant,
+    passes_threshold,
+)
 
 
 def test_compliance_pct_hand_computed():
@@ -38,3 +43,32 @@ def test_compute_performance_worked_example():
     result = compute_performance(Decimal("1.0"), Decimal("1.25"), Decimal("0.1"))
     assert result.compliance_pct == Decimal("0.8")
     assert result.passed_threshold is False
+
+
+# -- D-18 need-basis compliance (00-invariants.md K13 "commitments are over a period") --------------
+
+
+def test_need_basis_compliant_when_delivery_matches_measured_need():
+    assert is_need_basis_compliant(Decimal("1.0"), Decimal("2.5"), Decimal("1.0")) is True
+
+
+def test_need_basis_compliant_when_delivery_exceeds_measured_need():
+    assert is_need_basis_compliant(Decimal("1.5"), Decimal("2.5"), Decimal("1.0")) is True
+
+
+def test_need_basis_not_compliant_when_delivery_is_below_measured_need():
+    assert is_need_basis_compliant(Decimal("0.5"), Decimal("2.5"), Decimal("1.0")) is False
+
+
+def test_need_basis_measured_need_is_capped_at_committed():
+    """A measured need that exceeds the reserved maximum can never excuse more than the reservation
+    itself covers -- delivery is compared against min(measured_need, committed)."""
+    assert is_need_basis_compliant(Decimal("2.5"), Decimal("2.5"), Decimal("5.0")) is True
+    assert is_need_basis_compliant(Decimal("2.0"), Decimal("2.5"), Decimal("5.0")) is False
+
+
+def test_need_basis_defaults_to_compliant_when_no_measured_need_available():
+    """No site-meter reading for the interval (PIPELINE_AC has no kWh-shaped meter; a DATA_CENTER
+    reading might be missing/stale) -- treated as compliant by default, mirroring
+    opengrid.invariants.checks.classify_dip's stance for a need-basis obligation."""
+    assert is_need_basis_compliant(Decimal("0.0"), Decimal("2.5"), None) is True

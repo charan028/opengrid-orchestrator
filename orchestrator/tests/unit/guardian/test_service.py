@@ -841,6 +841,121 @@ async def test_another_obligation_within_its_own_commitment_does_not_block_need_
     assert (await service.evaluate_and_sign(make_batch_row(proposal))).outcome == "PASS"
 
 
+# --- K13 ERCOT_AS capacity hold: R-GRANT-AS-HOLD (migration 0020) ------------------------------------------
+
+
+class _AsAwards:
+    def __init__(self, service_types: dict, deployed: set) -> None:
+        self.service_types = service_types
+        self.deployed = deployed
+
+    async def service_type(self, obligation_id):
+        return self.service_types.get(obligation_id)
+
+    async def deployment_active(self, obligation_id):
+        return obligation_id in self.deployed
+
+
+def _as_hold_batch(fakes, *, extra: tuple | None = None):
+    """AS award A: 5 kW committed, held at 0 kW. `extra` adds obligation B as (id, committed_kw, granted_kw)."""
+    as_id = uuid4()
+    items = [ProposedItem("hub-0001", 0.0, "R-GRANT-AS-HOLD", as_id, Decimal("0"))]
+    if extra is not None:
+        other_id, _committed, granted = extra
+        items.append(ProposedItem("hub-0002", 3.0, "R-GRANT-COMMITTED", other_id, granted))
+    proposal = replace(make_proposal(), items=items)
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.commitments.frozen[as_id] = Decimal("5.0")
+    fakes.prior_grants.prior[as_id] = Decimal("5.0")
+    if extra is not None:
+        fakes.commitments.frozen[extra[0]] = extra[1]
+        if extra[1] > 0:
+            fakes.commitments.active_by_bank[BANK_ID].add(extra[0])
+    return proposal, as_id
+
+
+def _as_hold_service(fakes, config, seed, awards: _AsAwards | None):
+    service = service_with(fakes, config, seed)
+    service.ports = replace(fakes.as_ports(), as_awards=awards)
+    return service
+
+
+def _g19_reasons(fakes) -> set:
+    return {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]}
+
+
+async def test_held_as_award_with_no_deployment_is_signed(fakes, guardian_config, signing_seed):
+    proposal, as_id = _as_hold_batch(fakes)
+    service = _as_hold_service(fakes, guardian_config, signing_seed, _AsAwards({as_id: "ERCOT_AS"}, set()))
+    assert (await service.evaluate_and_sign(make_batch_row(proposal))).outcome == "PASS"
+
+
+async def test_held_as_award_while_deployed_is_vetoed(fakes, guardian_config, signing_seed):
+    """A deployment (for this award or for all AS) is active: the award must deliver; holding it is a K13
+    reduction that needs the normal override/shortfall reasons."""
+    proposal, as_id = _as_hold_batch(fakes)
+    service = _as_hold_service(fakes, guardian_config, signing_seed, _AsAwards({as_id: "ERCOT_AS"}, {as_id}))
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids
+    assert "AS_HOLD_WHILE_DEPLOYED" in _g19_reasons(fakes)
+
+
+@pytest.mark.parametrize(
+    ("committed", "granted"),
+    [(Decimal("1.0"), Decimal("4.0")), (Decimal("0"), Decimal("3.0"))],  # over its own commitment / none here
+)
+async def test_held_as_award_with_its_reservation_borrowed_is_vetoed(
+    fakes, guardian_config, signing_seed, committed, granted
+):
+    other_id = uuid4()
+    proposal, as_id = _as_hold_batch(fakes, extra=(other_id, committed, granted))
+    service = _as_hold_service(fakes, guardian_config, signing_seed, _AsAwards({as_id: "ERCOT_AS"}, set()))
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.signature is None and "G-19" in verdict.vetoed_rule_ids
+    assert "AS_HOLD_RESERVATION_REASSIGNED" in _g19_reasons(fakes)
+
+
+async def test_another_obligation_within_its_commitment_does_not_block_an_as_hold(
+    fakes, guardian_config, signing_seed
+):
+    other_id = uuid4()
+    proposal, as_id = _as_hold_batch(fakes, extra=(other_id, Decimal("3.0"), Decimal("3.0")))
+    service = _as_hold_service(fakes, guardian_config, signing_seed, _AsAwards({as_id: "ERCOT_AS"}, set()))
+    assert (await service.evaluate_and_sign(make_batch_row(proposal))).outcome == "PASS"
+
+
+@pytest.mark.parametrize("service_type", ["ERCOT_ENERGY", "PIPELINE", None])
+async def test_as_hold_claimed_on_a_non_as_obligation_is_vetoed(
+    fakes, guardian_config, signing_seed, service_type
+):
+    proposal, as_id = _as_hold_batch(fakes)
+    types = {as_id: service_type} if service_type else {}
+    service = _as_hold_service(fakes, guardian_config, signing_seed, _AsAwards(types, set()))
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.signature is None and "AS_HOLD_NOT_AN_AS_AWARD" in _g19_reasons(fakes)
+
+
+async def test_as_hold_without_the_award_read_is_vetoed(fakes, guardian_config, signing_seed):
+    proposal, _as_id = _as_hold_batch(fakes)
+    service = _as_hold_service(fakes, guardian_config, signing_seed, None)
+    assert "G-19" in (await service.evaluate_and_sign(make_batch_row(proposal))).vetoed_rule_ids
+
+
+async def test_as_hold_reason_does_not_excuse_a_different_obligation(fakes, guardian_config, signing_seed):
+    """The hold is per obligation: a second, non-held obligation cut below its lock is still vetoed."""
+    other_id = uuid4()
+    proposal, as_id = _as_hold_batch(fakes, extra=(other_id, Decimal("3.0"), Decimal("1.0")))
+    fakes.prior_grants.prior[other_id] = Decimal("3.0")
+    service = _as_hold_service(fakes, guardian_config, signing_seed, _AsAwards({as_id: "ERCOT_AS"}, set()))
+    assert "G-19" in (await service.evaluate_and_sign(make_batch_row(proposal))).vetoed_rule_ids
+
+
 async def test_best_effort_shortfall_grant_is_signed_when_the_guardian_confirms_the_shortfall(
     fakes, guardian_config, signing_seed
 ):
@@ -901,3 +1016,75 @@ async def test_default_guardian_signs_a_dual_unit_home_at_its_20_kw_rating(
     )
 
     assert "G-02" not in verdict.vetoed_rule_ids and verdict.outcome == "PASS"
+
+
+# --- TS-06-16: ZONE-scope safe stop ----------------------------------------------------------------------
+
+
+async def test_ts_06_16_a_zone_stop_holds_only_the_banks_in_that_zone(fakes, guardian_config, signing_seed):
+    """K8: a ZONE-scoped stop refuses batches for banks in that zone and nowhere else. Regression: og-guardian
+    was started with an empty bank->zone map, so it never saw a ZONE stop at all."""
+    fakes.safe_stop.stopped.add(("ZONE", "LZ_NORTH"))
+    in_zone = make_proposal(bank_id="bank-000")
+    other_zone = make_proposal(bank_id="bank-001")
+    for proposal in (in_zone, other_zone):
+        wire_default_passing_scenario(fakes, proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+    service.ports = replace(fakes.as_ports(), zones_by_bank={"bank-000": "LZ_NORTH", "bank-001": "LZ_SOUTH"})
+
+    stopped = await service.evaluate_and_sign(make_batch_row(in_zone))
+    running = await service.evaluate_and_sign(make_batch_row(other_zone))
+
+    assert stopped.signature is None and "SAFE_STOP" in stopped.vetoed_rule_ids
+    assert running.outcome == "PASS"
+
+
+# --- ALR-CLOCK-QUALITY -------------------------------------------------------------------------------------
+
+
+class _Alerts:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def raise_alert(self, rule, severity, summary, condition_key, detail):
+        self.calls.append(("raise", rule, severity))
+
+    async def clear_alert(self, rule, condition_key):
+        self.calls.append(("clear", rule))
+
+
+async def test_clock_hold_raises_alr_clock_quality_once_and_clears_on_recovery(
+    fakes, guardian_config, signing_seed
+):
+    alerts = _Alerts()
+    proposal = make_proposal()
+    wire_default_passing_scenario(fakes, proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+    service.ports = replace(fakes.as_ports(), alerts=alerts)
+
+    fakes.clock.offset_ms = 5_000.0
+    for _ in range(3):
+        assert (await service.evaluate_and_sign(make_batch_row(proposal))).outcome == "TIMEOUT"
+    assert alerts.calls == [("raise", "ALR-CLOCK-QUALITY", "critical")]
+
+    fakes.clock.offset_ms = 1.0
+    await service.evaluate_and_sign(make_batch_row(proposal))
+    await service.evaluate_and_sign(make_batch_row(proposal))
+    assert alerts.calls == [("raise", "ALR-CLOCK-QUALITY", "critical"), ("clear", "ALR-CLOCK-QUALITY")]
+
+
+async def test_batch_outcome_counts_only_explicit_vetoes(fakes, guardian_config, signing_seed):
+    proposal = make_proposal(p_kw_setpoint=999.0)  # G-02 item veto
+    wire_default_passing_scenario(fakes, proposal)
+    service = service_with(fakes, guardian_config, signing_seed)
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+    outcome = service.batch_outcome(verdict)
+    assert outcome is not None and (outcome.bank_id, outcome.commands, outcome.vetoed_commands) == (
+        BANK_ID,
+        1,
+        1,
+    )
+
+    fakes.clock.offset_ms = 5_000.0
+    held = await service.evaluate_and_sign(make_batch_row(make_proposal()))
+    assert service.batch_outcome(held) is None  # a G-20 hold never read a proposal: not counted

@@ -69,21 +69,34 @@ __all__ = [
 
 _repo: ContractsRepo | None = None
 _trace: TraceStore | None = None
+#: `[contracts.activation].data_center` (default `false`): gates admission of DATA_CENTER/PIPELINE_AC
+#: opportunities behind the full activation gate until the controllers are confirmed live
+#: (`admission._is_activation_gated`). Closed by default -- BUILD.md S5a "no hard-coded ... thresholds"
+#: is satisfied by reading this from config at startup, not by hard-coding `True`.
+_data_center_activation_enabled: bool = False
 
 
-def configure(repo: ContractsRepo, trace: TraceStore) -> None:
+def configure(
+    repo: ContractsRepo, trace: TraceStore, *, data_center_activation_enabled: bool = False
+) -> None:
     """Wire this module's storage. Called once by `opengrid.engine.main` at process startup, and by
-    test fixtures with fakes. Idempotent -- a later call simply replaces the pair."""
-    global _repo, _trace
+    test fixtures with fakes. Idempotent -- a later call simply replaces the pair.
+
+    `data_center_activation_enabled` is `[contracts.activation].data_center` from config, read once
+    at startup by the caller (this module never imports `opengrid.platform.config` itself, keeping it
+    testable with a plain bool -- BUILD.md S5a "pure logic separated from I/O")."""
+    global _repo, _trace, _data_center_activation_enabled
     _repo = repo
     _trace = trace
+    _data_center_activation_enabled = data_center_activation_enabled
 
 
 def reset_for_testing() -> None:
     """Clear the configured repo/trace (test teardown hygiene only)."""
-    global _repo, _trace
+    global _repo, _trace, _data_center_activation_enabled
     _repo = None
     _trace = None
+    _data_center_activation_enabled = False
 
 
 def _require_repo() -> ContractsRepo:
@@ -105,7 +118,13 @@ async def admit(
     contract's product rules) -- creates an `OFFERED` opportunity row, or raises `AdmissionError`
     with a `reason_code` if structurally infeasible (02a S2.1's `[*] -> OFFERED` / `-> REJECTED`)."""
     return await _admission.admit(
-        _require_repo(), _require_trace(), contract_id, window_start, window_end, requested_kw
+        _require_repo(),
+        _require_trace(),
+        contract_id,
+        window_start,
+        window_end,
+        requested_kw,
+        data_center_activation_enabled=_data_center_activation_enabled,
     )
 
 
@@ -130,6 +149,7 @@ async def admit_priced(
         requested_kw,
         value_per_mwh=value_per_mwh,
         scenario_basis=scenario_basis,
+        data_center_activation_enabled=_data_center_activation_enabled,
     )
 
 

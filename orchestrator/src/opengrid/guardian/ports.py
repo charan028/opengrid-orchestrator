@@ -187,6 +187,50 @@ class LeaseStatePort(Protocol):
         ...
 
 
+class AlertPort(Protocol):
+    """Operator alerts through the single `og.alert` writer (`opengrid.health.queries`). Raise is a
+    no-op while an alert with the same rule and `condition_key` is open (never an alert storm)."""
+
+    async def raise_alert(
+        self,
+        rule: str,
+        severity: Literal["warning", "critical"],
+        summary: str,
+        condition_key: str,
+        detail: dict[str, object],
+    ) -> None: ...
+
+    async def clear_alert(self, rule: str, condition_key: str) -> None: ...
+
+
+class ScopePosturePort(Protocol):
+    """ES06-S04: the per-scope posture og-guardian publishes (`og.scope_posture`) and the safe-stop REQUEST
+    it hands to a person (an unconfirmed operator-action proposal). Never engages a stop."""
+
+    async def set_posture(
+        self,
+        scope_kind: str,
+        scope_ref: str,
+        *,
+        posture: str,
+        veto_ratio: float,
+        consecutive: int,
+        stop_requested: bool,
+    ) -> None: ...
+
+    async def propose_safe_stop(self, scope_kind: str, scope_ref: str, reason: str) -> None: ...
+
+
+class AsAwardPort(Protocol):
+    """The guardian's own reads for an `R-GRANT-AS-HOLD` claim (og.obligation, og.as_deployment)."""
+
+    async def service_type(self, obligation_id: UUID) -> str | None: ...
+
+    async def deployment_active(self, obligation_id: UUID) -> bool:
+        """An uncancelled og.as_deployment covering now, for this obligation or for every AS award."""
+        ...
+
+
 class ServiceProfilePort(Protocol):
     async def setpoint_source(self, obligation_id: UUID) -> str | None:
         """The obligation's current service profile `setpoint_source` (e.g. MEASURED_FEEDBACK for a
@@ -286,3 +330,7 @@ class GuardianPorts:
     stop_release: StopReleasePort | None = None
     # None: no profile read, so no need-basis (R-GRANT-CLOSED-LOOP) reduction is ever corroborated (VETO).
     service_profiles: ServiceProfilePort | None = None
+    # None: no AS-award read, so no R-GRANT-AS-HOLD reduction is ever corroborated (VETO).
+    as_awards: AsAwardPort | None = None
+    # None: no operator alerts (e.g. ALR-CLOCK-QUALITY); decisions are unaffected.
+    alerts: AlertPort | None = None

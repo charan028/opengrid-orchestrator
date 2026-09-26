@@ -198,8 +198,43 @@ def find_dip(
     return worst
 
 
+@dataclass(frozen=True, slots=True)
+class ShortfallEvent:
+    """One traced SHORTFALL transition for an obligation (`opengrid.engine.gateways.
+    EngineLedgerGateway.record_shortfalls`'s payload: `shortfall_kw`). `shortfall_kw <= 0` marks the
+    constraint CLEARING -- the obligation should be back to its full commitment from that point."""
+
+    at: datetime
+    shortfall_kw: float
+    cycle_id: str | None
+
+
+def feasible_remainder_kw(committed_kw: float, shortfall_kw: float) -> float:
+    """K13 best-effort shortfall (owner decision 2026-09-26): the maximum deliverable while a SHORTFALL's
+    constraint holds -- the committed floor minus the traced shortfall, never negative or above
+    `committed_kw` itself."""
+    return min(max(committed_kw - max(shortfall_kw, 0.0), 0.0), committed_kw)
+
+
+def _feasible_remainder_at(
+    committed_kw: float, shortfall_events: list[ShortfallEvent], at: datetime
+) -> float:
+    """The feasible remainder in effect at `at`: the full commitment if no shortfall event has occurred
+    yet at or before `at`, else the most recent one's remainder (`feasible_remainder_kw`)."""
+    applicable = [e for e in shortfall_events if e.at <= at]
+    if not applicable:
+        return committed_kw
+    latest = max(applicable, key=lambda e: e.at)
+    return feasible_remainder_kw(committed_kw, latest.shortfall_kw)
+
+
 def _dip_is_covered(
-    dip: DipResult, *, earliest_covering_at: datetime | None, covered_cycle_ids: frozenset[str]
+    dip: DipResult,
+    *,
+    earliest_covering_at: datetime | None,
+    covered_cycle_ids: frozenset[str],
+    committed_kw: float,
+    shortfall_events: list[ShortfallEvent],
 ) -> bool:
     """K13 coverage policy -- the single place this rule lives, so it can change in one edit if the
     owner's policy changes (task brief). A delivery dip is an ALLOWED consequence of a committed
@@ -207,14 +242,82 @@ def _dip_is_covered(
     `R-COMMIT-LOCK-INFEASIBLE` reasons, or a recorded `R-SUBSTITUTION`/`R-AS-RELEASE`) if EITHER:
       * the dip's own `cycle_id` is one the trace already covers (`covered_cycle_ids`) -- the same-cycle
         epsilon, sidestepping the grant-before-trace write-order race entirely; or
-      * a covering trace was recorded strictly AT OR BEFORE the dip's timestamp -- covers every later
-        cycle of the same shortfall, including ones with no `cycle_id` at all (an implicit-zero gap).
+      * a covering trace was recorded strictly AT OR BEFORE the dip's timestamp.
     A dip that happened BEFORE any such transition was traced, in an EARLIER, different cycle, is not
     excused by one recorded later.
+
+    Owner decision 2026-09-26 (best-effort shortfall): a timestamp-covered dip during an active SHORTFALL
+    is compliant ONLY if the delivered kW actually reached that moment's `feasible_remainder_kw` --
+    "compliant only if they equal the feasible remainder", not just "any lower value". This refinement
+    only applies when `shortfall_events` is non-empty (a SHORTFALL-sourced cover); a bare substitution or
+    AS-release cover (no shortfall trace at all) is unaffected and stays a blanket cover, since those are
+    not partial-delivery scenarios in the first place.
     """
     if dip.cycle_id is not None and dip.cycle_id in covered_cycle_ids:
         return True
-    return earliest_covering_at is not None and earliest_covering_at <= dip.at
+    if earliest_covering_at is None or earliest_covering_at > dip.at:
+        return False
+    if shortfall_events:
+        remainder = _feasible_remainder_at(committed_kw, shortfall_events, dip.at)
+        return dip.kw >= remainder - _KW_TOLERANCE
+    return True
+
+
+#: Site-meter noise floor (owner decision 2026-09-26, K13 need-basis violation (b)): below this the site
+#: isn't meaningfully drawing from the grid, so there is no real bridging need even if `p_kw` is nominally
+#: positive.
+DEFAULT_DATA_CENTER_NEED_THRESHOLD_KW = 1.0
+#: Corridor AC mitigation is "needed" once induced current reaches this fraction of the corridor's own
+#: limit -- comfortably before an actual breach, matching a proactive mitigation posture.
+DEFAULT_PIPELINE_NEED_THRESHOLD_PCT = 0.9
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredNeedSample:
+    """One customer-measured reading behind a service profile's `feedback_signal_ref`
+    (`opengrid.site_ingest.latest.parse_feedback_ref`), resolved by `invariants.queries.
+    fetch_measured_need_sample` for the K13 need-basis violation (b): "an under-delivery where the
+    measured need exceeded delivery"."""
+
+    kind: Literal["site_meter", "corridor"]
+    field: str
+    value: float
+    limit: float | None  # corridor's own `limit_a`; None for site_meter
+    quality: Literal["GOOD", "SUSPECT", "BAD"]
+
+
+def measured_need_unmet(
+    sample: MeasuredNeedSample | None,
+    delivered_kw: float,
+    *,
+    data_center_threshold_kw: float = DEFAULT_DATA_CENTER_NEED_THRESHOLD_KW,
+    pipeline_need_threshold_pct: float = DEFAULT_PIPELINE_NEED_THRESHOLD_PCT,
+) -> bool:
+    """K13 need-basis violation (b) (owner decision 2026-09-26): did the customer's own measured signal
+    show real need for more than it actually got? A missing, non-`GOOD`, or unrecognised sample proves
+    nothing either way and is never treated as a violation -- an unmet-need claim needs positive
+    evidence, the mirror image of 06-service-profiles-and-power-quality.md S5.4's "missing is not
+    compliant" (here, missing is also not a confirmed violation).
+
+    DATA_CENTER (`site_meter`/`p_kw`): need is unmet if the site is still importing from the grid above
+    the noise floor while delivery fell short of that import. PIPELINE_AC (`corridor`/`i_ac_a`): need is
+    unmet if the induced current is within `pipeline_need_threshold_pct` of the corridor's own limit
+    while essentially nothing was delivered (`delivered_kw` here is the dip's own kW, already below
+    commitment by construction -- this function only decides whether that shortfall was justified).
+    """
+    if sample is None or sample.quality != "GOOD":
+        return False
+    if sample.kind == "site_meter" and sample.field == "p_kw":
+        return sample.value > data_center_threshold_kw and delivered_kw < sample.value - _KW_TOLERANCE
+    if (
+        sample.kind == "corridor"
+        and sample.field == "i_ac_a"
+        and sample.limit is not None
+        and sample.limit > 0
+    ):
+        ratio = sample.value / sample.limit
+        return ratio >= pipeline_need_threshold_pct and delivered_kw <= _KW_TOLERANCE
+    return False
 
 
 def classify_dip(
@@ -222,10 +325,13 @@ def classify_dip(
     *,
     earliest_covering_at: datetime | None,
     covered_cycle_ids: frozenset[str],
+    committed_kw: float = 0.0,
+    shortfall_events: list[ShortfallEvent] | None = None,
     is_need_basis: bool = False,
+    measured_need_is_unmet: bool = False,
 ) -> DipClassification:
     """The other single-place policy rule (task brief #4, extended by the owner's 2026-09-26 need-basis
-    decision, 00-invariants.md K13 "commitments are over a period"): a dip is `"covered"` (clean, no
+    and best-effort-shortfall decisions, 00-invariants.md K13): a dip is `"covered"` (clean, no
     violation), else `"outage_gap"` (K13_OUTAGE_GAP: the dip came from a grant-activity GAP -- an engine
     restart or a genuine comms outage, not a realized-below-committed delivery), else `"lock_violation"`
     (K13_LOCK_VIOLATION: grants WERE flowing and still came in below the committed floor, unexplained).
@@ -235,35 +341,48 @@ def classify_dip(
     `is_need_basis` (owner decision): for an obligation whose service profile is `MEASURED_FEEDBACK`
     (DATA_CENTER, PIPELINE_AC), the committed kW is a RESERVED MAXIMUM, not a fixed schedule -- the
     customer's measured need sets delivery below it (`R-GRANT-CLOSED-LOOP`), and the reservation itself
-    stays locked to the obligation the whole time. A need-basis dip is therefore compliant by definition,
-    covered before the ordinary trace-based check even runs.
-
-    Scope note (not yet implemented here, tracked for a follow-up): the owner's decision also names two
-    STILL-a-violation cases this function does not yet distinguish -- (a) the reserved capacity being
-    granted to a DIFFERENT obligation (today's K2 double-sold check already catches any reservation-level
-    encroachment on the same bank/interval, so this is not silently unguarded, just not re-derived here)
-    and (b) delivery below MEASURED need with no override reason, which needs the customer's own measured
-    signal (`og.customer_site_meter_reading`/`og.corridor_current_reading`) correlated against delivered
-    kW -- a genuinely different quantity comparison from "dip below committed", deliberately deferred
-    rather than rushed. The K13_RESTORE_LAG check (grants not returned to the feasible remainder within 2
-    cycles of a cleared SHORTFALL) is deferred with it, for the same reason.
+    stays locked to the obligation the whole time. A need-basis dip is covered UNLESS
+    `measured_need_is_unmet` (violation (b): `measured_need_unmet`) says the customer's own measured
+    signal showed real need that wasn't served -- violation (a) ("reserved capacity granted to another
+    obligation") is not re-derived here; K2's double-sold check already catches any reservation-level
+    encroachment on the same bank/interval.
     """
-    if is_need_basis:
+    if _dip_is_covered(
+        dip,
+        earliest_covering_at=earliest_covering_at,
+        covered_cycle_ids=covered_cycle_ids,
+        committed_kw=committed_kw,
+        shortfall_events=shortfall_events or [],
+    ):
         return "covered"
-    if _dip_is_covered(dip, earliest_covering_at=earliest_covering_at, covered_cycle_ids=covered_cycle_ids):
+    if is_need_basis and not measured_need_is_unmet:
         return "covered"
     return "outage_gap" if dip.is_gap else "lock_violation"
 
 
 def classify_lock_rows(
-    rows: list[tuple[str, datetime, datetime, float, DipResult, datetime | None, frozenset[str], bool]],
+    rows: list[
+        tuple[
+            str,
+            datetime,
+            datetime,
+            float,
+            DipResult,
+            datetime | None,
+            frozenset[str],
+            list[ShortfallEvent],
+            bool,
+            bool,
+        ]
+    ],
 ) -> tuple[list[Violation], list[Violation]]:
     """K13: split already-detected dips (`find_dip`) into `K13_LOCK_VIOLATION`s and `K13_OUTAGE_GAP`s
     via `classify_dip` (the single place that decision is made), dropping covered ones entirely.
 
     `rows`: `(obligation_id, interval_start, interval_end, committed_kw, dip, earliest_covering_at,
-    covered_cycle_ids, is_need_basis)` -- callers (`opengrid.invariants.__init__`) only include rows
-    where `find_dip` already found a dip. Returns `(lock_violations, outage_gaps)`.
+    covered_cycle_ids, shortfall_events, is_need_basis, measured_need_is_unmet)` -- callers
+    (`opengrid.invariants.__init__`) only include rows where `find_dip` already found a dip. Returns
+    `(lock_violations, outage_gaps)`.
     """
     lock_violations: list[Violation] = []
     outage_gaps: list[Violation] = []
@@ -275,13 +394,18 @@ def classify_lock_rows(
         dip,
         earliest_covering_at,
         covered_cycle_ids,
+        shortfall_events,
         is_need_basis,
+        measured_need_is_unmet,
     ) in rows:
         classification = classify_dip(
             dip,
             earliest_covering_at=earliest_covering_at,
             covered_cycle_ids=covered_cycle_ids,
+            committed_kw=committed_kw,
+            shortfall_events=shortfall_events,
             is_need_basis=is_need_basis,
+            measured_need_is_unmet=measured_need_is_unmet,
         )
         if classification == "covered":
             continue
@@ -295,10 +419,54 @@ def classify_lock_rows(
                 "interval_end": interval_end.isoformat(),
                 "is_gap": dip.is_gap,
                 "cycle_id": dip.cycle_id,
+                "is_need_basis": is_need_basis,
             },
         )
         (outage_gaps if classification == "outage_gap" else lock_violations).append(violation)
     return lock_violations, outage_gaps
+
+
+def find_restore_lag_violations(
+    rows: list[
+        tuple[str, datetime, datetime, float, list[tuple[datetime, float, str]], list[ShortfallEvent]]
+    ],
+    *,
+    restore_lag_cycles: int = 2,
+) -> list[Violation]:
+    """K13_RESTORE_LAG (owner decision 2026-09-26): once a SHORTFALL's constraint clears (a traced
+    `shortfall_kw <= 0`), the commitment must be restored to its full `committed_kw` within
+    `restore_lag_cycles` grant cycles -- "the owner requires restoring the full commitment as soon as
+    possible". A clear with fewer than `restore_lag_cycles` grant samples after it in the window is not
+    judged yet (not enough has elapsed to call it a lag); that is picked up on a later run once more
+    cycles land, by the same watermark-driven re-scan every other K13 check uses.
+
+    `rows`: `(obligation_id, interval_start, interval_end, committed_kw, cycles, shortfall_events)` --
+    the SAME per-cycle grant series `find_dip` uses, and every traced SHORTFALL event in the window
+    (`invariants.queries.fetch_shortfall_events`), for commitments that had at least one.
+    """
+    violations: list[Violation] = []
+    for obligation_id, interval_start, _interval_end, committed_kw, cycles, shortfall_events in rows:
+        clears = [e for e in shortfall_events if e.shortfall_kw <= _KW_TOLERANCE]
+        for clear in clears:
+            after = sorted((c for c in cycles if c[0] > clear.at), key=lambda c: c[0])
+            window = after[:restore_lag_cycles]
+            if len(window) < restore_lag_cycles:
+                continue  # not enough cycles have elapsed yet to judge -- avoid a false positive
+            if any(total_kw >= committed_kw - _KW_TOLERANCE for _ts, total_kw, _cid in window):
+                continue
+            violations.append(
+                Violation(
+                    scope={"obligation_id": obligation_id, "interval_start": interval_start.isoformat()},
+                    dedupe_key=f"{obligation_id}|{interval_start.isoformat()}|{clear.at.isoformat()}",
+                    detail={
+                        "committed_kw": committed_kw,
+                        "cleared_at": clear.at.isoformat(),
+                        "cycles_checked": len(window),
+                        "max_kw_in_window": max((c[1] for c in window), default=0.0),
+                    },
+                )
+            )
+    return violations
 
 
 def find_orphan_reservations(

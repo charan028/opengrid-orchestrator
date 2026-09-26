@@ -24,6 +24,7 @@ from opengrid.api.deps import get_config, get_store
 from opengrid.api.sse import sse_response
 from opengrid.api.store import HealthSnapshot, StoreProtocol
 from opengrid.core.models.platform import Alert
+from opengrid.health.queries import fetch_degraded_modes
 from opengrid.invariants import InvariantsSummary, read_summary
 from opengrid.platform.config import Config
 
@@ -60,6 +61,25 @@ async def _invariants_summary(pool: AsyncConnectionPool | None) -> InvariantsSum
         return _UNAVAILABLE_INVARIANTS_SUMMARY
 
 
+async def _degraded_modes(pool: AsyncConnectionPool | None) -> list[str]:
+    """R2 item 1 (defect fix): `opengrid.health.evaluate_once` already computes the current degraded-mode
+    set every cycle (02b S6.5), but only ever returned it in an in-process `HealthSnapshot` inside
+    og-settle -- this endpoint built a completely separate `api.store.HealthSnapshot` with no
+    degraded-mode field at all, so neither the API response nor the UI could ever show a real value.
+    `og.degraded_mode_state` (migration 0020) is `health`'s persisted form of the same computation
+    (`health.queries.write_degraded_modes`); this reads it directly rather than re-deriving the modes
+    here (BUILD.md S1 "no duplicated functions"). A missing pool or a read failure degrades to an empty
+    list (K7: degrade, don't trip), matching `_invariants_summary`'s pattern."""
+    if pool is None:
+        return []
+    try:
+        rows = await fetch_degraded_modes(pool)
+    except Exception:
+        logger.warning("degraded mode read failed", exc_info=True)
+        return []
+    return sorted(mode for mode, _since in rows)
+
+
 def _feed_payload(f: Any) -> dict[str, Any]:
     return {
         "source": f.source,
@@ -78,9 +98,11 @@ async def _health_payload(store: StoreProtocol, pool: AsyncConnectionPool | None
     active_commitments = await store.count_active_commitments()
     net_margin_usd = await _todays_net_margin(store)
     invariants = await _invariants_summary(pool)
+    degraded_modes = await _degraded_modes(pool)
     return {
         "status": "ok",
         "as_of": datetime.now(UTC).isoformat(),
+        "degraded_modes": degraded_modes,
         "processes": {
             p.process: {"pid": p.pid, "ts": p.ts.isoformat(), "status": p.status} for p in snapshot.processes
         },

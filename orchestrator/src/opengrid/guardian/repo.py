@@ -26,10 +26,10 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, ClassVar
-from uuid import UUID
+from typing import Any, ClassVar, Literal
+from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -38,6 +38,7 @@ from opengrid.core.pq import OffsetVector
 from opengrid.guardian.config import DEFAULT_CLOCK_CACHE_S, ClockSource
 from opengrid.guardian.ports import (
     ActiveObligation,
+    AlertPort,
     BankMembersPort,
     BankSnapshot,
     ClockPort,
@@ -276,6 +277,152 @@ class PgServiceProfilePort:
             await cur.execute(_SETPOINT_SOURCE_SQL, {"obligation_id": obligation_id})
             row = await cur.fetchone()
         return str(row[0]) if row and row[0] is not None else None
+
+
+_SERVICE_TYPE_SQL = "SELECT service_type FROM og.obligation WHERE obligation_id = %(obligation_id)s"
+
+# The engine's coverage rule (migration 0020): an uncancelled deployment covering now, for this
+# obligation or for every AS award (obligation_id NULL).
+_AS_DEPLOYMENT_ACTIVE_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM og.as_deployment d
+    WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+      AND (d.obligation_id IS NULL OR d.obligation_id = %(obligation_id)s)
+)
+"""
+
+
+class PgAsAwardPort:
+    """G-19 R-GRANT-AS-HOLD: the guardian's own reads of the award's service type and its deployment."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def service_type(self, obligation_id: UUID) -> str | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_SERVICE_TYPE_SQL, {"obligation_id": obligation_id})
+            row = await cur.fetchone()
+        return str(row[0]) if row and row[0] is not None else None
+
+    async def deployment_active(self, obligation_id: UUID) -> bool:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_AS_DEPLOYMENT_ACTIVE_SQL, {"obligation_id": obligation_id})
+            row = await cur.fetchone()
+        return bool(row and row[0])
+
+
+_OPEN_ALERTS_SQL = """
+SELECT id FROM og.alert
+WHERE rule = %(rule)s AND cleared_at IS NULL AND detail ->> 'condition_key' = %(condition_key)s
+"""
+
+
+class PgAlertPort:
+    """`AlertPort` through `opengrid.health.queries` (the single og.alert writer). The condition key is
+    stored in the alert detail so an open alert is raised once and cleared by its raiser."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def _open_ids(self, rule: str, condition_key: str) -> list[int]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_OPEN_ALERTS_SQL, {"rule": rule, "condition_key": condition_key})
+            rows = await cur.fetchall()
+        return [int(row[0]) for row in rows]
+
+    async def raise_alert(
+        self,
+        rule: str,
+        severity: Literal["warning", "critical"],
+        summary: str,
+        condition_key: str,
+        detail: dict[str, object],
+    ) -> None:
+        from opengrid.health.model import AlertFinding
+        from opengrid.health.queries import raise_alert
+
+        if await self._open_ids(rule, condition_key):
+            return
+        finding = AlertFinding(
+            rule=rule,
+            severity=severity,
+            summary=summary,
+            condition_key=condition_key,
+            detail={**detail, "condition_key": condition_key},
+        )
+        await raise_alert(self._pool, finding, opened_at=datetime.now(UTC))
+
+    async def clear_alert(self, rule: str, condition_key: str) -> None:
+        from opengrid.health.queries import clear_alert
+
+        for alert_id in await self._open_ids(rule, condition_key):
+            await clear_alert(self._pool, alert_id)
+
+
+_UPSERT_POSTURE_SQL = """
+INSERT INTO og.scope_posture (scope_kind, scope_ref, posture, veto_ratio, consecutive, stop_requested)
+VALUES (%(scope_kind)s, %(scope_ref)s, %(posture)s, %(veto_ratio)s, %(consecutive)s, %(stop_requested)s)
+ON CONFLICT (scope_kind, scope_ref) DO UPDATE SET
+    since = CASE WHEN og.scope_posture.posture = EXCLUDED.posture THEN og.scope_posture.since ELSE now() END,
+    posture = EXCLUDED.posture, veto_ratio = EXCLUDED.veto_ratio, consecutive = EXCLUDED.consecutive,
+    stop_requested = EXCLUDED.stop_requested, updated_at = now()
+"""
+
+# ES06-S04: the safe stop is REQUESTED of a person -- an unconfirmed operator-action proposal for the
+# normal two-step safe-stop flow. confirmed_at stays NULL; nothing here engages a stop.
+_PROPOSE_SAFE_STOP_SQL = """
+INSERT INTO og.operator_action (operator_action_id, operator_ref, action_kind, target_ref, tier, reason)
+VALUES (%(operator_action_id)s, 'guardian:escalation', 'SAFE_STOP_ENGAGE', %(target_ref)s, 'ENGAGE', %(reason)s)
+"""
+
+
+class PgScopePosturePort:
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def set_posture(
+        self,
+        scope_kind: str,
+        scope_ref: str,
+        *,
+        posture: str,
+        veto_ratio: float,
+        consecutive: int,
+        stop_requested: bool,
+    ) -> None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _UPSERT_POSTURE_SQL,
+                {
+                    "scope_kind": scope_kind,
+                    "scope_ref": scope_ref,
+                    "posture": posture,
+                    "veto_ratio": veto_ratio,
+                    "consecutive": consecutive,
+                    "stop_requested": stop_requested,
+                },
+            )
+            await conn.commit()
+
+    async def propose_safe_stop(self, scope_kind: str, scope_ref: str, reason: str) -> None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _PROPOSE_SAFE_STOP_SQL,
+                {"operator_action_id": uuid4(), "target_ref": f"{scope_kind}:{scope_ref}", "reason": reason},
+            )
+            await conn.commit()
+
+
+_ZONES_BY_BANK_SQL = "SELECT bank_id, zone FROM og.bank"
+
+
+async def load_zones_by_bank(pool: AsyncConnectionPool) -> dict[str, str]:
+    """`bank_id -> zone` (configuration). The guardian needs it for ZONE-scope safe stops (K8) and zone
+    veto statistics (ES06-S04); without it a ZONE stop was never seen by the guardian."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_ZONES_BY_BANK_SQL)
+        rows = await cur.fetchall()
+    return {str(bank_id): str(zone) for bank_id, zone in rows}
 
 
 class PgSafeStopPort:
@@ -821,6 +968,7 @@ def build_pg_ports(
     l2_instructions: L2InstructionPort,
     bank_members: BankMembersPort | None = None,
     stop_release: StopReleasePort | None = None,
+    alerts: AlertPort | None = None,
     zones_by_bank: dict[str, str] | None = None,
 ) -> tuple[GuardianPorts, PgLeaseStatePort]:
     """Convenience wiring for `main.py`: constructs every Postgres-backed port plus the durable lease
@@ -848,7 +996,9 @@ def build_pg_ports(
         zones_by_bank=dict(zones_by_bank or {}),
         bank_members=bank_members,
         stop_release=stop_release,
+        alerts=alerts,
         service_profiles=PgServiceProfilePort(pool),
+        as_awards=PgAsAwardPort(pool),
         pq=PqPorts(
             envelopes=PgPqEnvelopeStatePort(pool),
             measurements=PgPqMeasurementPort(pool),

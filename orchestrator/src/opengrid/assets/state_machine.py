@@ -55,6 +55,12 @@ class DriftEvent(StrEnum):
     #: S5.5.6: the verification capture fails -- the unit stays `RECOMMISSIONING` (never silently
     #: returns to dispatch, K7's "degrade, don't trip" fail-safe shape) pending another capture.
     RECOMMISSIONING_FAILED = "RECOMMISSIONING_FAILED"
+    #: Operator/owner-confirmed false positive (R2 incident, 2026-09-26: `PgDriftObservationRepo` fed a
+    #: stale pre-calibration offset -- see `repo.py`'s "LIVE BUG FIX" comment -- into hubs that were
+    #: never actually drifting). An explicit, audited override (`AssetHealthService.record_false_
+    #: positive_reset`) back to `OK`, never automatic and never available from `RECOMMISSIONING` (a
+    #: physical replacement already happened there; that is not a "false positive" to undo).
+    OPERATOR_FALSE_POSITIVE_RESET = "OPERATOR_FALSE_POSITIVE_RESET"
 
 
 class InvalidAssetTransitionError(ValueError):
@@ -83,6 +89,13 @@ _TRANSITIONS: dict[tuple[AssetState, DriftEvent], AssetState] = {
     ("AWAITING_REPLACEMENT", DriftEvent.INVERTER_REPLACED): "RECOMMISSIONING",
     ("RECOMMISSIONING", DriftEvent.RECOMMISSIONING_VERIFIED): "OK",
     ("RECOMMISSIONING", DriftEvent.RECOMMISSIONING_FAILED): "RECOMMISSIONING",
+    # Operator-confirmed false positive: undoes an unwarranted WATCH/DEGRADED/QUARANTINED/AWAITING_
+    # REPLACEMENT escalation back to OK. Deliberately excludes RECOMMISSIONING (S5.5.6: a physical
+    # replacement already happened there, so there is nothing to call a "false positive").
+    ("WATCH", DriftEvent.OPERATOR_FALSE_POSITIVE_RESET): "OK",
+    ("DEGRADED", DriftEvent.OPERATOR_FALSE_POSITIVE_RESET): "OK",
+    ("QUARANTINED", DriftEvent.OPERATOR_FALSE_POSITIVE_RESET): "OK",
+    ("AWAITING_REPLACEMENT", DriftEvent.OPERATOR_FALSE_POSITIVE_RESET): "OK",
 }
 
 

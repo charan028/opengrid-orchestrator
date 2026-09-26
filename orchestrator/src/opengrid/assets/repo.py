@@ -297,7 +297,7 @@ RETURNING work_order_id
 
 _CLOSE_WORK_ORDER_SQL = """
 UPDATE og.maintenance_work_order
-SET status = 'CLOSED', closed_at = %(closed_at)s, technician_notes = %(technician_notes)s
+SET status = %(status)s, closed_at = %(closed_at)s, technician_notes = %(technician_notes)s
 WHERE work_order_id = %(work_order_id)s
 """
 
@@ -326,7 +326,14 @@ class PgWorkOrderRepo:
         assert row is not None  # noqa: S101 -- RETURNING always yields exactly one row on INSERT
         return UUID(str(row[0]))
 
-    async def close(self, work_order_id: UUID, *, closed_at: datetime, technician_notes: str | None) -> None:
+    async def close(
+        self,
+        work_order_id: UUID,
+        *,
+        closed_at: datetime,
+        technician_notes: str | None,
+        status: str = "CLOSED",
+    ) -> None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 _CLOSE_WORK_ORDER_SQL,
@@ -334,6 +341,7 @@ class PgWorkOrderRepo:
                     "work_order_id": work_order_id,
                     "closed_at": closed_at,
                     "technician_notes": technician_notes,
+                    "status": status,
                 },
             )
             await conn.commit()
@@ -476,6 +484,15 @@ class PgDriftObservationRepo:
         rows = await pq_ingest.latest_summaries([hub_id], since=_window_start(self._window_s))
         if not rows:
             return None
+        # LIVE BUG FIX (R2, 2026-09-26): `pq_ingest.latest_summaries`/`PgPqIngestBackend.latest_
+        # summaries` return rows NEWEST FIRST (`ORDER BY hub_id, ts DESC`, pg_backend.py's own
+        # `_LATEST_SUMMARIES_SQL`). This method used to read `rows[-1]` for "the latest measured
+        # offset" -- the OLDEST row in the window, from before any real drift -- feeding a stale,
+        # near-zero pre-calibration offset into `request_calibration`'s correction math (hub-01996's
+        # 0.017 Hz vs. its real 0.2 Hz). Sorting explicitly by `ts` here, once, makes every downstream
+        # use of `rows` (this loop's chronological order and `exceeded_per_summary`'s tail, plus
+        # `rows[-1]` below) correct by construction -- never rely on a backend's row order again.
+        rows = sorted(rows, key=lambda r: r.ts)
 
         exceeded: list[bool] = []
         for row in rows:
@@ -493,22 +510,19 @@ class PgDriftObservationRepo:
                 or exceeds_watch_threshold(thd_dev_pct, DRIFT_FLOOR_THD_PCT / 1.5, DRIFT_FLOOR_THD_PCT)
                 or exceeds_watch_threshold(phase_dev, 1.0, DRIFT_FLOOR_PHASE_DEG)
             )
-        last = rows[-1]
+        newest = rows[-1]  # `rows` was explicitly sorted ascending by `ts` above -- last is newest.
         latest_offset = OffsetVector(
-            freq_hz=(float(last.freq_hz) - NOMINAL_FREQ_HZ) if last.freq_hz is not None else 0.0,
+            freq_hz=(float(newest.freq_hz) - NOMINAL_FREQ_HZ) if newest.freq_hz is not None else 0.0,
             voltage_pct=_max_pct_deviation(
-                last.v_rms_a, last.v_rms_b, last.v_rms_c, nominal=_NOMINAL_VOLTAGE_V
+                newest.v_rms_a, newest.v_rms_b, newest.v_rms_c, nominal=_NOMINAL_VOLTAGE_V
             ),
-            phase_deg=_max_abs(last.phase_angle_deg_a, last.phase_angle_deg_b, last.phase_angle_deg_c),
+            phase_deg=_max_abs(newest.phase_angle_deg_a, newest.phase_angle_deg_b, newest.phase_angle_deg_c),
         )
         return DriftObservationWindow(
             exceeded_per_summary=exceeded,
             correlates_with_fleet_event=False,
             latest_measured_offset=latest_offset,
         )
-
-    async def _characterization(self, hub_id: str) -> tuple[float, float, float] | None:
-        raise NotImplementedError  # replaced below once bound to a pool -- see PgDriftObservationRepo.bind
 
 
 def _window_start(window_s: float) -> datetime:

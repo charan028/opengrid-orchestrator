@@ -82,6 +82,11 @@ class GuardianConfig:
     calibration_budget_window_s: float = DEFAULT_CALIBRATION_BUDGET_WINDOW_S
     calibration_max_concurrent: int = DEFAULT_CALIBRATION_MAX_CONCURRENT
     calibration_systemic_drift_pct: float = DEFAULT_CALIBRATION_SYSTEMIC_DRIFT_PCT
+    #: ES06-S04: veto ratio above which a scope goes CONSERVATIVE, consecutive CONSERVATIVE ticks before a
+    #: safe stop is requested of a person, and idle ticks after which a CONSERVATIVE scope clears.
+    escalation_conservative_ratio: float = 0.05
+    escalation_stop_request_after: int = 3
+    escalation_idle_clear_ticks: int = 30
     #: K8: operators allowed to request/approve a stop RELEASE. Empty = no release is ever signed.
     stop_release_authorised_operators: frozenset[str] = frozenset()
     stop_release_max_age_s: float = DEFAULT_STOP_RELEASE_MAX_AGE_S
@@ -154,6 +159,9 @@ def load_guardian_config(cfg: Config) -> GuardianConfig:
         calibration_systemic_drift_pct=float(
             cfg.get("guardian.calibration_systemic_drift_pct", DEFAULT_CALIBRATION_SYSTEMIC_DRIFT_PCT)
         ),
+        escalation_conservative_ratio=float(cfg.get("guardian.escalation_conservative_ratio", 0.05)),
+        escalation_stop_request_after=int(cfg.get("guardian.escalation_stop_request_after", 3)),
+        escalation_idle_clear_ticks=int(cfg.get("guardian.escalation_idle_clear_ticks", 30)),
         stop_release_authorised_operators=frozenset(
             str(op) for op in cfg.get("guardian.stop_release_authorised_operators", []) or []
         ),

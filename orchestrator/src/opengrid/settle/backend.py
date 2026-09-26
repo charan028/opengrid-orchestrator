@@ -95,6 +95,26 @@ class SettleBackend(Protocol):
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
     ) -> list[PowerSample]: ...
 
+    async def fetch_measured_need_kwh(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal | None:
+        """D-18 need-basis settlement: the customer's measured need for this interval (migration
+        0015's `og.customer_site_meter_reading`, average import `p_kw` over the interval x its
+        duration), or `None` if there is no reading -- never called unless `ObligationSettlementContext
+        .is_need_basis` is `True` (`performance.is_need_basis_compliant` treats `None` as compliant by
+        default, so a missing reading never manufactures a penalty)."""
+        ...
+
+    async def fetch_grid_charged_kwh(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal:
+        """09 D5's M1 delivery charge: kWh actually drawn from the grid to charge this
+        obligation's bank(s) this interval -- never behind-the-meter solar. MVP-S has no
+        per-obligation charging-interval attribution yet (the same documented gap
+        `opengrid.settle.pg_backend.charging_cost_from_proxy` notes): `PgSettleBackend` returns `0`
+        until that attribution exists, logged rather than silent (BUILD.md S5a)."""
+        ...
+
     async def fetch_active_meter_interval(
         self, obligation_id: UUID, interval_start: datetime
     ) -> ExistingMeterInterval | None:
@@ -178,6 +198,7 @@ class SettleBackend(Protocol):
         energy_cost: Decimal,
         degradation_cost: Decimal,
         penalty: Decimal,
+        delivery_charge: Decimal,
         net_value: Decimal,
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,

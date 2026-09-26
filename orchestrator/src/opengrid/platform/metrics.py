@@ -99,6 +99,11 @@ k13_outage_gap_total = Counter(
     "separately from og_lock_violations_total -- still flagged (the chaos harness needs to see it), but "
     "not an unexplained realized-below-committed delivery. See opengrid.invariants.checks.classify_dip.",
 )
+k13_restore_lag_total = Counter(
+    "og_k13_restore_lag_total",
+    "K13 commitments not restored to their full committed kW within 2 grant cycles of a cleared "
+    "SHORTFALL (owner decision 2026-09-26). See opengrid.invariants.checks.find_restore_lag_violations.",
+)
 invariant_check_last_run_timestamp_seconds = Gauge(
     "og_invariant_check_last_run_timestamp_seconds",
     "Unix time of the last completed run of each opengrid.invariants check.",

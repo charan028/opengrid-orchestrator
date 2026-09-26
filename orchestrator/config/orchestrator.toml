@@ -47,6 +47,17 @@ ercot_load_fresh_s = 1800
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800
+# NP4-188-CD (DAM AS clearing prices) posts once/day (~14:00 CT) for the next delivery day; its
+# last_value_at is a delivery timestamp, so it normally lags "now" by up to ~1 posting cycle between
+# the current day's last hour and the next post -- 26h comfortably absorbs that (live defect: this was
+# previously a hard constant no config key could see or override, and got mistaken for a 1h-scale
+# staleness threshold, firing a false "stale for 77 minutes" alarm on data that was in fact healthy).
+as_price_fresh_s = 93600
+
+[contracts.activation]
+# 03 S2.7 activation gate: DATA_CENTER/PIPELINE_AC contract admission stays closed (default) until the
+# closed-loop controllers are confirmed live for a deployment. R-ADMIT-REJECT otherwise.
+data_center = false
 
 [forecast]
 horizon_hours = 24
@@ -54,11 +65,22 @@ resolution_min = 15
 quantiles = [0.10, 0.50, 0.90]
 
 [fleet]
+# NOTE: hub_count/banks/telemetry_interval_s/lease_ttl_s here are descriptive only -- no orchestrator
+# code reads them today (the seeded topology's actual hub_count/bank_count/zone_blocks come from
+# `integration-sims/config/fleet.yaml`, read read-only by `opengrid.fleet.seed`, its module docstring
+# explains why). `zones` IS read directly, by `opengrid.forecast.service.compute_and_persist` (its
+# `[forecast].price_series`/`load_series` fallback) -- keep it in sync with the zones actually seeded.
 hub_count = 2000
 banks = 40
 zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"]
+# Build phase, 2026-09-26 (market-model-two-markets.md): once `zone_blocks` in
+# integration-sims/config/fleet.yaml enables LZ_AEN and/or LZ_CPS, add them here too so
+# forecast computes their price/load series, e.g.:
+#   zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST", "LZ_AEN", "LZ_CPS"]
+# Also add `[zone_territory]` entries in tdsp_tariffs.toml for any new regulated zone (see that file).
 telemetry_interval_s = 2
 lease_ttl_s = 30
+banks_per_feeder = 5
 
 [allocator]
 cycle_interval_s = 2

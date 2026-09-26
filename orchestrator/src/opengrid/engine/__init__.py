@@ -819,7 +819,12 @@ async def main(cfg: Config) -> None:
         )
         # The selector's commit step and the lifecycle step transition obligations through
         # `opengrid.contracts` in this process, so its module facade needs the same repo/trace pair.
-        contracts_mod.configure(contracts_repo, trace_store)
+        # 03 S2.7 activation gate: DATA_CENTER/PIPELINE_AC admission stays closed until switched on.
+        contracts_mod.configure(
+            contracts_repo,
+            trace_store,
+            data_center_activation_enabled=bool(cfg.get("contracts.activation.data_center", False)),
+        )
         pq_mod.configure(
             PgPqIngestBackend(pool),
             FileBlobStore(str(cfg.get("pq_ingest.blob_store_dir", "/var/lib/opengrid/pq_waveform"))),

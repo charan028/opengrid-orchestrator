@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from opengrid.core.limits import (
@@ -15,6 +15,7 @@ from opengrid.core.limits import (
     check_hub_ramp,
 )
 from opengrid.core.physics import BankParams, HubParams, apply_ramp_limit, bank_capability
+from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import BankSnapshot, ProposedItem
 
 from .support import BASE_BANK, HUB_ID, Signer, evaluate, make_hub, passing_world
@@ -33,6 +34,7 @@ _banks = st.builds(
 )
 
 
+@settings(max_examples=500)
 @given(_kw, _hubs, _positive, st.one_of(st.none(), st.integers(min_value=1, max_value=4)))
 def test_k04_hub_power_is_bounded_by_the_homes_rating_and_the_per_unit_cap_times_units(
     p_kw, hub, inverter_cap_kw, units
@@ -46,6 +48,7 @@ def test_k04_hub_power_is_bounded_by_the_homes_rating_and_the_per_unit_cap_times
     assert result.ok == (abs(p_kw) <= cap + _EPSILON)
 
 
+@settings(max_examples=500)
 @given(_kw, _kw, _seconds, _positive)
 def test_k04_a_ramp_limited_setpoint_always_satisfies_the_guardian_ramp_check(prev_kw, target_kw, dt_s, rate):
     limited = apply_ramp_limit(prev_kw, target_kw, dt_s, rate)
@@ -54,6 +57,7 @@ def test_k04_a_ramp_limited_setpoint_always_satisfies_the_guardian_ramp_check(pr
     assert min(prev_kw, target_kw) - _EPSILON <= limited <= max(prev_kw, target_kw) + _EPSILON
 
 
+@settings(max_examples=500)
 @given(
     st.floats(min_value=0.0, max_value=1200.0),
     st.floats(min_value=-200.0, max_value=200.0),
@@ -67,6 +71,7 @@ def test_k04_an_accepted_bank_loading_never_exceeds_the_rated_fraction(load_kva,
         assert load_kva + additional_kw <= bank.kva_rating * pct + _EPSILON
 
 
+@settings(max_examples=500)
 @given(st.lists(st.floats(min_value=0.0, max_value=11.0), max_size=60), _banks)
 def test_k04_bank_capability_never_exceeds_rating_minus_reserve(member_kw, bank):
     capability = bank_capability(member_kw, bank)
@@ -75,6 +80,7 @@ def test_k04_bank_capability_never_exceeds_rating_minus_reserve(member_kw, bank)
     assert capability <= sum(member_kw) + _EPSILON
 
 
+@settings(max_examples=500)
 @given(_kw, _seconds, st.booleans())
 def test_k04_the_tighter_non_firm_fleet_cap_is_never_looser_than_the_firm_cap(delta_kw, dt_s, _unused):
     non_firm = check_fleet_ramp_cap(delta_kw, dt_s, is_firm_event=False)
@@ -83,6 +89,7 @@ def test_k04_the_tighter_non_firm_fleet_cap_is_never_looser_than_the_firm_cap(de
     assert not non_firm.ok or firm.ok
 
 
+@settings(max_examples=500)
 @given(_kw, _seconds, _positive, st.booleans())
 def test_k04_the_feeder_ceiling_binds_firm_events_and_only_firm_events(delta_kw, dt_s, ceiling, is_firm):
     result = check_feeder_ramp_ceiling(delta_kw, dt_s, ceiling, is_firm_event=is_firm)
@@ -99,6 +106,7 @@ _guardian_banks = st.builds(
 _setpoint = st.floats(min_value=-11.0, max_value=11.0, allow_nan=False)
 
 
+@settings(max_examples=500)
 @given(st.floats(min_value=0.0, max_value=250.0), _setpoint, _setpoint, _guardian_banks)
 def test_k04_the_guardian_never_signs_a_batch_that_overloads_its_bank_in_either_direction(
     load_kva, prev_kw, setpoint_kw, bank
@@ -117,6 +125,7 @@ def test_k04_the_guardian_never_signs_a_batch_that_overloads_its_bank_in_either_
         assert abs(projected) <= limit + _EPSILON or abs(projected) <= load_kva + _EPSILON
 
 
+@settings(max_examples=500)
 @given(st.floats(min_value=0.0, max_value=250.0), _setpoint, st.floats(min_value=30.01, max_value=1e9))
 def test_k04_the_guardian_never_signs_on_a_stale_or_missing_bank_reading(load_kva, setpoint_kw, age_s):
     world = passing_world([ProposedItem(HUB_ID, setpoint_kw, "SELECTOR")])
@@ -124,3 +133,53 @@ def test_k04_the_guardian_never_signs_on_a_stale_or_missing_bank_reading(load_kv
     world.bank = BankSnapshot(BASE_BANK, load_kva, None, None, bank_load_age_s=age_s)
 
     assert evaluate(world, _SIGNER).signature is None
+
+
+@settings(max_examples=500)
+@given(_setpoint, _setpoint, st.booleans(), st.floats(min_value=30.0, max_value=600.0))
+def test_k04_the_guardian_never_signs_a_step_beyond_the_fleet_ramp_cap(
+    prev_kw, setpoint_kw, is_firm, cap_per_min
+):
+    """G-05 (TS-06-05): a signed batch's fleet-wide step fits the applicable ramp cap for the tick."""
+    world = passing_world([ProposedItem(HUB_ID, setpoint_kw, "SELECTOR")])
+    world.proposal = replace(world.proposal, is_firm_event=is_firm)
+    world.hub = make_hub(soc_kwh=30.0, prev_p_kw=prev_kw, params=_FAST_HUB)
+    config = GuardianConfig(
+        key_path="",
+        cycle_interval_s=2.0,
+        discretionary_ramp_cap_kw_per_min=cap_per_min * 2,
+        non_firm_ramp_cap_kw_per_min=cap_per_min,
+        default_feeder_ramp_ceiling_kw_per_min=1e9,
+    )
+
+    verdict = evaluate(world, _SIGNER, config=config)
+
+    if verdict.signature is not None:
+        cap = (cap_per_min * 2 if is_firm else cap_per_min) * 2.0 / 60.0
+        assert abs(setpoint_kw - prev_kw) <= cap + _EPSILON
+
+
+@settings(max_examples=500)
+@given(_setpoint, _setpoint, st.booleans(), st.floats(min_value=30.0, max_value=600.0))
+def test_k04_the_guardian_never_signs_a_firm_step_beyond_its_feeder_ceiling(
+    prev_kw, setpoint_kw, is_firm, ceiling
+):
+    """G-06 (TS-06-05): on a bank with a feeder, a signed firm-event step fits the feeder ramp ceiling;
+    firm events are not exempted from it."""
+    world = passing_world([ProposedItem(HUB_ID, setpoint_kw, "SELECTOR")])
+    world.proposal = replace(world.proposal, is_firm_event=is_firm)
+    world.hub = make_hub(soc_kwh=30.0, prev_p_kw=prev_kw, params=_FAST_HUB)
+    world.bank = BankSnapshot(
+        BASE_BANK, 10.0, feeder_id="feeder-LZ_NORTH-00", feeder_ceiling_kw_per_min=ceiling
+    )
+    config = GuardianConfig(
+        key_path="",
+        cycle_interval_s=2.0,
+        discretionary_ramp_cap_kw_per_min=1e9,
+        non_firm_ramp_cap_kw_per_min=1e9,
+    )
+
+    verdict = evaluate(world, _SIGNER, config=config)
+
+    if verdict.signature is not None and is_firm:
+        assert abs(setpoint_kw - prev_kw) <= ceiling * 2.0 / 60.0 + _EPSILON

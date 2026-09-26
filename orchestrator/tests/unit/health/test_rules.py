@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import opengrid.fleet as fleet
 from opengrid.core.models.platform import FeedStatus, Heartbeat
+from opengrid.core.physics import HubParams
 from opengrid.health.model import ALL_PROCESSES, HealthThresholds, HubHealthCounts, ProcessHealth
 from opengrid.health.rules import (
     aggregate_hub_counts,
@@ -13,6 +15,7 @@ from opengrid.health.rules import (
     classify_hub_health,
     derive_degraded_modes,
     evaluate_cycle_latency_alert,
+    evaluate_cycle_latency_warning_alert,
     evaluate_energy_shortfall_risk_alert,
     evaluate_feed_alert,
     evaluate_guardian_timeout_alert,
@@ -23,6 +26,7 @@ from opengrid.health.rules import (
     evaluate_sim_offline_alert,
     is_fallback_feed_needed,
 )
+from opengrid.platform.config import Config
 
 NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
 THRESHOLDS = HealthThresholds()
@@ -108,6 +112,57 @@ def test_hub_offline_past_offline_threshold() -> None:
 def test_hub_fault_overrides_timing() -> None:
     state = classify_hub_health(last_seen_at=NOW, fault_code="INVERTER_TRIP", now=NOW, thresholds=THRESHOLDS)
     assert state == "fault"
+
+
+def test_fleet_hub_health_agrees_with_health_classify_hub_health() -> None:
+    """R2 item 3 (merged): `opengrid.fleet` used to carry its own `_classify_health` copy of this same
+    fault > offline > stale > online ladder, with its own separately-configured stale threshold -- by
+    default health's online/stale boundary was `telemetry_interval_s * 2` (4.0s) while fleet's was a
+    separately-configured `health.hub_stale_s` (6.0s), so a hub aged 5s classified "stale" via health but
+    "online" via fleet. The live-path agent has since consolidated on this module's
+    `classify_hub_health` as the ONE implementation: `opengrid.fleet.hub_health()` (its public
+    classification lookup, TS-03-04) now imports and calls `classify_hub_health` directly with a
+    `HealthThresholds` built from its own configured `hub_offline_s`/`telemetry_interval_s`.
+
+    This is a consistency test of `fleet`'s public output (`hub_health()`) against `classify_hub_health`
+    called directly with the same effective thresholds -- exercising fleet's real `configure()`/
+    `hub_health()` entry points (not a private implementation detail), so it stays meaningful regardless
+    of how `fleet` is internally wired to the shared classifier.
+    """
+    hub_offline_s = 30.0
+    telemetry_interval_s = 3.0  # fleet.hub_online_s = telemetry_interval_s * 2 = 6.0s
+
+    fleet.configure(
+        backend=object(),  # type: ignore[arg-type] -- configure() only stores it, never calls it here
+        cfg=Config(
+            {
+                "health": {"hub_offline_s": hub_offline_s},
+                "fleet": {"telemetry_interval_s": telemetry_interval_s},
+            }
+        ),
+    )
+    health_thresholds = HealthThresholds(
+        hub_offline_s=hub_offline_s, telemetry_interval_s=telemetry_interval_s
+    )
+
+    ages_s = [0.0, 1.0, 5.9, 6.0, 6.1, 15.0, 29.9, 30.0, 30.1, 120.0]
+    for i, age_s in enumerate(ages_s):
+        last_seen_at = NOW - timedelta(seconds=age_s)
+        for fault_code in (None, "INVERTER_TRIP"):
+            hub_id = f"hub-{i}-{fault_code}"
+            fleet._hubs[hub_id] = fleet._HubRuntime(
+                hub_id=hub_id,
+                bank_id="bank-000",
+                zone="LZ_NORTH",
+                params=HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=11.0),
+                fault_code=fault_code,
+                last_seen_at=last_seen_at,
+            )
+            fleet_state = fleet.hub_health(hub_id, now=NOW)
+            health_state = classify_hub_health(
+                last_seen_at=last_seen_at, fault_code=fault_code, now=NOW, thresholds=health_thresholds
+            )
+            assert fleet_state == health_state, f"age_s={age_s} fault_code={fault_code}"
 
 
 def test_aggregate_hub_counts_rolls_up_by_zone() -> None:
@@ -241,6 +296,23 @@ def test_cycle_latency_alert_requires_consecutive_breaches() -> None:
 def test_cycle_latency_alert_none_when_under_budget() -> None:
     assert evaluate_cycle_latency_alert(0.1, 5, thresholds=THRESHOLDS) is None
     assert evaluate_cycle_latency_alert(None, 5, thresholds=THRESHOLDS) is None
+
+
+def test_cycle_latency_warning_alert_fires_at_warn_ratio_before_breach() -> None:
+    """R2 pre-limit alert: THRESHOLDS.cycle_p99_warn_ratio=0.80 x budget_s=0.5 -> warns from 0.4s, no
+    consecutive-cycle requirement (fires on the very first sample, unlike the hard `ALR-CYCLE-P99`)."""
+    assert evaluate_cycle_latency_warning_alert(0.39, thresholds=THRESHOLDS) is None  # below 80%
+    finding = evaluate_cycle_latency_warning_alert(0.45, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-CYCLE-P99-APPROACHING"
+    assert finding.severity == "warning"
+
+
+def test_cycle_latency_warning_alert_yields_to_hard_breach_rule() -> None:
+    """Once p99 actually exceeds the budget, `ALR-CYCLE-P99` (the hard breach rule) owns it -- the
+    pre-limit warning must not also fire, avoiding a redundant duplicate alert."""
+    assert evaluate_cycle_latency_warning_alert(0.6, thresholds=THRESHOLDS) is None
+    assert evaluate_cycle_latency_warning_alert(None, thresholds=THRESHOLDS) is None
 
 
 def test_guardian_timeout_alert() -> None:

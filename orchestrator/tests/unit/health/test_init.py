@@ -50,6 +50,7 @@ class _FakeQueries:
         # ALR-SIM-OFFLINE aren't affected by it.
         self.latest_fleet_seen_at: datetime | None = None
         self.latest_scada_seen_at: datetime | None = None
+        self.degraded_mode_state: dict[str, datetime] = {}
         self._next_alert_id = 1
 
     async def fetch_heartbeats(self, pool):
@@ -74,6 +75,15 @@ class _FakeQueries:
 
     async def fetch_latest_scada_obs_at(self, pool):
         return self.latest_scada_seen_at
+
+    async def fetch_degraded_modes(self, pool):
+        return list(self.degraded_mode_state.items())
+
+    async def write_degraded_modes(self, pool, active_modes, *, now):
+        for mode in set(active_modes) - set(self.degraded_mode_state):
+            self.degraded_mode_state[mode] = now
+        for mode in set(self.degraded_mode_state) - set(active_modes):
+            del self.degraded_mode_state[mode]
 
     async def fetch_open_alerts(self, pool):
         return self.open_alerts
@@ -192,7 +202,8 @@ async def test_evaluate_alerts_never_clears_a_foreign_alert(fake_queries: _FakeQ
     lifecycle of, even across several cycles where health's own findings never mention it (it previously
     cleared ANY open alert whose rule+scope didn't match one of ITS OWN this-cycle findings, closing
     `ALR-SETTLE-STALLED`/`ALR-SELECTOR-GATE-FAILED`/`ALR-ENERGY-SHORTFALL-RISK` within one ~5s cycle of
-    them being raised)."""
+    them being raised). Also covers guardian's own alerts (R2 coordination note: guardian raises AND
+    clears `ALR-SCOPE-CONSERVATIVE`/`ALR-SAFE-STOP-REQUESTED`/`ALR-CLOCK-QUALITY` itself)."""
     fake_queries.heartbeats = [
         Heartbeat(process=p, pid=1, ts=NOW, status="ok")
         for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
@@ -222,6 +233,30 @@ async def test_evaluate_alerts_never_clears_a_foreign_alert(fake_queries: _FakeQ
             detail={"obligation_id": "OBL-1"},
             opened_at=NOW,
         ),
+        Alert(
+            id=104,
+            rule="ALR-SCOPE-CONSERVATIVE",
+            severity="warning",
+            summary="bank-000 posture CONSERVATIVE",
+            detail={"scope_ref": "bank-000"},
+            opened_at=NOW,
+        ),
+        Alert(
+            id=105,
+            rule="ALR-SAFE-STOP-REQUESTED",
+            severity="critical",
+            summary="safe stop requested for bank-000",
+            detail={"scope_ref": "bank-000"},
+            opened_at=NOW,
+        ),
+        Alert(
+            id=106,
+            rule="ALR-CLOCK-QUALITY",
+            severity="warning",
+            summary="guardian NTP offset degraded",
+            detail={},
+            opened_at=NOW,
+        ),
     ]
     fake_queries.open_alerts = list(foreign_alerts)
 
@@ -229,7 +264,7 @@ async def test_evaluate_alerts_never_clears_a_foreign_alert(fake_queries: _FakeQ
         await health.evaluate_alerts()
 
     assert fake_queries.cleared == []
-    assert {a.id for a in fake_queries.open_alerts} == {101, 102, 103}
+    assert {a.id for a in fake_queries.open_alerts} == {101, 102, 103, 104, 105, 106}
 
 
 async def test_evaluate_alerts_still_clears_its_own_resolved_alert(fake_queries: _FakeQueries) -> None:
@@ -383,3 +418,23 @@ async def test_evaluate_once_returns_snapshot_with_degraded_mode(fake_queries: _
     assert snapshot.degraded_modes == frozenset({"HOLD_LOCAL_AUTONOMY"})
     assert snapshot.hub_counts_by_zone["LZ_NORTH"].online == 1
     assert snapshot.open_alert_count >= 1  # at least ALR-PROCESS-DOWN for engine
+    # R2 item 1 (defect fix): the computed degraded-mode set must be persisted (`og.degraded_mode_state`)
+    # so `GET /og/api/health` and the UI banners can read it -- it used to go nowhere else.
+    assert set(fake_queries.degraded_mode_state) == {"HOLD_LOCAL_AUTONOMY"}
+
+
+async def test_evaluate_once_clears_persisted_degraded_mode_on_resolve(fake_queries: _FakeQueries) -> None:
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "guardian", "safestop", "settle", "api")
+    ]  # engine still missing -> HOLD_LOCAL_AUTONOMY
+    await health.evaluate_once()
+    assert set(fake_queries.degraded_mode_state) == {"HOLD_LOCAL_AUTONOMY"}
+
+    # Engine now reports -> the degraded mode resolves and must be cleared from the persisted set too.
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    await health.evaluate_once()
+    assert fake_queries.degraded_mode_state == {}

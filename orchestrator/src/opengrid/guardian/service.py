@@ -32,6 +32,7 @@ from opengrid.core.pq.constants import CALIBRATION_MIN_INTERVAL_S_DEFAULT
 from opengrid.guardian import checks, pq_checks, stop_release
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
+from opengrid.guardian.escalation import BatchOutcome, vetoed_command_count
 from opengrid.guardian.ports import BankSnapshot, GuardianPorts, ProposedBatch, ReleaseRequest
 from opengrid.guardian.pq_ports import (
     CalibrationFleetUsage,
@@ -43,7 +44,9 @@ from opengrid.platform.metrics import guardian_clock_offset_ms, guardian_verdict
 logger = logging.getLogger(__name__)
 
 _MAX_CYCLE_HISTORY = 64  # bound the in-memory ramp accumulators; MVP-S runs a 2s cycle, never GC-free
-_MAX_EVALUATED_PROPOSALS = 256  # > one tick's pending batches (main.py fetches at most 50 per tick)
+_MAX_EVALUATED_PROPOSALS = 256
+#: K12: raised while G-20 holds every signature.
+CLOCK_ALERT_RULE = "ALR-CLOCK-QUALITY"  # > one tick's pending batches (main.py fetches at most 50 per tick)
 _ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04", "G-24"})
 
 
@@ -100,6 +103,8 @@ class GuardianService:
     )
 
     _evaluated: OrderedDict[UUID, ProposedBatch] = field(default_factory=OrderedDict, init=False)
+    _clock_alert_open: bool = field(default=False, init=False)
+    _violations: OrderedDict[UUID, list[CheckOutcome]] = field(default_factory=OrderedDict, init=False)
 
     async def evaluate_and_sign(self, batch: CommandBatchRow) -> Verdict:
         """Run every applicable G-check against independently-read state; PASS signs, any veto returns
@@ -128,6 +133,19 @@ class GuardianService:
             batch, verdict_id, started, outcome=outcome, vetoed_rule_ids=rule_ids, violations=violations
         )
 
+    def batch_outcome(self, verdict: Verdict) -> BatchOutcome | None:
+        """ES06-S04: this verdict as the escalation counter sees it (commands, and how many an explicit
+        invariant veto refused). None when the batch's proposal was never read (nothing to count)."""
+        proposal = self._evaluated.get(verdict.command_batch_id)
+        if proposal is None:
+            return None
+        hubs = [item.hub_id for item in proposal.items]
+        violations = self._violations.get(verdict.command_batch_id, [])
+        vetoed = vetoed_command_count(
+            verdict.outcome, verdict.vetoed_rule_ids, hubs, (v.hub_id for v in violations)
+        )
+        return BatchOutcome(bank_id=proposal.bank_id, commands=len(hubs), vetoed_commands=vetoed)
+
     def evaluated_proposal(self, command_batch_id: UUID) -> ProposedBatch | None:
         """The exact proposal `evaluate_and_sign` checked for this batch. The caller publishes THIS,
         never a second read of the pre-image: a re-read could return different items than were
@@ -145,7 +163,33 @@ class GuardianService:
         if math.isnan(offset_ms):
             offset_ms = math.inf
         guardian_clock_offset_ms.set(offset_ms)
-        return checks.check_g20_clock_quality(offset_ms, self.config.clock_offset_max_ms).ok
+        ok = checks.check_g20_clock_quality(offset_ms, self.config.clock_offset_max_ms).ok
+        await self._clock_alert(ok, offset_ms)
+        return ok
+
+    async def _clock_alert(self, ok: bool, offset_ms: float) -> None:
+        """ALR-CLOCK-QUALITY: raised when G-20 starts holding (the guardian signs nothing), cleared when the
+        clock is back in limit. Only on transitions, and best-effort: the hold stands either way."""
+        alerts = self.ports.alerts
+        if alerts is None or ok != self._clock_alert_open:
+            return
+        try:
+            if ok:
+                await alerts.clear_alert(CLOCK_ALERT_RULE, CLOCK_ALERT_RULE)
+            else:
+                await alerts.raise_alert(
+                    CLOCK_ALERT_RULE,
+                    "critical",
+                    "guardian clock quality out of limit: signing held (G-20, K12)",
+                    CLOCK_ALERT_RULE,
+                    {
+                        "offset_ms": offset_ms if math.isfinite(offset_ms) else None,
+                        "limit_ms": self.config.clock_offset_max_ms,
+                    },
+                )
+            self._clock_alert_open = not ok
+        except Exception:
+            logger.exception("failed to update %s", CLOCK_ALERT_RULE)
 
     async def _run_checks(self, batch: CommandBatchRow) -> list[CheckOutcome]:
         violations: list[CheckOutcome] = []
@@ -656,6 +700,7 @@ class GuardianService:
             proposal.bank_id, proposal.cycle_id
         )
         committed_floor_kw = float(sum((o.frozen_kw for o in active_obligations), Decimal(0)))
+        committed_by_obligation = {str(o.obligation_id): o.frozen_kw for o in active_obligations}
         evidence: _OverrideEvidence | None = None
         for obligation in active_obligations:
             obligation_key = str(obligation.obligation_id)
@@ -664,6 +709,25 @@ class GuardianService:
             prior = await self.ports.prior_grants.prior_granted_kw(obligation.obligation_id)
             prior_kw = float(prior) if prior is not None else frozen_kw
             reason_code = reason_by_obligation.get(obligation_key)
+            if reason_code == reasons.R_GRANT_AS_HOLD and checks.g19_reduction_below_floor(
+                new_kw, frozen_kw, prior_kw
+            ):
+                # AS capacity hold (migration 0020): held at 0 kW until ERCOT deploys it, on the guardian's
+                # own reads of the award and its deployment, with the held reservation left unused.
+                as_port = self.ports.as_awards
+                held = checks.check_g19_as_hold(
+                    obligation_key,
+                    service_type=await as_port.service_type(obligation.obligation_id) if as_port else None,
+                    deployment_active=await as_port.deployment_active(obligation.obligation_id)
+                    if as_port
+                    else None,
+                    borrowed_by=checks.g19_obligations_over_commitment(
+                        totals, committed_by_obligation, exclude=obligation_key
+                    ),
+                )
+                if not held.ok:
+                    violations.append(held)
+                continue
             if reason_code == reasons.R_GRANT_CLOSED_LOOP and checks.g19_reduction_below_floor(
                 new_kw, frozen_kw, prior_kw
             ):
@@ -674,9 +738,7 @@ class GuardianService:
                     obligation_key,
                     setpoint_source=await self._setpoint_source(obligation.obligation_id),
                     borrowed_by=checks.g19_obligations_over_commitment(
-                        totals,
-                        {str(o.obligation_id): o.frozen_kw for o in active_obligations},
-                        exclude=obligation_key,
+                        totals, committed_by_obligation, exclude=obligation_key
                     ),
                 )
                 if not need.ok:
@@ -778,6 +840,10 @@ class GuardianService:
         vetoed_rule_ids: list[str],
         violations: list[CheckOutcome] | None = None,
     ) -> Verdict:
+        self._violations[batch.command_batch_id] = list(violations or [])
+        self._violations.move_to_end(batch.command_batch_id)
+        while len(self._violations) > _MAX_EVALUATED_PROPOSALS:
+            self._violations.popitem(last=False)
         latency_ms = max(int((self.monotonic_fn() - started) * 1000), 0)
         inputs_hash = self._inputs_hash(batch)
         signature: str | None = None

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
@@ -26,8 +27,9 @@ from opengrid.settle.backend import SettleBackend
 from opengrid.settle.baselines import METER_SOURCE_BY_SERVICE, compute_baseline_kwh
 from opengrid.settle.billing import draft_invoice_lines, next_version
 from opengrid.settle.metering import meter_interval as _meter_interval
-from opengrid.settle.performance import compute_performance
+from opengrid.settle.performance import compute_performance, is_need_basis_compliant
 from opengrid.settle.profitability import compute_forgone_upside, compute_pnl
+from opengrid.settle.tariffs import TdspTariff, m1_delivery_charge, resolve_tariff, tdsp_for_zone
 from opengrid.trace import TraceStore
 from opengrid.trace.pg_backend import run_retention_prune_job
 
@@ -55,10 +57,17 @@ _logger = logging.getLogger(__name__)
 _backend: SettleBackend | None = None
 _trace_store: TraceStore | None = None
 _trace_pool: AsyncConnectionPool | None = None
+_tdsp_tariffs: list[TdspTariff] | None = None
+_zone_default_tdsp: dict[str, str] | None = None
 
 
 def configure(
-    backend: SettleBackend, trace_store: TraceStore, *, trace_pool: AsyncConnectionPool | None = None
+    backend: SettleBackend,
+    trace_store: TraceStore,
+    *,
+    trace_pool: AsyncConnectionPool | None = None,
+    tdsp_tariffs: list[TdspTariff] | None = None,
+    zone_default_tdsp: dict[str, str] | None = None,
 ) -> None:
     """Wire up the real (or fake) I/O this process/test run uses. Called once by
     `opengrid.settle.main` at process startup, and by tests before exercising `settle()` or
@@ -66,11 +75,17 @@ def configure(
 
     `trace_pool`, when given, lets `run_trace_pruning_cycle()` also run the canonical per-event-class
     retention job (`opengrid.trace.pg_backend.run_retention_prune_job`, health-owned, BUILD.md S4).
-    Unit tests configure with no pool and get the pool-free seq-window prune only."""
-    global _backend, _trace_store, _trace_pool
+    Unit tests configure with no pool and get the pool-free seq-window prune only.
+
+    `tdsp_tariffs`/`zone_default_tdsp` (09 D5's M1 delivery charge, `opengrid.settle.tariffs`): both
+    `None` (the default) disables M1 entirely (`delivery_charge` settles as 0) rather than guessing at
+    a tariff -- `opengrid.settle.main` loads `tdsp_tariffs.toml` once at startup and passes both in."""
+    global _backend, _trace_store, _trace_pool, _tdsp_tariffs, _zone_default_tdsp
     _backend = backend
     _trace_store = trace_store
     _trace_pool = trace_pool
+    _tdsp_tariffs = tdsp_tariffs
+    _zone_default_tdsp = zone_default_tdsp
 
 
 def _require_backend() -> SettleBackend:
@@ -112,8 +127,38 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     metering = _meter_interval(samples, interval_minutes=interval_minutes, source=source)
 
     baseline_kwh = compute_baseline_kwh(ctx.service_type, ctx.committed_kw, duration_hours)
+    committed_kwh = ctx.committed_kw * duration_hours
     penalty_theta = ctx.penalty.theta if ctx.penalty is not None else None
     performance = compute_performance(metering.delivered_kwh, baseline_kwh, penalty_theta)
+
+    # --- D-18 need-basis settlement (00-invariants.md K13 "commitments are over a period"): a
+    # MEASURED_FEEDBACK obligation's committed kWh is a reserved maximum, and delivery below it that
+    # follows the customer's measured need is compliant, never a shortfall or a penalty. Only checked
+    # when there IS a dip below committed (an exact/over delivery needs no need-basis reasoning) and
+    # only queries the site meter for a need-basis obligation (never an extra query otherwise). -----
+    need_basis_compliant = False
+    if ctx.is_need_basis and metering.delivered_kwh < committed_kwh:
+        measured_need_kwh = await backend.fetch_measured_need_kwh(obligation_id, interval_start, interval_end)
+        need_basis_compliant = is_need_basis_compliant(
+            metering.delivered_kwh, committed_kwh, measured_need_kwh
+        )
+        if need_basis_compliant:
+            performance = replace(performance, passed_threshold=True)
+
+    # --- ERCOT_AS is a capacity HOLD, not a delivery schedule (commit d43da06, og.as_deployment): an
+    # award is granted 0 kW unless a deployment covers the interval, so "delivered/committed" is not a
+    # meaningful compliance ratio -- its performance metric is AVAILABILITY (was the held capacity
+    # available, with energy above reserve per the hold rule, and delivered when actually deployed),
+    # not delivered-vs-committed kWh. Full hold-availability compliance (HOLD_COMPLIANCE, SOC >=
+    # H_k*r/eta_d, 09 D6/G-32) is a guardian-side check out of scope here; settle has no independent
+    # signal that the hold ever failed, so it defaults to available/compliant -- the same "innocent
+    # until shown otherwise" stance as the need-basis fix just above. `og.performance.passed_threshold`
+    # is the ONLY field opengrid.engine.lifecycle.close_target reads to decide FULFILLED vs SHORTFALL
+    # at window-close (`NOT p.passed_threshold` in any interval), so this alone stops a held AS window
+    # from ever closing as SHORTFALL -- no engine-side lifecycle change is needed.
+    is_capacity_hold_service = ctx.service_type == "ERCOT_AS"
+    if is_capacity_hold_service:
+        performance = replace(performance, compliance_pct=None, passed_threshold=True)
 
     # --- meter_interval: insert-only, versioned by delivered_kwh changing -----------------------
     existing_meter = await backend.fetch_active_meter_interval(obligation_id, interval_start)
@@ -141,17 +186,35 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
         )
 
     # --- profitability -----------------------------------------------------------------------
-    committed_kwh = ctx.committed_kw * duration_hours
-    shortfall_kwh = max(Decimal("0"), committed_kwh - metering.delivered_kwh)
+    # A need-basis-compliant dip, or an AS capacity hold, is never a shortfall (D-18 / AS hold fix):
+    # zero it before penalty/pnl math, not just before billing, so compute_penalty never prices it.
+    shortfall_kwh = (
+        Decimal("0")
+        if need_basis_compliant or is_capacity_hold_service
+        else max(Decimal("0"), committed_kwh - metering.delivered_kwh)
+    )
+    # --- 09 D5's M1 TDSP delivery charge: kWh drawn from the grid to charge, ERCOT competitive area
+    # only. Disabled (delivery_charge = 0) unless opengrid.settle.main loaded tdsp_tariffs.toml at
+    # startup (configure()'s tdsp_tariffs/zone_default_tdsp) -- never a guessed rate. ------------
+    delivery_charge = Decimal("0")
+    if _tdsp_tariffs is not None and _zone_default_tdsp is not None:
+        grid_charged_kwh = await backend.fetch_grid_charged_kwh(obligation_id, interval_start, interval_end)
+        tdsp = tdsp_for_zone(_zone_default_tdsp, ctx.zone)
+        tariff = resolve_tariff(_tdsp_tariffs, tdsp, interval_start.date())
+        delivery_charge = m1_delivery_charge(grid_charged_kwh, tariff)
+
     pnl = compute_pnl(
+        service_type=ctx.service_type,
         delivered_kwh=metering.delivered_kwh,
         price_per_kwh=ctx.price_per_kwh,
-        wholesale_price_per_kwh=ctx.wholesale_price_per_kwh,
+        charging_cost_per_kwh=ctx.charging_cost_per_kwh,
+        discharge_spp_per_kwh=ctx.wholesale_price_per_kwh,
         eta_d=ctx.eta_d,
         degradation_cost_per_kwh=ctx.degradation_cost_per_kwh,
         shortfall_kwh=shortfall_kwh,
         committed_kwh=committed_kwh,
         penalty=ctx.penalty,
+        delivery_charge=delivery_charge,
     )
 
     rule_baseline_kwh = await backend.fetch_rule_baseline_delivered_kwh(
@@ -160,9 +223,11 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     rule_baseline_value: Decimal | None = None
     if rule_baseline_kwh is not None:
         rule_baseline_pnl = compute_pnl(
+            service_type=ctx.service_type,
             delivered_kwh=rule_baseline_kwh,
             price_per_kwh=ctx.price_per_kwh,
-            wholesale_price_per_kwh=ctx.wholesale_price_per_kwh,
+            charging_cost_per_kwh=ctx.charging_cost_per_kwh,
+            discharge_spp_per_kwh=ctx.wholesale_price_per_kwh,
             eta_d=ctx.eta_d,
             degradation_cost_per_kwh=ctx.degradation_cost_per_kwh,
             shortfall_kwh=max(Decimal("0"), committed_kwh - rule_baseline_kwh),
@@ -197,6 +262,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
             energy_cost=pnl.energy_cost,
             degradation_cost=pnl.degradation_cost,
             penalty=pnl.penalty,
+            delivery_charge=pnl.delivery_charge,
             net_value=pnl.net_value,
             rule_baseline_value=rule_baseline_value,
             forgone_upside=forgone_upside,
@@ -205,8 +271,13 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
         )
 
     # --- invoice lines: insert-only, versioned per (contract, obligation, period, line_type) ----
+    # A need-basis-compliant dip bills the full reserved-capacity payment (D-18: the customer pays for
+    # the reservation, not for how much of it they happened to need this interval) -- never scaled
+    # down by the true, lower compliance_pct.
     performance_factor = (
-        performance.compliance_pct if performance.compliance_pct is not None else Decimal("1")
+        Decimal("1")
+        if need_basis_compliant
+        else (performance.compliance_pct if performance.compliance_pct is not None else Decimal("1"))
     )
     drafts = draft_invoice_lines(
         service_type=ctx.service_type,
@@ -250,8 +321,11 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
                 "delivered_kwh": str(metering.delivered_kwh),
                 "net_value": str(pnl.net_value),
                 "quality_flag": metering.quality_flag,
+                "charging_cost_per_kwh": str(ctx.charging_cost_per_kwh),
+                "charging_cost_flag": ctx.charging_cost_flag,
                 "wholesale_price_per_kwh": str(ctx.wholesale_price_per_kwh),
                 "wholesale_price_flag": ctx.wholesale_price_flag,
+                "need_basis_compliant": need_basis_compliant,
             },
         )
 

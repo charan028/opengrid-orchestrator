@@ -177,6 +177,17 @@ def test_health_payload_has_control_room_kpis(client) -> None:
     assert isinstance(body["alerts"], list)
 
 
+def test_health_payload_has_degraded_modes_field(client) -> None:
+    """R2 item 1 (defect fix): `GET /og/api/health` used to have no `degraded_modes` field at all --
+    `opengrid.health.evaluate_once` computed it every cycle but nothing persisted or exposed it. This
+    test suite's `app.state.pool` is never set (no real `_lifespan`), so `_degraded_modes` degrades to an
+    empty list (K7) rather than the endpoint crashing -- proving the field is present and safe without a
+    database, not the persisted-value round trip (that's `tests/unit/health/test_queries.py`'s job)."""
+    resp = client.get("/og/api/health")
+    body = resp.json()
+    assert body["degraded_modes"] == []
+
+
 def test_opportunity_creation_surfaces_not_implemented_as_503(client) -> None:
     """`FakeContractsRepo` (this suite's test double, `contracts_fake.py`) does not model
     `create_opportunity_and_obligation` -- the API must surface that as a clear 503, not a bare 500

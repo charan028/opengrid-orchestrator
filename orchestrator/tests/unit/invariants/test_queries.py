@@ -234,6 +234,84 @@ async def test_get_trace_watermark_returns_stored_value() -> None:
     assert await queries.get_trace_watermark(pool, "guardian_verdict") == 42
 
 
+async def test_fetch_shortfall_events_parses_payload() -> None:
+    cursor = FakeCursor(fetchall_result=[(NOW, 40.0, "cyc-1"), (NOW, None, None)])
+    pool = FakePool(cursor)
+
+    events = await queries.fetch_shortfall_events(
+        pool, obligation_id="ob-1", window_start=NOW, window_end=NOW
+    )
+
+    assert events[0].shortfall_kw == 40.0
+    assert events[0].cycle_id == "cyc-1"
+    assert events[1].shortfall_kw == 0.0  # a NULL payload field defaults to 0.0 (no shortfall reported)
+
+
+async def test_fetch_measured_need_sample_returns_none_without_a_service_profile() -> None:
+    cursor = FakeCursor(fetchone_result=None)
+    pool = FakePool(cursor)
+
+    sample = await queries.fetch_measured_need_sample(pool, obligation_id="ob-1", at=NOW)
+
+    assert sample is None
+
+
+async def test_fetch_measured_need_sample_site_meter() -> None:
+    pytest.importorskip("opengrid.site_ingest")  # ships with the customer-services package
+    cursor = FakeCursor(
+        fetchone_results=[
+            ("cust-1", "site_meter:site-dc-01:p_kw"),  # profile lookup
+            (42.0, "GOOD"),  # reading lookup
+        ]
+    )
+    pool = FakePool(cursor)
+
+    sample = await queries.fetch_measured_need_sample(pool, obligation_id="ob-1", at=NOW)
+
+    assert sample is not None
+    assert sample.kind == "site_meter"
+    assert sample.field == "p_kw"
+    assert sample.value == 42.0
+    assert sample.limit is None
+    assert sample.quality == "GOOD"
+
+
+async def test_fetch_measured_need_sample_corridor() -> None:
+    pytest.importorskip("opengrid.site_ingest")  # ships with the customer-services package
+    cursor = FakeCursor(
+        fetchone_results=[
+            ("cust-1", "corridor:corr-07:i_ac_a"),
+            (85.0, 100.0, "GOOD"),
+        ]
+    )
+    pool = FakePool(cursor)
+
+    sample = await queries.fetch_measured_need_sample(pool, obligation_id="ob-1", at=NOW)
+
+    assert sample is not None
+    assert sample.kind == "corridor"
+    assert sample.value == 85.0
+    assert sample.limit == 100.0
+
+
+async def test_fetch_measured_need_sample_none_for_unparseable_ref() -> None:
+    cursor = FakeCursor(fetchone_results=[("cust-1", "not-a-valid-ref")])
+    pool = FakePool(cursor)
+
+    sample = await queries.fetch_measured_need_sample(pool, obligation_id="ob-1", at=NOW)
+
+    assert sample is None
+
+
+async def test_fetch_measured_need_sample_none_when_no_reading_yet() -> None:
+    cursor = FakeCursor(fetchone_results=[("cust-1", "site_meter:site-dc-01:p_kw"), None])
+    pool = FakePool(cursor)
+
+    sample = await queries.fetch_measured_need_sample(pool, obligation_id="ob-1", at=NOW)
+
+    assert sample is None
+
+
 async def test_upsert_trace_watermark_commits() -> None:
     cursor = FakeCursor()
     pool = FakePool(cursor)

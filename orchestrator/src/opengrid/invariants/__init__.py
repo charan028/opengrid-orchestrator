@@ -49,6 +49,7 @@ from opengrid.invariants.models import (
     CHECK_K2_DOUBLE_SOLD,
     CHECK_K13_LOCK_VIOLATION,
     CHECK_K13_OUTAGE_GAP,
+    CHECK_K13_RESTORE_LAG,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_ORPHAN_RESERVATION,
     CHECK_TRACE_VERIFY,
@@ -289,15 +290,17 @@ async def _run_double_sold_check(pool: AsyncConnectionPool, now: datetime) -> Ch
 
 async def _run_k13_checks(pool: AsyncConnectionPool, now: datetime) -> dict[str, CheckOutcome]:
     """K13: enumerate elapsed commitment intervals since the watermark, find each one's worst delivery
-    point across ALL of the obligation's banks combined (`checks.find_dip`), and -- only for the ones
-    that actually dipped -- look up whether/how the trace already covers it
-    (`checks.classify_dip`/`queries.fetch_covering_trace_info`). Splits the result into
-    `K13_LOCK_VIOLATION` (grants were flowing, still below committed) and `K13_OUTAGE_GAP` (a total
-    grant-activity gap) -- two persisted checks sharing this one scan, since the classification decision
-    on each dip is made once, right here."""
+    point across ALL of the obligation's banks combined (`checks.find_dip`), and look up how the trace
+    covers it (`checks.classify_dip`/`queries.fetch_covering_trace_info`/`fetch_shortfall_events`) and,
+    for need-basis (`MEASURED_FEEDBACK`) obligations, the customer's own measured signal
+    (`queries.fetch_measured_need_sample`). Splits the result into `K13_LOCK_VIOLATION` (grants were
+    flowing, still below committed, unexplained), `K13_OUTAGE_GAP` (a total grant-activity gap), and
+    `K13_RESTORE_LAG` (a cleared SHORTFALL not restored within 2 cycles) -- three persisted checks
+    sharing this one scan, since every classification decision is made once, right here."""
     start = time.perf_counter()
     lock_state = await queries.get_check_state(pool, CHECK_K13_LOCK_VIOLATION)
     outage_state = await queries.get_check_state(pool, CHECK_K13_OUTAGE_GAP)
+    restore_lag_state = await queries.get_check_state(pool, CHECK_K13_RESTORE_LAG)
     since = _parse_ts(lock_state.watermark.get("since")) or _EPOCH
     candidates, new_end = await queries.fetch_lock_commitment_candidates(pool, since=since, now=now)
     need_basis_obligation_ids = await queries.fetch_need_basis_obligation_ids(
@@ -305,12 +308,34 @@ async def _run_k13_checks(pool: AsyncConnectionPool, now: datetime) -> dict[str,
     )
 
     dip_rows: list[
-        tuple[str, datetime, datetime, float, checks.DipResult, datetime | None, frozenset[str], bool]
+        tuple[
+            str,
+            datetime,
+            datetime,
+            float,
+            checks.DipResult,
+            datetime | None,
+            frozenset[str],
+            list[checks.ShortfallEvent],
+            bool,
+            bool,
+        ]
+    ] = []
+    restore_lag_rows: list[
+        tuple[str, datetime, datetime, float, list[tuple[datetime, float, str]], list[checks.ShortfallEvent]]
     ] = []
     for obligation_id, interval_start, interval_end, committed_kw in candidates:
         cycles = await queries.fetch_grant_cycle_series(
             pool, obligation_id=obligation_id, window_start=interval_start, window_end=interval_end
         )
+        shortfall_events = await queries.fetch_shortfall_events(
+            pool, obligation_id=obligation_id, window_start=interval_start, window_end=interval_end
+        )
+        if shortfall_events:
+            restore_lag_rows.append(
+                (str(obligation_id), interval_start, interval_end, committed_kw, cycles, shortfall_events)
+            )
+
         dip = checks.find_dip(
             interval_start=interval_start,
             interval_end=interval_end,
@@ -323,6 +348,11 @@ async def _run_k13_checks(pool: AsyncConnectionPool, now: datetime) -> dict[str,
         earliest_covering_at, covered_cycle_ids = await queries.fetch_covering_trace_info(
             pool, obligation_id=obligation_id, window_start=interval_start, window_end=interval_end
         )
+        is_need_basis = str(obligation_id) in need_basis_obligation_ids
+        measured_need_is_unmet = False
+        if is_need_basis:
+            sample = await queries.fetch_measured_need_sample(pool, obligation_id=obligation_id, at=dip.at)
+            measured_need_is_unmet = checks.measured_need_unmet(sample, dip.kw)
         dip_rows.append(
             (
                 str(obligation_id),
@@ -332,14 +362,18 @@ async def _run_k13_checks(pool: AsyncConnectionPool, now: datetime) -> dict[str,
                 dip,
                 earliest_covering_at,
                 covered_cycle_ids,
-                str(obligation_id) in need_basis_obligation_ids,
+                shortfall_events,
+                is_need_basis,
+                measured_need_is_unmet,
             )
         )
 
     lock_violations, outage_gaps = checks.classify_lock_rows(dip_rows)
+    restore_lag_violations = checks.find_restore_lag_violations(restore_lag_rows)
     watermark = {"since": (new_end or since).isoformat()}
     lock_outcome = CheckOutcome(CHECK_K13_LOCK_VIOLATION, tuple(lock_violations), watermark)
     outage_outcome = CheckOutcome(CHECK_K13_OUTAGE_GAP, tuple(outage_gaps), watermark)
+    restore_lag_outcome = CheckOutcome(CHECK_K13_RESTORE_LAG, tuple(restore_lag_violations), watermark)
 
     run_ms = int((time.perf_counter() - start) * 1000)
     lock_new = await _persist_and_meter(
@@ -348,11 +382,24 @@ async def _run_k13_checks(pool: AsyncConnectionPool, now: datetime) -> dict[str,
     outage_new = await _persist_and_meter(
         pool, CHECK_K13_OUTAGE_GAP, outage_outcome, prior_total=outage_state.total_violations, run_ms=run_ms
     )
+    restore_lag_new = await _persist_and_meter(
+        pool,
+        CHECK_K13_RESTORE_LAG,
+        restore_lag_outcome,
+        prior_total=restore_lag_state.total_violations,
+        run_ms=run_ms,
+    )
     if lock_new:
         metrics.lock_violations_total.inc(len(lock_new))
     if outage_new:
         metrics.k13_outage_gap_total.inc(len(outage_new))
-    return {CHECK_K13_LOCK_VIOLATION: lock_outcome, CHECK_K13_OUTAGE_GAP: outage_outcome}
+    if restore_lag_new:
+        metrics.k13_restore_lag_total.inc(len(restore_lag_new))
+    return {
+        CHECK_K13_LOCK_VIOLATION: lock_outcome,
+        CHECK_K13_OUTAGE_GAP: outage_outcome,
+        CHECK_K13_RESTORE_LAG: restore_lag_outcome,
+    }
 
 
 async def _run_orphan_reservation_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:

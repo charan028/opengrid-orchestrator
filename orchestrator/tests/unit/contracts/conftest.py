@@ -42,6 +42,7 @@ def _configure(repo: FakeContractsRepo, trace: TraceStore) -> Iterator[None]:
 def make_contract(
     *,
     service_type: str = "ERCOT_ENERGY",
+    variant: str | None = None,
     tier: str = "T2",
     status: str = "ACTIVE",
     renomination_allowed: bool = False,
@@ -50,6 +51,7 @@ def make_contract(
         contract_id=uuid4(),
         customer_id=uuid4(),
         service_type=service_type,  # type: ignore[arg-type]
+        variant=variant,
         tier=tier,  # type: ignore[arg-type]
         profile_ref="profile@1",
         start_at=datetime.now(UTC) - timedelta(days=1),

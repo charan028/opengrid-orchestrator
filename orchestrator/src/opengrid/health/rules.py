@@ -239,6 +239,32 @@ def evaluate_cycle_latency_alert(
     )
 
 
+def evaluate_cycle_latency_warning_alert(
+    p99_s: float | None, *, thresholds: HealthThresholds
+) -> AlertFinding | None:
+    """ALR-CYCLE-P99-APPROACHING (warning, R2 pre-limit alert): fires the instant p99 crosses
+    `cycle_p99_warn_ratio` of the budget (80% by default) -- unlike `evaluate_cycle_latency_alert`, no
+    `cycle_p99_breach_cycles` consecutive-cycle requirement, so operators get an early warning before the
+    hard breach. Mutually exclusive with `ALR-CYCLE-P99`: this only fires strictly below the full budget,
+    the harder rule owns everything at or past it."""
+    if p99_s is None:
+        return None
+    warn_at_s = thresholds.cycle_p99_budget_s * thresholds.cycle_p99_warn_ratio
+    if p99_s < warn_at_s or p99_s > thresholds.cycle_p99_budget_s:
+        return None
+    return AlertFinding(
+        rule="ALR-CYCLE-P99-APPROACHING",
+        severity="warning",
+        summary=(
+            f"RT cycle p99 {p99_s * 1000:.0f} ms approaching "
+            f"{thresholds.cycle_p99_budget_s * 1000:.0f} ms budget "
+            f"({thresholds.cycle_p99_warn_ratio:.0%})"
+        ),
+        condition_key="ALR-CYCLE-P99-APPROACHING",
+        detail={"p99_s": p99_s, "budget_s": thresholds.cycle_p99_budget_s},
+    )
+
+
 def evaluate_guardian_timeout_alert(
     timeout_rate: float | None, *, thresholds: HealthThresholds
 ) -> AlertFinding | None:

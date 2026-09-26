@@ -25,6 +25,13 @@ from opengrid.core.models.mqtt import CommandBatch, CommandItem, Lease
 from opengrid.core.models.pq import CalibrationCommand, CalibrationReference
 from opengrid.core.pq import CalibrationBounds
 from opengrid.guardian.config import CalibrationSyncSource, GuardianConfig, load_guardian_config
+from opengrid.guardian.escalation import (
+    CONSERVATIVE_ALERT_RULE,
+    STOP_REQUEST_ALERT_RULE,
+    BatchOutcome,
+    EscalationTracker,
+    Transition,
+)
 from opengrid.guardian.keys import resolve_signing_seed
 from opengrid.guardian.mqtt_io import (
     MqttHubStatePort,
@@ -34,16 +41,19 @@ from opengrid.guardian.mqtt_io import (
     publish_lease,
     run_telemetry_listener,
 )
-from opengrid.guardian.ports import ProposedBatch
+from opengrid.guardian.ports import AlertPort, ProposedBatch, ScopePosturePort
 from opengrid.guardian.pq_ports import FirmwareCalibrationBoundsPort, ProposedCalibrationCommand
 from opengrid.guardian.repo import (
     PendingCalibration,
+    PgAlertPort,
     PgCalibrationQueuePort,
+    PgScopePosturePort,
     PgStopReleasePort,
     build_clock_port,
     build_pg_ports,
     load_bank_membership,
     load_hub_params,
+    load_zones_by_bank,
 )
 from opengrid.guardian.service import GuardianService
 from opengrid.platform.config import Config, load_config, resolve_secret
@@ -219,6 +229,58 @@ async def process_pending_calibrations(
     return published
 
 
+async def apply_escalation(
+    *,
+    tracker: EscalationTracker,
+    posture: ScopePosturePort,
+    alerts: AlertPort,
+    outcomes: list[BatchOutcome],
+    zone_by_bank: dict[str, str],
+) -> list[Transition]:
+    """ES06-S04: fold one tick's verdicts into the per-scope counter and publish the result -- the posture
+    the engine honours (`og.scope_posture`), ALR-SCOPE-CONSERVATIVE while degraded, and after three
+    consecutive CONSERVATIVE ticks ALR-SAFE-STOP-REQUESTED plus an operator-action proposal. A person decides;
+    nothing here engages a stop. Recovery clears the posture and both alerts."""
+    transitions = tracker.observe_tick(outcomes, zone_by_bank)
+    for t in transitions:
+        kind, ref = t.scope
+        key = f"{kind}:{ref}"
+        detail: dict[str, object] = {
+            "scope_kind": kind,
+            "scope_ref": ref,
+            "veto_ratio": round(t.veto_ratio, 4),
+            "consecutive": t.consecutive,
+        }
+        if t.kind == "CLEAR":
+            await posture.set_posture(
+                kind, ref, posture="NORMAL", veto_ratio=t.veto_ratio, consecutive=0, stop_requested=False
+            )
+            await alerts.clear_alert(CONSERVATIVE_ALERT_RULE, key)
+            await alerts.clear_alert(STOP_REQUEST_ALERT_RULE, key)
+            continue
+        await posture.set_posture(
+            kind,
+            ref,
+            posture="CONSERVATIVE",
+            veto_ratio=t.veto_ratio,
+            consecutive=t.consecutive,
+            stop_requested=tracker.stop_requested(t.scope),
+        )
+        if t.kind == "ENTER_CONSERVATIVE":
+            await alerts.raise_alert(
+                CONSERVATIVE_ALERT_RULE,
+                "warning",
+                f"{key} CONSERVATIVE: {t.veto_ratio:.0%} of commands vetoed",
+                key,
+                detail,
+            )
+        elif t.kind == "REQUEST_SAFE_STOP":
+            reason = f"{t.consecutive} consecutive CONSERVATIVE ticks ({t.veto_ratio:.0%} vetoed): safe stop requested"
+            await alerts.raise_alert(STOP_REQUEST_ALERT_RULE, "critical", f"{key}: {reason}", key, detail)
+            await posture.propose_safe_stop(kind, ref, reason)
+    return transitions
+
+
 async def process_pending_stop_releases(
     *, port: PgStopReleasePort, service: GuardianService, config: GuardianConfig
 ) -> int:
@@ -256,6 +318,15 @@ async def main() -> None:
     )
     l2_instructions = MqttL2InstructionPort()
     release_port = PgStopReleasePort(pool)
+    # K8/ES06-S04: bank -> zone, for ZONE-scope safe stops and zone veto statistics.
+    zones_by_bank = await load_zones_by_bank(pool)
+    alert_port = PgAlertPort(pool)
+    posture_port = PgScopePosturePort(pool)
+    escalation = EscalationTracker(
+        conservative_ratio=guardian_cfg.escalation_conservative_ratio,
+        stop_request_after=guardian_cfg.escalation_stop_request_after,
+        idle_clear_ticks=guardian_cfg.escalation_idle_clear_ticks,
+    )
     ports, leases = build_pg_ports(
         pool,
         trace_store,
@@ -264,6 +335,8 @@ async def main() -> None:
         l2_instructions=l2_instructions,
         bank_members=telemetry_cache,
         stop_release=release_port,
+        alerts=alert_port,
+        zones_by_bank=zones_by_bank,
     )
     calibration_queue = PgCalibrationQueuePort(pool)
 
@@ -293,9 +366,13 @@ async def main() -> None:
 
         async def tick() -> None:
             await write_heartbeat(pool, "guardian")
+            outcomes: list[BatchOutcome] = []
             for batch in await _fetch_pending_batches(pool):
                 verdict = await service.evaluate_and_sign(batch)
                 await _insert_verdict(pool, verdict)
+                outcome = service.batch_outcome(verdict)
+                if outcome is not None:
+                    outcomes.append(outcome)
                 if verdict.outcome != "PASS":
                     continue
                 # Publish exactly what was evaluated -- never a second read of the pre-image.
@@ -323,6 +400,17 @@ async def main() -> None:
                     )
                 except Exception:
                     logger.exception("calibration hand-off pass failed; batch signing unaffected")
+            # ES06-S04 escalation, isolated: publishing posture/alerts never touches the signing decisions.
+            try:
+                await apply_escalation(
+                    tracker=escalation,
+                    posture=posture_port,
+                    alerts=alert_port,
+                    outcomes=outcomes,
+                    zone_by_bank=zones_by_bank,
+                )
+            except Exception:
+                logger.exception("veto escalation pass failed; signing unaffected")
             # Isolated like the calibration pass: a release-path failure never touches batch signing, and a
             # stop simply stays engaged (K8 fails closed).
             try:

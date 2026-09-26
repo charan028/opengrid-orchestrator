@@ -52,6 +52,28 @@ def _select_product_rule(rules: list[ProductRule]) -> ProductRule | None:
     return rules[0] if rules else None
 
 
+#: Service types whose admission is gated behind `[contracts.activation]` (06-service-profiles-and-
+#: power-quality.md S9.2's activation-gate item, 03 S2.7): both went live as new/tightened dispatch
+#: profiles the controllers may not yet be ready for, so admission defaults to CLOSED.
+_ACTIVATION_GATED_SERVICE_TYPES = frozenset({"DATA_CENTER"})
+#: `PIPELINE_AC` has no `og.contract.service_type` value of its own yet (unlike `DATA_CENTER`,
+#: 0013_service_type_data_center.sql) -- it is admitted today as a `variant` under an existing service
+#: type (the same convention as `DIST_DEFERRAL`'s `TDU_SB415`/`PARTNER_CAPACITY`'s `EVENT` variants),
+#: so it is gated by variant instead of service_type.
+_ACTIVATION_GATED_VARIANTS = frozenset({"PIPELINE_AC"})
+
+
+def _is_activation_gated(contract: Contract) -> bool:
+    """DATA_CENTER and PIPELINE_AC contracts inherit the full `03 S2.7` activation gate (schema
+    validation -> static rules -> simulation conformance -> risk-tiered gate -> Tier 2 approval);
+    until that gate has actually run for a deployment, admission of a NEW contract of either kind
+    must be refused rather than silently accepted (BUILD.md S5a "no silent fallbacks")."""
+    return (
+        contract.service_type in _ACTIVATION_GATED_SERVICE_TYPES
+        or contract.variant in _ACTIVATION_GATED_VARIANTS
+    )
+
+
 async def _reject(
     trace: TraceStore,
     contract_id: UUID,
@@ -59,19 +81,26 @@ async def _reject(
     window_end: datetime,
     requested_kw: Decimal,
     reason_code: str,
+    *,
+    detail: str | None = None,
 ) -> None:
     """Trace a rejection that never reached `OFFERED` (ES04-S05: every rejection is traced with a
-    reason code and its inputs, even when no opportunity/obligation row was created)."""
+    reason code and its inputs, even when no opportunity/obligation row was created). `detail` adds a
+    clear, human-readable explanation to the payload for reasons whose code alone doesn't say why
+    (e.g. `R-ADMIT-REJECT`, which several unrelated admission checks could in principle share)."""
+    payload: dict[str, object] = {
+        "contract_id": str(contract_id),
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "requested_kw": str(requested_kw),
+    }
+    if detail is not None:
+        payload["detail"] = detail
     await trace.append(
         _admission_stream(contract_id),
         "ADMISSION",
         "ADMISSION",
-        {
-            "contract_id": str(contract_id),
-            "window_start": window_start.isoformat(),
-            "window_end": window_end.isoformat(),
-            "requested_kw": str(requested_kw),
-        },
+        payload,
         [reason_code],
     )
 
@@ -83,13 +112,26 @@ async def admit(
     window_start: datetime,
     window_end: datetime,
     requested_kw: Decimal,
+    *,
+    data_center_activation_enabled: bool = False,
 ) -> Opportunity:
     """Admission-time feasibility and eligibility check (02a S2.1). Creates an `OFFERED`
     opportunity (and its paired `OFFERED` obligation) on success; raises `AdmissionError` with a
     `reason_code` and traces the rejection on failure. Never touches any other obligation --
     admission only ever competes for uncommitted headroom later, at a selector gate (BUILD.md S2).
-    """
-    return await admit_priced(repo, trace, contract_id, window_start, window_end, requested_kw)
+
+    `data_center_activation_enabled` (default `False`, `[contracts.activation].data_center`): gates
+    admission of a DATA_CENTER/PIPELINE_AC contract's opportunities behind the full `03 S2.7`
+    activation gate (`_is_activation_gated`) until the closed-loop controllers are confirmed live."""
+    return await admit_priced(
+        repo,
+        trace,
+        contract_id,
+        window_start,
+        window_end,
+        requested_kw,
+        data_center_activation_enabled=data_center_activation_enabled,
+    )
 
 
 async def admit_priced(
@@ -102,6 +144,7 @@ async def admit_priced(
     *,
     value_per_mwh: Decimal | None = None,
     scenario_basis: str = "P50",
+    data_center_activation_enabled: bool = False,
 ) -> Opportunity:
     """Same admission-time feasibility/eligibility check as `admit()`, additionally recording the
     market value (`$/MWh`) and scenario basis a caller priced the opportunity at (02a S1.4's
@@ -123,6 +166,21 @@ async def admit_priced(
     if contract.status != "ACTIVE":
         await _reject(trace, contract_id, window_start, window_end, requested_kw, "R-ADMIT-CONTRACT-INACTIVE")
         raise AdmissionError("R-ADMIT-CONTRACT-INACTIVE")
+    if _is_activation_gated(contract) and not data_center_activation_enabled:
+        await _reject(
+            trace,
+            contract_id,
+            window_start,
+            window_end,
+            requested_kw,
+            "R-ADMIT-REJECT",
+            detail=(
+                f"DATA_CENTER/PIPELINE_AC admission is disabled until the closed-loop controllers "
+                f"are confirmed live (service_type={contract.service_type!r}, "
+                f"variant={contract.variant!r}; set [contracts.activation].data_center = true)"
+            ),
+        )
+        raise AdmissionError("R-ADMIT-REJECT")
 
     rules = await repo.get_product_rules(contract_id)
     rule = _select_product_rule(rules)

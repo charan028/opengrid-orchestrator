@@ -17,6 +17,7 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS, R_AS_RELEASE, R_SUBSTITUTION
+from opengrid.invariants import checks
 from opengrid.invariants.models import CheckState, InvariantsSummary, Violation
 
 #: 00-invariants.md K13's own exception list (never re-declared -- BUILD.md S1 "no duplicated
@@ -285,6 +286,108 @@ async def fetch_covering_trace_info(
     return row[0], frozenset(row[1] or [])
 
 
+async def fetch_shortfall_events(
+    pool: AsyncConnectionPool, *, obligation_id: UUID, window_start: datetime, window_end: datetime
+) -> list[checks.ShortfallEvent]:
+    """K13 best-effort shortfall / K13_RESTORE_LAG (owner decision 2026-09-26): every traced SHORTFALL
+    transition for `obligation_id` in `[window_start, window_end)`, with its `shortfall_kw` (the trace
+    payload `opengrid.engine.gateways.EngineLedgerGateway.record_shortfalls` writes) -- a
+    `shortfall_kw <= 0` event marks the constraint CLEARING. Sorted by time. Bounded the same way
+    `fetch_covering_trace_info` is: the GIN index on `reason_codes`, scoped to one obligation/window."""
+    sql = """
+        SELECT created_at, (payload ->> 'shortfall_kw')::float8, payload ->> 'cycle_id'
+        FROM og.trace
+        WHERE decision_type = 'SHORTFALL'
+          AND payload ->> 'obligation_id' = %(obligation_id)s
+          AND created_at >= %(window_start)s AND created_at < %(window_end)s
+        ORDER BY created_at
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            sql, {"obligation_id": str(obligation_id), "window_start": window_start, "window_end": window_end}
+        )
+        rows = await cur.fetchall()
+    return [checks.ShortfallEvent(at=r[0], shortfall_kw=float(r[1] or 0.0), cycle_id=r[2]) for r in rows]
+
+
+async def fetch_measured_need_sample(
+    pool: AsyncConnectionPool, *, obligation_id: UUID, at: datetime
+) -> checks.MeasuredNeedSample | None:
+    """K13 need-basis violation (b) (owner decision 2026-09-26): the customer's own measured reading
+    behind the obligation's service profile `feedback_signal_ref`
+    (`opengrid.site_ingest.latest.parse_feedback_ref`'s two forms, `site_meter:<site_id>:<field>` /
+    `corridor:<corridor_id>:<field>`), at or before `at` (the dip's own timestamp -- the reading in
+    effect when the dip happened, not "whatever is latest now"). `None` if the obligation has no service
+    profile, an unparseable/unsupported ref, or no reading has ever arrived for that source.
+
+    Bounded to one obligation's contract/profile lookup plus a single most-recent-row-at-or-before-`at`
+    read per table (`ix_site_meter_reading_ts`/`ix_corridor_current_reading_ts`), never a scan proportional
+    to reading volume.
+    """
+    sql_profile = """
+        SELECT c.customer_id::text, sp.feedback_signal_ref
+        FROM og.obligation o
+        JOIN og.contract c ON c.contract_id = o.contract_id
+        JOIN og.service_profile sp ON sp.contract_id = c.contract_id
+        WHERE o.obligation_id = %(obligation_id)s
+          AND sp.version = (
+              SELECT MAX(sp2.version) FROM og.service_profile sp2 WHERE sp2.contract_id = c.contract_id
+          )
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql_profile, {"obligation_id": obligation_id})
+        row = await cur.fetchone()
+    if row is None or row[1] is None:
+        return None
+    customer_id, feedback_signal_ref = row[0], row[1]
+
+    try:  # opengrid.site_ingest ships with the customer-services package; absent, there is no need basis
+        from opengrid.site_ingest.latest import (  # type: ignore[import-untyped,import-not-found,unused-ignore]
+            FeedbackRefError,
+            parse_feedback_ref,
+        )
+    except ImportError:
+        return None
+
+    try:
+        ref = parse_feedback_ref(feedback_signal_ref)
+    except FeedbackRefError:
+        return None
+
+    if ref.kind == "site_meter":
+        sql = """
+            SELECT p_kw, quality FROM og.customer_site_meter_reading
+            WHERE customer_id = %(customer_id)s AND site_id = %(source_id)s AND ts <= %(at)s
+            ORDER BY ts DESC LIMIT 1
+        """
+    else:
+        sql = """
+            SELECT i_ac_a, limit_a, quality FROM og.corridor_current_reading
+            WHERE customer_id = %(customer_id)s AND corridor_id = %(source_id)s AND ts <= %(at)s
+            ORDER BY ts DESC LIMIT 1
+        """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql, {"customer_id": customer_id, "source_id": ref.source_id, "at": at})
+        reading_row = await cur.fetchone()
+    if reading_row is None:
+        return None
+    if ref.kind == "site_meter":
+        return checks.MeasuredNeedSample(
+            kind="site_meter",
+            field=ref.field,
+            value=float(reading_row[0]),
+            limit=None,
+            quality=reading_row[1],
+        )
+    return checks.MeasuredNeedSample(
+        kind="corridor",
+        field=ref.field,
+        value=float(reading_row[0]),
+        limit=float(reading_row[1]),
+        quality=reading_row[2],
+    )
+
+
 async def fetch_orphan_reservations(
     pool: AsyncConnectionPool, *, limit: int = _DEFAULT_BATCH_LIMIT
 ) -> list[tuple[str, str, str, datetime]]:
@@ -528,6 +631,7 @@ async def read_summary(pool: AsyncConnectionPool) -> InvariantsSummary:
         CHECK_K2_DOUBLE_SOLD,
         CHECK_K13_LOCK_VIOLATION,
         CHECK_K13_OUTAGE_GAP,
+        CHECK_K13_RESTORE_LAG,
         CHECK_ORPHAN_COMMITMENT,
         CHECK_ORPHAN_RESERVATION,
     )
@@ -543,6 +647,7 @@ async def read_summary(pool: AsyncConnectionPool) -> InvariantsSummary:
         double_sold_kwh=totals.get(CHECK_K2_DOUBLE_SOLD, 0.0),
         lock_violations=int(totals.get(CHECK_K13_LOCK_VIOLATION, 0)),
         outage_gaps=int(totals.get(CHECK_K13_OUTAGE_GAP, 0)),
+        restore_lag=int(totals.get(CHECK_K13_RESTORE_LAG, 0)),
         orphan_reservations=last_counts.get(CHECK_ORPHAN_RESERVATION, 0),
         orphan_commitments=last_counts.get(CHECK_ORPHAN_COMMITMENT, 0),
         as_of=min(run_ats) if run_ats else None,

@@ -6,19 +6,32 @@ pattern."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from opengrid.health import queries
+
+NOW = datetime(2026, 9, 26, 0, 5, 0, tzinfo=UTC)
+SINCE = datetime(2026, 9, 26, 0, 0, 0, tzinfo=UTC)
 
 pytestmark = pytest.mark.asyncio
 
 
 class FakeCursor:
     def __init__(self) -> None:
-        self.executed: list[tuple[str, list]] = []
+        self.executed: list[tuple[str, object]] = []
 
     async def execute(self, sql, params=None):
-        self.executed.append((str(sql), list(params) if params is not None else []))
+        # Preserve the params' own shape: a dict (named placeholders, e.g. INSERT/DELETE here) stays a
+        # dict; a list/tuple (positional placeholders, e.g. the batched hub-health UPDATE) is copied.
+        if params is None:
+            recorded: object = []
+        elif isinstance(params, dict):
+            recorded = dict(params)
+        else:
+            recorded = list(params)
+        self.executed.append((str(sql), recorded))
 
     async def __aenter__(self):
         return self
@@ -91,3 +104,51 @@ async def test_write_hub_health_batch_chunks_at_500_rows() -> None:
     assert len(update_statements) == 3
     assert [len(p) // 2 for _s, p in update_statements] == [500, 500, 200]
     assert pool._conn.committed is True
+
+
+class FetchingFakeCursor(FakeCursor):
+    """Like `FakeCursor`, but `execute` on the configured SELECT returns `rows` from `fetchall`, so
+    `write_degraded_modes`'s internal `fetch_degraded_modes` read has something to work with."""
+
+    def __init__(self, rows: list[tuple[str, object]]) -> None:
+        super().__init__()
+        self._rows = rows
+
+    async def fetchall(self):
+        return self._rows
+
+
+async def test_write_degraded_modes_noop_when_nothing_changed() -> None:
+    """Defect fix (R2): `evaluate_once` now persists degraded modes every cycle -- when the active set
+    already matches what's stored, this must be a read-only no-op (no INSERT/DELETE/commit)."""
+    cursor = FetchingFakeCursor(rows=[("HOLD_LOCAL_AUTONOMY", SINCE)])
+    pool = FakePool(cursor)
+
+    await queries.write_degraded_modes(pool, frozenset({"HOLD_LOCAL_AUTONOMY"}), now=NOW)
+
+    assert len(cursor.executed) == 1  # only the SELECT from fetch_degraded_modes
+    assert pool._conn.committed is False
+
+
+async def test_write_degraded_modes_inserts_new_and_deletes_resolved() -> None:
+    cursor = FetchingFakeCursor(rows=[("HOLD_LOCAL_AUTONOMY", SINCE)])
+    pool = FakePool(cursor)
+
+    await queries.write_degraded_modes(pool, frozenset({"NO_NEW_COMMITMENTS"}), now=NOW)
+
+    statements = [s for s, _p in cursor.executed]
+    assert "SET LOCAL synchronous_commit TO OFF" in statements
+    inserted = [p for s, p in cursor.executed if "INSERT INTO og.degraded_mode_state" in s]
+    deleted = [p for s, p in cursor.executed if "DELETE FROM og.degraded_mode_state" in s]
+    assert inserted == [{"mode": "NO_NEW_COMMITMENTS", "since": NOW}]
+    assert deleted == [{"mode": "HOLD_LOCAL_AUTONOMY"}]
+    assert pool._conn.committed is True
+
+
+async def test_fetch_degraded_modes_returns_mode_since_pairs() -> None:
+    cursor = FetchingFakeCursor(rows=[("HOLD", SINCE)])
+    pool = FakePool(cursor)
+
+    result = await queries.fetch_degraded_modes(pool)
+
+    assert result == [("HOLD", SINCE)]

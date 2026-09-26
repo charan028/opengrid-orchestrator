@@ -119,8 +119,17 @@ class WorkOrderRepoPort(Protocol):
     ) -> UUID: ...
 
     async def close(
-        self, work_order_id: UUID, *, closed_at: datetime, technician_notes: str | None
-    ) -> None: ...
+        self,
+        work_order_id: UUID,
+        *,
+        closed_at: datetime,
+        technician_notes: str | None,
+        status: str = "CLOSED",
+    ) -> None:
+        """`status` is `'CLOSED'` (normal completion, e.g. after a replacement) or `'CANCELLED'` (the
+        drift that opened it was a false positive -- `og.maintenance_work_order`'s own CHECK constraint
+        already allows both, 0011_asset_health.sql S3)."""
+        ...
 
     async def open_for_hub(self, hub_id: str) -> MaintenanceWorkOrder | None:
         """The hub's currently `OPEN`/`IN_PROGRESS` work order, if any -- so replacement/recommissioning

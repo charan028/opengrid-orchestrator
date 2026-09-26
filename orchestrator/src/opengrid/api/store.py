@@ -493,7 +493,7 @@ class PgStore:
         sql = f"""
             SELECT p.obligation_id, o.service_type, o.contract_id, p.interval_start, p.interval_end,
                    p.revenue, p.energy_cost, p.degradation_cost, p.penalty, p.net_value,
-                   p.rule_baseline_value, p.forgone_upside
+                   p.rule_baseline_value, p.forgone_upside, p.delivery_charge
             FROM og.pnl p JOIN og.obligation o ON o.obligation_id = p.obligation_id
             WHERE {" AND ".join(clauses)}
             ORDER BY p.interval_start DESC LIMIT 1000

@@ -14,6 +14,7 @@ from opengrid.invariants.models import (
     CHECK_K2_DOUBLE_SOLD,
     CHECK_K13_LOCK_VIOLATION,
     CHECK_K13_OUTAGE_GAP,
+    CHECK_K13_RESTORE_LAG,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_ORPHAN_RESERVATION,
     CheckState,
@@ -39,6 +40,8 @@ class _FakeQueries:
         self.grant_cycle_series_by_obligation: dict = {}
         self.covering_trace_info_by_obligation: dict = {}  # obligation_id -> (earliest_at, cycle_ids)
         self.need_basis_obligation_ids: frozenset[str] = frozenset()
+        self.shortfall_events_by_obligation: dict = {}
+        self.measured_need_sample_by_obligation: dict = {}
 
         self.orphan_reservation_rows: list[tuple] = []
         self.orphan_commitment_rows: list[tuple] = []
@@ -78,6 +81,12 @@ class _FakeQueries:
 
     async def fetch_need_basis_obligation_ids(self, pool, obligation_ids):
         return frozenset(str(oid) for oid in obligation_ids) & self.need_basis_obligation_ids
+
+    async def fetch_shortfall_events(self, pool, *, obligation_id, window_start, window_end):
+        return self.shortfall_events_by_obligation.get(obligation_id, [])
+
+    async def fetch_measured_need_sample(self, pool, *, obligation_id, at):
+        return self.measured_need_sample_by_obligation.get(obligation_id)
 
     async def fetch_orphan_reservations(self, pool, *, limit=5000):
         return self.orphan_reservation_rows
@@ -135,9 +144,10 @@ async def test_run_once_reports_zero_on_clean_data(fake_queries: _FakeQueries) -
     assert outcomes[CHECK_K2_DOUBLE_SOLD].count == 0
     assert outcomes[CHECK_K13_LOCK_VIOLATION].count == 0
     assert outcomes[CHECK_K13_OUTAGE_GAP].count == 0
+    assert outcomes[CHECK_K13_RESTORE_LAG].count == 0
     assert outcomes[CHECK_ORPHAN_RESERVATION].count == 0
     assert outcomes[CHECK_ORPHAN_COMMITMENT].count == 0
-    assert len(fake_queries.upserts) == 6  # every check persisted its (empty) result
+    assert len(fake_queries.upserts) == 7  # every check persisted its (empty) result
 
 
 async def test_run_once_detects_seeded_reserve_breach(fake_queries: _FakeQueries) -> None:
@@ -167,9 +177,10 @@ async def test_run_once_k1_loops_until_a_short_batch_catches_up(
 
 async def test_run_once_detects_seeded_double_sold_using_true_capability(fake_queries: _FakeQueries) -> None:
     fake_queries.reservation_agg_rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 700.0)]
-    # A hub row that makes compute_bank_capabilities_kw resolve bank-000's true capability to 600 kW.
+    # A hub row that makes compute_bank_capabilities_kw resolve bank-000's true capability to 600 kW (enough
+    # stored energy to sustain its rating for the whole interval: capability is energy-limited, ES03-S05).
     fake_queries.bank_capability_inputs = [
-        ("bank-000", 10_000.0, 0.0, 39.2, 7.84, 600.0, 0.9487, 0.9487, 39.2, "online"),
+        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 600.0, 0.9487, 0.9487, 1000.0, "online"),
     ]
 
     outcomes = await invariants.run_once()
@@ -265,6 +276,45 @@ async def test_run_once_need_basis_obligation_dip_is_never_flagged(fake_queries:
     assert outcomes[CHECK_K13_OUTAGE_GAP].count == 0
 
 
+async def test_run_once_need_basis_flags_unmet_measured_need(fake_queries: _FakeQueries) -> None:
+    """K13 need-basis violation (b): a real measured need with no delivery and no override IS flagged."""
+    interval_start = NOW
+    interval_end = NOW + timedelta(minutes=15)
+    fake_queries.lock_commitment_candidates = [("ob-dc", interval_start, interval_end, 100.0)]
+    fake_queries.grant_cycle_series_by_obligation["ob-dc"] = []  # total silence
+    fake_queries.need_basis_obligation_ids = frozenset({"ob-dc"})
+    from opengrid.invariants.checks import MeasuredNeedSample
+
+    fake_queries.measured_need_sample_by_obligation["ob-dc"] = MeasuredNeedSample(
+        kind="site_meter", field="p_kw", value=50.0, limit=None, quality="GOOD"
+    )
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_K13_OUTAGE_GAP].count == 1  # total silence -> classified via the gap path
+
+
+async def test_run_once_restore_lag_flagged_when_not_restored_in_time(fake_queries: _FakeQueries) -> None:
+    from opengrid.invariants.checks import ShortfallEvent
+
+    interval_start = NOW
+    interval_end = NOW + timedelta(minutes=15)
+    cleared_at = interval_start + timedelta(minutes=1)
+    fake_queries.lock_commitment_candidates = [("ob-1", interval_start, interval_end, 100.0)]
+    fake_queries.grant_cycle_series_by_obligation["ob-1"] = [
+        (cleared_at + timedelta(seconds=2), 60.0, "cyc-1"),
+        (cleared_at + timedelta(seconds=4), 60.0, "cyc-2"),
+    ]
+    fake_queries.shortfall_events_by_obligation["ob-1"] = [
+        ShortfallEvent(at=interval_start, shortfall_kw=40.0, cycle_id="cyc-0"),
+        ShortfallEvent(at=cleared_at, shortfall_kw=0.0, cycle_id="cyc-1b"),
+    ]
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_K13_RESTORE_LAG].count == 1
+
+
 async def test_run_once_detects_seeded_orphans(fake_queries: _FakeQueries) -> None:
     fake_queries.orphan_reservation_rows = [("res-1", "ob-1", "bank-000", NOW)]
     fake_queries.orphan_commitment_rows = [("com-1", "ob-2", NOW, "REJECTED")]
@@ -285,7 +335,7 @@ async def test_run_once_carries_forward_watermark_across_runs(fake_queries: _Fak
     fake_queries.reserve_batches = [([], None)]
     fake_queries._reserve_batch_calls = 0
     await invariants.run_once()
-    second_upsert = next(u for u in fake_queries.upserts[6:] if u["check_name"] == CHECK_K1_RESERVE_BREACH)
+    second_upsert = next(u for u in fake_queries.upserts[7:] if u["check_name"] == CHECK_K1_RESERVE_BREACH)
     assert second_upsert["violation_count"] == 0
     assert second_upsert["total_violations"] == 1  # unchanged from the first run's total
 
@@ -297,7 +347,7 @@ async def test_run_once_does_not_recount_a_persisting_violation_across_runs(
     counted into the running total once, not once per run."""
     fake_queries.reservation_agg_rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 700.0)]
     fake_queries.bank_capability_inputs = [
-        ("bank-000", 10_000.0, 0.0, 39.2, 7.84, 600.0, 0.9487, 0.9487, 39.2, "online"),
+        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 600.0, 0.9487, 0.9487, 1000.0, "online"),
     ]
 
     await invariants.run_once()

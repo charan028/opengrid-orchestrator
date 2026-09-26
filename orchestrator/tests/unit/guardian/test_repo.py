@@ -528,3 +528,52 @@ def test_g19_active_obligations_are_scoped_to_the_current_interval_on_this_bank(
     sql = repo._ACTIVE_OBLIGATIONS_FOR_BANK_SQL
     assert "r.interval_start <= now() AND r.interval_end > now()" in sql
     assert "SUM(r.amount)" in sql
+
+
+async def test_load_zones_by_bank():
+    cursor = FakeCursor([[("bank-000", "LZ_NORTH"), ("bank-001", "LZ_SOUTH")]])
+    assert await repo.load_zones_by_bank(FakePool(cursor)) == {"bank-000": "LZ_NORTH", "bank-001": "LZ_SOUTH"}
+
+
+async def test_scope_posture_is_upserted_and_a_stop_is_only_proposed():
+    cursor = FakeCursor([None, None])
+    pool = FakePool(cursor)
+    port = repo.PgScopePosturePort(pool)  # type: ignore[arg-type]
+    await port.set_posture(
+        "ZONE", "LZ_NORTH", posture="CONSERVATIVE", veto_ratio=0.2, consecutive=3, stop_requested=True
+    )
+    await port.propose_safe_stop("ZONE", "LZ_NORTH", "3 consecutive CONSERVATIVE ticks")
+
+    upsert_sql, params = cursor.executed[0]
+    assert "og.scope_posture" in upsert_sql and "ON CONFLICT (scope_kind, scope_ref)" in upsert_sql
+    assert params["posture"] == "CONSERVATIVE" and params["stop_requested"] is True
+    propose_sql, propose_params = cursor.executed[1]
+    assert "og.operator_action" in propose_sql and "'SAFE_STOP_ENGAGE'" in propose_sql
+    assert "confirmed_at" not in propose_sql  # an unconfirmed proposal: a person decides
+    assert propose_params["target_ref"] == "ZONE:LZ_NORTH"
+    assert "stop_event" not in propose_sql
+
+
+async def test_alert_port_raises_once_while_open_and_clears_by_condition(monkeypatch):
+    import opengrid.health.queries as health_queries
+
+    raised, cleared = [], []
+
+    async def fake_raise(pool, finding, *, opened_at):
+        raised.append((finding.rule, finding.detail["condition_key"]))
+        return 1
+
+    async def fake_clear(pool, alert_id, *, cleared_at=None):
+        cleared.append(alert_id)
+
+    monkeypatch.setattr(health_queries, "raise_alert", fake_raise)
+    monkeypatch.setattr(health_queries, "clear_alert", fake_clear)
+
+    already_open = repo.PgAlertPort(FakePool(FakeCursor([[(7,)]])))  # type: ignore[arg-type]
+    await already_open.raise_alert("ALR-SCOPE-CONSERVATIVE", "warning", "s", "BANK:bank-000", {})
+    fresh = repo.PgAlertPort(FakePool(FakeCursor([[]])))  # type: ignore[arg-type]
+    await fresh.raise_alert("ALR-SCOPE-CONSERVATIVE", "warning", "s", "BANK:bank-000", {})
+    closing = repo.PgAlertPort(FakePool(FakeCursor([[(7,), (9,)]])))  # type: ignore[arg-type]
+    await closing.clear_alert("ALR-SCOPE-CONSERVATIVE", "BANK:bank-000")
+
+    assert raised == [("ALR-SCOPE-CONSERVATIVE", "BANK:bank-000")] and cleared == [7, 9]

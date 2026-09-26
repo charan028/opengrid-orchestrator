@@ -305,6 +305,28 @@ def check_g19_need_basis(
     return CheckOutcome.passed("G-19")
 
 
+#: `og.obligation.service_type` of an ancillary-service award, held until ERCOT deploys it.
+AS_SERVICE_TYPE = "ERCOT_AS"
+
+
+def check_g19_as_hold(
+    obligation_id: str, *, service_type: str | None, deployment_active: bool | None, borrowed_by: list[str]
+) -> CheckOutcome:
+    """K13 AS capacity hold (lead decision 2026-09-26, migration 0020): an `R-GRANT-AS-HOLD` grant below the
+    commitment is signed only if the guardian's own reads show (a) the obligation is `ERCOT_AS`, (b) no
+    deployment covering now is active for it (or for every AS award) -- while deployed it must deliver, and
+    a reduction needs the normal override/shortfall reasons -- and (c) no other obligation on the bank is
+    granted beyond its own commitment (the held reservation is not being used). `deployment_active` None
+    means no read: VETO."""
+    if service_type != AS_SERVICE_TYPE:
+        return CheckOutcome("G-19", False, "AS_HOLD_NOT_AN_AS_AWARD", obligation_id=obligation_id)
+    if deployment_active is None or deployment_active:
+        return CheckOutcome("G-19", False, "AS_HOLD_WHILE_DEPLOYED", obligation_id=obligation_id)
+    if borrowed_by:
+        return CheckOutcome("G-19", False, "AS_HOLD_RESERVATION_REASSIGNED", obligation_id=obligation_id)
+    return CheckOutcome.passed("G-19")
+
+
 def check_g20_clock_quality(offset_ms: float, max_offset_ms: float) -> CheckOutcome:
     """K12: refuse to sign when the guardian's own clock offset from NTP exceeds its limit. Runs first,
     before every other check (02a S6.2a) -- every freshness/lease check downstream depends on this

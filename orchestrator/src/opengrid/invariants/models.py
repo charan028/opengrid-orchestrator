@@ -18,6 +18,9 @@ CHECK_K13_LOCK_VIOLATION = "K13_LOCK_VIOLATION"
 #: distinct per the owner's policy call; the classification itself lives in one place
 #: (`checks.classify_dip`).
 CHECK_K13_OUTAGE_GAP = "K13_OUTAGE_GAP"
+#: Owner decision 2026-09-26: after a SHORTFALL's constraint clears, the commitment must be restored
+#: within 2 grant cycles -- a separate, named violation from K13_LOCK_VIOLATION/K13_OUTAGE_GAP.
+CHECK_K13_RESTORE_LAG = "K13_RESTORE_LAG"
 CHECK_ORPHAN_RESERVATION = "ORPHAN_RESERVATION"
 CHECK_ORPHAN_COMMITMENT = "ORPHAN_COMMITMENT"
 CHECK_TRACE_VERIFY = "TRACE_VERIFY"
@@ -27,6 +30,7 @@ ALL_CHECKS: tuple[str, ...] = (
     CHECK_K2_DOUBLE_SOLD,
     CHECK_K13_LOCK_VIOLATION,
     CHECK_K13_OUTAGE_GAP,
+    CHECK_K13_RESTORE_LAG,
     CHECK_ORPHAN_RESERVATION,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_TRACE_VERIFY,
@@ -110,6 +114,7 @@ class InvariantsSummary:
     double_sold_kwh: float
     lock_violations: int
     outage_gaps: int
+    restore_lag: int
     orphan_reservations: int
     orphan_commitments: int
     as_of: datetime | None
@@ -124,6 +129,7 @@ class InvariantsSummary:
             double_sold_kwh=0.0,
             lock_violations=0,
             outage_gaps=0,
+            restore_lag=0,
             orphan_reservations=0,
             orphan_commitments=0,
             as_of=None,

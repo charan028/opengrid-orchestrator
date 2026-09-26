@@ -42,6 +42,13 @@ FROM og.bank b
 _FETCH_LATEST_HUB_SEEN_AT_SQL = "SELECT MAX(last_seen_at) FROM og.hub_state"
 _FETCH_LATEST_SCADA_OBS_AT_SQL = "SELECT MAX(ts) FROM og.feed_obs WHERE source = 'scada'"
 
+_FETCH_DEGRADED_MODES_SQL = "SELECT mode, since FROM og.degraded_mode_state"
+_INSERT_DEGRADED_MODE_SQL = """
+INSERT INTO og.degraded_mode_state (mode, since) VALUES (%(mode)s, %(since)s)
+ON CONFLICT (mode) DO NOTHING
+"""
+_DELETE_DEGRADED_MODE_SQL = "DELETE FROM og.degraded_mode_state WHERE mode = %(mode)s"
+
 _FETCH_OPEN_ALERTS_SQL = """
 SELECT id, rule, severity, summary, detail, opened_at, cleared_at, acked_by
 FROM og.alert WHERE cleared_at IS NULL
@@ -152,6 +159,41 @@ async def fetch_latest_scada_obs_at(pool: AsyncConnectionPool) -> datetime | Non
         await cur.execute(_FETCH_LATEST_SCADA_OBS_AT_SQL)
         row = await cur.fetchone()
     return row[0] if row is not None else None
+
+
+async def fetch_degraded_modes(pool: AsyncConnectionPool) -> list[tuple[str, datetime]]:
+    """Returns `(mode, since)` for every currently-active degraded mode (`og.degraded_mode_state`,
+    migration 0020) -- the persisted form of `opengrid.health.rules.derive_degraded_modes`'s output, read
+    by `opengrid.api.routers.health` for `GET /og/api/health` and by the UI's degraded-mode banners."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_FETCH_DEGRADED_MODES_SQL)
+        rows = await cur.fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+async def write_degraded_modes(
+    pool: AsyncConnectionPool, active_modes: frozenset[str], *, now: datetime
+) -> None:
+    """Persists the currently-active degraded-mode set (defect fix: previously computed only in-process
+    inside og-settle every cycle and never exposed to `opengrid.api`/the UI). Inserts a fresh row
+    (`since=now`) for each newly-active mode and deletes rows for modes no longer active; a mode that
+    stays active across cycles keeps its original `since`. There are at most 4 possible modes
+    (`opengrid.health.model.DegradedMode`), so this is a handful of tiny statements per cycle -- not a
+    batching concern like `write_hub_health_batch`'s ~2,000 hubs. Async commit (`_ASYNC_COMMIT_SQL`),
+    matching the rest of this module's soft-state writes; a no-op (no round trip) when nothing changed.
+    """
+    current = {mode for mode, _since in await fetch_degraded_modes(pool)}
+    to_insert = active_modes - current
+    to_delete = current - active_modes
+    if not to_insert and not to_delete:
+        return
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_ASYNC_COMMIT_SQL)
+        for mode in to_insert:
+            await cur.execute(_INSERT_DEGRADED_MODE_SQL, {"mode": mode, "since": now})
+        for mode in to_delete:
+            await cur.execute(_DELETE_DEGRADED_MODE_SQL, {"mode": mode})
+        await conn.commit()
 
 
 async def fetch_open_alerts(pool: AsyncConnectionPool) -> list[Alert]:

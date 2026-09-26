@@ -42,6 +42,7 @@ from opengrid.platform.log import configure_logging
 from opengrid.platform.process import Cadence, run_forever
 from opengrid.settle import close_settled_obligations, configure, run_settle_cycle, run_trace_pruning_cycle
 from opengrid.settle.pg_backend import PgSettleBackend
+from opengrid.settle.tariffs import TdspTariff, load_tdsp_tariffs, resolve_tdsp_tariffs_path
 from opengrid.trace import TraceStore
 from opengrid.trace.pg_backend import PgTraceBackend
 
@@ -208,9 +209,30 @@ async def _run() -> None:
     cfg = load_config(os.environ.get("OG_CONFIG"))
     pool = await make_pool(cfg)
     trace_store = TraceStore(PgTraceBackend(pool))
-    configure(PgSettleBackend(pool), trace_store, trace_pool=pool)
-    # FULFILLED/SHORTFALL -> SETTLED goes through opengrid.contracts (single writer of obligation state).
-    contracts.configure(PgContractsRepo(pool), trace_store)
+    # 09 D5's M1 TDSP delivery charge: loaded once at startup, never re-read per settlement cycle.
+    # Missing/malformed tdsp_tariffs.toml degrades to "M1 disabled" (delivery_charge settles as 0),
+    # logged loudly rather than crashing og-settle over a pricing config file (K7 "degrade, don't
+    # trip") -- BUILD.md S5a still applies: this is a logged degradation, not a silent one.
+    tdsp_tariffs: list[TdspTariff] | None = None
+    zone_default_tdsp: dict[str, str] | None = None
+    try:
+        tdsp_tariffs, zone_default_tdsp = load_tdsp_tariffs(resolve_tdsp_tariffs_path(cfg.source_path))
+    except (OSError, ValueError, KeyError):
+        logger.exception("could not load tdsp_tariffs.toml: M1 delivery charge disabled this run")
+    configure(
+        PgSettleBackend(pool),
+        trace_store,
+        trace_pool=pool,
+        tdsp_tariffs=tdsp_tariffs,
+        zone_default_tdsp=zone_default_tdsp,
+    )
+    # FULFILLED/SHORTFALL -> SETTLED goes through opengrid.contracts (single writer of obligation
+    # state). og-settle never calls admit()/admit_priced() itself, but this process-wide config value
+    # is threaded through anyway for consistency with whichever process does (og-engine).
+    data_center_activation_enabled = bool(cfg.get("contracts.activation.data_center", False))
+    contracts.configure(
+        PgContractsRepo(pool), trace_store, data_center_activation_enabled=data_center_activation_enabled
+    )
     health.configure(pool, cfg)
 
     health_interval_s = float(cfg.get("health.heartbeat_interval_s", _DEFAULT_HEALTH_INTERVAL_S))

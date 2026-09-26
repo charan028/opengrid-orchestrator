@@ -38,6 +38,8 @@ class FakeObligationSetup:
     samples: list[PowerSample]
     rule_baseline_delivered_kwh: Decimal | None = None
     best_competing_value_per_kwh: Decimal | None = None
+    measured_need_kwh: Decimal | None = None
+    grid_charged_kwh: Decimal = Decimal("0")
 
 
 @dataclass
@@ -49,6 +51,7 @@ class FakeSettleBackend:
     meter_intervals: dict[tuple[UUID, datetime], ExistingMeterInterval] = field(default_factory=dict)
     invoice_lines: dict[tuple[UUID, str], ExistingInvoiceLineRow] = field(default_factory=dict)
     pnl_rows: dict[tuple[UUID, datetime], ExistingPnl] = field(default_factory=dict)
+    performance_rows: dict[tuple[UUID, datetime], tuple[Decimal | None, bool]] = field(default_factory=dict)
     pending: list[tuple[UUID, datetime, datetime]] = field(default_factory=list)
     settleable: list[UUID] = field(default_factory=list)
 
@@ -106,6 +109,7 @@ class FakeSettleBackend:
         compliance_pct: Decimal | None,
         passed_threshold: bool,
     ) -> UUID:
+        self.performance_rows[(obligation_id, interval_start)] = (compliance_pct, passed_threshold)
         return uuid4()
 
     async def fetch_active_invoice_line(
@@ -150,6 +154,7 @@ class FakeSettleBackend:
         energy_cost: Decimal,
         degradation_cost: Decimal,
         penalty: Decimal,
+        delivery_charge: Decimal,
         net_value: Decimal,
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
@@ -173,6 +178,16 @@ class FakeSettleBackend:
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
     ) -> Decimal | None:
         return self.obligations[obligation_id].best_competing_value_per_kwh
+
+    async def fetch_measured_need_kwh(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal | None:
+        return self.obligations[obligation_id].measured_need_kwh
+
+    async def fetch_grid_charged_kwh(
+        self, obligation_id: UUID, interval_start: datetime, interval_end: datetime
+    ) -> Decimal:
+        return self.obligations[obligation_id].grid_charged_kwh
 
     async def fetch_invoice_lines_for_period(
         self, contract_id: UUID, period_start: date, period_end: date
@@ -275,12 +290,15 @@ def make_context(
     service_type: ServiceType = "DIST_DEFERRAL",
     committed_kw: Decimal = Decimal("10"),
     price_per_kwh: Decimal = Decimal("0.10"),
+    charging_cost_per_kwh: Decimal = Decimal("0.03"),
     wholesale_price_per_kwh: Decimal = Decimal("0.03"),
     eta_d: Decimal = Decimal("0.9487"),
     degradation_cost_per_kwh: Decimal = Decimal("0.03"),
     penalty: PenaltyParams | None = None,
     period_start: date = date(2026, 9, 26),
     period_end: date = date(2026, 9, 26),
+    is_need_basis: bool = False,
+    zone: str | None = None,
 ) -> ObligationSettlementContext:
     return ObligationSettlementContext(
         obligation_id=obligation_id or uuid4(),
@@ -288,12 +306,15 @@ def make_context(
         service_type=service_type,
         committed_kw=committed_kw,
         price_per_kwh=price_per_kwh,
+        charging_cost_per_kwh=charging_cost_per_kwh,
         wholesale_price_per_kwh=wholesale_price_per_kwh,
         eta_d=eta_d,
         degradation_cost_per_kwh=degradation_cost_per_kwh,
         penalty=penalty,
         period_start=period_start,
         period_end=period_end,
+        is_need_basis=is_need_basis,
+        zone=zone,
     )
 
 

@@ -37,6 +37,8 @@ from opengrid.core.physics import (
     recharge_headroom,
 )
 from opengrid.core.timeutil import is_stale
+from opengrid.health.model import HealthThresholds
+from opengrid.health.rules import classify_hub_health
 from opengrid.platform.config import Config
 from opengrid.platform.metrics import hubs as hubs_gauge
 from opengrid.platform.metrics import telemetry_fresh_ratio
@@ -49,7 +51,7 @@ fleet_rows_dropped_total = Counter(
     labelnames=("kind",),  # telemetry | ack
 )
 
-HubHealth = str  # "online" | "stale" | "offline" | "fault" -- see _classify_health
+HubHealth = str  # "online" | "stale" | "offline" | "fault" -- opengrid.health.rules.classify_hub_health
 
 
 class AvailableCapability(NamedTuple):
@@ -160,14 +162,17 @@ class _BankRuntime:
     hub_ids: set[str] = field(default_factory=set)
 
 
-_HUB_STALE_S_DEFAULT = 6.0
 _HUB_OFFLINE_S_DEFAULT = 30.0
 _TELEMETRY_INTERVAL_S_DEFAULT = 2.0
 
 _backend: FleetBackend | None = None
-_hub_stale_s: float = _HUB_STALE_S_DEFAULT
 _hub_offline_s: float = _HUB_OFFLINE_S_DEFAULT
 _telemetry_interval_s: float = _TELEMETRY_INTERVAL_S_DEFAULT
+#: The ONE hub-health classifier's thresholds (`opengrid.health.rules.classify_hub_health`): online
+#: <= 2 x telemetry interval, offline after `hub_offline_s`. Cached once per `configure()`.
+_thresholds: HealthThresholds = HealthThresholds(
+    hub_offline_s=_HUB_OFFLINE_S_DEFAULT, telemetry_interval_s=_TELEMETRY_INTERVAL_S_DEFAULT
+)
 
 _hubs: dict[str, _HubRuntime] = {}
 _banks: dict[str, _BankRuntime] = {}
@@ -182,11 +187,11 @@ def configure(backend: FleetBackend, cfg: Config) -> None:
     """Wire the twin to its storage backend and read its two health thresholds from config
     (`[health].hub_stale_s`/`hub_offline_s`, 02b S1.4). Called once by `opengrid.engine.main` at
     startup; safe to call again in tests to reset module state between cases."""
-    global _backend, _hub_stale_s, _hub_offline_s, _telemetry_interval_s
+    global _backend, _hub_offline_s, _telemetry_interval_s, _thresholds
     _backend = backend
-    _hub_stale_s = float(cfg.get("health.hub_stale_s", _HUB_STALE_S_DEFAULT))
     _hub_offline_s = float(cfg.get("health.hub_offline_s", _HUB_OFFLINE_S_DEFAULT))
     _telemetry_interval_s = float(cfg.get("fleet.telemetry_interval_s", _TELEMETRY_INTERVAL_S_DEFAULT))
+    _thresholds = HealthThresholds(hub_offline_s=_hub_offline_s, telemetry_interval_s=_telemetry_interval_s)
     _hubs.clear()
     _banks.clear()
     _pending_telemetry.clear()
@@ -248,26 +253,15 @@ async def load_topology() -> None:
     logger.info("fleet topology loaded", extra={"hubs": len(_hubs), "banks": len(_banks)})
 
 
-def _classify_health(*, fault_code: str | None, last_seen_at: datetime | None, now: datetime) -> HubHealth:
-    """K7/02b S6.4: fault (hub-reported) is independent of timing; otherwise online/stale/offline is
-    purely `age = now - last_seen_at` compared against the two configured thresholds, via the single
-    shared `core.timeutil.is_stale` primitive (02b S12) -- never re-derived here."""
-    if fault_code:
-        return "fault"
-    if is_stale(last_seen_at, _hub_offline_s, now=now):
-        return "offline"
-    if is_stale(last_seen_at, _hub_stale_s, now=now):
-        return "stale"
-    return "online"
-
-
 def hub_health(hub_id: str, *, now: datetime | None = None) -> HubHealth:
     """Current classification for one hub (TS-03-04). Raises `LookupError` for an unknown hub."""
     runtime = _hubs.get(hub_id)
     if runtime is None:
         raise LookupError(f"unknown hub_id: {hub_id}")
     now = now or datetime.now(UTC)
-    return _classify_health(fault_code=runtime.fault_code, last_seen_at=runtime.last_seen_at, now=now)
+    return classify_hub_health(
+        fault_code=runtime.fault_code, last_seen_at=runtime.last_seen_at, now=now, thresholds=_thresholds
+    )
 
 
 async def ingest_telemetry(payload: dict[str, Any]) -> None:
@@ -355,8 +349,11 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
     fresh_threshold_s = 2 * _telemetry_interval_s  # 02b S6.6: "no older than 2x telemetry interval"
 
     for runtime in _hubs.values():
-        classification = _classify_health(
-            fault_code=runtime.fault_code, last_seen_at=runtime.last_seen_at, now=now
+        classification = classify_hub_health(
+            fault_code=runtime.fault_code,
+            last_seen_at=runtime.last_seen_at,
+            now=now,
+            thresholds=_thresholds,
         )
         health_counts[classification] = health_counts.get(classification, 0) + 1
         fresh = not is_stale(runtime.last_seen_at, fresh_threshold_s, now=now)
@@ -364,7 +361,7 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
         if runtime.last_seen_at is None:
             continue
         # HubState.health accepts the full vocabulary (online/stale/offline/fault), so persist as classified.
-        persisted_health: Literal["online", "stale", "offline", "fault"] = classification  # type: ignore[assignment]
+        persisted_health: Literal["online", "stale", "offline", "fault"] = classification
         states.append(
             HubState(
                 hub_id=runtime.hub_id,
@@ -488,8 +485,11 @@ async def capability(bank_id: str, interval_start: datetime) -> AvailableCapabil
 
     for hub_id in bank_rt.hub_ids:
         runtime = _hubs[hub_id]
-        classification = _classify_health(
-            fault_code=runtime.fault_code, last_seen_at=runtime.last_seen_at, now=now
+        classification = classify_hub_health(
+            fault_code=runtime.fault_code,
+            last_seen_at=runtime.last_seen_at,
+            now=now,
+            thresholds=_thresholds,
         )
         if classification != "online":
             excluded.add(hub_id)
@@ -570,8 +570,11 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
     snapshots: list[HubCapabilitySnapshot] = []
     for hub_id in bank_rt.hub_ids:
         runtime = _hubs[hub_id]
-        classification = _classify_health(
-            fault_code=runtime.fault_code, last_seen_at=runtime.last_seen_at, now=now
+        classification = classify_hub_health(
+            fault_code=runtime.fault_code,
+            last_seen_at=runtime.last_seen_at,
+            now=now,
+            thresholds=_thresholds,
         )
         free_discharge_kw = 0.0
         soc_kwh: float | None = None

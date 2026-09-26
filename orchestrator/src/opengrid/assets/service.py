@@ -12,6 +12,7 @@ never signs a `CalibrationCommand`; it only builds the candidate and asks the gu
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -56,15 +57,45 @@ class AssetHealthPorts:
     sensitive_grants: SensitiveGrantPort
 
 
+#: R2 incident proposal (2026-09-26, see `repo.py`'s "LIVE BUG FIX" and `runner.py`'s "SWEEP DISABLED"):
+#: in addition to `core.pq.is_persistent_drift`'s existing ">= 90% of the window" rule, also require the
+#: most recent `N` summaries (chronological tail, `DriftObservationWindow.exceeded_per_summary` is now
+#: sorted ascending by `repo.PgDriftObservationRepo`) to ALL individually exceed the WATCH threshold --
+#: closes exactly the failure class this incident exposed (a single wrong/stale reading, from an
+#: ordering bug or any other future defect, driving an escalation on its own). 3 consecutive summaries at
+#: the default 2-10s telemetry cadence is tens of seconds, not a new multi-minute detection delay, while
+#: still being immune to any ONE bad reading. `evaluate_drift`'s `min_consecutive_exceedances` parameter
+#: is OPT-IN (default `None`, today's exact pre-incident behaviour) -- this is a proposal for the owner
+#: to review and enable when the sweep is re-enabled, not a silent behaviour change.
+PROPOSED_MIN_CONSECUTIVE_EXCEEDANCES = 3
+
+
+def _tail_consecutive_exceedances_ok(exceeded_per_summary: Sequence[bool], n: int) -> bool:
+    """True iff the last `n` entries of `exceeded_per_summary` (chronological order, oldest first) are
+    ALL `True`. `n <= 0` is treated as "no additional requirement" (always True) -- a caller passing a
+    non-positive `n` has opted out, not asked for an impossible bar."""
+    if n <= 0:
+        return True
+    tail = list(exceeded_per_summary)[-n:]
+    return len(tail) == n and all(tail)
+
+
 @dataclass
 class AssetHealthService:
     ports: AssetHealthPorts
     calibration_min_interval_s: float = 86_400.0
     recurrence_window_days: float = CALIBRATION_RECURRENCE_WINDOW_DAYS_DEFAULT
 
-    async def evaluate_drift(self, hub_id: str, *, now: datetime) -> AssetState | None:
+    async def evaluate_drift(
+        self, hub_id: str, *, now: datetime, min_consecutive_exceedances: int | None = None
+    ) -> AssetState | None:
         """S5.5.1: advance `hub_id`'s asset state from its current rolling observation window. Returns
-        `None` (no judgement made) when there is not yet enough telemetry -- never treated as "OK"."""
+        `None` (no judgement made) when there is not yet enough telemetry -- never treated as "OK".
+
+        `min_consecutive_exceedances` (opt-in, default `None` = off): additionally require the most
+        recent `N` summaries to ALL individually exceed the WATCH threshold, on top of `core.pq.
+        is_persistent_drift`'s existing window-fraction rule -- see `PROPOSED_MIN_CONSECUTIVE_
+        EXCEEDANCES`'s module-level docstring (the R2 incident's proposed re-enable threshold)."""
         window = await self.ports.drift.observation_window(hub_id)
         if window is None:
             return None
@@ -73,7 +104,11 @@ class AssetHealthService:
             return None
 
         persistent = (
-            is_persistent_drift(window.exceeded_per_summary) and not window.correlates_with_fleet_event
+            is_persistent_drift(window.exceeded_per_summary)
+            and _tail_consecutive_exceedances_ok(
+                window.exceeded_per_summary, min_consecutive_exceedances or 0
+            )
+            and not window.correlates_with_fleet_event
         )
 
         if record.asset_state == "OK":
@@ -189,6 +224,47 @@ class AssetHealthService:
         if record is None:
             return None
         return await self._advance(hub_id, record.asset_state, DriftEvent.CALIBRATION_NO_CHANGE, now)
+
+    async def record_false_positive_reset(
+        self, hub_id: str, *, reason: str, now: datetime
+    ) -> AssetState | None:
+        """An explicit, audited operator/owner override: undoes a `WATCH`/`DEGRADED`/`QUARANTINED`/
+        `AWAITING_REPLACEMENT` escalation that turned out not to reflect a real drift (R2 incident,
+        2026-09-26: see `repo.py`'s "LIVE BUG FIX" comment). Never available from `RECOMMISSIONING`
+        (`opengrid.assets.state_machine`'s transition table has no entry for it there -- `next_asset_
+        state` raises `InvalidAssetTransitionError`, which this method deliberately does NOT catch: a
+        replaced unit is not a "false positive" to undo, and a caller trying it on one has a bug worth
+        surfacing, not silencing).
+
+        Closes the hub's open work order as `CANCELLED` (never `CLOSED` -- a cancelled order was never
+        legitimately actionable, unlike one closed after a real replacement) and traces an
+        `OPERATOR_ACTION` decision carrying `reason` and the cancelled work order id, IN ADDITION to the
+        `ASSET_STATE_TRANSITION` `_advance` already writes -- two independent audit trail entries for a
+        correction this consequential."""
+        record = await self.ports.asset_health.get(hub_id)
+        if record is None:
+            return None
+
+        work_order = await self.ports.work_orders.open_for_hub(hub_id)
+        new_state = await self._advance(
+            hub_id, record.asset_state, DriftEvent.OPERATOR_FALSE_POSITIVE_RESET, now
+        )
+        if work_order is not None:
+            await self.ports.work_orders.close(
+                work_order.work_order_id, closed_at=now, technician_notes=reason, status="CANCELLED"
+            )
+        await self.ports.trace.append(
+            "OPERATOR_ACTION",
+            {
+                "hub_id": hub_id,
+                "action": "ASSET_FALSE_POSITIVE_RESET",
+                "reason": reason,
+                "cancelled_work_order_id": str(work_order.work_order_id) if work_order else None,
+                "from_state": record.asset_state,
+                "to_state": new_state,
+            },
+        )
+        return new_state
 
     async def quarantine(self, hub_id: str, *, now: datetime) -> AssetState | None:
         """S5.5.5: escalate a `DEGRADED` unit to `QUARANTINED` ahead of a scheduled replacement, when

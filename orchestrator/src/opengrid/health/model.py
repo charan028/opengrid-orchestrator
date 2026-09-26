@@ -33,7 +33,9 @@ DegradedMode = Literal[
 #: selector, `ALR-ENERGY-SHORTFALL-RISK` raised directly by the allocator/engine hook, see
 #: `evaluate_energy_shortfall_risk_alert`'s docstring) within one ~5s cycle of them being raised. Only a
 #: rule in this set -- exactly the `ALR-*` rules `opengrid.health.evaluate_alerts` itself evaluates every
-#: cycle -- may be auto-cleared here; every other module clears its own alerts.
+#: cycle -- may be auto-cleared here; every other module clears its own alerts. In particular,
+#: `ALR-SCOPE-CONSERVATIVE`, `ALR-SAFE-STOP-REQUESTED` and `ALR-CLOCK-QUALITY` are guardian's (it raises
+#: and clears them itself, R2 coordination note) and must stay OUT of this set.
 HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
     {
         "ALR-FEED-STALE",
@@ -41,6 +43,7 @@ HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
         "ALR-PROCESS-DOWN",
         "ALR-HUB-OFFLINE-RATIO",
         "ALR-CYCLE-P99",
+        "ALR-CYCLE-P99-APPROACHING",
         "ALR-GUARDIAN-TIMEOUT-RATE",
         "ALR-RESERVE-BREACH",
         "ALR-SCADA-OVERLOAD",
@@ -61,6 +64,10 @@ class HealthThresholds:
     hub_offline_s: float = 30.0
     cycle_p99_budget_s: float = 0.5
     cycle_p99_breach_cycles: int = 3
+    # ALR-CYCLE-P99-APPROACHING (pre-limit warning, R2): fires the instant p99 crosses this fraction of
+    # `cycle_p99_budget_s`, with no consecutive-cycle requirement -- an early signal before the hard
+    # breach (`ALR-CYCLE-P99`, which still needs `cycle_p99_breach_cycles` consecutive breaches).
+    cycle_p99_warn_ratio: float = 0.80
     hub_offline_ratio_warning: float = 0.05
     hub_offline_ratio_critical: float = 0.20
     guardian_timeout_rate_critical: float = 0.01
@@ -120,6 +127,7 @@ class HealthThresholds:
                 "health.bank_kva_overload_critical_pct", defaults.bank_kva_overload_critical_pct
             ),
             sim_offline_s=cfg.get("health.sim_offline_s", defaults.sim_offline_s),
+            cycle_p99_warn_ratio=cfg.get("health.cycle_p99_warn_ratio", defaults.cycle_p99_warn_ratio),
         )
 
 

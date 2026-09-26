@@ -41,6 +41,7 @@ from opengrid.health.rules import (
     classify_hub_health,
     derive_degraded_modes,
     evaluate_cycle_latency_alert,
+    evaluate_cycle_latency_warning_alert,
     evaluate_feed_alert,
     evaluate_guardian_timeout_alert,
     evaluate_hub_offline_ratio_alert,
@@ -290,6 +291,9 @@ async def evaluate_alerts() -> None:
     )
     if cycle_finding:
         findings.append(cycle_finding)
+    cycle_warning_finding = evaluate_cycle_latency_warning_alert(cycle_latency.p99_s, thresholds=_thresholds)
+    if cycle_warning_finding:
+        findings.append(cycle_warning_finding)
     guardian_finding = evaluate_guardian_timeout_alert(guardian_timeout_rate, thresholds=_thresholds)
     if guardian_finding:
         findings.append(guardian_finding)
@@ -358,6 +362,9 @@ async def evaluate_once() -> HealthSnapshot:
     )
     cycle_latency = await _fetch_cycle_latency(now)
     degraded_modes = derive_degraded_modes(feed_stale=any_feed_stale, process_health=processes)
+    # Defect fix: persist so `opengrid.api`/the UI can read the current degraded-mode set -- this
+    # in-process computation used to go nowhere else (see `queries.write_degraded_modes`'s docstring).
+    await queries.write_degraded_modes(pool, degraded_modes, now=now)
     open_alerts = await queries.fetch_open_alerts(pool)
 
     return HealthSnapshot(

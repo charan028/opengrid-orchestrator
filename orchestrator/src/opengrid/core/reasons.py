@@ -40,6 +40,9 @@ R_GRANT_DIST_DEFERRAL_PI = "R-GRANT-DIST-DEFERRAL-PI"
 #: Need-basis delivery (00-invariants.md K13, owner decision 2026-09-26): a measured closed-loop profile's
 #: grant follows the customer's measured need below its reserved maximum; the reservation stays locked.
 R_GRANT_CLOSED_LOOP = "R-GRANT-CLOSED-LOOP"
+#: An ERCOT_AS award held at 0 kW until ERCOT deploys it (og.as_deployment, migration 0020): a capacity
+#: hold, its reservation stays locked (K13).
+R_GRANT_AS_HOLD = "R-GRANT-AS-HOLD"
 
 # --- Shortfall reasons reported against the obligation that could not be fully served (never a
 # reallocation to a different obligation -- 00-invariants.md K13) ---------------------------------

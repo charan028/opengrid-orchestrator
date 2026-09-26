@@ -30,8 +30,24 @@ def _drifting_window() -> DriftObservationWindow:
     )
 
 
-async def test_run_once_no_hubs_is_a_no_op(service, fakes):
+async def test_run_once_disabled_by_default_is_a_safe_no_op(service, fakes):
+    """R2 incident, 2026-09-26: the sweep must be OFF by default (`DRIFT_SWEEP_ENABLED_DEFAULT = False`)
+    until the owner/lead explicitly re-enables it -- a caller that forgets `enabled=True` must never
+    silently run the sweep, even with hubs seeded and drifting."""
+    fakes.asset_health.records["hub-1"] = make_asset_record(hub_id="hub-1", since=NOW)
+    fakes.drift.windows["hub-1"] = _drifting_window()
+
     result = await runner.run_once(service, now=NOW)
+
+    assert result == runner.RunOnceResult(
+        evaluated=0, calibrations_requested=0, work_orders_opened=0, errors=0
+    )
+    assert fakes.asset_health.records["hub-1"].asset_state == "OK"  # untouched
+    assert not fakes.calibration_attempts.attempts
+
+
+async def test_run_once_no_hubs_is_a_no_op(service, fakes):
+    result = await runner.run_once(service, now=NOW, enabled=True)
     assert result.evaluated == 0
     assert result.calibrations_requested == 0
     assert result.work_orders_opened == 0
@@ -44,7 +60,7 @@ async def test_run_once_evaluates_every_hub_and_requests_calibration_on_watch(se
     fakes.drift.windows["hub-1"] = _drifting_window()
     fakes.drift.windows["hub-2"] = _quiet_window()
 
-    result = await runner.run_once(service, now=NOW)
+    result = await runner.run_once(service, now=NOW, enabled=True)
 
     assert result.evaluated == 2
     assert result.calibrations_requested == 1
@@ -58,7 +74,7 @@ async def test_run_once_skips_calibration_request_while_sensitive_grant_active(s
     fakes.drift.windows["hub-1"] = _drifting_window()
     fakes.sensitive_grants.sensitive_hubs.add("hub-1")
 
-    result = await runner.run_once(service, now=NOW)
+    result = await runner.run_once(service, now=NOW, enabled=True)
 
     assert result.evaluated == 1
     assert result.calibrations_requested == 0
@@ -71,7 +87,7 @@ async def test_run_once_opens_work_order_for_degraded_hub_without_one(service, f
     )
     fakes.drift.windows["hub-1"] = _drifting_window()  # observation window content irrelevant for DEGRADED
 
-    result = await runner.run_once(service, now=NOW)
+    result = await runner.run_once(service, now=NOW, enabled=True)
 
     assert result.work_orders_opened == 1
     assert "hub-1" in fakes.work_orders.open_orders
@@ -84,7 +100,7 @@ async def test_run_once_does_not_duplicate_an_existing_open_work_order(service, 
     fakes.drift.windows["hub-1"] = _drifting_window()
     await fakes.work_orders.open("hub-1", severity="HIGH", evidence={}, opened_at=NOW)
 
-    result = await runner.run_once(service, now=NOW)
+    result = await runner.run_once(service, now=NOW, enabled=True)
 
     assert result.work_orders_opened == 0
     assert len(fakes.work_orders.open_orders) == 1
@@ -102,7 +118,7 @@ async def test_run_once_continues_after_one_hub_evaluation_fails(service, fakes,
 
     monkeypatch.setattr(fakes.drift, "observation_window", boom)
 
-    result = await runner.run_once(service, now=NOW)
+    result = await runner.run_once(service, now=NOW, enabled=True)
 
     assert result.errors == 1
     assert result.evaluated == 1  # only hub-2 completed

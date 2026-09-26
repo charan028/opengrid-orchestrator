@@ -130,3 +130,67 @@ async def test_admit_block_rule_admits_exactly_the_block_size(repo: FakeContract
 
     opportunity = await contracts.admit(contract.contract_id, start, end, Decimal("50"))
     assert opportunity.requested_kw == Decimal("50")
+
+
+# -- DATA_CENTER/PIPELINE_AC activation gate (03 S2.7; default closed until controllers are live) ----
+
+
+async def test_admit_data_center_is_rejected_when_activation_gate_closed(
+    repo: FakeContractsRepo, trace_backend: FakeTraceBackend
+) -> None:
+    contract = make_contract(service_type="DATA_CENTER")
+    await repo.upsert_contract(contract)
+    start, end = _window()
+
+    with pytest.raises(AdmissionError) as exc_info:
+        await contracts.admit(contract.contract_id, start, end, Decimal("100"))
+
+    assert exc_info.value.reason_code == "R-ADMIT-REJECT"
+    reject_rows = [r for r in trace_backend.rows if r["reason_codes"] == ["R-ADMIT-REJECT"]]
+    assert len(reject_rows) == 1
+    assert "DATA_CENTER" in reject_rows[0]["payload"]["detail"]
+    # never created an opportunity/obligation
+    assert repo.opportunities == {}
+
+
+async def test_admit_pipeline_ac_variant_is_rejected_when_activation_gate_closed(
+    repo: FakeContractsRepo,
+) -> None:
+    """PIPELINE_AC has no `service_type` of its own yet -- it is admitted as a variant under an
+    existing service type (the same convention as DIST_DEFERRAL's TDU_SB415), so the gate must catch
+    it by variant too."""
+    contract = make_contract(service_type="DIST_DEFERRAL", variant="PIPELINE_AC")
+    await repo.upsert_contract(contract)
+    start, end = _window()
+
+    with pytest.raises(AdmissionError) as exc_info:
+        await contracts.admit(contract.contract_id, start, end, Decimal("50"))
+
+    assert exc_info.value.reason_code == "R-ADMIT-REJECT"
+
+
+async def test_admit_data_center_succeeds_when_activation_gate_open(
+    repo: FakeContractsRepo, trace: object
+) -> None:
+    contract = make_contract(service_type="DATA_CENTER")
+    await repo.upsert_contract(contract)
+    contracts.configure(repo, trace, data_center_activation_enabled=True)  # type: ignore[arg-type]
+    start, end = _window()
+
+    opportunity = await contracts.admit(contract.contract_id, start, end, Decimal("100"))
+
+    assert opportunity.state == "OFFERED"
+
+
+async def test_admit_non_gated_service_type_is_unaffected_by_the_activation_gate(
+    repo: FakeContractsRepo,
+) -> None:
+    """The activation gate is specific to DATA_CENTER/PIPELINE_AC -- an ordinary ERCOT_ENERGY contract
+    must never be rejected by it, gate open or closed (the default, closed, applies here)."""
+    contract = make_contract(service_type="ERCOT_ENERGY")
+    await repo.upsert_contract(contract)
+    start, end = _window()
+
+    opportunity = await contracts.admit(contract.contract_id, start, end, Decimal("10"))
+
+    assert opportunity.state == "OFFERED"

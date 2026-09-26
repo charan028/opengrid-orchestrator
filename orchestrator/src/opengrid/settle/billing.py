@@ -40,12 +40,18 @@ def draft_invoice_lines(
     is `performance.compute_compliance_pct`'s result (or 1 if there is none), used to scale
     `CAPACITY_PAYMENT` per 02a S7.3's "x performance factor" rule.
 
-    `CAPACITY_PAYMENT` for `PARTNER_CAPACITY`/`DIST_DEFERRAL` (and `ERCOT_AS`) is `committed_kwh *
-    price_per_kwh * performance_factor` -- committed capacity valued at the contract price, scaled
-    once by performance. It is deliberately *not* `revenue * performance_factor`: `revenue` (`pnl.
-    revenue`, profitability.py) is already `price_per_kwh * delivered_kwh`, and `delivered_kwh`
-    already reflects any shortfall, so multiplying that by `performance_factor` again double-counts
-    the shortfall (e.g. 80% delivery would bill ~64% instead of 80% of the committed payment)."""
+    `CAPACITY_PAYMENT` for `PARTNER_CAPACITY`/`DIST_DEFERRAL` is `committed_kwh * price_per_kwh *
+    performance_factor` -- committed capacity valued at the contract price, scaled once by
+    performance. It is deliberately *not* `revenue * performance_factor`: `revenue` (`pnl.revenue`,
+    profitability.py) is already `price_per_kwh * delivered_kwh`, and `delivered_kwh` already
+    reflects any shortfall, so multiplying that by `performance_factor` again double-counts the
+    shortfall (e.g. 80% delivery would bill ~64% instead of 80% of the committed payment).
+
+    `ERCOT_AS` is deliberately its OWN branch, never scaled by `performance_factor`: an AS award pays
+    for the capacity HELD (`award x MCPC`, per the table above), not for energy delivered, so
+    `performance_factor` (delivered/committed) would otherwise near-zero the payment on a normal
+    hold-not-discharge interval (2026-09-26 live-soak correction, alongside `profitability.
+    compute_revenue`'s matching fix for `pnl.revenue`)."""
     if service_type == "HOME":
         return []
 
@@ -53,6 +59,16 @@ def draft_invoice_lines(
         lines = [
             InvoiceLineDraft(
                 line_type="ENERGY", quantity=delivered_kwh, unit="kWh", rate=price_per_kwh, amount=revenue
+            )
+        ]
+    elif service_type == "ERCOT_AS":
+        lines = [
+            InvoiceLineDraft(
+                line_type="CAPACITY_PAYMENT",
+                quantity=committed_kwh,
+                unit="kWh",
+                rate=price_per_kwh,
+                amount=committed_kwh * price_per_kwh,
             )
         ]
     else:

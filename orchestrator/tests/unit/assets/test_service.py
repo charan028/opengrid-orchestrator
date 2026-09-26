@@ -8,8 +8,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import pytest
+
 from opengrid.assets.calibration import CalibrationReference
 from opengrid.assets.ports import DriftObservationWindow
+from opengrid.assets.state_machine import InvalidAssetTransitionError
 from opengrid.core.pq import CalibrationBounds, CalibrationOutcome, OffsetVector
 
 from .conftest import HUB_ID, make_asset_record
@@ -247,3 +250,83 @@ async def test_record_inverter_replaced_unknown_hub_returns_none(service):
         "hub-unknown", old_serial=None, new_serial="SN-NEW", old_firmware=None, new_firmware="1.0", now=NOW
     )
     assert result is None
+
+
+# --- R2 incident (2026-09-26): false-positive reset + the consecutive-exceedances proposal --------------
+
+
+async def test_record_false_positive_reset_quarantined_to_ok_cancels_work_order(service, fakes):
+    """The hub-01996/97/98 shape: QUARANTINED by the ordering-bug's wrong `WORSE_ROLLED_BACK` reading,
+    with an open work order -- reset to OK, work order CANCELLED (not CLOSED), audited."""
+    fakes.asset_health.records[HUB_ID] = make_asset_record(asset_state="QUARANTINED", since=NOW)
+    work_order_id = await fakes.work_orders.open(HUB_ID, severity="HIGH", evidence={}, opened_at=NOW)
+
+    state = await service.record_false_positive_reset(HUB_ID, reason="R2 ordering bug", now=NOW)
+
+    assert state == "OK"
+    assert fakes.asset_health.records[HUB_ID].asset_state == "OK"
+    assert fakes.work_orders.open_orders.get(HUB_ID) is None
+    assert fakes.work_orders.closed_status[work_order_id] == "CANCELLED"
+    decision_types = [d for d, _ in fakes.trace.appended]
+    assert "ASSET_STATE_TRANSITION" in decision_types
+    assert "OPERATOR_ACTION" in decision_types
+    operator_action = next(p for d, p in fakes.trace.appended if d == "OPERATOR_ACTION")
+    assert operator_action["reason"] == "R2 ordering bug"
+    assert operator_action["cancelled_work_order_id"] == str(work_order_id)
+
+
+async def test_record_false_positive_reset_degraded_to_ok_with_no_work_order(service, fakes):
+    fakes.asset_health.records[HUB_ID] = make_asset_record(asset_state="DEGRADED", since=NOW)
+    state = await service.record_false_positive_reset(HUB_ID, reason="false positive", now=NOW)
+    assert state == "OK"
+    assert fakes.work_orders.closed == []  # nothing to cancel
+
+
+async def test_record_false_positive_reset_unknown_hub_returns_none(service):
+    assert await service.record_false_positive_reset("hub-unknown", reason="n/a", now=NOW) is None
+
+
+async def test_record_false_positive_reset_refuses_from_recommissioning(service, fakes):
+    """A unit already RECOMMISSIONING had a real physical replacement -- never a "false positive" to
+    undo; the state machine has no transition for it, and this must surface, not be silenced."""
+    fakes.asset_health.records[HUB_ID] = make_asset_record(asset_state="RECOMMISSIONING", since=NOW)
+    with pytest.raises(InvalidAssetTransitionError):
+        await service.record_false_positive_reset(HUB_ID, reason="n/a", now=NOW)
+
+
+async def test_evaluate_drift_min_consecutive_exceedances_blocks_single_bad_reading(service, fakes):
+    """The R2 proposal: even when `is_persistent_drift`'s 90%-of-window rule is satisfied, requiring the
+    tail N readings to ALL exceed threshold blocks a window where the most recent readings have already
+    recovered (a single earlier bad/stale reading must not still be driving an escalation)."""
+    fakes.asset_health.records[HUB_ID] = make_asset_record(since=NOW)
+    # 9 of 10 exceed (>= 90%), but the tail 3 (chronological, oldest..newest) do NOT all exceed.
+    fakes.drift.windows[HUB_ID] = DriftObservationWindow(
+        exceeded_per_summary=[True] * 9 + [False],
+        correlates_with_fleet_event=False,
+        latest_measured_offset=ZERO_OFFSET,
+    )
+    state = await service.evaluate_drift(HUB_ID, now=NOW, min_consecutive_exceedances=3)
+    assert state == "OK"
+
+
+async def test_evaluate_drift_min_consecutive_exceedances_allows_genuine_recent_drift(service, fakes):
+    fakes.asset_health.records[HUB_ID] = make_asset_record(since=NOW)
+    fakes.drift.windows[HUB_ID] = DriftObservationWindow(
+        exceeded_per_summary=[True] * 10,
+        correlates_with_fleet_event=False,
+        latest_measured_offset=ZERO_OFFSET,
+    )
+    state = await service.evaluate_drift(HUB_ID, now=NOW, min_consecutive_exceedances=3)
+    assert state == "WATCH"
+
+
+async def test_evaluate_drift_default_min_consecutive_exceedances_is_off(service, fakes):
+    """Opt-in only: passing nothing preserves today's exact (pre-incident) persistence rule."""
+    fakes.asset_health.records[HUB_ID] = make_asset_record(since=NOW)
+    fakes.drift.windows[HUB_ID] = DriftObservationWindow(
+        exceeded_per_summary=[True] * 9 + [False],
+        correlates_with_fleet_event=False,
+        latest_measured_offset=ZERO_OFFSET,
+    )
+    state = await service.evaluate_drift(HUB_ID, now=NOW)
+    assert state == "WATCH"

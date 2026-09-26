@@ -134,14 +134,21 @@ def project_soc_over_lease_kwh(
     return soc_kwh + eta_c * p_c * lease_ttl_h - (p_d * lease_ttl_h) / eta_d
 
 
-def hub_capability(soc_kwh: float, params: HubParams) -> tuple[float, float]:
-    """Return (max_discharge_kw, max_charge_kw) available right now, honoring the reserve floor (K1)
-    and the hub's power limit. Both values are >= 0.
-    """
-    usable_above_reserve = max(soc_kwh - params.r_kwh, 0.0)
-    headroom_to_full = max(params.e_kwh - soc_kwh, 0.0)
-    max_discharge_kw = params.p_kw if usable_above_reserve > 0 else 0.0
-    max_charge_kw = params.p_kw if headroom_to_full > 0 else 0.0
+#: The planning interval a reported capability must be sustainable for (02a S3: 15 minutes).
+CAPABILITY_INTERVAL_H = 0.25
+
+
+def hub_capability(
+    soc_kwh: float, params: HubParams, *, dt_h: float = CAPABILITY_INTERVAL_H
+) -> tuple[float, float]:
+    """Return (max_discharge_kw, max_charge_kw) SUSTAINABLE for a full interval of `dt_h`, honoring the
+    reserve floor (K1), the full-charge ceiling and the hub's power limit. Both values are >= 0.
+
+    ES03-S05 (K1): this used to report the full rated `p_kw` whenever SoC was above reserve by any
+    margin -- a hub 0.1 kWh above its floor was offered at 11 kW for a whole interval (~2.75 kWh). It is
+    now the energy-limited `hub_sustainable_discharge_kw`/`hub_sustainable_charge_kw`."""
+    max_discharge_kw = hub_sustainable_discharge_kw(soc_kwh, params.r_kwh, params.p_kw, dt_h, params.eta_d)
+    max_charge_kw = hub_sustainable_charge_kw(soc_kwh, params.e_kwh, params.p_kw, dt_h, params.eta_c)
     return max_discharge_kw, max_charge_kw
 
 
