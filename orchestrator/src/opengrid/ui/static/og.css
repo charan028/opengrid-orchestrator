@@ -15,7 +15,9 @@
   --status-good: #1baf7a;
   --status-info: #7cc4ff;
   --status-caution: #eda100;
-  --status-critical: #e34948;
+  /* #ee6160, not #e34948: the 13px .btn-danger/.btn-safestop text has to clear WCAG AA 4.5:1 on
+     --panel-2 and on the safe-stop fill (tests-e2e/ui/test_a11y.py) */
+  --status-critical: #ee6160;
   --status-neutral: #8b92a8;
 
   /* 7-series customer-type categorical palette, fixed order everywhere (UI-UX spec S5.2) */
@@ -46,6 +48,8 @@
   --status-critical: #ab2e2d;
   --status-neutral: #5b6172;
 
+  /* without this the dark ring (#7cc4ff) is inherited: ~1.7:1 on the light surfaces (WCAG 1.4.11) */
+  --focus-ring: #1861c7;
   color-scheme: light;
 }
 

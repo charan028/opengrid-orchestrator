@@ -29,7 +29,7 @@
     {% for column in pipeline.columns %}
     <div class="og-kanban-column" data-state="{{ column.state }}">
       <h3>{{ column.label }} <span>{{ column.count }}</span></h3>
-      {% for item in column.items %}
+      {% for item in column["items"] %}
       <div class="og-kanban-card{% if item.at_risk %} og-at-risk{% endif %}">
         <div>{{ item.obligation_id }}</div>
         <div class="og-card-meta">{{ item.service_type }} &middot; {{ item.tier }} &middot; {{ item.committed_qty_kw }} kW</div>

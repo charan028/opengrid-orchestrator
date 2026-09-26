@@ -18,14 +18,30 @@
 
    Focus management (BUILD.md code-review round item 3): opening the dialog (via the trigger button, or
    already-open on render) moves focus to the Cancel button; closing it (Escape, or Cancel) returns focus
-   to the trigger button. Escape-to-close was already wired via `x-on:keydown.escape.window`. #}
+   to the trigger button -- or, when rendered already open with no trigger of its own, to whatever had
+   focus when it appeared (the step-1 form's submit button), so Escape never drops focus to <body>.
+   The confirm result fragments carry `target`'s own id, hence `hx-swap="outerHTML"` (a nested copy of
+   the id would break `aria-live` targeting and id uniqueness). #}
 <span x-data="{
         open: {{ 'true' if open_default|default(false) else 'false' }},
         busy: false,
-        remaining: {{ expires_in_s|default('null') }}
+        remaining: {{ expires_in_s|default('null') }},
+        returnTo: null,
+        show() {
+          this.returnTo = document.activeElement;
+          this.open = true;
+          this.$nextTick(() => { if (this.$refs.cancelBtn) { this.$refs.cancelBtn.focus(); } });
+        },
+        close() {
+          this.open = false;
+          this.$nextTick(() => {
+            const target = this.$refs.triggerBtn || this.returnTo;
+            if (target && target.focus) { target.focus(); }
+          });
+        }
       }"
       x-init="
-        if (open) { $nextTick(function () { if ($refs.cancelBtn) { $refs.cancelBtn.focus(); } }); }
+        if (open) { show(); }
         if (remaining !== null) {
           let _timer = setInterval(function () {
             remaining = Math.max(0, remaining - 1);
@@ -38,14 +54,14 @@
   <button type="button"
           x-ref="triggerBtn"
           class="btn {{ 'btn-safestop' if variant == 'safestop' else ('btn-danger' if variant == 'danger' else 'btn-primary') }}"
-          @click="open = true; $nextTick(function () { if ($refs.cancelBtn) { $refs.cancelBtn.focus(); } })">
+          @click="show()">
     {{ trigger_label }}
   </button>
   {% endif %}
   <div class="confirm-dialog-backdrop"
        x-show="open"
        x-cloak
-       x-on:keydown.escape.window="open = false; $nextTick(function () { if ($refs.triggerBtn) { $refs.triggerBtn.focus(); } })"
+       x-on:keydown.escape.window="if (open) { close(); }"
        role="presentation">
     <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="{{ dialog_id }}-title">
       <h2 id="{{ dialog_id }}-title">{{ title }}</h2>
@@ -57,8 +73,7 @@
       </p>
       {% endif %}
       <div class="confirm-dialog-actions">
-        <button type="button" class="btn" x-ref="cancelBtn" :disabled="busy"
-                x-on:click="open = false; $nextTick(function () { if ($refs.triggerBtn) { $refs.triggerBtn.focus(); } })">
+        <button type="button" class="btn" x-ref="cancelBtn" :disabled="busy" x-on:click="close()">
           Cancel
         </button>
         <button type="button"
@@ -66,7 +81,7 @@
                 :disabled="busy || (remaining !== null && remaining <= 0)"
                 hx-post="{{ confirm_url }}"
                 hx-target="{{ target|default('#confirm-result') }}"
-                hx-swap="innerHTML"
+                hx-swap="outerHTML"
                 x-on:click="busy = true"
                 x-on:htmx:after-request="busy = false; open = false">
           {{ confirm_label|default('Confirm') }}
