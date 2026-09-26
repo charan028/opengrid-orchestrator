@@ -44,3 +44,19 @@ async def test_a_full_queue_drops_and_counts_and_a_failing_handler_does_not_stop
     await worker.drain()
     task.cancel()
     assert seen == [1]
+
+
+async def test_raw_capture_handler_validates_off_loop_and_drops_invalid(monkeypatch) -> None:
+    import opengrid.pq_ingest as pq_ingest
+    from opengrid.engine import ingest_raw_capture_off_loop
+
+    ingested: list[dict] = []
+
+    async def _ingest(payload):
+        ingested.append(payload)
+
+    monkeypatch.setattr(pq_ingest, "ingest_raw_capture", _ingest)
+
+    await ingest_raw_capture_off_loop({"hub_id": "hub-1"})  # missing required fields -> dropped
+
+    assert ingested == []

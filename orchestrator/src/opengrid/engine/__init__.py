@@ -634,7 +634,7 @@ async def main(cfg: Config) -> None:
         async with build_client(
             cfg, username="og_engine", password=mqtt_password, client_id="og-engine"
         ) as client:
-            raw_worker = BackgroundIngest("pq-raw", pq_mod.ingest_raw_capture)
+            raw_worker = BackgroundIngest("pq-raw", ingest_raw_capture_off_loop)
             raw_task = asyncio.create_task(raw_worker.run())
             ingest_task = asyncio.create_task(_mqtt_ingest_loop(client, cfg, raw_worker))
             ingest_task.add_done_callback(_log_ingest_exit)
@@ -649,6 +649,21 @@ async def main(cfg: Config) -> None:
                         await task
     finally:
         await pool.close()
+
+
+async def ingest_raw_capture_off_loop(payload: dict[str, Any]) -> None:
+    """Background handler for a raw waveform capture: schema validation (the per-sample array check was
+    ~34% of og-engine CPU on the event loop, live 2026-09-26) runs in a worker thread, then the blob and
+    index are written. An invalid capture is logged and dropped."""
+    from opengrid import pq_ingest
+    from opengrid.platform.mqtt import SchemaValidationError, validate_payload
+
+    try:
+        await asyncio.to_thread(validate_payload, "pq_waveform_raw", payload)
+    except SchemaValidationError:
+        logger.warning("dropped invalid raw waveform capture", extra={"hub_id": payload.get("hub_id")})
+        return
+    await pq_ingest.ingest_raw_capture(payload)
 
 
 def _log_ingest_exit(task: asyncio.Task[None]) -> None:
@@ -689,8 +704,7 @@ async def _mqtt_ingest_loop(client: aiomqtt.Client, cfg: Config, raw_worker: Bac
                 validate_payload("pq_waveform_summary", payload)
                 await pq_ingest.ingest_summary(payload)
             elif message.topic.matches(wave_raw_topic):
-                validate_payload("pq_waveform_raw", payload)
-                raw_worker.submit(payload)  # blob write + index insert off the ingest path
+                raw_worker.submit(payload)  # validation, blob write and index insert off the ingest path
             elif message.topic.matches(ack_topic):
                 validate_payload("ack", payload)
                 await fleet.ingest_ack(payload)
