@@ -1,0 +1,7 @@
+# Local downloads and intermediate data: re-created by the scripts, never committed
+capture_rate/downloads/
+price_history/data/
+*.pkl
+*.zip
+*.xlsx
+*.log

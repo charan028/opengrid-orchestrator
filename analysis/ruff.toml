@@ -1,0 +1,11 @@
+# Lint config for the analysis scripts. The orchestrator CI gate does not cover this folder.
+# Run: ruff check analysis && ruff format --check analysis
+line-length = 120
+target-version = "py310"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[lint.isort]
+known-local-folder = ["run", "arb", "h5"]
