@@ -25,7 +25,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
@@ -38,6 +39,7 @@ from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine.gates import run_due_gates
+from opengrid.engine.latency import CycleLatencyWindow
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
 from opengrid.health.queries import raise_alert
 from opengrid.platform.config import Config
@@ -318,6 +320,25 @@ class _EngineState:
     # restarted `seq` at 1 below the guardian's high-water mark, so every batch after an engine restart
     # was VETOED on G-13 (live 2026-09-26).
     epoch: int = 1
+    latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
+
+
+async def timed_tick(state: _EngineState) -> None:
+    """One engine tick, timed into `state.latency` (A11) whether it succeeds or raises; publishes the
+    window's p50/p99/max as an `RT_ALLOCATION` / `CYCLE_LATENCY` trace event when a report is due."""
+    started = time.monotonic()
+    try:
+        await _engine_tick(state)
+    finally:
+        finished = time.monotonic()
+        state.latency.record((finished - started) * 1000.0)
+        if state.latency.report_due(finished):
+            summary = state.latency.summary()
+            logger.info("engine cycle latency", extra=summary)
+            try:
+                await state.trace.append("engine-cycle-latency", "RT_ALLOCATION", "CYCLE_LATENCY", summary)
+            except Exception:
+                logger.exception("failed to trace engine cycle latency")
 
 
 async def _engine_tick(state: _EngineState) -> None:
@@ -528,7 +549,7 @@ async def main(cfg: Config) -> None:
             ingest_task.add_done_callback(_log_ingest_exit)
             try:
                 await run_forever(
-                    lambda: _engine_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
+                    lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
                 )
             finally:
                 ingest_task.cancel()

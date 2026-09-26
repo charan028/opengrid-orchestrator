@@ -150,3 +150,48 @@ def test_soc_stays_within_bounds_in_every_scenario(
 
     ok, violations = validate_plan(inputs, plan)
     assert ok, violations
+
+
+def test_c15_terminal_floor_is_soft_so_a_committed_drawdown_without_charging_stays_lp() -> None:
+    """Regression (live 2026-09-26): with no charge headroom (the selector never passed charge
+    capability; SCADA also reported every bank overloaded), a hard `terminal SoC >= initial` made every
+    gate's model infeasible -- even with nothing to deliver, since self-discharge alone drains the bank --
+    so every plan was RULE_FALLBACK. The floor is now a penalized target: the LP stays OPTIMAL, the
+    committed delivery is kept exactly (K13), and the plan validates."""
+    bank = _bank_with_soc(self_discharge_kwh_per_h=0.01)
+    inputs = ModelInputs(
+        intervals=(0, 1),
+        interval_minutes=15.0,
+        banks=(bank,),
+        scenarios=(zero_price_scenario(range(2)),),
+        committed=(committed("o-commit", {0: 20.0}, ("B1",)),),
+        candidates=(),
+    )
+
+    built = build_mode_o_model(inputs)
+    outcome = highs_solve(built, FAST_SETTINGS)
+    plan = extract_plan(built, outcome, "L-ID")
+
+    assert outcome.status == "OPTIMAL"
+    assert plan.bank_interval_allocation[("o-commit", "B1", 0)] == 20.0
+    ok, violations = validate_plan(inputs, plan)
+    assert ok, violations
+
+
+def test_c15_terminal_penalty_keeps_energy_back_for_tomorrow_when_it_is_optional() -> None:
+    """Soft, not ignored: with a spot price below the terminal penalty the LP does not sell the bank's
+    energy it would need to end the day where it started."""
+    bank = _bank_with_soc()
+    inputs = ModelInputs(
+        intervals=(0, 1),
+        interval_minutes=15.0,
+        banks=(bank,),
+        scenarios=(zero_price_scenario(range(2)),),
+        committed=(),
+        candidates=(binary_candidate("c1", 40.0, 50.0, (0,), ("B1",)),),
+    )
+
+    built = build_mode_o_model(inputs)
+    plan = extract_plan(built, highs_solve(built, FAST_SETTINGS), "L-ID")
+
+    assert plan.selected_x.get("c1", False) is False

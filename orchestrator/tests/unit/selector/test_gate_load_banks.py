@@ -127,3 +127,24 @@ async def test_load_banks_skips_soc_modeling_when_every_hub_is_offline(
     assert banks[0].capacity_kwh == 0.0
     assert banks[0].reserve_kwh == 0.0
     assert banks[0].initial_soc_kwh == 0.0
+
+
+async def test_load_banks_passes_the_live_charge_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (live 2026-09-26): `max_charge_kw` was never populated, so the LP could never plan a
+    recharge and every gate's C15 terminal floor was infeasible."""
+
+    async def _fake_capability(bank_id, interval_start):
+        return AvailableCapability(
+            bank_id=bank_id,
+            interval_start=interval_start,
+            max_discharge_kw=22.0,
+            max_charge_kw=9.5,
+            excluded_hub_ids=frozenset(),
+        )
+
+    monkeypatch.setattr(gate, "fleet_capability", _fake_capability)
+    monkeypatch.setattr(gate, "fleet_hub_capabilities", lambda bank_id: [])
+
+    (bank,) = await gate.load_banks(HORIZON_START, HORIZON_END, ("bank-000",))
+
+    assert bank.max_charge_kw == {0: 9.5}

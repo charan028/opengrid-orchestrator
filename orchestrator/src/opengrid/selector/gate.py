@@ -8,6 +8,7 @@ they need (BUILD.md "use fakes for siblings") without touching the pure `model`/
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -109,15 +110,20 @@ async def load_banks(
     snapshots = []
     for bank_id in bank_ids:
         by_interval: dict[int, float] = {}
+        charge_by_interval: dict[int, float] = {}
         for t in range(n_intervals):
             interval_start = horizon_start + timedelta(minutes=INTERVAL_MINUTES * t)
             cap = await fleet_capability(bank_id, interval_start)
             by_interval[t] = cap.max_discharge_kw
+            # The charge envelope was never passed, so the model could never recharge a bank
+            # (live 2026-09-26: every plan RULE_FALLBACK).
+            charge_by_interval[t] = cap.max_charge_kw
         capacity_kwh, reserve_kwh, initial_soc_kwh, eta_c, eta_d = _bank_energy_envelope(bank_id)
         snapshots.append(
             BankSnapshot(
                 bank_id=bank_id,
                 max_discharge_kw=by_interval,
+                max_charge_kw=charge_by_interval,
                 capacity_kwh=capacity_kwh,
                 reserve_kwh=reserve_kwh,
                 initial_soc_kwh=initial_soc_kwh,
@@ -314,7 +320,9 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         candidates=candidates,
     )
 
-    result = solve_gate(inputs, gate_kind, horizon_start)
+    # Off the event loop: a 24 h Mode O solve takes 0.1-30 s (A11 budget), and og-engine's 2 s dispatch
+    # cycle and MQTT ingest share this loop.
+    result = await asyncio.to_thread(solve_gate, inputs, gate_kind, horizon_start)
 
     _last_hint_x.clear()
     _last_hint_x.update({k: 1.0 if v else 0.0 for k, v in result.selected_x.items()})
