@@ -120,7 +120,9 @@ engine_port = 9101
 
 [assets]
 # Asset-health drift sweep in og-settle (WATCH -> guardian-signed calibration, DEGRADED -> work order).
-drift_enabled = true
+# OFF 2026-09-26 10:00: enabling it fleet-wide put 188 hubs in DEGRADED, 4 in QUARANTINED and opened 192
+# work orders within 10 minutes (drift thresholds vs. the simulator's natural drift); re-enable only after tuning.
+drift_enabled = false
 drift_interval_s = 60.0
 
 [pq_ingest]
