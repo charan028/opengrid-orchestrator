@@ -3,9 +3,19 @@
 {% block header_title %}Dispatch & commitments{% endblock %}
 
 {% block header_actions %}
-<form method="get" action="{{ base_path }}/dispatch" aria-label="Select bank for ledger timeline" class="og-toolbar">
-  <label for="bank_id">Bank</label>
-  <input type="text" id="bank_id" name="bank_id" value="{{ bank_id }}">
+<form method="get" action="{{ base_path }}/dispatch" aria-label="Select ledger scope" class="og-toolbar">
+  <label for="ledger-level">Ledger</label>
+  <select id="ledger-level" name="level">
+    <option value="fleet" {% if scope.level == 'fleet' %}selected{% endif %}>Fleet</option>
+    <option value="zone" {% if scope.level == 'zone' %}selected{% endif %}>Zone</option>
+    <option value="bank" {% if scope.level in ('bank', 'hub') %}selected{% endif %}>Feeder segment (bank)</option>
+  </select>
+  <label for="ledger-id">Which</label>
+  <select id="ledger-id" name="id">
+    <option value="" {% if not scope.id %}selected{% endif %}>whole fleet</option>
+    {% for z in scope.zones %}<option value="{{ z }}" {% if scope.level == 'zone' and scope.id == z %}selected{% endif %}>zone {{ z }}</option>{% endfor %}
+    {% for b in scope.all_banks %}<option value="{{ b }}" {% if scope.level in ('bank', 'hub') and scope.banks and scope.banks[0] == b %}selected{% endif %}>{{ b }}</option>{% endfor %}
+  </select>
   <button class="btn" type="submit">View</button>
 </form>
 <span class="stale-badge" id="dispatch-updated" role="status" data-stale="false">live</span>
@@ -43,10 +53,29 @@
 </section>
 
 <section class="og-panel" aria-labelledby="ledger-heading">
-  <h2 id="ledger-heading">Ledger timeline &mdash; bank {{ ledger.bank_id }}</h2>
-  <p>{{ ledger.obligation_count }} committed obligations plotted, plus free headroom.
+  {# a div, not a second <nav>: the page keeps one landmark navigation (tests-e2e/ui/test_a11y.py) #}
+  <div class="og-crumbs">
+    <span class="og-crumbs-label">Scope</span>
+    {% for c in scope.crumbs %}
+      {% if not loop.last %}<a href="{{ base_path }}/dispatch?level={{ c.level }}&amp;id={{ c.id }}">{{ c.label }}</a><span aria-hidden="true">&rsaquo;</span>{% else %}<span aria-current="location">{{ c.label }}</span>{% endif %}
+    {% endfor %}
+  </div>
+  <h2 id="ledger-heading">Ledger timeline &mdash; {{ ledger.bank_id }}</h2>
+  <p>Committed kW per obligation, stacked, against the scope's {{ '%.0f'|format(ledger.capacity_kw) }} kW of sellable capacity; the dashed remainder is capacity nobody has bought yet.
+    {% if scope.level == 'fleet' %}Aggregate of every feeder segment; pick a zone or a segment to drill down.{% elif scope.level == 'zone' %}Aggregate of the zone's feeder segments.{% elif scope.level == 'bank' %}A bank is a feeder segment aggregating its homes ({{ scope.hubs_in_scope or 50 }} hubs, one 600 kVA rating), not a single hub.{% else %}Hubs share their segment's ledger; this is {{ scope.banks[0] }}'s.{% endif %}
+    {{ ledger.obligation_count }} obligation{{ '' if ledger.obligation_count == 1 else 's' }} plotted.
+    {% if scope.banks_unavailable %}<span class="stale-badge" data-stale="true">{{ scope.banks_unavailable|length }} of {{ scope.banks|length }} segments unavailable</span>{% endif %}
     {% with since_iso=ledger.generated_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  <div id="ledger-chart" style="height: 280px;" role="img" aria-label="Stacked area chart of committed capacity and free headroom over time" data-empty="No capacity reserved on this bank yet. The selector reserves at the next quarter-hour gate."></div>
+  {% if scope.level == 'fleet' and scope.zones %}
+  <p class="og-drill">Drill down:
+    {% for z in scope.zones %}<a href="{{ base_path }}/dispatch?level=zone&amp;id={{ z }}">{{ z }}</a>{% if not loop.last %} &middot; {% endif %}{% endfor %}
+  </p>
+  {% elif scope.level == 'zone' %}
+  <p class="og-drill">Feeder segments:
+    {% for b in scope.banks %}<a href="{{ base_path }}/dispatch?level=bank&amp;id={{ b }}">{{ b }}</a>{% if not loop.last %} &middot; {% endif %}{% endfor %}
+  </p>
+  {% endif %}
+  <div id="ledger-chart" style="height: 300px;" role="img" aria-label="Stacked area chart of committed capacity per obligation and uncommitted capacity over time" data-empty="No capacity reserved in this scope yet. The selector reserves at the next quarter-hour gate."></div>
 </section>
 
 <section class="og-grid">

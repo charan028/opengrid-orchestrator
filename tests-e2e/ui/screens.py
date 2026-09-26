@@ -14,7 +14,7 @@ SCREENS: tuple[tuple[str, str], ...] = (
     (f"{BASE_PATH}/fleet", "Fleet monitoring & control"),
     (f"{BASE_PATH}/dispatch", "Dispatch & commitments"),
     (f"{BASE_PATH}/markets", "Markets & feeds"),
-    (f"{BASE_PATH}/health", "Health"),
+    (f"{BASE_PATH}/health", "System Health"),
     (f"{BASE_PATH}/profitability", "Profitability"),
     (f"{BASE_PATH}/billing", "Billing & audit"),
 )

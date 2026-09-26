@@ -17,9 +17,10 @@ passes these through when present and degrades to `None` when absent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
@@ -158,11 +159,24 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
     }
 
 
+LedgerLevel = Literal["fleet", "zone", "bank", "hub"]
+UNCOMMITTED_SERIES = "uncommitted capacity (kW)"
+_HUBS_PER_BANK_DEFAULT = 50
+
+
 def ledger_timeline_view(
-    bank_id: str, reservations: list[dict[str, Any]], bank_capacity_kw: float, *, now: datetime
+    bank_id: str,
+    reservations: list[dict[str, Any]],
+    bank_capacity_kw: float,
+    *,
+    now: datetime,
+    obligation_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Stacked-area ECharts option: one series per obligation's committed y-hat plus a headroom series
-    for uncommitted capacity, per bank (02b S8 screen 3 ledger timeline)."""
+    """Stacked-area ECharts option for one ledger scope: one series per obligation's committed kW plus
+    the capacity nobody has bought yet (02b S8 screen 3; CR #19 item 3: the legend names each series by
+    service and short id and calls the remainder "uncommitted capacity", never "free headroom").
+    `reservations` may span several banks (fleet/zone scopes): amounts for the same obligation and
+    interval are summed, so the chart is the aggregate the scope asks for."""
     by_interval: dict[str, dict[str, float]] = {}
     obligation_ids: list[str] = []
     for reservation in reservations:
@@ -171,29 +185,31 @@ def ledger_timeline_view(
         obligation_id = reservation["obligation_id"]
         if obligation_id not in obligation_ids:
             obligation_ids.append(obligation_id)
-        by_interval.setdefault(reservation["interval_start"], {})[obligation_id] = float(
-            reservation["amount"]
-        )
+        bucket = by_interval.setdefault(reservation["interval_start"], {})
+        bucket[obligation_id] = bucket.get(obligation_id, 0.0) + float(reservation["amount"])
     intervals = sorted(by_interval)
+    labels = obligation_labels or {}
     series: list[dict[str, Any]] = [
         {
-            "name": obligation_id[:8],  # short id, as on the pipeline cards; the tooltip keeps the series
+            "name": labels.get(obligation_id) or obligation_id[:8],
             "type": "line",
             "stack": "ledger",
             "areaStyle": {},
             "showSymbol": False,
-            "data": [by_interval[interval].get(obligation_id, 0.0) for interval in intervals],
+            "data": [round(by_interval[interval].get(obligation_id, 0.0), 3) for interval in intervals],
         }
         for obligation_id in obligation_ids
     ]
     committed_totals = [sum(by_interval[interval].values()) for interval in intervals]
-    headroom = [max(bank_capacity_kw - total, 0.0) for total in committed_totals]
+    headroom = [round(max(bank_capacity_kw - total, 0.0), 3) for total in committed_totals]
     series.append(
         {
-            "name": "free headroom",
+            "name": UNCOMMITTED_SERIES,
             "type": "line",
             "stack": "ledger",
-            "areaStyle": {},
+            "areaStyle": {"opacity": 0.35},
+            "lineStyle": {"type": "dashed"},
+            "itemStyle": {"color": "token:--muted@0.55"},
             "showSymbol": False,
             "data": headroom,
         }
@@ -204,12 +220,115 @@ def ledger_timeline_view(
             "xAxis": {"type": "category", "data": intervals},
             "yAxis": {"type": "value", "name": "kW"},
             "series": series,
-            "legend": {},
-            "tooltip": {"trigger": "axis"},
+            "legend": {"data": [s["name"] for s in series], "top": 0},
+            "tooltip": {"trigger": "axis", "valueFormatter": "token:kw"},
+            "grid": {"containLabel": True, "left": 8, "right": 12, "top": 44, "bottom": 8},
         },
         "obligation_count": len(obligation_ids),
+        "capacity_kw": round(bank_capacity_kw, 3),
         "generated_at": now.isoformat(),
     }
+
+
+def obligation_labels(obligations: list[dict[str, Any]]) -> dict[str, str]:
+    """`obligation_id -> "ERCOT_AS 8937a346"` for the ledger legend, from the pipeline rows."""
+    out: dict[str, str] = {}
+    for row in obligations:
+        oid = str(row.get("obligation_id") or "")
+        if oid:
+            out[oid] = f"{row.get('service_type') or 'obligation'} {oid[:8]}"
+    return out
+
+
+def ledger_scope(level: str | None, scope_id: str | None, hubs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Resolve the aggregate-first ledger scope (CR #19 item 3: fleet -> zone -> bank -> hub) to the set
+    of banks it covers, plus breadcrumb and caption data. A bank is a feeder segment aggregating its
+    hubs (the seeded fleet: 50 homes per 600 kVA segment), never a single hub, and the caption says so."""
+    banks: dict[str, dict[str, Any]] = {}
+    for h in hubs:
+        b = str(h.get("bank_id") or "")
+        if not b:
+            continue
+        entry = banks.setdefault(b, {"bank_id": b, "zone": str(h.get("zone") or ""), "hubs": 0})
+        entry["hubs"] += 1
+    zones = sorted({b["zone"] for b in banks.values() if b["zone"]})
+    lvl: str = level if level in ("fleet", "zone", "bank", "hub") else "fleet"
+    sid = (scope_id or "").strip()
+    hub_bank: str | None = None
+    if lvl == "hub":
+        match = next((h for h in hubs if str(h.get("hub_id")) == sid), None)
+        hub_bank = str(match.get("bank_id")) if match else None
+        if hub_bank is None:
+            lvl = "fleet"
+    if lvl == "zone" and sid not in zones:
+        lvl = "fleet"
+    if lvl == "bank" and sid not in banks:
+        lvl = "fleet"
+    if lvl == "fleet":
+        covered = sorted(banks)
+    elif lvl == "zone":
+        covered = sorted(b for b, e in banks.items() if e["zone"] == sid)
+    elif lvl == "bank":
+        covered = [sid]
+    else:
+        covered = [hub_bank or ""]
+    zone_of_bank = (
+        banks.get(covered[0], {}).get("zone") if lvl in ("bank", "hub") and covered else None
+    ) or ""
+    crumbs = [{"label": "Fleet", "level": "fleet", "id": ""}]
+    if lvl in ("zone", "bank", "hub"):
+        z = sid if lvl == "zone" else zone_of_bank
+        if z:
+            crumbs.append({"label": z, "level": "zone", "id": z})
+    if lvl in ("bank", "hub"):
+        crumbs.append({"label": covered[0], "level": "bank", "id": covered[0]})
+    if lvl == "hub":
+        crumbs.append({"label": sid, "level": "hub", "id": sid})
+    hubs_in_scope = sum(banks[b]["hubs"] for b in covered if b in banks)
+    if lvl == "fleet":
+        title = f"fleet ({len(covered)} feeder segments, {hubs_in_scope} homes)"
+    elif lvl == "zone":
+        title = f"{sid} ({len(covered)} feeder segments, {hubs_in_scope} homes)"
+    elif lvl == "bank":
+        title = f"{sid} (feeder segment of {hubs_in_scope or _HUBS_PER_BANK_DEFAULT} homes)"
+    else:
+        title = f"{sid} on {covered[0]} (the ledger is kept per feeder segment)"
+    return {
+        "level": lvl,
+        "id": sid if lvl != "fleet" else "",
+        "banks": covered,
+        "zones": zones,
+        "all_banks": sorted(banks),
+        "crumbs": crumbs,
+        "title": title,
+        "hubs_in_scope": hubs_in_scope,
+    }
+
+
+async def _aggregate_timeline(banks: list[str]) -> tuple[list[dict[str, Any]], float, list[str]]:
+    """Sum the per-bank ledger timelines of `banks`: reservations concatenated (the view sums same
+    obligation/interval amounts), capacity summed. Returns (reservations, capacity_kw, failed_banks).
+    ponytail: N calls to the per-bank endpoint until `GET /og/api/dispatch/ledger?level=` lands."""
+
+    async def one(bank: str) -> tuple[str, dict[str, Any] | None]:
+        try:
+            body = await get_json(f"/og/api/ledger/{bank}/timeline")
+            return bank, body if isinstance(body, dict) else None
+        except ApiUnavailable as exc:
+            logger.warning("dispatch: /og/api/ledger/%s/timeline unavailable: %s", bank, exc)
+            return bank, None
+
+    results = await asyncio.gather(*(one(b) for b in banks))
+    reservations: list[dict[str, Any]] = []
+    capacity = 0.0
+    failed: list[str] = []
+    for bank, body in results:
+        if body is None:
+            failed.append(bank)
+            continue
+        reservations.extend(body.get("reservations", []))
+        capacity += float(body.get("bank_capacity_kw", 0.0))
+    return reservations, capacity, failed
 
 
 def _minutes(value: Any) -> str:
@@ -319,10 +438,18 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
 
 
 @router.get("", response_class=HTMLResponse)
-async def dispatch_page(request: Request, bank_id: str | None = Query(default=None)) -> HTMLResponse:
-    """Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S)."""
+async def dispatch_page(
+    request: Request,
+    bank_id: str | None = Query(default=None),
+    level: str | None = Query(default=None),
+    id: str | None = Query(default=None),
+) -> HTMLResponse:
+    """Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S). The ledger panel
+    is aggregate-first (CR #19 item 3): `?level=fleet|zone|bank|hub&id=` selects the scope, default
+    fleet; the legacy `?bank_id=` still opens a bank."""
     now = datetime.now(tz=UTC)
-    bank_id = bank_id or await _default_bank_id()
+    if bank_id and not level:
+        level, id = "bank", bank_id
     degraded: str | None = None
     obligations: list[dict[str, Any]] = []
     plan: dict[str, Any] | None = None
@@ -330,6 +457,16 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
     grants: list[dict[str, Any]] = []
     bank_capacity_kw = 0.0
     commitments: list[dict[str, Any]] = []
+    hubs: list[dict[str, Any]] = []
+    try:
+        raw_hubs = await get_json("/og/api/fleet/hubs")
+        hubs = raw_hubs.get("items", []) if isinstance(raw_hubs, dict) else raw_hubs or []
+    except ApiUnavailable as exc:
+        logger.warning("dispatch: /og/api/fleet/hubs unavailable: %s", exc)
+    scope = ledger_scope(level, id, hubs)
+    if not scope["banks"] or scope["banks"] == [""]:
+        scope["banks"] = [bank_id or await _default_bank_id()]
+    bank_id = scope["banks"][0]
 
     try:
         raw = await get_json("/og/api/dispatch/opportunities")
@@ -344,12 +481,28 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
         logger.warning("dispatch: /og/api/dispatch/plan/latest unavailable: %s", exc)
         degraded = degraded or str(exc)
 
+    # Aggregate ledger: the CR #19 endpoint when it exists, else the per-bank timelines summed.
+    aggregate_loaded = False
+    try:
+        agg = await get_json("/og/api/dispatch/ledger", params={"level": scope["level"], "id": scope["id"]})
+        if isinstance(agg, dict) and "reservations" in agg:
+            reservations = agg.get("reservations", [])
+            bank_capacity_kw = float(agg.get("capacity_kw", agg.get("bank_capacity_kw", 0.0)))
+            aggregate_loaded = True
+    except ApiUnavailable as exc:
+        if exc.status_code not in (404, 405):
+            logger.info("dispatch: aggregate ledger endpoint not available yet: %s", exc)
+    if not aggregate_loaded:
+        reservations, bank_capacity_kw, failed = await _aggregate_timeline(scope["banks"])
+        if failed and len(failed) == len(scope["banks"]):
+            degraded = degraded or "GET /og/api/ledger/<bank>/timeline failed for every bank in scope"
+        scope["banks_unavailable"] = failed
+
+    # Grants and lock events stay per bank (the first bank in scope): they list rows, not a curve.
     try:
         timeline = await get_json(f"/og/api/ledger/{bank_id}/timeline")
         if isinstance(timeline, dict):
-            reservations = timeline.get("reservations", [])
             grants = timeline.get("grants", [])
-            bank_capacity_kw = float(timeline.get("bank_capacity_kw", 0.0))
             commitments = timeline.get("commitments", [])
     except ApiUnavailable as exc:
         logger.warning("dispatch: /og/api/ledger/%s/timeline unavailable: %s", bank_id, exc)
@@ -362,9 +515,16 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
             "role": role_of(request),
             "is_operator": is_operator(request),
             "bank_id": bank_id,
+            "scope": scope,
             "pipeline": pipeline_view(obligations if isinstance(obligations, list) else [], now=now),
             "plan": plan_view(plan if isinstance(plan, dict) else None),
-            "ledger": ledger_timeline_view(bank_id, reservations, bank_capacity_kw, now=now),
+            "ledger": ledger_timeline_view(
+                scope["title"],
+                reservations,
+                bank_capacity_kw,
+                now=now,
+                obligation_labels=obligation_labels(obligations if isinstance(obligations, list) else []),
+            ),
             "grants": grants_and_substitutions_view(grants),
             "lock_events": commitment_lock_events_view(commitments),
             "degraded": degraded,

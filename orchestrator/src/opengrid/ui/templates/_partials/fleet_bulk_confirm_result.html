@@ -1,0 +1,28 @@
+{# fleet_bulk_confirm_result.html -- step-2 bulk manual-command confirm HTMX fragment (CR #19 item 2).
+   Params:
+     result: dict|None (the API's BulkCommandConfirmResult: proposal_id/outcome/accepted/rejected/
+       vetoed_rule_ids/trace_id) -- present on a PASS *and* on a 409 veto, since the veto body is itself
+       a result
+     status_code: int|None (503 timeout, 410/404 expired or unknown)
+     message: str|None (failure detail) #}
+<div id="bulk-confirm-result" role="{{ 'status' if (result and result.outcome == 'PASS') else 'alert' }}">
+  {% if result and result.outcome == "PASS" %}
+  <p>{% with status='ok', label='PASS' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Command accepted for {{ result.accepted|default(result.hub_ids|default([]))|length }} hub{{ '' if (result.accepted|default(result.hub_ids|default([]))|length) == 1 else 's' }}.
+    {% if result.rejected %}{{ result.rejected|length }} rejected.{% endif %}
+    Trace {{ result.trace_id|default('-') }}.</p>
+  {% elif result and result.outcome %}
+  <p>{% with status='critical', label=result.outcome %}{% include "_partials/status_badge.html" %}{% endwith %}
+    Vetoed by guardian: {{ result.vetoed_rule_ids|join(', ')|default('no rule ids given', true) }}.
+    Trace {{ result.trace_id|default('-') }}.</p>
+  {% elif status_code == 503 %}
+  <p>{% with status='warning', label='TIMEOUT' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    No guardian verdict within the poll window. {{ message }}</p>
+  {% elif status_code in (410, 404) %}
+  <p>{% with status='caution', label='EXPIRED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The proposal expired or is unknown -- select the hubs and propose again. {{ message }}</p>
+  {% else %}
+  <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    {{ message|default('the command could not be confirmed') }}</p>
+  {% endif %}
+</div>
