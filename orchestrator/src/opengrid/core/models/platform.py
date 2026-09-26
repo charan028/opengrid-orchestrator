@@ -24,9 +24,8 @@ class Hub(_Row):
     eta_d: float = 0.9487
     lat: float | None = None
     lon: float | None = None
-    units: Literal[1, 2] = 1
-    """Battery units in the home (migration 0032's `og.hub.units`): 2 for a dual-unit home, else 1. The
-    guardian's G-02 cap is 11 kW per unit and 20 kW for a dual-unit home, so the seed writes it explicitly."""
+    # Battery/inverter units in the home (migration 0032): 1 = 11 kW, 2 = 20 kW dual-unit (G-02 unit cap).
+    units: int = 1
 
 
 class Bank(_Row):
@@ -48,6 +47,14 @@ class HubState(_Row):
     last_command_id: UUID | None = None
     last_seen_at: datetime
     fault_code: str | None = None
+    # Latest optional discharge-flow telemetry (migration 0027); None until a hub reports it.
+    home_load_kw: float | None = None
+    pv_kw: float | None = None
+    meter_kw: float | None = None
+    cell_temp_c: float | None = None
+    p_dis_max_kw: float | None = None
+    p_ch_max_kw: float | None = None
+    peak_power_budget_kws: float | None = None
 
 
 class Heartbeat(_Row):
@@ -66,6 +73,10 @@ class Alert(_Row):
     opened_at: datetime
     cleared_at: datetime | None = None
     acked_by: str | None = None
+    # Structured scope columns (migration 0024), additive alongside `detail`'s rule-specific fields --
+    # so the UI/API can key off a real scope instead of parsing `summary` text.
+    scope_kind: str | None = None
+    scope_ref: str | None = None
 
 
 class FeedObs(_Row):

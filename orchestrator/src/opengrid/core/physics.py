@@ -146,9 +146,19 @@ def hub_capability(
 
     ES03-S05 (K1): this used to report the full rated `p_kw` whenever SoC was above reserve by any
     margin -- a hub 0.1 kWh above its floor was offered at 11 kW for a whole interval (~2.75 kWh). It is
-    now the energy-limited `hub_sustainable_discharge_kw`/`hub_sustainable_charge_kw`."""
-    max_discharge_kw = hub_sustainable_discharge_kw(soc_kwh, params.r_kwh, params.p_kw, dt_h, params.eta_d)
-    max_charge_kw = hub_sustainable_charge_kw(soc_kwh, params.e_kwh, params.p_kw, dt_h, params.eta_c)
+    now the energy-limited `hub_sustainable_discharge_kw`/`hub_sustainable_charge_kw`.
+
+    K2/G-02 (migration 0032): the power ceiling is the home's unit-capped continuous rating
+    (`opengrid.core.limits.continuous_power_kw` -- 11 kW per unit, 20 kW for a dual-unit home, fail-closed
+    to one unit when `params.units` is unknown), never the seeded `p_kw` alone, so the capability the
+    ledger admits against and K2's independent recomputation agree with what the guardian will sign."""
+    # Local import: `core.limits` imports this module (HubParams et al.), so a module-level import here
+    # would be circular. The rating formula has ONE owner (`core.limits`); it is reused, not re-derived.
+    from opengrid.core.limits import continuous_power_kw
+
+    rated_kw = continuous_power_kw(params)
+    max_discharge_kw = hub_sustainable_discharge_kw(soc_kwh, params.r_kwh, rated_kw, dt_h, params.eta_d)
+    max_charge_kw = hub_sustainable_charge_kw(soc_kwh, params.e_kwh, rated_kw, dt_h, params.eta_c)
     return max_discharge_kw, max_charge_kw
 
 

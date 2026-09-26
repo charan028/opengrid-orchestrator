@@ -49,6 +49,22 @@ WIRE_TYPE_TO_CATALOGUE_ID: dict[str, str] = {
     "FLEET_CALIBRATION_DRIFT_CORRECTABLE": "calibration_drift_correctable",
     "FLEET_CALIBRATION_DRIFT_HARDWARE": "calibration_drift_hardware",
     "FLEET_REPLACE_INVERTER": "replace_inverter",
+    # Service-catalogue additions (build phase, 2026-09-26; SERVICES agent's scenario files,
+    # FLEET-SIM wiring).
+    "MARKET_PJM_EMERGENCY_PERFORMANCE_EVENT": "pjm_emergency_performance_event",
+    "MARKET_AS_DEPLOYMENT": "as_deployment",
+    "FLEET_MOBILE_DEPLOYMENT_START": "mobile_deployment_start",
+    "FLEET_MOBILE_DEPLOYMENT_RELOCATE": "mobile_deployment_relocate",
+    # ogsim.customer (customer-operator simulators): shared here per coordination with the
+    # lead so ogsim.customer can reuse parse_scenario_cmd unchanged.
+    "CUSTOMER_LOAD_STEP": "load_step_datacenter",
+    "CUSTOMER_PIPELINE_CURRENT_SURGE": "pipeline_current_surge",
+    "CUSTOMER_REQUEST_BURST": "request_burst",
+    "CUSTOMER_MALFORMED_REQUEST": "malformed_request",
+    "CUSTOMER_LATE_CANCELLATION": "late_cancellation",
+    "CUSTOMER_INVOICE_DISPUTE": "invoice_dispute",
+    "CUSTOMER_SITE_METER_STALE": "site_meter_stale",
+    "CUSTOMER_LARGE_LOAD_CURTAILMENT_REQUEST": "large_load_curtailment_request",
 }
 
 

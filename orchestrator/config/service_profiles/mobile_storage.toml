@@ -1,0 +1,77 @@
+# MOBILE_STORAGE service profile, version 1 (owner decision 2026-09-26).
+# Spec: docs/orchestrator/07-delivery/06-service-profiles-and-power-quality.md S1.3-1.5, S2, S5.5.3;
+# 02-architecture/03-decision-engine.md S2.5-2.7 (EVENT_SCHEDULE_TRACKING primitive, deployment-band
+# pattern shared with ISO_XML_DEPLOYMENT/NCLR_DEPLOYMENT_BAND); 07-delivery/14-additional-services.md.
+#
+# A trailer or mobile battery deployed to a customer site for a scheduled window. Unlike every other
+# profile in this directory, the delivery location is NOT fixed for the life of the contract: each
+# deployment carries its own `site_id`, so `feedback_signal_ref` and the M&V site meter reference are
+# re-filled at EVERY deployment's instantiation, not once at contract signing (S1.3's normal "filled at
+# instantiation" rule still applies -- it just applies once per deployment here, not once per contract).
+# State of charge on arrival is a deployment-time fact (recorded on the og.service_profile row created for
+# that deployment via [instantiation]; there is no separate field in the shared schema for it -- it is
+# carried as the deployment's starting condition for M&V, not a control-law parameter).
+#
+# Wired: MOBILE_STORAGE is a registered ServiceType (core/models/engine.py, migration 0025, MARKET-MODEL
+# owned). NOT yet wired (wiring lines in the SERVICES agent's 2026-09-26 report): opengrid.settle.
+# baselines.METER_SOURCE_BY_SERVICE (settle owner) and opengrid.selector.gate._CATEGORY_BY_SERVICE_TYPE
+# (optimizer owner) both need a "MOBILE_STORAGE" entry.
+
+[profile]
+service_type = "MOBILE_STORAGE"
+profile_ref = "mobile-storage-profile@1"
+version = 1
+variant = "MOBILE_DEPLOYMENT"
+tier = "T2"                                # committed for the deployment window, not top firm tier
+
+[service_profile]
+control_primitive = "EVENT_SCHEDULE_TRACKING"  # track the declared deployment profile to a compliance band
+target_quantity = "KW"
+target_scope = "SITE_METER"                    # "delivered to a site's meter" (task brief)
+setpoint_source = "PLAN"                       # the deployment's day-ahead/intraday delivery schedule
+feedback_signal_ref = "site_meter:{site_id}:p_kw"  # {site_id} re-filled per deployment (see file header)
+response_time_s = 300.0                        # time to be online and tracking after energization
+ramp_limit_unit = "kw_per_min"
+priority_tier = "T2"                           # must equal [profile].tier (S1.3 conformance check)
+mv_method = "AMI_INTERVAL"                     # site meter, same source class as DATA_CENTER (S1.1)
+settlement_metric = "deployment_capacity_payment"
+failure_behaviour = "HOLD_THEN_SCHEDULE"       # S2.5 element-8 library value
+
+[control]
+# Same deployment-compliance-band shape as ERCOT_AS's NCLR_DEPLOYMENT_BAND / PARTNER_CAPACITY's EVENT
+# variant (03 S2.6) -- a plan is tracked to a band, not closed-loop feedback-regulated (K9: no new loop).
+tracking_mode = "COMPLIANCE_BAND"
+compliance_band_pct = 95.0                     # meter-after/meter-before style band, matches NCLR (03 S2.6)
+relocatable = true                             # site_id changes per deployment; the fleet asset does not
+
+[instantiation]
+# ramp_limit (kW/min) = committed_kw * 60 / response_time_s, so committed kW is reachable within
+# response_time_s of energization.
+ramp_limit_per_committed_kw_per_min = 0.2
+accuracy_tolerance_fraction_of_committed = 0.03   # per deployment
+deadband_fraction_of_committed = 0.015            # per deployment
+sustain_duration_required = true                  # the deployment must state its window duration
+
+[eligibility]
+# The mobile unit's own inverter is what is characterized here (og.hub_inverter_pq keyed by the trailer's
+# hub_id, unchanged by relocation); not PQ-sensitive like DATA_CENTER, so no PQ-aware selection weighting.
+min_quality_score = 0.5
+required_ride_through_class = "CATEGORY_II"
+eligible_asset_states = ["OK", "WATCH"]
+excluded_asset_states = ["DEGRADED", "QUARANTINED", "AWAITING_REPLACEMENT", "RECOMMISSIONING"]
+pq_aware_selection = false
+
+[pq_envelope]
+# Grid-code minimum (S2 defaults) at the delivery site; only phase_config is set here.
+phase_config = "3P"
+
+[settlement]
+performance_factor = "pf_kw"                      # kW/availability compliance only, no PQ compliance line
+
+[[settlement.lines]]
+name = "deployment_capacity_payment"
+mv_output = "delivered_kw_vs_committed_per_deployment_window"
+
+[[settlement.lines]]
+name = "deployment_availability_pct"
+mv_output = "share_of_deployment_window_energized_and_compliant"

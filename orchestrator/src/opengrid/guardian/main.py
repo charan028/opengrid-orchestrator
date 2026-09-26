@@ -32,6 +32,7 @@ from opengrid.guardian.escalation import (
     EscalationTracker,
     Transition,
 )
+from opengrid.guardian.flow_repo import PgGridTopologyPort, PgTerritoryPort, load_required_zone_territory
 from opengrid.guardian.keys import resolve_signing_seed
 from opengrid.guardian.mqtt_io import (
     MqttHubStatePort,
@@ -63,7 +64,7 @@ from opengrid.platform.log import configure_logging
 from opengrid.platform.mqtt import build_client
 from opengrid.platform.process import run_forever
 from opengrid.trace import TraceStore
-from opengrid.trace.pg_backend import PgTraceBackend
+from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
 
 logger = logging.getLogger("guardian")
 
@@ -238,9 +239,10 @@ async def apply_escalation(
     zone_by_bank: dict[str, str],
 ) -> list[Transition]:
     """ES06-S04: fold one tick's verdicts into the per-scope counter and publish the result -- the posture
-    the engine honours (`og.scope_posture`), ALR-SCOPE-CONSERVATIVE while degraded, and after three
-    consecutive CONSERVATIVE ticks ALR-SAFE-STOP-REQUESTED plus an operator-action proposal. A person decides;
-    nothing here engages a stop. Recovery clears the posture and both alerts."""
+    the engine honours (`og.scope_posture`), ALR-SCOPE-CONSERVATIVE while degraded, and once the escalation
+    count reaches three (bad ticks without recovery, hysteresis in `escalation`) ALR-SAFE-STOP-REQUESTED plus
+    an operator-action proposal. A person decides; nothing here engages a stop. Recovery clears the posture
+    and both alerts."""
     transitions = tracker.observe_tick(outcomes, zone_by_bank)
     for t in transitions:
         kind, ref = t.scope
@@ -275,7 +277,10 @@ async def apply_escalation(
                 detail,
             )
         elif t.kind == "REQUEST_SAFE_STOP":
-            reason = f"{t.consecutive} consecutive CONSERVATIVE ticks ({t.veto_ratio:.0%} vetoed): safe stop requested"
+            reason = (
+                f"{t.consecutive} CONSERVATIVE ticks without recovery ({t.veto_ratio:.0%} vetoed): "
+                "safe stop requested"
+            )
             await alerts.raise_alert(STOP_REQUEST_ALERT_RULE, "critical", f"{key}: {reason}", key, detail)
             await posture.propose_safe_stop(kind, ref, reason)
     return transitions
@@ -308,7 +313,7 @@ async def main() -> None:
     pool = AsyncConnectionPool(build_dsn(cfg), min_size=1, max_size=4, open=False)
     await pool.open(wait=True, timeout=POOL_OPEN_TIMEOUT_S)  # PLAT-004
 
-    trace_store = TraceStore(PgTraceBackend(pool))
+    trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
     # GUARD-02/04: guardian's hub-state read is always its OWN MQTT telemetry cache, never a Postgres
     # port -- passed in directly so `build_pg_ports` can never default to reading og.hub_state instead.
     telemetry_cache = MqttHubStatePort(
@@ -326,7 +331,10 @@ async def main() -> None:
         conservative_ratio=guardian_cfg.escalation_conservative_ratio,
         stop_request_after=guardian_cfg.escalation_stop_request_after,
         idle_clear_ticks=guardian_cfg.escalation_idle_clear_ticks,
+        clear_after_good_ticks=guardian_cfg.escalation_clear_after_good_ticks,
+        clear_ratio_factor=guardian_cfg.escalation_clear_ratio_factor,
     )
+    zone_territory = load_required_zone_territory()
     ports, leases = build_pg_ports(
         pool,
         trace_store,
@@ -337,6 +345,9 @@ async def main() -> None:
         stop_release=release_port,
         alerts=alert_port,
         zones_by_bank=zones_by_bank,
+        # 09 S2.6 flow limits (G-26..G-32) and K15 territory (G-33): always wired in production.
+        topology=PgGridTopologyPort(pool, guardian_cfg, zone_territory),
+        territory=PgTerritoryPort(pool, zone_territory),
     )
     calibration_queue = PgCalibrationQueuePort(pool)
 

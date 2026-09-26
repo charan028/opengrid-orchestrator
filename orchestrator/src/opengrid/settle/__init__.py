@@ -17,23 +17,37 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.reasons import R_AS_HOLD_SHORT
+from opengrid.market.capacity import regulated_capacity_payment
+from opengrid.market.charging import regulated_charging_cost
+from opengrid.market.config import DEFAULT_UTILITIES
 from opengrid.settle.backend import SettleBackend
 from opengrid.settle.baselines import METER_SOURCE_BY_SERVICE, compute_baseline_kwh
 from opengrid.settle.billing import draft_invoice_lines, next_version
 from opengrid.settle.metering import meter_interval as _meter_interval
 from opengrid.settle.performance import compute_performance, is_need_basis_compliant
 from opengrid.settle.profitability import compute_forgone_upside, compute_pnl
-from opengrid.settle.tariffs import TdspTariff, m1_delivery_charge, resolve_tariff, tdsp_for_zone
+from opengrid.settle.services_extra import pjm_non_performance_charge
+from opengrid.settle.tariffs import (
+    TdspTariff,
+    grid_charged_kwh_for_delivery,
+    m1_delivery_charge,
+    resolve_tariff,
+    tdsp_for_zone,
+)
 from opengrid.trace import TraceStore
 from opengrid.trace.pg_backend import run_retention_prune_job
 
 _SECONDS_PER_HOUR = Decimal("3600")
+#: M1 grid share: the trailing charging window ending at the interval (the same 24 h the charging-cost
+#: proxy averages over, `pg_backend._FETCH_CHARGING_COST_PROXY_SQL`).
+M1_GRID_SHARE_WINDOW = timedelta(hours=24)
 _SETTLE_STREAM_ID = "settle"
 _DEFAULT_MAX_CONCURRENCY = 20  # BUILD.md S2: many customers/obligations settled concurrently
 
@@ -156,9 +170,28 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     # is the ONLY field opengrid.engine.lifecycle.close_target reads to decide FULFILLED vs SHORTFALL
     # at window-close (`NOT p.passed_threshold` in any interval), so this alone stops a held AS window
     # from ever closing as SHORTFALL -- no engine-side lifecycle change is needed.
-    is_capacity_hold_service = ctx.service_type == "ERCOT_AS"
+    # REGULATED_CAPACITY is likewise a capacity hold (08 S3, 09 D1/D2): the utility pays for kW
+    # committed, not kWh delivered, so it gets the identical availability treatment as ERCOT_AS.
+    is_capacity_hold_service = ctx.service_type in ("ERCOT_AS", "REGULATED_CAPACITY")
     if is_capacity_hold_service:
-        performance = replace(performance, compliance_pct=None, passed_threshold=True)
+        # og.performance.compliance_pct is NOT NULL (0001_init.sql) -- it must always be a number.
+        # 1.0 (100%) while held and available (our default, absent an independent unavailability
+        # signal); a genuinely deployed-but-under-delivered interval would need its own availability
+        # figure (og.performance.availability_pct, unused today) once G-32's hold-availability check
+        # exists. LIVE BUG FIX 2026-09-26: this used to write compliance_pct=NULL, violating the
+        # column's NOT NULL constraint -- every AS settlement failed from the 13:00 deploy until this
+        # fix (obligation 8e1cdcde's 12:45 interval and any other AS interval since).
+        performance = replace(performance, compliance_pct=Decimal("1"), passed_threshold=True)
+
+    # --- ERCOT_AS hold flag (review finding, 2026-09-26): while ALR-ENERGY-SHORTFALL-RISK was open for the
+    # award, the held capacity may not have been fully available, so the interval is FLAGGED
+    # (R-AS-HOLD-SHORT on the settlement trace, `as_hold_short` in its payload). The payment is unchanged:
+    # there is no owner decision on an AS hold penalty yet. --------------------------------------------
+    settlement_reasons: list[str] = []
+    if ctx.service_type == "ERCOT_AS" and await backend.fetch_shortfall_risk_open(
+        obligation_id, interval_start, interval_end
+    ):
+        settlement_reasons.append(R_AS_HOLD_SHORT)
 
     # --- meter_interval: insert-only, versioned by delivered_kwh changing -----------------------
     existing_meter = await backend.fetch_active_meter_interval(obligation_id, interval_start)
@@ -181,7 +214,12 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
             obligation_id=obligation_id,
             interval_start=interval_start,
             interval_end=interval_end,
-            compliance_pct=performance.compliance_pct,
+            # og.performance.compliance_pct is NOT NULL (0001_init.sql): a service with no baseline
+            # (HOME; compute_compliance_pct returns None) is vacuously compliant -- 1.0 (100%), the
+            # same value passes_threshold(None, ...) already treats it as, never NULL.
+            compliance_pct=(
+                performance.compliance_pct if performance.compliance_pct is not None else Decimal("1")
+            ),
             passed_threshold=performance.passed_threshold,
         )
 
@@ -193,21 +231,71 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
         if need_basis_compliant or is_capacity_hold_service
         else max(Decimal("0"), committed_kwh - metering.delivered_kwh)
     )
-    # --- 09 D5's M1 TDSP delivery charge: kWh drawn from the grid to charge, ERCOT competitive area
-    # only. Disabled (delivery_charge = 0) unless opengrid.settle.main loaded tdsp_tariffs.toml at
-    # startup (configure()'s tdsp_tariffs/zone_default_tdsp) -- never a guessed rate. ------------
+    # --- 08/09 two-market model: REGULATED (a utility territory) vs FREE (ERCOT competitive area).
+    # M1 (the TDSP delivery charge) is a FREE-market-only concept (09 S1.6: a regulated utility's own
+    # charging terms already include its delivery cost) -- a REGULATED contract instead prices
+    # charging via `opengrid.market.charging.regulated_charging_cost` (TOU-aware) and, for
+    # REGULATED_CAPACITY, its capacity payment via `opengrid.market.capacity.
+    # regulated_capacity_payment`. Both are the MARKET-MODEL agent's canonical functions (BUILD.md S1
+    # no-duplication) -- settle only resolves the `og.utility` row and passes the already-computed
+    # dollar figures into `compute_pnl`/`draft_invoice_lines`.
+    is_regulated_market = ctx.market == "REGULATED"
+    charging_cost_per_kwh = ctx.charging_cost_per_kwh
     delivery_charge = Decimal("0")
-    if _tdsp_tariffs is not None and _zone_default_tdsp is not None:
-        grid_charged_kwh = await backend.fetch_grid_charged_kwh(obligation_id, interval_start, interval_end)
+    regulated_capacity_amount: Decimal | None = None
+    if is_regulated_market and ctx.utility_id is not None:
+        utility = await backend.fetch_utility(ctx.utility_id)
+        if utility is None:
+            # No live og.utility row yet (dev/seed/market_model_seed.sql not applied) -- fall back to
+            # opengrid.market.config's own planning defaults rather than guess independently.
+            utility = DEFAULT_UTILITIES.get(ctx.utility_id)
+        if utility is not None:
+            charging_cost_per_kwh = regulated_charging_cost(
+                utility, ctx.zone or "", interval_start
+            ).blended_usd_per_kwh
+            if ctx.service_type == "REGULATED_CAPACITY":
+                regulated_capacity_amount = regulated_capacity_payment(
+                    committed_kw=ctx.committed_kw,
+                    # "price None -> 0" handled here, not inside opengrid.market.capacity.
+                    price_usd_per_kw=utility.capacity_price_usd_per_kw or Decimal("0"),
+                    basis=utility.payment_basis,
+                    hours=duration_hours,
+                )
+        else:
+            _logger.warning(
+                "settle: no og.utility row or planning default for utility_id, "
+                "regulated charging cost/capacity payment settle as 0",
+                extra={"obligation_id": str(obligation_id), "utility_id": ctx.utility_id},
+            )
+    elif _tdsp_tariffs is not None and _zone_default_tdsp is not None:
+        # --- 09 D5's M1 TDSP delivery charge: kWh drawn from the grid to charge, ERCOT competitive
+        # area only. Disabled (delivery_charge = 0) unless opengrid.settle.main loaded
+        # tdsp_tariffs.toml at startup (configure()'s tdsp_tariffs/zone_default_tdsp) -- never a
+        # guessed rate. A zone with no TDSP (regulated LZ_AEN/LZ_CPS, LCRA/co-op, unmapped) is never
+        # queried and settles M1 at 0. Owner decision: the FULL charge on grid-drawn charging energy,
+        # i.e. the energy this delivery had to be charged with, times the zone's grid (non-PV) share of
+        # charging over the trailing window (`tariffs.grid_charged_kwh_for_delivery`). ---------------
         tdsp = tdsp_for_zone(_zone_default_tdsp, ctx.zone)
         tariff = resolve_tariff(_tdsp_tariffs, tdsp, interval_start.date())
-        delivery_charge = m1_delivery_charge(grid_charged_kwh, tariff)
+        if tariff is not None and ctx.zone is not None and metering.delivered_kwh > 0:
+            # Hour-aligned so every interval (and obligation) of the zone in that hour shares one scan.
+            window_end = interval_end.replace(minute=0, second=0, microsecond=0)
+            zone_charge = await backend.fetch_zone_charge_energy(
+                ctx.zone, window_end - M1_GRID_SHARE_WINDOW, window_end
+            )
+            grid_charged_kwh = grid_charged_kwh_for_delivery(
+                metering.delivered_kwh,
+                eta_c=ctx.eta_d,  # og.hub carries eta_c = eta_d (0.9487 each); the context holds eta_d only
+                eta_d=ctx.eta_d,
+                grid_share=zone_charge.grid_share,
+            )
+            delivery_charge = m1_delivery_charge(grid_charged_kwh, tariff)
 
     pnl = compute_pnl(
         service_type=ctx.service_type,
         delivered_kwh=metering.delivered_kwh,
         price_per_kwh=ctx.price_per_kwh,
-        charging_cost_per_kwh=ctx.charging_cost_per_kwh,
+        charging_cost_per_kwh=charging_cost_per_kwh,
         discharge_spp_per_kwh=ctx.wholesale_price_per_kwh,
         eta_d=ctx.eta_d,
         degradation_cost_per_kwh=ctx.degradation_cost_per_kwh,
@@ -215,7 +303,33 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
         committed_kwh=committed_kwh,
         penalty=ctx.penalty,
         delivery_charge=delivery_charge,
+        regulated_capacity_amount=regulated_capacity_amount,
     )
+
+    # --- PJM_CAPACITY non-performance charge (opengrid.settle.services_extra, SERVICES agent):
+    # billed only for a shortfall DURING a declared emergency performance hour, on top of (never in
+    # place of) the ordinary CAPACITY_PAYMENT x performance_factor line. Folded into pnl.penalty/
+    # net_value and the single LD_PENALTY invoice line (rather than a second LD_PENALTY draft): og.
+    # invoice_line's insert-only versioning is keyed one row per (contract, obligation, period,
+    # line_type), so two independently-versioned LD_PENALTY drafts for the same interval would race
+    # each other's next_version() lookup -- one combined amount is the safe, documented choice.
+    if ctx.service_type == "PJM_CAPACITY":
+        pjm_rate = await backend.fetch_pjm_emergency_rate(obligation_id, interval_start, interval_end)
+        if pjm_rate is not None:
+            delivered_kw = metering.delivered_kwh / duration_hours if duration_hours != 0 else Decimal("0")
+            pjm_extra_penalty = pjm_non_performance_charge(
+                committed_kw=ctx.committed_kw,
+                delivered_kw=delivered_kw,
+                duration_hours=duration_hours,
+                non_performance_rate_per_kwh=pjm_rate,
+                is_emergency_performance_hour=True,
+            )
+            if pjm_extra_penalty > 0:
+                pnl = replace(
+                    pnl,
+                    penalty=pnl.penalty + pjm_extra_penalty,
+                    net_value=pnl.net_value - pjm_extra_penalty,
+                )
 
     rule_baseline_kwh = await backend.fetch_rule_baseline_delivered_kwh(
         obligation_id, interval_start, interval_end
@@ -226,13 +340,14 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
             service_type=ctx.service_type,
             delivered_kwh=rule_baseline_kwh,
             price_per_kwh=ctx.price_per_kwh,
-            charging_cost_per_kwh=ctx.charging_cost_per_kwh,
+            charging_cost_per_kwh=charging_cost_per_kwh,
             discharge_spp_per_kwh=ctx.wholesale_price_per_kwh,
             eta_d=ctx.eta_d,
             degradation_cost_per_kwh=ctx.degradation_cost_per_kwh,
             shortfall_kwh=max(Decimal("0"), committed_kwh - rule_baseline_kwh),
             committed_kwh=committed_kwh,
             penalty=ctx.penalty,
+            regulated_capacity_amount=regulated_capacity_amount,
         )
         rule_baseline_value = rule_baseline_pnl.net_value
 
@@ -287,6 +402,8 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
         revenue=pnl.revenue,
         performance_factor=performance_factor,
         penalty_amount=pnl.penalty,
+        regulated_capacity_amount=regulated_capacity_amount,
+        discharge_spp_per_kwh=ctx.wholesale_price_per_kwh,
     )
     any_line_posted = False
     for draft in drafts:
@@ -326,7 +443,10 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
                 "wholesale_price_per_kwh": str(ctx.wholesale_price_per_kwh),
                 "wholesale_price_flag": ctx.wholesale_price_flag,
                 "need_basis_compliant": need_basis_compliant,
+                "delivery_charge": str(pnl.delivery_charge),
+                "as_hold_short": R_AS_HOLD_SHORT in settlement_reasons,
             },
+            reason_codes=settlement_reasons or None,
         )
 
 

@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from opengrid.settle.models import ZoneChargeEnergy
 from opengrid.settle.tariffs import (
     TdspTariff,
+    grid_charged_kwh_for_delivery,
     load_tdsp_tariffs,
     m1_delivery_charge,
     resolve_tariff,
@@ -19,6 +21,32 @@ from opengrid.settle.tariffs import (
 )
 
 _TARIFFS_PATH = Path(__file__).resolve().parents[4] / "orchestrator" / "config" / "tdsp_tariffs.toml"
+
+
+def test_grid_share_is_the_grid_fraction_of_charging_and_full_when_nothing_charged():
+    assert ZoneChargeEnergy(Decimal("400"), Decimal("100")).grid_share == Decimal("0.25")
+    assert ZoneChargeEnergy(Decimal("0"), Decimal("0")).grid_share == Decimal("1")  # owner: assume full M1
+    assert ZoneChargeEnergy(Decimal("10"), Decimal("12")).grid_share == Decimal("1")  # clamped
+
+
+def test_grid_charged_kwh_for_delivery_is_the_energy_charged_for_it_times_the_grid_share():
+    kwh = grid_charged_kwh_for_delivery(
+        Decimal("9"), eta_c=Decimal("0.9487"), eta_d=Decimal("0.9487"), grid_share=Decimal("0.5")
+    )
+    assert kwh == Decimal("9") / (Decimal("0.9487") * Decimal("0.9487")) * Decimal("0.5")
+    assert grid_charged_kwh_for_delivery(
+        Decimal("0"), eta_c=Decimal("0.95"), eta_d=Decimal("0.95"), grid_share=Decimal("1")
+    ) == Decimal("0")
+    assert grid_charged_kwh_for_delivery(
+        Decimal("5"), eta_c=Decimal("0"), eta_d=Decimal("0.95"), grid_share=Decimal("1")
+    ) == Decimal("0")
+
+
+def test_regulated_zones_have_no_tdsp_in_the_real_tariff_file(loaded_tariffs):
+    """Owner: FREE-market zones only; Austin Energy / CPS Energy (regulated) pay no M1."""
+    _tariffs, zone_default = loaded_tariffs
+    assert tdsp_for_zone(zone_default, "LZ_AEN") is None
+    assert tdsp_for_zone(zone_default, "LZ_CPS") is None
 
 
 @pytest.fixture(scope="module")

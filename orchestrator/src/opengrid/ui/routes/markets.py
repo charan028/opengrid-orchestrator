@@ -10,7 +10,7 @@ unit-tested against JSON fixtures, no HTTP or DB involved.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -56,6 +56,21 @@ _FORECAST_ZONE = "LZ_NORTH"
 # colours ... not colour alone"). A source not in this map is shown as LIVE by default since the real
 # feeds (ercot/eia/nws) are the common case; SIM and history-replay sources are the exceptions.
 _HIST_OR_SIM_SOURCES: dict[str, str] = {"sim": "SIM", "history_replay": "HIST"}
+
+# The bid funnel's four stages in the order they happen, with the operator-facing label for each. Fixed
+# order, not the payload's: a funnel that reorders itself between polls is unreadable, and "rejected"
+# last is what makes the drop from "we submitted" legible as a loss.
+_BID_FUNNEL_STAGES: tuple[tuple[str, str], ...] = (
+    ("available", "Made available by ERCOT"),
+    ("submitted", "We submitted"),
+    ("awarded", "We won"),
+    ("rejected", "Rejected"),
+)
+
+# How far back the funnel panel looks. Matches the screen's other "recent activity" framing rather than
+# the settlement day, because the question it answers ("are we leaving offers on the table right now?")
+# is an operational one. ponytail: fixed window; add a range picker if anyone asks for last-week views.
+_BID_FUNNEL_WINDOW = timedelta(hours=24)
 
 
 def _parse_ts(value: str) -> datetime:
@@ -194,6 +209,103 @@ def freshness_table_view(feed_statuses: list[dict[str, Any]], *, now: datetime) 
     return rows
 
 
+def _pct_of(part: float, whole: float) -> float:
+    """A percentage of `whole`, 1 dp. A zero denominator is 0%, not an error: a window in which ERCOT
+    offered nothing (or in which we bid on nothing) is a normal quiet hour, and the panel has to render
+    it rather than 500 the whole markets screen on a division."""
+    return round(100.0 * part / whole, 1) if whole else 0.0
+
+
+def _reason_label(code: str) -> str:
+    """`PRICE_ABOVE_CLEARING` -> `Price above clearing`. The raw code stays on the row next to this so an
+    operator can quote it back to ERCOT verbatim; only the display text is softened."""
+    words = str(code).replace("_", " ").strip()
+    return words[:1].upper() + words[1:].lower() if words else str(code)
+
+
+def bid_funnel_view(payload: dict[str, Any] | None, *, now: datetime) -> dict[str, Any]:
+    """Bid funnel: ERCOT opportunities seen -> bids submitted -> awards won -> rejections, with the
+    reasons (CR #19 item 4).
+
+    Provisional contract. `GET /og/api/markets/bid-funnel?from=&to=` is still being built by the
+    market-adapter team and 404s today, so this view is written against the agreed shape and the panel
+    shows an explanatory empty state until the endpoint lands:
+
+        {"from": "2026-09-26T00:00:00Z", "to": "2026-09-27T00:00:00Z",
+         "products": [{"product": "NSPIN", "available": 24, "submitted": 18, "awarded": 11,
+                       "rejected": 7,
+                       "rejection_reasons": [{"reason": "PRICE_ABOVE_CLEARING", "count": 5},
+                                             {"reason": "INSUFFICIENT_CAPACITY", "count": 2}]}],
+         "by_hour": [{"hour": "2026-09-26T14:00:00Z", "available": 4, "submitted": 3, "awarded": 2,
+                      "rejected": 1}]}
+
+    Every stage percentage is of `available`, so the four bars read as one funnel narrowing from what the
+    market offered -- a percentage of the previous stage would hide that we never bid on half of it.
+    ponytail: `by_hour` is deliberately not rendered. The totals answer "how leaky is the funnel"; add an
+    hourly chart when someone needs to know *when* it leaks.
+    """
+    # API shape (`routers.markets_funnel`): `by_product[]` and top-level `rejection_reasons[]`
+    # (`reason_code`, `count`); the provisional shape (`products[]` with per-product reasons) still parses.
+    raw_products: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        raw_products = payload.get("by_product") or payload.get("products") or []
+    rows: list[dict[str, Any]] = []
+    for product in raw_products:
+        counts = {key: int(product.get(key) or 0) for key, _ in _BID_FUNNEL_STAGES}
+        rows.append(
+            {
+                "product": str(product.get("product") or product.get("service_type") or "unknown"),
+                **counts,
+                # Win rate is of what we *bid*, not of what ERCOT offered: the opportunities we skipped
+                # were a bidding decision, not a loss, and folding them in would hide how well we price.
+                "win_rate_pct": _pct_of(counts["awarded"], counts["submitted"]),
+            }
+        )
+
+    reason_counts: dict[str, int] = {}
+    top_reasons = payload.get("rejection_reasons") if isinstance(payload, dict) else None
+    reason_entries = (
+        top_reasons
+        if isinstance(top_reasons, list)
+        else [entry for product in raw_products for entry in product.get("rejection_reasons") or []]
+    )
+    for entry in reason_entries:
+        code = str(entry.get("reason_code") or entry.get("reason") or "UNKNOWN")
+        reason_counts[code] = reason_counts.get(code, 0) + int(entry.get("count") or 0)
+
+    totals = {key: sum(row[key] for row in rows) for key, _ in _BID_FUNNEL_STAGES}
+    return {
+        # No products at all means the endpoint is not serving yet (or the window is empty); the template
+        # branches on this to explain that rather than drawing four 0% bars that look like a total loss.
+        "has_data": bool(rows),
+        "stages": [
+            {
+                "key": key,
+                "label": label,
+                "count": totals[key],
+                "pct": _pct_of(totals[key], totals["available"]),
+            }
+            for key, label in _BID_FUNNEL_STAGES
+        ]
+        if rows
+        else [],
+        "rows": rows,
+        "reasons": [
+            {
+                "reason": code,
+                "label": _reason_label(code),
+                "count": count,
+                "pct_of_rejected": _pct_of(count, totals["rejected"]),
+            }
+            # Biggest reason first, code as the tie-break: two reasons biting equally often must not
+            # swap places between 30 s polls, or the list flickers under the operator's eye.
+            for code, count in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        "totals": totals,
+        "generated_at": now.isoformat(),
+    }
+
+
 def _to_freshness_table_row(row: dict[str, Any]) -> dict[str, Any]:
     """Render a `freshness_table_view` row into `data_table.html`-ready HTML cells (status/stale badges
     are colour + icon + text, never colour alone, per 02b S8's accessibility rule)."""
@@ -249,6 +361,19 @@ async def markets_page(request: Request) -> HTMLResponse:
         logger.warning("markets: health/feeds unavailable: %s", exc)
         degraded = degraded or str(exc)
 
+    # Bid funnel (CR #19 item 4). The endpoint is still being built and 404s today, so a failure here is
+    # expected, not an incident: log at INFO and leave `degraded` alone, otherwise every markets page
+    # would wear a degraded banner for a panel everyone knows is pending. The panel explains itself.
+    bid_funnel = bid_funnel_view(None, now=now)
+    try:
+        funnel = await get_json(
+            "/og/api/markets/bid-funnel",
+            params={"from": (now - _BID_FUNNEL_WINDOW).isoformat(), "to": now.isoformat()},
+        )
+        bid_funnel = bid_funnel_view(funnel if isinstance(funnel, dict) else None, now=now)
+    except ApiUnavailable as exc:
+        logger.info("markets: bid-funnel endpoint not available yet: %s", exc)
+
     return templates.TemplateResponse(
         request,
         "markets.html",
@@ -257,6 +382,7 @@ async def markets_page(request: Request) -> HTMLResponse:
             "is_operator": is_operator(request),
             "series_charts": series_charts,
             "forecast": forecast_band_view(forecast if isinstance(forecast, dict) else {}),
+            "bid_funnel": bid_funnel,
             "freshness_rows": [
                 _to_freshness_table_row(row) for row in freshness_table_view(feed_statuses, now=now)
             ],

@@ -208,6 +208,9 @@ async def test_schedule_gateway_prices_each_bank_at_its_own_zone():
     by_bank = {p.bank_id: p.price_usd_per_mwh for p in schedule.prices}
     assert by_bank["bank-000"] == 23.45
     assert by_bank["bank-001"] == pytest.approx((23.45 + 40.0 + 30.0) / 3)
+    # ... but a bank without its own zone's price takes no headroom (review R3).
+    thresholds = {p.bank_id: p.threshold_usd_per_mwh for p in schedule.prices}
+    assert thresholds["bank-001"] is None and thresholds["bank-000"] is not None
     assert schedule.conservative_bank_ids == frozenset()
 
 
@@ -219,7 +222,8 @@ async def test_headroom_threshold_is_the_replacement_cost_not_a_fixed_30():
     cursor = FakeCursor([[("LZ_NORTH", 16.0)], [], [("LZ_NORTH", 20.0)]])
     (signal,) = (await EngineScheduleGateway(pool=FakePool(cursor)).schedule(["bank-000"])).prices
     assert signal.price_usd_per_mwh == 16.0
-    assert signal.threshold_usd_per_mwh == pytest.approx((20.0 + 60.295) / (0.9487 * 0.9487), rel=1e-3)
+    # ... plus the wear of discharging the MWh (09 D8: $0.03/kWh = $30/MWh).
+    assert signal.threshold_usd_per_mwh == pytest.approx((20.0 + 60.295) / (0.9487 * 0.9487) + 30.0, rel=1e-3)
 
     # No forecast: the live price stands in for the recharge price; an unknown zone takes the highest M1.
     assert gw.headroom_threshold_usd_per_mwh(None, None, 16.0, round_trip_efficiency=1.0) == pytest.approx(

@@ -73,6 +73,20 @@ R_FLEET_RAMP_CAP = "FLEET_RAMP_CAP"
 R_FEEDER_RAMP_CEILING = "FEEDER_RAMP_CEILING"
 R_ONE_BUYER_EXCEEDED = "ONE_BUYER_EXCEEDED"
 
+# --- Discharge-flow limits at every level (09-optimizer-dispatcher-update.md S1.9, S2.6; K4, K15) ----
+R_HUB_POWER_DERATED = "HUB_POWER_DERATED"  # G-02: above P_max(SoC, T) (or the BMS limit)
+R_HOME_EXPORT_LIMIT = "HOME_EXPORT_LIMIT"  # G-26: meter export beyond the premise's export limit
+R_HOME_IMPORT_LIMIT = "HOME_IMPORT_LIMIT"  # G-26: meter import beyond the service rating
+R_XFMR_LIMIT = "XFMR_LIMIT"  # G-27: service transformer, either direction
+R_FEEDER_THERMAL_LIMIT = "FEEDER_THERMAL_LIMIT"  # G-28: forward thermal
+R_FEEDER_REVERSE_FLOW = "FEEDER_REVERSE_FLOW"  # G-28: feeder-head reverse flow
+R_SUBSTATION_LIMIT = "SUBSTATION_LIMIT"  # G-29: substation transformer, either direction
+R_TERRITORY_EXPORT = "TERRITORY_EXPORT"  # G-30: net export out of a regulated territory (K15, R_rev = 0)
+R_PEAK_POWER_LIMIT = "PEAK_POWER_LIMIT"  # G-31: above continuous without a valid peak allowance
+R_FEEDER_RAMP_NON_FIRM = "FEEDER_RAMP_NON_FIRM"  # G-32: feeder ramp for non-firm steps
+R_SYNC_STEP_LIMIT = "SYNC_STEP_LIMIT"  # G-05: synchronized (unstaggered) step in one tick
+R_TERRITORY_INELIGIBLE = "R-TERRITORY-INELIGIBLE"  # G-33/K15: REG obligation served outside its territory
+
 # --- G-01-ENERGY: lease-duration energy projection (K1), independent of the instantaneous G-01 check
 R_RESERVE_FLOOR_LEASE = "RESERVE_FLOOR_LEASE"
 R_CHARGE_CEILING_LEASE = "CHARGE_CEILING_LEASE"
@@ -80,6 +94,13 @@ R_CHARGE_CEILING_LEASE = "CHARGE_CEILING_LEASE"
 # --- Continuous per-obligation energy-sufficiency check (K1, 03-decision-engine.md S8.11) ----------
 R_ENERGY_SOC_MISSING = "R-ENERGY-SOC-MISSING"
 ALR_ENERGY_SHORTFALL_RISK = "ALR-ENERGY-SHORTFALL-RISK"
+#: Settlement flag: an ERCOT_AS interval settled while ALR-ENERGY-SHORTFALL-RISK was open for that award --
+#: the held capacity may not have been fully available. Recorded on the settlement, payment unchanged (no
+#: owner decision on an AS hold penalty yet).
+R_AS_HOLD_SHORT = "R-AS-HOLD-SHORT"
+
+# --- Degraded mode (health degraded modes): no new commitments while degraded -----------------------
+R_DEGRADED_NO_NEW_COMMIT = "R-DEGRADED-NO-NEW-COMMIT"
 
 # --- Gateway/dependency timeout handling (ALLOC-05: allocator run_cycle) --------------------------
 R_GATEWAY_TIMEOUT = "R-GATEWAY-TIMEOUT"

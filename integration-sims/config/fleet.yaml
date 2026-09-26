@@ -44,6 +44,15 @@ p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-2
 # the base fleet) so the same 0.2 dual_unit_share above yields 10 dual-unit homes per new bank too.
 # `[forecast].price_series`/`load_series` (orchestrator.toml) and `[zone_default_tdsp]`
 # (tdsp_tariffs.toml) must also be updated when a block is enabled -- see those files' own comments.
+#
+# LZ_LCRA (Lower Colorado River Authority) and LZ_RAYBN (Rayburn Country Electric Cooperative) are
+# FREE-market ERCOT zones (unlike LZ_AEN/LZ_CPS above, which are REGULATED-utility zones) -- confirmed
+# present in live ERCOT NP6-905-CD settlement-point-price results (2026-09-26 probe, FLEET-SIM build
+# report: 8 LZ points returned, including these two). Added here, disabled, for the same reason as
+# AEN/CPS: the fleet-composition config surface should already know about every real ERCOT LZ before
+# any of them are turned on. See tdsp_tariffs.toml's `[zone_territory]` for their TDSP/delivery-charge
+# treatment (LCRA is itself a transmission/distribution utility -- no separate competitive TDSP charge;
+# RAYBN is a member-owned cooperative, outside retail competition -- no filed competitive TDSP tariff).
 zone_blocks:
   - zone: LZ_AEN
     banks: 10
@@ -52,6 +61,32 @@ zone_blocks:
   - zone: LZ_CPS
     banks: 10
     homes_per_bank: 50
+    enabled: false
+  - zone: LZ_LCRA
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+  - zone: LZ_RAYBN
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+
+# Substation-sited battery-set assets (build phase, 2026-09-26: 09-optimizer-dispatcher-update.md D11
+# SUBSTATION_BESS; `ogsim.common.config.SubstationAssetConfig`). Configurable and OFF by default, same
+# as the zone_blocks above -- a substation asset is its own one-hub "bank"
+# (`ogsim.fleet.state._substation_segment`), not part of the home-fleet numbering, so enabling it adds
+# one extra simulated hub on top of `hub_count`. Left `enabled: false` here deliberately: several
+# fixed-hub-count tests/tools (benchmark, wave, scada-roster parity) assume the shipped production
+# fleet.yaml's hub set is exactly `hub_count`, the same reason the AEN/CPS/LCRA/RAYBN zone blocks above
+# ship disabled too. The Austin config's substation asset (LZ_AEN, 20 MW / 2 h) is demonstrated end to
+# end in `integration-sims/tests/test_fleet_substation_asset.py` with `enabled: true`; flip the flag
+# below the same way to actually run one. Coordinate `asset_id` with the MARKET-MODEL agent's
+# `og.asset` model before wiring the orchestrator side to it (see the FLEET-SIM build report).
+substation_assets:
+  - asset_id: sub-LZ_AEN-00
+    zone: LZ_AEN
+    rated_mw: 20.0
+    duration_h: 2.0
     enabled: false
 
 guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub

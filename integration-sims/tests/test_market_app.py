@@ -233,6 +233,49 @@ async def test_admin_cancel_removes_an_active_anomaly(client: httpx.AsyncClient)
     assert cancel_resp.json()["ok"] is True
 
 
+async def test_as_deployment_endpoint_reports_none_by_default(client: httpx.AsyncClient):
+    resp = await client.get("/admin/as_deployment")
+    assert resp.status_code == 200
+    assert resp.json() == {"active": None}
+
+
+async def test_as_deployment_endpoint_reports_the_active_injection(client: httpx.AsyncClient):
+    """Build phase, 2026-09-26 (FLEET-SIM task 4): a manually-injected `as_deployment` anomaly must be
+    visible on `GET /admin/as_deployment` for DISPATCH/the release manager to poll and treat like an
+    operator-declared `og.as_deployment` row."""
+    await client.post(
+        "/admin/anomalies",
+        json={
+            "id": "as-dep-1",
+            "type": "as_deployment",
+            "target": "*",
+            "params": {"service": "RRS", "deployed_mw": 75.0},
+            "duration": 300.0,
+        },
+    )
+    resp = await client.get("/admin/as_deployment")
+    active = resp.json()["active"]
+    assert active is not None
+    assert active["service"] == "RRS"
+    assert active["deployed_mw"] == 75.0
+    assert active["recall"] is False
+
+
+async def test_as_deployment_recall_flag_is_carried_through(client: httpx.AsyncClient):
+    await client.post(
+        "/admin/anomalies",
+        json={
+            "id": "as-dep-2",
+            "type": "as_deployment",
+            "target": "*",
+            "params": {"service": "ECRS", "deployed_mw": 0.0, "recall": True},
+            "duration": 60.0,
+        },
+    )
+    resp = await client.get("/admin/as_deployment")
+    assert resp.json()["active"]["recall"] is True
+
+
 async def test_admin_anomaly_reverts_deterministically_via_injected_clock():
     """HTTP-level revert test (BUILD.md §5a's "no flaky sleeps: use injected
     clocks"): injects a price_spike with a 10s duration and an implicit

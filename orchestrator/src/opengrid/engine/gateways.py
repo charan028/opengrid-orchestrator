@@ -18,14 +18,20 @@ share is the correct cross-process boundary (mirrors `opengrid.guardian.repo.PgB
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+import math
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid import contracts, fleet, ledger
+from opengrid.allocator.energy_hold import (
+    DEFAULT_AS_DEPLOYMENT_H,
+    HOLD_MARGIN_FRACTION,
+    deliverable_margin_kwh,
+)
 from opengrid.allocator.energy_sufficiency import (
     EnergySufficiencyResult,
     HubEnergyState,
@@ -45,16 +51,25 @@ from opengrid.allocator.models import (
     ShortfallReport,
     SubstitutionEvent,
 )
+from opengrid.core.economics import wear_cost
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, COMMIT_LOCK_OVERRIDE_REASONS, R_SUBSTITUTION
 from opengrid.core.timeutil import floor_to_interval
-from opengrid.engine import pq_eligibility
 from opengrid.engine.alerts import clear_open_alerts, open_alert_details
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.health.rules import evaluate_energy_shortfall_risk_alert
 from opengrid.ledger import GrantRecord
+from opengrid.market.config import load_zone_territory
+from opengrid.market.model import MarketModel
+from opengrid.market.territory import FREE, MarketModelError, MarketRef, market_of
+from opengrid.settle.tariffs import (
+    load_tdsp_tariffs,
+    resolve_tariff,
+    resolve_tdsp_tariffs_path,
+    tdsp_for_zone,
+)
 from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
@@ -118,10 +133,10 @@ GROUP BY r.obligation_id, r.bank_id, c.customer_id, o.service_type, o.contract_i
 """
 
 #: Full-deployment duration assumed for an ERCOT_AS award whose product rule has none (ECRS, the shortest).
-DEFAULT_AS_DEPLOYMENT_MINUTES = 60
+DEFAULT_AS_DEPLOYMENT_MINUTES = int(DEFAULT_AS_DEPLOYMENT_H * 60)
 #: The guardian's G-01-ENERGY keeps this fraction of each hub's capacity above reserve at lease end; an AS
-#: energy hold must cover it too.
-AS_HOLD_FLOOR_FRACTION = 0.01
+#: energy hold must cover it too (the one constant, `allocator.energy_hold`).
+AS_HOLD_FLOOR_FRACTION = HOLD_MARGIN_FRACTION
 
 
 def as_energy_hold(now: datetime, hold_kw: object, duration_minutes: object) -> tuple[float, datetime]:
@@ -174,22 +189,68 @@ M1_USD_PER_MWH_BY_ZONE: dict[str, float] = {
 _M1_FALLBACK_USD_PER_MWH = max(M1_USD_PER_MWH_BY_ZONE.values())
 
 
+#: The home wear rate per AC kWh discharged (09 D8, A-DE-16: $0.03/kWh), `[allocator].wear_usd_per_kwh`.
+DEFAULT_WEAR_USD_PER_KWH = 0.03
+
+#: The optimizer's published stored-energy value read API (09 D7): `(bank_ids, now) -> {bank_id: $/MWh}`,
+#: the break-even price for discharging one AC MWh of headroom now, `1000 x (nu / eta_d + wear)` (wear
+#: included; `opengrid.selector.energy_value.discharge_threshold_usd_per_mwh`). A bank it has no value for
+#: uses the replacement-cost fallback.
+StoredEnergyValueReader = Callable[[Sequence[str], datetime], Awaitable[Mapping[str, float]]]
+
+
+def wear_usd_per_mwh(wear_usd_per_kwh: float) -> float:
+    """09 D8 wear per MWh discharged, via the one wear formula (`core.economics.wear_cost`)."""
+    return float(wear_cost(Decimal(1000), Decimal(str(wear_usd_per_kwh))))
+
+
 def headroom_threshold_usd_per_mwh(
     zone: str | None,
     recharge_price_usd_per_mwh: float | None,
     live_price_usd_per_mwh: float,
     *,
     round_trip_efficiency: float,
+    wear_usd_per_mwh: float = 0.0,
+    m1_by_zone: Mapping[str, float] | None = None,
 ) -> float:
-    """Architect finding (c) / 09 S1.8 (G9): headroom is discharged only when the RT price covers what
-    the spent energy costs to put back -- the cheapest recharge price ahead (else the live price) plus the
-    M1 delivery charge, grossed up for round-trip losses. Replaces the fixed $30/MWh. (The plan's water
-    value, once the selector publishes it, supersedes this bound.)"""
+    """Architect finding (c) / 09 S1.8 (G9) -- the fallback when the optimizer has published no stored-
+    energy value for the bank: headroom is discharged only when the RT price covers what the spent
+    energy costs to put back -- the cheapest recharge price ahead (else the live price) plus the M1
+    delivery charge, grossed up for round-trip losses -- plus the wear of discharging it (D8). Never a
+    fixed number. An unknown zone takes the highest M1 known, so headroom is never under-costed."""
     charge_price = (
         recharge_price_usd_per_mwh if recharge_price_usd_per_mwh is not None else live_price_usd_per_mwh
     )
-    m1 = M1_USD_PER_MWH_BY_ZONE.get(zone or "", _M1_FALLBACK_USD_PER_MWH)
-    return (max(charge_price, 0.0) + m1) / max(round_trip_efficiency, 1e-6)
+    m1_table = M1_USD_PER_MWH_BY_ZONE if m1_by_zone is None else m1_by_zone
+    fallback_m1 = max(m1_table.values(), default=_M1_FALLBACK_USD_PER_MWH)
+    m1 = m1_table.get(zone or "", fallback_m1)
+    return (max(charge_price, 0.0) + m1) / max(round_trip_efficiency, 1e-6) + max(wear_usd_per_mwh, 0.0)
+
+
+def m1_usd_per_mwh_by_zone(as_of: date, *, config_path: str | None = None) -> dict[str, float]:
+    """M1 ($/MWh on grid-charged kWh) per load zone from `tdsp_tariffs.toml` via `opengrid.settle.
+    tariffs` (the file's owner): each competitive zone's default TDSP tariff in effect `as_of`, and 0 for a
+    regulated-territory zone (`[zone_territory]`, 09 D5: no M1 inside AE/CPS). Raises `OSError` if the
+    file is missing; the caller then keeps the built-in table."""
+    path = resolve_tdsp_tariffs_path(config_path)
+    tariffs, zone_default_tdsp = load_tdsp_tariffs(path)
+    by_zone: dict[str, float] = {}
+    for zone in zone_default_tdsp:
+        tariff = resolve_tariff(tariffs, tdsp_for_zone(zone_default_tdsp, zone), as_of)
+        if tariff is not None:
+            by_zone[zone] = float(tariff.volumetric_usd_per_kwh) * 1000.0
+    for zone in load_zone_territory(path):
+        by_zone[zone] = 0.0
+    return by_zone
+
+
+def valid_value(value: object) -> float | None:
+    """A published stored-energy value usable as a threshold: a finite number, else `None`."""
+    try:
+        number = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _bank_zone(bank_id: str) -> str | None:
@@ -218,7 +279,10 @@ SELECT r.obligation_id, r.bank_id, r.amount, o.service_type, o.tier, op.value_pe
            SELECT 1 FROM og.as_deployment d
            WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
              AND (d.obligation_id IS NULL OR d.obligation_id = o.obligation_id)
-       ) AS as_deployed
+       ) AS as_deployed,
+       -- The AS product's full-deployment duration (Non-Spin 240 min, ECRS 60 min) for its energy hold.
+       (SELECT MAX(pr.duration_minutes) FROM og.product_rule pr WHERE pr.contract_id = o.contract_id)
+           AS duration_minutes
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
@@ -228,6 +292,13 @@ WHERE r.bank_id = ANY(%(bank_ids)s)
   -- Owner decision 2026-09-26: a mid-window SHORTFALL never stops dispatch; it keeps receiving the
   -- maximum feasible kW of its unchanged commitment until its window ends (K13: nothing reallocated).
   AND o.state IN ('COMMITTED', 'DELIVERING', 'SHORTFALL')
+"""
+
+_CONTRACT_MARKETS_SQL = """
+SELECT o.obligation_id, c.market, c.utility_id, c.service_type
+FROM og.obligation o
+JOIN og.contract c ON c.contract_id = o.contract_id
+WHERE o.obligation_id = ANY(%(obligation_ids)s::uuid[])
 """
 
 # Latest grant per obligation on these banks -- `prior_granted_kw` (02a S5.1's K13 "never below
@@ -261,7 +332,14 @@ class FleetCapabilityProvider:
 class EngineFleetGateway:
     """`opengrid.allocator.gateways.FleetGateway` backed by the in-process fleet twin
     (`opengrid.fleet`, already loaded/kept warm by `og-engine`'s own `load_topology()`/MQTT ingest --
-    no extra I/O here beyond what the twin already does)."""
+    no extra I/O here beyond what the twin already does).
+
+    With a `market_model`, each bank carries its K15 territory and whether that territory's utility
+    grants FREE access (`opengrid.market`); without one, the territory is left unknown (the allocator
+    enforces territory only when the engine's cycle extras turn it on)."""
+
+    def __init__(self, market_model: MarketModel | None = None) -> None:
+        self._market = market_model
 
     async def bank_ids(self) -> Sequence[str]:
         return fleet.known_bank_ids()
@@ -277,12 +355,15 @@ class EngineFleetGateway:
                 continue
             scada = fleet.bank_scada_signal(bank_id)
             load_kva = scada.value if scada is not None and scada.signal == "APPARENT_POWER_KVA" else 0.0
+            territory = self._market.territory_of_bank(bank_id) if self._market is not None else None
             banks.append(
                 BankSnapshot(
                     bank_id=bank_id,
                     capability_kw=cap.max_discharge_kw,
                     load_kva=load_kva,
                     zone=fleet.bank_zone(bank_id),
+                    territory=territory,
+                    free_access=self._market.free_access(territory) if self._market is not None else False,
                 )
             )
             for snap in fleet.hub_capabilities(bank_id):
@@ -304,6 +385,13 @@ class EngineFleetGateway:
                         e_kwh=snap.e_kwh,
                         eta_d=snap.eta_d,
                         rated_kw=snap.rated_kw,
+                        p_kw=snap.p_kw,
+                        # 09 S1.9 telemetry (migration 0027), picked up as soon as the fleet twin carries it;
+                        # until then None: F1 takes the guardian's unknown-temperature factor.
+                        cell_temp_c=getattr(snap, "cell_temp_c", None),
+                        p_dis_max_kw=getattr(snap, "p_dis_max_kw", None),
+                        meter_kw=getattr(snap, "meter_kw", None),
+                        units=getattr(snap, "units", None),
                     )
                 )
         return FleetState(hubs=tuple(hubs), banks=tuple(banks))
@@ -328,9 +416,20 @@ class EngineScheduleGateway:
     why this doesn't go through `opengrid.feeds.latest`), and L2 instructions from the fleet twin's own
     ingest (`opengrid.fleet.utility_instruction`, already validated/stored off MQTT)."""
 
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(
+        self,
+        pool: AsyncConnectionPool,
+        *,
+        stored_energy_value: StoredEnergyValueReader | None = None,
+        wear_usd_per_kwh: float = DEFAULT_WEAR_USD_PER_KWH,
+        m1_by_zone: Mapping[str, float] | None = None,
+    ) -> None:
         self._pool = pool
         self._posture_warned = False
+        self._stored_energy_value = stored_energy_value
+        self._wear_usd_per_mwh = wear_usd_per_mwh(wear_usd_per_kwh)
+        self._m1_by_zone = m1_by_zone
+        self._value_warned = False
 
     async def schedule(self, bank_ids: Sequence[str]) -> Schedule:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -338,17 +437,35 @@ class EngineScheduleGateway:
             zone_rows = await cur.fetchall()
         conservative = await self._conservative_scopes()
         recharge_by_zone = await self._recharge_prices()
+        published = await self._published_values(bank_ids)
         price_by_zone = {str(series): float(value) for series, value in zone_rows}
         prices = []
         conservative_banks: set[str] = set()
         for bank_id in bank_ids:
             zone = _bank_zone(bank_id)
             live = bank_price(zone, price_by_zone)
-            threshold = headroom_threshold_usd_per_mwh(
-                zone,
-                recharge_by_zone.get(zone or ""),
-                live,
-                round_trip_efficiency=DEFAULT_ETA_C * DEFAULT_ETA_D,
+            value = valid_value(published.get(bank_id))
+            if zone is None or zone not in price_by_zone:
+                # No live price for the bank's own zone: no headroom this cycle (threshold None), never
+                # priced off other zones' prices or $0.
+                prices.append(
+                    PriceSignal(bank_id=bank_id, price_usd_per_mwh=live, threshold_usd_per_mwh=None)
+                )
+                if ("BANK", bank_id) in conservative or (zone is not None and ("ZONE", zone) in conservative):
+                    conservative_banks.add(bank_id)
+                continue
+            # 09 D7: the optimizer's stored-energy break-even (wear included); else the replacement cost.
+            threshold = (
+                value
+                if value is not None
+                else headroom_threshold_usd_per_mwh(
+                    zone,
+                    recharge_by_zone.get(zone or ""),
+                    live,
+                    round_trip_efficiency=DEFAULT_ETA_C * DEFAULT_ETA_D,
+                    wear_usd_per_mwh=self._wear_usd_per_mwh,
+                    m1_by_zone=self._m1_by_zone,
+                )
             )
             prices.append(
                 PriceSignal(bank_id=bank_id, price_usd_per_mwh=live, threshold_usd_per_mwh=threshold)
@@ -358,6 +475,20 @@ class EngineScheduleGateway:
         if not price_by_zone:
             logger.warning("no live price observed yet; allocator sees price=0.0 this cycle")
         return Schedule(prices=tuple(prices), conservative_bank_ids=frozenset(conservative_banks))
+
+    async def _published_values(self, bank_ids: Sequence[str]) -> Mapping[str, float]:
+        """The optimizer's stored-energy values; unreadable -> none (every bank falls back)."""
+        if self._stored_energy_value is None:
+            return {}
+        try:
+            return await self._stored_energy_value(bank_ids, datetime.now(UTC))
+        except Exception:
+            if not self._value_warned:
+                logger.warning(
+                    "stored-energy values unreadable; thresholds use the replacement cost", exc_info=True
+                )
+                self._value_warned = True
+            return {}
 
     async def _recharge_prices(self) -> dict[str, float]:
         """Cheapest P50 price ahead per zone (og.forecast); unreadable/empty -> the live price is used."""
@@ -410,6 +541,7 @@ class EngineLedgerGateway:
         self.last_shortfalls: list[tuple[str, str]] = []
         #: (obligation_id, reason, interval) K13 shortfalls already traced in the current episode.
         self._traced_shortfalls: set[tuple[str, str, str]] = set()
+        self._market_warned = False
 
     async def ledger_view(self, bank_ids: Sequence[str], interval_start: datetime) -> LedgerView:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -417,28 +549,22 @@ class EngineLedgerGateway:
             call_rows = await cur.fetchall()
             await cur.execute(_PRIOR_GRANTS_SQL, {"bank_ids": list(bank_ids)})
             prior_rows = await cur.fetchall()
+        markets = await self._markets([str(row[0]) for row in call_rows])
 
         prior_by_obligation = {str(obligation_id): float(kw) for obligation_id, kw in prior_rows}
 
         calls: list[ObligationCall] = []
-        for (
-            obligation_id,
-            bank_id,
-            amount,
-            service_type,
-            tier,
-            value_per_mwh,
-            state,
-            as_deployed,
-        ) in call_rows:
+        for row in call_rows:
+            obligation_id, bank_id, amount, service_type, tier, value_per_mwh, state, as_deployed = row[:8]
+            duration_minutes = row[8] if len(row) > 8 else None
             try:
                 eligible_hub_ids = tuple(
                     s.hub_id for s in fleet.hub_capabilities(bank_id) if s.health == "online"
                 )
             except LookupError:
                 eligible_hub_ids = ()
-            # WP-D: a PQ-sensitive profile (DATA_CENTER) draws only on its PQ-eligible hubs.
-            eligible_hub_ids = pq_eligibility.filter_hub_ids(str(service_type), bank_id, eligible_hub_ids)
+            # WP-D: the S5.2 PQ filter for PQ-sensitive profiles (DATA_CENTER) runs inside the allocator
+            # cycle (`allocator.pq_eligibility.apply_eligibility`, fed by the engine's cycle extras).
             calls.append(
                 ObligationCall(
                     obligation_id=str(obligation_id),
@@ -451,9 +577,37 @@ class EngineLedgerGateway:
                     value_per_mwh=float(value_per_mwh) if value_per_mwh is not None else 0.0,
                     in_shortfall=state == "SHORTFALL",
                     as_deployed=bool(as_deployed),
+                    hold_duration_h=float(str(duration_minutes)) / 60.0 if duration_minutes else None,
+                    market_ref=markets.get(str(obligation_id), FREE),
                 )
             )
         return LedgerView(calls=tuple(calls))
+
+    async def _markets(self, obligation_ids: Sequence[str]) -> dict[str, MarketRef | None]:
+        """K15: each obligation's market from its contract (`og.contract.market`/`utility_id`, migration
+        0025). Inconsistent market data is `None` (never served while territory is enforced). Unreadable
+        (0025 not applied yet) means every contract is FREE, the column's default -- a regulated obligation
+        then sits on territory banks FREE may not use, so it fails closed there."""
+        if not obligation_ids:
+            return {}
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_CONTRACT_MARKETS_SQL, {"obligation_ids": list(set(obligation_ids))})
+                rows = await cur.fetchall()
+        except Exception:
+            if not self._market_warned:
+                logger.warning("contract markets unreadable; obligations treated as FREE", exc_info=True)
+                self._market_warned = True
+            return {}
+        markets: dict[str, MarketRef | None] = {}
+        for obligation_id, market, utility_id, service_type in rows:
+            try:
+                markets[str(obligation_id)] = market_of(
+                    market=market, utility_id=utility_id, service_type=service_type
+                )
+            except MarketModelError:
+                markets[str(obligation_id)] = None
+        return markets
 
     async def ledger_version(self) -> int:
         return await ledger.ledger_version()
@@ -687,8 +841,9 @@ class EnergySufficiencyGateway:
 
             # AS energy hold margin, matching the guardian's G-01-ENERGY floor: the hold keeps reserve +
             # 1% of capacity + kW x duration / eta_d, else the last leases of a full deployment are vetoed.
-            hold_margin_kwh = AS_HOLD_FLOOR_FRACTION * sum(
-                (getattr(h, "e_kwh", None) or 0.0) * h.eta_d for h in online_hubs
+            # Only hubs with a live SoC hold energy, so only they carry the margin (K1).
+            hold_margin_kwh = deliverable_margin_kwh(
+                (getattr(h, "e_kwh", None), h.eta_d) for h in online_hubs if h.soc_kwh is not None
             )
 
             for obligation_id, committed_kw, window_end, customer_id in obligations:
@@ -790,14 +945,25 @@ class EnergySufficiencyGateway:
 
 
 def build_gateways(
-    pool: AsyncConnectionPool, trace: TraceStore | None = None
+    pool: AsyncConnectionPool,
+    trace: TraceStore | None = None,
+    *,
+    market_model: MarketModel | None = None,
+    stored_energy_value: StoredEnergyValueReader | None = None,
+    wear_usd_per_kwh: float = DEFAULT_WEAR_USD_PER_KWH,
+    m1_by_zone: Mapping[str, float] | None = None,
 ) -> tuple[EngineFleetGateway, EngineLedgerGateway, EngineScadaGateway, EngineScheduleGateway]:
     """Convenience constructor for `opengrid.engine.main`: one of each gateway, built once per process
     (the fleet/scada gateways hold no state of their own; the ledger/schedule gateways hold the shared
     pool, and the ledger gateway the process's trace store for substitution events)."""
     return (
-        EngineFleetGateway(),
+        EngineFleetGateway(market_model),
         EngineLedgerGateway(pool, trace),
         EngineScadaGateway(),
-        EngineScheduleGateway(pool),
+        EngineScheduleGateway(
+            pool,
+            stored_energy_value=stored_energy_value,
+            wear_usd_per_kwh=wear_usd_per_kwh,
+            m1_by_zone=m1_by_zone,
+        ),
     )

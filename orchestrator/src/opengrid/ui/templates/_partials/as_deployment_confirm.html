@@ -1,0 +1,14 @@
+<div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="as-confirm-title">
+  <h3 id="as-confirm-title">{% if stop %}Confirm stop deployment{% else %}Confirm ERCOT AS deployment{% endif %}</h3>
+  <p>{{ summary }}</p>
+  {% if not stop %}<p class="og-card-meta">This is step 1 of 2. No award changes state until you confirm.</p>{% endif %}
+  <form hx-post="{{ confirm_url }}" hx-target="#as-action-result" hx-swap="innerHTML">
+    {% if not stop %}
+    <input type="hidden" name="obligation_id" value="{{ obligation_id }}">
+    <input type="hidden" name="duration_minutes" value="{{ duration_minutes }}">
+    <input type="hidden" name="reason" value="{{ reason }}">
+    {% endif %}
+    <button class="btn" type="button" onclick="this.closest('.confirm-dialog').remove()">Cancel</button>
+    <button class="btn {% if stop %}btn-danger{% else %}btn-primary{% endif %}" type="submit">{% if stop %}Stop deployment{% else %}Confirm deployment{% endif %}</button>
+  </form>
+</div>

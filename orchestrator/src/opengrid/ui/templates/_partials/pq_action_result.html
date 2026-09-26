@@ -1,0 +1,3 @@
+{# pq_action_result.html -- step-2 result of a PQ write (capture / calibration request). Carries the
+   target's id: the confirm dialog swaps it in with hx-swap="outerHTML". Params: message, ok. #}
+<div id="pq-action-result" class="action-result {{ 'action-result-ok' if ok else 'action-result-error' }}" role="{{ 'status' if ok else 'alert' }}">{{ message }}</div>

@@ -30,6 +30,7 @@ POLL_INTERVAL_S: dict[str, float] = {
     "np4-732-cd": 30 * 60,
     "np4-737-cd": 30 * 60,
     "np4-188-cd": 24 * 60 * 60,
+    "np4-745-cd": 30 * 60,  # D-28 regional solar: hourly posting, polled like NP4-737-CD
 }
 NWS_POLL_INTERVAL_S = 60 * 60
 EIA_FALLBACK_PRODUCT = "np6-345-cd"  # the only product EIA can stand in for (system load)
@@ -53,6 +54,9 @@ class FeedsScheduler:
     nws_grid_point_pinned: str | None
     ercot_bucket: TokenBucket
     trace: TraceStore | None = None
+    #: ERCOT products configured off (e.g. `[feeds.ercot].solar_by_region_enabled = false`): never polled,
+    #: so they never write a `feed_status` row that health could read as stale.
+    disabled_products: frozenset[str] = frozenset()
     _ercot_breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker("ERCOT"))
     _eia_breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker("EIA"))
     _nws_breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker("NWS"))
@@ -63,7 +67,8 @@ class FeedsScheduler:
     def __post_init__(self) -> None:
         epoch = datetime.min.replace(tzinfo=UTC)
         for product in PRODUCT_PATHS:
-            self._product_state[product] = _ProductState(next_poll_at=epoch)
+            if product not in self.disabled_products:
+                self._product_state[product] = _ProductState(next_poll_at=epoch)
         self._nws_state = _ProductState(next_poll_at=epoch)
 
     async def _trace(self, event_class: str, payload: dict[str, object]) -> None:
@@ -77,8 +82,7 @@ class FeedsScheduler:
         S1.2) at a short fixed interval (e.g. 5s) -- `POLL_INTERVAL_S`/`NWS_POLL_INTERVAL_S` govern
         which sources actually make a network call on a given tick."""
         now = now or datetime.now(UTC)
-        for product in PRODUCT_PATHS:
-            state = self._product_state[product]
+        for product, state in self._product_state.items():
             if now >= state.next_poll_at:
                 await self._poll_ercot_product(product, now=now)
                 state.next_poll_at = now.replace(microsecond=0) + timedelta(seconds=POLL_INTERVAL_S[product])

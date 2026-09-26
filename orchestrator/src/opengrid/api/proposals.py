@@ -26,13 +26,16 @@ class Proposal[T]:
     summary: str
     proposer: str
     created_at: float = field(default_factory=time.monotonic)
+    #: Confirmation window. 60 s by default (02b S7.1); a safe-stop proposal uses og-safestop's own
+    #: [safestop].confirm_window_s so the API never accepts a confirm the broker already expired.
+    ttl_s: float = PROPOSAL_TTL_S
 
     def expired(self, *, now: float | None = None) -> bool:
-        return (now if now is not None else time.monotonic()) - self.created_at > PROPOSAL_TTL_S
+        return (now if now is not None else time.monotonic()) - self.created_at > self.ttl_s
 
 
 class ProposalExpiredError(KeyError):
-    """The proposal existed but its 60 s confirmation window has passed."""
+    """The proposal existed but its confirmation window (`Proposal.ttl_s`) has passed."""
 
 
 class ProposalStore:
@@ -41,10 +44,12 @@ class ProposalStore:
     def __init__(self) -> None:
         self._proposals: dict[UUID, Proposal[Any]] = {}
 
-    def create[T](self, kind: str, body: T, summary: str, proposer: str) -> Proposal[T]:
+    def create[T](
+        self, kind: str, body: T, summary: str, proposer: str, *, ttl_s: float = PROPOSAL_TTL_S
+    ) -> Proposal[T]:
         self._sweep_expired()
         proposal: Proposal[T] = Proposal(
-            proposal_id=uuid4(), kind=kind, body=body, summary=summary, proposer=proposer
+            proposal_id=uuid4(), kind=kind, body=body, summary=summary, proposer=proposer, ttl_s=ttl_s
         )
         self._proposals[proposal.proposal_id] = proposal
         return proposal

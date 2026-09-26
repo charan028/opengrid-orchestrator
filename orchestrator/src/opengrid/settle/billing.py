@@ -1,12 +1,14 @@
 """Insert-only invoice-line rules (02a S7.3).
 
-| Service          | `line_type`s posted                                                        |
-|------------------|-----------------------------------------------------------------------------|
-| ERCOT_ENERGY     | `ENERGY` (settlement-shadow value)                                          |
-| ERCOT_AS         | `CAPACITY_PAYMENT` (award x MCPC), `LD_PENALTY` if a deployment failed       |
-| DIST_DEFERRAL    | `CAPACITY_PAYMENT` x performance factor, `LD_PENALTY` for a failed interval  |
-| PARTNER_CAPACITY | `CAPACITY_PAYMENT` x performance factor (EVENT)                             |
-| HOME             | none                                                                          |
+| Service            | `line_type`s posted                                                        |
+|--------------------|-----------------------------------------------------------------------------|
+| ERCOT_ENERGY       | `ENERGY`, priced at the zone's real-time SPP at delivery (2026-09-26 fix)   |
+| ERCOT_AS           | `CAPACITY_PAYMENT` (award x MCPC), `LD_PENALTY` if a deployment failed       |
+| DIST_DEFERRAL      | `CAPACITY_PAYMENT` x performance factor, `LD_PENALTY` for a failed interval  |
+| PARTNER_CAPACITY   | `CAPACITY_PAYMENT` x performance factor (EVENT)                             |
+| PIPELINE_AC        | `FIXED_FEE` (06 S4.a: a flat corridor-mitigation service fee, never scaled by delivered kWh) |
+| REGULATED_CAPACITY | `CAPACITY_PAYMENT` = `opengrid.market.capacity.regulated_capacity_payment` verbatim (08 S3) |
+| HOME               | none                                                                          |
 
 `draft_invoice_lines` is pure (given the interval's numbers, decide *what* to post); `next_version`
 is the insert-only correction rule (02a S1.1: "never UPDATE, only INSERT ... a `supersedes` column
@@ -35,6 +37,8 @@ def draft_invoice_lines(
     revenue: Decimal,
     performance_factor: Decimal,
     penalty_amount: Decimal,
+    regulated_capacity_amount: Decimal | None = None,
+    discharge_spp_per_kwh: Decimal | None = None,
 ) -> list[InvoiceLineDraft]:
     """Which invoice lines this obligation-interval posts, per the table above. `performance_factor`
     is `performance.compute_compliance_pct`'s result (or 1 if there is none), used to scale
@@ -56,9 +60,17 @@ def draft_invoice_lines(
         return []
 
     if service_type == "ERCOT_ENERGY":
+        # `rate` reflects what `revenue` was actually priced at (the zone's real-time SPP,
+        # profitability.compute_revenue's 2026-09-26 fix), not the opportunity's `price_per_kwh` --
+        # showing the stale forward price here would make the invoice line self-contradictory
+        # (amount = revenue, but a rate that doesn't multiply out to it).
         lines = [
             InvoiceLineDraft(
-                line_type="ENERGY", quantity=delivered_kwh, unit="kWh", rate=price_per_kwh, amount=revenue
+                line_type="ENERGY",
+                quantity=delivered_kwh,
+                unit="kWh",
+                rate=discharge_spp_per_kwh if discharge_spp_per_kwh is not None else price_per_kwh,
+                amount=revenue,
             )
         ]
     elif service_type == "ERCOT_AS":
@@ -69,6 +81,30 @@ def draft_invoice_lines(
                 unit="kWh",
                 rate=price_per_kwh,
                 amount=committed_kwh * price_per_kwh,
+            )
+        ]
+    elif service_type == "PIPELINE_AC":
+        # 06 S4.a: a flat corridor AC-mitigation service fee -- never scaled by delivered kWh or
+        # performance_factor, since the service is continuous line monitoring, not energy delivery.
+        lines = [
+            InvoiceLineDraft(
+                line_type="FIXED_FEE",
+                quantity=None,
+                unit=None,
+                rate=None,
+                amount=committed_kwh * price_per_kwh,
+            )
+        ]
+    elif service_type == "REGULATED_CAPACITY":
+        # 08 S3: the utility capacity payment, already computed by opengrid.market.capacity.
+        # regulated_capacity_payment (BUILD.md S1 no-duplication) -- never scaled here again.
+        lines = [
+            InvoiceLineDraft(
+                line_type="CAPACITY_PAYMENT",
+                quantity=committed_kwh,
+                unit="kWh",
+                rate=price_per_kwh,
+                amount=regulated_capacity_amount if regulated_capacity_amount is not None else Decimal("0"),
             )
         ]
     else:

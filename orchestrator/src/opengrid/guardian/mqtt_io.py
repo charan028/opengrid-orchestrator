@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -25,11 +26,14 @@ import aiomqtt
 
 from opengrid.core.models.mqtt import CommandBatch, Lease, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.pq import CalibrationCommand
-from opengrid.guardian.ports import HubSnapshot, L2Instruction
+from opengrid.guardian.ports import HubFlowTelemetry, HubSnapshot, L2Instruction, Reading
 from opengrid.platform.config import Config
 from opengrid.platform.mqtt import topic, validate_payload
 
 logger = logging.getLogger(__name__)
+
+#: Hub telemetry fields the flow-limit checks read (09 S2.6; `HubFlowTelemetry`).
+FLOW_TELEMETRY_FIELDS = ("meter_kw", "pv_kw", "cell_temp_c", "p_dis_max_kw", "p_ch_max_kw", "peak_budget_kws")
 
 
 class MqttHubStatePort:
@@ -53,6 +57,7 @@ class MqttHubStatePort:
         self._received_at: dict[str, float] = {}
         self._max_age_s = max_age_s
         self._monotonic = monotonic_fn
+        self._flow: dict[str, dict[str, tuple[float, float]]] = {}
         self._hubs_by_bank: dict[str, list[str]] = {}
         for hub_id, bank_id in (bank_by_hub or {}).items():
             self._hubs_by_bank.setdefault(bank_id, []).append(hub_id)
@@ -64,12 +69,28 @@ class MqttHubStatePort:
         self._snapshots[message.hub_id] = HubSnapshot(
             params=prior.params, soc_kwh=message.soc_kwh, prev_p_kw=message.p_kw, health=message.health
         )
-        self._received_at[message.hub_id] = self._monotonic()
+        now = self._monotonic()
+        self._received_at[message.hub_id] = now
+        flow = self._flow.setdefault(message.hub_id, {})
+        for name in FLOW_TELEMETRY_FIELDS:
+            value = getattr(message, name, None)  # additive telemetry fields (09 S2.6) as FLEET-SIM adds them
+            if isinstance(value, int | float) and math.isfinite(float(value)):
+                flow[name] = (float(value), now)
+
+    def _flow_telemetry(self, hub_id: str) -> HubFlowTelemetry:
+        now = self._monotonic()
+        readings = {
+            name: Reading(value, now - received)
+            for name, (value, received) in self._flow.get(hub_id, {}).items()
+        }
+        return HubFlowTelemetry(**readings)
 
     async def snapshot(self, hub_id: str) -> HubSnapshot | None:
         """Any snapshot the guardian has not refreshed within `max_age_s` is `stale`, whatever its last
         message said -- an old "offline"/"fault" report is as unverifiable now as an old "online"."""
         snap = self._snapshots.get(hub_id)
+        if snap is not None and hub_id in self._flow:
+            snap = replace(snap, flow=self._flow_telemetry(hub_id))
         if snap is None or self._max_age_s is None or snap.health == "stale":
             return snap
         received_at = self._received_at.get(hub_id)
@@ -81,6 +102,10 @@ class MqttHubStatePort:
         """`BankMembersPort`: the guardian's own snapshot of every configured hub on `bank_id`."""
         snapshots = [await self.snapshot(hub_id) for hub_id in self._hubs_by_bank.get(bank_id, [])]
         return [s for s in snapshots if s is not None]
+
+    async def member_hub_ids(self, bank_id: str) -> list[str]:
+        """`BankMembersPort`: the configured hub ids on `bank_id` (og.hub membership)."""
+        return list(self._hubs_by_bank.get(bank_id, []))
 
 
 class MqttL2InstructionPort:

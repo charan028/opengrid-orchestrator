@@ -15,6 +15,7 @@ import pytest
 
 import opengrid.ledger as ledger_module
 from opengrid.ledger import decode_interval_key
+from opengrid.market import MarketModel
 from opengrid.selector import commit, gate
 from opengrid.selector.types import CandidateOpportunity
 from unit.selector.factories import make_bank, zero_price_scenario
@@ -56,15 +57,45 @@ async def _fake_configured_bank_ids():
     return ("B1",)
 
 
+async def _fake_load_market(bank_ids):
+    zones = dict.fromkeys(bank_ids, "LZ_NORTH")
+    return MarketModel(zone_territory={}, utilities={}, banks=zones.items()), zones
+
+
 @pytest.fixture
 def _wired(monkeypatch):
     monkeypatch.setattr(gate, "load_banks", _fake_load_banks)
     monkeypatch.setattr(gate, "load_scenarios", _fake_load_scenarios)
     monkeypatch.setattr(gate, "load_committed", _fake_load_committed)
     monkeypatch.setattr(gate, "load_candidates", _fake_load_candidates)
+    monkeypatch.setattr(gate, "load_market", _fake_load_market)
     monkeypatch.setattr(gate, "_configured_bank_ids", _fake_configured_bank_ids)
 
     persisted = {}
+
+    async def _fake_insert_plan_analytics(value_row, shadow_rows, energy_rows):
+        persisted["analytics"] = (value_row, shadow_rows, energy_rows)
+
+    monkeypatch.setattr(gate.db, "insert_plan_analytics", _fake_insert_plan_analytics)
+
+    async def _no_degraded_modes():
+        return frozenset()
+
+    async def _all_series_fit(horizon_start, horizon_end):
+        return frozenset()
+
+    monkeypatch.setattr(gate.db, "load_degraded_modes", _no_degraded_modes)
+    monkeypatch.setattr(gate.db, "load_unfit_price_series", _all_series_fit)
+
+    async def _no_solar(zone_by_bank, horizon_start, n_intervals, now):
+        return {}
+
+    async def _prune(keep_days=7):
+        persisted["pruned"] = keep_days
+        return 0
+
+    monkeypatch.setattr(gate, "load_solar_shares", _no_solar)
+    monkeypatch.setattr(gate.db, "prune_plan_energy_value", _prune)
 
     async def _fake_persist_plan(plan_mode, gate_kind, horizon_start, horizon_end, scenarios, result):
         persisted["plan_mode"] = plan_mode
@@ -173,8 +204,12 @@ async def test_ts_05_03_infeasible_reserve_retries_on_live_headroom(monkeypatch,
         (candidate,) = await _fake_load_candidates(horizon_start, horizon_end, bank_ids, contract_scope)
         return (dataclasses.replace(candidate, eligible_bank_ids=("B1", "B2")),)
 
+    async def _two_configured_banks():
+        return ("B1", "B2")  # a bank must exist in og.bank (and so have a territory) to be eligible, K15
+
     monkeypatch.setattr(commit.ledger, "reserve", _refuse_first)
     monkeypatch.setattr(commit.ledger, "free_headroom", _headroom)
+    monkeypatch.setattr(gate, "_configured_bank_ids", _two_configured_banks)
     monkeypatch.setattr(gate, "load_banks", _two_banks)
     monkeypatch.setattr(gate, "load_candidates", _two_bank_candidate)
 
@@ -251,6 +286,109 @@ async def test_run_gate_never_reserves_against_a_fabricated_bank_id(monkeypatch,
     # `load_candidates` (asserted above) and `ledger.reserve` (here) only ever saw the real bank id
     # `og.bank` returned -- never a fabricated `bank-NN` placeholder from a count/format guess.
     assert reserved["selected_kw"], "expected a real reservation to be made"
+
+
+async def test_run_gate_persists_the_shadow_value_for_its_plan(_wired):
+    """ES05-S07: every gate writes the LP-vs-rule values (og.plan_value) under its own plan id."""
+    persisted, reserved = _wired
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    value_row, shadow_rows, _energy_rows = persisted["analytics"]
+    assert persisted["pruned"] == 7  # og.plan_energy_value retention runs with every gate
+    assert value_row["plan_id"] == reserved["plan_id"]
+    assert value_row["value_added"] == value_row["lp_net_value"] - value_row["rule_net_value"]
+    assert [r["obligation_id"] for r in shadow_rows] == [OBLIGATION_ID]
+
+
+async def test_plan_analytics_failure_never_fails_the_gate(monkeypatch, _wired):
+    async def _no_table(*_args):
+        raise RuntimeError('relation "og.plan_value" does not exist')
+
+    monkeypatch.setattr(gate.db, "insert_plan_analytics", _no_table)
+
+    plan = await gate.run_gate("SCHEDULED_15MIN")
+
+    assert plan.solver_status == "OPTIMAL"
+
+
+async def test_stale_price_feed_no_new_commitments_mode_makes_zero_new_commitments(monkeypatch, _wired):
+    """02b S6.5 row 1 (review blocker): while health's NO_NEW_COMMITMENTS is active (a price feed crossed
+    STALE), the gate reserves and commits nothing new; the offer stays OFFERED (neither selected nor
+    rejected); the gate still runs and plans what is already committed (K13)."""
+    _persisted, reserved = _wired
+    transitions = commit.contracts.transition_obligation
+    decisions = commit.contracts.record_opportunity_decision
+
+    async def _stale():
+        return frozenset({"NO_NEW_COMMITMENTS"})
+
+    monkeypatch.setattr(gate.db, "load_degraded_modes", _stale)
+    monkeypatch.setattr(gate, "_rated_kw_by_bank", lambda bank_ids: {"B1": 0.0})  # would reject if reached
+
+    plan = await gate.run_gate("SCHEDULED_15MIN")
+
+    assert plan.solver_status == "OPTIMAL"
+    assert reserved == {}
+    assert transitions.calls == []
+    assert decisions.calls == []
+
+
+async def test_unreadable_degraded_mode_fails_closed(monkeypatch, _wired):
+    _persisted, reserved = _wired
+
+    async def _db_down():
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(gate.db, "load_degraded_modes", _db_down)
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    assert reserved == {}
+    assert commit.contracts.transition_obligation.calls == []
+
+
+async def test_mode_clear_selects_and_commits_normally(_wired):
+    _persisted, reserved = _wired
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    assert reserved["obligation_id"] == UUID(OBLIGATION_ID)
+    assert commit.contracts.transition_obligation.calls[-1][1] == "COMMITTED"
+
+
+async def test_offer_priced_only_off_a_not_for_firm_series_is_withheld_not_rejected(monkeypatch, _wired):
+    """The only bank is priced off a series forecast flags NOT_FOR_FIRM: nothing is committed, and the
+    offer is NOT rejected (its structural capacity is fine; only this gate's data is unfit)."""
+    _persisted, reserved = _wired
+
+    async def _unfit(horizon_start, horizon_end):
+        return frozenset({"LZ_NORTH"})
+
+    async def _zoned_bank(horizon_start, horizon_end, bank_ids):
+        return (dataclasses.replace(make_bank("B1", 10.0, range(1)), zone="LZ_NORTH"),)
+
+    monkeypatch.setattr(gate.db, "load_unfit_price_series", _unfit)
+    monkeypatch.setattr(gate, "load_banks", _zoned_bank)
+    monkeypatch.setattr(gate, "_rated_kw_by_bank", lambda bank_ids: {"B1": 600.0})
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    assert reserved == {}
+    assert commit.contracts.transition_obligation.calls == []
+
+
+async def test_unreadable_series_fitness_fails_closed(monkeypatch, _wired):
+    _persisted, reserved = _wired
+
+    async def _db_down(horizon_start, horizon_end):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(gate.db, "load_unfit_price_series", _db_down)
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    assert reserved == {}
 
 
 async def test_run_gate_renomination_requires_contract_scope():

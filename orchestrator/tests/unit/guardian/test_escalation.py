@@ -73,14 +73,56 @@ def test_three_consecutive_conservative_ticks_request_a_stop_once():
     ]
 
 
-def test_recovery_clears_and_the_count_restarts():
+def test_a_genuinely_recovered_scope_clears_after_three_good_ticks_and_the_count_decays():
     tracker = EscalationTracker()
+    scope = ("BANK", "bank-000")
     tracker.observe_tick(_tick(50), {})
     tracker.observe_tick(_tick(50), {})
-    assert [t.kind for t in tracker.observe_tick(_tick(1), {})] == ["CLEAR"]
-    assert tracker.posture(("BANK", "bank-000")) == "NORMAL"
+    assert tracker.observe_tick(_tick(1), {}) == [] and tracker.observe_tick(_tick(0), {}) == []
+    assert tracker.posture(scope) == "CONSERVATIVE"  # one or two good ticks are not yet recovery
+    assert [t.kind for t in tracker.observe_tick(_tick(2), {})] == ["CLEAR"]
+    assert tracker.posture(scope) == "NORMAL" and not tracker.stop_requested(scope)
+    assert tracker.escalation_count(scope) == 1  # decayed by one, not reset
+    tracker.observe_tick(_tick(0), {})
+    assert tracker.escalation_count(scope) == 0  # every further good tick decays it
     kinds = [tracker.observe_tick(_tick(50), {})[0].kind for _ in range(2)]
     assert kinds == ["ENTER_CONSERVATIVE", "STAY_CONSERVATIVE"]  # a fresh episode: no early stop request
+
+
+def test_a_flapping_veto_ratio_escalates_to_a_stop_request():
+    """Review fix (K7): 6 %, 4 %, 6 %, ... used to alternate ENTER/CLEAR forever and never reach the request."""
+    tracker = EscalationTracker()
+    kinds = [[t.kind for t in tracker.observe_tick(_tick(v), {})] for v in (6, 4, 6, 4, 6)]
+    assert kinds == [["ENTER_CONSERVATIVE"], [], ["STAY_CONSERVATIVE"], [], ["REQUEST_SAFE_STOP"]]
+    assert tracker.posture(("BANK", "bank-000")) == "CONSERVATIVE"
+
+
+def test_a_fault_on_every_other_tick_escalates_even_with_clean_ticks_between():
+    tracker = EscalationTracker()
+    kinds = [[t.kind for t in tracker.observe_tick(_tick(v), {})] for v in (6, 0, 6, 0, 6)]
+    assert kinds[-1] == ["REQUEST_SAFE_STOP"] and ["CLEAR"] not in kinds
+
+
+def test_a_tick_between_the_thresholds_breaks_the_good_streak():
+    tracker = EscalationTracker()
+    tracker.observe_tick(_tick(50), {})
+    for vetoed in (0, 0, 4, 0, 0):  # 4 % is under the 5 % entry ratio but over the 2.5 % clear ratio
+        assert tracker.observe_tick(_tick(vetoed), {}) == []
+    assert [t.kind for t in tracker.observe_tick(_tick(0), {})] == ["CLEAR"]
+
+
+def test_a_relapse_soon_after_clearing_resumes_close_to_a_stop_request():
+    tracker = EscalationTracker()
+    for vetoed in (50, 50, 0, 0, 0):  # escalation count 2, cleared -> decays to 1
+        tracker.observe_tick(_tick(vetoed), {})
+    kinds = [tracker.observe_tick(_tick(50), {})[0].kind for _ in range(2)]
+    assert kinds == ["ENTER_CONSERVATIVE", "REQUEST_SAFE_STOP"]
+
+
+def test_the_hysteresis_is_configurable():
+    tracker = EscalationTracker(clear_after_good_ticks=1, clear_ratio_factor=1.0)
+    tracker.observe_tick(_tick(50), {})
+    assert [t.kind for t in tracker.observe_tick(_tick(5), {})] == ["CLEAR"]
 
 
 def test_a_zone_is_judged_on_all_its_banks_together():
@@ -135,11 +177,37 @@ async def test_escalation_publishes_posture_alerts_and_only_a_request():
 
     rec.calls.clear()
     await _apply(tracker, rec, _tick(0))
+    await _apply(tracker, rec, _tick(0))
+    assert rec.calls == []  # not yet recovered: the posture and both alerts stay
+    await _apply(tracker, rec, _tick(0))
     assert rec.calls == [
         ("posture", "BANK", "bank-000", "NORMAL", 0, False),
         ("clear", CONSERVATIVE_ALERT_RULE, "BANK:bank-000"),
         ("clear", STOP_REQUEST_ALERT_RULE, "BANK:bank-000"),
     ]
+
+
+async def test_a_flapping_fault_raises_the_stop_request_alert():
+    """Review fix (K7): the 6 %/4 %/6 % flap reaches ALR-SAFE-STOP-REQUESTED and one operator proposal."""
+    tracker, rec = EscalationTracker(), _Recorder()
+    for vetoed in (6, 4, 6, 4, 6):
+        await _apply(tracker, rec, _tick(vetoed))
+
+    assert ("raise", STOP_REQUEST_ALERT_RULE, "critical", "BANK:bank-000") in rec.calls
+    assert rec.calls.count(("propose", "BANK", "bank-000")) == 1
+    assert not any(call[0] == "clear" for call in rec.calls)
+
+
+def test_the_hysteresis_settings_are_read_from_config():
+    from opengrid.guardian.config import load_guardian_config
+    from opengrid.platform.config import Config
+
+    cfg = load_guardian_config(
+        Config({"guardian": {"escalation_clear_after_good_ticks": 5, "escalation_clear_ratio_factor": 0.25}})
+    )
+    assert cfg.escalation_clear_after_good_ticks == 5 and cfg.escalation_clear_ratio_factor == 0.25
+    defaults = load_guardian_config(Config({}))
+    assert defaults.escalation_clear_after_good_ticks == 3 and defaults.escalation_clear_ratio_factor == 0.5
 
 
 def test_the_guardian_escalation_path_has_no_way_to_engage_a_stop():

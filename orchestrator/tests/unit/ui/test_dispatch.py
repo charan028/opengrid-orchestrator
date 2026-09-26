@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from opengrid.ui.routes.dispatch import (
+    as_awards_view,
     commitment_lock_events_view,
     grants_and_substitutions_view,
     ledger_timeline_view,
@@ -73,11 +74,13 @@ def test_ledger_timeline_view_builds_stacked_series_plus_headroom() -> None:
     assert view["bank_id"] == "BANK-0001"
     series_names = {s["name"] for s in view["chart_option"]["series"]}
     # OBL-1099's reservation is released and must be excluded from the ledger.
-    assert series_names == {"OBL-1002", "OBL-1003", "free headroom"}
+    assert series_names == {"OBL-1002", "OBL-1003", "uncommitted capacity (kW)"}
     assert view["obligation_count"] == 2
     intervals = view["chart_option"]["xAxis"]["data"]
     assert intervals == ["2026-09-25T18:00:00+00:00", "2026-09-25T18:15:00+00:00"]
-    headroom_series = next(s for s in view["chart_option"]["series"] if s["name"] == "free headroom")
+    headroom_series = next(
+        s for s in view["chart_option"]["series"] if s["name"] == "uncommitted capacity (kW)"
+    )
     # First interval: 40 + 8 = 48 committed of 500 kW bank capacity.
     assert headroom_series["data"][0] == 452.0
 
@@ -120,3 +123,37 @@ def test_commitment_lock_events_view_filters_lock_reason_or_supersession() -> No
     assert [e["commitment_id"] for e in events] == ["COMMIT-2"]
     assert events[0]["reason_code"] == "R-COMMIT-LOCK-L1"
     assert events[0]["supersedes"] == "COMMIT-0"
+
+
+def test_as_awards_view_joins_deployments_and_marks_energy_risk() -> None:
+    awards = [
+        {
+            "obligation_id": "AS-1",
+            "customer_id": "CUST-A",
+            "service_type": "ERCOT_AS",
+            "product": "ECRS",
+            "committed_qty_kw": 10.0,
+            "energy_held_kwh": 8.0,
+        },
+        {
+            "obligation_id": "AS-2",
+            "customer_id": "CUST-B",
+            "service_type": "ERCOT_AS",
+            "product": "NON_SPIN",
+            "committed_qty_kw": 10.0,
+        },
+        {"obligation_id": "ENERGY-1", "service_type": "ERCOT_ENERGY", "committed_qty_kw": 99.0},
+    ]
+    rows = as_awards_view(
+        awards,
+        [{"deployment_id": "DEP-1", "obligation_id": "AS-2", "end_at": "2026-09-25T19:00:00Z"}],
+        now=_NOW,
+    )
+
+    assert [row["obligation_id"] for row in rows] == ["AS-1", "AS-2"]
+    assert rows[0]["state"] == "held"
+    assert rows[0]["required_hours"] == 1
+    assert rows[0]["at_risk"] is True
+    assert rows[1]["state"] == "deployed"
+    assert rows[1]["required_energy_kwh"] == 40.0
+    assert rows[1]["deployment_id"] == "DEP-1"

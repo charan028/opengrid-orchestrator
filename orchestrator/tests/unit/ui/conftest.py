@@ -93,7 +93,11 @@ def fake_post_api(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, Any]],
 
     def install(responses: dict[str, Any]) -> None:
         async def fake_post_json(
-            path: str, payload: dict[str, Any], *, remote_user: str | None = None
+            path: str,
+            payload: dict[str, Any],
+            *,
+            remote_user: str | None = None,
+            timeout_s: float | None = None,
         ) -> Any:
             posted.append({"path": path, "payload": payload, "remote_user": remote_user})
             if path not in responses:

@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}Power quality -- OpenGrid Orchestrator{% endblock %}
+{% block header_title %}Power quality & assets{% endblock %}
+
+{% block header_actions %}
+<form method="get" action="{{ base_path }}/pq" aria-label="Choose a hub" class="og-toolbar">
+  <label for="pq-hub">Hub</label>
+  <input type="text" id="pq-hub" name="hub" value="{{ hub_id }}" placeholder="hub-01000" pattern="[A-Za-z0-9_-]+">
+  <button class="btn" type="submit">Show</button>
+</form>
+{% endblock %}
+
+{% block content %}
+<section class="og-panel" aria-labelledby="wo-heading">
+  <p class="og-panel-lead">Inverters that drifted, failed a calibration, or were quarantined, and the work orders raised for them. Pick one to see its waveform, spectrum and history.</p>
+  <h2 id="wo-heading">Maintenance work orders ({{ open_count }} open)</h2>
+  <div class="og-table-wrap"><table class="data-table" id="work-orders">
+    <thead><tr><th scope="col">Hub</th><th scope="col">Severity</th><th scope="col">Status</th><th scope="col">Evidence</th><th scope="col">Opened</th></tr></thead>
+    <tbody>
+    {% for w in work_orders[:30] %}
+      <tr>
+        <td><a href="{{ base_path }}/pq?hub={{ w.hub_id }}">{{ w.hub_id }}</a></td>
+        <td>{% with status=('critical' if w.severity == 'HIGH' else 'caution'), label=w.severity %}{% include "_partials/status_badge.html" %}{% endwith %}</td>
+        <td>{{ w.status }}</td>
+        <td>{{ w.evidence_text }}</td>
+        <td><span class="stale-badge" data-since="{{ w.opened_at }}" data-stale-after="86400" title="{{ w.opened_at }}">age: unknown</span></td>
+      </tr>
+    {% else %}<tr><td class="empty" colspan="5">No work orders</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+
+{% if hub_id and not hub_found %}
+<div class="og-degraded-banner" role="status" id="pq-hub-missing">No hub {{ hub_id }} (or it has no power-quality record).</div>
+{% elif hub_id %}
+<section class="og-grid">
+  <div class="og-panel" aria-labelledby="summary-heading">
+    <h2 id="summary-heading">Waveform summary: {{ hub_id }}</h2>
+    {% if summary %}
+    <p class="og-card-meta">Reported <span class="stale-badge" data-since="{{ summary.ts }}" data-stale-after="{{ summary_stale_after_s|int }}" title="{{ summary.ts }}">age: unknown</span>
+      &middot; frequency <strong>{{ '%.3f'|format(summary.freq_hz) if summary.freq_hz is not none else '--' }} Hz</strong></p>
+    <div class="og-table-wrap"><table class="data-table" id="pq-phases">
+      <thead><tr><th scope="col">Phase</th><th scope="col" class="num">V rms (V)</th><th scope="col" class="num">I rms (A)</th><th scope="col" class="num">PF</th><th scope="col" class="num">THD V (%)</th><th scope="col" class="num">THD I (%)</th><th scope="col" class="num">Angle (°)</th></tr></thead>
+      <tbody>
+      {% for p in summary.phases %}
+        <tr><td>{{ p.phase }}</td>
+          {% for v, fmt in [(p.v_rms, '%.1f'), (p.i_rms, '%.2f'), (p.pf, '%.3f'), (p.thd_v, '%.2f'), (p.thd_i, '%.2f'), (p.angle, '%.1f')] %}
+          <td class="num">{{ fmt|format(v) if v is not none else '--' }}</td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="og-empty" id="pq-no-summary">No waveform summary in the last 15 minutes. Missing is never compliant (K1).</p>
+    {% endif %}
+  </div>
+  <div class="og-panel" aria-labelledby="bank-pq-heading">
+    <h2 id="bank-pq-heading">Bank {{ bank_id or '--' }} measured PQ</h2>
+    {% if bank_pq and bank_pq.measurement %}
+    {% set m = bank_pq.measurement %}
+    <p class="og-card-meta">{{ bank_pq.reporting_hub_count }} of {{ bank_pq.hub_count }} hubs reporting in the last {{ bank_pq.freshness_s|int }} s</p>
+    <dl class="og-deflist" id="bank-pq">
+      {% for key, value in m.items() if value is number %}<dt>{{ key|replace('_', ' ') }}</dt><dd>{{ '%.3f'|format(value) }}</dd>{% endfor %}
+    </dl>
+    {% else %}
+    <p class="og-empty">No fresh bank measurement (never shown as compliant).</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="og-grid">
+  <div class="og-panel" aria-labelledby="spectrum-heading">
+    <h2 id="spectrum-heading">Harmonic spectrum (latest)</h2>
+    <div id="pq-spectrum-bars" style="height: 220px;" role="img" aria-label="Bar chart of harmonic magnitudes by order, current and voltage" data-empty="No harmonics reported."></div>
+  </div>
+  <div class="og-panel" aria-labelledby="trend-heading">
+    <h2 id="trend-heading">Current harmonics, last 15 minutes</h2>
+    <div id="pq-spectrum-trend" style="height: 220px;" role="img" aria-label="Line chart of current harmonic magnitudes over time" data-empty="No summaries in the window."></div>
+  </div>
+</section>
+
+<section class="og-panel" aria-labelledby="captures-heading">
+  <h2 id="captures-heading">Raw waveform captures</h2>
+  <div class="og-table-wrap"><table class="data-table" id="pq-captures">
+    <thead><tr><th scope="col">Captured</th><th scope="col">Trigger</th><th scope="col" class="num">Channels</th><th scope="col" class="num">Rate (Hz)</th><th scope="col" class="num">Cycles</th><th scope="col">Kept until</th></tr></thead>
+    <tbody>
+    {% for c in captures %}
+      <tr><td title="{{ c.capture_id }}"><span class="stale-badge" data-since="{{ c.ts }}" data-stale-after="86400" title="{{ c.ts }}">age: unknown</span></td><td>{{ c.trigger_reason }}</td><td class="num">{{ c.channels }}</td><td class="num">{{ c.sample_rate_hz or '--' }}</td><td class="num">{{ c.cycles or '--' }}</td><td>{{ c.retain_until or '--' }}</td></tr>
+    {% else %}<tr><td class="empty" colspan="6">No raw captures for this hub</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+  {% if is_operator %}
+  <form class="og-form-inline" id="pq-capture-form" hx-post="{{ base_path }}/pq/{{ hub_id }}/capture/propose" hx-target="#pq-action-dialog" hx-swap="innerHTML">
+    <label>Reason <input type="text" name="reason" required maxlength="500" value="Operator on-demand capture"></label>
+    <button class="btn" type="submit">Request raw capture (step 1 of 2)</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="og-grid">
+  <div class="og-panel" aria-labelledby="asset-heading">
+    <h2 id="asset-heading">Asset health</h2>
+    {% if asset %}
+    {% set inv = asset.inverter_pq or {} %}
+    <p>{% with status=('good' if asset.asset_state == 'OK' else ('critical' if asset.asset_state == 'QUARANTINED' else 'caution')), label=asset.asset_state %}{% include "_partials/status_badge.html" %}{% endwith %}
+      {% if inv.asset_state_since %}<span class="og-card-meta">since {{ inv.asset_state_since }}</span>{% endif %}</p>
+    <dl class="og-deflist" id="asset-characterization">
+      {% for key in ['kva_rating', 'pf_min_leading', 'pf_min_lagging', 'freq_offset_hz', 'voltage_offset_pct', 'thd_current_pct', 'phase_angle_error_deg', 'quality_score', 'consecutive_correctable_drifts', 'last_estimated_at', 'last_recalibration_at'] if inv[key] is defined and inv[key] is not none %}
+      <dt>{{ key|replace('_', ' ') }}</dt><dd>{{ inv[key] }}</dd>
+      {% endfor %}
+    </dl>
+    {% if asset.open_work_order %}<p class="og-card-meta">Open work order: {{ asset.open_work_order.severity }} &middot; {{ asset.open_work_order.status }}</p>{% endif %}
+    <h3>History</h3>
+    <div class="og-table-wrap"><table class="data-table" id="asset-history">
+      <thead><tr><th scope="col">When</th><th scope="col">Event</th><th scope="col">From → to</th><th scope="col">Reason</th></tr></thead>
+      <tbody>
+      {% for e in asset.history[:20] %}
+        <tr><td title="{{ e.occurred_at }}">{{ (e.occurred_at or '')[:16]|replace('T', ' ') }}</td><td>{{ e.event_type }}</td><td>{{ e.from_state or '--' }} → {{ e.to_state or '--' }}</td><td>{{ e.reason_code or '' }}</td></tr>
+      {% else %}<tr><td class="empty" colspan="4">No asset events</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="og-empty">No inverter PQ record for this hub.</p>
+    {% endif %}
+  </div>
+  <div class="og-panel" aria-labelledby="calibration-heading">
+    <h2 id="calibration-heading">Calibration history</h2>
+    <div class="og-table-wrap"><table class="data-table" id="calibration-history">
+      <thead><tr><th scope="col">Requested</th><th scope="col">Outcome</th><th scope="col">Guardian (G-25)</th><th scope="col" class="num">Δf (Hz)</th><th scope="col" class="num">ΔV (%)</th><th scope="col" class="num">Δφ (°)</th></tr></thead>
+      <tbody>
+      {% for c in calibrations %}
+        <tr><td title="{{ c.calibration_id }}">{{ (c.requested_at or '')[:16]|replace('T', ' ') }}</td><td>{{ c.outcome or 'PENDING' }}</td><td>{{ c.command_status or 'undecided' }}{% if c.command_reason %} <span class="og-card-meta">{{ c.command_reason }}</span>{% endif %}</td>
+          <td class="num">{{ c.correction_freq_hz if c.correction_freq_hz is not none else '--' }}</td><td class="num">{{ c.correction_voltage_pct if c.correction_voltage_pct is not none else '--' }}</td><td class="num">{{ c.correction_phase_deg if c.correction_phase_deg is not none else '--' }}</td></tr>
+      {% else %}<tr><td class="empty" colspan="6">No calibration attempts</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+    {% if is_operator %}
+    <form class="og-form-inline" id="pq-calibrate-form" hx-post="{{ base_path }}/pq/{{ hub_id }}/calibrate/propose" hx-target="#pq-action-dialog" hx-swap="innerHTML">
+      <label>Reason <input type="text" name="reason" required maxlength="500" value="Operator-initiated recalibration"></label>
+      <button class="btn btn-danger" type="submit">Request calibration (step 1 of 2)</button>
+    </form>
+    <p class="og-card-meta">Records a PENDING attempt only; the guardian checks it (G-25) and signs or refuses.</p>
+    {% endif %}
+  </div>
+</section>
+{% if is_operator %}
+<div id="pq-action-dialog"></div>
+<div id="pq-action-result" role="status"></div>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    {% if hub_found %}
+    var bars = {{ bars|tojson }};
+    var trend = {{ trend|tojson }};
+    og.chart("#pq-spectrum-bars", bars.empty ? { series: [] } : bars);
+    og.chart("#pq-spectrum-trend", trend.empty ? { series: [] } : trend);
+    {% endif %}
+  });
+</script>
+{% endblock %}

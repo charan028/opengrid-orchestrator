@@ -24,7 +24,6 @@ import cmath
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from dataclasses import replace as dataclasses_replace
 
 from opengrid.allocator.models import HubSnapshot
 from opengrid.core.pq import RIDE_THROUGH_RANK, KvaCircle, kva_point_feasible
@@ -377,11 +376,12 @@ def apply_eligibility(
         ]
         phase_weight_by_id = phase_balance_weights(candidates_for_phase, phase_kw_by_phase)
 
-    eligible_ids = set(weight_by_id)
-    survivors = [h for h in hubs if h.hub_id in eligible_ids]
-    return tuple(
-        dataclasses_replace(
-            hub, tau=hub.tau * weight_by_id[hub.hub_id] * phase_weight_by_id.get(hub.hub_id, 1.0)
-        )
-        for hub in survivors
-    )
+    kept: list[HubSnapshot] = []
+    for hub in hubs:
+        weight = weight_by_id.get(hub.hub_id)
+        if weight is None:
+            continue
+        factor = weight * phase_weight_by_id.get(hub.hub_id, 1.0)
+        # A neutral weight keeps the snapshot as is (no copy on the 2 s hot path).
+        kept.append(hub if factor == 1.0 else hub.evolve(tau=hub.tau * factor))
+    return tuple(kept)

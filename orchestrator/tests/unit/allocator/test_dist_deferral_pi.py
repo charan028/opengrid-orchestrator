@@ -81,7 +81,8 @@ def test_ts_05_34_gross_need_kva_never_negative() -> None:
     steps=st.integers(min_value=1, max_value=200),
     disturbance_kva=st.floats(min_value=-5000, max_value=5000, allow_nan=False),
 )
-@settings(max_examples=50)
+# No deadline: CPU-bound on a shared host, where the deadline measured load, not the PI.
+@settings(max_examples=50, deadline=None)
 def test_ts_05_35_property_pi_stable_and_bounded_on_step_disturbance(
     steps: int, disturbance_kva: float
 ) -> None:

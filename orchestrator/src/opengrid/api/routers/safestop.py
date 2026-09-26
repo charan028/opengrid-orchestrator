@@ -26,7 +26,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from opengrid.api.auth import Identity, require_operator
-from opengrid.api.deps import get_proposals, get_store, get_trace_store
+from opengrid.api.deps import get_config, get_proposals, get_store, get_trace_store
 from opengrid.api.proposals import ProposalExpiredError, ProposalStore
 from opengrid.api.schemas import (
     ProposalAccepted,
@@ -35,6 +35,7 @@ from opengrid.api.schemas import (
     SafestopReleaseRequest,
 )
 from opengrid.api.store import StoreProtocol
+from opengrid.platform.config import Config
 from opengrid.safestop.pg_backend import REQUEST_CHANNEL
 from opengrid.trace.store import TraceStore
 
@@ -53,13 +54,17 @@ async def propose_safestop(
     body: SafestopProposalRequest,
     proposals: Annotated[ProposalStore, Depends(get_proposals)],
     store: Annotated[StoreProtocol, Depends(get_store)],
+    cfg: Annotated[Config, Depends(get_config)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> ProposalAccepted:
     """Step 1 of 2 (02b S7.1): arms `og-safestop`'s own `ConfirmationBroker` via a PROPOSE
-    notification; nothing stops yet -- a single message can never engage the fleet (TS-10-03)."""
+    notification; nothing stops yet -- a single message can never engage the fleet (TS-10-03). The
+    proposal expires here at og-safestop's own `[safestop].confirm_window_s` (30 s), not the generic
+    60 s: a confirm the broker would already reject is refused with 409 instead of timing out."""
     scope_desc = body.scope + (f"/{body.scope_id}" if body.scope_id else "")
     summary = f"Engage safe stop on {scope_desc} ({body.reason})"
-    proposal = proposals.create(_SAFESTOP_PROPOSAL_KIND, body, summary, identity.user)
+    window_s = safestop_confirm_window_s(cfg)
+    proposal = proposals.create(_SAFESTOP_PROPOSAL_KIND, body, summary, identity.user, ttl_s=window_s)
     await store.notify(
         REQUEST_CHANNEL,
         {
@@ -71,7 +76,16 @@ async def propose_safestop(
             "initiator_ref": identity.user,
         },
     )
-    return ProposalAccepted(proposal_id=proposal.proposal_id, summary=summary, expires_in_s=60.0)
+    return ProposalAccepted(proposal_id=proposal.proposal_id, summary=summary, expires_in_s=window_s)
+
+
+#: og-safestop's `ConfirmationBroker` default (`opengrid.safestop.main`: `[safestop].confirm_window_s`).
+DEFAULT_SAFESTOP_CONFIRM_WINDOW_S = 30.0
+
+
+def safestop_confirm_window_s(cfg: Config) -> float:
+    """The safe-stop confirmation window og-safestop enforces -- the one config key both sides read."""
+    return float(cfg.get("safestop.confirm_window_s", DEFAULT_SAFESTOP_CONFIRM_WINDOW_S))
 
 
 @router.post("/{proposal_id}/confirm")
@@ -85,8 +99,14 @@ async def confirm_safestop(
     """Step 2 of 2 (02b S7.1/S7.3): NOTIFYs CONFIRM, then polls `og.stop_event` for the ENGAGE row
     `og-safestop` inserts on success. No matching event within the poll window means either the
     PROPOSE already expired in `og-safestop`'s own (shorter) `confirm_window_s`, or `og-safestop`
-    is not running -- reported as `503`, never assumed to have engaged."""
-    proposal = _pop_or_404(proposals, proposal_id, kind=_SAFESTOP_PROPOSAL_KIND)
+    is not running -- reported as `503`, never assumed to have engaged. A proposal older than the
+    broker's window is refused up front with `409` ("proposal expired, propose again")."""
+    try:
+        proposal = proposals.pop(proposal_id, kind=_SAFESTOP_PROPOSAL_KIND)
+    except ProposalExpiredError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="proposal expired, propose again") from exc
+    except KeyError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="unknown proposal") from exc
     body: SafestopProposalRequest = proposal.body
     scope_kind = _SCOPE_KIND[body.scope]
     scope_ref = body.scope_id or "FLEET"

@@ -65,7 +65,7 @@ async def _run_sequence(sequence: list[tuple[str, str, str, str]]) -> list[dict[
 
 
 @given(sequence=_sequence_strategy)
-@settings(max_examples=500)
+@settings(max_examples=500, deadline=None)  # a safety property, not a timing test: no flaky deadline
 def test_no_sequence_ever_produces_a_release_row(sequence):
     rows = asyncio.run(_run_sequence(sequence))
     assert all(row["action"] == "ENGAGE" for row in rows)

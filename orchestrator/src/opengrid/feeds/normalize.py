@@ -218,10 +218,27 @@ def ercot_load_to_feed_obs(
     return obs
 
 
+#: `opengrid.feeds.store.FeedStore.latest`/`window` key `og.feed_obs` by `series` ALONE (no `product`
+#: filter -- see `store.py`'s `_LATEST_SQL`/`_WINDOW_SQL`), so two products sharing a series name would
+#: silently interleave each other's rows for any caller reading through that interface (`opengrid.feeds`
+#: is the fixed public read interface every other package, including `forecast`, goes through). Wind
+#: (NP4-732-CD) and solar (NP4-737-CD) are exactly that: both are "system-wide actual + forecast"
+#: products, so a bare `"actual"`/`"forecast"` series name would collide between them the moment anyone
+#: reads either through `latest()`/`window()` -- caught here before the D-24 solar-shape forecast work
+#: became the first real reader of solar's `forecast` series. Product-qualified names close the gap
+#: without changing `FeedStore`'s query shape (BUILD.md S1 no-duplication: one place decides these
+#: names, both normalizers use it).
+WIND_ACTUAL_SERIES = "wind_actual"
+WIND_FORECAST_SERIES = "wind_forecast"
+SOLAR_ACTUAL_SERIES = "solar_actual"
+SOLAR_FORECAST_SERIES = "solar_forecast"
+
+
 def ercot_wind_to_feed_obs(
     payload: dict[str, object], *, product: str, recorded_at: datetime
 ) -> list[FeedObs]:
-    """NP4-732-CD system-wide wind actual + forecast (MW), stored as two series: `actual`, `forecast`.
+    """NP4-732-CD system-wide wind actual + forecast (MW), stored as two series: `wind_actual`,
+    `wind_forecast`.
 
     Real fields (confirmed live): actual generation is `genSystemWide` (the originally-assumed
     `actualSystemWideWindOutput` does not exist), forecast is `STWPFSystemWide` (Short-Term Wind Power
@@ -232,6 +249,8 @@ def ercot_wind_to_feed_obs(
         product=product,
         actual_col="genSystemWide",
         forecast_col="STWPFSystemWide",
+        actual_series=WIND_ACTUAL_SERIES,
+        forecast_series=WIND_FORECAST_SERIES,
         recorded_at=recorded_at,
     )
 
@@ -239,7 +258,8 @@ def ercot_wind_to_feed_obs(
 def ercot_solar_to_feed_obs(
     payload: dict[str, object], *, product: str, recorded_at: datetime
 ) -> list[FeedObs]:
-    """NP4-737-CD system-wide solar actual + forecast (MW), stored as two series: `actual`, `forecast`.
+    """NP4-737-CD system-wide solar actual + forecast (MW), stored as two series: `solar_actual`,
+    `solar_forecast`.
 
     Real fields (confirmed live): actual generation is `genSystemWide`, forecast is `STPPFSystemWide`
     (Short-Term Photovoltaic Power Forecast) -- the originally-assumed `actualSystemWideSolarOutput`/
@@ -250,8 +270,62 @@ def ercot_solar_to_feed_obs(
         product=product,
         actual_col="genSystemWide",
         forecast_col="STPPFSystemWide",
+        actual_series=SOLAR_ACTUAL_SERIES,
+        forecast_series=SOLAR_FORECAST_SERIES,
         recorded_at=recorded_at,
     )
+
+
+#: NP4-745-CD's six solar geographical regions (ERCOT NPRR935). These are ERCOT's SOLAR regions, not
+#: NP6-345-CD's load weather zones -- the two partitions of the system do not coincide (see
+#: `opengrid.feeds.solar_share` for how a load zone is paired with a solar region).
+SOLAR_REGIONS: tuple[str, ...] = ("CenterWest", "NorthWest", "FarWest", "FarEast", "SouthEast", "CenterEast")
+
+
+def solar_actual_series(region: str) -> str:
+    """The `og.feed_obs.series` for one solar region's actual output: `solar_actual_<Region>`. The ONE
+    place the regional series names are formed (the normalizer writes them, `solar_share` reads them)."""
+    return f"{SOLAR_ACTUAL_SERIES}_{region}"
+
+
+def solar_forecast_series(region: str) -> str:
+    """The `og.feed_obs.series` for one solar region's STPPF forecast: `solar_forecast_<Region>`."""
+    return f"{SOLAR_FORECAST_SERIES}_{region}"
+
+
+def ercot_solar_by_region_to_feed_obs(
+    payload: dict[str, object], *, product: str, recorded_at: datetime
+) -> list[FeedObs]:
+    """NP4-745-CD solar actual + STPPF forecast (MW) per geographical region (D-28), two series per
+    region (`solar_actual_<Region>`, `solar_forecast_<Region>`). The system-wide columns this product
+    also carries are NOT stored again -- NP4-737-CD already owns `solar_actual`/`solar_forecast`.
+
+    Field names follow NP4-737-CD's live-confirmed pattern (`gen<Region>`, `STPPF<Region>`, with
+    `deliveryDate`/`hourEnding`/`DSTFlag`), and the region list is ERCOT's published one (`SOLAR_REGIONS`).
+    A region whose columns are absent from `fields` is skipped; a response carrying NONE of them raises
+    `FeedDataError` -- a silently empty feed would read as a healthy poll with no data.
+    """
+    fields = payload.get("fields")
+    if not isinstance(fields, list):
+        raise FeedDataError(f"{product}: malformed envelope, missing fields/data")
+    names = {f.get("name") for f in fields if isinstance(f, dict)}
+    regions = [r for r in SOLAR_REGIONS if f"gen{r}" in names and f"STPPF{r}" in names]
+    if not regions:
+        raise FeedDataError(f"{product}: no solar region columns (gen<Region>/STPPF<Region>) in response")
+    obs: list[FeedObs] = []
+    for region in regions:
+        obs.extend(
+            _ercot_actual_forecast_to_feed_obs(
+                payload,
+                product=product,
+                actual_col=f"gen{region}",
+                forecast_col=f"STPPF{region}",
+                actual_series=solar_actual_series(region),
+                forecast_series=solar_forecast_series(region),
+                recorded_at=recorded_at,
+            )
+        )
+    return obs
 
 
 def _ercot_actual_forecast_to_feed_obs(
@@ -260,13 +334,18 @@ def _ercot_actual_forecast_to_feed_obs(
     product: str,
     actual_col: str,
     forecast_col: str,
+    actual_series: str,
+    forecast_series: str,
     recorded_at: datetime,
 ) -> list[FeedObs]:
     """Shared wind/solar normalizer. The interval timestamp comes from `deliveryDate`/`hourEnding`/
     `DSTFlag` (America/Chicago local, like every other MVP-S ERCOT product), not `postedDatetime`
     (which is the forecast's publish time, not the delivery interval it describes). `actual_col` is
     `null` for a not-yet-elapsed delivery hour (a forecast-horizon row) -- that series is skipped for
-    such rows rather than raising, since the row is still valid data for the `forecast` series.
+    such rows rather than raising, since the row is still valid data for the forecast series.
+    `actual_series`/`forecast_series` are the product-qualified `og.feed_obs.series` names (see
+    `WIND_ACTUAL_SERIES` etc.) -- never the bare `"actual"`/`"forecast"` strings, which would collide
+    between wind and solar under `FeedStore`'s series-only lookup.
     """
     rows = normalize_ercot_envelope(
         payload,
@@ -288,7 +367,7 @@ def _ercot_actual_forecast_to_feed_obs(
                 FeedObs(
                     source=SOURCE_ERCOT,
                     product=product,
-                    series="actual",
+                    series=actual_series,
                     ts=ts,
                     value=float(str(r["actual"])),
                     unit="mw",
@@ -301,7 +380,7 @@ def _ercot_actual_forecast_to_feed_obs(
                 FeedObs(
                     source=SOURCE_ERCOT,
                     product=product,
-                    series="forecast",
+                    series=forecast_series,
                     ts=ts,
                     value=float(str(r["forecast"])),
                     unit="mw",

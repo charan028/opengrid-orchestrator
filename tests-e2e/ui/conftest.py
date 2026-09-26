@@ -48,8 +48,10 @@ _SERVER_READY_TIMEOUT_S = 15.0
 _SERVER_STOP_TIMEOUT_S = 5.0
 _MAP_TILE_URL_GLOB = "**/tile.openstreetmap.org/**"
 
+BULK_PROPOSAL_ID = "fc038bc1-ac6d-4c90-b30e-845fbb777d63"  # the API ui19 fixture's
 SAFESTOP_PROPOSAL_ID = "11111111-1111-1111-1111-111111111111"
 COMMAND_PROPOSAL_ID = "33333333-3333-3333-3333-333333333333"
+AS_DEPLOYMENT_ID = "44444444-4444-4444-4444-444444444444"
 
 
 def live_base_url() -> str | None:
@@ -74,11 +76,22 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/fleet/hubs/hub-0001": hub_detail,
         "/og/api/fleet/hubs/hub-0002": {**hub_detail, "hub_id": "hub-0002"},
         "/og/api/dispatch/opportunities": _load("dispatch_obligations.json"),
+        "/og/api/dispatch/as-deployments": [],
         "/og/api/dispatch/plan/latest": _load("dispatch_plan.json"),
         "/og/api/ledger/BANK-0001/timeline": timeline,
         "/og/api/markets/series": _load("markets_series_price.json"),
         "/og/api/forecast": _load("markets_forecast.json"),
         "/og/api/profitability/summary": _load("profitability_summary.json"),
+        "/og/api/views/settlement": _load("views_settlement.json"),
+        "/og/api/profitability/per-kw": _load("profitability_per_kw.json"),
+        "/og/api/profitability/lp-value": _load("profitability_lp_value.json"),
+        "/og/api/work-orders": _load("pq_work_orders.json"),
+        "/og/api/hubs/hub-01998/waveform": _load("pq_waveform.json"),
+        "/og/api/hubs/hub-01998/spectrum": _load("pq_spectrum.json"),
+        "/og/api/hubs/hub-01998/asset-health": _load("pq_asset_health.json"),
+        "/og/api/hubs/hub-01998/calibration-history": _load("pq_calibration.json"),
+        "/og/api/fleet/hubs/hub-01998": _load("pq_hub_location.json"),
+        "/og/api/banks/bank-038/pq": _load("pq_bank.json"),
         "/og/api/billing/invoice-lines": _load("billing_invoice_lines.json"),
         "/og/api/trace/events": _load("billing_trace_events.json"),
     }
@@ -90,9 +103,16 @@ def _post_responses() -> dict[str, Any]:
         "/og/api/safestop": _load("fleet_safestop_propose.json"),
         f"/og/api/safestop/{SAFESTOP_PROPOSAL_ID}/confirm": _load("fleet_safestop_confirm.json"),
         "/og/api/fleet/command": _load("fleet_command_propose.json"),
+        "/og/api/fleet/commands/bulk": _load("ui19_bulk_propose.json"),
+        # the API flags the selection: the first confirm answers AWAITING_SECOND_CONFIRM, the second executes
+        f"/og/api/fleet/commands/bulk/{BULK_PROPOSAL_ID}/confirm": [
+            _load("ui19_bulk_confirm_1.json"),
+            _load("ui19_bulk_confirm_2.json"),
+        ],
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
         "/og/api/alerts/7/ack": _load("alert_ack.json"),
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},
+        "/og/api/dispatch/as-deployments": {"deployment_id": AS_DEPLOYMENT_ID, "status": "ACTIVE"},
     }
 
 
@@ -104,9 +124,10 @@ def _route_modules() -> list[ModuleType]:
     import opengrid.ui.routes.fleet as fleet
     import opengrid.ui.routes.health as health
     import opengrid.ui.routes.markets as markets
+    import opengrid.ui.routes.pq as pq
     import opengrid.ui.routes.profitability as profitability
 
-    return [api_client, billing_audit, control_room, dispatch, fleet, health, markets, profitability]
+    return [api_client, billing_audit, control_room, dispatch, fleet, health, markets, pq, profitability]
 
 
 def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,13 +142,31 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
             raise ApiUnavailable(f"no fixture registered for GET {path}")
         return gets[path]
 
-    async def fake_post_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
+    post_calls: dict[str, int] = {}
+
+    async def fake_post_json(
+        path: str, payload: dict[str, Any], *, remote_user: str | None = None, timeout_s: float | None = None
+    ) -> Any:
         if path not in posts:
             raise ApiUnavailable(f"no fixture registered for POST {path}")
-        return posts[path]
+        body = posts[path]
+        if isinstance(body, list):  # a sequence: one response per call, the last one repeats
+            served = post_calls.setdefault(path, 0)
+            post_calls[path] = served + 1
+            return body[min(served, len(body) - 1)]
+        return body
+
+    async def fake_delete_json(path: str, *, remote_user: str | None = None) -> Any:
+        if path != f"/og/api/dispatch/as-deployments/{AS_DEPLOYMENT_ID}":
+            raise ApiUnavailable(f"no fixture registered for DELETE {path}")
+        return {"deployment_id": AS_DEPLOYMENT_ID, "status": "STOPPED"}
 
     for module in _route_modules():
-        for name, fake in (("get_json", fake_get_json), ("post_json", fake_post_json)):
+        for name, fake in (
+            ("get_json", fake_get_json),
+            ("post_json", fake_post_json),
+            ("delete_json", fake_delete_json),
+        ):
             if hasattr(module, name):
                 monkeypatch.setattr(module, name, fake)
 

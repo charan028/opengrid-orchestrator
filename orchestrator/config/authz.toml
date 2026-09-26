@@ -1,0 +1,108 @@
+# Authorization policy (owner-approved "light version", 2026-09-26): declarative role x action x
+# resource-scope rules for `opengrid.authz`. Deny by default -- an action with no matching [[rule]] for
+# the caller's role is refused. This file is data, never imported code; `opengrid.authz.policy.load_policies`
+# parses it into `Rule` objects and `decide()` matches against them.
+#
+# Fields per [[rule]]:
+#   role           -- "viewer" | "operator" | "customer" | "admin"
+#   action         -- dotted action id. A trailing ".*" matches any action sharing that prefix
+#                     (e.g. "customer.*" matches "customer.read", "customer.cancel", ...).
+#   resource_scope -- "global" (default, no resource check) or "own" (the resource's customer_id must
+#                     equal the caller's customer_id -- customer-only; cross-customer access is denied
+#                     even with a matching role+action).
+#   audited        -- default false. When true, every DENY of this action is written to the trace store
+#                     as a `TRACE_AUTHZ_DENY` event (privileged actions: safe stop, dispatch-as-deploy,
+#                     contract writes, release approval, admin).
+
+# --- generic API surface (today's require_viewer / require_operator, api/auth.py) -------------------
+[[rule]]
+role = "operator"
+action = "api.read"
+
+[[rule]]
+role = "viewer"
+action = "api.read"
+
+[[rule]]
+role = "operator"
+action = "api.write"
+audited = true
+
+# --- fine-grained actions (declarative; routers opt in via authz.require_action, not yet wired into
+# every route -- see the platform agent's build report for the per-route wiring lines) --------------
+[[rule]]
+role = "operator"
+action = "safestop.engage"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "safestop.release.request"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "safestop.release.approve"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "dispatch.as_deploy"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "contracts.write"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "fleet.command.bulk"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "admin.seed_fleet_topology"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "retention.write"
+audited = true
+
+[[rule]]
+role = "operator"
+action = "alerts.ack"
+
+# --- customer API: own-scope only, never fleet-wide -------------------------------------------------
+[[rule]]
+role = "customer"
+action = "customer.read"
+resource_scope = "own"
+
+[[rule]]
+role = "customer"
+action = "customer.cancel"
+resource_scope = "own"
+audited = true
+
+[[rule]]
+role = "customer"
+action = "customer.renominate"
+resource_scope = "own"
+audited = true
+
+# --- admin role (reserved; no Apache account maps to it yet -- add via [api.roles.admin] when needed)
+[[rule]]
+role = "admin"
+action = "admin.*"
+audited = true
+
+[[rule]]
+role = "admin"
+action = "api.read"
+
+[[rule]]
+role = "admin"
+action = "api.write"
+audited = true

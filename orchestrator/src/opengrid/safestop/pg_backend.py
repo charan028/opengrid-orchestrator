@@ -8,12 +8,16 @@ Only `opengrid.platform.db` (a connection pool) is used here -- no engine/guardi
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
+
+logger = logging.getLogger(__name__)
 
 # Channel `og-api` (once built) NOTIFYs on with a JSON payload -- see README.md "Request intake".
 REQUEST_CHANNEL = "og_safestop_request"
@@ -49,6 +53,13 @@ _LATEST_ACTION_SQL = """
 SELECT action FROM og.stop_event
 WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s
 ORDER BY created_at DESC
+LIMIT 1
+"""
+
+_HAS_L2_ENGAGE_SQL = """
+SELECT 1 FROM og.stop_event
+WHERE action = 'ENGAGE' AND scope_kind = 'BANK' AND scope_ref = %(bank_id)s
+  AND initiator_kind = 'UTILITY' AND strpos(reason, %(instruction_id)s) > 0
 LIMIT 1
 """
 
@@ -104,6 +115,31 @@ class PgStopEventBackend:
             await cur.execute(_LATEST_ACTION_SQL, {"scope_kind": scope_kind, "scope_ref": scope_ref})
             row = await cur.fetchone()
             return None if row is None else str(row[0])
+
+    async def has_l2_engage(self, instruction_id: UUID, bank_id: str) -> bool:
+        """Whether a UTILITY-initiated BANK ENGAGE for this utility L2 instruction is already recorded
+        (the L2 intake writes the instruction id into `reason`, see `opengrid.safestop.l2_intake`). This
+        is the restart-proof half of the L2 idempotency check."""
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_HAS_L2_ENGAGE_SQL, {"bank_id": bank_id, "instruction_id": str(instruction_id)})
+            return await cur.fetchone() is not None
+
+
+async def retry_trace_conflict[T](op: Callable[[], Awaitable[T]], *, attempts: int = 3) -> T:
+    """Run `op` (a whole `SafestopService.engage` call), retrying on a Postgres unique violation.
+
+    og-safestop's own tasks (API request intake, L2 intake) and the host CLI all append to the one
+    `"safestop"` trace stream; two concurrent appends race on `(stream_id, seq)` and the loser fails with
+    `UniqueViolation` *at the trace write* -- which `engage()` does first, before any row or publish, so
+    the whole call is safe to redo. Anything else propagates unchanged."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return await op()
+        except psycopg.errors.UniqueViolation:
+            if attempt == attempts:
+                raise
+            logger.warning("safestop trace append conflict; retrying", extra={"attempt": attempt})
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 async def listen_for_requests(pool: AsyncConnectionPool) -> AsyncIterator[dict[str, Any]]:

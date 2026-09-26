@@ -26,6 +26,9 @@ _PRODUCT_THRESHOLD_KEY = {
     "np6-345-cd": "ercot_load_fresh_s",
     "np4-732-cd": "wind_solar_fresh_s",
     "np4-737-cd": "wind_solar_fresh_s",
+    # D-28 regional solar: the same hourly posting cadence as NP4-737-CD, and its rows run into the STPPF
+    # forecast horizon, so last_value_at normally sits in the future -- the shared wind/solar threshold fits.
+    "np4-745-cd": "wind_solar_fresh_s",
     "np4-188-cd": "as_price_fresh_s",
 }
 
@@ -34,6 +37,7 @@ _PRODUCT_THRESHOLD_DEFAULT = {
     "np6-345-cd": 600.0,
     "np4-732-cd": 600.0,
     "np4-737-cd": 600.0,
+    "np4-745-cd": 600.0,
     "np4-188-cd": float(AS_PRICE_FRESH_S_DEFAULT),
 }
 

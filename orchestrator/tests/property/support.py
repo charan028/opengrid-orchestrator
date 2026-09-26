@@ -104,6 +104,9 @@ class World:
     async def member_snapshots(self, bank_id: str) -> list[HubSnapshot]:
         return list(self.members or [])
 
+    async def member_hub_ids(self, bank_id: str) -> list[str]:
+        return []  # no per-hub PQ reads in the property worlds
+
     async def append_calibration_verdict(self, calibration_id: UUID, payload: dict[str, object]) -> None:
         return None
 

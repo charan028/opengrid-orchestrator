@@ -37,6 +37,29 @@ dual_unit_share: 0.2
 e_kwh_dual_unit: 78.4  # Dual-unit home usable kWh (2 Base Power battery units).
 p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-25).
 
+# Optional extra load-zone blocks (build phase, 2026-09-26: Austin Energy / CPS Energy) -- see
+# integration-sims/config/fleet.yaml's own comment for the full explanation. Disabled by default here
+# too, so the dev-stack fleet (200 hubs / 8 banks) is unchanged; a developer who enables one of these
+# for local testing does not need to rescale it to match hub_count/bank_count above -- a zone block's
+# size is independent of the base fleet's.
+zone_blocks:
+  - zone: LZ_AEN
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+  - zone: LZ_CPS
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+  - zone: LZ_LCRA
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+  - zone: LZ_RAYBN
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+
 # The dev override paths win over the plain paths (FleetConfig.public_key_path()/
 # safestop_key_path()) -- dev/scripts/gen-keys.* writes the matching .pub files here, and
 # docker-compose.yml bind-mounts dev/keys/ into the sim-fleet container at /app/dev/keys/.

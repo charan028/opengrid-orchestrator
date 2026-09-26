@@ -323,6 +323,34 @@ async def test_upsert_trace_watermark_commits() -> None:
     assert params == {"stream_id": "guardian_verdict", "next_from_seq": 7}
 
 
+_CAP_ROW = ("bank-000", 600.0, 0.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 50.0, "online")
+
+
+async def test_fetch_bank_capability_inputs_selects_hub_units_when_column_exists() -> None:
+    """K2 units (migration 0032): `h.units` is selected and returned as the row's 11th element."""
+    cursor = FakeCursor(fetchone_result=(True,), fetchall_result=[(*_CAP_ROW, 2)])
+    pool = FakePool(cursor)
+
+    rows = await queries.fetch_bank_capability_inputs(pool)
+
+    assert rows == [(*_CAP_ROW, 2)]
+    assert "information_schema.columns" in cursor.executed[0][0]
+    assert "h.units" in cursor.executed[1][0]
+
+
+async def test_fetch_bank_capability_inputs_units_none_when_column_missing() -> None:
+    """A pre-0032 database: no `og.hub.units` column -- the select must not reference it, and every row's
+    `units` is None (the capability cap then fails closed to one unit)."""
+    cursor = FakeCursor(fetchone_result=(False,), fetchall_result=[(*_CAP_ROW, None)])
+    pool = FakePool(cursor)
+
+    rows = await queries.fetch_bank_capability_inputs(pool)
+
+    assert rows == [(*_CAP_ROW, None)]
+    assert "h.units" not in cursor.executed[1][0]
+    assert "NULL::smallint" in cursor.executed[1][0]
+
+
 async def test_read_summary_all_zero_and_as_of_none_when_never_run() -> None:
     cursor = FakeCursor(fetchall_result=[])
     pool = FakePool(cursor)

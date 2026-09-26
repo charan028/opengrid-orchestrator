@@ -27,6 +27,10 @@ _SCHEMA_NAMES = {
     "pq_waveform_summary": "pq_waveform_summary.schema.json",
     "pq_waveform_raw": "pq_waveform_raw.schema.json",
     "waveform_capture_request": "waveform_capture_request.schema.json",
+    # ogsim.customer (customer-operator simulators): shared here per coordination with the
+    # lead so ogsim.customer can reuse SimMqttClient.publish_batch/publish_validated unchanged.
+    "customer_site_meter": "customer_site_meter.schema.json",
+    "pipeline_corridor_current": "pipeline_corridor_current.schema.json",
 }
 
 

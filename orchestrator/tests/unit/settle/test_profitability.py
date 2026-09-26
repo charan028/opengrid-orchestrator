@@ -36,7 +36,8 @@ def test_penalty_zero_when_no_penalty_params():
 
 
 def test_pnl_net_margin_hand_computed():
-    """TS-08-06 worked example:
+    """TS-08-06 worked example (DIST_DEFERRAL: the generic price_per_kwh * delivered_kwh revenue
+    branch, not one of the service-specific ones):
     delivered_kwh = 100, price_per_kwh = 0.10, charging_cost_per_kwh = 0.03, eta_d = 0.5,
     degradation_cost_per_kwh = 0.03, shortfall_kwh = 20, committed_kwh = 100,
     penalty(alpha=0.01, beta=0.5, theta=0.05).
@@ -49,7 +50,7 @@ def test_pnl_net_margin_hand_computed():
     """
     penalty = PenaltyParams(alpha=Decimal("0.01"), beta=Decimal("0.5"), theta=Decimal("0.05"))
     result = compute_pnl(
-        service_type="ERCOT_ENERGY",
+        service_type="DIST_DEFERRAL",
         delivered_kwh=Decimal("100"),
         price_per_kwh=Decimal("0.10"),
         charging_cost_per_kwh=Decimal("0.03"),
@@ -71,7 +72,7 @@ def test_pnl_net_margin_hand_computed():
 
 def test_pnl_no_penalty_configured_and_no_shortfall():
     result = compute_pnl(
-        service_type="ERCOT_ENERGY",
+        service_type="DIST_DEFERRAL",
         delivered_kwh=Decimal("50"),
         price_per_kwh=Decimal("0.20"),
         charging_cost_per_kwh=Decimal("0.04"),
@@ -118,14 +119,44 @@ def test_ercot_as_revenue_adds_energy_value_only_for_kwh_actually_deployed():
     assert revenue == Decimal("1.9625")
 
 
-def test_non_as_revenue_is_unchanged_price_times_delivered():
+def test_generic_service_revenue_is_price_times_delivered():
     assert compute_revenue(
-        service_type="ERCOT_ENERGY",
+        service_type="DIST_DEFERRAL",
         delivered_kwh=Decimal("100"),
         committed_kwh=Decimal("100"),
         price_per_kwh=Decimal("0.10"),
-        discharge_spp_per_kwh=Decimal("0.999"),  # must be ignored for a non-AS service
+        discharge_spp_per_kwh=Decimal("0.999"),  # must be ignored for a generic service
     ) == Decimal("10.00")
+
+
+# -- ERCOT_ENERGY revenue: the zone's real-time SPP at delivery (2026-09-26 live P&L review) ---------
+
+
+def test_ercot_energy_revenue_is_delivered_kwh_times_zone_spp():
+    """Live bug: ERCOT_ENERGY revenue was `price_per_kwh * delivered_kwh`, and `price_per_kwh` (the
+    opportunity's `value_per_mwh`) is null for many admission paths -- revenue settled at $0 despite
+    real delivered energy and a live SPP feed. 02a S7.1's own baseline is "ISO_SETTLEMENT_SHADOW"
+    against the simulated real-time price: revenue must be delivered_kwh * the zone's SPP, not the
+    stale/absent forward price."""
+    revenue = compute_revenue(
+        service_type="ERCOT_ENERGY",
+        delivered_kwh=Decimal("100"),
+        committed_kwh=Decimal("100"),
+        price_per_kwh=Decimal("0"),  # null opportunity value_per_mwh -- must NOT zero out revenue
+        discharge_spp_per_kwh=Decimal("0.045"),  # $45/MWh real-time SPP
+    )
+    assert revenue == Decimal("4.50")
+
+
+def test_ercot_energy_revenue_is_zero_only_when_spp_is_genuinely_missing():
+    revenue = compute_revenue(
+        service_type="ERCOT_ENERGY",
+        delivered_kwh=Decimal("100"),
+        committed_kwh=Decimal("100"),
+        price_per_kwh=Decimal("0.10"),  # ignored even when present
+        discharge_spp_per_kwh=Decimal("0"),  # MISSING flag -- no SPP within 1h
+    )
+    assert revenue == Decimal("0")
 
 
 def test_ercot_as_pnl_held_not_deployed_has_no_shortfall_penalty_and_wear_only_on_discharge():

@@ -1,0 +1,106 @@
+{
+  "from": "2026-09-19T19:35:15.680270+00:00",
+  "to": "2026-09-26T19:35:15.680270+00:00",
+  "bucket": "day",
+  "totals": {
+    "available": 6,
+    "submitted": 3,
+    "awarded": 3,
+    "rejected": 3,
+    "expired": 0
+  },
+  "by_product": [
+    {
+      "service_type": "DATA_CENTER",
+      "product": "DATA_CENTER",
+      "available": 1,
+      "submitted": 0,
+      "awarded": 0,
+      "rejected": 1,
+      "expired": 0
+    },
+    {
+      "service_type": "ERCOT_AS",
+      "product": "ECRS",
+      "available": 2,
+      "submitted": 0,
+      "awarded": 0,
+      "rejected": 2,
+      "expired": 0
+    },
+    {
+      "service_type": "ERCOT_ENERGY",
+      "product": "ENERGY",
+      "available": 3,
+      "submitted": 3,
+      "awarded": 3,
+      "rejected": 0,
+      "expired": 0
+    }
+  ],
+  "series": [
+    {
+      "bucket_start": "2026-09-26T19:00:00+00:00",
+      "service_type": "DATA_CENTER",
+      "product": "DATA_CENTER",
+      "available": 1,
+      "submitted": 0,
+      "awarded": 0,
+      "rejected": 1,
+      "expired": 0
+    },
+    {
+      "bucket_start": "2026-09-26T19:00:00+00:00",
+      "service_type": "ERCOT_AS",
+      "product": "ECRS",
+      "available": 2,
+      "submitted": 0,
+      "awarded": 0,
+      "rejected": 2,
+      "expired": 0
+    },
+    {
+      "bucket_start": "2026-09-26T19:00:00+00:00",
+      "service_type": "ERCOT_ENERGY",
+      "product": "ENERGY",
+      "available": 3,
+      "submitted": 3,
+      "awarded": 3,
+      "rejected": 0,
+      "expired": 0
+    }
+  ],
+  "rejection_reasons": [
+    {
+      "reason_code": "R-GATE-REJECT",
+      "count": 2,
+      "by_product": {
+        "ECRS": 2
+      }
+    },
+    {
+      "reason_code": "R-ADMIT-REJECT",
+      "count": 1,
+      "by_product": {
+        "DATA_CENTER": 1
+      }
+    }
+  ],
+  "mms": null,
+  "sources": {
+    "available": [
+      "og.opportunity",
+      "og.trace ADMISSION rejections"
+    ],
+    "submitted": [
+      "gate decisions"
+    ],
+    "awarded": [
+      "og.obligation COMMITTED+"
+    ],
+    "rejected": [
+      "og.opportunity/og.obligation REJECTED",
+      "R-ADMIT-*"
+    ]
+  }
+}

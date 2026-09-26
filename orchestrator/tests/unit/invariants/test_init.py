@@ -10,11 +10,15 @@ import pytest
 
 import opengrid.invariants as invariants
 from opengrid.invariants.models import (
+    CHECK_ANCHOR_FRESHNESS,
+    CHECK_AS_HOLD,
+    CHECK_FLOW_LIMIT,
     CHECK_K1_RESERVE_BREACH,
     CHECK_K2_DOUBLE_SOLD,
     CHECK_K13_LOCK_VIOLATION,
     CHECK_K13_OUTAGE_GAP,
     CHECK_K13_RESTORE_LAG,
+    CHECK_K15_TERRITORY,
     CHECK_ORPHAN_COMMITMENT,
     CHECK_ORPHAN_RESERVATION,
     CheckState,
@@ -45,6 +49,11 @@ class _FakeQueries:
 
         self.orphan_reservation_rows: list[tuple] = []
         self.orphan_commitment_rows: list[tuple] = []
+
+        self.territory_candidates: list[tuple] = []
+        self.as_hold_candidates: list[tuple] = []
+        self.flow_limit_candidates: list[tuple] = []
+        self.latest_anchor_published_at = None
 
         self.states: dict[str, CheckState] = {}
         self.upserts: list[dict] = []
@@ -93,6 +102,20 @@ class _FakeQueries:
 
     async def fetch_orphan_commitments(self, pool, *, limit=5000):
         return self.orphan_commitment_rows
+
+    async def fetch_territory_candidates(self, pool, *, since, now, limit=5000):
+        return self.territory_candidates, (
+            self.territory_candidates[-1][6] if self.territory_candidates else None
+        )
+
+    async def fetch_as_hold_candidates(self, pool, *, now):
+        return self.as_hold_candidates
+
+    async def fetch_flow_limit_candidates(self, pool):
+        return self.flow_limit_candidates
+
+    async def fetch_latest_anchor_published_at(self, pool):
+        return self.latest_anchor_published_at
 
     async def insert_violations(self, pool, check_name, violations):
         seen = self._seen_dedupe_keys.setdefault(check_name, set())
@@ -147,7 +170,11 @@ async def test_run_once_reports_zero_on_clean_data(fake_queries: _FakeQueries) -
     assert outcomes[CHECK_K13_RESTORE_LAG].count == 0
     assert outcomes[CHECK_ORPHAN_RESERVATION].count == 0
     assert outcomes[CHECK_ORPHAN_COMMITMENT].count == 0
-    assert len(fake_queries.upserts) == 7  # every check persisted its (empty) result
+    assert outcomes[CHECK_K15_TERRITORY].count == 0
+    assert outcomes[CHECK_AS_HOLD].count == 0
+    assert outcomes[CHECK_FLOW_LIMIT].count == 0
+    assert outcomes[CHECK_ANCHOR_FRESHNESS].count == 1  # never anchored yet -- reported stale, not skipped
+    assert len(fake_queries.upserts) == 11  # every check persisted its result
 
 
 async def test_run_once_detects_seeded_reserve_breach(fake_queries: _FakeQueries) -> None:
@@ -179,9 +206,10 @@ async def test_run_once_detects_seeded_double_sold_using_true_capability(fake_qu
     fake_queries.reservation_agg_rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 700.0)]
     # A hub row that makes compute_bank_capabilities_kw resolve bank-000's true capability to 600 kW (enough
     # stored energy to sustain its rating for the whole interval: capability is energy-limited, ES03-S05).
+    # 30 dual-unit homes (20 kW each, the G-02 unit cap) = 600 kW.
     fake_queries.bank_capability_inputs = [
-        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 600.0, 0.9487, 0.9487, 1000.0, "online"),
-    ]
+        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 20.0, 0.9487, 0.9487, 1000.0, "online", 2),
+    ] * 30
 
     outcomes = await invariants.run_once()
 
@@ -335,7 +363,7 @@ async def test_run_once_carries_forward_watermark_across_runs(fake_queries: _Fak
     fake_queries.reserve_batches = [([], None)]
     fake_queries._reserve_batch_calls = 0
     await invariants.run_once()
-    second_upsert = next(u for u in fake_queries.upserts[7:] if u["check_name"] == CHECK_K1_RESERVE_BREACH)
+    second_upsert = next(u for u in fake_queries.upserts[11:] if u["check_name"] == CHECK_K1_RESERVE_BREACH)
     assert second_upsert["violation_count"] == 0
     assert second_upsert["total_violations"] == 1  # unchanged from the first run's total
 
@@ -346,9 +374,10 @@ async def test_run_once_does_not_recount_a_persisting_violation_across_runs(
     """The idempotency fix (#5b): the SAME still-true K2 over-sale, re-detected on every run, must be
     counted into the running total once, not once per run."""
     fake_queries.reservation_agg_rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 700.0)]
+    # 30 dual-unit homes (20 kW each, the G-02 unit cap) = 600 kW.
     fake_queries.bank_capability_inputs = [
-        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 600.0, 0.9487, 0.9487, 1000.0, "online"),
-    ]
+        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 20.0, 0.9487, 0.9487, 1000.0, "online", 2),
+    ] * 30
 
     await invariants.run_once()
     await invariants.run_once()
@@ -379,3 +408,80 @@ async def test_run_due_swallows_check_failures(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(invariants, "run_trace_verify_once", _boom)
 
     await invariants.run_due()  # must not raise, even though both checks are due and both fail
+
+
+# --- K15 territory / AS-hold / flow-limit / K11 anchor freshness --------------------------------------
+
+
+async def test_run_once_detects_seeded_territory_violation(fake_queries: _FakeQueries) -> None:
+    fake_queries.territory_candidates = [
+        ("grant-1", "ob-1", "bank-000", "LZ_HOUSTON", "AUSTIN_ENERGY", ("LZ_AEN",), NOW),
+    ]
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_K15_TERRITORY].count == 1
+
+
+async def test_run_once_detects_seeded_as_hold_violation(fake_queries: _FakeQueries) -> None:
+    fake_queries.as_hold_candidates = [("dep-1", "ob-1", 100.0, 240, 250.0)]  # needs 400 kWh, has 250
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_AS_HOLD].count == 1
+
+
+async def test_run_once_detects_seeded_flow_limit_violation(fake_queries: _FakeQueries) -> None:
+    fake_queries.flow_limit_candidates = [("home_meter", "hub-1", -12.0, None, 10.0)]
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_FLOW_LIMIT].count == 1
+
+
+async def test_run_once_anchor_freshness_clean_when_recently_published(fake_queries: _FakeQueries) -> None:
+    fake_queries.latest_anchor_published_at = NOW - timedelta(minutes=5)  # well within default tolerance
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_ANCHOR_FRESHNESS].count == 0
+
+
+async def test_run_once_anchor_freshness_flags_stale_publish(fake_queries: _FakeQueries) -> None:
+    invariants._anchor_interval_s = 900.0
+    fake_queries.latest_anchor_published_at = NOW - timedelta(hours=1)  # well past 2x900s tolerance
+
+    outcomes = await invariants.run_once()
+
+    assert outcomes[CHECK_ANCHOR_FRESHNESS].count == 1
+
+
+async def test_run_due_also_publishes_an_anchor_when_due(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    async def _fake_publish() -> None:
+        calls["n"] += 1
+
+    monkeypatch.setattr(invariants, "run_anchor_publish_once", _fake_publish)
+    invariants._anchor_cadence.due = lambda: True  # type: ignore[union-attr]
+    invariants._cadence.due = lambda: False  # type: ignore[union-attr]
+    invariants._trace_cadence.due = lambda: False  # type: ignore[union-attr]
+
+    await invariants.run_due()
+
+    assert calls["n"] == 1
+
+
+async def test_run_anchor_publish_once_delegates_to_anchoring(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    async def _fake_publish_anchor(pool, trace_store, cfg):
+        captured["called"] = True
+        return "sentinel-result"
+
+    monkeypatch.setattr(invariants.anchoring, "publish_anchor", _fake_publish_anchor)
+
+    result = await invariants.run_anchor_publish_once()
+
+    assert captured["called"] is True
+    assert result == "sentinel-result"

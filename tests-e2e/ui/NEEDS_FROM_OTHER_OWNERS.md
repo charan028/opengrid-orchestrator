@@ -120,3 +120,30 @@
     `allocator/__init__.py::_to_grant_row`: it masked `bank_id` and `obligation_id` behind `uuid5(...)`, so grant
     rows never matched the real bank or obligation (`og.grant.obligation_id` is an FK). Still open:
     COMMITTED -> DELIVERING at window start (who owns it is unclear from the code), and settlement after delivery.
+20. **CR #19 map and funnel endpoints -- UI is built and waiting** (owner: api + fleet + market). The
+    screens call each of these and fall back cleanly today, so landing them needs no UI change:
+    - `GET /og/api/fleet/map` -- hubs with `lat`/`lon`, `activity` (DELIVERING, IDLE, HOME_USE, CHARGING,
+      FAULT, OFFLINE), `kw`, `soc_pct`, `serving_obligations[]`, `can_serve_services[]`. Until it answers,
+      hubs are scattered deterministically inside their real load zone and `activity` is derived from
+      health plus the sign of `p_kw` (`static/og-map.js::activityOf`). `HOME_USE` cannot be derived --
+      it needs the obligation behind the discharge, so it only appears once this endpoint ships.
+    - `GET /og/api/customers/map` -- customer sites; the layer is simply empty until then.
+    - `GET /og/api/grid/layers` -- zone load, utility batteries, transmission, grid connection, demand
+      cells. A static real ERCOT/HIFLD export ships at `ui/static/grid-layers.json` (344 KB: 8 zones,
+      90 batteries, 846 backbone segments >=200 kV) so the map is real today; swap to the endpoint when
+      it lands. **Best sell destination is a documented proxy** (highest zone load) until this endpoint
+      carries settlement-point prices -- the popup and legend say so.
+    - `POST /og/api/fleet/commands/bulk` + `.../{id}/confirm` -- the bulk command. The UI computes its own
+      risk reasons (`routes/fleet.py::bulk_risk_reasons`) and demands a second acknowledgement when a
+      selected hub is serving a customer or is faulted; it ORs that with the API's
+      `requires_double_confirm`. Expected confirm body: `{proposal_id, outcome, accepted[], rejected[],
+      vetoed_rule_ids[], trace_id}`.
+    - `GET /og/api/markets/bid-funnel?from=&to=` -- available/submitted/awarded/rejected by product plus
+      rejection reasons; the panel shows an explanatory empty state until it answers.
+21. **Hub coordinates -- FIXED, awaiting merge of PR #25** (owner: fleet + api). `og.hub.lat`/`lon` were
+    NULL for every seeded hub, so every map position was derived in the browser. `fleet/seed.py` now
+    places each hub deterministically within ~45 km of its real ERCOT load-zone centroid
+    (`hub_coordinates`), and `api/store.py::list_hubs` projects the columns. Verified on the dev stack:
+    200/200 hubs carry coordinates, per-zone means land on the real centroids, and both maps stop
+    deriving (the "positions are derived" legend note disappears on its own). Until #25 merges, the maps
+    in this PR fall back to browser-side placement, which is why that fallback stays.

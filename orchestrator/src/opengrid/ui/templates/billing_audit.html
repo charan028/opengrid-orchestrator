@@ -16,13 +16,82 @@
 {% endblock %}
 
 {% block content %}
-<section class="og-panel" aria-labelledby="invoice-heading">
+<section class="og-panel" aria-labelledby="invoice-heading" id="invoice-lines">
   <p class="og-panel-lead">What each buyer is billed, the measurement behind it, and a tamper-evident record of every decision that led there.</p>
   <h2 id="invoice-heading">Invoice lines ({{ invoices.row_count }}, total {{ "%.2f"|format(invoices.total_amount) }} USD)</h2>
-  <p>{% with since_iso=generated_at, stale_after_s=300 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
-  {% with columns=[{"key": "invoice_line_id", "label": "Line"}, {"key": "contract_id", "label": "Contract"}, {"key": "obligation_id", "label": "Obligation"}, {"key": "period_start", "label": "Period start"}, {"key": "period_end", "label": "Period end"}, {"key": "line_type", "label": "Type"}, {"key": "quantity", "label": "Qty", "numeric": true}, {"key": "rate", "label": "Rate", "numeric": true}, {"key": "amount", "label": "Amount", "numeric": true}, {"key": "status", "label": "Status"}], rows=invoices.rows, empty_message='No invoice lines yet. Settlement bills each delivered interval once measurement and verification pass.' %}
-    {% include "_partials/data_table.html" %}
-  {% endwith %}
+  <p class="og-card-meta" id="billing-last-updated">
+    Last invoiced {% if last_invoiced_at %}<span class="stale-badge" data-since="{{ last_invoiced_at }}" data-stale-after="3600" title="{{ last_invoiced_at }}">age: unknown</span>{% else %}<strong>never</strong>{% endif %}
+    &middot; last metered {% if last_metered_at %}<span class="stale-badge" data-since="{{ last_metered_at }}" data-stale-after="3600" title="{{ last_metered_at }}">age: unknown</span>{% else %}<strong>never</strong>{% endif %}
+    {% if invoices.superseded_count %}&middot; {{ invoices.superseded_count }} superseded line{{ '' if invoices.superseded_count == 1 else 's' }} shown struck through, not counted{% endif %}
+  </p>
+  <form method="get" action="{{ base_path }}/billing" aria-label="Filter invoice lines" class="og-toolbar" id="invoice-filter">
+    <label for="inv-customer">Customer</label>
+    <select id="inv-customer" name="customer">
+      <option value="">All</option>
+      {% for o in options.customers %}<option value="{{ o.id }}"{% if customer == o.id %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+    </select>
+    <label for="inv-contract">Contract</label>
+    <select id="inv-contract" name="contract">
+      <option value="">All</option>
+      {% for o in options.contracts %}<option value="{{ o.id }}"{% if contract == o.id %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+    </select>
+    {% if obligation %}<input type="hidden" name="obligation" value="{{ obligation }}">{% endif %}
+    <input type="hidden" name="from" value="{{ from_ or '' }}"><input type="hidden" name="to" value="{{ to or '' }}">
+    <button class="btn" type="submit">Filter</button>
+    {% if obligation %}<a class="btn" href="{{ base_path }}/billing" id="invoice-clear-obligation">Showing one obligation &times;</a>{% endif %}
+  </form>
+
+  <section class="og-grid">
+    <div aria-labelledby="inv-by-contract-heading">
+      <h3 id="inv-by-contract-heading">Total by contract</h3>
+      <div class="og-table-wrap"><table class="data-table" id="invoice-by-contract">
+        <thead><tr><th scope="col">Contract</th><th scope="col" class="num">Lines</th><th scope="col" class="num">Amount (USD)</th></tr></thead>
+        <tbody>
+        {% for g in invoices.by_contract %}
+          <tr><td><a href="{{ base_path }}/billing?contract={{ g.key }}#invoice-lines" title="{{ g.key }}">{{ g.label }}</a></td><td class="num">{{ g.count }}</td><td class="num">{{ '%.2f'|format(g.total) }}</td></tr>
+        {% else %}<tr><td class="empty" colspan="3">No invoice lines</td></tr>{% endfor %}
+        </tbody>
+      </table></div>
+    </div>
+    <div aria-labelledby="inv-by-type-heading">
+      <h3 id="inv-by-type-heading">Total by line type</h3>
+      <div class="og-table-wrap"><table class="data-table" id="invoice-by-type">
+        <thead><tr><th scope="col">Type</th><th scope="col" class="num">Amount (USD)</th></tr></thead>
+        <tbody>
+        {% for t, amount in invoices.totals_by_type.items() %}
+          <tr><td>{{ t }}</td><td class="num">{{ '%.2f'|format(amount) }}</td></tr>
+        {% else %}<tr><td class="empty" colspan="2">No invoice lines</td></tr>{% endfor %}
+        </tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <div class="og-table-wrap">
+  <table class="data-table og-settlement-table" id="invoice-table">
+    <thead>
+      <tr>
+        <th scope="col">Contract</th><th scope="col">Customer</th><th scope="col">Obligation</th><th scope="col">Type</th>
+        <th scope="col" class="num">Qty</th><th scope="col" class="num">Rate</th><th scope="col" class="num">Amount</th><th scope="col">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in invoices.rows %}
+      <tr class="{{ 'is-superseded' if r.superseded else '' }}" data-obligation-id="{{ r.obligation_id }}" data-contract-id="{{ r.contract_id }}" title="line {{ r.invoice_line_id }}">
+        <td class="contract-cell" title="contract {{ r.contract_id }}">{{ r.contract_label }}</td>
+        <td title="customer {{ r.customer_id }}">{{ r.customer_label }}</td>
+        <td class="obligation-cell" title="obligation {{ r.obligation_id }}"><a href="{{ base_path }}/billing?obligation={{ r.obligation_id }}#invoice-lines">{{ r.obligation_label }}</a></td>
+        <td>{{ r.line_type }}</td>
+        <td class="num">{{ r.quantity if r.quantity is not none else '--' }} {{ r.unit }}</td>
+        <td class="num">{{ r.rate if r.rate is not none else '--' }}</td>
+        <td class="num">{{ '%.2f'|format(r.amount) }}</td>
+        <td>{{ r.status }}{% if r.is_correction %} <span class="og-card-meta">correction v{{ r.version }}</span>{% endif %}{% if r.superseded %} <span class="og-card-meta">superseded</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td class="empty" colspan="8">No invoice lines yet. Settlement bills each delivered interval once measurement and verification pass.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
 </section>
 
 <section class="og-panel" aria-labelledby="mnv-heading">
@@ -49,4 +118,12 @@
   </form>
   <div id="verify-result" role="status"></div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    og.initStaleBadges(document.getElementById("billing-last-updated"));
+  });
+</script>
 {% endblock %}

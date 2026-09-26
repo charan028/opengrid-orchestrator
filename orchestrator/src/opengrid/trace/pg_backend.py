@@ -21,8 +21,11 @@ checkpoint forward always still passes (02a S8.3).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -36,6 +39,32 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RETENTION_DAYS = 400  # 02b S1.4: unknown/unconfigured event classes default here.
 
+#: K11 fail-safe (00-invariants.md, adversarial review): relative, per-workspace default -- resolves
+#: inside whichever process's own working directory runs it, the same convention `[pq_ingest].
+#: blob_store_dir` already uses, so no per-workspace config file is needed. Production overrides this
+#: via `PgTraceBackend(pool, journal_path=...)` (main.py callers may pass `[trace].journal_path`).
+DEFAULT_JOURNAL_PATH = Path("var/trace_journal.jsonl")
+
+
+def journal_path_from_config(cfg: object) -> Path:
+    """Resolve `[trace].journal_path` (production: an absolute, opengrid-writable path, e.g.
+    `/var/lib/opengrid/trace_journal.jsonl` -- set once in `orchestrator.toml`, applies to every process
+    that constructs a `PgTraceBackend`) -- falls back to `DEFAULT_JOURNAL_PATH` (a workspace-relative
+    default, still correct for tests/dev workspaces that never set it) when unconfigured. Takes `cfg` as
+    `object` (structurally: anything with a `.get(dotted_path, default)` method, i.e.
+    `opengrid.platform.config.Config`) so this module never has to import `platform.config` itself
+    (`trace` has no dependency on `platform` today; adding one just for this accessor was worse than a
+    duck-typed parameter)."""
+    value = cfg.get("trace.journal_path", None) if hasattr(cfg, "get") else None
+    return Path(str(value)) if value else DEFAULT_JOURNAL_PATH
+
+
+class TraceJournalUnavailableError(RuntimeError):
+    """K11 "no fork, no skipped link": the database is unreachable for `last_head(stream_id)`, AND this
+    stream has no journal entry and no in-process cached head to safely resume from. Guessing a starting
+    seq here risks writing a second, forked chain for a stream this process has never actually seen --
+    refusing is the safe failure (the caller's `append()` fails loudly; nothing is silently corrupted)."""
+
 
 class TraceAppendConflictError(RuntimeError):
     """A concurrent append already claimed this stream's next seq or prev_hash (UNIQUE violation on
@@ -46,6 +75,40 @@ class TraceAppendConflictError(RuntimeError):
         super().__init__(f"concurrent append conflict on stream {stream_id!r} at seq {seq}: {cause}")
         self.stream_id = stream_id
         self.seq = seq
+
+
+@dataclass(frozen=True, slots=True)
+class _JournalEntry:
+    """One fully-formed, already-hashed trace row that couldn't reach Postgres. Every field mirrors
+    `insert_trace_row`'s own parameters exactly (JSON-safe: `payload`/`reason_codes` already are;
+    `created_at` is stored as its ISO string)."""
+
+    trace_id: str
+    stream_id: str
+    seq: int
+    decision_type: str
+    event_class: str
+    payload: dict[str, Any]
+    reason_codes: list[str] | None
+    prev_hash: str | None
+    record_hash: str
+    created_at: str
+
+
+class JournalCorruptError(RuntimeError):
+    """A local trace-journal line could not be parsed -- surfaced, never silently skipped or dropped."""
+
+
+def _journal_entry_to_line(entry: _JournalEntry) -> str:
+    return json.dumps(asdict(entry), separators=(",", ":"))
+
+
+def _journal_line_to_entry(line: str) -> _JournalEntry:
+    try:
+        data = json.loads(line)
+        return _JournalEntry(**data)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise JournalCorruptError(f"unparseable trace journal line: {line!r}") from exc
 
 
 _LAST_HEAD_SQL = """
@@ -124,13 +187,27 @@ def _row_to_chain_record(row: tuple[int, str, str, dict[str, Any], str | None, s
 
 
 class PgTraceBackend:
-    """`TraceBackend` implementation backed by `opengrid.platform.db`'s async connection pool."""
+    """`TraceBackend` implementation backed by `opengrid.platform.db`'s async connection pool.
 
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    K11 fail-safe (adversarial review): when the database is unreachable, `last_head`/`insert_trace_row`
+    fall back to a local append-only journal (`journal_path`) instead of raising -- `TraceStore.append()`
+    has already computed this record's hash before calling either method, so the chain stays internally
+    consistent even while journaled; only its DURABLE HOME moves. Every successful DB call opportunistically
+    drains any pending journal first (`_drain_journal_if_pending`), so recovery is automatic on the next
+    call this process instance makes -- no separate replay process or cross-process journal sharing is
+    needed. `replay()`/`pending_count()` are also exposed directly for a caller (e.g.
+    `opengrid.invariants`) that wants to force/observe this."""
+
+    def __init__(self, pool: AsyncConnectionPool, *, journal_path: Path | None = None) -> None:
         self._pool = pool
         # Best-effort in-process serialization for same-stream concurrent appends (reduces, but does
         # not replace, the DB unique-constraint safety net above -- see module docstring.
         self._stream_locks: dict[str, asyncio.Lock] = {}
+        self._journal_path = journal_path if journal_path is not None else DEFAULT_JOURNAL_PATH
+        # Bridges the gap between "last successful DB read/write" and "first journal entry" for a
+        # stream that fails over mid-outage with nothing journaled for it yet (see `last_head`'s
+        # fallback order: journal tail, then this cache, then refuse).
+        self._last_known_head: dict[str, tuple[int, str | None]] = {}
 
     def _lock_for(self, stream_id: str) -> asyncio.Lock:
         lock = self._stream_locks.get(stream_id)
@@ -140,13 +217,32 @@ class PgTraceBackend:
         return lock
 
     async def last_head(self, stream_id: str) -> tuple[int, str | None]:
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_LAST_HEAD_SQL, {"stream_id": stream_id})
-            row = await cur.fetchone()
-        if row is None:
-            return -1, None
-        seq, head_hash = row
-        return seq, head_hash
+        await self._drain_journal_if_pending()
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_LAST_HEAD_SQL, {"stream_id": stream_id})
+                row = await cur.fetchone()
+        except Exception:
+            logger.error(
+                "trace DB unavailable for last_head; falling back to local journal",
+                extra={"stream_id": stream_id},
+                exc_info=True,
+            )
+            return self._fallback_last_head(stream_id)
+        result = (-1, None) if row is None else (row[0], row[1])
+        self._last_known_head[stream_id] = result
+        return result
+
+    def _fallback_last_head(self, stream_id: str) -> tuple[int, str | None]:
+        journaled = self._journal_tail(stream_id)
+        if journaled is not None:
+            return journaled
+        cached = self._last_known_head.get(stream_id)
+        if cached is not None:
+            return cached
+        raise TraceJournalUnavailableError(
+            f"stream {stream_id!r}: database unreachable and no journal/cached head to resume from"
+        )
 
     async def insert_trace_row(
         self,
@@ -162,6 +258,7 @@ class PgTraceBackend:
         record_hash: str,
         created_at: datetime,
     ) -> None:
+        await self._drain_journal_if_pending()
         async with self._lock_for(stream_id):
             try:
                 async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -183,6 +280,120 @@ class PgTraceBackend:
                     await conn.commit()
             except psycopg.errors.UniqueViolation as exc:
                 raise TraceAppendConflictError(stream_id, seq, exc) from exc
+            except Exception:
+                logger.error(
+                    "trace DB unavailable; journaling trace row locally (K11 fail-safe)",
+                    extra={"stream_id": stream_id, "seq": seq},
+                    exc_info=True,
+                )
+                self._append_journal(
+                    _JournalEntry(
+                        trace_id=str(trace_id),
+                        stream_id=stream_id,
+                        seq=seq,
+                        decision_type=decision_type,
+                        event_class=event_class,
+                        payload=payload,
+                        reason_codes=reason_codes,
+                        prev_hash=prev_hash,
+                        record_hash=record_hash,
+                        created_at=created_at.isoformat(),
+                    )
+                )
+            self._last_known_head[stream_id] = (seq, record_hash)
+
+    # --- K11 fail-safe journal: append-only local file, replayed in order on recovery -----------------
+
+    def _append_journal(self, entry: _JournalEntry) -> None:
+        self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._journal_path.open("a", encoding="utf-8") as fh:
+            fh.write(_journal_entry_to_line(entry) + "\n")
+
+    def _read_journal(self) -> list[_JournalEntry]:
+        if not self._journal_path.exists():
+            return []
+        entries = []
+        with self._journal_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    entries.append(_journal_line_to_entry(stripped))
+        return entries
+
+    def _journal_tail(self, stream_id: str) -> tuple[int, str | None] | None:
+        last: _JournalEntry | None = None
+        for entry in self._read_journal():
+            if entry.stream_id == stream_id:
+                last = entry
+        return None if last is None else (last.seq, last.record_hash)
+
+    def pending_count(self) -> int:
+        """How many trace rows are currently journaled, not yet in Postgres -- a lag/health signal for
+        `opengrid.invariants`."""
+        return len(self._read_journal())
+
+    async def _drain_journal_if_pending(self) -> None:
+        """Opportunistic self-heal: if anything is journaled, try to flush it before this call's own DB
+        round trip. A no-op (one cheap file-existence check) when the journal is empty, which is the
+        overwhelming common case."""
+        if self._journal_path.exists() and self._journal_path.stat().st_size > 0:
+            await self.replay()
+
+    async def replay(self) -> int:
+        """Insert every journaled record into the real backend, in order (oldest first) -- K11 "replayed
+        in order on recovery with the chain preserved". A record already applied (UNIQUE violation, e.g.
+        a partially-successful prior replay) is treated as already-replayed, not an error. Stops at the
+        first record that still fails for a reason OTHER than "already applied" (the DB is still down),
+        leaving it and everything after it in the journal for the next attempt. Returns the count
+        actually replayed (including ones found already-applied)."""
+        entries = self._read_journal()
+        if not entries:
+            return 0
+        remaining: list[_JournalEntry] = []
+        replayed = 0
+        stop = False
+        for entry in entries:
+            if stop:
+                remaining.append(entry)
+                continue
+            try:
+                async with self._pool.connection() as conn, conn.cursor() as cur:
+                    await cur.execute(
+                        _INSERT_TRACE_SQL,
+                        {
+                            "trace_id": entry.trace_id,
+                            "decision_type": entry.decision_type,
+                            "event_class": entry.event_class,
+                            "stream_id": entry.stream_id,
+                            "seq": entry.seq,
+                            "payload": Jsonb(entry.payload),
+                            "reason_codes": entry.reason_codes,
+                            "prev_hash": entry.prev_hash,
+                            "record_hash": entry.record_hash,
+                            "created_at": datetime.fromisoformat(entry.created_at),
+                        },
+                    )
+                    await conn.commit()
+                replayed += 1
+            except psycopg.errors.UniqueViolation:
+                replayed += 1  # already applied by an earlier partial replay
+            except Exception:
+                logger.warning("trace journal replay stopped: DB still unavailable", exc_info=True)
+                remaining.append(entry)
+                stop = True
+        self._rewrite_journal(remaining)
+        if replayed:
+            logger.info(
+                "trace journal replay progress", extra={"replayed": replayed, "remaining": len(remaining)}
+            )
+        return replayed
+
+    def _rewrite_journal(self, entries: list[_JournalEntry]) -> None:
+        tmp_path = self._journal_path.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            for entry in entries:
+                fh.write(_journal_entry_to_line(entry) + "\n")
+        tmp_path.replace(self._journal_path)
 
     async def exists_preimage(self, decision_ref: UUID) -> bool:
         async with self._pool.connection() as conn, conn.cursor() as cur:

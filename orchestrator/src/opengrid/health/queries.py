@@ -50,13 +50,19 @@ ON CONFLICT (mode) DO NOTHING
 _DELETE_DEGRADED_MODE_SQL = "DELETE FROM og.degraded_mode_state WHERE mode = %(mode)s"
 
 _FETCH_OPEN_ALERTS_SQL = """
-SELECT id, rule, severity, summary, detail, opened_at, cleared_at, acked_by
+SELECT id, rule, severity, summary, detail, opened_at, cleared_at, acked_by, scope_kind, scope_ref
 FROM og.alert WHERE cleared_at IS NULL
 """
 
+# Structured scope columns (migration 0024): populated from `AlertFinding.detail`'s "scope_kind"/
+# "scope_ref" keys when present, additive alongside `detail` itself (unchanged). This is the single
+# `og.alert` writer (`opengrid.guardian.repo.PgAlertPort.raise_alert` calls this same function), so
+# guardian's ALR-SCOPE-CONSERVATIVE/ALR-SAFE-STOP-REQUESTED alerts -- whose `detail` already carries
+# "scope_kind"/"scope_ref" (`opengrid.guardian.main.apply_escalation`) -- get these columns with no
+# guardian-side change needed.
 _INSERT_ALERT_SQL = """
-INSERT INTO og.alert (rule, severity, summary, detail, opened_at)
-VALUES (%(rule)s, %(severity)s, %(summary)s, %(detail)s, %(opened_at)s)
+INSERT INTO og.alert (rule, severity, summary, detail, opened_at, scope_kind, scope_ref)
+VALUES (%(rule)s, %(severity)s, %(summary)s, %(detail)s, %(opened_at)s, %(scope_kind)s, %(scope_ref)s)
 RETURNING id
 """
 
@@ -210,6 +216,8 @@ async def fetch_open_alerts(pool: AsyncConnectionPool) -> list[Alert]:
             opened_at=r[5],
             cleared_at=r[6],
             acked_by=r[7],
+            scope_kind=r[8],
+            scope_ref=r[9],
         )
         for r in rows
     ]
@@ -218,6 +226,9 @@ async def fetch_open_alerts(pool: AsyncConnectionPool) -> list[Alert]:
 async def raise_alert(pool: AsyncConnectionPool, finding: AlertFinding, *, opened_at: datetime) -> int:
     from psycopg.types.json import Jsonb  # local import: only this write path needs the jsonb adapter
 
+    detail = finding.detail or {}
+    scope_kind = detail.get("scope_kind")
+    scope_ref = detail.get("scope_ref")
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             _INSERT_ALERT_SQL,
@@ -227,6 +238,8 @@ async def raise_alert(pool: AsyncConnectionPool, finding: AlertFinding, *, opene
                 "summary": finding.summary,
                 "detail": Jsonb(finding.detail) if finding.detail else None,
                 "opened_at": opened_at,
+                "scope_kind": scope_kind,
+                "scope_ref": scope_ref,
             },
         )
         row = await cur.fetchone()

@@ -21,33 +21,52 @@ from datetime import datetime
 
 from opengrid.allocator import reasons
 from opengrid.allocator.dist_deferral_pi import DistDeferralPI
+from opengrid.allocator.energy_hold import headroom_energy_cap_kw
+from opengrid.allocator.flow_limits import (
+    apply_group_caps,
+    bank_budget_caps_kw,
+    cap_hub,
+    consume_group_budget,
+    with_topology,
+    xfmr_budgets_kw,
+)
 from opengrid.allocator.lexicographic import allocate_tiers
 from opengrid.allocator.models import (
+    BankSnapshot,
     CycleResult,
     DwellState,
     FleetState,
+    FlowLimits,
+    HubAllocation,
     HubSnapshot,
     Instruction,
     LedgerView,
     ObligationCall,
     PiState,
+    PqCapabilityReduction,
+    PqDispatchContext,
     ProposedGrant,
     ScadaSample,
     Schedule,
     ShortfallReport,
     SubstitutionEvent,
+    TerritoryBlock,
 )
+from opengrid.allocator.pq_eligibility import EligibilityResult, HubEligibilityVerdict, apply_eligibility
 from opengrid.allocator.price_response import price_responsive_schedule
 from opengrid.allocator.substitution import realize_obligation
 from opengrid.core.physics import hub_sustainable_discharge_kw
+from opengrid.market.territory import FREE, check_territory
 
 _EPS = 1e-9
-_DEFAULT_PRICE_THRESHOLD_USD_PER_MWH = 30.0
+_NO_FLOW_LIMITS = FlowLimits()
+#: Single-phase connections the phase-balance weight balances across (S3.2c).
+_SINGLE_PHASES = ("A", "B", "C")
 # 02a S5's "hold horizon (the lease TTL, not 2 s)": how long a discharge grant must be SUSTAINABLE for,
 # not merely instantaneously safe -- K7's hold-the-last-setpoint-until-lease-expiry duration (00-
 # invariants.md K7: "30 s during events, 60 s otherwise"). The conservative (shorter) default is used
 # unless the caller knows the actual per-cycle lease TTL.
-_DEFAULT_LEASE_TTL_S = 30.0
+DEFAULT_LEASE_TTL_S = 30.0
 
 
 def cycle(
@@ -61,26 +80,59 @@ def cycle(
     cycle_id: str | None = None,
     pi_states: MutableMapping[str, PiState] | None = None,
     dwell_states: MutableMapping[str, DwellState] | None = None,
-    price_threshold_usd_per_mwh: float = _DEFAULT_PRICE_THRESHOLD_USD_PER_MWH,
+    price_threshold_usd_per_mwh: float | None = None,
     dt_c_s: float = 2.0,
-    lease_ttl_s: float = _DEFAULT_LEASE_TTL_S,
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
     stickiness: float = 0.2,
+    closed_loop_caps: Mapping[tuple[str, str], float] | None = None,
+    pq: PqDispatchContext | None = None,
+    enforce_territory: bool = False,
+    flow_limits: FlowLimits = _NO_FLOW_LIMITS,
 ) -> CycleResult:
     """Run one S1-S7 cycle across every bank in `fleet_state`.
 
     `pi_states`/`dwell_states` are mutated in place (one entry per bank) so the caller keeps exactly
     one `DistDeferralPI` integrator and one dwell tracker alive per bank across cycles (K9). Both
     default to fresh empty dicts when omitted, for one-shot/test use.
+
+    - `price_threshold_usd_per_mwh`: a threshold for banks whose `PriceSignal` carries none. `None`
+      (default): such a bank takes no headroom discharge -- the threshold is the value of the stored
+      energy (09 D7), never a fixed number.
+    - `closed_loop_caps`: per `(obligation_id, bank_id)`, the closed-loop controller's kW this cycle
+      (`closed_loop_common.closed_loop_caps`; need basis, S4.a/S4.b). The grant follows it inside
+      `[0, committed]` with R-GRANT-CLOSED-LOOP; the unused commitment stays idle (K13).
+    - `pq`: S5.2 eligibility (filter + diversity/phase weights) for PQ-sensitive obligations, and the
+      S5.4 ladder's hub exclusions.
+    - `enforce_territory`: K15 -- each obligation only on banks its market may use (`market.
+      check_territory`), FREE headroom only where the territory allows it; unknown fails closed.
+    - `flow_limits`: 09 S1.9 F1-F3 caps.
     """
     cycle_id = cycle_id or t.isoformat()
     pi_states = {} if pi_states is None else pi_states
     dwell_states = {} if dwell_states is None else dwell_states
+    closed_loop_caps = closed_loop_caps or {}
 
     effective_cap, l2_banks = _apply_instructions(fleet_state, instructions)
+    for bank_id, budget_cap in bank_budget_caps_kw(fleet_state.banks, flow_limits).items():
+        effective_cap[bank_id] = min(effective_cap.get(bank_id, budget_cap), budget_cap)
 
     hubs_by_bank: dict[str, list[HubSnapshot]] = {}
+    # 09 S1.9: what the per-hub flow caps (F1 derating, F2 export) take off each healthy hub also comes off
+    # its bank's capability, so the tiers never allocate kW the hubs cannot deliver.
+    flow_cut_by_bank: dict[str, float] = {}
     for hub in fleet_state.hubs:
-        hubs_by_bank.setdefault(hub.bank_id, []).append(_cap_sustainable_discharge(hub, lease_ttl_s))
+        if flow_limits.enabled:
+            hub = with_topology(hub, flow_limits)
+        sustainable = _cap_sustainable_discharge(hub, lease_ttl_s)
+        capped = cap_hub(sustainable, flow_limits)
+        if capped is not sustainable and sustainable.is_healthy:
+            cut = sustainable.free_discharge_kw - capped.free_discharge_kw
+            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + cut
+        hubs_by_bank.setdefault(hub.bank_id, []).append(capped)
+    for bank in fleet_state.banks:
+        cut = flow_cut_by_bank.get(bank.bank_id, 0.0)
+        if cut > _EPS:
+            effective_cap[bank.bank_id] = max(effective_cap.get(bank.bank_id, bank.capability_kw) - cut, 0.0)
 
     calls_by_bank: dict[str, list[ObligationCall]] = {}
     for call in ledger_view.calls:
@@ -90,26 +142,39 @@ def cycle(
     thresholds_by_bank = {
         p.bank_id: p.threshold_usd_per_mwh for p in schedule.prices if p.threshold_usd_per_mwh is not None
     }
+    # S5.2 verdicts indexed once per cycle, so each PQ-sensitive obligation looks up only its own hubs.
+    verdicts_by_service = (
+        {svc: {v.hub_id: v for v in result.verdicts} for svc, result in pq.results_by_service.items()}
+        if pq is not None
+        else {}
+    )
 
     grants: list[ProposedGrant] = []
     shortfalls: list[ShortfallReport] = []
     substitutions: list[SubstitutionEvent] = []
     held: list[str] = []
+    hub_allocations: list[HubAllocation] = []
+    pq_reductions: list[PqCapabilityReduction] = []
+    territory_blocks: list[TerritoryBlock] = []
 
     for bank in sorted(fleet_state.banks, key=lambda b: b.bank_id):
         bank_id = bank.bank_id
         cap = effective_cap.get(bank_id, bank.capability_kw)
         calls = tuple(calls_by_bank.get(bank_id, ()))
-        hubs_by_obligation = _index_hubs_by_obligation(hubs_by_bank.get(bank_id, ()), calls)
+        bank_hubs = hubs_by_bank.get(bank_id, [])
+        hubs_by_obligation = _index_hubs_by_obligation(bank_hubs, calls)
 
         # K13 exception behind any shortfall on this bank: an L2 instruction binds first; otherwise the
         # dominant cause among device faults (L0), the reserve floor (L1) and unknown-state hubs.
-        hub_loss_reason = classify_hub_loss(hubs_by_bank.get(bank_id, ()))
+        hub_loss_reason = classify_hub_loss(bank_hubs)
         shortfall_reason = reasons.R_COMMIT_LOCK_OVERRIDE_L2 if bank_id in l2_banks else hub_loss_reason
         tier_result = allocate_tiers(bank_id, calls, cap, shortfall_reason=shortfall_reason)
-        shortfalls.extend(tier_result.shortfalls)
+        bank_shortfalls = list(tier_result.shortfalls)
         short_obligations = {s.obligation_id: s.reason_code for s in tier_result.shortfalls}
         tier_short = set(short_obligations)  # short at the bank-capability step (vs. no hub substitute)
+        # Obligations whose tier shortfall is not a real one this cycle: the closed-loop controller asked
+        # for less than the bank could give, or K15 kept the obligation off this bank (its own report).
+        not_tier_short: set[str] = set()
 
         remaining_headroom = tier_result.remaining_capability_kw
 
@@ -134,34 +199,47 @@ def cycle(
 
         pi_extra_applied = False
 
+        # 09 F3: the service transformers' discharge budgets for this cycle, consumed obligation by
+        # obligation (nested group caps inside each water-fill).
+        xfmr_remaining = xfmr_budgets_kw(bank_hubs, flow_limits)
+        xfmr_of = {h.hub_id: h.xfmr_id for h in bank_hubs if h.xfmr_id is not None}
+        phase_kw = _phase_discharge_kw(bank_hubs, pq) if pq is not None else {}
+
         # ALLOC-01/K2: a hub can appear in more than one obligation's eligible set at the same bank
         # (e.g. a HOME obligation and a DIST_DEFERRAL obligation sharing hubs). Track what this cycle
         # has already granted each hub and subtract it before the NEXT obligation's water-fill, so no
         # hub is ever granted beyond its own capability across obligations.
         granted_kw_by_hub: dict[str, float] = {}
-        bank_has_as_hold = False
-        for call in sorted(calls, key=lambda c: c.obligation_id):
-            tier_granted = tier_result.granted_kw.get(call.obligation_id, 0.0)
+        # Hubs delivering a PQ-sensitive obligation this cycle serve only it (its hub items are built from
+        # the allocation below; a second obligation's item on the same hub would override it).
+        pq_hubs: set[str] = set()
+        for call in sorted(calls, key=lambda c: (_pq_result(pq, c) is None, c.obligation_id)):
+            oid = call.obligation_id
+            tier_granted = tier_result.granted_kw.get(oid, 0.0)
             reason_code = reasons.R_GRANT_COMMITTED
+
+            if enforce_territory:
+                block = check_territory(call.market_ref, bank.territory, free_access=bank.free_access)
+                if block is not None:
+                    # K15 fail-safe: never served here; the shortfall is recorded against the same
+                    # obligation. Its tier capacity stays locked (never exported as headroom).
+                    territory_blocks.append(TerritoryBlock(bank_id, oid, block))
+                    not_tier_short.add(oid)
+                    bank_shortfalls.append(ShortfallReport(oid, bank_id, max(call.committed_kw, 0.0), block))
+                    # An explicit 0 kW grant carrying the K15 reason: an omitted obligation reads to G-19 as
+                    # an unexplained reduction to 0 (commitment-lock violation).
+                    grants.append(_zero_grant(bank_id, oid, block))
+                    continue
 
             if call.is_as_hold:
                 # ERCOT_AS is a capacity hold (NPRR1282): undeployed it discharges nothing. Its tier
                 # allocation stays out of `remaining_headroom` (K13: the capacity stays locked, never
                 # exported), and no shortfall is reported -- holding IS delivering the service.
-                held.append(call.obligation_id)
-                bank_has_as_hold = True
+                held.append(oid)
                 # An explicit 0 kW grant carrying R-GRANT-AS-HOLD: omitting the award from the batch would
                 # read to the guardian's G-19 as an unexplained reduction to 0 (it enumerates every active
                 # obligation itself); the guardian signs the hold on its own reads.
-                grants.append(
-                    ProposedGrant(
-                        bank_id=bank_id,
-                        granted_kw=0.0,
-                        obligation_id=call.obligation_id,
-                        is_headroom=False,
-                        reason_code=reasons.R_GRANT_AS_HOLD,
-                    )
-                )
+                grants.append(_zero_grant(bank_id, oid, reasons.R_GRANT_AS_HOLD))
                 continue
 
             if call.service_type == "DIST_DEFERRAL" and not pi_extra_applied and pi_extra_kw > _EPS:
@@ -169,32 +247,65 @@ def cycle(
                 reason_code = reasons.R_GRANT_DIST_DEFERRAL_PI
                 pi_extra_applied = True
 
+            # Need basis (S4.a/S4.b): the closed-loop controller's kW, inside [0, committed]. What it
+            # leaves unused stays idle (it is already out of `remaining_headroom`, K13).
+            closed_loop_cap = closed_loop_caps.get((oid, bank_id))
+            closed_loop_bound = closed_loop_cap is not None and closed_loop_cap < tier_granted - _EPS
+            if closed_loop_cap is not None and closed_loop_bound:
+                tier_granted = max(closed_loop_cap, 0.0)
+                reason_code = reasons.R_GRANT_CLOSED_LOOP
+                not_tier_short.add(oid)
+
             if tier_granted <= _EPS:
+                if closed_loop_bound:
+                    grants.append(_zero_grant(bank_id, oid, reasons.R_GRANT_CLOSED_LOOP))
                 continue
 
-            eligible = _apply_granted_so_far(
-                hubs_by_obligation.get(call.obligation_id, ()), granted_kw_by_hub
-            )
-            result = realize_obligation(
-                call.obligation_id, bank_id, eligible, tier_granted, stickiness=stickiness
-            )
+            eligible = hubs_by_obligation.get(oid, ())
+            pq_result = _pq_result(pq, call)
+            reduced_by_pq = False
+            if pq is not None and pq_result is not None:
+                eligible, reduction = _pq_eligible(
+                    call,
+                    _apply_granted_so_far(eligible, granted_kw_by_hub),
+                    verdicts_by_service[call.service_type],
+                    pq,
+                    phase_kw,
+                    tier_granted,
+                )
+                if reduction is not None:
+                    pq_reductions.append(reduction)
+                    reduced_by_pq = True
+            else:
+                if pq_hubs:
+                    eligible = tuple(h for h in eligible if h.hub_id not in pq_hubs)
+                eligible = _apply_granted_so_far(eligible, granted_kw_by_hub)
+            eligible = apply_group_caps(eligible, xfmr_remaining)
+
+            result = realize_obligation(oid, bank_id, eligible, tier_granted, stickiness=stickiness)
+            consume_group_budget(result.per_hub_kw, xfmr_of, xfmr_remaining)
             if result.shortfall is not None:
-                realized_short = dataclasses_replace(result.shortfall, reason_code=hub_loss_reason)
-                shortfalls.append(realized_short)
-                short_obligations.setdefault(call.obligation_id, realized_short.reason_code)
-            if call.obligation_id in short_obligations:
+                # PQ eligibility is the cause when it removed the capability: no substitute exists.
+                cause = reasons.R_COMMIT_LOCK_INFEASIBLE if reduced_by_pq else hub_loss_reason
+                realized_short = dataclasses_replace(result.shortfall, reason_code=cause)
+                bank_shortfalls.append(realized_short)
+                short_obligations.setdefault(oid, realized_short.reason_code)
+                not_tier_short.discard(oid)
+            if oid in short_obligations and oid not in not_tier_short:
                 # A grant below the committed kW carries its K13 exception (G-19 accepts only these); an
                 # obligation already in SHORTFALL carries the best-effort shortfall code G-19 corroborates.
-                reason_code = short_obligations[call.obligation_id]
+                reason_code = short_obligations[oid]
                 if call.in_shortfall:
-                    reason_code = best_effort_reason(
-                        reason_code, at_bank_capacity=call.obligation_id in tier_short
-                    )
+                    reason_code = best_effort_reason(reason_code, at_bank_capacity=oid in tier_short)
             if result.event is not None:
                 substitutions.append(result.event)
 
             for hub_id, kw in result.per_hub_kw.items():
                 granted_kw_by_hub[hub_id] = granted_kw_by_hub.get(hub_id, 0.0) + kw
+            if pq_result is not None:
+                used = tuple(sorted((h, kw) for h, kw in result.per_hub_kw.items() if kw > _EPS))
+                pq_hubs.update(h for h, _ in used)
+                hub_allocations.append(HubAllocation(oid, bank_id, used))
 
             delivered = sum(result.per_hub_kw.values())
             if delivered > _EPS:
@@ -202,25 +313,39 @@ def cycle(
                     ProposedGrant(
                         bank_id=bank_id,
                         granted_kw=delivered,
-                        obligation_id=call.obligation_id,
+                        obligation_id=oid,
                         is_headroom=False,
                         reason_code=reason_code,
                     )
                 )
+            elif closed_loop_bound:
+                grants.append(_zero_grant(bank_id, oid, reasons.R_GRANT_CLOSED_LOOP))
 
-        if bank_has_as_hold or bank_id in schedule.conservative_bank_ids:
-            # A held AS award's ENERGY must stay above the reserve floor for a full deployment (Non-Spin
-            # 4 h, ECRS 1 h): spot-exporting the bank's free headroom would spend exactly that energy.
-            # A CONSERVATIVE scope (K7 escalation) takes no new uncommitted/market dispatch either.
-            continue
-        spot_kw, new_dwell = price_responsive_schedule(
-            remaining_headroom,
-            prices_by_bank.get(bank_id, 0.0),
-            thresholds_by_bank.get(bank_id, price_threshold_usd_per_mwh),
-            dwell_states.get(bank_id, DwellState()),
-            t,
+        shortfalls.extend(
+            s
+            for s in bank_shortfalls
+            if not (s.obligation_id in not_tier_short and s in tier_result.shortfalls)
         )
-        dwell_states[bank_id] = new_dwell
+
+        if bank_id in schedule.conservative_bank_ids:
+            # A CONSERVATIVE scope (K7 escalation) takes no new uncommitted/market dispatch.
+            continue
+        spot_kw = _headroom_kw(
+            t,
+            bank,
+            remaining_headroom,
+            calls=calls,
+            bank_hubs=bank_hubs,
+            granted_kw_by_hub=granted_kw_by_hub,
+            pq_hubs=pq_hubs,
+            price=prices_by_bank.get(bank_id, 0.0),
+            threshold=thresholds_by_bank.get(bank_id, price_threshold_usd_per_mwh),
+            dwell_states=dwell_states,
+            lease_ttl_s=lease_ttl_s,
+            enforce_territory=enforce_territory,
+            flow_limits=flow_limits,
+            territory_blocks=territory_blocks,
+        )
         if spot_kw > _EPS:
             grants.append(
                 ProposedGrant(
@@ -242,7 +367,121 @@ def cycle(
         shortfalls=tuple(shortfalls),
         substitutions=tuple(substitutions),
         held=tuple(sorted(set(held))),
+        hub_allocations=tuple(hub_allocations),
+        pq_reductions=tuple(pq_reductions),
+        territory_blocks=tuple(territory_blocks),
     )
+
+
+def _zero_grant(bank_id: str, obligation_id: str, reason_code: str) -> ProposedGrant:
+    return ProposedGrant(
+        bank_id=bank_id,
+        granted_kw=0.0,
+        obligation_id=obligation_id,
+        is_headroom=False,
+        reason_code=reason_code,
+    )
+
+
+def _headroom_kw(
+    t: datetime,
+    bank: BankSnapshot,
+    remaining_headroom: float,
+    *,
+    calls: Sequence[ObligationCall],
+    bank_hubs: Sequence[HubSnapshot],
+    granted_kw_by_hub: Mapping[str, float],
+    pq_hubs: set[str],
+    price: float,
+    threshold: float | None,
+    dwell_states: MutableMapping[str, DwellState],
+    lease_ttl_s: float,
+    enforce_territory: bool,
+    flow_limits: FlowLimits,
+    territory_blocks: list[TerritoryBlock],
+) -> float:
+    """S6: the bank's FREE headroom discharge this cycle.
+
+    - K15: none where the bank's territory does not allow FREE dispatch (or is unknown).
+    - F7 / Frank #6: never below the AS energy hold (`energy_hold.headroom_energy_cap_kw`: reserve + 1 %
+      x capacity + kW x duration / eta_d for every ERCOT_AS award on the bank).
+    - 09 S1.9: with flow limits on, no more than the hubs' remaining capped capability.
+    - 09 D7: only when the price clears the stored-energy value (`threshold`); unknown value: none.
+    """
+    bank_id = bank.bank_id
+    if enforce_territory:
+        block = check_territory(FREE, bank.territory, free_access=bank.free_access)
+        if block is not None:
+            territory_blocks.append(TerritoryBlock(bank_id, None, block))
+            return 0.0
+    as_awards = [c for c in calls if c.service_type == "ERCOT_AS"]
+    if as_awards:
+        remaining_headroom = min(
+            remaining_headroom, headroom_energy_cap_kw(bank_hubs, as_awards, lease_ttl_s)
+        )
+    if flow_limits.enabled:
+        hub_room = sum(
+            max(h.free_discharge_kw - granted_kw_by_hub.get(h.hub_id, 0.0), 0.0)
+            for h in bank_hubs
+            if h.is_healthy and h.hub_id not in pq_hubs
+        )
+        remaining_headroom = min(remaining_headroom, hub_room)
+    if threshold is None:
+        return 0.0
+    spot_kw, new_dwell = price_responsive_schedule(
+        max(remaining_headroom, 0.0), price, threshold, dwell_states.get(bank_id, DwellState()), t
+    )
+    dwell_states[bank_id] = new_dwell
+    return spot_kw
+
+
+def _pq_result(pq: PqDispatchContext | None, call: ObligationCall) -> EligibilityResult | None:
+    return pq.results_by_service.get(call.service_type) if pq is not None else None
+
+
+def _phase_discharge_kw(hubs: Sequence[HubSnapshot], pq: PqDispatchContext) -> dict[str, float]:
+    """S3.2(c): the bank's measured discharge per single phase (kW), the phase-balance weight's input."""
+    per_phase = dict.fromkeys(_SINGLE_PHASES, 0.0)
+    for hub in hubs:
+        phase = pq.phase_by_hub_id.get(hub.hub_id)
+        if phase in per_phase and hub.p_kw is not None:
+            per_phase[phase] += max(-hub.p_kw, 0.0)
+    return per_phase
+
+
+def _pq_eligible(
+    call: ObligationCall,
+    hubs: tuple[HubSnapshot, ...],
+    verdicts: Mapping[str, HubEligibilityVerdict],
+    pq: PqDispatchContext,
+    phase_kw: Mapping[str, float],
+    needed_kw: float,
+) -> tuple[tuple[HubSnapshot, ...], PqCapabilityReduction | None]:
+    """S5.2 steps 1-2 for one PQ-sensitive obligation: keep its PQ-eligible hubs, weighted for harmonic
+    diversity and phase balance (`pq_eligibility.apply_eligibility`). Hubs the S5.4 ladder excluded from
+    it go to substitution as unhealthy, so the swap is recorded with R-SUBSTITUTION. Reports a capability
+    reduction when eligibility leaves less than the obligation needs."""
+    excluded = pq.excluded_by_obligation.get(call.obligation_id, frozenset())
+    before_kw = sum(h.free_discharge_kw for h in hubs if h.is_healthy)
+    candidates = tuple(h for h in hubs if h.hub_id not in excluded)
+    phases = {h.hub_id: pq.phase_by_hub_id[h.hub_id] for h in candidates if h.hub_id in pq.phase_by_hub_id}
+    # This obligation's own hubs' verdicts only (a hub with no verdict is not eligible).
+    result = EligibilityResult(tuple(verdicts[h.hub_id] for h in candidates if h.hub_id in verdicts))
+    kept = apply_eligibility(candidates, result, phase_by_hub_id=phases, phase_kw_by_phase=phase_kw)
+    ladder_out = tuple(h.evolve(health="LAGGING") for h in hubs if h.hub_id in excluded and h.is_healthy)
+    after_kw = sum(h.free_discharge_kw for h in kept if h.is_healthy)
+    reduction = None
+    if after_kw < before_kw - _EPS and after_kw < needed_kw - _EPS:
+        kept_ids = {h.hub_id for h in kept}
+        reduction = PqCapabilityReduction(
+            obligation_id=call.obligation_id,
+            bank_id=call.bank_id,
+            needed_kw=needed_kw,
+            capability_before_kw=before_kw,
+            capability_after_kw=after_kw,
+            excluded_hub_ids=tuple(sorted(h.hub_id for h in hubs if h.hub_id not in kept_ids)),
+        )
+    return kept + ladder_out, reduction
 
 
 def best_effort_reason(lock_reason: str, *, at_bank_capacity: bool) -> str:
@@ -305,14 +544,14 @@ def _cap_sustainable_discharge(hub: HubSnapshot, lease_ttl_s: float) -> HubSnaps
     if hub.soc_kwh is None or hub.reserve_kwh is None:
         if hub.free_discharge_kw <= 0.0:
             return hub
-        return dataclasses_replace(hub, free_discharge_kw=0.0)
+        return hub.evolve(free_discharge_kw=0.0)
     dt_h = lease_ttl_s / 3600.0
     sustainable_kw = hub_sustainable_discharge_kw(
         hub.soc_kwh, hub.reserve_kwh, hub.free_discharge_kw, dt_h, hub.eta_d
     )
     if sustainable_kw >= hub.free_discharge_kw:
         return hub
-    return dataclasses_replace(hub, free_discharge_kw=sustainable_kw)
+    return hub.evolve(free_discharge_kw=sustainable_kw)
 
 
 def _apply_granted_so_far(
@@ -329,9 +568,7 @@ def _apply_granted_so_far(
         if used <= _EPS:
             adjusted.append(hub)
         else:
-            adjusted.append(
-                dataclasses_replace(hub, free_discharge_kw=max(hub.free_discharge_kw - used, 0.0))
-            )
+            adjusted.append(hub.evolve(free_discharge_kw=max(hub.free_discharge_kw - used, 0.0)))
     return tuple(adjusted)
 
 
