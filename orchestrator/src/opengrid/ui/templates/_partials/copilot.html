@@ -1,0 +1,31 @@
+{# copilot.html -- the docked, dismissible copilot panel (issue #26 item 1), included on every screen
+   from base.html and opened from the status-bar launcher (UI spec S2.2).
+
+   Advisory only: it answers and cites, and it cannot command anything. Everything it says is rendered
+   by `copilot_answer.html`, which carries the citations and the AI-assisted badge. #}
+<div class="og-copilot" id="og-copilot" x-data="{ open: false }" x-cloak>
+  <button type="button" class="og-copilot-launcher" x-on:click="open = !open"
+          :aria-expanded="open ? 'true' : 'false'" aria-controls="og-copilot-panel"
+          aria-label="Open the operator copilot">
+    <svg class="og-icon" aria-hidden="true"><use href="#i-pulse"/></svg>
+    <span>Copilot</span>
+  </button>
+  <section class="og-copilot-panel" id="og-copilot-panel" x-show="open" x-cloak
+           x-on:keydown.escape.window="open = false" aria-label="Operator copilot">
+    <header class="og-copilot-head">
+      <h2>Copilot</h2>
+      <button type="button" class="btn" x-on:click="open = false" aria-label="Dismiss the copilot">Close</button>
+    </header>
+    <p class="og-copilot-intro">Advisory only. It reads what this console reads, cites what it used, and
+      cannot command anything &mdash; every action still goes through the screen's own two-step control.</p>
+    <div class="og-copilot-log" id="copilot-answers" role="log" aria-live="polite"></div>
+    <form class="og-copilot-form" hx-post="{{ base_path }}/copilot/ask" hx-target="#copilot-answers"
+          hx-swap="beforeend" hx-on:htmx:after-request="this.reset()">
+      <input type="hidden" name="screen" value="{{ request.url.path }}">
+      <label for="copilot-question" class="og-sr-only">Ask the copilot</label>
+      <input type="text" id="copilot-question" name="question" maxlength="500" autocomplete="off"
+             placeholder="Which obligations are at risk?">
+      <button class="btn btn-primary" type="submit">Ask</button>
+    </form>
+  </section>
+</div>

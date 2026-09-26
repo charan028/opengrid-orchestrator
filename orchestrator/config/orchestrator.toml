@@ -100,6 +100,23 @@ ramp_bank_s = 30
 ramp_zone_s = 60
 ramp_fleet_s = 120
 
+[ai_agent]
+# The advisory operator copilot (issue #26). It is read-only and never in the control loop.
+# Set daily_usd = 0 to switch the assistant off entirely without removing the deployment; the console
+# then answers from its deterministic tier and says the assistant is unavailable.
+#
+# Keys come from the environment, never from this file:
+#   TYPESAFE_API_KEY  -- System One judgements (routing, injection screening). Fast: ~200-400 ms.
+#   ANTHROPIC_API_KEY -- plain-language explanations. Provisioned by ops in /etc/opengrid/ai_agent.env.
+# Absent keys are a normal state: the tier they serve simply reports itself unavailable.
+judgement_model = "jev-latest"
+judgement_timeout_s = 6.0
+prose_model = "claude-haiku-4-5-20251001"
+daily_tokens = 200000
+daily_usd = 5.0
+requests_per_minute = 20
+timeout_s = 20.0
+
 [health]
 # Cycle-latency alert source (og-engine's [metrics].engine_port).
 engine_metrics_url = "http://127.0.0.1:9101/metrics"

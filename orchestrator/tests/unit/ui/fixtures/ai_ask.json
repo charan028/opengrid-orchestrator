@@ -1,0 +1,16 @@
+{
+  "text": "1 obligation flagged at risk: ffcc182c (DIST_DEFERRAL, FEEDER_OVERLOAD).",
+  "tier": "deterministic",
+  "citations": [
+    {
+      "source": "/og/api/dispatch/opportunities",
+      "ref": "ffcc182c",
+      "label": "DIST_DEFERRAL ffcc182c"
+    }
+  ],
+  "model": null,
+  "confidence_label": null,
+  "intent": "deterministic_query",
+  "refusal_reason": null,
+  "trace_id": "9f2c11a4-0000-4000-8000-000000000001"
+}

@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid import ai_agent
 from opengrid.api.csrf import CSRFMiddleware
 from opengrid.api.proposals import ProposalStore
 from opengrid.api.store import PgStore
@@ -44,6 +45,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.store = PgStore(pool)
     app.state.trace_store = trace_store
     app.state.proposals = ProposalStore()
+    # The advisory copilot (issue #26). Configuring it cannot fail the process: a missing key or a
+    # switched-off budget is a normal state the panel renders, never a start-up error.
+    ai_agent.configure(cfg)
     # `opengrid.contracts` has no signing key or safety-critical state (unlike guardian/safestop) --
     # its writes are ordinary CRUD/business-rule checks against `og.contract`/`og.opportunity`, so
     # `api` configuring its own repo/trace pair here is the intended reuse (single owner of the
@@ -129,6 +133,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
 def _include_routers(app: FastAPI) -> None:
     from opengrid.api.routers import (
         admin,
+        ai,
         billing,
         contracts,
         dispatch,
@@ -153,6 +158,7 @@ def _include_routers(app: FastAPI) -> None:
         safestop,
         admin,
         scenario,
+        ai,
     ):
         app.include_router(router_module.router)
 
