@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from opengrid.core.crypto import generate_keypair, verify_payload
 from opengrid.core.models.engine import Verdict
+from opengrid.core.models.mqtt import COMMAND_BATCH_SIGNED_FIELDS
 from opengrid.guardian import main as guardian_main
 from opengrid.guardian.ports import ProposedBatch, ProposedItem
+from opengrid.guardian.service import GuardianService
 from opengrid.platform.config import Config
 
 from .test_mqtt_io import FakePublishClient
@@ -60,9 +64,8 @@ async def test_insert_verdict_commits():
     assert cursor.executed[0][1]["command_batch_id"] == verdict.command_batch_id
 
 
-async def test_publish_signed_batch_publishes_batch_and_leases_per_item():
-    client = FakePublishClient()
-    proposal = ProposedBatch(
+def _proposal() -> ProposedBatch:
+    return ProposedBatch(
         command_batch_id=uuid4(),
         bank_id="bank-1",
         cycle_id="cycle-1",
@@ -76,20 +79,32 @@ async def test_publish_signed_batch_publishes_batch_and_leases_per_item():
             ProposedItem(hub_id="hub-2", p_kw_setpoint=-2.0, reason_code="SELECTOR"),
         ],
     )
-    verdict = Verdict(
-        verdict_id=uuid4(),
-        command_batch_id=proposal.command_batch_id,
-        outcome="PASS",
-        vetoed_rule_ids=[],
-        latency_ms=5,
-        inputs_hash="a" * 64,
-        signature="sig",
-        signed_at=NOW,
-    )
+
+
+def _service(seed: bytes) -> GuardianService:
+    return GuardianService(ports=None, config=None, signing_seed=seed)  # type: ignore[arg-type]
+
+
+def test_built_batch_is_signed_over_its_own_envelope_fields():
+    """crypto.md S2.1: the published signature must verify over the envelope's 7 signed fields --
+    the hub's check. The verdict's signature (S2.2, different fields) must never be reused here."""
+    seed, public = generate_keypair()
+    batch = guardian_main.build_signed_batch(_service(seed), key_id="guardian-2026a", proposal=_proposal())
+
+    wire = json.loads(batch.model_dump_json())
+    signed_fields = {k: wire[k] for k in COMMAND_BATCH_SIGNED_FIELDS}
+    assert verify_payload(public, signed_fields, wire["signature"])
+    assert wire["key_id"] == "guardian-2026a"
+
+
+async def test_publish_signed_batch_publishes_batch_and_leases_per_item():
+    client = FakePublishClient()
+    proposal = _proposal()
+    seed, _public = generate_keypair()
     cfg = Config({"mqtt": {"topic_root": "ogtest/guard"}})
 
     await guardian_main._publish_signed_batch(
-        mqtt_client=client, cfg=cfg, key_id="guardian-2026a", verdict=verdict, proposal=proposal
+        mqtt_client=client, cfg=cfg, service=_service(seed), key_id="guardian-2026a", proposal=proposal
     )
 
     topics = [p[0] for p in client.published]

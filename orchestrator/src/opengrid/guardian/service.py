@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 
 from opengrid.core.crypto import sha256_hex_of_json, sign_payload
 from opengrid.core.models.engine import CommandBatchRow, Verdict, VerdictOutcome
+from opengrid.core.models.mqtt import CommandBatch
 from opengrid.guardian import checks
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
@@ -307,6 +308,14 @@ class GuardianService:
         ).inc()
         await self._trace_verdict(verdict)
         return verdict
+
+    def sign_command_batch(self, batch: CommandBatch) -> CommandBatch:
+        """Sign the command-batch envelope a hub will verify (interfaces/crypto.md S2.1). This is a
+        separate signature from the verdict's (S2.2): the verdict signature stays in `og.verdict` for
+        the audit trail, and is never what goes on the wire."""
+        return batch.model_copy(
+            update={"signature": sign_payload(self.signing_seed, batch.signing_payload())}
+        )
 
     def _inputs_hash(self, batch: CommandBatchRow) -> str:
         """sha256, hex -- domain-separated over (version_vector, ledger_version, batch_hash), per

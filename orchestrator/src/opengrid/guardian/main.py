@@ -60,11 +60,10 @@ VALUES (%(verdict_id)s, %(command_batch_id)s, %(outcome)s, %(vetoed_rule_ids)s, 
 """
 
 
-async def _publish_signed_batch(
-    *, mqtt_client: aiomqtt.Client, cfg: Config, key_id: str, verdict: Verdict, proposal: ProposedBatch
-) -> None:
-    """On a PASS verdict, publish the signed command batch and renew the bank's hub leases."""
-    batch = CommandBatch(
+def build_signed_batch(service: GuardianService, *, key_id: str, proposal: ProposedBatch) -> CommandBatch:
+    """The wire envelope for a PASS proposal, signed over its own fields (crypto.md S2.1) -- not the
+    verdict's signature, which covers different fields and would fail every hub's BAD_SIGNATURE check."""
+    unsigned = CommandBatch(
         batch_id=proposal.command_batch_id,
         bank_id=proposal.bank_id,
         epoch=proposal.epoch,
@@ -76,8 +75,21 @@ async def _publish_signed_batch(
             for i in proposal.items
         ],
         key_id=key_id,
-        signature=verdict.signature or "",
+        signature="",
     )
+    return service.sign_command_batch(unsigned)
+
+
+async def _publish_signed_batch(
+    *,
+    mqtt_client: aiomqtt.Client,
+    cfg: Config,
+    service: GuardianService,
+    key_id: str,
+    proposal: ProposedBatch,
+) -> None:
+    """On a PASS verdict, publish the signed command batch and renew the bank's hub leases."""
+    batch = build_signed_batch(service, key_id=key_id, proposal=proposal)
     await publish_command_batch(mqtt_client, cfg, batch)
     for item in proposal.items:
         lease = Lease(
@@ -172,8 +184,8 @@ async def main() -> None:
                 await _publish_signed_batch(
                     mqtt_client=mqtt_client,
                     cfg=cfg,
+                    service=service,
                     key_id=guardian_cfg.key_id,
-                    verdict=verdict,
                     proposal=proposal,
                 )
 

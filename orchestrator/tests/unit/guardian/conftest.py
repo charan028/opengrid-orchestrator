@@ -54,8 +54,10 @@ class FakeTrace:
     def __init__(self, *, preimage_exists: bool = True) -> None:
         self.preimage_exists = preimage_exists
         self.appended: list[tuple[UUID, dict]] = []
+        self.preimage_refs_checked: list[UUID] = []
 
     async def exists_preimage(self, decision_ref: UUID) -> bool:
+        self.preimage_refs_checked.append(decision_ref)
         return self.preimage_exists
 
     async def append_verdict(self, batch_id: UUID, payload: dict) -> None:
