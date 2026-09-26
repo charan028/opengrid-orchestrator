@@ -52,7 +52,8 @@ Terminology:
 Build status:
 
 - Wave 1 (A: schemas and migrations `0010`/`0011`; B: `core/pq`; E: the simulator inverter model and calibration) is
-  built on branch `wip/pq-wave1-20260925`. B is complete. A and E still need their lint, type and dedicated tests.
+  on `main`. B is complete. A and E still need their lint, type and dedicated tests; migrations `0010`/`0011` are
+  not yet applied on the live database.
 - Wave 2 (C guardian PQ checks, D allocator PQ eligibility and monitoring, G waveform ingest, H simulator waveforms,
   I asset health) and wave 3 (J API/UI, F DATA_CENTER) are owned by the lead's agents.
 
@@ -64,7 +65,7 @@ Build status:
 - **fancyviper007:** DOC1 needs a PQ alerts section (drafted after wave 3). DEMO: add "customer PQ deviation →
   correction". U1 covers PQ screens once wave 3 lands.
 
-Please don't depend on the `wip/` branches; they are checkpoints, not review targets.
+Please don't depend on `wip/` branches; they are checkpoints, not review targets.
 
 ---
 
