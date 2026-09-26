@@ -134,6 +134,10 @@
         }
       });
     })(option);
+    // "token:kw" in a tooltip valueFormatter slot -> a kW formatter (python view code stays free of JS).
+    if (option.tooltip && option.tooltip.valueFormatter === "token:kw") {
+      option.tooltip.valueFormatter = function (v) { return (typeof v === "number" ? v.toFixed(1) : v) + " kW"; };
+    }
     // An empty chart says so instead of drawing a bare axis frame and a stray legend.
     const hasData = (option.series || []).some(function (s) { return (s.data || []).length > 0; });
     if (!hasData) {
