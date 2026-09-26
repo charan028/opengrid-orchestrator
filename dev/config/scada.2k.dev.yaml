@@ -1,0 +1,15 @@
+# dev/config/scada.2k.dev.yaml -- dev-only scale-run preset: scada.dev.yaml with bank_count 40, to
+# match fleet.2k.dev.yaml. Selected by dev/docker-compose.scale.yml (OG_SCALE_PRESET=2k).
+
+bank_count: 40
+zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
+
+publish_interval_s: 2.0
+# feeder segment (~50 homes), not a single distribution transformer.
+bank_kva_rating_default: 600.0
+overload_consecutive_samples: 3
+base_load_kw_default: 200.0
+
+# No history file in the dev stack (that path only exists on the production server) -- this is
+# not fatal, ogsim.scada.background falls back to a synthetic diurnal background load.
+history_tsv_path: /var/lib/opengrid/import/mariadb_history_signals.tsv

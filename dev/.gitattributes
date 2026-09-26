@@ -1,0 +1,14 @@
+# Force LF line endings for shell scripts under dev/ that get bind-mounted into a Linux
+# container and either exec'd via their shebang (dev/postgres/init-og-test-db.sh, run by
+# postgres's docker-entrypoint.sh) or parsed by a strict POSIX shell (dev/scripts/*.sh).
+#
+# Without this, a Windows checkout with the (very common) `core.autocrlf=true` and no root
+# .gitattributes rewrites these to CRLF on checkout: the shebang becomes `#!/bin/sh\r`, which the
+# kernel reports as "cannot execute: required file not found" (it looked for an interpreter
+# literally named `/bin/sh\r`), and a script invoked as `sh script.sh` instead fails mid-parse,
+# e.g. `set: line 9: illegal option -` (busybox ash choking on `set -eu\r`).
+#
+# Fixed 2026-09-26 (fix #4) after the first real `docker compose up` run: mosquitto-init exited
+# 2 and postgres logged "cannot execute: required file not found" for the og_test init script.
+# See dev/README.md's Troubleshooting section.
+*.sh text eol=lf

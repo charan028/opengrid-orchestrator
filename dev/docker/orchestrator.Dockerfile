@@ -19,6 +19,14 @@ RUN apt-get update \
 COPY orchestrator/ orchestrator/
 
 RUN pip install --no-cache-dir -e ./orchestrator
+# orchestrator/pyproject.toml declares fastapi>=0.110 but not python-multipart. FastAPI needs it
+# eagerly at *route-registration* time (not just when a Form is actually posted) for any
+# `Form(...)` parameter -- opengrid/ui/routes/health.py's `POST /alerts/ack` has one -- so og-api
+# fails at import with "RuntimeError: Form data requires python-multipart to be installed"
+# before it ever binds its port. Product-code gap (needs an owner to add it to
+# orchestrator/pyproject.toml's dependencies); installed here as a dev-stack workaround so the
+# orchestrator profile's image matches what og-api's own code actually needs to import cleanly.
+RUN pip install --no-cache-dir python-multipart
 
 # dev/ itself is bind-mounted at runtime (docker-compose.yml), not copied, so editing
 # dev/config/*.toml or dev/config/*.yaml never requires an image rebuild.

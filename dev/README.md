@@ -4,14 +4,28 @@ A local `docker compose` stack that mirrors production's topology (see `deploy/R
 laptop scale, so contributors and their AI agents can run integration tests without access to
 the base server (192.168.5.35).
 
-**Status: UNTESTED ON DOCKER.** Docker is not installed on the machine (or the base server)
-this stack was built on, so it has only been verified by static checks: the compose YAML's
-structure (`yaml.safe_load` + a services/volumes/dependencies sanity check), every process
-module path (`opengrid.*`, `ogsim.*`) importing cleanly in the local `.venv`, the generated
-Mosquitto ACL matching production's structure exactly, and the key-generation scripts
-producing valid Ed25519 keypairs. **It has never been through `docker compose up`.** If you are
-the first person to run this, please report back what broke (or that it worked) — see
-"Troubleshooting" below for what to capture.
+**Status: runs on Docker Engine 29.8.0 (Docker Desktop, WSL2, Windows 11), 2026-09-26.** Both
+`dev-up` and `dev-up-full` (`--profile orchestrator`) come up healthy: `migrate` applies every
+migration and seeds 8 banks / 200 hubs, the four sims publish telemetry over MQTT, og-engine runs
+its cycles and gates, og-guardian signs verdicts, and og-api answers on 127.0.0.1:8080. Every
+published port binds to 127.0.0.1 only.
+
+The first real run found dev/-only bugs, all fixed here:
+
+- shell scripts checked out with CRLF on Windows broke the Postgres init script and
+  `mosquitto-init` (`dev/.gitattributes` now forces LF for `*.sh`);
+- `dev/secrets.example` was loaded after `dev/secrets` as an `env_file`, so its blank values
+  overrode the real ones (it is no longer loaded);
+- the Mosquitto password file was root-owned with mode 600, so the broker's own user could not read
+  it (`gen-mosquitto-passwd.sh` now chowns it);
+- the configs lacked the D-12 identities (`[api.roles]`, the two-person release allow-list), the
+  guardian public key og-safestop needs to relay a release, the sim-market token URL, and
+  `dev/config/tdsp_tariffs.toml`;
+- the orchestrator image lacked `python-multipart` (see `dev/docker/orchestrator.Dockerfile`);
+- `gen-keys.*` fell back to a bare `python` in a worktree without its own `.venv`
+  (`OPENGRID_VENV_PYTHON` now points it at a shared one).
+
+The static checks made before any Docker run are kept at the end.
 
 ## What's in the stack
 
@@ -161,6 +175,52 @@ profile `normal`) — every sim rolls its own catalogue as a Poisson process eve
 inject anything manually. `random set-profile --profile calm|stressed|chaos` and
 `random pause`/`random resume` control that.
 
+## Calling og-api, and the live UI tests (dev proxy)
+
+og-api believes `X-Remote-User` only together with `X-OG-Proxy-Auth` equal to
+`OG_API_PROXY_SECRET` (`opengrid.api.auth`). In production Apache sets both; the dev stack has no
+Apache, so a browser or `curl` pointed straight at `127.0.0.1:8080` gets `401`.
+`tests-e2e/functional` sends the secret itself (it reads `dev/secrets`). For a browser, or
+`tests-e2e/ui` in live mode, run the dev proxy, which stands in for Apache:
+
+```bash
+python dev/scripts/dev_proxy.py            # 127.0.0.1:8088 -> og-api on 127.0.0.1:8080
+OG_UI_BASE_URL=http://127.0.0.1:8088 PYTHONPATH=orchestrator/src python -m pytest tests-e2e/ui -q
+```
+
+It listens on loopback only, replaces any client `X-OG-Proxy-Auth` with the one from
+`dev/secrets` (never printed), passes the client's `X-Remote-User` through as the Basic-Auth user
+Apache would set, and streams responses, so SSE works. Any local process can therefore choose an
+identity through it: use it on the dev stack only, never deploy it. Identities with a role in
+`dev/config/*.toml` `[api.roles]`: `operator`, `viewer`, `og-op-a`, `og-op-b`.
+
+`/og/api/health` answers only connections from loopback *inside* the og-api container, so from the
+host it returns `403` even through the proxy (Docker's port forwarding arrives from the bridge
+gateway). The System Health screen itself works, since og-api reads its own API from inside.
+
+## Scale runs (12-scale-test-plan)
+
+`docs/orchestrator/07-delivery/12-scale-test-plan.md` runs the fleet at 2,000 and 10,000 hubs.
+`dev/docker-compose.scale.yml` does that on this stack with dev-only presets,
+`dev/config/fleet.{2k,10k}.dev.yaml` and `scada.{2k,10k}.dev.yaml` (50 hubs per bank, as
+production), picked by `OG_SCALE_PRESET`. It runs as its own compose project, so the scale
+database never mixes with the normal one; stop the normal stack first (same host ports):
+
+```bash
+cd dev
+docker compose -f docker-compose.yml --profile orchestrator stop
+OG_SCALE_PRESET=10k docker compose -p ogscale -f docker-compose.yml -f docker-compose.scale.yml --profile orchestrator up -d --build
+docker compose -p ogscale -f docker-compose.yml logs migrate      # "seeded 200 banks, 10000 hubs"
+# og-engine's /metrics is loopback-only inside its container:
+docker compose -p ogscale -f docker-compose.yml exec -T og-engine python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:9101/metrics').read().decode())"
+docker stats --no-stream                                           # CPU and memory per container
+docker compose -p ogscale -f docker-compose.yml -f docker-compose.scale.yml --profile orchestrator down -v
+docker compose -f docker-compose.yml --profile orchestrator up -d
+```
+
+This is a laptop-scale approximation of the plan (one host, Docker Desktop), not the server run
+the plan describes; report it as such.
+
 ## Resetting
 
 - `make dev-down` — stop containers, keep data (Postgres volume, Mosquitto password volume).
@@ -173,8 +233,7 @@ inject anything manually. `random set-profile --profile calm|stressed|chaos` and
 
 ## Troubleshooting
 
-Since this stack has not been run against real Docker yet, please capture and report, in
-whichever channel/PR you're using:
+If something does not come up, capture and report, in whichever channel/PR you're using:
 
 - `docker compose -f dev/docker-compose.yml version` and OS/Docker version.
 - The exact command that failed and its full output.
@@ -205,11 +264,10 @@ Known risk areas worth checking first if something's wrong:
   desync them.
 - **Port already in use**: change the relevant `*_PORT` in `dev/.env` and re-run `make dev-up`.
 
-## Verification performed without Docker
+## Verification performed before the first Docker run
 
-Docker was not available in the environment this stack was built in (neither locally nor on
-the base server), so the following were checked instead, and should be re-checked whenever
-these files change:
+Docker was not available where this stack was first built (neither locally nor on the base
+server), so the following were checked instead. They still apply whenever these files change:
 
 - `docker-compose.yml` parses with `yaml.safe_load` and passes a structural sanity check
   (every declared service has an `image`/`build`, every `depends_on` target and named `volumes`
@@ -229,7 +287,6 @@ these files change:
   `opengrid.guardian.keys`/`opengrid.safestop.keys`'s own format exactly (they're the same
   code).
 
-What was **not** verified: that `docker compose up` actually succeeds, that the containers can
-reach each other over the compose network, that Mosquitto accepts the generated password file,
-or that telemetry/commands actually flow end-to-end. Please report your results after the
-first real run.
+What these could not show (that `docker compose up` succeeds, that the containers reach each
+other, that Mosquitto accepts the password file, that telemetry and commands flow end to end) was
+confirmed by the first real run on 2026-09-26; see Status at the top.
