@@ -8,12 +8,14 @@ automated harness. It also covers the availability row of `02b-mvp-s-spec-platfo
 The lead's answers to the design questions (2026-09-26) are recorded in §13 as **lead default, pending owner
 confirmation**. Nothing on the server changes until the owner approves the checklist in §14.
 
-Code references are to `main @ f3b3365`. The branch is rebased onto current main, and a refresh of the references and
-blocker status to current main is in progress. The owner's decisions of 2026-09-26 are already applied:
+Code references were first written against `main @ f3b3365`. The blocker status in §3, the release path and the
+metrics sources are refreshed to `main @ 434d230` (2026-09-26); every blocker found in the code is now fixed there.
+The owner's decisions of 2026-09-26 are applied:
 - per-workspace broker accounts (B2);
 - the base server as the permanent host (§13 Q3, Appendix A);
-- the PostgreSQL checkpoint cadence (§9.4). `o/` stands for `orchestrator/src/opengrid/`, and `ogsim/` for
-`integration-sims/src/ogsim/`.
+- the PostgreSQL checkpoint cadence (§9.4).
+
+`o/` stands for `orchestrator/src/opengrid/`, and `ogsim/` for `integration-sims/src/ogsim/`.
 
 ## 1. Design decisions
 
@@ -66,6 +68,10 @@ Fix:
 
 This is owned by the architect (`platform/mqtt.py`) and each process owner (its call site).
 
+**Status at `434d230`: fixed.** `compose_client_id` (`o/platform/mqtt.py:109`) builds the ID from the prefix,
+`OG_WS` and the process, and raises `MqttIdentityError` (`:103`, `:119`) instead of connecting with a production
+identity outside production.
+
 **B2: shared broker identities.** Workspaces reuse the production MQTT users (`og_engine`, `og_guardian`, and so on).
 BUILD.md §5 says the ACL allows `ogtest/<ws>` "for all og users", and the same users may also publish under `og/v1`. A
 chaos process with a wrong topic root would publish into production.
@@ -77,6 +83,9 @@ removed.
 - This design proposes one more account per chaos workspace, the read-only `ogw_<ws>_ro`, for the MQTT observer
   (§9.1), so a harness bug cannot publish into the stack it measures.
 - Per-workspace accounts do not fix B1: client IDs are global on the broker, whichever account connects.
+
+**Status at `434d230`: built (D-13).** `deploy/mosquitto/provision_ws_users.py` (and `.sh`) provision the per-workspace
+`ogw_<ws>` accounts. The chaos names and the proposed `_ro` observer accounts are still to add (§14).
 
 **B3: the simulator ignores `OG_MQTT_ROOT` and pins production keys.**
 - The topic root is read as `raw.get("topic_root", os.environ.get("OG_MQTT_ROOT", "og/v1"))`
@@ -103,6 +112,10 @@ Fix (sims owner):
 Independently, chaos sim units point `OGSIM_FLEET_CONFIG` and `OGSIM_SCADA_CONFIG` at rendered chaos YAMLs (§4.2),
 and the workspace's broker account (B2) cannot publish under `og/v1` even if a setting is wrong.
 
+**Status at `434d230`: fixed.** Outside a process explicitly marked production (`OGSIM_ENV=prod`,
+`ogsim/common/config.py:106`), ogsim no longer falls back to the production topic root or key paths. It raises
+`WorkspaceConfigError` instead (`:110`).
+
 **Related K8 finding (not a harness blocker): the hub sim releases a fleet stop without a signature.**
 - `ogsim/fleet/__main__.py:124-131` handles `<root>/stop/...` messages. For any payload that parses as JSON but is
   empty or false (`{}`, `null`, `[]`, `0`, `false`), it calls `apply_stop_event("RELEASE", …)` without verifying
@@ -121,17 +134,27 @@ Fix: releases only through a guardian-signed RELEASE event. A zero-length retain
 never changes stop state. The owners are the sims owner and the architect (`topics.md`). §9.3's K8 row checks for
 this.
 
+**Status at `434d230`: fixed.**
+- `ogsim/fleet/__main__.py:110` rejects any stop payload that is not a non-empty object.
+- The hub now tracks outstanding stops by `stop_id` (`ogsim/fleet/stop.py:99-152`), so an old signed RELEASE cannot
+  lift a newer stop either.
+- A related dormant edge case, the scope-wide `issued_at` backstop, is recorded in `13-known-limitations.md` DM-1.
+
 **Handled by configuration, not code (§4):**
 - **Ports.** `og-api` binds 8080 in both configs (`test.toml:100`), the guardian metrics server defaults to 9103
   (`o/guardian/main.py:166`), and the market sim to 8090 (`ogsim/market/config.py:86`). Port 18090 is already used by
   `tests/integration/feeds/test_market_sim.py`.
 - **Test keys.** They live in `/tmp` (`test.toml` `key_path`), which every unit sees as private under
   `PrivateTmp=true`.
-- **Raw waveform store.** `pq_ingest.blob_store_dir` defaults to the production store `/var/lib/opengrid/pq_waveform`
-  (`o/engine/__init__.py:621`), and `test.toml` does not set it.
+- **Raw waveform store.** `pq_ingest.blob_store_dir` defaults to the production store `/var/lib/opengrid/pq_waveform`.
+  `test.toml` now sets a workspace-relative `var/pq_waveform` (`orchestrator/config/test.toml:116`), and the chaos
+  config sets its own (§4.2).
 - **No `sudo`.** The server has none (02b §9.1).
-- **Metrics.** Only the guardian serves `/metrics` (`o/guardian/main.py:165`). The engine has no endpoint and
-  `health.engine_metrics_url` is unset.
+- **Metrics.** The guardian serves `/metrics`, and the engine now does too (`o/engine/metrics.py:56`,
+  `[metrics].engine_port` 9101, loopback only). The chaos port block gives each its own port (§4.2).
+- **API identity.** Every API call the harness makes must carry the chaos instance's own proxy secret
+  (`X-OG-Proxy-Auth`, checked against `OG_API_PROXY_SECRET` in `o/api/auth.py:82`) and a chaos operator's
+  `X-Remote-User`. The chaos secret is generated per instance and never shared with production.
 
 ## 4. The chaos stack (what gets killed)
 
@@ -217,8 +240,9 @@ reads through a read-only role, `ogt_<ws>_ro`.
 5. Start the target.
 6. Wait for steady state (§6.1).
 
-A reset is also the only way to clear an engaged safe stop, because RELEASE is not built (the release endpoint returns
-501, `o/api/routers/safestop.py:164-168`).
+A reset is also the fallback way to clear an engaged safe stop. At `434d230` a two-person, guardian-signed RELEASE
+exists (`o/guardian/stop_release.py`; the API request/approve steps in `o/api/routers/safestop.py`). Stop experiments
+therefore end with a real release where they can (§6.6), and fall back to a reset if the release fails.
 
 ## 5. Safe targeting (defence in depth)
 
@@ -377,8 +401,10 @@ Mode H needs no runtime drop-ins and no `daemon-reload`, so polkit only has to a
 
 - Experiments run one at a time in a seeded random order; the seed goes in the report. After each experiment the stack
   must return to steady state before the next one starts.
-- Experiments that engage a safe stop run last, or are followed by a reset (§4.4). A reset is how stop experiments end
-  until a guardian-signed RELEASE exists (lead default, §13 Q2).
+- Experiments that engage a safe stop run last. They end with a real two-person release through the chaos API:
+  chaos operator A requests, operator B approves, as the D-12 test operators og-op-a/og-op-b do on dev. That release
+  is itself an assertion: a self-approval is refused (403), and the stop lifts only after B approves. A reset (§4.4)
+  is the fallback if the release fails. See §13 Q2.
 - At the start, the harness injects a firm call (for example `PARTNER_CAPACITY`, as in step 6 of the §5 demo script)
   through the chaos API's scenario endpoint (`o/api/routers/scenario.py:33`), so there is a committed obligation to
   protect.
@@ -510,7 +536,7 @@ These are checked for the whole campaign. Any violation fails the experiment tha
 | K8 | No RELEASE row in `og.stop_event` (the stop key can only stop). While the stack runs, nothing is published on `stop/#` except signed ENGAGE events; a JSON-empty payload releases a fleet stop in the sim (§3). Stop latency within budget | `og.stop_event`; observer |
 | K10 | Every signed verdict's batch has a `trace_pre_image_id` that exists in `og.trace` | SQL |
 | K11 | `verify()` passes for every stream after each recovery. The scheduled verify runs every 300 s, which can fall outside a 120 s recovery window, so the harness also triggers one on demand. The next scheduled result must pass as well | the chaos API's `POST …/trace/verify` (`o/api/routers/billing.py:107`); the scheduled verify's record |
-| K13 | Every commitment active at a kill keeps its `committed_kw`; any reduced grant carries an allowed reason code; no new K13 row in `og.invariant_violation` | `og.commitment`, `og.grant`, trace; `og.invariant_violation` |
+| K13 | Every commitment active at a kill keeps its `committed_kw`; any reduced grant carries an allowed reason code; no new `K13_LOCK_VIOLATION` row. A mode-H engine or sim outage longer than 30 s is expected to add `K13_OUTAGE_GAP` rows (a grant-activity gap, reported separately by design, `o/invariants/checks.py` `classify_dip`); the harness records them as evidence, not failures | `og.commitment`, `og.grant`, trace; `og.invariant_violation` |
 
 The K7 hold check is inferred from `p_kw`, because the sim tracks lease state internally
 (`ogsim/fleet/lease.py:30-49`) but does not publish it. If telemetry carried the lease state (§11, item 4), the
@@ -626,7 +652,9 @@ The lead answered these on 2026-09-26. Each answer is the default until the owne
    `og-api` for K8. The answer is an operator CLI on the host that signs with `og-safestop`'s stop-only key directly
    (§6.7). It is a dependency, owned by the safestop owner.
 2. **Ending stop experiments.** *Lead default, pending owner confirmation:* a workspace reset (§4.4) ends every stop
-   experiment until a guardian-signed RELEASE exists.
+   experiment until a guardian-signed RELEASE exists. That condition is now met: the two-person RELEASE is on main
+   at `434d230`. *Proposed update, pending lead confirmation:* end each stop experiment with a real two-person release
+   (§6.6), with a reset as the fallback.
 3. **Scale and host.** The base server is the permanent hosting solution (owner decision 2026-09-26).
    *Lead default, pending owner confirmation:* nightly chaos runs there, within its limits: 2,000 hubs at low
    priority (§4.1), guarded by the L4 production sentinel and the L5 resource guard.
@@ -643,7 +671,9 @@ The lead answered these on 2026-09-26. Each answer is the default until the owne
 4. **Modes.** *Lead default, pending owner confirmation:* mode R for every process; mode H also for the engine,
    guardian, safestop and sims. The consequence:
    - `og-feeds`' degraded mode ("no new commitments") is not reached in the restart gap; TS-02-05/07 cover it with a
-     stubbed stale feed.
+     stubbed stale feed. The 2026-09-26 review found that mode displayed but not enforced by the selector and intake
+     (routed for R3). A mode-H `og-feeds` kill held past the staleness threshold would test that enforcement end to
+     end. *Suggestion:* add mode H for `og-feeds` once the fix lands.
    - For `og-settle` and `og-api`, the outage behaviour is observed only for the restart gap: settlement and health
      evaluation pause, and the console is lost.
 5. **Cadence.** *Lead default, pending owner confirmation:* nightly (the §14 timer, 00:30 to 02:45), plus on demand
