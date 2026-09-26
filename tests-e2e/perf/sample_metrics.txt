@@ -1,0 +1,82 @@
+# Hand-written sample of og-engine's /metrics after ~10 minutes at 2,000 hubs (300 cycles of 2 s).
+# Used by `capture.py --dry-run` and `test_metrics.py`. Bucket boundaries are prometheus_client's defaults.
+# HELP og_control_tick_duration_seconds Per-phase and total real-time control-cycle latency.
+# TYPE og_control_tick_duration_seconds histogram
+og_control_tick_duration_seconds_bucket{le="0.005",phase="total"} 0.0
+og_control_tick_duration_seconds_bucket{le="0.01",phase="total"} 0.0
+og_control_tick_duration_seconds_bucket{le="0.025",phase="total"} 0.0
+og_control_tick_duration_seconds_bucket{le="0.05",phase="total"} 30.0
+og_control_tick_duration_seconds_bucket{le="0.075",phase="total"} 90.0
+og_control_tick_duration_seconds_bucket{le="0.1",phase="total"} 150.0
+og_control_tick_duration_seconds_bucket{le="0.25",phase="total"} 285.0
+og_control_tick_duration_seconds_bucket{le="0.5",phase="total"} 299.0
+og_control_tick_duration_seconds_bucket{le="0.75",phase="total"} 300.0
+og_control_tick_duration_seconds_bucket{le="1.0",phase="total"} 300.0
+og_control_tick_duration_seconds_bucket{le="2.5",phase="total"} 300.0
+og_control_tick_duration_seconds_bucket{le="5.0",phase="total"} 300.0
+og_control_tick_duration_seconds_bucket{le="7.5",phase="total"} 300.0
+og_control_tick_duration_seconds_bucket{le="10.0",phase="total"} 300.0
+og_control_tick_duration_seconds_bucket{le="+Inf",phase="total"} 300.0
+og_control_tick_duration_seconds_count{phase="total"} 300.0
+og_control_tick_duration_seconds_sum{phase="total"} 36.5
+og_control_tick_duration_seconds_bucket{le="0.005",phase="allocate"} 60.0
+og_control_tick_duration_seconds_bucket{le="0.01",phase="allocate"} 200.0
+og_control_tick_duration_seconds_bucket{le="0.025",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="0.05",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="0.075",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="0.1",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="0.25",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="0.5",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="0.75",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="1.0",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="2.5",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="5.0",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="7.5",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="10.0",phase="allocate"} 300.0
+og_control_tick_duration_seconds_bucket{le="+Inf",phase="allocate"} 300.0
+og_control_tick_duration_seconds_count{phase="allocate"} 300.0
+og_control_tick_duration_seconds_sum{phase="allocate"} 3.1
+# HELP og_control_ticks_total Real-time control-cycle count.
+# TYPE og_control_ticks_total counter
+og_control_ticks_total{outcome="on_time"} 299.0
+og_control_ticks_total{outcome="late"} 1.0
+# HELP og_eventloop_lag_seconds asyncio event-loop scheduling lag.
+# TYPE og_eventloop_lag_seconds histogram
+og_eventloop_lag_seconds_bucket{le="0.005",process="engine"} 5400.0
+og_eventloop_lag_seconds_bucket{le="0.01",process="engine"} 5900.0
+og_eventloop_lag_seconds_bucket{le="0.025",process="engine"} 5990.0
+og_eventloop_lag_seconds_bucket{le="0.05",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="0.075",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="0.1",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="0.25",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="0.5",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="0.75",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="1.0",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="2.5",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="5.0",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="7.5",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="10.0",process="engine"} 6000.0
+og_eventloop_lag_seconds_bucket{le="+Inf",process="engine"} 6000.0
+og_eventloop_lag_seconds_count{process="engine"} 6000.0
+og_eventloop_lag_seconds_sum{process="engine"} 18.2
+# HELP og_hubs Current hub count per health state.
+# TYPE og_hubs gauge
+og_hubs{health="online"} 1987.0
+og_hubs{health="stale"} 9.0
+og_hubs{health="offline"} 4.0
+og_hubs{health="fault"} 0.0
+# HELP og_telemetry_fresh_ratio Fraction of hubs with telemetry no older than 2x the telemetry interval.
+# TYPE og_telemetry_fresh_ratio gauge
+og_telemetry_fresh_ratio{zone="LZ_NORTH"} 0.994
+og_telemetry_fresh_ratio{zone="LZ_SOUTH"} 0.992
+og_telemetry_fresh_ratio{zone="LZ_HOUSTON"} 0.996
+og_telemetry_fresh_ratio{zone="LZ_WEST"} 0.99
+# HELP og_reserve_breaches_total Count of reserve-floor breaches (K1). Must stay 0 (A10).
+# TYPE og_reserve_breaches_total counter
+og_reserve_breaches_total 0.0
+# HELP og_double_sold_kwh_total kWh sold twice across obligations (K2 violation). Must stay 0 (A10).
+# TYPE og_double_sold_kwh_total counter
+og_double_sold_kwh_total 0.0
+# HELP og_process_up 1 if the process's heartbeat is current, else 0.
+# TYPE og_process_up gauge
+og_process_up{process="engine"} 1.0
