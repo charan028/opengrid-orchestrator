@@ -487,7 +487,12 @@ async def dispatch_page(
         agg = await get_json("/og/api/dispatch/ledger", params={"level": scope["level"], "id": scope["id"]})
         if isinstance(agg, dict) and "reservations" in agg:
             reservations = agg.get("reservations", [])
-            bank_capacity_kw = float(agg.get("capacity_kw", agg.get("bank_capacity_kw", 0.0)))
+            # `dict.get(key, default)` does not fall back when the key is present and null, which is
+            # exactly what the API sends for an unknown capacity -- `float(None)` would 500 the page.
+            raw_capacity = agg.get("capacity_kw")
+            if raw_capacity is None:
+                raw_capacity = agg.get("bank_capacity_kw")
+            bank_capacity_kw = float(raw_capacity) if raw_capacity is not None else 0.0
             aggregate_loaded = True
     except ApiUnavailable as exc:
         if exc.status_code not in (404, 405):

@@ -77,7 +77,9 @@ def test_ledger_timeline_view_builds_stacked_series_plus_headroom() -> None:
     assert view["obligation_count"] == 2
     intervals = view["chart_option"]["xAxis"]["data"]
     assert intervals == ["2026-09-25T18:00:00+00:00", "2026-09-25T18:15:00+00:00"]
-    headroom_series = next(s for s in view["chart_option"]["series"] if s["name"] == "uncommitted capacity (kW)")
+    headroom_series = next(
+        s for s in view["chart_option"]["series"] if s["name"] == "uncommitted capacity (kW)"
+    )
     # First interval: 40 + 8 = 48 committed of 500 kW bank capacity.
     assert headroom_series["data"][0] == 452.0
 
