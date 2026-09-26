@@ -71,3 +71,14 @@ def test_ui_route_binds_remote_user_for_its_api_calls(monkeypatch: pytest.Monkey
     client = TestClient(app)
     assert client.get("/og/health", headers={"X-Remote-User": "operator"}).status_code == 200
     assert seen and seen[0] == "operator"
+
+
+def test_status_badge_shows_the_status_when_no_label_is_given() -> None:
+    """Live run: every badge rendered without an explicit label read "None" (Jinja's `default` only
+    replaces undefined, not None)."""
+    from opengrid.ui.render import render_status_badge
+
+    html = render_status_badge("GOOD")
+    assert ">GOOD<" in html and "None" not in html
+    assert ">stale<" in render_status_badge("stale", label=None)
+    assert ">PASS<" in render_status_badge("ok", label="PASS")

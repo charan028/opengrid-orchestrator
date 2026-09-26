@@ -11,5 +11,5 @@
     {%- else -%}&ndash;
     {%- endif -%}
   </span>
-  <span class="status-text">{{ label|default(status) }}</span>
+  <span class="status-text">{{ label if label else status }}</span>
 </span>
