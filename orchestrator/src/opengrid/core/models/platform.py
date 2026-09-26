@@ -24,6 +24,9 @@ class Hub(_Row):
     eta_d: float = 0.9487
     lat: float | None = None
     lon: float | None = None
+    units: Literal[1, 2] = 1
+    """Battery units in the home (migration 0032's `og.hub.units`): 2 for a dual-unit home, else 1. The
+    guardian's G-02 cap is 11 kW per unit and 20 kW for a dual-unit home, so the seed writes it explicitly."""
 
 
 class Bank(_Row):

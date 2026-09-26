@@ -656,3 +656,26 @@ async def test_seed_writes_the_feeder_id():
 
     bank_params = [params for sql, params in cursor.executed if sql.strip().startswith("INSERT INTO og.bank")]
     assert [p["feeder_id"] for p in bank_params] == ["feeder-LZ_NORTH-00", "feeder-LZ_NORTH-00"]
+
+
+async def test_seed_writes_hub_units_explicitly_2_for_dual_unit_else_1():
+    """#30: og.hub.units (migration 0032) is written by the seed, never left to the e_kwh-derived insert
+    trigger -- the guardian's G-02 cap is 11 kW per unit and 20 kW for a dual-unit home."""
+    config = SimFleetTopologyConfig(hub_count=200, bank_count=40)
+    topology = build_topology(config)
+    for hub in topology.hubs:
+        dual = hub.e_kwh == config.e_kwh_dual_unit
+        assert hub.units == (2 if dual else 1)
+        assert hub.p_kw == (config.p_kw_dual_unit if dual else config.p_kw_default)
+    assert {h.units for h in topology.hubs} == {1, 2}
+
+    cursor = FakeCursor()
+    await seed_topology(FakePool(cursor), topology)
+    hub_rows = [
+        (sql, params) for sql, params in cursor.executed if sql.strip().startswith("INSERT INTO og.hub")
+    ]
+    assert len(hub_rows) == len(topology.hubs)
+    assert all("units = EXCLUDED.units" in sql for sql, _ in hub_rows)
+    by_id = {h.hub_id: h for h in topology.hubs}
+    for _sql, params in hub_rows:
+        assert params["units"] == by_id[params["hub_id"]].units
