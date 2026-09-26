@@ -30,7 +30,7 @@ Accounts (Apache Basic Auth; passwords are in the lead's credentials file, never
 | `operator` | operator | Everything on the console, except completing a safe-stop release (the guardian signs a release only for the named operators below) |
 | `og-op-a`, `og-op-b` | operator | Everything, including the two-person release: one requests, the other approves |
 | `viewer` | viewer | Read every screen; no write panel is shown, and every write is refused (403) |
-| `og-cust-*` (`dc`, `pipe`, `ercot`, `dist`, `partner`) | customer | The customer API only (`/og/api/customer/`); not the console. **Known gap:** no customer API is served in this release |
+| `og-cust-*` (`dc`, `pipe`, `ercot`, `dist`, `partner`, `pjm`, `mobile`, `largeld`) | customer | The customer API only (`/og/api/customer/`); not the console. **Switched off in this release:** og-api serves the customer API only when `[api.customer_api] enabled = true`, and the shipped config sets `false` |
 | `tester` | control plane | The simulator control plane at `/ogsim/` |
 
 How identity works: Apache authenticates you and forwards your account name to og-api together with a
@@ -88,7 +88,7 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
 | Fleet | `/og/fleet` | at load | The hubs; safe stop, release, manual and bulk commands |
 | Dispatch | `/og/dispatch` | live (2 s) for the pipeline cards; the rest at load | Customers, commitments, the ledger, AS awards |
 | Markets | `/og/markets` | poll 30 s | Prices per zone, feeds and their health, forecast |
-| System Health | `/og/health` | live (2 s) | Processes, feeds, hubs, alerts, degraded modes |
+| System Health | `/og/health` | live (2 s) for the banner, hub health and alerts; processes and feeds at load | Processes, feeds, hubs, alerts, degraded modes |
 | Power quality | `/og/pq` | at load | One hub's power quality, calibration, work orders |
 | Profitability | `/og/profitability` | poll 30 s | Money: per interval, per contract, per kW |
 | Billing & audit | `/og/billing` | at load | Invoice lines, M&V, the trace and its verification |
@@ -115,7 +115,8 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
   **kWh sold twice** are running totals since the invariant checks started, not today's, so "promises broken
   today" is really "ever" (and "kWh sold twice" also rises when hubs lose capacity under future
   reservations). The tiles' age badges turn "stale" about 10 s after load although four of them keep updating;
-  the banner, escalations and alert list reflect page load (System Health is live).
+  the banner, escalations and alert list reflect page load (the control-room stream does not carry the degraded
+  modes; System Health's banner and alerts are live).
 
 ### 3.2 Fleet (`/og/fleet`)
 
@@ -127,8 +128,9 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
   bank, zone, health, SoC, power, lease epoch, lease expiry, last command.
 - Operator panels: **Scoped safe stop**, **Release a safe stop (two operators)**, **Manual command**,
   **Command the selection** (section 6).
-- **Known gaps:** the table and map show at most the first 200 hubs by id, so filter by zone or bank on the
-  2,000-hub server; the table does not update live (reload).
+- **Known gaps:** the Hubs table shows at most the first 200 hubs by id, so filter by zone or bank on the
+  2,000-hub server, and it does not update live (reload). The map draws every hub that matches the Zone and Bank
+  filters; it ignores the Health filter.
 
 ### 3.3 Dispatch (`/og/dispatch`)
 
@@ -137,7 +139,9 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
   "Fulfilled / shortfall". Each card: obligation, service · tier · kW, customer, and for committed ones the
   energy margin and time to depletion, plus one sentence on the decision ("Locked: this promise is kept even
   if a better price appears (K13)" for a commitment). An amber border means AT_RISK.
-- **AS awards & deployment:** ERCOT ancillary-service awards, held or deployed (section 6.5).
+- **AS awards & deployment:** ERCOT ancillary-service awards, held or deployed (section 6.5). The table lists
+  every ERCOT_AS obligation, up to 500, in any state: an expired or fulfilled award also reads `held` with a
+  **Deploy** button, which og-api refuses ("award is ..., not deployable").
 - **Ledger timeline:** committed capacity per obligation stacked over time, with the uncommitted capacity on
   top, for the chosen scope. New opportunities can only take the uncommitted part.
 - **Latest selector plan:** mode ("LP optimizer" or "Rule-based fallback"), gate, horizon, solver status, gap,
@@ -149,8 +153,9 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
   shortfall is in the trace (section 7.3).
 - **Real-time grants & substitutions:** the latest grants for the first bank in scope, with kind headroom,
   commitment or substitution (a delivery moved to other hubs).
-- **Known gap:** a card in SHORTFALL sits under "Fulfilled / shortfall" with "Delivered short; penalty
-  applies" while it is still delivering on best effort (section 7.3).
+- **Known gaps:** a card in SHORTFALL sits under "Fulfilled / shortfall" with "Delivered short; penalty
+  applies" while it is still delivering on best effort, and after a utility (L2) instruction is lifted og-engine
+  keeps applying it (section 7.3).
 
 ### 3.4 Markets (`/og/markets`)
 
@@ -158,8 +163,9 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
   **Wind (MW)**, **Solar (MW)**, **AS price ($/MW)** (RRS). Each bank is dispatched and settled at its own load
   zone's price (decision D-10), never at a hub price.
 - **Forecast band (P10 / P50 / P90)** for `LZ_NORTH`.
-- **Bid funnel:** what ERCOT made available, what we submitted, won and had rejected, with reasons; it says "No
-  bid funnel yet" until the market adapter reports it.
+- **Bid funnel:** what ERCOT made available, what we submitted, won and had rejected, with reasons. It is derived
+  from the opportunity pipeline, so it fills as soon as offers exist; the market-submission part is empty until
+  a market adapter reports it.
 - **Freshness & source status:** per feed its mode (`LIVE`, `SIM` for the simulator, `HIST` for a replay), age,
   consecutive failures and circuit breaker (`closed`, or `OPEN` in red).
 
@@ -168,13 +174,14 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
 - **Degraded-mode banner** and **Guardian escalations** (section 7).
 - **Processes:** each process and the time of its last heartbeat. A missing heartbeat raises
   `ALR-PROCESS-DOWN` (critical) within 15 s. **Known gap:** the Status column reads `ok` even for a stopped
-  process; trust the alert and the Since time. The simulators are not in this list (`ALR-SIM-OFFLINE` covers
-  them).
-- **Feed freshness:** per feed, its quality and age. STALE shows only while the feed's breaker is open; a feed
-  that is merely old shows GOOD with a large age, while the banner already says "Feed stale".
+  process, and the table (with its Since time) reflects page load; trust the alert, or reload. The simulators
+  are not in this list (`ALR-SIM-OFFLINE` covers them).
+- **Feed freshness** (at load): per feed, its quality and age. STALE shows only while the feed's breaker is open;
+  a feed that is merely old shows GOOD with a large age, while the banner already says "Feed stale".
 - **Hub health:** how many hubs are online, stale, offline or in fault.
-- **Cycle latency (p50/p99):** empty in this release ("og-engine exports no metrics" to this panel); the
-  engine's own `/metrics` is on the server's loopback (`127.0.0.1:9101`).
+- **Cycle latency (p50/p99):** always empty: the panel is not wired to any data (its note says "og-engine
+  exports no metrics"). og-engine does export `/metrics` on the server's loopback (`127.0.0.1:9101`), and the
+  health evaluator reads it for `ALR-CYCLE-P99`.
 - **Alerts:** live list of open alerts; operators acknowledge by id (section 6.8). Every rule is in section 8.
 
 ### 3.6 Power quality & assets (`/og/pq`)
@@ -186,9 +193,8 @@ Enter a hub id and **Show**. Without one it opens the hub of the first open work
   health** (state and history) and **Calibration history** (with the guardian's G-25 decision).
 - Operator actions: **Request raw capture (step 1 of 2)** and **Request calibration (step 1 of 2)** (section
   6.7).
-- A missing measurement is never shown as compliant.
-- **Known gap:** the power-quality API is on a separate branch; until it is in the release every panel shows
-  its empty state.
+- A missing measurement is never shown as compliant. A panel is empty only when that hub has no data of that
+  kind; with `[assets] drift_enabled = false` there may be no open work order, so enter a hub id.
 
 ### 3.7 Profitability (`/og/profitability`)
 
@@ -197,7 +203,10 @@ Filters: customer, contract, service, day (market-local, CT).
 - Totals: Revenue, Energy cost, Degradation, Penalty, Net margin, **Forgone upside (lock)** (the value the
   fleet chose not to chase because it kept its commitments).
 - **Economics per kW (annualised):** $/kW-in, $/kW-out, net and payback per scope (fleet, regulated market,
-  free market, contract), against the 3-year target.
+  free market, contract), against the 3-year target. Operators only: a viewer sees "Operator role required for
+  the $/kW view."
+- **LP value added (latest selector gate):** **known gap:** always reads "The LP value-added view is not
+  available on this deployment yet." (its API is not served in this release).
 - **Net by contract**, **Net by day**, **Per settled interval** (one row per obligation-interval; superseded
   rows struck through and left out of totals) and **LP vs rule baseline**.
 
@@ -209,8 +218,11 @@ Filters: customer, contract, service, day (market-local, CT).
 - **Trace explorer:** every recorded decision (trace id, decision type, class, stream, sequence, reason
   codes), filterable by class and time.
 - **Run chain verify:** checks the hash chain of every trace stream (section 6.9).
-- **Known gaps:** **Export CSV** fails unless both dates are plain dates, and **Run chain verify** reports FAIL
-  because it does not forward your identity; use the API calls in section 6.9 meanwhile.
+- **Export CSV** always sends plain dates: a blank From/To means the 1st of this month to today (CT). An export
+  includes lines up to the To date only, so set To to tomorrow to include today's lines.
+- **Known gap:** **Run chain verify** reports FAIL from an unfiltered page (the empty From/To are refused). Set
+  both From and To in the header filter first (every stream is verified whatever the filter), or use the API
+  call in section 6.9.
 
 ## 4. Commitments, in one page
 
@@ -224,7 +236,8 @@ Filters: customer, contract, service, day (market-local, CT).
   reserved maximum when the measured need is lower (reason `R-GRANT-CLOSED-LOOP`); the unused reservation stays
   locked for that customer and is never resold. The guardian checks this (G-19) and settlement pays the full
   reservation when the measured need was met. **Not active in this release:** those contracts' admission is
-  off (`[contracts.activation] data_center = false`) and the allocator does not emit the reason yet.
+  off (`[contracts.activation] data_center = false`), and the closed-loop control that grants
+  `R-GRANT-CLOSED-LOOP` is off (`[allocator.closed_loop] enabled = false`, `[site_ingest] enabled = false`).
 - **AS awards** are held at 0 kW until deployed (section 6.5).
 - **Energy counts, not only power:** every 2 s the engine checks that the committed hubs hold enough energy
   above their homes' reserve for the rest of the window. A commitment short of energy turns AT_RISK (amber)
@@ -248,9 +261,8 @@ Filters: customer, contract, service, day (market-local, CT).
   scope. A refusal leaves the stop engaged; the operators must request and approve again after fixing the
   cause. The reason is in the trace (Billing & audit, class `GUARDIAN_VERDICT`, outcome REFUSED) and in the
   guardian's log.
-- **In the simulator:** stopped hubs drop toward 0 kW. **Known gap:** a hub commanded above about half its
-  rating holds a reduced setpoint until its lease lapses (up to about 35 s). The `[safestop] ramp_*_s` settings
-  are not used by any code.
+- **In the simulator:** stopped hubs ramp to 0 kW within about 4 s (the simulator's own `stop_ramp_s`). The
+  `[safestop] ramp_bank_s`, `ramp_zone_s` and `ramp_fleet_s` settings are reserved and not read by any code.
 
 ## 6. Actions
 
@@ -269,7 +281,7 @@ failure at step 1 shows **UNAVAILABLE** with the reason.
 |---|---|---|---|---|
 | Manual command | Fleet, "Manual command" | Propose (step 1 of 2) | Send command | 60 s |
 | Bulk command | Fleet, "Command the selection" | Propose for selection (step 1 of 2) | Send to selection | 60 s |
-| Safe stop | Fleet, "Scoped safe stop" | Propose safe stop (step 1 of 2) | Engage safe stop | **30 s** (see 6.3) |
+| Safe stop | Fleet, "Scoped safe stop" | Propose safe stop (step 1 of 2) | Engage safe stop | 30 s |
 | Release request | Fleet, "Release a safe stop (two operators)" | Request release (operator 1) | none (the request itself) | 60 s for the approval |
 | Release approval | same panel | Review and approve (operator 2) | Approve release | until the request expires |
 | AS deployment | Dispatch, "AS awards & deployment" | Deploy / Propose deployment | Confirm deployment | none |
@@ -285,21 +297,19 @@ confirm.
 | Result | Meaning |
 |---|---|
 | **PASS** | The guardian signed it; it goes to the hub in a signed batch. "Command accepted. Trace ..." |
-| **VETOED** (critical) | The guardian refused it; the sentence lists the rule ids (for example G-02 hub power, G-04 hub ramp, G-19 commitment lock, G-01 reserve) |
-| **TIMEOUT** | No guardian verdict within the poll window (check og-guardian on System Health) |
+| **VETOED** (critical) | The guardian refused it: "Vetoed by guardian: G-02, ... Trace ...", with the rule ids (for example G-02 hub power, G-04 hub ramp, G-19 commitment lock, G-01 reserve, and since R2 the flow and territory checks G-26…G-33) |
+| **TIMEOUT** | No guardian verdict within the poll window (check og-guardian on System Health). A guardian TIMEOUT verdict shows the TIMEOUT badge with "Vetoed by guardian: no rule ids given." |
 | **EXPIRED** | The proposal expired, or the hub id is unknown. Propose again |
 | **FAILED** | Anything else, with the error |
-
-**Known gap:** a veto currently shows as **FAILED** with "409 Conflict" in the text instead of VETOED; read the
-rule ids in the trace (Billing & audit, class `GUARDIAN_VERDICT`).
 
 ### 6.3 Scoped safe stop
 
 Fields: Scope (Fleet, Zone, Bank), Scope id (the zone, e.g. `LZ_SOUTH`, or the bank, e.g. `bank-022`; empty for
 Fleet), Reason. Summary: "Engage safe stop on bank/bank-022 (reason)".
 
-- **Confirm within 30 s.** og-safestop keeps a proposal for 30 s. **Known gap:** the dialog counts down from 60 s;
-  a confirm after 30 s shows TIMEOUT and nothing stops. Propose again.
+- **Confirm within 30 s.** The dialog counts down from 30 s (og-safestop's `[safestop] confirm_window_s`) and
+  disables **Engage safe stop** at 0. A confirm that still arrives late is refused and shows FAILED; propose
+  again.
 - Results: **ENGAGED** (red, on purpose) "Safe stop engaged for bank/bank-022. Trace ..."; **TIMEOUT** (no
   confirmation from og-safestop: it is down, or its 30 s passed); **EXPIRED**; **FAILED**.
 - A zone or bank stop needs its id; with an empty id og-safestop ignores the request and the confirm times out.
@@ -315,7 +325,7 @@ Fleet), Reason. Summary: "Engage safe stop on bank/bank-022 (reason)".
 | Result | Meaning |
 |---|---|
 | **RELEASED** | The guardian signed the release and og-safestop relayed it: "Safe stop released for BANK:bank-022" |
-| **PENDING** | Approved, but the guardian has not released yet; it may still, or it refused (section 5). Check the trace |
+| **PENDING** | Approved, but the guardian has not signed within og-api's 10 s wait (the screen waits 15 s); it may still, or it refused (section 5). Check the bank on Fleet or the trace |
 | **REFUSED** | You requested it yourself: "The requesting operator cannot approve their own release." The request stays valid for the other operator |
 | **EXPIRED** | More than 60 s passed, or the id is unknown. Request again |
 | **FAILED** | Anything else |
@@ -323,8 +333,7 @@ Fleet), Reason. Summary: "Engage safe stop on bank/bank-022 (reason)".
 The shared `operator` account can request and approve through the API, but the guardian refuses it
 (`OPERATOR_NOT_AUTHORISED`); use og-op-a and og-op-b.
 
-**Known gap:** an approval the guardian takes more than 5 s to sign shows FAILED although it may still land; check
-the bank on Fleet, or approve with the API (operator 2's account), which waits up to 10 s:
+Operator 2 can also approve from a shell:
 
 ```bash
 curl -s -u og-op-b:... -X POST https://base.tocy-net.net/og/api/safestop/release/<request id>/approve
@@ -347,9 +356,13 @@ curl -s -u og-op-b:... -X POST https://base.tocy-net.net/og/api/safestop/release
 - **End early:** **Stop deploy** → **Stop deployment**: "Deployment `<id>` stopped."; the award returns to a 0 kW
   hold on the next cycle. A deployment also ends at its end time.
 - Every deploy and stop is traced (`AS_DEPLOYMENT`, `AS_DEPLOYMENT_END`).
-- **Known gaps:** the form also offers "all held AS awards", and the duration bound is one global 1-240 min
-  rather than the product's own window: deploy one award at a time, for no longer than its product. The row may
-  read `ERCOT_AS · 4h` for an ECRS award; its energy hold is ECRS's 1 h.
+- **The Product column** reads `ECRS · 1 h hold` (Non-Spin `· 4 h hold`); an award whose product is unknown shows
+  `ERCOT_AS` with no hold. **Energy held** reads `-- / N kWh` (only the requirement is shown).
+- **Known gaps:** the Deploy selector still lists "all held AS awards" and the form accepts 1-240 min, but og-api
+  refuses a deployment without an award, and one longer than the award's product (ECRS 60 min, Non-Spin
+  240 min); the result line then shows a raw 422 or 409 error. Deploy one award at a time, within its product.
+  og-api accepts a second deployment of an award that is already deployed, so never chain deployments past the
+  product's window: the energy hold covers one product duration.
 
 ### 6.6 Bulk command (a selection of hubs)
 
@@ -362,7 +375,8 @@ Reason → **Propose for selection (step 1 of 2)** → **Send to selection**.
   ("Confirm again and send to the selection").
 - Results: **PASS** (every hub passed the guardian) or **PARTIAL** ("P of N hubs passed ..." with each refused
   hub and its rule ids), **TIMEOUT**, **EXPIRED**, **FAILED**.
-- The guardian checks and signs every hub's command; a selection never bypasses it.
+- The guardian checks and signs every hub's command; a selection never bypasses it. At most 500 hubs per bulk
+  command (a larger selection is refused).
 
 ### 6.7 Power-quality actions
 
@@ -382,7 +396,7 @@ alert. An alert clears by itself when its condition ends.
 - Every decision (dispatch, verdicts, operator actions, alerts) is hash-chained per stream. Chain verify
   re-checks every stream: `passed: true` and `first_broken: null` mean nothing was edited or removed; a failure
   names the first broken stream and sequence.
-- **Known gap** (section 3.8) — until the buttons are fixed, from a shell:
+- If **Run chain verify** shows FAIL on an unfiltered page (section 3.8), or for the CSV, from a shell:
 
 ```bash
 curl -s -u viewer:... -X POST https://base.tocy-net.net/og/api/trace/verify -H 'Content-Type: application/json' -d '{}'
@@ -403,31 +417,41 @@ load). Several modes can be active together ("Feed stale + Guardian down").
 | Guardian down | `HOLD` | og-guardian's heartbeat is missing | og-guardian heartbeats again |
 | SCADA silent | `DIST_DEFERRAL_OPEN_LOOP` | A bank's SCADA stops reporting | SCADA reports again |
 
-- **Known gap:** in this release the modes are shown to the operator and recorded, but no code acts on the
-  mode itself. The engine does not refuse new commitments while a feed is stale. With the guardian down, the
-  engine's own heartbeat check makes it propose no batches (it holds) while it keeps allocating; with the
-  engine down there is nothing to sign. Either way the hubs hold their last setpoint for the lease plus hold
-  (about 35 s) and then serve their own homes. "SCADA silent" is never raised yet, and the DIST_DEFERRAL loop
-  keeps using the last SCADA reading.
-- Feed freshness windows (`orchestrator/config/orchestrator.toml` `[feeds.staleness]`): ERCOT price 600 s,
-  ERCOT load 1,800 s, wind and solar 10,800 s, NWS and EIA 10,800 s, AS prices 93,600 s (they post once a day).
+- **Feed stale is enforced.** While it lasts, og-engine skips intake (trace `INTAKE_SKIPPED`) and every selector
+  gate selects nothing new: offers stay OFFERED, and committed deliveries continue. An unreadable mode counts as
+  active. Contract admission (operator CRUD) is not blocked.
+- **The other modes are shown and recorded only.** With the guardian down, the engine's own heartbeat check makes
+  it propose no batches (it holds) while it keeps allocating; with the engine down there is nothing to sign.
+  Either way the hubs hold their last setpoint for the lease plus hold (about 35 s) and then serve their own
+  homes. **Known gap:** "SCADA silent" is never raised, and the DIST_DEFERRAL loop keeps using the last SCADA
+  reading.
+- Feed freshness windows (`orchestrator/config/orchestrator.toml` `[feeds.staleness]`): ERCOT price 2,700 s,
+  ERCOT load 172,800 s (48 h), wind and solar 10,800 s (including the regional solar feed `np4-745-cd`), NWS
+  10,800 s, EIA 10,800 s (counted only while the ERCOT load feed is stale), AS prices 93,600 s (they post once a
+  day).
+- **Watch the regional solar feed.** `np4-745-cd` is new in this release and polled by default. If its row never
+  gets a value, "Feed stale" stays on and nothing new is committed anywhere: tell the lead, who can switch that
+  feed off in configuration without a deploy.
 
 ### 7.2 Guardian escalation (K7)
 
 The guardian watches its own veto rate per bank and per zone, every 2 s tick:
 
-1. More than 5% of a scope's batches vetoed in a tick → the scope goes **CONSERVATIVE**:
-   `ALR-SCOPE-CONSERVATIVE`, shown as "Scope held conservative: BANK bank-012" under **Guardian escalations**.
-   The engine stops selling spot headroom there; committed deliveries continue.
-2. Three consecutive conservative ticks → `ALR-SAFE-STOP-REQUESTED`, "Guardian requests a safe stop", plus an
-   unconfirmed safe-stop proposal. Operators get **Review safe stop (two-step)**, which opens Fleet's "Scoped
-   safe stop" prefilled with the scope and "Guardian escalation: safe stop requested". **The guardian never
-   engages a stop itself:** a person reviews the scope and decides whether to propose and confirm.
-3. A tick with commands and at most 5% vetoed, or 30 ticks (about 60 s) with no commands, returns the scope to
-   normal and clears both alerts. The guardian's unconfirmed proposal stays behind in the operator-action log;
+1. More than 5% of a scope's commands vetoed in a tick (a bad tick) → the scope goes **CONSERVATIVE**:
+   `ALR-SCOPE-CONSERVATIVE`, shown under **Guardian escalations** as "Scope held conservative" with the scope
+   ("bank bank-012"). The engine stops selling spot headroom there; committed deliveries continue. Each bad tick
+   raises the scope's escalation count by one.
+2. An escalation count of 3 → `ALR-SAFE-STOP-REQUESTED`, "Guardian requests a safe stop", plus an unconfirmed
+   safe-stop proposal. Operators get **Review safe stop (two-step)**, which opens Fleet's "Scoped safe stop"
+   prefilled with the scope and "Guardian escalation: safe stop requested". **The guardian never engages a stop
+   itself:** a person reviews the scope and decides whether to propose and confirm.
+3. The scope returns to normal, and both alerts clear, after 3 consecutive good ticks (at most 2.5% vetoed), or
+   after 30 ticks (about 60 s) with no commands. A tick between 2.5% and 5% neither worsens nor recovers. After
+   clearing, the count drops by one per good tick instead of resetting, so a fault that comes back soon is
+   close to a stop request again. The guardian's unconfirmed proposal stays behind in the operator-action log;
    it is never acted on by itself. **Known gap:** the posture is held in the guardian's memory, so after an
-   og-guardian restart a scope left CONSERVATIVE may stay so (no headroom sold there) until it goes conservative
-   and recovers again.
+   og-guardian restart a scope left CONSERVATIVE may stay so (no headroom sold there, both alerts open) until it
+   goes conservative and recovers again.
 
 A timeout is not a veto and a veto is not a stop (K7): a guardian that cannot answer in time degrades dispatch;
 it never trips the fleet. **Known gap:** Guardian escalations are drawn at page load; reload.
@@ -442,8 +466,9 @@ rest of its window, never 0 and never stopped, and the full commitment comes bac
 interval; it settles on what was actually delivered. The state stays SHORTFALL until the window closes. Find it
 in the trace: stream `shortfall-<obligation id>` (class `ALLOCATOR_SHORTFALL`) and the obligation's own stream
 (`AT_RISK`, `AT_RISK_CLEARED`, the SHORTFALL transition). **Known gaps:** the card shows "Delivered short; penalty
-applies" while delivery continues, and the return to the full commitment after the cause is lifted is an open
-defect.
+applies" while delivery continues; and after a utility (L2) instruction is lifted, og-engine keeps applying it,
+so that bank stays at the best-effort remainder until the window closes (a defect routed for fixing). Watch
+"Real-time grants & substitutions", not the card.
 
 ## 8. Alerts
 
@@ -458,14 +483,14 @@ alert is raised or cleared and the degraded modes freeze.
 |---|---|---|---|
 | `ALR-PROCESS-DOWN` | critical | A process's heartbeat (feeds, engine, guardian, safestop, api) is missing for more than 15 s. "Process {name} heartbeat missing" | When it heartbeats again |
 | `ALR-SIM-OFFLINE` | critical | No fleet telemetry and no SCADA reading reached the database for 60 s. The engine writes both, so an og-engine outage also raises it | When readings arrive again |
-| `ALR-FEED-STALE` | warning | A feed's latest value is older than its freshness window (section 7.1). "Feed ERCOT:np6-905-cd stale for over 600s" | When the feed is fresh again |
+| `ALR-FEED-STALE` | warning | A feed's latest value is older than its freshness window (section 7.1). "Feed ERCOT:np6-905-cd stale for over 2700s" | When the feed is fresh again |
 | `ALR-FEED-LGV-EXHAUSTED` | critical | A feed's circuit breaker is open (5 consecutive failures, or half of the last 10 polls) | When the breaker closes |
 | `ALR-HUB-OFFLINE-RATIO` | warning / critical | Offline plus fault hubs in a zone exceed 5% (warning) or 20% (critical). A hub is offline after 30 s without telemetry | When the ratio is 5% or less |
 | `ALR-SCADA-OVERLOAD` | warning / critical | A bank's latest SCADA apparent power exceeds its kVA rating (warning) or 120% of it (critical) | When the reading is at or under the rating |
 | `ALR-ENERGY-SHORTFALL-RISK` | critical | A committed, delivering or shortfall obligation starting within 15 min lacks the energy above reserve to finish its window (for an AS award: its full product duration). The card turns AT_RISK | og-engine clears it when the obligation is no longer at risk |
 | `ALR-RESERVE-BREACH` | critical | The K1 check has recorded any home discharging below its reserve | Only when the count is 0; **known gap:** the count is a running total, so once raised it stays |
-| `ALR-CYCLE-P99`, `ALR-CYCLE-P99-APPROACHING` | warning | The engine's 2 s cycle p99 is over its 500 ms budget for 3 reads, or within 80-100% of it | When it is back under. Needs the engine's metrics address in `[health]` |
-| `ALR-GUARDIAN-TIMEOUT-RATE` | critical | More than 1% of guardian verdicts time out. **Known gap:** never raised with the shipped config (`[health] guardian_metrics_url` is not set) | When the rate drops |
+| `ALR-CYCLE-P99`, `ALR-CYCLE-P99-APPROACHING` | warning | The engine's 2 s cycle p99 is over its 500 ms budget for 3 reads, or within 80-100% of it. Active: `[health] engine_metrics_url` is set | When it is back under |
+| `ALR-GUARDIAN-TIMEOUT-RATE` | critical | More than 1% of guardian verdicts time out. **Known gap:** never raised with the shipped config: `[health] guardian_metrics_url` is not set (og-guardian serves `127.0.0.1:9103/metrics`) | When the rate drops |
 | `ALR-SELECTOR-GATE-FAILED` | warning | A selector gate failed, including a solver timeout. "Selector gate {kind} failed (...)"; each failure adds a row | og-engine clears it when the same gate next succeeds |
 | `ALR-OBLIGATION-STUCK-SELECTED` | critical | An obligation stayed SELECTED for more than 120 s and could be neither committed nor rejected | When it is no longer stuck |
 | `ALR-SETTLE-STALLED` | critical | og-settle's settlement job has not completed for more than 180 s | og-settle clears it when the job succeeds |
@@ -475,6 +500,8 @@ alert is raised or cleared and the degraded modes freeze.
 | `ALR-CLOCK-QUALITY` | critical | The guardian's clock is more than 200 ms off NTP (G-20). While it lasts, every verdict is TIMEOUT and nothing is signed | og-guardian clears it when the clock is back in limit |
 | `ALR-CALIBRATION-BUDGET` | warning | The guardian held a remote calibration (fleet budget, concurrency or suspected systemic drift, G-25). Dormant while `[assets] drift_enabled = false` | No automatic clear |
 | `ALR-CALIBRATION-PROTOCOL` | warning | A calibration acknowledgement did not match the issued command, or the hub rejected it. Dormant like the above | No automatic clear |
+| `ALR-XFMR-UNMAPPED` | warning | og-guardian checked a batch with a hub that has no service-transformer mapping, so G-27 checks it as a group of one. Every hub today: expect one open row per bank the guardian commands, all with the same summary | No automatic clear |
+| `ALR-TRACE-VERDICT-WRITE-FAILED` | warning | A verdict's `GUARDIAN_VERDICT` trace row could not be written (the verdict stands; the audit row is missing) | No automatic clear |
 
 An open alert keeps the severity it opened with: a zone that goes from 6% to 25% offline stays a warning until
 it clears and re-opens.
@@ -483,14 +510,12 @@ it clears and re-opens.
 
 | Gap | What to do meanwhile |
 |---|---|
-| Safe-stop dialog counts down from 60 s; og-safestop's window is 30 s | Confirm within 30 s |
-| A release the guardian signs slowly (over 5 s) shows FAILED | Check the scope on Fleet, or approve with the API (6.4) |
-| A guardian veto shows FAILED instead of VETOED | Read the rule ids in the trace |
-| Run chain verify reports FAIL; Export CSV fails | Use the API calls in 6.9 |
-| Fleet table and map show at most 200 hubs; no live table updates | Filter by zone or bank; reload |
-| AS deploy form offers "all awards"; one global 1-240 min bound; ECRS shown as 4 h | Deploy one award, within its product's window |
-| Degraded modes are shown but not enforced; "SCADA silent" never raised | Treat the banner as a call to act (7.1) |
-| Escalations, Control-room banner and alerts reflect page load | Reload; System Health is live |
-| Best-effort shortfall is labelled "Delivered short"; the full commitment does not come back | Watch the grants, not the card |
-| Simulator stop ramp: some hubs hold a reduced setpoint until the lease lapses | Expect up to about 35 s to reach 0 kW |
-| Power-quality, $/kW, bid funnel, fleet-map and bulk-command APIs | Present only when the release includes them; panels show an empty state otherwise |
+| Run chain verify reports FAIL from an unfiltered page | Set From and To first, or use the API call in 6.9 |
+| Fleet table shows at most 200 hubs and does not update live | Filter by zone or bank; reload |
+| AS deploy form offers "all held AS awards" and 1-240 min; og-api refuses both beyond one award and its product | Deploy one award, within its product's window; never chain deployments |
+| Only Feed stale is enforced; "SCADA silent" is never raised | Treat the other banners as a call to act (7.1) |
+| A stale regional solar feed (`np4-745-cd`) keeps Feed stale on | Tell the lead (7.1) |
+| Escalations, Control-room banner and alerts reflect page load | Reload; System Health's banner and alerts are live |
+| Best-effort shortfall is labelled "Delivered short"; after a lifted L2 instruction the full commitment does not come back | Watch the grants, not the card |
+| One permanent `ALR-XFMR-UNMAPPED` warning per bank | Expected until transformers are mapped; acknowledge |
+| Profitability's "LP value added" panel is never available | Use "LP vs rule baseline" |

@@ -5,10 +5,15 @@ injected moment is a scenario or anomaly on the simulator control plane (`/ogsim
 The operator guide (`docs/operator/README.md`) explains each screen and action in depth; this document only
 says what to do, where to look, and what must happen.
 
-What changed since DEMO-1 (R1.6): the two-person safe-stop release is built (steps 19-20), ERCOT AS awards are
-held and deployed by an operator (steps 9-10), the guardian escalates on repeated vetoes (steps 15-16), the
-degraded-mode banner is on screen (step 18), a lost delivery continues on best effort (step 14), and prices
-are per load zone (step 2). Screens were renamed: Health is now **System Health**.
+What changed since DEMO-1 (R1.6):
+- the two-person safe-stop release is built (steps 19-20);
+- ERCOT AS awards are held, and deployed by an operator (steps 9-10);
+- the guardian escalates on repeated vetoes (steps 15-16);
+- a stale feed stops new commitments and shows a banner (step 18);
+- a lost delivery continues on best effort (step 14);
+- prices are per load zone (step 2).
+
+The Health screen is now called **System Health**.
 
 ## Step markers
 
@@ -87,7 +92,8 @@ the id you `DELETE` to end a moment early.
    `{"active": []}`. A restart of `og-sim-control` un-pauses random mode again; pause it after any restart.
 2. **All processes up.** Open **System Health**: every process in the Processes table has a heartbeat time from
    the last few seconds (the Status column always reads `ok`, so read the time), no `ALR-PROCESS-DOWN`, no
-   degraded-mode banner, and no open critical alert.
+   degraded-mode banner, and no open critical alert. One `ALR-XFMR-UNMAPPED` warning per commanded bank is
+   expected in this release (no hub has a service-transformer mapping yet).
 3. **Customers committed: run the demo seed.** `python dev/scripts/seed_demo_customers.py` offers the three
    seeded demo contracts (ERCOT_ENERGY, DIST_DEFERRAL, PARTNER_CAPACITY) for a one-hour window starting at the
    quarter hour after next, through the real admission path, and waits until the selector has committed them.
@@ -131,9 +137,10 @@ Timing is the budget per step; the total is about 15 minutes.
   "Forecast band (P10 / P50 / P90)".
 - **Expect:** One price line per ERCOT load zone; each bank is dispatched and settled at its own zone's price,
   never at a hub price (decision D-10). Freshness rows for `np6-905-cd` (price), `np6-345-cd` (load),
-  `np4-732-cd` (wind), `np4-737-cd` (solar), `np4-188-cd` (AS), EIA and NWS, each `LIVE` (or `SIM` when feeds
-  read the simulator), failures `0`, breaker `closed`. The forecast band is drawn ahead of now for `LZ_NORTH`.
-  The "Bid funnel" panel may say "No bid funnel yet" until its API is on the release.
+  `np4-732-cd` (wind), `np4-737-cd` (solar), `np4-745-cd` (solar by region, new in R2), `np4-188-cd` (AS), EIA
+  and NWS, each `LIVE` (or `SIM` when feeds read the simulator), failures `0`, breaker `closed`. The forecast
+  band is drawn ahead of now for `LZ_NORTH`. The "Bid funnel" is derived from the pipeline, so it shows the
+  demo offers.
 
 ### Topic 2: the fleet
 
@@ -142,8 +149,8 @@ Timing is the budget per step; the total is about 15 minutes.
 - **Show:** The Fleet map and the Hubs table; the operator panels.
 - **Expect:** Filtered, exactly 50 hubs (`$HUB` and every 40th hub id after it), `online`, age a few seconds.
   og-op-a sees "Scoped safe stop", "Release a safe stop (two operators)", "Manual command" and "Command the
-  selection"; the viewer sees none of them. Unfiltered, the table and map show the first 200 hubs only (a known
-  cap of this release), so always filter by zone or bank.
+  selection"; the viewer sees none of them. Unfiltered, the Hubs table shows the first 200 hubs only (a known
+  cap of this release; the map draws every hub), so filter by zone or bank.
 
 **Step 4: One hub up close** (30 s)
 - **Action:** Click the `$HUB` row (or Enter on it).
@@ -193,8 +200,7 @@ Timing is the budget per step; the total is about 15 minutes.
   sells, and keeps enough energy above the homes' reserve to run the whole product (ECRS 1 h, Non-Spin 4 h).
   The guardian independently signs a below-commitment hold only when its own reads show an ERCOT_AS award with
   no active deployment and an unused reservation (G-19).
-- **Known gap:** the row may read `ERCOT_AS · 4h` for the ECRS award (the API rows do not carry the product
-  yet); the energy hold behind it is ECRS's 1 h.
+- The Product column reads `ECRS · 1 h hold`; "Energy held" shows only the requirement (`-- / N kWh`).
 
 **Step 10 [JUDGES]: Deploy it** (60 s)
 - **Action:** Press **Deploy** on the award row (15 minutes). Read the summary in "Confirm ERCOT AS
@@ -204,8 +210,9 @@ Timing is the budget per step; the total is about 15 minutes.
   up to its committed kW like any committed delivery; when the deployment ends, or on **Stop deploy** →
   **Stop deployment**, it returns to a 0 kW hold on the next cycle. Every step is in the trace
   (`AS_DEPLOYMENT`, `AS_DEPLOYMENT_END`), step 23.
-- **Known gap:** the form's "Deploy" selector also offers "all held AS awards", and the duration bound is one
-  global 1-240 min rather than the product's own window; deploy the one award.
+- **Known gap:** the form's "Deploy" selector still offers "all held AS awards" and 1-240 min, and og-api
+  refuses both a deployment without an award and one longer than the product (ECRS: 60 min), with a raw error.
+  Use the row's **Deploy** button.
 
 ### Topic 6: a SCADA overload, DIST_DEFERRAL responds, an alert fires
 
@@ -226,6 +233,9 @@ skip to step 13.
 - **Expect:** The DIST_DEFERRAL grant on `$BANK` rises (more discharge to relieve the feeder segment) while
   every committed kW is unchanged. The alert clears when the anomaly ends (300 s), or now:
   `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`.
+- **Note:** after 3 overloaded readings the SCADA simulator also issues a LIMIT at 90% of the rating (540 kW) on
+  `$BANK` with no expiry, and in this release og-engine keeps applying it. `$BANK` stays capped at 540 kW for the
+  rest of the run, which does not affect the demo's 40-60 kW obligations.
 
 ### Topic 7: comms loss, substitution, then best effort
 
@@ -247,10 +257,14 @@ skip to step 13.
   hubs themselves serve their homes on local autonomy once their lease lapses. The zone returns at 240 s; to end now,
   `curl -u tester:... -X DELETE $SIM/api/anomalies/demo-03-zone-comms-loss:zone_mass_disconnect:90` (and
   `...:hub_offline:0`).
-- **Known gaps:** the card moves to "Fulfilled / shortfall" with the text "Delivered short; penalty applies"
-  although delivery continues; the "Commitment-lock events (K13)" table is not populated yet (use the trace);
-  and restoring the full commitment once capacity returns is an open defect (found with a lifted L2 block: the
-  delivery stays at the best-effort remainder). The state itself stays SHORTFALL until the window closes.
+- **Known gaps:**
+  - The card moves to "Fulfilled / shortfall" with the text "Delivered short; penalty applies", although
+    delivery continues.
+  - The "Commitment-lock events (K13)" table is not populated yet; use the trace.
+  - A delivery cut by a utility (L2) instruction does not return to the full commitment when the instruction is
+    lifted, because og-engine keeps applying the expired instruction (a defect routed for fixing).
+
+  The state itself stays SHORTFALL until the window closes.
 
 ### Topic 8: the guardian gets cautious (K7)
 
@@ -265,11 +279,11 @@ skip to step 13.
   done; echo
   ```
 - **Show:** The printed status codes; then System Health (reload).
-- **Expect:** A row of `409`: the guardian vetoes every one (G-02, hub power). More than 5% of a tick's batches
-  vetoed puts `$BANK` (and its zone, if the zone crosses 5% too) **CONSERVATIVE**: "Guardian escalations"
-  shows "Scope held conservative" (`ALR-SCOPE-CONSERVATIVE`), and the engine stops selling spot headroom there.
-  After three consecutive conservative ticks it shows "Guardian requests a safe stop"
-  (`ALR-SAFE-STOP-REQUESTED`) with **Review safe stop (two-step)**.
+- **Expect:** A row of `409`: the guardian vetoes every one (G-02 hub power; since R2 the flow checks, e.g. G-31,
+  may be listed too). More than 5% of a tick's commands vetoed puts `$BANK` (and its zone, if the zone crosses
+  5% too) **CONSERVATIVE**: "Guardian escalations" shows "Scope held conservative" (`ALR-SCOPE-CONSERVATIVE`),
+  and the engine stops selling spot headroom there. After three bad ticks it shows "Guardian requests a safe
+  stop" (`ALR-SAFE-STOP-REQUESTED`) with **Review safe stop (two-step)**.
 
 **Step 16: A person decides** (30 s)
 - **Action:** Click **Review safe stop (two-step)**.
@@ -277,7 +291,8 @@ skip to step 13.
 - **Expect:** Scope and scope id filled from the guardian's request, reason "Guardian escalation: safe stop
   requested", and the note "Prefilled from the guardian's safe-stop request ... nothing is engaged until you
   confirm". Nothing has stopped: the guardian never engages a stop by itself (K8). Do not propose it; stop
-  here. With no more vetoes the escalation clears on its own (after 30 idle ticks, about 60 s).
+  here. With no more vetoes the escalation clears on its own, after 3 consecutive good ticks (at most 2.5%
+  vetoed), or after 30 ticks with no commands (about 60 s).
 - **Known gap:** "Guardian escalations" is drawn at page load; reload to see it change.
 
 ### Topic 9: a forged command, and the legitimate path
@@ -286,26 +301,29 @@ skip to step 13.
 - **Action:** `/og/fleet`, "Manual command": hub `hub-00142`, setpoint `2`, reason `demo signed path`,
   **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown.
 - **Show:** The confirm dialog (focus starts on Cancel, Tab to the confirm button, Escape closes); the result.
-- **Expect:** `PASS` "Command accepted. Trace ..." (the drill-down's last command id changes), or a guardian
-  veto with its rule ids. Either way the setpoint reached the hub only in a guardian-signed batch.
-- **Known gap:** in this release a veto renders as `FAILED` with a raw "409 Conflict" text instead of the
-  VETOED badge; the 409 in step 15 is the same veto seen from the API.
+- **Expect:** `PASS` "Command accepted. Trace ..." (the drill-down's last command id changes), or `VETOED` "Vetoed
+  by guardian: <rule ids>. Trace ..."; the 409 in step 15 is the same veto seen from the API. Either way the
+  setpoint reached the hub only in a guardian-signed batch.
 - **Forged command:** `demo-04-tampered-command` still only registers an active anomaly (the simulator's
   self-test is not invoked), so there is nothing to show on screen; leave it out.
 
 ### Topic 10: degraded mode [feeds→sim]
 
 **Step 18: A feed goes down** [ogsim] (30 s, started about 10 minutes earlier)
+- **Where:** the dev stack, whose price freshness window is 600 s. On the server the window is 2,700 s since R2.
+  That is longer than this scenario's 17 minutes without new data, so there the banner appears only if the
+  breaker opens. Skip the step on the server unless the lead shortens the window for the run [root].
 - **Action:** Start it during step 3:
   `curl -u tester:... -X POST $SIM/api/scenarios/feed_outage_and_stale/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
   (np6-905-cd returns 503 for 120 s, then stops posting new data for 900 s). Now open System Health.
-- **Show:** The banner at the top; "Feed freshness"; "Alerts".
-- **Expect:** "Degraded mode: **Feed stale**" once the price feed is older than 600 s (`ALR-FEED-STALE`,
+- **Show:** The banner at the top; "Feed freshness"; "Alerts"; then Dispatch.
+- **Expect:** "Degraded mode: **Feed stale**" once the price feed is older than its window (`ALR-FEED-STALE`,
   warning), or at once if its breaker opened (`ALR-FEED-LGV-EXHAUSTED`, critical). Markets shows the row's
   failures and breaker. The banner is live on System Health; the Control room shows it on reload.
-- **Say:** in this release the four modes (Feed stale, Engine down, Guardian down, SCADA silent) are shown to
-  the operator but do not yet change what the engine or selector does; see the operator guide. "Engine down"
-  and "Guardian down" need `systemctl stop` [root] and interrupt delivery, so they are not part of this run.
+- **Say:** Feed stale is enforced. While it lasts, og-engine skips intake and every selector gate commits
+  nothing new; the committed deliveries continue. The other modes (Engine down, Guardian down, SCADA silent)
+  are shown and recorded only. "Engine down" and "Guardian down" need `systemctl stop` [root] and interrupt
+  delivery, so they are not part of this run.
 
 ### Topic 11: a scoped safe stop, released by two operators
 
@@ -318,10 +336,8 @@ skip to step 13.
   vetoes batches for a stopped bank); the other banks keep delivering; Reserve breaches stays `0`. Say:
   og-safestop is its own process with its own stop-only key, so this works with engine and guardian down; a
   single message can never stop anything.
-- **Known gaps:** confirm within **30 s**. The dialog counts down from 60, but og-safestop drops the proposal
-  after 30; a confirm after that shows `TIMEOUT` and nothing stops (propose again). In the simulator a hub
-  that was commanded above about half its rating holds a reduced setpoint until its lease lapses (up to about
-  35 s) instead of reaching 0 kW over the 4 s stop ramp.
+- Confirm within **30 s**: the dialog counts down from 30 s and disables **Engage safe stop** at 0 (propose
+  again). In the simulator the stopped hubs reach 0 kW over the 4 s stop ramp.
 
 **Step 20 [JUDGES]: Release it, two people** (60 s)
 - **Action:** As og-op-a, "Release a safe stop (two operators)": scope `Bank`, scope id `bank-022`, reason
@@ -332,8 +348,8 @@ skip to step 13.
   og-op-a approving its own request, `REFUSED` "The requesting operator cannot approve their own release." (the
   API answers 403 and the request stays valid). For og-op-b, `RELEASED` "Safe stop released for BANK:bank-022"
   once the guardian has signed the release and og-safestop relayed it; bank-022's hubs resume.
-- **Known gap** (until the fix is in): a release that takes the guardian more than 5 s to sign shows `FAILED`
-  although it may still land (the screen gives up after 5 s, the API waits 10 s). Fallback, with the request id:
+- If the guardian has not signed within og-api's 10 s wait, og-op-b sees `PENDING`; the release usually lands a
+  moment later (check bank-022 on Fleet). The same approvals from a shell, with the request id:
   ```bash
   curl -s -u og-op-a:... -X POST "$OG/safestop/release/<id>/approve" -w ' %{http_code}\n'   # 403
   curl -s -u og-op-b:... -X POST "$OG/safestop/release/<id>/approve" -w ' %{http_code}\n'   # 200 released (202 = pending)
@@ -347,16 +363,17 @@ skip to step 13.
   "Economics per kW (annualised)"; "Per settled interval"; "LP vs rule baseline".
 - **Expect:** Net margin positive; Forgone upside (lock) non-zero if step 8 ran. One row per settled
   obligation-interval; a shortfall from step 14 shows a penalty. "Economics per kW" shows $/kW-in, $/kW-out and
-  payback per scope, or "The $/kW view is not available on this deployment yet."
+  payback per scope (operators only).
+- **Known gap:** "LP value added (latest selector gate)" reads "The LP value-added view is not available on this
+  deployment yet." in R2; show "LP vs rule baseline" instead.
 
 **Step 22: Invoice lines and M&V** (30 s)
-- **Action:** `/og/billing`; then the CSV:
-  `curl -s -u viewer:... "$OG/billing/invoice-lines?from=<today>&to=<tomorrow>&format=csv"` (dates as `YYYY-MM-DD`).
+- **Action:** `/og/billing`; set From to today and To to tomorrow, then **Export CSV** (or
+  `curl -s -u viewer:... "$OG/billing/invoice-lines?from=<today>&to=<tomorrow>&format=csv"`, dates as `YYYY-MM-DD`).
 - **Show:** "Invoice lines"; "M&V performance".
 - **Expect:** One line per settled obligation-interval per contract, matching Profitability; the CSV downloads
-  with the same lines. M&V shows average compliance and pass rate.
-- **Known gap:** the **Export CSV** button relays the From/To filter unchanged, and the API needs both as plain
-  dates, so with the filter blank or holding a time the export fails; use the `curl` until it is fixed.
+  with the same lines (To is exclusive of that day, hence tomorrow). M&V shows average compliance and pass
+  rate.
 
 ### Topic 13: the audit chain
 
@@ -373,8 +390,8 @@ skip to step 13.
 - **Expect:** `"passed": true`, `"first_broken": null`, and `checked` = the number of streams verified. Say:
   records are hash-chained per stream, so nothing above could have been edited or removed without this turning
   to `passed: false` with the first broken `stream_id`/`seq`.
-- **Known gap:** the "Run chain verify" button on Billing & audit does not forward the viewer's identity in this
-  release and reports FAIL; use the `curl` until it is fixed.
+- **Known gap:** the "Run chain verify" button on Billing & audit reports FAIL from an unfiltered page (its empty
+  From/To are refused); set From and To in the header filter first, or use the `curl`.
 
 ### Topic 14: energy runs low
 
