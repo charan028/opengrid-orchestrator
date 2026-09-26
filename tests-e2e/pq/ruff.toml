@@ -1,0 +1,14 @@
+# Mirrors orchestrator/pyproject.toml [tool.ruff] (BUILD.md S5a). tests-e2e/ has no pyproject of its own and
+# ruff only discovers config in ancestor directories, so each e2e package carries this copy.
+line-length = 110
+target-version = "py313"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "N", "RUF", "ASYNC", "S"]
+ignore = ["E501"]
+
+[lint.isort]
+known-first-party = ["ogsim", "opengrid"]
+
+[lint.per-file-ignores]
+"test_*.py" = ["S101"]
