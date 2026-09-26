@@ -22,7 +22,24 @@ def _deploy(stack: Stack, body: dict, *, user: str = "operator"):
     return stack.post(ROUTE, {"reason": "e2e validation", **body}, user=user)
 
 
+def _existing(stack: Stack, service_type: str, product_code: str | None) -> UUID | None:
+    """A live obligation of this kind already on the stack (e.g. from the demo seed), when one exists."""
+    found = stack.rows(
+        """SELECT o.obligation_id FROM og.obligation o
+           LEFT JOIN og.opportunity op USING (opportunity_id)
+           LEFT JOIN og.product_rule pr ON pr.product_rule_id = op.product_rule_id
+           WHERE o.service_type = %(t)s AND o.state IN ('COMMITTED', 'DELIVERING')
+             AND (%(p)s::text IS NULL OR pr.product_code = %(p)s)
+           ORDER BY o.created_at DESC LIMIT 1""",
+        {"t": service_type, "p": product_code},
+    )
+    return found[0]["obligation_id"] if found else None
+
+
 def _committed(stack: Stack, service_type: str, *, variant: str | None, rule: dict | None, kw: float) -> UUID:
+    existing = _existing(stack, service_type, rule["product_code"] if rule else None)
+    if existing is not None:
+        return existing
     contract_id = stack.create_contract(service_type, "T2", variant=variant)
     if rule is not None:
         stack.add_product_rule(contract_id, **rule)
@@ -43,7 +60,7 @@ def test_an_unknown_obligation_is_404(stack: Stack) -> None:
 
 
 def test_a_non_as_obligation_is_409(stack: Stack) -> None:
-    energy = _committed(stack, "ERCOT_ENERGY", variant=None, rule=None, kw=40)
+    energy = _committed(stack, "DIST_DEFERRAL", variant=None, rule=None, kw=40)
 
     resp = _deploy(stack, {"obligation_id": str(energy), "duration_minutes": 15})
 
