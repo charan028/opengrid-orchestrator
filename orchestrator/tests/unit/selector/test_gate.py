@@ -55,3 +55,51 @@ def test_solve_gate_falls_back_when_validation_catches_a_bad_solve():
     plan = solve_gate(inputs, "SCHEDULED_15MIN", NOW)
 
     assert plan.plan_mode == "RULE_FALLBACK"
+
+
+async def test_the_solve_runs_in_a_separate_process_and_matches_the_in_process_result():
+    """A11 regression (live 2026-09-26): the solve ran in a worker THREAD, and pure-Python model build,
+    validation and price-of-firmness held the GIL for seconds, so every await in the 2 s dispatch tick
+    queued behind it (ticks of 0.7-1.2 s during each gate). It now runs in a solver process."""
+    import os
+
+    from opengrid.selector import gate
+
+    bank = make_bank("B1", 10.0, range(1))
+    scenario = zero_price_scenario(range(1))
+    c1 = binary_candidate("c1", 10.0, 100.0, (0,), ("B1",))
+    inputs = simple_inputs((bank,), (scenario,), (), (c1,), n_intervals=1)
+
+    try:
+        remote = await gate.solve_off_loop(inputs, "SCHEDULED_15MIN", NOW, {}, {})
+        worker_pid = await gate.run_in_solver_process(os.getpid)
+    finally:
+        gate.shutdown_solver_process()
+
+    local = solve_gate(inputs, "SCHEDULED_15MIN", NOW)
+    assert remote.solver_status == local.solver_status == "OPTIMAL"
+    assert remote.selected_x == local.selected_x
+    assert worker_pid != os.getpid()
+
+
+async def test_a_broken_solver_process_falls_back_to_a_thread(monkeypatch):
+    from concurrent.futures.process import BrokenProcessPool
+
+    from opengrid.selector import gate
+
+    async def _broken(fn, *args):
+        raise BrokenProcessPool("worker died")
+
+    monkeypatch.setattr(gate, "run_in_solver_process", _broken)
+    bank = make_bank("B1", 10.0, range(1))
+    inputs = simple_inputs(
+        (bank,),
+        (zero_price_scenario(range(1)),),
+        (),
+        (binary_candidate("c1", 10.0, 100.0, (0,), ("B1",)),),
+        n_intervals=1,
+    )
+
+    plan = await gate.solve_off_loop(inputs, "SCHEDULED_15MIN", NOW, {}, {})
+
+    assert plan.solver_status == "OPTIMAL"

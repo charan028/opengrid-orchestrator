@@ -11,9 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import multiprocessing
+from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from opengrid import forecast
@@ -65,6 +69,49 @@ _CATEGORY_BY_SERVICE_TYPE: dict[str, Literal["FIRM", "AS", "MARKET"]] = {
 # (02a S3.7 "previous plan shifted one interval"). Kept in-process only -- a restart just solves cold.
 _last_hint_x: dict[str, float] = {}
 _last_hint_q: dict[str, float] = {}
+
+# The solve runs in ONE long-lived solver process, not a worker thread: model build, validation and
+# price-of-firmness are pure Python and held the GIL for seconds per gate, so every await of og-engine's
+# 2 s dispatch tick queued behind them (A11, live 2026-09-26). `spawn`, not `fork`: the engine process
+# has an event loop, a DB pool and threads.
+_solver_pool: ProcessPoolExecutor | None = None
+
+
+def _get_solver_pool() -> ProcessPoolExecutor:
+    global _solver_pool
+    if _solver_pool is None:
+        _solver_pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+    return _solver_pool
+
+
+def shutdown_solver_process() -> None:
+    """Stop the solver process (tests, orderly shutdown); the next solve starts a fresh one."""
+    global _solver_pool
+    if _solver_pool is not None:
+        _solver_pool.shutdown(wait=True, cancel_futures=True)
+        _solver_pool = None
+
+
+async def run_in_solver_process[T](fn: Callable[..., T], *args: Any) -> T:
+    return await asyncio.get_running_loop().run_in_executor(_get_solver_pool(), fn, *args)
+
+
+async def solve_off_loop(
+    inputs: ModelInputs,
+    gate_kind: GateKind,
+    horizon_start: datetime,
+    x_hint: dict[str, float],
+    q_hint: dict[str, float],
+) -> ExtractedPlan:
+    """`solve_gate` in the solver process. If that process has died it is replaced and this solve runs in
+    a thread instead (K7: a gate is never lost to a crashed worker)."""
+    global _solver_pool
+    try:
+        return await run_in_solver_process(solve_gate, inputs, gate_kind, horizon_start, x_hint, q_hint)
+    except BrokenProcessPool:
+        logger.warning("selector solver process died; solving this gate in a thread")
+        _solver_pool = None
+        return await asyncio.to_thread(solve_gate, inputs, gate_kind, horizon_start, x_hint, q_hint)
 
 
 async def compute_horizon(gate_kind: GateKind, now: datetime) -> tuple[datetime, datetime]:
@@ -277,14 +324,26 @@ async def persist_plan(
     return plan_id
 
 
-def solve_gate(inputs: ModelInputs, gate_kind: GateKind, horizon_start: datetime) -> ExtractedPlan:
+def solve_gate(
+    inputs: ModelInputs,
+    gate_kind: GateKind,
+    horizon_start: datetime,
+    x_hint: dict[str, float] | None = None,
+    q_hint: dict[str, float] | None = None,
+) -> ExtractedPlan:
     """The solver core (02a S3.8, no I/O): build, solve, validate, fall back to F2 if needed. Exercised
     directly by unit/property tests against hand-built `ModelInputs`; `run_gate` wraps it with the
-    DB/`contracts`/`ledger`/`fleet`/`forecast` I/O the fixed interface requires end to end."""
+    DB/`contracts`/`ledger`/`fleet`/`forecast` I/O the fixed interface requires end to end. Warm-start
+    hints are passed in (the solver process has no memory of earlier gates); `None` uses this process's."""
     plan_mode = _plan_mode_for(gate_kind, horizon_start)
     settings = solver_settings_for(gate_kind)
     built = build_mode_o_model(inputs)
-    outcome = highs_solve(built, settings, x_hint=_last_hint_x, q_hint=_last_hint_q)
+    outcome = highs_solve(
+        built,
+        settings,
+        x_hint=_last_hint_x if x_hint is None else x_hint,
+        q_hint=_last_hint_q if q_hint is None else q_hint,
+    )
     result = extract_plan(built, outcome, plan_mode)
 
     if outcome.status in ("INFEASIBLE_F1", "TIME_LIMIT_GAP"):
@@ -327,9 +386,9 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         candidates=candidates,
     )
 
-    # Off the event loop: a 24 h Mode O solve takes 0.1-30 s (A11 budget), and og-engine's 2 s dispatch
-    # cycle and MQTT ingest share this loop.
-    result = await asyncio.to_thread(solve_gate, inputs, gate_kind, horizon_start)
+    # Off the event loop AND off this process's GIL: a 24 h Mode O solve takes 0.1-30 s (A11 budget), and
+    # og-engine's 2 s dispatch cycle and MQTT ingest share this loop.
+    result = await solve_off_loop(inputs, gate_kind, horizon_start, dict(_last_hint_x), dict(_last_hint_q))
 
     _last_hint_x.clear()
     _last_hint_x.update({k: 1.0 if v else 0.0 for k, v in result.selected_x.items()})
