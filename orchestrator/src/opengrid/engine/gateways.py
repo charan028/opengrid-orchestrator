@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -70,15 +70,30 @@ ON CONFLICT (obligation_id) DO UPDATE SET
     computed_at = EXCLUDED.computed_at
 """
 
+# Per (obligation, bank): the committed energy still to deliver (kWh = sum of each remaining 15-min
+# reservation's kW x its not-yet-elapsed hours) and when that draw ends. Only obligations delivering now
+# or starting within the look-ahead are checked -- a delivery hours away has time to recharge, and
+# summing a whole day of sequential deliveries against today's SoC raised thousands of false alerts
+# (live 2026-09-26: 6,748 ALR-ENERGY-SHORTFALL-RISK rows in 6 minutes, stalling the engine tick).
 _ENERGY_SUFFICIENCY_ROWS_SQL = """
-SELECT r.obligation_id, r.bank_id, r.amount, o.window_end, c.customer_id
+SELECT r.obligation_id, r.bank_id,
+       SUM(r.amount * EXTRACT(EPOCH FROM (r.interval_end - GREATEST(r.interval_start, %(now)s))) / 3600.0)
+           AS required_kwh,
+       MAX(r.interval_end) AS draw_end,
+       c.customer_id
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.contract c ON c.contract_id = o.contract_id
 WHERE r.released_at IS NULL
   AND r.kind = 'POWER_KW'
   AND o.state IN ('COMMITTED', 'DELIVERING')
+  AND o.window_start <= %(lookahead_end)s
+  AND r.interval_end > %(now)s
+GROUP BY r.obligation_id, r.bank_id, c.customer_id
 """
+
+#: Obligations whose window starts within this many seconds are energy-checked ahead of delivery.
+DEFAULT_ENERGY_LOOKAHEAD_S = 900.0
 
 # 02b's "current price" signal for the allocator's headroom/dwell threshold (S6) -- ERCOT settlement
 # point price (np6-905-cd, see opengrid.feeds.ercot's product map), the same product
@@ -326,20 +341,39 @@ class EnergySufficiencyGateway:
     a dedicated transition/reason code later.
     """
 
-    def __init__(self, pool: AsyncConnectionPool, trace: TraceStore) -> None:
+    def __init__(
+        self, pool: AsyncConnectionPool, trace: TraceStore, *, lookahead_s: float = DEFAULT_ENERGY_LOOKAHEAD_S
+    ) -> None:
         self._pool = pool
         self._trace = trace
+        self._lookahead = timedelta(seconds=lookahead_s)
+        # Obligations currently AT_RISK: the trace/alert is written on ENTRY only, not every 2 s cycle.
+        self._at_risk: set[str] = set()
 
     async def run(self, now: datetime) -> list[EnergySufficiencyResult]:
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_ENERGY_SUFFICIENCY_ROWS_SQL)
+            await cur.execute(
+                _ENERGY_SUFFICIENCY_ROWS_SQL, {"now": now, "lookahead_end": now + self._lookahead}
+            )
             rows = await cur.fetchall()
 
+        # (obligation_id, average kW over the remaining draw, draw end, customer_id) per bank.
         by_bank: dict[str, list[tuple[str, float, datetime, str | None]]] = {}
-        for obligation_id, bank_id, amount, window_end, customer_id in rows:
+        for obligation_id, bank_id, required_kwh, draw_end, customer_id in rows:
+            remaining_h = max((draw_end - now).total_seconds(), 0.0) / 3600.0
+            avg_kw = float(required_kwh) / remaining_h if remaining_h > 0 else 0.0
             by_bank.setdefault(bank_id, []).append(
-                (str(obligation_id), float(amount), window_end, str(customer_id) if customer_id else None)
+                (str(obligation_id), avg_kw, draw_end, str(customer_id) if customer_id else None)
             )
+
+        results = await self._evaluate_banks(by_bank, now)
+        now_at_risk = {r.obligation_id for r in results if r.at_risk}
+        self._at_risk &= now_at_risk  # recovered obligations may alert again on a later entry
+        return results
+
+    async def _evaluate_banks(
+        self, by_bank: dict[str, list[tuple[str, float, datetime, str | None]]], now: datetime
+    ) -> list[EnergySufficiencyResult]:
 
         results: list[EnergySufficiencyResult] = []
         for bank_id, obligations in by_bank.items():
@@ -386,7 +420,8 @@ class EnergySufficiencyGateway:
                 )
                 results.append(result)
                 await self._record_status(result)
-                if result.at_risk:
+                if result.at_risk and result.obligation_id not in self._at_risk:
+                    self._at_risk.add(result.obligation_id)
                     await self._record_at_risk(result, customer_id)
         return results
 

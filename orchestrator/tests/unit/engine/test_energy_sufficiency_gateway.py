@@ -180,8 +180,8 @@ async def test_two_obligations_sharing_a_bank_the_other_ones_energy_is_excluded_
     # drawing 5 kW for 2h (10 kWh required each) on the SAME single hub -- together they need 20 kWh,
     # more than the hub has, so at least one must be AT_RISK.
     rows = [
-        (obl_a, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
-        (obl_b, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
+        (obl_a, "bank-01", 10.0, NOW + timedelta(hours=2), uuid4()),
+        (obl_b, "bank-01", 10.0, NOW + timedelta(hours=2), uuid4()),
     ]
     monkeypatch.setattr(
         gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=20.0)]
@@ -193,3 +193,45 @@ async def test_two_obligations_sharing_a_bank_the_other_ones_energy_is_excluded_
 
     assert len(results) == 2
     assert any(r.at_risk for r in results)
+
+
+async def test_at_risk_alert_is_raised_on_entry_only(monkeypatch, _patch_alert_raising):
+    """Regression (live 2026-09-26): the gateway raised a new ALR-ENERGY-SHORTFALL-RISK alert and trace
+    row for every at-risk obligation on EVERY 2 s cycle (6,748 alerts in 6 minutes), stalling the
+    engine tick. One alert per entry into AT_RISK; a recovery re-arms it."""
+    obligation_id = uuid4()
+    rows = [(obligation_id, "bank-01", 5.0, NOW + timedelta(hours=2), uuid4())]
+    soc = {"value": None}
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=soc["value"])]
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+
+    await gateway.run(NOW)
+    await gateway.run(NOW + timedelta(seconds=2))
+    assert len(_patch_alert_raising) == 1
+
+    soc["value"] = 39.2  # recovered
+    await gateway.run(NOW + timedelta(seconds=4))
+    soc["value"] = None  # at risk again -> a new entry
+    await gateway.run(NOW + timedelta(seconds=6))
+    assert len(_patch_alert_raising) == 2
+
+
+async def test_query_is_scoped_to_remaining_energy_within_the_lookahead(monkeypatch, _patch_alert_raising):
+    """The SQL sums only not-yet-elapsed reservation energy of obligations delivering now or within the
+    look-ahead; the third column is kWh (not kW), so the gateway divides by the remaining hours."""
+    obligation_id = uuid4()
+    rows = [(obligation_id, "bank-01", 11.0, NOW + timedelta(hours=1), uuid4())]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=39.2)]
+    )
+    pool = _FakePool(rows)
+    gateway = gw.EnergySufficiencyGateway(pool, TraceStore(_FakeTraceBackend()), lookahead_s=600.0)
+
+    (result,) = await gateway.run(NOW)
+
+    sql, params = pool.conns[0].cursor_obj.executed[0]
+    assert "GROUP BY" in sql
+    assert params == {"now": NOW, "lookahead_end": NOW + timedelta(seconds=600)}
+    assert result.required_kwh == pytest.approx(11.0)

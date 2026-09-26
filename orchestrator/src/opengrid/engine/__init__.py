@@ -404,7 +404,12 @@ async def main(cfg: Config) -> None:
     import opengrid.feeds as feeds_mod
     import opengrid.fleet as fleet_mod
     import opengrid.ledger as ledger_mod
-    from opengrid.engine.gateways import EnergySufficiencyGateway, FleetCapabilityProvider, build_gateways
+    from opengrid.engine.gateways import (
+        DEFAULT_ENERGY_LOOKAHEAD_S,
+        EnergySufficiencyGateway,
+        FleetCapabilityProvider,
+        build_gateways,
+    )
     from opengrid.engine.pg_backend import PgEngineBackend
     from opengrid.fleet.pg_backend import PgFleetBackend
     from opengrid.forecast import configure as configure_forecast
@@ -488,7 +493,11 @@ async def main(cfg: Config) -> None:
             ledger_gateway=ledger_gateway,
             scada_gateway=scada_gateway,
             schedule_gateway=schedule_gateway,
-            energy_sufficiency_gateway=EnergySufficiencyGateway(pool, trace_store),
+            energy_sufficiency_gateway=EnergySufficiencyGateway(
+                pool,
+                trace_store,
+                lookahead_s=float(cfg.get("allocator.energy_check_lookahead_s", DEFAULT_ENERGY_LOOKAHEAD_S)),
+            ),
             lifecycle_backend=backend,
             lease_ttl_s=float(cfg.get("allocator.lease_ttl_s", DEFAULT_LEASE_TTL_S)),
         )
