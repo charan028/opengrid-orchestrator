@@ -106,3 +106,17 @@ async def run_scenario(injector: Injector, scenario: Scenario, speed: float = 1.
         )
         injected_ids.append(record.id)
     return injected_ids
+
+
+async def stop_scenario_anomalies(injector: Injector, name: str) -> list[str]:
+    """Demo gap #18, 2026-09-26: ends every still-active anomaly `name`'s scenario injected -- every
+    `run_scenario` injection id is `f"{scenario.name}:{step.type}:{step.at_s:g}"`, so `f"{name}:"` is
+    an unambiguous prefix -- regardless of whether the scenario's own asyncio task is still running,
+    already finished, or was already cancelled. Returns the ids actually ended. The caller
+    (`ogsim.control.app`) is responsible for also cancelling the scenario's own task, which only stops
+    injecting further PENDING steps; it does not, by itself, end anomalies already injected."""
+    prefix = f"{name}:"
+    to_cancel = [r.id for r in injector.active(source="scenario") if r.id.startswith(prefix)]
+    for anomaly_id in to_cancel:
+        await injector.cancel(anomaly_id)
+    return to_cancel

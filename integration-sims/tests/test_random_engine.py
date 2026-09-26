@@ -10,11 +10,25 @@ import pytest
 
 from ogsim.control.injector import Injector
 from ogsim.control.random_config import ParamRange, RandomEngineConfig, TypeRandomConfig
-from ogsim.control.random_engine import RandomEngine, plan_arrivals, sample_duration_s, sample_params
+from ogsim.control.random_engine import (
+    PAUSE_STATE_PATH_ENV_VAR,
+    RandomEngine,
+    plan_arrivals,
+    sample_duration_s,
+    sample_params,
+)
 
 SECONDS_PER_HOUR = 3600.0
 LARGE_WINDOW_HOURS = 200
 RATE_TOLERANCE_FRACTION = 0.20  # Poisson counts are noisy; 20% is generous for a single large sample
+
+
+@pytest.fixture(autouse=True)
+def _isolated_pause_state(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `RandomEngine()` in this file resolves its persisted-pause-state path (demo gap #16) to
+    a fresh, per-test file -- without this, tests would share (and pollute each other via)
+    `./random_pause_state.json` in the real working directory."""
+    monkeypatch.setenv(PAUSE_STATE_PATH_ENV_VAR, str(tmp_path / "random_pause_state.json"))
 
 
 def test_plan_arrivals_is_reproducible_for_the_same_seed():
@@ -97,6 +111,59 @@ def test_sample_params_stays_within_range():
     for _ in range(50):
         params = sample_params(rng, cfg)
         assert 1.0 <= params["x"] <= 2.0
+
+
+def test_pause_persists_across_a_new_engine_instance(tmp_path) -> None:
+    """Demo gap #16, 2026-09-26: random mode must not silently resume after a control-plane restart
+    just because pause state lived only in memory. A fresh `RandomEngine` (simulating a restart)
+    reading the same state path must come up already paused."""
+    state_path = tmp_path / "pause.json"
+    engine_a = RandomEngine(Injector(), RandomEngineConfig(seed=1), pause_state_path=str(state_path))
+    assert engine_a.config.paused is False
+
+    engine_a.pause()
+
+    engine_b = RandomEngine(Injector(), RandomEngineConfig(seed=1), pause_state_path=str(state_path))
+    assert engine_b.config.paused is True
+
+
+def test_resume_persists_across_a_new_engine_instance(tmp_path) -> None:
+    state_path = tmp_path / "pause.json"
+    engine_a = RandomEngine(Injector(), RandomEngineConfig(seed=1), pause_state_path=str(state_path))
+    engine_a.pause()
+    engine_a.resume()
+
+    engine_b = RandomEngine(Injector(), RandomEngineConfig(seed=1), pause_state_path=str(state_path))
+    assert engine_b.config.paused is False
+
+
+def test_persisted_pause_overrides_the_shipped_config_default(tmp_path) -> None:
+    """The operator's last explicit pause/resume (persisted) wins over whatever config/random.yaml's
+    own `paused:` default says -- a restart must not un-pause an operator's deliberate pause."""
+    state_path = tmp_path / "pause.json"
+    RandomEngine(
+        Injector(), RandomEngineConfig(seed=1, paused=False), pause_state_path=str(state_path)
+    ).pause()
+
+    engine = RandomEngine(
+        Injector(), RandomEngineConfig(seed=1, paused=False), pause_state_path=str(state_path)
+    )
+    assert engine.config.paused is True
+
+
+def test_missing_pause_state_file_uses_the_config_default(tmp_path) -> None:
+    state_path = tmp_path / "does-not-exist.json"
+    engine = RandomEngine(
+        Injector(), RandomEngineConfig(seed=1, paused=True), pause_state_path=str(state_path)
+    )
+    assert engine.config.paused is True  # falls through to the config's own default, unchanged
+
+
+def test_corrupt_pause_state_file_does_not_crash(tmp_path) -> None:
+    state_path = tmp_path / "corrupt.json"
+    state_path.write_text("{not valid json", encoding="utf-8")
+    engine = RandomEngine(Injector(), RandomEngineConfig(seed=1), pause_state_path=str(state_path))
+    assert engine.config.paused is False  # falls back to the config default rather than raising
 
 
 def _engine_with_type(**config_overrides: object) -> tuple[RandomEngine, Injector]:

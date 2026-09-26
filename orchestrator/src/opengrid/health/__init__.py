@@ -48,8 +48,11 @@ from opengrid.health.rules import (
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
     evaluate_scada_overload_alert,
+    evaluate_scada_silent_alert,
     evaluate_sim_offline_alert,
     is_fallback_feed_needed,
+    is_firm_blocking_feed,
+    is_scada_silent,
 )
 from opengrid.platform.config import Config
 from opengrid.platform.process import run_forever
@@ -234,7 +237,8 @@ async def _fetch_reserve_breach_count() -> float:
 
 async def evaluate_alerts() -> None:
     """Run the MVP-S `ALR-*` alert rule set (feed stale, process down, hub offline ratio, cycle p99,
-    guardian verdict timeout rate, reserve-breach counter) and insert `og.alert` rows (02b S6.4).
+    guardian verdict timeout rate, reserve-breach counter, SCADA silence) and insert `og.alert` rows
+    (02b S6.4).
 
     Raises a new alert only when its `condition_key` has no currently-open row (TS-07-06: no duplicate
     storm), and clears any open alert whose condition no longer evaluates true -- but only for a rule in
@@ -305,6 +309,9 @@ async def evaluate_alerts() -> None:
     )
     if sim_offline_finding:
         findings.append(sim_offline_finding)
+    scada_silent_finding = evaluate_scada_silent_alert(latest_scada_seen_at, now=now, thresholds=_thresholds)
+    if scada_silent_finding:
+        findings.append(scada_silent_finding)
 
     open_alerts = await queries.fetch_open_alerts(pool)
     open_by_key = {queries.condition_key_for(a): a for a in open_alerts}
@@ -359,9 +366,16 @@ async def evaluate_once() -> HealthSnapshot:
         )
         is not None
         for fs in _feeds_needing_stale_check(feed_statuses, now=now)
+        if is_firm_blocking_feed(fs, thresholds=_thresholds)
     )
     cycle_latency = await _fetch_cycle_latency(now)
-    degraded_modes = derive_degraded_modes(feed_stale=any_feed_stale, process_health=processes)
+    # R3, DM-09/ES07-S02: SCADA-silent degraded mode -- see `is_scada_silent`'s docstring for the
+    # cold-start exception (no reading yet is not silence).
+    latest_scada_seen_at = await queries.fetch_latest_scada_obs_at(pool)
+    scada_silent = is_scada_silent(latest_scada_seen_at, now=now, thresholds=_thresholds)
+    degraded_modes = derive_degraded_modes(
+        feed_stale=any_feed_stale, process_health=processes, dist_deferral_scada_silent=scada_silent
+    )
     # Defect fix: persist so `opengrid.api`/the UI can read the current degraded-mode set -- this
     # in-process computation used to go nowhere else (see `queries.write_degraded_modes`'s docstring).
     await queries.write_degraded_modes(pool, degraded_modes, now=now)

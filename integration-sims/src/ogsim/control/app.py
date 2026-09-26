@@ -9,6 +9,7 @@ from, per BUILD.md's "single control plane for all simulators."
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,7 +24,7 @@ from ogsim.control import catalogue
 from ogsim.control.injector import InjectionSource, Injector, UnknownAnomalyTypeError
 from ogsim.control.random_config import INTENSITY_PROFILES, load_random_config
 from ogsim.control.random_engine import RandomEngine
-from ogsim.control.scenarios import load_scenarios_dir, run_scenario
+from ogsim.control.scenarios import load_scenarios_dir, run_scenario, stop_scenario_anomalies
 from ogsim.control.schema_validation import ScenarioCmdValidationError
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -51,8 +52,29 @@ class SimEnabledBody(BaseModel):
     enabled: bool
 
 
+#: Env var override for a fixed deployment prefix (e.g. Apache ProxyPass at "/ogsim"), when no
+#: X-Forwarded-Prefix header is set by the reverse proxy. Live bug fix, 2026-09-26 (FLEET-SIM demo
+#: gap #17): the web UI's own JS called `/api/...` by ABSOLUTE path, which only ever works when the
+#: page is served from the domain root -- behind Apache's `/ogsim/` ProxyPass, every button called the
+#: wrong (unprefixed) URL and 404'd.
+BASE_PATH_ENV = "OGSIM_CONTROL_BASE_PATH"
+
+
+def _base_path(request: Request) -> str:
+    """The deployment path prefix this app is mounted under, with no trailing slash (`""` at the
+    domain root). `X-Forwarded-Prefix` (set by a reverse proxy that strips its own mount prefix before
+    forwarding, e.g. Apache `ProxyPass /ogsim http://... ProxyPassReverse` plus
+    `RequestHeader set X-Forwarded-Prefix /ogsim`) wins; else `OGSIM_CONTROL_BASE_PATH`; else `""`."""
+    forwarded = request.headers.get("x-forwarded-prefix", "").strip()
+    if forwarded:
+        return forwarded.rstrip("/")
+    return os.environ.get(BASE_PATH_ENV, "").rstrip("/")
+
+
 def create_app(
-    scenarios_dir: str | Path | None = None, random_config_path: str | Path | None = None
+    scenarios_dir: str | Path | None = None,
+    random_config_path: str | Path | None = None,
+    random_pause_state_path: str | Path | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -71,7 +93,11 @@ def create_app(
     app.state.injector = Injector()
     app.state.scenarios_dir = Path(scenarios_dir) if scenarios_dir else DEFAULT_SCENARIOS_DIR
     app.state.running_scenarios = running_scenarios
-    app.state.random_engine = RandomEngine(app.state.injector, load_random_config(random_config_path))
+    app.state.random_engine = RandomEngine(
+        app.state.injector,
+        load_random_config(random_config_path),
+        pause_state_path=str(random_pause_state_path) if random_pause_state_path else None,
+    )
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     def injector(request: Request) -> Injector:
@@ -146,6 +172,40 @@ def create_app(
         running[name] = asyncio.create_task(run_scenario(injector(request), match, speed=body.speed))
         return {"ok": True, "scenario": name, "steps": len(match.steps)}
 
+    @app.post("/api/scenarios/{name}/stop", response_model=None)
+    async def stop_named_scenario(request: Request, name: str) -> JSONResponse | dict[str, Any]:
+        """Demo gap #18, 2026-09-26: cancels `name`'s pending steps (if its scenario task is still
+        running) AND ends every anomaly it already injected -- `run_named_scenario`'s asyncio task
+        alone has no "stop" verb, and cancelling just the task leaves any already-injected anomaly
+        (e.g. a long `duration` bank_overload) running for its full original duration."""
+        scenarios = load_scenarios_dir(request.app.state.scenarios_dir)
+        if not any(s.name == name for s in scenarios):
+            return JSONResponse(status_code=404, content={"error": f"unknown scenario '{name}'"})
+        task = request.app.state.running_scenarios.get(name)
+        task_cancelled = task is not None and not task.done()
+        if task_cancelled:
+            task.cancel()
+        ended = await stop_scenario_anomalies(injector(request), name)
+        return {"ok": True, "scenario": name, "task_cancelled": task_cancelled, "anomalies_ended": ended}
+
+    @app.post("/api/scenarios/stop-all")
+    async def stop_all_scenarios(request: Request) -> dict[str, Any]:
+        """Demo gap #18: stops every scenario this process has ever run (its task, if still running,
+        plus every still-active anomaly it injected) -- not limited to scenarios currently tracked as
+        "running", since a scenario's own anomalies can outlive its task (its steps finish injecting
+        well before their last `duration` elapses)."""
+        names = {r.id.split(":", 1)[0] for r in injector(request).active(source="scenario")}
+        names |= set(request.app.state.running_scenarios)
+        stopped = []
+        for name in sorted(names):
+            task = request.app.state.running_scenarios.get(name)
+            task_cancelled = task is not None and not task.done()
+            if task_cancelled:
+                task.cancel()
+            ended = await stop_scenario_anomalies(injector(request), name)
+            stopped.append({"scenario": name, "task_cancelled": task_cancelled, "anomalies_ended": ended})
+        return {"ok": True, "stopped": stopped}
+
     @app.get("/api/scenarios/{name}/status")
     async def scenario_status(request: Request, name: str) -> dict[str, Any]:
         task = request.app.state.running_scenarios.get(name)
@@ -185,7 +245,12 @@ def create_app(
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"types": catalogue.as_list(), "scenarios": scenarios, "profiles": INTENSITY_PROFILES},
+            {
+                "types": catalogue.as_list(),
+                "scenarios": scenarios,
+                "profiles": INTENSITY_PROFILES,
+                "base_path": _base_path(request),
+            },
         )
 
     return app

@@ -7,6 +7,8 @@ unit-testable with fakes (BUILD.md S5a, task instruction "use fakes for other mo
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -16,6 +18,8 @@ from opengrid.forecast.models import ForecastKind, ForecastRow, ScenarioPoint
 from opengrid.forecast.quantiles import (
     DEFAULT_LOOKBACK_DAYS,
     DEFAULT_RESOLUTION_MIN,
+    FIRM_POOLED,
+    MIN_SLOT_SAMPLES,
     InsufficientHistoryError,
     compute_slot_quantiles,
 )
@@ -110,6 +114,11 @@ async def compute_and_persist(
     horizon_hours = int(cfg.get("forecast.horizon_hours", 24))
     horizon_start = floor_to_interval(now, resolution_min)
     steps = (horizon_hours * 60) // resolution_min
+    firm_rule = FirmRule(
+        min_samples=int(cfg.get("forecast.min_samples_firm", MIN_SLOT_SAMPLES)),
+        pool_day_types_when_short=bool(cfg.get("forecast.pool_day_types_when_short", True)),
+        pooled_max_spread=_optional_float(cfg.get("forecast.pooled_max_spread")),
+    )
 
     price_series: list[str] = list(
         cfg.get("forecast.price_series") or cfg.get("fleet.zones", list(DEFAULT_PRICE_SERIES))
@@ -140,6 +149,7 @@ async def compute_and_persist(
                 horizon_start=horizon_start,
                 steps=steps,
                 resolution_min=resolution_min,
+                firm_rule=firm_rule,
                 solar_mw_by_ts=solar_mw_by_ts,
                 cloud_cover_by_ts=cloud_cover_by_ts,
             )
@@ -166,6 +176,7 @@ async def compute_and_persist(
                 horizon_start=horizon_start,
                 steps=steps,
                 resolution_min=resolution_min,
+                firm_rule=firm_rule,
             )
         )
 
@@ -197,6 +208,7 @@ async def _compute_series(
     horizon_start: datetime,
     steps: int,
     resolution_min: int,
+    firm_rule: FirmRule | None = None,
     solar_mw_by_ts: dict[datetime, float] | None = None,
     cloud_cover_by_ts: dict[datetime, float] | None = None,
 ) -> list[ForecastRow]:
@@ -229,12 +241,22 @@ async def _compute_series(
         for obs in window_obs:
             totals[obs.ts] = totals.get(obs.ts, 0.0) + obs.value
     pairs = sorted(totals.items())
+    rule = firm_rule or FirmRule()
 
     rows: list[ForecastRow] = []
+    basis_counts: Counter[str] = Counter()
     for step in range(steps):
         target_start = horizon_start + timedelta(minutes=step * resolution_min)
         try:
-            slot = compute_slot_quantiles(pairs, target_start, stale=stale, resolution_min=resolution_min)
+            slot = compute_slot_quantiles(
+                pairs,
+                target_start,
+                stale=stale,
+                resolution_min=resolution_min,
+                min_slot_samples=rule.min_samples,
+                pool_day_types_when_short=rule.pool_day_types_when_short,
+                pooled_max_spread=rule.pooled_max_spread,
+            )
         except InsufficientHistoryError:
             # No silent fallback (BUILD.md S5a): a slot forecast has to be skipped, log it so it is
             # visible in health/alerts rather than quietly missing from `og.forecast`.
@@ -243,6 +265,7 @@ async def _compute_series(
                 extra={"series_key": series_key, "kind": kind, "interval_start": target_start.isoformat()},
             )
             continue
+        basis_counts[slot.basis] += 1
         p10, p50, p90 = slot.p10, slot.p50, slot.p90
         if kind == "price":
             shape = resolve_solar_shape_input(
@@ -263,7 +286,42 @@ async def _compute_series(
                 firm_fitness=slot.firm_fitness,
             )
         )
+    if basis_counts["POOLED"]:
+        # Audit trail for the short-history relaxation: these slots are FIRM_OK in `og.forecast` on
+        # weekday+weekend pooled samples, not the strict same-day-type rule.
+        logger.warning(
+            "forecast: slots firm on pooled day types (short history)",
+            extra={
+                "reason_code": FIRM_POOLED,
+                "series_key": series_key,
+                "kind": kind,
+                "pooled_slots": basis_counts["POOLED"],
+                "strict_slots": basis_counts["STRICT"],
+                "fallback_slots": basis_counts["FALLBACK"],
+                "stale": stale,
+            },
+        )
     return rows
+
+
+@dataclass(frozen=True, slots=True)
+class FirmRule:
+    """`[forecast]` firm-fitness knobs: `min_samples_firm` (default 3, 02b S3), the short-history
+    `pool_day_types_when_short` relaxation (default on) and its optional `pooled_max_spread` cap on a
+    pooled slot's P90-P10 spread (series units; unset = no cap -- 02b S3 defines no dispersion
+    threshold for the strict rule either)."""
+
+    min_samples: int = MIN_SLOT_SAMPLES
+    pool_day_types_when_short: bool = True
+    pooled_max_spread: float | None = None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    raise ValueError(f"[forecast].pooled_max_spread must be a number, got {value!r}")
 
 
 _SCENARIO_NAMES: tuple[Literal["P10", "P50", "P90"], ...] = ("P10", "P50", "P90")

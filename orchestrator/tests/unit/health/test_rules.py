@@ -25,9 +25,12 @@ from opengrid.health.rules import (
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
     evaluate_scada_overload_alert,
+    evaluate_scada_silent_alert,
     evaluate_sim_offline_alert,
     evaluate_temperature_limit_alert,
     is_fallback_feed_needed,
+    is_firm_blocking_feed,
+    is_scada_silent,
 )
 from opengrid.platform.config import Config
 
@@ -210,6 +213,13 @@ def test_degraded_modes_can_combine() -> None:
     ]
     modes = derive_degraded_modes(feed_stale=True, process_health=processes)
     assert modes == frozenset({"NO_NEW_COMMITMENTS", "HOLD_LOCAL_AUTONOMY", "HOLD"})
+
+
+def test_scada_silent_yields_dist_deferral_open_loop() -> None:
+    """R3, DM-09/ES07-S02: SCADA silence is its own independent trigger for `DIST_DEFERRAL_OPEN_LOOP`."""
+    processes = [ProcessHealth(p, "ok", NOW) for p in ALL_PROCESSES]
+    modes = derive_degraded_modes(feed_stale=False, process_health=processes, dist_deferral_scada_silent=True)
+    assert modes == frozenset({"DIST_DEFERRAL_OPEN_LOOP"})
 
 
 # --- alert rules -----------------------------------------------------------------------------------
@@ -514,6 +524,45 @@ def test_fallback_needed_when_primary_never_seen() -> None:
     assert is_fallback_feed_needed(None, now=NOW, primary_threshold_s=60) is True
 
 
+# --- firm-blocking feeds (R3 hotfix: NO_NEW_COMMITMENTS over-blocked) -------------------------------
+
+
+def test_ercot_price_series_is_firm_blocking_by_default() -> None:
+    fs = FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=None)
+    assert is_firm_blocking_feed(fs, thresholds=THRESHOLDS) is True
+
+
+def test_ercot_load_actuals_are_not_firm_blocking() -> None:
+    """The defect: ERCOT system-load ACTUALS (np6-345-cd, a daily product) used to block
+    NO_NEW_COMMITMENTS when stale even though it feeds no firm pricing."""
+    fs = FeedStatus(source="ERCOT", product="np6-345-cd", last_value_at=None)
+    assert is_firm_blocking_feed(fs, thresholds=THRESHOLDS) is False
+
+
+def test_nws_is_not_firm_blocking() -> None:
+    fs = FeedStatus(source="NWS", product="nws-hourly", last_value_at=None)
+    assert is_firm_blocking_feed(fs, thresholds=THRESHOLDS) is False
+
+
+def test_eia_fallback_is_not_firm_blocking() -> None:
+    fs = FeedStatus(source="EIA", product="eia-demand", last_value_at=None)
+    assert is_firm_blocking_feed(fs, thresholds=THRESHOLDS) is False
+
+
+def test_firm_blocking_feeds_is_config_driven() -> None:
+    custom = HealthThresholds(firm_blocking_feeds=frozenset({"NWS:nws-hourly"}))
+    ercot_price = FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=None)
+    nws = FeedStatus(source="NWS", product="nws-hourly", last_value_at=None)
+    assert is_firm_blocking_feed(ercot_price, thresholds=custom) is False
+    assert is_firm_blocking_feed(nws, thresholds=custom) is True
+
+
+def test_firm_blocking_feeds_from_config() -> None:
+    cfg = Config({"health": {"firm_blocking_feeds": ["ERCOT:np6-905-cd", "NWS:nws-hourly"]}})
+    thresholds = HealthThresholds.from_config(cfg)
+    assert thresholds.firm_blocking_feeds == frozenset({"ERCOT:np6-905-cd", "NWS:nws-hourly"})
+
+
 # --- ALR-SIM-OFFLINE (defect fix) -------------------------------------------------------------------
 
 
@@ -535,3 +584,39 @@ def test_sim_offline_alert_critical_when_both_signals_stale() -> None:
     assert finding.rule == "ALR-SIM-OFFLINE"
     assert finding.severity == "critical"
     assert finding.condition_key == "ALR-SIM-OFFLINE"
+
+
+# --- ALR-SCADA-SILENT (R3, DM-09/ES07-S02) ------------------------------------------------------------
+
+
+def test_scada_silent_false_on_cold_start() -> None:
+    """No SCADA reading has ever arrived -- not evidence of silence, same rule as ALR-SIM-OFFLINE's
+    cold-start exception."""
+    assert is_scada_silent(None, now=NOW, thresholds=THRESHOLDS) is False
+    assert evaluate_scada_silent_alert(None, now=NOW, thresholds=THRESHOLDS) is None
+
+
+def test_scada_silent_false_when_reading_fresh() -> None:
+    fresh = NOW - timedelta(seconds=5)
+    assert is_scada_silent(fresh, now=NOW, thresholds=THRESHOLDS) is False
+    assert evaluate_scada_silent_alert(fresh, now=NOW, thresholds=THRESHOLDS) is None
+
+
+def test_scada_silent_true_and_alert_fires_past_threshold() -> None:
+    old = NOW - timedelta(seconds=THRESHOLDS.scada_silent_s + 1)
+    assert is_scada_silent(old, now=NOW, thresholds=THRESHOLDS) is True
+    finding = evaluate_scada_silent_alert(old, now=NOW, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-SCADA-SILENT"
+    assert finding.severity == "critical"
+    assert finding.condition_key == "ALR-SCADA-SILENT"
+
+
+def test_scada_silent_clears_once_reading_resumes() -> None:
+    """Not a stateful test (this module is pure) -- just confirms the finding depends only on the
+    latest timestamp given, so a fresh reading on the next cycle naturally stops it firing (the
+    raise-once/clear-on-resolve wiring in `evaluate_alerts()` does the rest)."""
+    old = NOW - timedelta(seconds=THRESHOLDS.scada_silent_s + 1)
+    assert evaluate_scada_silent_alert(old, now=NOW, thresholds=THRESHOLDS) is not None
+    fresh = NOW
+    assert evaluate_scada_silent_alert(fresh, now=NOW, thresholds=THRESHOLDS) is None

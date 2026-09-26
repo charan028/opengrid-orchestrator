@@ -136,6 +136,16 @@ def evaluate_feed_alert(
     return None
 
 
+def is_firm_blocking_feed(feed_status: FeedStatus, *, thresholds: HealthThresholds) -> bool:
+    """R3 hotfix: whether `feed_status` is one of the feeds `NO_NEW_COMMITMENTS` (02b S6.5 row 1) may
+    gate on -- `thresholds.firm_blocking_feeds`, keyed `"{source}:{product}"`. Every feed still raises its
+    own `ALR-FEED-STALE`/`ALR-FEED-LGV-EXHAUSTED` regardless of this check (see `evaluate_feed_alert`,
+    called unconditionally); this only narrows which stale feeds are allowed to block new commitments --
+    previously ANY stale feed did, including ERCOT system-load ACTUALS (np6-345-cd), NWS and the EIA
+    fallback, none of which feed firm pricing, which blocked production commitments for no reason."""
+    return f"{feed_status.source}:{feed_status.product}" in thresholds.firm_blocking_feeds
+
+
 def is_fallback_feed_needed(
     primary_feed_status: FeedStatus | None, *, now: datetime, primary_threshold_s: float
 ) -> bool:
@@ -186,6 +196,43 @@ def evaluate_sim_offline_alert(
         condition_key="ALR-SIM-OFFLINE",
         detail={
             "latest_fleet_seen_at": latest_fleet_seen_at.isoformat() if latest_fleet_seen_at else None,
+            "latest_scada_seen_at": latest_scada_seen_at.isoformat() if latest_scada_seen_at else None,
+        },
+    )
+
+
+def is_scada_silent(
+    latest_scada_seen_at: datetime | None, *, now: datetime, thresholds: HealthThresholds
+) -> bool:
+    """DM-09 / ES07-S02 / `DegradedMode.DIST_DEFERRAL_OPEN_LOOP`: true once no SCADA bank reading
+    (`og.feed_obs` where `source='scada'`) has arrived for over `scada_silent_s`.
+
+    A cold start (`latest_scada_seen_at=None`, no SCADA reading has ever arrived) is NOT silent -- the
+    same rule as `evaluate_sim_offline_alert`'s "no data yet is not evidence of an offline sim": there is
+    no evidence either way yet, so this must not trip the instant og-settle starts, before the first
+    reading has had a chance to land.
+    """
+    if latest_scada_seen_at is None:
+        return False
+    return is_stale(latest_scada_seen_at, thresholds.scada_silent_s, now=now)
+
+
+def evaluate_scada_silent_alert(
+    latest_scada_seen_at: datetime | None, *, now: datetime, thresholds: HealthThresholds
+) -> AlertFinding | None:
+    """ALR-SCADA-SILENT (critical, DM-09 / ES07-S02): no SCADA bank reading for over `scada_silent_s` --
+    SCADA-dependent dispatch loops must HOLD then SCHEDULE (07 S6.8) until it recovers. Clears
+    automatically once a fresh reading arrives (this function simply stops returning a finding; the usual
+    raise-once/clear-on-resolve wiring in `evaluate_alerts()` does the rest). See `is_scada_silent`'s
+    docstring for the cold-start exception."""
+    if not is_scada_silent(latest_scada_seen_at, now=now, thresholds=thresholds):
+        return None
+    return AlertFinding(
+        rule="ALR-SCADA-SILENT",
+        severity="critical",
+        summary=f"No SCADA bank reading for over {thresholds.scada_silent_s:.0f}s (DM-09)",
+        condition_key="ALR-SCADA-SILENT",
+        detail={
             "latest_scada_seen_at": latest_scada_seen_at.isoformat() if latest_scada_seen_at else None,
         },
     )

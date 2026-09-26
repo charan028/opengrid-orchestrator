@@ -52,6 +52,7 @@ HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
         # listed now so wiring them into evaluate_alerts() later doesn't also require touching this set.
         "ALR-METER-EXPORT-LIMIT",
         "ALR-TEMPERATURE-LIMIT",
+        "ALR-SCADA-SILENT",
     }
 )
 
@@ -97,6 +98,22 @@ class HealthThresholds:
     meter_export_warn_ratio: float = 0.90
     temperature_warn_ratio: float = 0.90
     limit_proximity_sustained_cycles: int = 3
+    # ALR-SCADA-SILENT / DIST_DEFERRAL_OPEN_LOOP (R3, DM-09 / ES07-S02): no SCADA bank reading
+    # (`og.feed_obs` source='scada') for longer than this is "SCADA silent" -- SCADA-dependent dispatch
+    # loops must HOLD/SCHEDULE until it recovers (07 S6.8). Distinct from (and independently configurable
+    # from) `sim_offline_s`, which also folds in fleet telemetry to infer whether `ogsim` itself is alive.
+    scada_silent_s: float = 60.0
+    # R3 hotfix: `NO_NEW_COMMITMENTS` (02b S6.5 row 1) used to fire on ANY stale `feed_status` row,
+    # including ERCOT system-load ACTUALS (np6-345-cd, a daily product), NWS and the EIA fallback --
+    # none of those feed firm pricing, so their normal staleness (or, for EIA, being idle while its
+    # ERCOT primary is healthy, see `is_fallback_feed_needed`) blocked production commitments for no
+    # reason. Only a feed in this set blocks new commitments when stale; every feed still raises its own
+    # `ALR-FEED-STALE`/`ALR-FEED-LGV-EXHAUSTED` regardless of membership here -- this only narrows the
+    # gate, not the alerting. Keyed as `"{source}:{product}"` (matching `FeedStatus.source`/`.product`).
+    # Default: the ERCOT real-time price series (np6-905-cd) -- the firm-pricing input `forecast.scenarios`
+    # /`selector.gate` need fresh. Config-driven so the architect can extend it as more feeds are
+    # confirmed to be genuine firm-pricing inputs.
+    firm_blocking_feeds: frozenset[str] = field(default_factory=lambda: frozenset({"ERCOT:np6-905-cd"}))
 
     @property
     def heartbeat_down_after_s(self) -> float:
@@ -146,6 +163,10 @@ class HealthThresholds:
             temperature_warn_ratio=cfg.get("health.temperature_warn_ratio", defaults.temperature_warn_ratio),
             limit_proximity_sustained_cycles=cfg.get(
                 "health.limit_proximity_sustained_cycles", defaults.limit_proximity_sustained_cycles
+            ),
+            scada_silent_s=cfg.get("health.scada_silent_s", defaults.scada_silent_s),
+            firm_blocking_feeds=frozenset(
+                cfg.get("health.firm_blocking_feeds", sorted(defaults.firm_blocking_feeds))
             ),
         )
 

@@ -26,6 +26,10 @@
     .big-switch { padding: 0.6rem 1.2rem; font-size: 1rem; }
     .big-switch.on { background: #dc2626; }
     .sim-toggle { display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 1rem; }
+    #toast { position: fixed; top: 1rem; right: 1rem; padding: 0.6rem 1rem; border-radius: 6px; background: #10b981; color: white; font-size: 0.85rem; display: none; z-index: 10; max-width: 24rem; }
+    #toast.error { background: #dc2626; }
+    .error-line { color: #f87171; font-size: 0.85rem; margin-top: 0.5rem; }
+    #scenarioStatus { font-size: 0.85rem; color: #9aa4b2; margin-top: 0.5rem; min-height: 1.2rem; }
   </style>
 </head>
 <body>
@@ -36,9 +40,10 @@
     <div class="row">
       <button id="pauseAllBtn" class="big-switch" onclick="toggleRandomPause()">Pause all random</button>
       <label style="margin:0;">Profile</label>
-      <select id="profileSelect" style="width:auto;" onchange="setProfile()">
+      <select id="profileSelect" style="width:auto;">
         {% for p in profiles %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
       </select>
+      <button id="applyProfileBtn" onclick="setProfile()">Apply profile</button>
     </div>
     <div class="row" style="margin-top:0.6rem;" id="simToggles"></div>
     <div id="randomStatus" style="margin-top:0.6rem; font-size:0.85rem; color:#9aa4b2;"></div>
@@ -58,13 +63,21 @@
     <label for="duration">Duration (seconds)</label>
     <input id="duration" type="number" value="60">
 
-    <button onclick="inject()">Inject</button>
-    <div id="status"></div>
+    <button id="injectBtn" onclick="inject()">Inject</button>
   </section>
 
   <section>
     <h2>Scenarios</h2>
-    <div id="scenarios"></div>
+    <div class="row">
+      <label for="scenarioSelect" style="margin:0;">Scenario</label>
+      <select id="scenarioSelect" style="width:auto;"></select>
+      <button id="runScenarioBtn" onclick="runSelectedScenario()">Run scenario</button>
+      <button id="stopScenarioBtn" onclick="stopSelectedScenario()">Stop</button>
+      <button id="stopAllScenariosBtn" onclick="stopAllScenarios()">Stop all</button>
+    </div>
+    <div id="scenarioDescription" style="margin-top:0.4rem; font-size:0.85rem; color:#9aa4b2;"></div>
+    <div id="scenarioStatus">No scenario running.</div>
+    <div id="scenarioError" class="error-line"></div>
   </section>
 
   <section>
@@ -77,10 +90,36 @@
     <table id="log"><thead><tr><th>time</th><th>action</th><th>source</th><th>id</th><th>type</th><th>target</th><th>start</th><th>end</th></tr></thead><tbody></tbody></table>
   </section>
 
+  <div id="toast"></div>
+
 <script>
 let TYPES = {{ types | tojson }};
+// Live bug fix, 2026-09-26 (demo gap #17): every fetch() below is relative to API_BASE, not an
+// absolute "/api/..." path, so this page works whether it's served at the domain root or behind a
+// reverse-proxy mount prefix (e.g. Apache `ProxyPass /ogsim`) -- see app.py's `_base_path`.
+const API_BASE = {{ base_path | tojson }};
 
-function setStatus(msg) { document.getElementById('status').textContent = msg; }
+let SCENARIOS = [];
+
+function showToast(msg, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.toggle('error', !!isError);
+  el.style.display = 'block';
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+async function fetchJson(url, options) {
+  const resp = await fetch(url, options);
+  let data = null;
+  try { data = await resp.json(); } catch (e) { /* non-JSON body */ }
+  if (!resp.ok) {
+    const detail = (data && data.error) ? data.error : resp.statusText;
+    throw new Error(`${resp.status} ${detail}`);
+  }
+  return data;
+}
 
 function populateTypes() {
   const sel = document.getElementById('type');
@@ -108,61 +147,156 @@ async function inject() {
     params: JSON.parse(document.getElementById('params').value || '{}'),
     duration: parseFloat(document.getElementById('duration').value || '60'),
   };
-  const resp = await fetch('/api/inject', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
-  const data = await resp.json();
-  setStatus(resp.ok ? `Injected ${data.anomaly.id}` : `Error: ${data.error}`);
+  try {
+    const data = await fetchJson(`${API_BASE}/api/inject`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    });
+    showToast(`Injected ${data.anomaly.id}`, false);
+  } catch (e) {
+    showToast(`Inject failed: ${e.message}`, true);
+  }
   refresh();
 }
 
 async function cancelAnomaly(id) {
-  await fetch(`/api/anomalies/${id}`, { method: 'DELETE' });
+  try {
+    await fetchJson(`${API_BASE}/api/anomalies/${id}`, { method: 'DELETE' });
+    showToast(`Cancelled ${id}`, false);
+  } catch (e) {
+    showToast(`Cancel failed: ${e.message}`, true);
+  }
   refresh();
 }
 
-async function runScenario(name) {
-  const resp = await fetch(`/api/scenarios/${name}/run`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{"speed": 1.0}' });
-  const data = await resp.json();
-  setStatus(resp.ok ? `Running scenario ${name} (${data.steps} steps)` : `Error: ${data.error}`);
+function selectedScenarioName() {
+  const sel = document.getElementById('scenarioSelect');
+  return sel && sel.value ? sel.value : null;
+}
+
+async function runSelectedScenario() {
+  const name = selectedScenarioName();
+  if (!name) { showToast('No scenario selected', true); return; }
+  try {
+    const data = await fetchJson(`${API_BASE}/api/scenarios/${name}/run`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{"speed": 1.0}',
+    });
+    showToast(`Running ${name} (${data.steps} steps)`, false);
+  } catch (e) {
+    showToast(`Run failed: ${e.message}`, true);
+  }
+  refreshScenarioStatus();
+}
+
+async function stopSelectedScenario() {
+  const name = selectedScenarioName();
+  if (!name) { showToast('No scenario selected', true); return; }
+  try {
+    const data = await fetchJson(`${API_BASE}/api/scenarios/${name}/stop`, { method: 'POST' });
+    showToast(`Stopped ${name} (${(data.anomalies_ended || []).length} anomalies ended)`, false);
+  } catch (e) {
+    showToast(`Stop failed: ${e.message}`, true);
+  }
+  refreshScenarioStatus();
+  refresh();
+}
+
+async function stopAllScenarios() {
+  try {
+    const data = await fetchJson(`${API_BASE}/api/scenarios/stop-all`, { method: 'POST' });
+    showToast(`Stopped ${data.stopped.length} scenario(s)`, false);
+  } catch (e) {
+    showToast(`Stop all failed: ${e.message}`, true);
+  }
+  refreshScenarioStatus();
+  refresh();
+}
+
+function updateScenarioDescription() {
+  const name = selectedScenarioName();
+  const s = SCENARIOS.find(x => x.name === name);
+  document.getElementById('scenarioDescription').textContent = s ? `${s.steps} steps — ${s.description}` : '';
+}
+
+async function refreshScenarioStatus() {
+  const name = selectedScenarioName();
+  const statusEl = document.getElementById('scenarioStatus');
+  if (!name) { statusEl.textContent = 'No scenario running.'; return; }
+  try {
+    const data = await fetchJson(`${API_BASE}/api/scenarios/${name}/status`);
+    if (data.running) {
+      const activeData = await fetchJson(`${API_BASE}/api/anomalies?source=scenario`);
+      const stepsSoFar = activeData.active.filter(a => a.id.startsWith(`${name}:`)).length;
+      statusEl.textContent = `Running ${name} — ${stepsSoFar} step anomaly(ies) currently active.`;
+    } else {
+      statusEl.textContent = `${name}: not running.`;
+    }
+  } catch (e) {
+    statusEl.textContent = `Could not read status for ${name}: ${e.message}`;
+  }
 }
 
 async function loadScenarios() {
-  const resp = await fetch('/api/scenarios');
-  const data = await resp.json();
-  const div = document.getElementById('scenarios');
-  div.innerHTML = '';
-  for (const s of data.scenarios) {
-    const row = document.createElement('div');
-    row.style.marginBottom = '0.5rem';
-    row.innerHTML = `<b>${s.name}</b> (${s.steps} steps) — ${s.description} `;
-    const btn = document.createElement('button');
-    btn.textContent = 'Run';
-    btn.onclick = () => runScenario(s.name);
-    row.appendChild(btn);
-    div.appendChild(row);
+  const errEl = document.getElementById('scenarioError');
+  errEl.textContent = '';
+  try {
+    const data = await fetchJson(`${API_BASE}/api/scenarios`);
+    SCENARIOS = data.scenarios;
+    const sel = document.getElementById('scenarioSelect');
+    const previous = sel.value;
+    sel.innerHTML = '';
+    for (const s of SCENARIOS) {
+      const opt = document.createElement('option');
+      opt.value = s.name;
+      opt.textContent = `${s.name} (${s.steps} steps)`;
+      sel.appendChild(opt);
+    }
+    if (previous && SCENARIOS.some(s => s.name === previous)) sel.value = previous;
+    sel.onchange = updateScenarioDescription;
+    updateScenarioDescription();
+  } catch (e) {
+    errEl.textContent = `could not load scenarios: ${e.message}`;
   }
 }
 
 async function toggleRandomPause() {
   const btn = document.getElementById('pauseAllBtn');
   const paused = btn.classList.contains('on');
-  await fetch(paused ? '/api/random/resume' : '/api/random/pause', { method: 'POST' });
+  try {
+    await fetchJson(paused ? `${API_BASE}/api/random/resume` : `${API_BASE}/api/random/pause`, { method: 'POST' });
+  } catch (e) {
+    showToast(`Pause/resume failed: ${e.message}`, true);
+  }
   refreshRandomStatus();
 }
 
 async function setProfile() {
   const profile = document.getElementById('profileSelect').value;
-  await fetch('/api/random/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({profile}) });
+  try {
+    await fetchJson(`${API_BASE}/api/random/profile`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({profile}) });
+    showToast(`Profile applied: ${profile}`, false);
+  } catch (e) {
+    showToast(`Apply profile failed: ${e.message}`, true);
+  }
   refreshRandomStatus();
 }
 
 async function toggleSim(sim, enabled) {
-  await fetch(`/api/random/sims/${sim}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled}) });
+  try {
+    await fetchJson(`${API_BASE}/api/random/sims/${sim}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled}) });
+  } catch (e) {
+    showToast(`Toggle ${sim} failed: ${e.message}`, true);
+  }
   refreshRandomStatus();
 }
 
 async function refreshRandomStatus() {
-  const resp = await fetch('/api/random/status');
-  const s = await resp.json();
+  let s;
+  try {
+    s = await fetchJson(`${API_BASE}/api/random/status`);
+  } catch (e) {
+    document.getElementById('randomStatus').textContent = `could not load random status: ${e.message}`;
+    return;
+  }
   const btn = document.getElementById('pauseAllBtn');
   btn.textContent = s.paused ? 'Resume all random' : 'Pause all random';
   btn.classList.toggle('on', s.paused);
@@ -188,9 +322,16 @@ async function refreshRandomStatus() {
 
 async function refresh() {
   const now = Date.now() / 1000;
-  const activeResp = await fetch('/api/anomalies');
-  const activeData = await activeResp.json();
   const tbody = document.querySelector('#active tbody');
+  let activeData;
+  try {
+    activeData = await fetchJson(`${API_BASE}/api/anomalies`);
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="7">could not load active anomalies: ${e.message}</td></tr>`;
+    refreshRandomStatus();
+    refreshScenarioStatus();
+    return;
+  }
   tbody.innerHTML = '';
   for (const a of activeData.active) {
     const tr = document.createElement('tr');
@@ -205,20 +346,24 @@ async function refresh() {
     tbody.appendChild(tr);
   }
 
-  const logResp = await fetch('/api/log');
-  const logData = await logResp.json();
   const logBody = document.querySelector('#log tbody');
-  logBody.innerHTML = '';
-  for (const e of logData.log.slice(-50).reverse()) {
-    const tr = document.createElement('tr');
-    const t = new Date((e.logged_at || 0) * 1000).toLocaleTimeString();
-    const fmt = (v) => v === undefined || v === null ? '' : new Date(v * 1000).toLocaleTimeString();
-    tr.innerHTML = `<td>${t}</td><td>${e.action || ''}</td><td>${e.source || ''}</td><td>${e.id || ''}</td>` +
-      `<td>${e.type || ''}</td><td>${e.target || ''}</td><td>${fmt(e.start)}</td><td>${fmt(e.end)}</td>`;
-    logBody.appendChild(tr);
+  try {
+    const logData = await fetchJson(`${API_BASE}/api/log`);
+    logBody.innerHTML = '';
+    for (const e of logData.log.slice(-50).reverse()) {
+      const tr = document.createElement('tr');
+      const t = new Date((e.logged_at || 0) * 1000).toLocaleTimeString();
+      const fmt = (v) => v === undefined || v === null ? '' : new Date(v * 1000).toLocaleTimeString();
+      tr.innerHTML = `<td>${t}</td><td>${e.action || ''}</td><td>${e.source || ''}</td><td>${e.id || ''}</td>` +
+        `<td>${e.type || ''}</td><td>${e.target || ''}</td><td>${fmt(e.start)}</td><td>${fmt(e.end)}</td>`;
+      logBody.appendChild(tr);
+    }
+  } catch (e) {
+    logBody.innerHTML = `<tr><td colspan="8">could not load the injection log: ${e.message}</td></tr>`;
   }
 
   refreshRandomStatus();
+  refreshScenarioStatus();
 }
 
 populateTypes();
