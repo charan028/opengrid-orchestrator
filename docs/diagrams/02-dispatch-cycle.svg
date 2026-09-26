@@ -6,7 +6,7 @@
 <marker id="arrow_334155" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/></marker>
 </defs>
 <text x="30" y="28" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="20" font-weight="700" text-anchor="start" fill="#111827" >OpenGrid Orchestrator — Dispatch Stack and the 2-Second Real-Time Cycle</text>
-<text x="30" y="48" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12" font-weight="normal" text-anchor="start" fill="#475569" >Selector (MILP/LP) → real-time allocator → ledger → guardian sign → MQTT → hub → ack/telemetry → settle, as implemented on main @ 434d230</text>
+<text x="30" y="48" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12" font-weight="normal" text-anchor="start" fill="#475569" >Selector (MILP/LP) → real-time allocator → ledger → guardian sign → MQTT → hub → ack/telemetry → settle, as implemented on main @ 434d230; guardian check grid updated to 6470cfa (R2)</text>
 <rect x="30" y="62" width="16" height="13" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
 <text x="50" y="73" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >implemented stage</text>
 <rect x="188.72000000000003" y="62" width="16" height="13" rx="8" ry="8" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
@@ -92,7 +92,7 @@
 <text x="40" y="1092.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >profile's eligible hub set from og.hub_inverter_pq + live health every</text>
 <text x="40" y="1106.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >PQ_ELIGIBILITY_REFRESH_S (engine/__init__.py, run_periodic); selector.gate.</text>
 <text x="40" y="1120.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >exceeds_pq_eligible_capacity() (gate.py:526) refuses to commit an obligation beyond it. PQ</text>
-<text x="40" y="1134.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >continuous MONITORING (allocator/pq_monitor.py) is separate and still has 0 callers anywhere</text>
+<text x="40" y="1134.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >continuous MONITORING (allocator/pq_monitor.py) is separate: 0 callers at 434d230, wired at R2 but off</text>
 <text x="40" y="1148.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >(diagram 06). Zone-block load zones (f5058af): fleet.seed's ZoneBlockConfig is disabled by</text>
 <text x="40" y="1162.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >default — base fleet topology is unaffected either way.</text>
 <rect x="920" y="684.0999999999999" width="450" height="284.7" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
@@ -194,7 +194,7 @@
 <text x="40" y="2242.7999999999993" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >operator B approves (403 if B==A) — og.operator_action SAFE_STOP_RELEASE (TIER2) traced,</text>
 <text x="40" y="2256.7999999999993" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >then guardian-signed via [guardian].stop_release_authorised_operators (an ALLOW-LIST; empty</text>
 <text x="40" y="2270.7999999999993" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >signs nothing until named). Test operators og-op-a/og-op-b are env-overridable, not prod ids.</text>
-<rect x="920" y="1811.3" width="450" height="361.8" rx="8" ry="8" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
+<rect x="920" y="1811.3" width="450" height="483.4" rx="8" ry="8" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
 <text x="930" y="1832.3" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Guardian checks implemented</text>
 <text x="930" y="1848.3" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >guardian/checks.py — numbering per 00-invariants.md</text>
 <text x="930" y="1868.3" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-20</text>
@@ -210,33 +210,50 @@
 <text x="930" y="1944.3000000000002" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-01-ENERGY</text>
 <text x="1020" y="1944.3000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: SoC over the FULL lease duration (K1)</text>
 <text x="930" y="1959.5000000000002" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-02</text>
-<text x="1020" y="1959.5000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: |P| within inverter/hub cap (K4)</text>
+<text x="1020" y="1959.5000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: |P| within P_max(SoC, T) + unit cap (K4, R2)</text>
 <text x="930" y="1974.7000000000003" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-04</text>
 <text x="1020" y="1974.7000000000003" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: hub ramp bound (K4, shared w/ engine)</text>
 <text x="930" y="1989.9000000000003" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-03</text>
 <text x="1020" y="1989.9000000000003" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >bank kVA loading, ADDED load, BOTH directions (NEW)</text>
 <text x="930" y="2005.1000000000004" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-05</text>
-<text x="1020" y="2005.1000000000004" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >fleet-wide ramp cap, firm vs. non-firm (K4)</text>
+<text x="1020" y="2005.1000000000004" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >fleet ramp cap + synchronized-step stagger (K4)</text>
 <text x="930" y="2020.3000000000004" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-06</text>
 <text x="1020" y="2020.3000000000004" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-feeder ramp ceiling, real feeder_id (K4, NEW)</text>
 <text x="930" y="2035.5000000000005" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-15</text>
 <text x="1020" y="2035.5000000000005" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >active L2 instruction is a hard boundary (K5)</text>
 <text x="930" y="2050.7000000000003" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-19</text>
-<text x="1020" y="2050.7000000000003" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >commitment lock; re-verifies override claims (K13, NEW)</text>
+<text x="1020" y="2050.7000000000003" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >commitment lock, override claims, AS hold (K13)</text>
 <text x="930" y="2065.9" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >SAFE_STOP</text>
 <text x="1020" y="2065.9" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >an engaged stop (fleet/zone/bank) vetoes the batch</text>
 <text x="930" y="2081.1" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-21</text>
-<text x="1020" y="2081.1" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-phase imbalance, PQ-sensitive only (K14, NEW)</text>
+<text x="1020" y="2081.1" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-phase imbalance, PQ-sensitive only (K14)</text>
 <text x="930" y="2096.2999999999997" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-22</text>
-<text x="1020" y="2096.2999999999997" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >THD voltage+current, PQ-sensitive only (K14, NEW)</text>
+<text x="1020" y="2096.2999999999997" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >THD voltage+current, PQ-sensitive only (K14)</text>
 <text x="930" y="2111.4999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-23</text>
-<text x="1020" y="2111.4999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >freq/voltage deviation, PQ-sensitive (K14, NEW)</text>
+<text x="1020" y="2111.4999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >freq/voltage deviation, PQ-sensitive (K14)</text>
 <text x="930" y="2126.6999999999994" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-24</text>
-<text x="1020" y="2126.6999999999994" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >asset-state + ride-through conformance (K14, NEW)</text>
+<text x="1020" y="2126.6999999999994" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >asset-state + ride-through conformance (K14)</text>
 <text x="930" y="2141.899999999999" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-25</text>
-<text x="1020" y="2141.899999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >calibration-command safety, bounds/rate (K14, NEW)</text>
-<rect x="920" y="2191.1" width="450" height="34" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
-<text x="930" y="2211.1" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#6b7280" font-style="italic" >G-21..G-25: guardian/pq_checks.py (NEW, additive; diagram 06)</text>
+<text x="1020" y="2141.899999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >calibration-command safety, bounds/rate (K14)</text>
+<text x="930" y="2157.099999999999" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-26</text>
+<text x="1020" y="2157.099999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: home meter within [-export, service] (R2)</text>
+<text x="930" y="2172.299999999999" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-27</text>
+<text x="1020" y="2172.299999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: service transformer, all members (R2)</text>
+<text x="930" y="2187.4999999999986" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-28</text>
+<text x="1020" y="2187.4999999999986" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >feeder thermal + reverse flow, per cycle (R2)</text>
+<text x="930" y="2202.6999999999985" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-29</text>
+<text x="1020" y="2202.6999999999985" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >substation limit + asset POI both ways (R2)</text>
+<text x="930" y="2217.8999999999983" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-30</text>
+<text x="1020" y="2217.8999999999983" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >regulated-territory export flow (R2)</text>
+<text x="930" y="2233.099999999998" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-31</text>
+<text x="1020" y="2233.099999999998" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: above continuous only in peak budget (R2)</text>
+<text x="930" y="2248.299999999998" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-32</text>
+<text x="1020" y="2248.299999999998" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >feeder ramp binds non-firm steps too (R2)</text>
+<text x="930" y="2263.4999999999977" font-family="Consolas, monospace" font-size="11.2" font-weight="700" text-anchor="start" fill="#86198f" >G-33</text>
+<text x="1020" y="2263.4999999999977" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >per-item: territory / market access (K15, R2)</text>
+<rect x="920" y="2312.7" width="450" height="52" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
+<text x="930" y="2332.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#6b7280" font-style="italic" >G-21..G-25: guardian/pq_checks.py (additive; diagram 06)</text>
+<text x="930" y="2350.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#6b7280" font-style="italic" >G-26..G-33 (R2): guardian/flow_checks.py; G-32: core/limits.py</text>
 <path d="M 120 2296.7999999999997 L 120 2312.7999999999997" fill="none" stroke="#334155" stroke-width="1.7" marker-end="url(#arrow_334155)"/>
 <rect x="125.0" y="2293.8" width="96.2" height="20.4" fill="#ffffff" opacity="0.94" rx="3" stroke="#e5e7eb" stroke-width="1"/>
 <text x="130" y="2304.7999999999997" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="start" fill="#0f172a" >publish, QoS 1</text>
@@ -289,6 +306,6 @@
 <rect x="30" y="3123.8999999999996" width="1340" height="70" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
 <text x="46" y="3143.8999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#111827" >Sources</text>
 <text x="46" y="3161.8999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >orchestrator/src/opengrid/selector/{gate,model,rule_fallback,commit}.py  ·  allocator/{cycle,pq_eligibility,pq_monitor}.py  ·  engine/{__init__,gateways,escalation,latency,pq_eligibility,metrics}.py</text>
-<text x="46" y="3176.3999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >orchestrator/src/opengrid/guardian/{service,checks,escalation,stop_release,mqtt_io}.py  ·  api/routers/{dispatch,safestop}.py  ·  orchestrator/migrations/0019,0020_*.sql  ·  ogsim/fleet/{commands,runtime}.py</text>
-<text x="46" y="3190.8999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >00-invariants.md (K1-K14, G-numbering)  ·  02a-mvp-s-spec-engine.md §3.1, §5  ·  snapshot 434d230 (2026-09-26)  ·  verified by grep -rn for each function name, not commit messages</text>
+<text x="46" y="3176.3999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >guardian/{service,checks,flow_checks,flow_repo,escalation,stop_release,mqtt_io}.py  ·  api/routers/{dispatch,safestop}.py  ·  orchestrator/migrations/0019,0020_*.sql  ·  ogsim/fleet/{commands,runtime}.py</text>
+<text x="46" y="3190.8999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >00-invariants.md (K1-K14, G-numbering)  ·  02a-mvp-s-spec-engine.md §3.1, §5  ·  snapshot 434d230, check grid 6470cfa (2026-09-26)  ·  verified by grep -rn for each function name, not commit messages</text>
 </svg>
