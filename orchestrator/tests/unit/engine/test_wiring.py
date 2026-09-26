@@ -354,8 +354,12 @@ def test_a_held_as_award_is_carried_at_zero_kw_with_its_hold_reason() -> None:
 
     assert [i["hub_id"] for i in items] == ["h1", "h2"]
     assert all(i["reason_code"] == "R-GRANT-AS-HOLD" for i in items)
-    assert all(i["obligation_id"] == str(hold.obligation_id) and i["obligation_granted_kw"] == "0" for i in items)
-    assert items[0]["p_kw_setpoint"] == pytest.approx(-10.0 + 0.1 * 2.0 * engine.RAMP_SAFETY_FACTOR)  # ramps down
+    assert all(
+        i["obligation_id"] == str(hold.obligation_id) and i["obligation_granted_kw"] == "0" for i in items
+    )
+    assert items[0]["p_kw_setpoint"] == pytest.approx(
+        -10.0 + 0.1 * 2.0 * engine.RAMP_SAFETY_FACTOR
+    )  # ramps down
     assert items[1]["p_kw_setpoint"] == 0.0
 
 

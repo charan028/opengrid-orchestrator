@@ -244,7 +244,9 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     # Matches the guardian's G-01-ENERGY floor (1% of capacity above reserve), else the
                     # last leases of a full deployment are vetoed shortly before its end. Only with a
                     # committed hold present (a candidate-only row at q=0 must not bind).
-                    margin_kwh = AS_HOLD_FLOOR_FRACTION * bank.capacity_kwh if committed_hold_cap_kwh > 0 else 0.0
+                    margin_kwh = (
+                        AS_HOLD_FLOOR_FRACTION * bank.capacity_kwh if committed_hold_cap_kwh > 0 else 0.0
+                    )
                     slack = highs.addVariable(lb=0.0, ub=committed_hold_cap_kwh + margin_kwh)
                     hold_slack_vars.append((scenario.scenario, slack))
                     required = highs.qsum([(hold_h / bank.eta_d) * var for var, hold_h, _c in holds])

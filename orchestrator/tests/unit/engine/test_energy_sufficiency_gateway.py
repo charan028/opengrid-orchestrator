@@ -421,7 +421,9 @@ async def test_the_as_energy_hold_includes_the_guardians_one_percent_floor(monke
     """Lead (matches G-01-ENERGY): the hold keeps reserve + 1% of capacity + kW x duration / eta_d, else
     the last leases of a full deployment are vetoed ~2 minutes before its end."""
     obligation_id = uuid4()
-    rows = [(obligation_id, "bank-01", 1.25, NOW + timedelta(minutes=15), uuid4(), "ERCOT_AS", 5.0, 60, False)]
+    rows = [
+        (obligation_id, "bank-01", 1.25, NOW + timedelta(minutes=15), uuid4(), "ERCOT_AS", 5.0, 60, False)
+    ]
     monkeypatch.setattr(
         gw.fleet,
         "hub_capabilities",
