@@ -140,6 +140,10 @@
       vetoed_rule_ids[], trace_id}`.
     - `GET /og/api/markets/bid-funnel?from=&to=` -- available/submitted/awarded/rejected by product plus
       rejection reasons; the panel shows an explanatory empty state until it answers.
-21. **Hub coordinates are still the one real blocker for the map** (owner: sims + fleet seed). `og.hub.lat`
-    and `lon` are NULL for every seeded hub and the fleet config carries none, so every map position is
-    derived. One column of real data turns three derived layers into measured ones.
+21. **Hub coordinates -- FIXED, awaiting merge of PR #25** (owner: fleet + api). `og.hub.lat`/`lon` were
+    NULL for every seeded hub, so every map position was derived in the browser. `fleet/seed.py` now
+    places each hub deterministically within ~45 km of its real ERCOT load-zone centroid
+    (`hub_coordinates`), and `api/store.py::list_hubs` projects the columns. Verified on the dev stack:
+    200/200 hubs carry coordinates, per-zone means land on the real centroids, and both maps stop
+    deriving (the "positions are derived" legend note disappears on its own). Until #25 merges, the maps
+    in this PR fall back to browser-side placement, which is why that fallback stays.
