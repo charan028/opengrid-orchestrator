@@ -38,6 +38,7 @@ from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine.escalation import ShortfallEscalator, merge_signals
 from opengrid.engine.gates import run_due_gates
 from opengrid.engine.latency import CycleLatencyWindow
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
@@ -47,6 +48,7 @@ from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.process import Cadence, run_forever
 
 if TYPE_CHECKING:
+    from opengrid.allocator.energy_sufficiency import EnergySufficiencyResult
     from opengrid.allocator.gateways import FleetGateway, LedgerGateway, ScadaGateway, ScheduleGateway
     from opengrid.engine.gateways import EnergySufficiencyGateway
     from opengrid.trace import TraceStore
@@ -321,6 +323,7 @@ class _EngineState:
     # was VETOED on G-13 (live 2026-09-26).
     epoch: int = 1
     latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
+    escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
     pq_flush: Cadence | None = None  # `[pq_ingest].flush_interval_s`; None when waveform ingest is off
 
 
@@ -340,6 +343,56 @@ async def timed_tick(state: _EngineState) -> None:
                 await state.trace.append("engine-cycle-latency", "RT_ALLOCATION", "CYCLE_LATENCY", summary)
             except Exception:
                 logger.exception("failed to trace engine cycle latency")
+
+
+async def escalate_sustained_shortfalls(
+    state: _EngineState, energy_results: list[EnergySufficiencyResult], transition: Any
+) -> list[tuple[str, str]]:
+    """02a S2.1 mid-window `DELIVERING -> SHORTFALL` for a sustained allocator shortfall (L2 instruction,
+    no substitute) or energy infeasibility after substitution (`opengrid.engine.escalation`). An
+    obligation not yet delivering is skipped (the state machine refuses the edge). Returns what escalated."""
+    allocator_shortfalls = getattr(state.ledger_gateway, "last_shortfalls", [])
+    infeasible = [r.obligation_id for r in energy_results if r.at_risk and r.margin_kwh < 0]
+    escalated: list[tuple[str, str]] = []
+    for obligation_id, reason in state.escalator.observe(merge_signals(allocator_shortfalls, infeasible)):
+        try:
+            await transition(
+                UUID(obligation_id),
+                "SHORTFALL",
+                reason_code=reason,
+                payload={"escalation": "sustained", "sustain_cycles": state.escalator.sustain_cycles},
+            )
+        except Exception:
+            logger.info("shortfall escalation not applicable", extra={"obligation_id": obligation_id})
+            continue
+        logger.warning(
+            "obligation escalated to SHORTFALL", extra={"obligation_id": obligation_id, "reason_code": reason}
+        )
+        escalated.append((obligation_id, reason))
+    return escalated
+
+
+async def exercise_due_renomination_points(
+    contract_id: UUID, plan_id: UUID | None, now: datetime
+) -> list[str]:
+    """After a RENOMINATION gate for `contract_id`: exercise each of its due points (02a S1.7/S2.1). A
+    point whose obligation is DELIVERING is `RESELECTED` (the `R-RENOM-GATE` self-loop, traced); any other
+    point (obligation not delivering, or none) is `CONFIRMED` -- the gate ran, nothing changed. Returns
+    the outcomes."""
+    from opengrid import contracts
+
+    outcomes: list[str] = []
+    for point in await contracts.due_renomination_points(as_of=now):
+        if point.contract_id != contract_id:
+            continue
+        outcome = "RESELECTED" if point.obligation_id is not None else "CONFIRMED"
+        try:
+            await contracts.exercise_renomination_point(point.renomination_point_id, outcome, plan_id=plan_id)
+        except contracts.IllegalTransitionError:
+            outcome = "CONFIRMED"  # obligation not DELIVERING (yet / any more)
+            await contracts.exercise_renomination_point(point.renomination_point_id, outcome, plan_id=plan_id)
+        outcomes.append(outcome)
+    return outcomes
 
 
 async def _flush_pq_summaries(state: _EngineState) -> None:
@@ -386,6 +439,9 @@ async def _engine_tick(state: _EngineState) -> None:
         run_gate=selector.run_gate,
         trace=state.trace,
         raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
+        on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
+            contract_id, plan_id, now
+        ),
     )
 
     if state.lifecycle_backend is not None:
@@ -408,11 +464,16 @@ async def _engine_tick(state: _EngineState) -> None:
     # K1 (user requirement: energy above reserve checked continuously, EVERY cycle, not just power
     # headroom): independent of the S1-S7 power-capability path above. Degrade, don't trip (K7) -- a
     # failure here must never block the allocator's own grant/guardian handoff this cycle.
+    energy_results: list[EnergySufficiencyResult] = []
     if state.energy_sufficiency_gateway is not None:
         try:
-            await state.energy_sufficiency_gateway.run(now)
+            energy_results = await state.energy_sufficiency_gateway.run(now)
         except Exception:
             logger.exception("energy-sufficiency check failed this cycle", extra={"cycle_id": cycle_id})
+    try:
+        await escalate_sustained_shortfalls(state, energy_results, contracts.transition_obligation)
+    except Exception:
+        logger.exception("shortfall escalation failed this cycle", extra={"cycle_id": cycle_id})
     if not await guardian_is_available(
         state.backend, now=now, miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold
     ):

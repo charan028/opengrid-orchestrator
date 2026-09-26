@@ -417,3 +417,16 @@ async def test_a3_hub_acks_are_buffered_and_persisted_on_flush() -> None:
         ("6d3f0d8c-f0d4-4191-bfbc-eb94d834c621", False, "STALE_SEQ"),
     ]
     assert str(backend.upserted[-1].last_command_id) == accepted_batch
+
+
+async def test_rated_discharge_is_structural_not_live() -> None:
+    """The admission-reject check needs what a bank could EVER deliver: every hub at rated power, capped
+    by the bank's kVA rating -- independent of health/SoC (a stale hub still counts)."""
+    backend = FakeFleetBackend(
+        hubs=[_hub("h1", p_kw=11.0), _hub("h2", p_kw=20.0)], banks=[_bank(kva_rating=600.0)], states=[]
+    )
+    await _seed(backend)
+
+    assert fleet.rated_discharge_kw("bank-1") == pytest.approx(31.0)
+    with pytest.raises(LookupError):
+        fleet.rated_discharge_kw("bank-unknown")

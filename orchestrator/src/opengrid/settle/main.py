@@ -22,13 +22,15 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 
+import opengrid.contracts as contracts
 import opengrid.health as health
+from opengrid.contracts.pg_repo import PgContractsRepo
 from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.log import configure_logging
 from opengrid.platform.process import Cadence, run_forever
-from opengrid.settle import configure, run_settle_cycle, run_trace_pruning_cycle
+from opengrid.settle import close_settled_obligations, configure, run_settle_cycle, run_trace_pruning_cycle
 from opengrid.settle.pg_backend import PgSettleBackend
 from opengrid.trace import TraceStore
 from opengrid.trace.pg_backend import PgTraceBackend
@@ -77,7 +79,10 @@ async def _run() -> None:
     logger = configure_logging(_PROCESS_NAME)
     cfg = load_config(os.environ.get("OG_CONFIG"))
     pool = await make_pool(cfg)
-    configure(PgSettleBackend(pool), TraceStore(PgTraceBackend(pool)), trace_pool=pool)
+    trace_store = TraceStore(PgTraceBackend(pool))
+    configure(PgSettleBackend(pool), trace_store, trace_pool=pool)
+    # FULFILLED/SHORTFALL -> SETTLED goes through opengrid.contracts (single writer of obligation state).
+    contracts.configure(PgContractsRepo(pool), trace_store)
     health.configure(pool, cfg)
 
     health_interval_s = float(cfg.get("health.heartbeat_interval_s", _DEFAULT_HEALTH_INTERVAL_S))
@@ -86,6 +91,9 @@ async def _run() -> None:
         settled_count = await run_settle_cycle()
         if settled_count:
             logger.info("settlement cycle complete", extra={"settled_count": settled_count})
+        closed = await close_settled_obligations()
+        if closed:
+            logger.info("obligations settled", extra={"settled_obligations": closed})
 
     async def prune_job() -> None:
         deleted = await run_trace_pruning_cycle()

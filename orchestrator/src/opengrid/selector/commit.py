@@ -10,6 +10,7 @@ of the `SELECTED -> REJECTED` edge. One obligation's failure never stops the oth
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -148,3 +149,38 @@ def _log_refusal(obligation_id: UUID, attempt: str, exc: ledger.ReservationError
             **exc.detail,
         },
     )
+
+
+R_ADMIT_REJECT = "R-ADMIT-REJECT"
+
+
+def structurally_infeasible(candidate: CandidateOpportunity, rated_kw_by_bank: dict[str, float]) -> bool:
+    """02a S2.1 `OFFERED -> REJECTED` ("capacity structurally infeasible"): even with every eligible
+    bank's hubs online at rated power, the smallest tradable quantity cannot be delivered. A candidate
+    that is merely not selected this gate (prices, live capability, SoC) stays OFFERED."""
+    smallest_kw = candidate.requested_kw if candidate.variable_kind == "BINARY" else candidate.min_qty_kw
+    rated_kw = sum(rated_kw_by_bank.get(b, 0.0) for b in candidate.eligible_bank_ids)
+    return smallest_kw > rated_kw
+
+
+async def reject_structurally_infeasible(
+    candidates: Iterable[CandidateOpportunity], rated_kw_by_bank: dict[str, float], plan_id: UUID
+) -> int:
+    """Reject (`R-ADMIT-REJECT`, traced) every unselected candidate `structurally_infeasible` says can
+    never be served, so it stops being re-offered at every gate. Returns the number rejected."""
+    rejected = 0
+    for candidate in candidates:
+        if not structurally_infeasible(candidate, rated_kw_by_bank):
+            continue
+        try:
+            await contracts.transition_obligation(
+                UUID(candidate.obligation_id),
+                "REJECTED",
+                reason_code=R_ADMIT_REJECT,
+                payload={"plan_id": str(plan_id), "requested_kw": candidate.requested_kw},
+            )
+        except (contracts.IllegalTransitionError, contracts.ConcurrentUpdateError, LookupError):
+            continue
+        await _record_opportunity_decision(candidate, "REJECTED", R_ADMIT_REJECT, plan_id)
+        rejected += 1
+    return rejected

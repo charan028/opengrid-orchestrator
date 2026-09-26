@@ -58,6 +58,9 @@ class FakeLedgerGateway:
     async def record_substitution(self, obligation_id, from_hub_id, to_hub_id, reason_code):
         self.substitutions.append((obligation_id, from_hub_id, to_hub_id, reason_code))
 
+    async def record_shortfalls(self, cycle_id, shortfalls):
+        self.shortfalls = list(shortfalls)
+
     async def record_substitution_events(self, cycle_id, events):
         self.substitution_events.extend((cycle_id, e) for e in events)
 

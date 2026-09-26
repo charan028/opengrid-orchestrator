@@ -222,3 +222,8 @@ class SettleBackend(Protocol):
         by `opengrid.settle.main`'s tick; the pure `settle()` orchestration above does not call this
         itself so unit tests can call `settle()` directly for one obligation-interval."""
         ...
+
+    async def fetch_settleable_obligations(self) -> list[UUID]:
+        """`FULFILLED`/`SHORTFALL` obligations whose every window interval is metered, with P&L posted and
+        (for every service but HOME) an invoice line -- ready for `-> SETTLED` (02a S2.1)."""
+        ...

@@ -294,3 +294,37 @@ async def test_opportunity_records_the_gate_decision(monkeypatch, _wired):
     ((opportunity_id, state, reason, gate_id),) = decisions.calls
     assert (opportunity_id, state, reason) == (UUID(OPPORTUNITY_ID), "SELECTED", "R-GATE-SELECT")
     assert gate_id == reserved["plan_id"]
+
+
+async def test_structurally_infeasible_offer_is_rejected_r_admit_reject(monkeypatch, _wired):
+    """02a S2.1 `OFFERED -> REJECTED` / `R-ADMIT-REJECT` had no production caller: an offer larger than
+    every eligible bank's RATED capacity was re-offered at every gate forever."""
+    transitions = commit.contracts.transition_obligation
+    decisions = commit.contracts.record_opportunity_decision
+
+    async def _huge_candidate(horizon_start, horizon_end, bank_ids, contract_scope):
+        (candidate,) = await _fake_load_candidates(horizon_start, horizon_end, bank_ids, contract_scope)
+        return (dataclasses.replace(candidate, requested_kw=50_000.0),)
+
+    monkeypatch.setattr(gate, "load_candidates", _huge_candidate)
+    monkeypatch.setattr(gate, "_rated_kw_by_bank", lambda bank_ids: {"B1": 600.0})
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    assert transitions.calls == [(UUID(OBLIGATION_ID), "REJECTED", "R-ADMIT-REJECT")]
+    assert [(c[1], c[2]) for c in decisions.calls] == [("REJECTED", "R-ADMIT-REJECT")]
+
+
+async def test_an_offer_that_merely_is_not_selected_stays_offered(monkeypatch, _wired):
+    transitions = commit.contracts.transition_obligation
+
+    async def _unpriced(horizon_start, horizon_end, bank_ids, contract_scope):
+        (candidate,) = await _fake_load_candidates(horizon_start, horizon_end, bank_ids, contract_scope)
+        return (dataclasses.replace(candidate, value_per_mwh=-1_000.0),)
+
+    monkeypatch.setattr(gate, "load_candidates", _unpriced)
+    monkeypatch.setattr(gate, "_rated_kw_by_bank", lambda bank_ids: {"B1": 600.0})
+
+    await gate.run_gate("SCHEDULED_15MIN")
+
+    assert transitions.calls == []

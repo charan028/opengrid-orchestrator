@@ -79,3 +79,74 @@ async def test_an_intake_failure_does_not_stop_the_gate() -> None:
 
     assert failed == 0
     assert ran == ["SCHEDULED_15MIN"]
+
+
+async def test_a_renomination_gate_exercises_the_contracts_due_points() -> None:
+    """02a S1.7: nothing exercised a due re-nomination point, so the RENOMINATION gate re-ran every tick
+    and the R-RENOM-GATE self-loop never happened."""
+    contract = uuid4()
+    plan_id = uuid4()
+    exercised: list[tuple[object, object]] = []
+
+    async def _intake(gate_kind, contract_scope, *, now):
+        return None
+
+    async def _gate(gate_kind, contract_scope):
+        return type("Plan", (), {"plan_id": plan_id})()
+
+    async def _on_renomination(contract_id, gate_plan_id):
+        exercised.append((contract_id, gate_plan_id))
+
+    async def _alert(finding):
+        raise AssertionError("unexpected alert")
+
+    await run_due_gates(
+        [GateTrigger("RENOMINATION", contract), GateTrigger("SCHEDULED_15MIN")],
+        now=NOW,
+        run_intake=_intake,
+        run_gate=_gate,
+        trace=_Trace(),
+        raise_alert=_alert,
+        on_renomination=_on_renomination,
+    )
+
+    assert exercised == [(contract, plan_id)]
+
+
+async def test_due_points_are_reselected_when_delivering_else_confirmed(monkeypatch) -> None:
+    import types
+
+    import opengrid.contracts as contracts
+    from opengrid.contracts import IllegalTransitionError
+    from opengrid.engine import exercise_due_renomination_points
+
+    contract, other = uuid4(), uuid4()
+    delivering = types.SimpleNamespace(
+        renomination_point_id=uuid4(), contract_id=contract, obligation_id=uuid4()
+    )
+    committed = types.SimpleNamespace(
+        renomination_point_id=uuid4(), contract_id=contract, obligation_id=uuid4()
+    )
+    foreign = types.SimpleNamespace(renomination_point_id=uuid4(), contract_id=other, obligation_id=None)
+    calls: list[tuple[object, str]] = []
+
+    async def _due(*, as_of=None):
+        return [delivering, committed, foreign]
+
+    async def _exercise(point_id, outcome, *, plan_id=None):
+        if point_id == committed.renomination_point_id and outcome == "RESELECTED":
+            raise IllegalTransitionError(
+                from_state="COMMITTED", to_state="DELIVERING", reason_code="R-RENOM-GATE"
+            )
+        calls.append((point_id, outcome))
+
+    monkeypatch.setattr(contracts, "due_renomination_points", _due)
+    monkeypatch.setattr(contracts, "exercise_renomination_point", _exercise)
+
+    outcomes = await exercise_due_renomination_points(contract, uuid4(), NOW)
+
+    assert outcomes == ["RESELECTED", "CONFIRMED"]
+    assert calls == [
+        (delivering.renomination_point_id, "RESELECTED"),
+        (committed.renomination_point_id, "CONFIRMED"),
+    ]

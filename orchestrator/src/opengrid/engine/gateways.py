@@ -42,6 +42,7 @@ from opengrid.allocator.models import (
     ProposedGrant,
     ScadaSample,
     Schedule,
+    ShortfallReport,
     SubstitutionEvent,
 )
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
@@ -253,6 +254,8 @@ class EngineLedgerGateway:
     def __init__(self, pool: AsyncConnectionPool, trace: TraceStore | None = None) -> None:
         self._pool = pool
         self._trace = trace
+        #: `(obligation_id, shortfall reason)` from the latest cycle, read by the engine's escalation.
+        self.last_shortfalls: list[tuple[str, str]] = []
 
     async def ledger_view(self, bank_ids: Sequence[str], interval_start: datetime) -> LedgerView:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -316,6 +319,10 @@ class EngineLedgerGateway:
             {"obligation_id": obligation_id, "from_hub_ids": [from_hub_id], "to_hub_ids": [to_hub_id]},
             reason_code,
         )
+
+    async def record_shortfalls(self, cycle_id: str, shortfalls: Sequence[ShortfallReport]) -> None:
+        _ = cycle_id
+        self.last_shortfalls = [(s.obligation_id, s.reason_code) for s in shortfalls]
 
     async def record_substitution_events(self, cycle_id: str, events: Sequence[SubstitutionEvent]) -> None:
         """S5.3: the automatic swaps one 2 s cycle made, one `SUBSTITUTION` trace event each."""

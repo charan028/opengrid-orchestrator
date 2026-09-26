@@ -139,6 +139,30 @@ ORDER BY o.obligation_id, gs.interval_start
 LIMIT 500
 """
 
+_FETCH_SETTLEABLE_SQL = """
+SELECT o.obligation_id
+FROM og.obligation o
+WHERE o.state IN ('FULFILLED', 'SHORTFALL')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM generate_series(
+          date_trunc('hour', o.window_start)
+              + (floor(extract(minute FROM o.window_start) / 15) * interval '15 minutes'),
+          o.window_end - interval '15 minutes',
+          interval '15 minutes'
+      ) AS gs(interval_start)
+      WHERE NOT EXISTS (
+          SELECT 1 FROM og.meter_interval mi
+          WHERE mi.obligation_id = o.obligation_id AND mi.interval_start = gs.interval_start
+            AND mi.superseded_by IS NULL
+      )
+  )
+  AND EXISTS (SELECT 1 FROM og.pnl p WHERE p.obligation_id = o.obligation_id)
+  AND (o.service_type = 'HOME'
+       OR EXISTS (SELECT 1 FROM og.invoice_line il WHERE il.obligation_id = o.obligation_id))
+LIMIT 200
+"""
+
 _INSERT_PNL_SQL = """
 INSERT INTO og.pnl
     (pnl_id, obligation_id, interval_start, interval_end, revenue, energy_cost, degradation_cost,
@@ -426,6 +450,12 @@ class PgSettleBackend:
             )
             rows = await cur.fetchall()
         return [MeterIntervalExportRow(**r) for r in rows]
+
+    async def fetch_settleable_obligations(self) -> list[UUID]:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_FETCH_SETTLEABLE_SQL)
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
 
     async def fetch_pending_intervals(self) -> list[tuple[UUID, datetime, datetime]]:
         async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

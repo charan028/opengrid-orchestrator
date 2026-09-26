@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -21,8 +22,13 @@ from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.fleet import capability as fleet_capability
 from opengrid.fleet import hub_capabilities as fleet_hub_capabilities
+from opengrid.fleet import rated_discharge_kw as fleet_rated_discharge_kw
 from opengrid.selector import db
-from opengrid.selector.commit import commit_candidate, selected_kw_by_interval_key
+from opengrid.selector.commit import (
+    commit_candidate,
+    reject_structurally_infeasible,
+    selected_kw_by_interval_key,
+)
 from opengrid.selector.extract import extract_plan
 from opengrid.selector.model import build_mode_o_model
 from opengrid.selector.rule_fallback import rule_fallback_f2
@@ -38,6 +44,8 @@ from opengrid.selector.types import (
     solver_settings_for,
 )
 from opengrid.selector.validate import validate_plan
+
+logger = logging.getLogger(__name__)
 
 INTERVAL_MINUTES = 15.0
 SCHEDULED_HORIZON_INTERVALS = 96  # 24h / 15min, 02a S3.2
@@ -332,17 +340,22 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
 
     plan_id = await persist_plan(result.plan_mode, gate_kind, horizon_start, horizon_end, scenarios, result)
 
+    unselected: list[CandidateOpportunity] = []
     for c in candidates:
         selected = (
             result.selected_x.get(c.opportunity_id, False) or result.selected_q.get(c.opportunity_id, 0.0) > 0
         )
         if not selected:
+            unselected.append(c)
             continue
         # Keys are `encode_interval_key(bank, start, end)` per bank (a bare interval index collided
         # across banks), and the obligation -- not the opportunity -- owns the reservation (FK).
         selected_kw = selected_kw_by_interval_key(c, result, horizon_start, INTERVAL_MINUTES)
         if selected_kw:
             await commit_candidate(c, selected_kw, plan_id)
+    rated_kw_by_bank = _rated_kw_by_bank(bank_ids) if unselected else None
+    if unselected and rated_kw_by_bank is not None:
+        await reject_structurally_infeasible(unselected, rated_kw_by_bank, plan_id)
 
     return Plan(
         plan_id=plan_id,
@@ -356,6 +369,16 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         solver_time_ms=result.solver_time_ms,
         objective_value=Decimal(str(result.objective_value)),
     )
+
+
+def _rated_kw_by_bank(bank_ids: tuple[str, ...]) -> dict[str, float] | None:
+    """Structural (rated) discharge per bank from the fleet twin, for the admission-reject check; `None`
+    (skip the check -- never reject on missing data) if the twin does not know a bank."""
+    try:
+        return {b: fleet_rated_discharge_kw(b) for b in bank_ids}
+    except LookupError:
+        logger.warning("fleet twin lacks a configured bank; structural admission check skipped")
+        return None
 
 
 async def _configured_bank_ids() -> tuple[str, ...]:

@@ -23,6 +23,7 @@ from opengrid.allocator.models import (
     ProposedGrant,
     ScadaSample,
     Schedule,
+    ShortfallReport,
     SubstitutionEvent,
 )
 
@@ -60,6 +61,10 @@ class LedgerGateway(Protocol):
         """S5.3: persist a single manual/one-off hub swap for `obligation_id` as a `grant`-table
         change with `reason_code` (always `R-SUBSTITUTION`) -- never a `commitment` write.
         """
+        ...
+
+    async def record_shortfalls(self, cycle_id: str, shortfalls: Sequence[ShortfallReport]) -> None:
+        """This cycle's shortfalls (possibly none), for the engine's sustained-exception escalation."""
         ...
 
     async def record_substitution_events(self, cycle_id: str, events: Sequence[SubstitutionEvent]) -> None:

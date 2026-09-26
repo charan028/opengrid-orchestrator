@@ -473,6 +473,17 @@ async def capability(bank_id: str, interval_start: datetime) -> AvailableCapabil
     )
 
 
+def rated_discharge_kw(bank_id: str) -> float:
+    """The bank's STRUCTURAL discharge capability: every configured hub at its rated power, bounded by
+    the bank's kVA rating (`core.physics.bank_capability`), regardless of health or SoC. What admission
+    can ever hope for from this bank -- `capability()` is the live, transient figure. Raises
+    `LookupError` for an unknown bank."""
+    bank_rt = _banks.get(bank_id)
+    if bank_rt is None:
+        raise LookupError(f"unknown bank_id: {bank_id}")
+    return bank_capability([_hubs[h].params.p_kw for h in bank_rt.hub_ids], bank_rt.params)
+
+
 def known_bank_ids() -> list[str]:
     """Every bank the twin has topology for (merge task, dispatch-live pass): the engine's
     `FleetGateway.bank_ids()` adapter reads this so `opengrid.allocator.run_cycle` covers every real

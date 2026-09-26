@@ -131,6 +131,10 @@ async def run_cycle(
     )
 
     await ledger.persist_grants(cycle_id, list(result.grants))
+    try:
+        await ledger.record_shortfalls(cycle_id, list(result.shortfalls))
+    except Exception:
+        logger.exception("failed to record shortfalls", extra={"cycle_id": cycle_id})
     if result.substitutions:
         # S5.3: every automatic hub swap is recorded; a recording failure never costs the cycle (K7).
         try:

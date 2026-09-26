@@ -39,6 +39,7 @@ class TraceAppender(Protocol):
 RunIntake = Callable[..., Awaitable[object]]
 RunGate = Callable[..., Awaitable[object]]
 RaiseAlert = Callable[[AlertFinding], Awaitable[object]]
+OnRenomination = Callable[[UUID, UUID | None], Awaitable[object]]
 
 
 async def run_due_gates(
@@ -49,6 +50,7 @@ async def run_due_gates(
     run_gate: RunGate,
     trace: TraceAppender,
     raise_alert: RaiseAlert,
+    on_renomination: OnRenomination | None = None,
 ) -> int:
     """Run intake then the selector gate for each trigger. Returns the number of gates that failed."""
     failed = 0
@@ -62,11 +64,19 @@ async def run_due_gates(
         except Exception:
             logger.exception("intake failed ahead of gate -- running the gate anyway", extra=scope)
         try:
-            await run_gate(trigger.gate_kind, trigger.contract_scope)
+            plan = await run_gate(trigger.gate_kind, trigger.contract_scope)
         except Exception as exc:
             failed += 1
             logger.exception("selector gate failed", extra=scope)
             await _report_gate_failure(trigger, exc, trace=trace, raise_alert=raise_alert)
+            continue
+        if trigger.gate_kind == "RENOMINATION" and on_renomination is not None and trigger.contract_scope:
+            # The gate reached the contract's due re-nomination point(s): record them exercised, or the
+            # engine re-runs this gate every tick (02a S1.7).
+            try:
+                await on_renomination(trigger.contract_scope, getattr(plan, "plan_id", None))
+            except Exception:
+                logger.exception("could not exercise re-nomination point(s)", extra=scope)
     return failed
 
 
