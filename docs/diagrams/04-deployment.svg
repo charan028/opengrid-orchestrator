@@ -1,0 +1,204 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1513" width="1400" height="1513" role="img" aria-label="OpenGrid base server and local dev stack deployment layout">
+<title>OpenGrid base server and local dev stack deployment layout</title>
+<style>text { font-family: Segoe UI, Arial, Helvetica, sans-serif; }</style>
+<rect x="0" y="0" width="1400" height="1513" fill="#ffffff"/>
+<defs>
+<marker id="arrow_15803d" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#15803d"/></marker>
+<marker id="arrow_b45309" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/></marker>
+</defs>
+<text x="30" y="28" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="20" font-weight="700" text-anchor="start" fill="#111827" >OpenGrid Orchestrator — Deployment</text>
+<text x="30" y="48" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="normal" text-anchor="start" fill="#475569" >Base server (basepower) from deploy/  ·  local dev stack from dev/docker-compose.yml  ·  env-variable NAMES only, no secret values</text>
+<rect x="30" y="60" width="16" height="13" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="50" y="71" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >orchestrator unit (opengrid.target)</text>
+<rect x="301.6" y="60" width="16" height="13" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="321.6" y="71" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >sim unit (ogsim.target)</text>
+<rect x="499.28000000000003" y="60" width="16" height="13" rx="8" ry="8" fill="#dcfce7" stroke="#15803d" stroke-width="1.6"/>
+<text x="519.28" y="71" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >PostgreSQL / Mosquitto</text>
+<rect x="690.8000000000001" y="60" width="16" height="13" rx="8" ry="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.6"/>
+<text x="710.8000000000001" y="71" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >Apache</text>
+<rect x="783.7600000000001" y="60" width="16" height="13" rx="8" ry="8" fill="#ffffff" stroke="#334155" stroke-width="1.6"/>
+<text x="803.7600000000001" y="71" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >filesystem / config</text>
+<text x="30" y="106" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15" font-weight="700" text-anchor="start" fill="#0f172a" >Base server — basepower (192.168.5.35)</text>
+<text x="30" y="122" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#475569" >deploy/README.md, deploy/systemd/*, deploy/apache/opengrid.conf. No sudo on this host; deploy role only, over SSH.</text>
+<rect x="30" y="136" width="1340" height="108" rx="8" ry="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.6"/>
+<text x="700" y="157" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#0f172a" >Apache reverse proxy (base.tocy-net.net)</text>
+<text x="50" y="182" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#111827" >Location /og/  →  http://127.0.0.1:8080 (og-api)  ·  Basic Auth: operator, viewer  ·  SSE-friendly (no buffering/gzip)</text>
+<text x="50" y="202" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#111827" >Location /ogsim/ →  http://127.0.0.1:8091 (ogsim.control)  ·  Basic Auth: tester</text>
+<text x="50" y="222" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7f1d1d" >AuthUserFile /etc/opengrid/htpasswd (mode 750 root:opengrid; www-data granted search-only via a POSIX ACL, deploy/README.md)</text>
+<text x="30" y="278" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#0f172a" >opengrid.target  —  venv /opt/opengrid/venv  ·  WorkingDirectory /opt/opengrid/current/orchestrator</text>
+<rect x="30" y="288" width="210" height="154.4" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="40" y="309" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-feeds</text>
+<text x="40" y="325" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-feeds.service</text>
+<text x="40" y="345" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m opengrid.feeds.main</text>
+<text x="40" y="366.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 512M / High 410M</text>
+<rect x="252" y="288" width="210" height="154.4" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="262" y="309" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-engine</text>
+<text x="262" y="325" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-engine.service</text>
+<text x="262" y="345" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m opengrid.engine.main</text>
+<text x="262" y="366.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 2G / High 1638M</text>
+<text x="262" y="388.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >2 s allocator (diagram 02)</text>
+<rect x="474" y="288" width="210" height="154.4" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="484" y="309" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-guardian</text>
+<text x="484" y="325" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-guardian.service</text>
+<text x="484" y="345" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m opengrid.guardian.main</text>
+<text x="484" y="366.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 512M / High 410M</text>
+<text x="484" y="388.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >Prometheus :9103</text>
+<text x="484" y="402.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >(metrics.guardian_port)</text>
+<text x="484" y="416.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >guardian_ed25519.key (0600)</text>
+<rect x="696" y="288" width="210" height="154.4" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="706" y="309" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-safestop</text>
+<text x="706" y="325" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-safestop.service</text>
+<text x="706" y="345" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m opengrid.safestop.main</text>
+<text x="706" y="366.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 256M / High 205M</text>
+<text x="706" y="388.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >No After=/Requires= on engine</text>
+<text x="706" y="402.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >or guardian (K8)</text>
+<text x="706" y="416.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >safestop_ed25519.key</text>
+<rect x="918" y="288" width="210" height="154.4" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="928" y="309" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-settle</text>
+<text x="928" y="325" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-settle.service</text>
+<text x="928" y="345" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m opengrid.settle.main</text>
+<text x="928" y="366.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 512M / High 410M</text>
+<text x="928" y="388.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >+ opengrid.health evaluator</text>
+<text x="928" y="402.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >ONE run_forever loop (NEW)</text>
+<rect x="1140" y="288" width="210" height="154.4" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="1150" y="309" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-api</text>
+<text x="1150" y="325" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-api.service</text>
+<text x="1150" y="345" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m opengrid.api.main</text>
+<text x="1150" y="366.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 1G / High 819M</text>
+<text x="1150" y="388.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >bind 127.0.0.1:8080</text>
+<text x="1150" y="402.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >(api.bind_port)</text>
+<rect x="30" y="466.4" width="660" height="130" rx="8" ry="8" fill="#dcfce7" stroke="#15803d" stroke-width="1.6"/>
+<text x="46" y="488.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >PostgreSQL 17</text>
+<text x="46" y="508.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >127.0.0.1:5432  ·  databases: og (prod), og_test, og_t_&lt;ws&gt; (agent workspaces, disposable)</text>
+<text x="46" y="523.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >Nightly pg_dump --format=custom via cron (03:00, opengrid user) →</text>
+<text x="46" y="538.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >/var/lib/opengrid/backups/og-&lt;date&gt;.dump, 7 kept (deploy/scripts/backup.sh)</text>
+<rect x="710" y="466.4" width="660" height="130" rx="8" ry="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.6"/>
+<text x="726" y="488.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Mosquitto</text>
+<text x="726" y="508.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#78350f" >127.0.0.1:1883  ·  ACL /etc/mosquitto/opengrid.acl (off-limits to agents, BUILD.md §6)</text>
+<text x="726" y="523.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#78350f" >Users: og_engine, og_guardian, og_safestop, og_sim, og_simctl, og_api</text>
+<text x="726" y="538.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#78350f" >Topic root og/v1 (prod); ogtest/&lt;ws&gt; needs the ACL's test root re-enabled first (deploy/README.md)</text>
+<path d="M 135.0 442.4 L 135.0 452.4 L 85.0 452.4 L 85.0 466.4" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
+<path d="M 357.0 442.4 L 357.0 452.4 L 195.0 452.4 L 195.0 466.4" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
+<path d="M 579.0 442.4 L 579.0 452.4 L 305.0 452.4 L 305.0 466.4" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
+<path d="M 801.0 442.4 L 801.0 452.4 L 415.0 452.4 L 415.0 466.4" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
+<path d="M 1023.0 442.4 L 1023.0 452.4 L 525.0 452.4 L 525.0 466.4" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
+<path d="M 1245.0 442.4 L 1245.0 452.4 L 635.0 452.4 L 635.0 466.4" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
+<path d="M 399.0 442.4 L 399.0 458.4 L 750 458.4 L 750 466.4" fill="none" stroke="#b45309" stroke-width="1.7" marker-end="url(#arrow_b45309)"/>
+<path d="M 621.0 442.4 L 621.0 462.4 L 900 462.4 L 900 466.4" fill="none" stroke="#b45309" stroke-width="1.7" marker-end="url(#arrow_b45309)"/>
+<path d="M 843.0 442.4 L 843.0 466.4 L 1050 466.4 L 1050 466.4" fill="none" stroke="#b45309" stroke-width="1.7" marker-end="url(#arrow_b45309)"/>
+<path d="M 1287.0 442.4 L 1287.0 470.4 L 1200 470.4 L 1200 466.4" fill="none" stroke="#b45309" stroke-width="1.7" marker-end="url(#arrow_b45309)"/>
+<text x="480" y="632.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#0f172a" >ogsim.target  —  venv /opt/ogsim/venv  ·  WorkingDirectory /opt/opengrid/current/integration-sims</text>
+<rect x="30" y="642.4" width="210" height="140.4" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="40" y="663.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-sim-fleet</text>
+<text x="40" y="679.4" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-sim-fleet.service</text>
+<text x="40" y="699.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m ogsim.fleet</text>
+<text x="40" y="721.1" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 3G / High 2458M</text>
+<text x="40" y="742.8000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >2,000-hub asyncio tasks</text>
+<rect x="252" y="642.4" width="210" height="140.4" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="262" y="663.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-sim-scada</text>
+<text x="262" y="679.4" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-sim-scada.service</text>
+<text x="262" y="699.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m ogsim.scada</text>
+<text x="262" y="721.1" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 384M / High 307M</text>
+<rect x="474" y="642.4" width="210" height="140.4" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="484" y="663.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-sim-market</text>
+<text x="484" y="679.4" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-sim-market.service</text>
+<text x="484" y="699.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m ogsim.market</text>
+<text x="484" y="721.1" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 384M / High 307M</text>
+<text x="484" y="742.8000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >bind 0.0.0.0:8090</text>
+<rect x="696" y="642.4" width="210" height="140.4" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="706" y="663.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-sim-control</text>
+<text x="706" y="679.4" font-family="Consolas, 'Courier New', monospace" font-size="11.1" font-weight="500" text-anchor="start" fill="#334155" >og-sim-control.service</text>
+<text x="706" y="699.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >-m ogsim.control</text>
+<text x="706" y="721.1" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >MemoryMax 256M / High 205M</text>
+<text x="706" y="742.8000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >bind 0.0.0.0:8091</text>
+<text x="706" y="756.8000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="400" text-anchor="start" fill="#1f2937" >REST + web UI + CLI</text>
+<path d="M 135.0 596.4 L 135.0 642.4" fill="none" stroke="#b45309" stroke-width="1.7" marker-end="url(#arrow_b45309)"/>
+<path d="M 357.0 596.4 L 357.0 642.4" fill="none" stroke="#b45309" stroke-width="1.7" marker-end="url(#arrow_b45309)"/>
+<rect x="30" y="806.8" width="1340" height="46" rx="8" ry="8" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="6,4"/>
+<text x="46" y="824.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >Every unit above also sets: Restart=always, RestartSec=2, NoNewPrivileges=true, ProtectSystem=strict,</text>
+<text x="46" y="840.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >ReadWritePaths=/var/lib/opengrid /var/log/opengrid, PrivateTmp=true  (deploy/systemd/og-*.service)</text>
+<rect x="30" y="882.8" width="440" height="223" rx="8" ry="8" fill="#ffffff" stroke="#334155" stroke-width="1.6"/>
+<text x="40" y="903.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Filesystem layout</text>
+<text x="40" y="919.8" font-family="Consolas, 'Courier New', monospace" font-size="11.2" font-weight="500" text-anchor="start" fill="#334155" >deploy/README.md, install.sh</text>
+<text x="40" y="939.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >/opt/opengrid/venv, /opt/ogsim/venv</text>
+<text x="40" y="953.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >/opt/opengrid/current → releases/&lt;ts&gt;</text>
+<text x="40" y="967.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  (atomic symlink swap on deploy)</text>
+<text x="40" y="981.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >/opt/opengrid/releases/ (5 kept)</text>
+<text x="40" y="995.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >/etc/opengrid/ (0750 root:opengrid):</text>
+<text x="40" y="1009.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  orchestrator.toml, secrets.env,</text>
+<text x="40" y="1023.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  api_keys.env, htpasswd,</text>
+<text x="40" y="1037.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  guardian_ed25519.key, safestop_</text>
+<text x="40" y="1051.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  ed25519.key</text>
+<text x="40" y="1065.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >/var/lib/opengrid  (state, backups/)</text>
+<text x="40" y="1079.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >/var/log/opengrid  (rotate 14d)</text>
+<rect x="490" y="882.8" width="440" height="223" rx="8" ry="8" fill="#ffffff" stroke="#334155" stroke-width="1.6"/>
+<text x="500" y="903.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Deploy / rollback flow</text>
+<text x="500" y="919.8" font-family="Consolas, 'Courier New', monospace" font-size="11.2" font-weight="500" text-anchor="start" fill="#334155" >deploy/scripts/{deploy,rollback}.sh</text>
+<text x="500" y="939.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >1. copy release → /opt/opengrid/releases/&lt;ts&gt;</text>
+<text x="500" y="953.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >2. python -m opengrid.platform.db migrate</text>
+<text x="500" y="967.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >3. re-point current → new release (atomic)</text>
+<text x="500" y="981.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >4. systemctl restart opengrid.target</text>
+<text x="500" y="995.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >   ogsim.target</text>
+<text x="500" y="1009.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >5. poll GET /og/api/health, up to 30 s</text>
+<text x="500" y="1023.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >6. any failure in 2-5 → auto re-point</text>
+<text x="500" y="1037.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >   current back, restart, exit non-zero</text>
+<text x="500" y="1059.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Migrations forward-only (additive only,</text>
+<text x="500" y="1073.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >02b §9.6) — rollback tolerates newer schema</text>
+<rect x="950" y="882.8" width="420" height="223" rx="8" ry="8" fill="#ffffff" stroke="#334155" stroke-width="1.6"/>
+<text x="960" y="903.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Env-variable NAMES (no values)</text>
+<text x="960" y="919.8" font-family="Consolas, 'Courier New', monospace" font-size="11.2" font-weight="500" text-anchor="start" fill="#334155" >EnvironmentFile secrets.env / api_keys.env</text>
+<text x="960" y="939.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >OG_CONFIG, OG_DB, OG_MQTT_ROOT</text>
+<text x="960" y="953.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >OG_DB_PASSWORD</text>
+<text x="960" y="967.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >OG_MQTT_&lt;ENGINE|GUARDIAN|SAFESTOP|</text>
+<text x="960" y="981.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  API|SIM&gt;_PASSWORD</text>
+<text x="960" y="995.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >GUARDIAN_SIGNING_SEED</text>
+<text x="960" y="1009.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >ERCOT_PUBLIC_API_KEY_PRIMARY /</text>
+<text x="960" y="1023.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  _SECONDARY, ERCOT_API_USER,</text>
+<text x="960" y="1037.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >  ERCOT_API_PASSWORD</text>
+<text x="960" y="1051.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >EIA_API_KEY</text>
+<text x="30" y="1145.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15" font-weight="700" text-anchor="start" fill="#0f172a" >Local dev stack — dev/docker-compose.yml (“make dev-up”, WP D0)</text>
+<text x="30" y="1161.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#b45309" >Mirrors the base server's topology at laptop scale. Status: UNTESTED ON DOCKER (dev/README.md).</text>
+<rect x="30" y="1177.8" width="179.42857142857142" height="106" rx="8" ry="8" fill="#dcfce7" stroke="#15803d" stroke-width="1.6"/>
+<text x="38" y="1196.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="700" text-anchor="start" fill="#0f172a" >postgres:17</text>
+<text x="38" y="1213.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >databases og, og_test</text>
+<text x="38" y="1227.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >port 5432</text>
+<text x="38" y="1241.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >(POSTGRES_PORT)</text>
+<rect x="223.42857142857142" y="1177.8" width="179.42857142857142" height="106" rx="8" ry="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.6"/>
+<text x="231.42857142857142" y="1196.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="700" text-anchor="start" fill="#0f172a" >mosquitto:2</text>
+<text x="231.42857142857142" y="1213.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >mosquitto/opengrid.acl</text>
+<text x="231.42857142857142" y="1227.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >(generated, 6 users)</text>
+<text x="231.42857142857142" y="1241.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >port 1883</text>
+<text x="231.42857142857142" y="1255.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >(MOSQUITTO_PORT)</text>
+<rect x="416.85714285714283" y="1177.8" width="179.42857142857142" height="106" rx="8" ry="8" fill="#ffffff" stroke="#334155" stroke-width="1.6"/>
+<text x="424.85714285714283" y="1196.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="700" text-anchor="start" fill="#0f172a" >migrate</text>
+<text x="424.85714285714283" y="1213.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >one-shot: db migrate</text>
+<text x="424.85714285714283" y="1227.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >+ fleet.seed</text>
+<rect x="610.2857142857142" y="1177.8" width="179.42857142857142" height="106" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="618.2857142857142" y="1196.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="700" text-anchor="start" fill="#0f172a" >sim-market</text>
+<text x="618.2857142857142" y="1213.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >ogsim.market</text>
+<text x="618.2857142857142" y="1227.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >port 8090</text>
+<text x="618.2857142857142" y="1241.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >(MARKET_SIM_PORT)</text>
+<rect x="803.7142857142857" y="1177.8" width="179.42857142857142" height="106" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="811.7142857142857" y="1196.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="700" text-anchor="start" fill="#0f172a" >sim-fleet</text>
+<text x="811.7142857142857" y="1213.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >ogsim.fleet</text>
+<text x="811.7142857142857" y="1227.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >200 hubs / 8 banks</text>
+<text x="811.7142857142857" y="1241.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >(dev default)</text>
+<rect x="997.1428571428571" y="1177.8" width="179.42857142857142" height="106" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="1005.1428571428571" y="1196.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="700" text-anchor="start" fill="#0f172a" >sim-scada</text>
+<text x="1005.1428571428571" y="1213.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >ogsim.scada</text>
+<text x="1005.1428571428571" y="1227.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >8 banks</text>
+<rect x="1190.5714285714284" y="1177.8" width="179.42857142857142" height="106" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
+<text x="1198.5714285714284" y="1196.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.2" font-weight="700" text-anchor="start" fill="#0f172a" >sim-control</text>
+<text x="1198.5714285714284" y="1213.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >ogsim.control</text>
+<text x="1198.5714285714284" y="1227.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >port 8091</text>
+<text x="1198.5714285714284" y="1241.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >(CONTROL_SIM_PORT)</text>
+<rect x="30" y="1303.8" width="1340" height="70" rx="8" ry="8" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="6,4"/>
+<text x="46" y="1323.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#334155" >optional “orchestrator” compose profile: containerized og-feeds/og-engine/og-guardian/og-safestop/og-settle/</text>
+<text x="46" y="1339.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#334155" >og-api (profiles: ["orchestrator"]) — NOT started by default; the normal path runs them from an IDE/venv</text>
+<text x="46" y="1355.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#334155" >against dev/config/dev.toml, whose [feeds.*] base_url already points at sim-market (same config swap as prod)</text>
+<rect x="30" y="1403.8" width="1340" height="90" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
+<text x="46" y="1423.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#111827" >Sources</text>
+<text x="46" y="1441.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >deploy/README.md  ·  deploy/systemd/{og-*.service,opengrid.target,ogsim.target}  ·  deploy/apache/opengrid.conf  ·  deploy/{cron,logrotate}/opengrid  ·  deploy/scripts/{deploy,rollback,backup,install}.sh</text>
+<text x="46" y="1456.3" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >dev/README.md  ·  dev/docker-compose.yml  ·  dev/.env.example  ·  dev/mosquitto/opengrid.acl  ·  guardian/main.py (Prometheus :9103)  ·  BUILD.md (deadline / 192.168.5.35)</text>
+<text x="46" y="1470.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >Snapshot f3b3365 (2026-09-26): 0 deploy/* changes since fcaa2ca — pq_ingest, guardian pq_checks and assets fold into the existing og-engine/og-guardian units; no new process, port, or env var.</text>
+</svg>
