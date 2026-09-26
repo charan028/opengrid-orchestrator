@@ -41,17 +41,20 @@ and the demo step that depends on it. Items resolved since DEMO-1 are listed at 
     the script). Its self-test is never invoked on anomaly start, and no rejected ack reaches the orchestrator.
 15. **Legacy scenario files use ids the simulator does not know** (owner: sims; not used by the script).
     `bank_overload_and_utility_limit`, `compound_stress` and `tampered_command` target `BANK_07`, `BANK_12`,
-    `HUB_0501`, `HUB_0142`; the simulator's ids are `bank-NNN`/`hub-NNNNN`.
+    `HUB_0501`, `HUB_0142`; the simulator's ids are `bank-NNN`/`hub-NNNNN`. A fix is on `wp/scenario-target-ids`.
 16. **Random mode resumes after a control-plane restart** (owner: sims; "Before you start" item 1). Pause is held
     in memory only.
 17. **The control plane's web page calls `/api/...` by absolute path** (owner: sims; "Before you start" item 6).
     Behind Apache's `/ogsim/` the buttons probably fail; the script uses `curl`.
 18. **No "stop scenario" verb** (owner: market). `POST /api/scenarios/{name}/run` has no matching stop; pending
     steps still fire after their first anomaly is cancelled.
-19. **Three committed customers on bank-012** (owner: lead; steps 5-8, 12). There is no seed for the demo's
-    customers; the presenter creates them ("Before you start" item 3).
 
 ## Resolved since DEMO-1
+
+- **The demo's committed customers** (was item 5): `dev/scripts/seed_demo_customers.py` (dev-stack PR #35)
+  commits the three seeded demo contracts through admission and the selector, idempotently, and names the demo
+  bank the steps use. The selector, not the seed, picks the banks, so the demo bank is no longer fixed to
+  `bank-012`.
 
 - **Safe-stop release** (was item 6): the two-person release is built (og-op-a requests, og-op-b approves,
   self-approval refused); steps 19-20.
