@@ -39,7 +39,9 @@ solar_by_region_enabled = false
 
 # Solar share of load (opengrid.feeds.ercot_solar; rule in opengrid.core.solar_share): which ERCOT solar region(s) cover a load weather zone.
 # ERCOT's solar regions and load weather zones are different partitions, so only zones listed here get a
-# zonal share ("total" = system-wide always works). Empty until the mapping is agreed with the lead.
+# zonal share ("total" = system-wide always works). Empty for this release: region solar is OFF and the
+# NP4-745-CD field names are unconfirmed. The proposed mapping (WP-L #39) is in
+# docs/orchestrator/07-delivery/integrations/solar-region-mapping.md and tests/unit/feeds/test_solar_region_mapping.py.
 [feeds.ercot.solar_share_zones]
 
 [feeds.eia]
