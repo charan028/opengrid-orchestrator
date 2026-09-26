@@ -63,6 +63,10 @@ _K13_SHORTFALL_REASONS = COMMIT_LOCK_OVERRIDE_REASONS
 # committed draw against its bank(s), joined to the contract for customer_id and the obligation for
 # window_end. MVP-S reservations are bank-scoped (02a S1.9), so this check is scoped to (obligation,
 # bank) pairs exactly like `_ACTIVE_CALLS_SQL` above -- the same simplification already used for S1-S7.
+#: Display state recomputed every cycle: a lost last commit on a crash costs nothing (same reasoning as
+#: `opengrid.fleet.pg_backend`'s soft-state writes).
+_ASYNC_COMMIT_SQL = "SET LOCAL synchronous_commit TO OFF"
+
 _UPSERT_ENERGY_STATUS_SQL = """
 INSERT INTO og.obligation_energy_status
     (obligation_id, required_kwh, available_kwh, margin_kwh, time_to_depletion_h, at_risk,
@@ -502,37 +506,40 @@ class EnergySufficiencyGateway:
                     reserved_kwh_by_hub,
                 )
                 results.append(result)
-                await self._record_status(result)
                 if result.at_risk and result.obligation_id not in self._at_risk:
                     self._at_risk.add(result.obligation_id)
                     await self._record_at_risk(result, customer_id)
+        await self._record_statuses(results)
         return results
 
-    async def _record_status(self, result: EnergySufficiencyResult) -> None:
-        """Persists EVERY cycle's result (not just AT_RISK ones) to `og.obligation_energy_status`, so
+    async def _record_statuses(self, results: list[EnergySufficiencyResult]) -> None:
+        """Persists EVERY cycle's results (not just AT_RISK ones) to `og.obligation_energy_status`, so
         `GET /og/api/dispatch/opportunities`/the dispatch SSE stream can show a live
-        `energy_margin_kwh`/`time_to_depletion_h` for an obligation that is currently fine, not only a
-        trace/alert trail for the ones that weren't (merge task item 5). Best-effort: a status-row write
-        failure must never block the AT_RISK trace/alert path below, which is the safety-relevant one."""
+        `energy_margin_kwh`/`time_to_depletion_h` for an obligation that is currently fine (merge task
+        item 5). Display state, recomputed every cycle: one transaction per cycle with an asynchronous
+        commit, never one synchronous commit per obligation inside the dispatch tick (A11). Best-effort: a
+        failure never blocks the AT_RISK trace/alert path, which is the safety-relevant one."""
+        if not results:
+            return
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(
-                    _UPSERT_ENERGY_STATUS_SQL,
-                    {
-                        "obligation_id": result.obligation_id,
-                        "required_kwh": result.required_kwh,
-                        "available_kwh": result.available_kwh,
-                        "margin_kwh": result.margin_kwh,
-                        "time_to_depletion_h": result.time_to_depletion_h,
-                        "at_risk": result.at_risk,
-                        "used_substitution": result.used_substitution,
-                    },
-                )
+                await cur.execute(_ASYNC_COMMIT_SQL)
+                for result in results:
+                    await cur.execute(
+                        _UPSERT_ENERGY_STATUS_SQL,
+                        {
+                            "obligation_id": result.obligation_id,
+                            "required_kwh": result.required_kwh,
+                            "available_kwh": result.available_kwh,
+                            "margin_kwh": result.margin_kwh,
+                            "time_to_depletion_h": result.time_to_depletion_h,
+                            "at_risk": result.at_risk,
+                            "used_substitution": result.used_substitution,
+                        },
+                    )
                 await conn.commit()
         except Exception:
-            logger.exception(
-                "failed to persist obligation_energy_status", extra={"obligation_id": result.obligation_id}
-            )
+            logger.exception("failed to persist obligation_energy_status", extra={"count": len(results)})
 
     async def _record_at_risk(self, result: EnergySufficiencyResult, customer_id: str | None) -> None:
         await self._set_at_risk(

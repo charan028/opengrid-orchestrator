@@ -149,13 +149,40 @@ async def test_ample_energy_obligation_is_not_flagged(monkeypatch, _patch_alert_
     status_writes = [
         c
         for c in pool.conns
-        if c.cursor_obj.executed and "og.obligation_energy_status" in (c.cursor_obj.executed[0][0] or "")
+        if any("og.obligation_energy_status" in (sql or "") for sql, _ in c.cursor_obj.executed)
     ]
     assert len(status_writes) == 1
-    _sql, params = status_writes[0].cursor_obj.executed[0]
+    _sql, params = next(e for e in status_writes[0].cursor_obj.executed if e[1])
     assert params["obligation_id"] == str(obligation_id)
     assert params["at_risk"] is False
     assert status_writes[0].committed is True
+
+
+async def test_energy_statuses_are_one_asynchronous_commit_per_cycle(monkeypatch):
+    """A11 (live 2026-09-26 06:04, host disk stall): every obligation's status row was its own synchronous
+    commit, one after another inside the dispatch tick -- 22 obligations = 22 fsyncs, and the tick's
+    energy_check phase reached 5.7 s. The display-only status rows now go out in one transaction with an
+    asynchronous commit (they are recomputed every 2 s); AT_RISK writes stay synchronous."""
+    rows = [
+        (uuid4(), "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
+        (uuid4(), "bank-01", 5.0, NOW + timedelta(hours=2), uuid4()),
+    ]
+    monkeypatch.setattr(
+        gw.fleet, "hub_capabilities", lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=39.2)]
+    )
+    pool = _FakePool(rows)
+    await gw.EnergySufficiencyGateway(pool, TraceStore(_FakeTraceBackend())).run(NOW)
+
+    status_conns = [
+        c
+        for c in pool.conns
+        if any("og.obligation_energy_status" in (sql or "") for sql, _ in c.cursor_obj.executed)
+    ]
+    assert len(status_conns) == 1
+    executed = [sql for sql, _ in status_conns[0].cursor_obj.executed]
+    assert "synchronous_commit" in executed[0]
+    assert sum("og.obligation_energy_status" in s for s in executed) == 2
+    assert status_conns[0].committed is True
 
 
 async def test_missing_soc_flags_at_risk_and_raises_alert(monkeypatch, _patch_alert_raising):
