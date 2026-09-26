@@ -9,7 +9,7 @@ is claimed. Only the **Lead** deploys and merges to `main`.
 |---|---|---|
 | **Lead** (repo owner + build agents) | Integration, deployment, server, live verification, diagrams | L1–L4, D0, DOC3 |
 | **rpagaria2000** | Correctness and test depth | Q1, Q2, P1, DOC2 |
-| **theviper007** | User-facing quality, performance tooling, demo | U1, Q3, DEMO, DOC1 |
+| **fancyviper007** | User-facing quality, performance tooling, demo | U1, Q3, DEMO, DOC1 |
 
 ## Lead (integration + deployment; server access)
 
@@ -29,16 +29,16 @@ is claimed. Only the **Lead** deploys and merges to `main`.
 | Q2 | End-to-end functional suite, part 2: guardian negative tests, safe stop, anomaly responses (TS-06/07) via `ogsim.control` | `tests-e2e/functional/safety/` | D0 | As Q1 | CLAIMED (rpagaria2000) |
 | P1 | Property tests for K1–K13 across modules (Hypothesis), filling the gaps listed in `qa/review-*.md` | `orchestrator/tests/property/` | none | One property test per K, all green | CLAIMED (rpagaria2000) |
 | DOC2 | API reference (from OpenAPI) + integration how-to (switch live ↔ simulator, the ERCOT token flow) | `docs/api/` | none | Generated + curated | CLAIMED (rpagaria2000) |
-| U1 | UI validation and polish: a scripted walkthrough (Playwright or equivalent) of all 7 screens + scenario panel; accessibility (keyboard, contrast, labels); fix defects in UI templates/routes | `orchestrator/src/opengrid/ui/`, `tests-e2e/ui/` | D0 | Walkthrough green; a11y checklist in the PR | CLAIMED (theviper007) |
-| Q3 | Performance and chaos tooling: a 10k-hub load profile, cycle-latency capture, a kill-each-process script with expected-behaviour assertions (TS-N/C) | `tests-e2e/perf/`, `tests-e2e/chaos/` | D0 | Runs locally at 2k; the lead runs it on the server (L4) | CLAIMED (theviper007) |
-| DEMO | Demo script + scenario pack: a 20-step sign-off walkthrough (test plan §5) using `integration-sims/scenarios/` | `docs/demo/`, `integration-sims/scenarios/demo-*.yaml` | D0 | Runs start to finish on the dev stack | CLAIMED (theviper007) |
-| DOC1 | Operator guide: start/stop, screens, the two-step actions, safe stop, what each alert means, degraded modes | `docs/operator/` | none | Reviewed by the lead | CLAIMED (theviper007) |
+| U1 | UI validation and polish: a scripted walkthrough (Playwright or equivalent) of all 7 screens + scenario panel; accessibility (keyboard, contrast, labels); fix defects in UI templates/routes | `orchestrator/src/opengrid/ui/`, `tests-e2e/ui/` | D0 | Walkthrough green; a11y checklist in the PR | CLAIMED (fancyviper007) |
+| Q3 | Performance and chaos tooling: a 10k-hub load profile, cycle-latency capture, a kill-each-process script with expected-behaviour assertions (TS-N/C) | `tests-e2e/perf/`, `tests-e2e/chaos/` | D0 | Runs locally at 2k; the lead runs it on the server (L4) | CLAIMED (fancyviper007) |
+| DEMO | Demo script + scenario pack: a 20-step sign-off walkthrough (test plan §5) using `integration-sims/scenarios/` | `docs/demo/`, `integration-sims/scenarios/demo-*.yaml` | D0 | Runs start to finish on the dev stack | CLAIMED (fancyviper007) |
+| DOC1 | Operator guide: start/stop, screens, the two-step actions, safe stop, what each alert means, degraded modes | `docs/operator/` | none | Reviewed by the lead | CLAIMED (fancyviper007) |
 | DOC3 | Architecture and flow diagrams: architecture, the 2 s dispatch cycle, commitment lifecycle, deployment, data model | `docs/diagrams/` | none | SVG/HTML diagrams consistent with the code | CLAIMED (lead) |
 
 ## Suggested order (each developer)
 
 - **rpagaria2000:** P1 first (no dependencies; start immediately), then Q1 → Q2 once D0 lands, and DOC2 in gaps.
-- **theviper007:** DOC1 and U1's walkthrough plan first (read the UI code and `02b` §8), then U1 → Q3 → DEMO once
+- **fancyviper007:** DOC1 and U1's walkthrough plan first (read the UI code and `02b` §8), then U1 → Q3 → DEMO once
   D0 lands.
 
 ## Coordination rules

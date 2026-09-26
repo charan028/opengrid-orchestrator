@@ -1,4 +1,4 @@
-# Lane: UX, performance tooling and demo (assignee: the second developer; see WORKBOARD.md)
+# Lane: UX, performance tooling and demo (assignee: fancyviper007)
 
 You and your AI agent own work packages **DOC1, U1, Q3, DEMO** from `WORKBOARD.md`. Edit only their paths. Only
 the lead deploys and merges to `main`.
