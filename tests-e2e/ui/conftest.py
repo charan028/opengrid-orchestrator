@@ -60,6 +60,21 @@ def live_base_url() -> str | None:
     return value.rstrip("/") if value else None
 
 
+# Extra Chromium switches, space-separated, e.g. on the shared base host (same disk as production Postgres):
+#   OG_E2E_CHROMIUM_ARGS="--disk-cache-dir=/dev/shm/og-e2e-cache --disk-cache-size=1"
+# Playwright puts the throwaway profile (--user-data-dir) under $TMPDIR, so run with TMPDIR=/dev/shm there too.
+CHROMIUM_ARGS_ENV = "OG_E2E_CHROMIUM_ARGS"
+
+
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args: dict[str, Any]) -> dict[str, Any]:
+    """pytest-playwright's launch args plus any `OG_E2E_CHROMIUM_ARGS` switches."""
+    extra = os.environ.get(CHROMIUM_ARGS_ENV, "").split()
+    if not extra:
+        return browser_type_launch_args
+    return {**browser_type_launch_args, "args": [*browser_type_launch_args.get("args", []), *extra]}
+
+
 def _load(name: str) -> Any:
     with (FIXTURES_DIR / name).open(encoding="utf-8") as fh:
         return json.load(fh)
