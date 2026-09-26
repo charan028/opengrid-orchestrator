@@ -39,6 +39,11 @@ INTERVAL = timedelta(minutes=15)
 #: Present only on a deployed OpenGrid host. There the defaults below are the PRODUCTION og-api, simulator
 #: control plane and database, so the suites refuse to run unless every target is set explicitly.
 PRODUCTION_HOST_MARKER = Path("/etc/opengrid")
+#: Regulated-utility territories (K15): a manual operator command is FREE-market work, which G-33 correctly vetoes
+#: on these hubs, so generic guardian scenarios pick competitive-area hubs.
+REGULATED_ZONES = ("LZ_AEN", "LZ_CPS")
+#: The `slow` marker promises a delivery scenario waits at most about this long for its window (conftest.py).
+MAX_DELIVERY_WAIT = timedelta(minutes=20)
 EXPLICIT_TARGETS = ("OG_E2E_API", "OG_E2E_CONTROL", "OG_E2E_DSN")
 
 #: How long an admission gate normally takes to decide a fresh contract's offer (next 2 s engine tick + solve).
@@ -283,6 +288,68 @@ class Stack:
             what=f"a gate decision on opportunity {offer.opportunity_id}",
         )
 
+    def delivery_window(
+        self, *, max_committed_kw: float, lead: timedelta = timedelta(seconds=90)
+    ) -> tuple[datetime, datetime]:
+        """The earliest lightly-loaded single interval that opens at least `lead` from now, for a scenario that
+        waits for a real delivery. Skips, naming the committed load it found, when that interval is further
+        away than MAX_DELIVERY_WAIT: on a loaded stack `light_window` can land hours out, and the `slow` marker
+        promises about 20 minutes."""
+        earliest = now_utc() + lead
+        start, end = self.light_window(1, max_committed_kw=max_committed_kw)
+        if start < earliest:
+            start, end = self.light_window(1, max_committed_kw=max_committed_kw, first_offset=2)
+        if start - now_utc() > MAX_DELIVERY_WAIT:
+            load = self.rows(
+                """SELECT c.interval_start, sum(c.committed_kw) AS kw FROM og.commitment c
+                   WHERE c.interval_start >= %(a)s AND c.interval_start < %(b)s
+                     AND NOT EXISTS (SELECT 1 FROM og.commitment n WHERE n.supersedes = c.commitment_id)
+                   GROUP BY 1 ORDER BY 1""",
+                {"a": quarter(0), "b": start},
+            )
+            summary = ", ".join(f"{r['interval_start']:%H:%M} {r['kw']} kW" for r in load) or "none"
+            pytest.skip(
+                f"no interval with <= {max_committed_kw} kW committed opens within {MAX_DELIVERY_WAIT}; the nearest "
+                f"is {start:%H:%M} UTC. Committed load before it: {summary}. Reset the dev DB or wait."
+            )
+        return start, end
+
+    def cleanup(self) -> None:
+        """Dev stack only: retire what this session created so reruns start clean. Every non-superseded
+        commitment row stays frozen for the selector (K13) whatever the obligation's state, so this deletes the
+        session's FUTURE commitment rows, releases their reservations and expires obligations that had not
+        started, then ends the contracts. Past and in-progress intervals are left as history."""
+        if PRODUCTION_HOST_MARKER.exists() or not self.created_contracts:
+            for contract_id in self.created_contracts:
+                self.end_contract(contract_id)
+            return
+        ids = list(self.created_contracts)
+        with psycopg.connect(self.dsn) as conn:
+            obligations = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT obligation_id FROM og.obligation WHERE contract_id = ANY(%(c)s)", {"c": ids}
+                ).fetchall()
+            ]
+            if obligations:
+                conn.execute(
+                    "DELETE FROM og.commitment WHERE obligation_id = ANY(%(o)s) AND interval_start > now()",
+                    {"o": obligations},
+                )
+                conn.execute(
+                    "UPDATE og.reservation SET released_at = now(), release_reason = 'E2E_CLEANUP' "
+                    "WHERE obligation_id = ANY(%(o)s) AND released_at IS NULL AND interval_start > now()",
+                    {"o": obligations},
+                )
+                conn.execute(
+                    "UPDATE og.obligation SET state = 'EXPIRED', last_reason_code = 'E2E_CLEANUP', updated_at = now() "
+                    "WHERE obligation_id = ANY(%(o)s) AND window_start > now() "
+                    "AND state IN ('OFFERED', 'SELECTED', 'COMMITTED')",
+                    {"o": obligations},
+                )
+        for contract_id in ids:
+            self.end_contract(contract_id)
+
     def light_window(
         self, intervals: int, *, max_committed_kw: float, first_offset: int = 1
     ) -> tuple[datetime, datetime]:
@@ -342,16 +409,18 @@ class Stack:
         return self.post(f"/fleet/command/{proposed.json()['proposal_id']}/confirm", user=user)
 
     def online_hub(self, *, exclude_banks: tuple[str, ...] = (), idle: bool = False) -> dict[str, Any]:
-        """An online hub (params + live state), outside `exclude_banks`. `idle=True` wants one at 0 kW, i.e.
+        """An online hub (params + live state) in the ERCOT competitive area, outside `exclude_banks`. `idle=True` wants one at 0 kW, i.e.
         not currently driven by the engine, and skips the test when every hub is being dispatched (the
         engine also dispatches uncommitted headroom, so on a busy stack there may be none)."""
         found = self.rows(
             """SELECT h.hub_id, h.bank_id, h.p_kw AS p_limit_kw, h.e_kwh, h.r_kwh, s.soc_kwh, s.p_kw
                FROM og.hub h JOIN og.hub_state s USING (hub_id)
+               JOIN og.bank b ON b.bank_id = h.bank_id
                WHERE s.health = 'online' AND NOT (h.bank_id = ANY(%(x)s))
+                 AND NOT (b.zone = ANY(%(reg)s))
                  AND (NOT %(idle)s OR s.p_kw = 0)
                ORDER BY s.soc_kwh DESC LIMIT 1""",
-            {"x": list(exclude_banks), "idle": idle},
+            {"x": list(exclude_banks), "idle": idle, "reg": list(REGULATED_ZONES)},
         )
         if not found and idle:
             pytest.skip("every online hub is currently dispatched by the engine; no idle hub to command")
@@ -370,6 +439,20 @@ class Stack:
 
     def clear_anomaly(self, anomaly_id: str) -> None:
         self.control("DELETE", f"/api/anomalies/{anomaly_id}")
+
+    def require_committed(
+        self, obligation: dict[str, Any], what: str = "the scenario's baseline offer"
+    ) -> None:
+        """Skip, not fail, when the stack cannot commit at all: since R2 the selector withholds firm commitments
+        from banks without a zone price forecast (NOT_FOR_FIRM) and while NO_NEW_COMMITMENTS is active, which a
+        fresh dev database or a stale feed produces. A scenario can only test the lock once something commits."""
+        if obligation["state"] == "COMMITTED":
+            return
+        modes = [row["mode"] for row in self.rows("SELECT mode FROM og.degraded_mode_state")]
+        pytest.skip(
+            f"{what} was not committed ({obligation['state']}); degraded modes: {modes or 'none'}. The selector "
+            "withholds banks without a zone price forecast (NOT_FOR_FIRM): let the forecast build history"
+        )
 
     def free_window(
         self, intervals: int, *, first_offset: int = 3, last_offset: int = 88
