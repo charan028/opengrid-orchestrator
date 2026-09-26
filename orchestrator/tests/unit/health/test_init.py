@@ -36,6 +36,7 @@ class _FakeQueries:
         self.heartbeats: list[Heartbeat] = []
         self.hub_rows: list[tuple[str, str, datetime | None, str | None]] = []
         self.feed_statuses: list[FeedStatus] = []
+        self.bank_loads: list[tuple[str, float, float | None]] = []
         self.open_alerts: list[Alert] = []
         self.written_hub_health: dict[str, str] = {}
         self.raised: list[str] = []
@@ -53,6 +54,9 @@ class _FakeQueries:
 
     async def fetch_feed_statuses(self, pool):
         return self.feed_statuses
+
+    async def fetch_bank_loads(self, pool):
+        return self.bank_loads
 
     async def fetch_open_alerts(self, pool):
         return self.open_alerts
@@ -125,6 +129,26 @@ async def test_evaluate_alerts_raises_once_and_clears_on_resolve(fake_queries: _
     await health.evaluate_alerts()
     assert fake_queries.open_alerts == []
     assert len(fake_queries.cleared) == first_round_open
+
+
+async def test_evaluate_alerts_raises_scada_overload(fake_queries: _FakeQueries) -> None:
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "sim", "settle", "api")
+    ]
+    fake_queries.bank_loads = [("bank-000", 75.0, 95.0)]  # 126% of rating -> critical
+
+    await health.evaluate_alerts()
+
+    assert "ALR-SCADA-OVERLOAD:bank-000" in fake_queries.raised
+    alert = next(a for a in fake_queries.open_alerts if a.rule == "ALR-SCADA-OVERLOAD")
+    assert alert.severity == "critical"
+
+    # Resolves once the load drops back under rating.
+    fake_queries.raised.clear()
+    fake_queries.bank_loads = [("bank-000", 75.0, 10.0)]
+    await health.evaluate_alerts()
+    assert not any(a.rule == "ALR-SCADA-OVERLOAD" for a in fake_queries.open_alerts)
 
 
 async def test_evaluate_once_returns_snapshot_with_degraded_mode(fake_queries: _FakeQueries) -> None:

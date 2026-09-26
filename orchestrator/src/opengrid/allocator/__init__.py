@@ -12,6 +12,9 @@ to a different obligation (K13) -- see `opengrid.allocator.cycle` for the full i
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
@@ -24,11 +27,33 @@ from opengrid.core.models.engine import Grant
 
 __all__ = ["cycle", "run_cycle", "substitute_hub"]
 
+logger = logging.getLogger(__name__)
+
 # One DIST_DEFERRAL PI integrator and one dwell tracker per bank, kept alive for the life of the
 # process (K9: exactly one integrating controller per bank kVA loop). Module-level because
 # `og-engine` runs the allocator as a single long-lived process (02a S0 "Stack").
 _pi_states: dict[str, PiState] = {}
 _dwell_states: dict[str, DwellState] = {}
+
+# ALLOC-05: every gateway await in `run_cycle` is bounded by this timeout (K7 "degrade, don't trip" --
+# a hung fleet/ledger/scada/schedule read must never hang the 2 s allocation cycle indefinitely). On
+# timeout, `run_cycle` holds the last cycle's signed-off grants rather than propose a fresh (and
+# possibly stale-input) batch, and traces `reasons.R_GATEWAY_TIMEOUT` (2 s: `01-saturday-delivery-plan`
+# S0's own cycle budget -- a gateway that cannot answer within it should not block the cycle at all).
+GATEWAY_TIMEOUT_S = 2.0
+
+# The most recent cycle's successfully-built grant rows, held and re-returned verbatim on a gateway
+# timeout (K7) rather than proposing a batch built from partial/stale inputs.
+_last_grants: list[Grant] = []
+
+
+async def _with_gateway_timeout[T](awaitable: Awaitable[T], *, gateway_name: str) -> T:
+    """Bound one gateway call to `GATEWAY_TIMEOUT_S`, re-raising as `TimeoutError` with the gateway's
+    name attached (so the caller's log/trace records which dependency stalled)."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout=GATEWAY_TIMEOUT_S)
+    except TimeoutError:
+        raise TimeoutError(f"{gateway_name} gateway timed out after {GATEWAY_TIMEOUT_S}s") from None
 
 
 async def run_cycle(
@@ -58,13 +83,40 @@ async def run_cycle(
         )
 
     t = now or datetime.now(UTC)
-    bank_ids = list(await fleet.bank_ids())
 
-    fleet_state = await fleet.fleet_state(bank_ids, t)
-    ledger_view = await ledger.ledger_view(bank_ids, t)
-    scada = await scada_gateway.samples(bank_ids) if scada_gateway is not None else {}
-    schedule = await schedule_gateway.schedule(bank_ids) if schedule_gateway is not None else Schedule()
-    instructions = await schedule_gateway.instructions(bank_ids) if schedule_gateway is not None else ()
+    try:
+        bank_ids = list(await _with_gateway_timeout(fleet.bank_ids(), gateway_name="fleet.bank_ids"))
+        fleet_state = await _with_gateway_timeout(
+            fleet.fleet_state(bank_ids, t), gateway_name="fleet.fleet_state"
+        )
+        ledger_view = await _with_gateway_timeout(
+            ledger.ledger_view(bank_ids, t), gateway_name="ledger.ledger_view"
+        )
+        scada = (
+            await _with_gateway_timeout(scada_gateway.samples(bank_ids), gateway_name="scada.samples")
+            if scada_gateway is not None
+            else {}
+        )
+        schedule = (
+            await _with_gateway_timeout(schedule_gateway.schedule(bank_ids), gateway_name="schedule.schedule")
+            if schedule_gateway is not None
+            else Schedule()
+        )
+        instructions = (
+            await _with_gateway_timeout(
+                schedule_gateway.instructions(bank_ids), gateway_name="schedule.instructions"
+            )
+            if schedule_gateway is not None
+            else ()
+        )
+    except TimeoutError as exc:
+        # K7 "degrade, don't trip": hold the last cycle's signed-off grants rather than propose a
+        # fresh batch built from a stalled/partial read of this cycle's inputs.
+        logger.warning(
+            "allocator gateway timeout, holding last grants",
+            extra={"cycle_id": cycle_id, "error": str(exc), "reason_code": reasons.R_GATEWAY_TIMEOUT},
+        )
+        return list(_last_grants)
 
     result: CycleResult = cycle(
         t,
@@ -80,7 +132,9 @@ async def run_cycle(
 
     await ledger.persist_grants(cycle_id, list(result.grants))
     ledger_version = await ledger.ledger_version()
-    return [_to_grant_row(cycle_id, ledger_version, g) for g in result.grants]
+    grants = [_to_grant_row(cycle_id, ledger_version, g) for g in result.grants]
+    _last_grants[:] = grants
+    return grants
 
 
 async def substitute_hub(obligation_id: str, from_hub_id: str, to_hub_id: str, reason_code: str) -> None:

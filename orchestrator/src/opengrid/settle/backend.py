@@ -109,13 +109,19 @@ class SettleBackend(Protocol):
         source: str,
         quality_flag: QualityFlag,
         version: int,
+        supersedes: UUID | None = None,
     ) -> UUID:
-        """Insert a new `meter_interval` row (never an UPDATE of its data columns); returns its id."""
-        ...
+        """Insert a new `meter_interval` row (never an UPDATE of its data columns); returns its id.
 
-    async def mark_meter_interval_superseded(self, old_id: UUID, new_id: UUID) -> None:
-        """The one narrow link-only mutation 02a S1.1 allows on an insert-only table: point the
-        retired row's `superseded_by` at its replacement. No data column is ever touched."""
+        When `supersedes` is given, retiring the old row (pointing its `superseded_by` at this new
+        row's id) and inserting this row happen atomically, in ONE transaction, with the retirement
+        applied FIRST -- never the other way around. `ux_meter_active`'s partial unique index allows
+        at most one active (`superseded_by IS NULL`) row per (obligation_id, interval_start); an
+        insert-then-retire order would violate it the instant the new row is added while the old one
+        is still active. Retiring first requires the self-referencing FK to be deferred (checked at
+        COMMIT, migration 0007), since the old row's `superseded_by` briefly points at an id that does
+        not exist as a row yet.
+        """
         ...
 
     async def insert_performance(
@@ -173,13 +179,11 @@ class SettleBackend(Protocol):
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
         version: int,
+        supersedes: UUID | None = None,
     ) -> UUID:
-        """Insert a new `pnl` row (never an UPDATE of its data columns); returns its id."""
-        ...
-
-    async def mark_pnl_superseded(self, old_id: UUID, new_id: UUID) -> None:
-        """The one narrow link-only mutation 02a S1.1 allows: point the retired `pnl` row's
-        `superseded_by` at its replacement, mirroring `mark_meter_interval_superseded`."""
+        """Insert a new `pnl` row (never an UPDATE of its data columns); returns its id. `supersedes`
+        behaves exactly as `insert_meter_interval`'s: retire-then-insert, atomically, in one
+        transaction (`ux_pnl_active`, migration 0006/0007)."""
         ...
 
     async def fetch_rule_baseline_delivered_kwh(

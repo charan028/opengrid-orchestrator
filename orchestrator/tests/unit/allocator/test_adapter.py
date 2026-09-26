@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
 
+import opengrid.allocator as allocator_module
 from opengrid.allocator import reasons, run_cycle, substitute_hub
 from opengrid.allocator.models import (
     BankSnapshot,
@@ -120,3 +122,28 @@ async def test_ts_05_65_substitute_hub_records_via_ledger_gateway() -> None:
 def test_ts_05_66_schedule_import_still_usable() -> None:
     # Sanity check that the adapter's default Schedule() fallback constructs cleanly.
     assert Schedule().prices == ()
+
+
+class _HangingFleetGateway:
+    """ALLOC-05: a fleet gateway whose `bank_ids()` never returns, to prove `run_cycle` times out
+    rather than hanging the 2 s allocation cycle indefinitely."""
+
+    async def bank_ids(self):
+        await asyncio.sleep(3600)
+        return ()
+
+    async def fleet_state(self, bank_ids, interval_start):
+        raise AssertionError("must not be reached: bank_ids() should have timed out first")
+
+
+@pytest.mark.asyncio
+async def test_alloc_05_gateway_timeout_holds_last_grants(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(allocator_module, "GATEWAY_TIMEOUT_S", 0.05)
+    held_grant = object()
+    monkeypatch.setattr(allocator_module, "_last_grants", [held_grant])
+
+    ledger = FakeLedgerGateway(LedgerView(calls=()))
+    grants = await run_cycle("cycle-timeout", fleet=_HangingFleetGateway(), ledger=ledger)
+
+    assert grants == [held_grant]
+    assert ledger.persisted == []  # never reached persist_grants -- the cycle never ran

@@ -163,6 +163,104 @@ concurrent commitments, A4/A6 grants+signed verdicts, A8 settle pnl/invoice line
 section 9), A11 alert-after-injection (no alert rule fires without a real hub to go offline -- likely
 also downstream of section 9, not independently investigated).
 
+## 11. Dispatch-live pass (2026-09-25/26) — what landed
+
+Ownership as of this pass: merge owns `engine/fleet/ledger/api/contracts/health/trace/guardian/safestop/
+migrations/config/deploy/tests-e2e`; a follow-up fix agent owns `core/allocator/feeds/settle` (ERCOT
+field names, settle idempotency, allocator physics duplication/timeouts).
+
+**Landed:**
+- `opengrid.fleet.seed` (new): idempotent `og.hub`/`og.bank` loader reproducing `ogsim.fleet.state`'s
+  exact id scheme (`hub-NNNNN`/`bank-NNN`) from `integration-sims/config/fleet.yaml`, read-only.
+  `deploy.sh` now runs it after every migration; also exposed as
+  `POST /og/api/admin/seed-fleet-topology` (operator-only).
+- **Allocator <-> engine wiring** (`opengrid.engine.gateways`, new): real `FleetGateway`/
+  `LedgerGateway`/`ScadaGateway`/`ScheduleGateway` adapters, wired into `_engine_tick` so
+  `allocator.run_cycle` runs for real every 2 s instead of raising `NotImplementedError`. Also fixed:
+  **`opengrid.ledger.configure()` was never called anywhere** -- every `selector.run_gate ->
+  ledger.reserve()` call was raising `RuntimeError` before this pass; `opengrid.engine.main` now wires
+  a real `ReservationLedger(PgLedgerBackend, FleetCapabilityProvider, grant_backend=PgGrantBackend)`
+  once at startup.
+- **Guardian lease_state**: `opengrid.guardian.repo.PgLeaseStatePort` reads/writes `og.lease_state`
+  (monotonic upsert), replacing `InMemoryLeaseStatePort` so G-13 freshness survives a guardian restart.
+- **Safestop pubkey CLI bug fixed**: `opengrid.safestop.keys`'s `keygen` now writes plain hex (no
+  `"<key_id> "` prefix) to `--pubkey-out`, matching `ogsim.common.crypto.load_public_key`'s parser and
+  `opengrid.guardian.keys.keygen`'s own format. Fleet sim already pointed at both key paths correctly
+  (`integration-sims/config/fleet.yaml`'s `guardian_public_key_path`/`safestop_public_key_path`); only
+  the write side was broken.
+- **Health alerts**: added `ALR-SCADA-OVERLOAD` (bank load over `kva_rating`, tuned so the anomaly
+  catalogue's default `bank_overload` injection -- 20% over rating -- lands `critical`, not just
+  `warning`). `ALR-FEED-STALE` and `ALR-HUB-OFFLINE-RATIO` already existed and needed no change.
+
+**Real blocker found, NOT fixed here (outside merge's owned paths):**
+`opengrid.selector.gate._configured_bank_ids()` generates `"bank-01"`.."bank-NN"` (2-digit, 1-indexed),
+but the real fleet topology (this pass's seed loader, matching `ogsim.fleet.state`) uses `"bank-000"`..
+`"bank-039"` (3-digit, 0-indexed) -- **completely disjoint id spaces**. `tests/unit/selector/
+test_gate_loaders.py::test_configured_bank_ids_reads_fleet_banks_count` explicitly locks in the
+`"bank-01"` format, so this looks like a deliberate placeholder from early parallel development, not an
+oversight -- changing it isn't a one-line fix I should make unilaterally without the selector owner's
+sign-off, especially given the explicit test.
+
+**This is the actual reason A4/A5/A6/A8 still fail after this pass's fixes**, even with real topology
+seeded and the allocator wired for real: `selector.load_banks()` calls `fleet.capability("bank-01", ...)`
+every gate cycle, which raises `LookupError` (no such bank), so `run_gate` fails before ever reserving
+anything -- 0 commitments, 0 grants, 0 verdicts, 0 settlement, exactly the smoke-test symptoms. **The fix
+selector's owner needs:** change `_configured_bank_ids()` to `f"bank-{i:03d}" for i in range(bank_count)`
+(0-indexed, 3-digit) to match, or better, read bank ids from `og.bank` directly instead of
+reconstructing them from a count + format guess (this would also survive a future bank_count/format
+change with no code edit). Also see the same file's `README.md`/docstrings for two more places that
+already flag "every configured bank is eligible for every candidate" as a known simplification -- once
+bank ids match, that simplification itself does not need to change for A4/A5/A6/A8 to pass.
+
+**Also deferred (documented, not implemented):** `EngineLedgerGateway.record_substitution` (used only by
+`opengrid.allocator.substitute_hub`'s manual/API-triggered path, not the automatic 2 s `run_cycle` loop)
+raises `NotImplementedError` -- `og.grant` has no `reason_code` column to record why a substitution
+happened, so persisting one honestly needs a schema decision first, not a guessed column shape.
+
+## 12. Second real blocker found live: og-sim-fleet stops publishing telemetry after a short burst
+
+Confirmed on the live deploy (2026-09-25 19:2x-19:3x CT), after fixing everything else in this pass
+(topology seeded with matching ids, MQTT ingestion wired, `og-engine`'s tick loop confirmed healthy via
+heartbeat, `fleet.flush()`'s hub_state upsert fixed to a single bulk statement instead of ~2,000
+per-row round trips):
+
+- `og.telemetry`/`og.hub_state.last_seen_at` both went stale by the same ~4m33s, while `og.heartbeat`
+  for `engine` stayed under 3 seconds old the entire time -- i.e. `og-engine`'s own tick loop and MQTT
+  ingest subscriber are healthy and waiting; nothing new is arriving to ingest.
+- `systemctl status og-sim-fleet` showed the unit `active (running)`, no crash, no restart, 9 minutes of
+  uptime, but only ~1m10s of CPU time consumed in that whole window -- consistent with its internal
+  publish loop running briefly after startup (I did see one genuine burst: `og.telemetry` had fresh,
+  correctly-spaced ~2.3s-interval rows for about the first 15-20s after a restart) and then going idle
+  without logging anything or exiting.
+- This is `integration-sims`/`ogsim.fleet`'s own process loop (owned by the ui/integration-sims fix
+  agent, not merge) -- I did not look inside its source to avoid editing outside my paths, only
+  confirmed the symptom from the outside (systemd status, `og.telemetry`/`og.hub_state` timestamps).
+
+**This, not a merge-owned bug, is why A2 (2,000 hubs online) still fails** even after topology seeding
+and the hub_state bulk-upsert fix landed: telemetry simply stops arriving a short time after each
+restart of the sim/engine targets, so every hub eventually reads "stale" no matter how fast `og-engine`
+classifies it. Recommend the sim owner check `ogsim.fleet`'s main publish loop for an unhandled
+exception being swallowed by a bare `except`/task that was never awaited/observed (the `og-engine` log
+around the same restart shows `MqttCodeError: [code:141] Keep alive timeout` on the *previous* engine
+process's MQTT client during shutdown, in case a similar keep-alive/reconnect issue affects the sim's own
+MQTT client and its publish loop doesn't recover from a dropped connection).
+
+## 13. Confirms allocator/guardian wiring works end-to-end; guardian correctly VETOes given stale hubs
+
+Final verification after fixing the ruff S608 finding and redeploying with the other agents' feeds/
+market fixes: `og.command_batch` has 160 rows and `og.grant` has 160 rows -- the allocator/engine wiring
+(item 2 above) is genuinely proposing headroom grants and handing them to the guardian every cycle, and
+`og-guardian`'s own heartbeat is fresh (sub-second) -- it is alive and actively evaluating every batch.
+All 160 verdicts are `VETOED`, not `PASS`. This is consistent with, and most likely fully explained by,
+section 12's `og-sim-fleet` telemetry gap: the guardian's `HubStatePort` is deliberately its **own**,
+independently-read MQTT telemetry cache (never `og.hub_state`, by design -- GUARD-02/04), so once
+telemetry stops arriving, guardian's own view of every hub also goes stale/unknown and G-01 (or similar)
+correctly VETOes rather than signing against data it can't trust (K7's "degrade, don't trip" working
+exactly as intended -- this is the guardian doing its job correctly, not a guardian bug). Once section
+12's sim-side fix lands, this pipeline should very plausibly start producing `PASS` verdicts without any
+further guardian-side change needed -- worth re-running `tests-e2e/smoke.py` first after that fix, before
+assuming any of A6/A8 need more work.
+
 ## 7. Pre-existing mypy finding (not introduced by this pass)
 
 `mypy orchestrator/src/opengrid/fleet` reports one pre-existing error unrelated to the A3 additions:

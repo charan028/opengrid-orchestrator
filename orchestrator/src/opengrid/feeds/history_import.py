@@ -29,6 +29,7 @@ import sys
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from opengrid.core.models.platform import FeedObs
 from opengrid.feeds.store import FeedStore
@@ -47,10 +48,14 @@ _SIGNAL_TYPE_TO_PRODUCT = {
     "substation_load_kw": "hist-load",
 }
 
-_QUALITY_MAP = {"GOOD": "GOOD", "ESTIMATED": "ESTIMATED", "STALE": "STALE"}
+_QUALITY_MAP: dict[str, Literal["GOOD", "ESTIMATED", "STALE"]] = {
+    "GOOD": "GOOD",
+    "ESTIMATED": "ESTIMATED",
+    "STALE": "STALE",
+}
 
 
-def _normalize_quality(raw: str) -> str:
+def _normalize_quality(raw: str) -> Literal["GOOD", "ESTIMATED", "STALE"]:
     return _QUALITY_MAP.get(raw.strip().upper(), "ESTIMATED")
 
 

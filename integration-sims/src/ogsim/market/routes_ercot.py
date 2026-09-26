@@ -110,8 +110,8 @@ async def spp_node_zone_hub(
 @router.get("/np6-345-cd/act_sys_load_by_wzn", response_model=None)
 async def act_sys_load_by_wzn(
     request: Request,
-    operatingDateFrom: str | None = Query(default=None),
-    operatingDateTo: str | None = Query(default=None),
+    operatingDayFrom: str | None = Query(default=None),
+    operatingDayTo: str | None = Query(default=None),
     size: int = Query(default=DEFAULT_PAGE_SIZE),
     page: int = Query(default=DEFAULT_PAGE),
     Ocp_Apim_Subscription_Key: str | None = Header(default=None, alias="Ocp-Apim-Subscription-Key"),

@@ -37,6 +37,10 @@ def water_fill(
     all hubs' free_discharge_kw is less than `target_kw`, every hub is granted its full capability
     (the caller is responsible for reporting the residual as a shortfall -- this function never
     invents capacity, K1/K4).
+
+    ALLOC-07: if every hub's weight (`hub_weight`) is zero (e.g. `tau=0` for all of them), water-
+    filling on a zero weight is undefined, so `target_kw` is split pro-rata by each hub's own
+    `free_discharge_kw` instead of granting everyone zero.
     """
     if not hubs or target_kw <= 0:
         return {h.hub_id: 0.0 for h in hubs}
@@ -49,6 +53,16 @@ def water_fill(
     total_cap = float(caps.sum())
     if target_kw >= total_cap - _EPS:
         return dict(zip(ids, caps.tolist(), strict=True))
+
+    if not np.any(weights > _EPS):
+        # ALLOC-07: all-zero weights (e.g. every hub has tau=0 or zero free capability priced the
+        # same) -- water-filling on a zero weight is undefined (theta*0 == 0 for any theta), so fall
+        # back to splitting `target_kw` pro-rata by each hub's own capability instead of granting
+        # everyone zero and reporting a false shortfall.
+        if total_cap <= _EPS:
+            return {h.hub_id: 0.0 for h in hubs}
+        granted = caps * (target_kw / total_cap)
+        return dict(zip(ids, granted.tolist(), strict=True))
 
     theta = _solve_water_level(caps, weights, target_kw)
     granted = np.minimum(caps, theta * weights)

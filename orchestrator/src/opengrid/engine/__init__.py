@@ -27,7 +27,7 @@ import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID, uuid4
 
 import aiomqtt
@@ -39,6 +39,9 @@ from opengrid.core.timeutil import floor_to_interval
 from opengrid.platform.config import Config
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.process import run_forever
+
+if TYPE_CHECKING:
+    from opengrid.allocator.gateways import FleetGateway, LedgerGateway, ScadaGateway, ScheduleGateway
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +182,10 @@ class _EngineState:
     heartbeat_miss_threshold: int
     telemetry_interval_s: float
     heartbeat_pool: AsyncConnectionPool
+    fleet_gateway: FleetGateway
+    ledger_gateway: LedgerGateway
+    scada_gateway: ScadaGateway
+    schedule_gateway: ScheduleGateway
     cycle_seq: int = 0
 
 
@@ -209,7 +216,14 @@ async def _engine_tick(state: _EngineState) -> None:
         )
         await selector.run_gate(trigger.gate_kind, trigger.contract_scope)
 
-    grants = await allocator.run_cycle(cycle_id)
+    grants = await allocator.run_cycle(
+        cycle_id,
+        fleet=state.fleet_gateway,
+        ledger=state.ledger_gateway,
+        scada_gateway=state.scada_gateway,
+        schedule_gateway=state.schedule_gateway,
+        now=now,
+    )
     if not await guardian_is_available(
         state.backend, now=now, miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold
     ):
@@ -243,8 +257,12 @@ async def main(cfg: Config) -> None:
     unavailable guardian is enforced here (`guardian_is_available`, "hold, don't pile up batches").
     """
     import opengrid.fleet as fleet_mod
+    import opengrid.ledger as ledger_mod
+    from opengrid.engine.gateways import FleetCapabilityProvider, build_gateways
     from opengrid.engine.pg_backend import PgEngineBackend
     from opengrid.fleet.pg_backend import PgFleetBackend
+    from opengrid.ledger import ReservationLedger
+    from opengrid.ledger.pg_backend import PgGrantBackend, PgLedgerBackend
     from opengrid.platform.config import resolve_secret
     from opengrid.platform.db import make_pool
     from opengrid.platform.log import configure_logging
@@ -256,7 +274,20 @@ async def main(cfg: Config) -> None:
         fleet_mod.configure(PgFleetBackend(pool), cfg)
         await fleet_mod.load_topology()
 
+        # opengrid.ledger's module-level facade (reserve/release/persist_grants/ledger_version) is a
+        # per-process singleton wired exactly once, here -- selector.run_gate's ledger.reserve() calls
+        # and the allocator gateway's persist_grants/ledger_version both run inside this same og-engine
+        # process (02a S4: "one Python module, one process") and share this one instance.
+        ledger_mod.configure(
+            ReservationLedger(
+                PgLedgerBackend(pool),
+                FleetCapabilityProvider(),
+                grant_backend=PgGrantBackend(pool),
+            )
+        )
+
         backend = PgEngineBackend(pool)
+        fleet_gateway, ledger_gateway, scada_gateway, schedule_gateway = build_gateways(pool)
         state = _EngineState(
             cfg=cfg,
             backend=backend,
@@ -266,6 +297,10 @@ async def main(cfg: Config) -> None:
             heartbeat_miss_threshold=int(cfg.get("health.heartbeat_miss_threshold", 3)),
             telemetry_interval_s=float(cfg.get("fleet.telemetry_interval_s", 2.0)),
             heartbeat_pool=pool,
+            fleet_gateway=fleet_gateway,
+            ledger_gateway=ledger_gateway,
+            scada_gateway=scada_gateway,
+            schedule_gateway=schedule_gateway,
         )
 
         mqtt_password = resolve_secret("OG_MQTT_ENGINE_PASSWORD")

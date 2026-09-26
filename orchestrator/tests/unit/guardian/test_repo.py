@@ -125,11 +125,34 @@ async def test_pg_prior_grant_port_found_and_missing():
     assert await missing.prior_granted_kw(obligation_id) is None
 
 
-async def test_in_memory_lease_state_defaults_and_records():
-    leases = repo.InMemoryLeaseStatePort()
+async def test_pg_lease_state_defaults_to_zero_zero():
+    leases = repo.PgLeaseStatePort(FakePool(FakeCursor([None])))
     assert await leases.last_accepted("bank-1") == (0, 0)
-    leases.record_accepted("bank-1", 3, 7)
+
+
+async def test_pg_lease_state_reads_back_recorded_value():
+    leases = repo.PgLeaseStatePort(FakePool(FakeCursor([(3, 7)])))
     assert await leases.last_accepted("bank-1") == (3, 7)
+
+
+async def test_pg_lease_state_record_accepted_writes_and_commits():
+    cursor = FakeCursor([None])
+    pool = FakePool(cursor)
+    leases = repo.PgLeaseStatePort(pool)
+    await leases.record_accepted("bank-1", 3, 7)
+    sql, params = cursor.executed[0]
+    assert "lease_state" in sql
+    assert params == {"bank_id": "bank-1", "epoch": 3, "seq": 7}
+    assert pool._conn.committed is True
+
+
+async def test_pg_lease_state_record_accepted_never_raises_on_db_failure():
+    class RaisingCursor(FakeCursor):
+        async def execute(self, sql, params=None):
+            raise RuntimeError("db is down")
+
+    leases = repo.PgLeaseStatePort(FakePool(RaisingCursor([])))
+    await leases.record_accepted("bank-1", 3, 7)  # must not raise (K7: degrade, don't trip)
 
 
 async def test_pg_l2_instruction_port_active_and_none():
@@ -247,7 +270,7 @@ async def test_build_pg_ports_wires_everything():
     ports, leases = repo.build_pg_ports(pool, trace_store, hubs, zones_by_bank={"bank-1": "zone-a"})  # type: ignore[arg-type]
     assert ports.zones_by_bank == {"bank-1": "zone-a"}
     assert ports.hubs is hubs
-    assert isinstance(leases, repo.InMemoryLeaseStatePort)
+    assert isinstance(leases, repo.PgLeaseStatePort)
 
 
 def test_pg_hub_state_port_removed():

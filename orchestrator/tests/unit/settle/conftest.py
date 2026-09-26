@@ -84,6 +84,7 @@ class FakeSettleBackend:
         source: str,
         quality_flag: QualityFlag,
         version: int,
+        supersedes: UUID | None = None,
     ) -> UUID:
         self.insert_meter_interval_calls += 1
         self.meter_interval_insert_log.append((obligation_id, interval_start))
@@ -92,9 +93,6 @@ class FakeSettleBackend:
             meter_interval_id=new_id, delivered_kwh=delivered_kwh, version=version
         )
         return new_id
-
-    async def mark_meter_interval_superseded(self, old_id: UUID, new_id: UUID) -> None:
-        return None
 
     async def insert_performance(
         self,
@@ -153,6 +151,7 @@ class FakeSettleBackend:
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
         version: int,
+        supersedes: UUID | None = None,
     ) -> UUID:
         self.insert_pnl_calls += 1
         self.pnl_insert_log.append((obligation_id, interval_start))
@@ -161,9 +160,6 @@ class FakeSettleBackend:
             pnl_id=new_id, net_value=net_value, version=version
         )
         return new_id
-
-    async def mark_pnl_superseded(self, old_id: UUID, new_id: UUID) -> None:
-        return None
 
     async def fetch_rule_baseline_delivered_kwh(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

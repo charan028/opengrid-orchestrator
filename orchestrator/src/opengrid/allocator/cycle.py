@@ -21,7 +21,6 @@ from datetime import datetime
 
 from opengrid.allocator import reasons
 from opengrid.allocator.dist_deferral_pi import DistDeferralPI
-from opengrid.core.physics import hub_sustainable_discharge_kw
 from opengrid.allocator.lexicographic import allocate_tiers
 from opengrid.allocator.models import (
     CycleResult,
@@ -40,6 +39,7 @@ from opengrid.allocator.models import (
 )
 from opengrid.allocator.price_response import price_responsive_schedule
 from opengrid.allocator.substitution import realize_obligation
+from opengrid.core.physics import hub_sustainable_discharge_kw
 
 _EPS = 1e-9
 _DEFAULT_PRICE_THRESHOLD_USD_PER_MWH = 30.0

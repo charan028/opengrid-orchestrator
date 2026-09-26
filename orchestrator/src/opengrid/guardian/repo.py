@@ -165,23 +165,51 @@ class PgPriorGrantPort:
         return Decimal(str(row[0])) if row else None
 
 
-class InMemoryLeaseStatePort:
-    """MVP-S schema gap (open item for the architect): `og.command_batch` has no `bank_id`/epoch/seq
-    columns, so there is no durable per-bank lease-sequence table to read independently from. Guardian
-    tracks the last-accepted (epoch, seq) per bank in memory, updated only after it PASSes a batch --
-    this is sound within one guardian process lifetime (K6 freshness still holds across cycles) but does
-    not survive a guardian restart; a restarted guardian starts every bank at (0, 0), which is safe
-    (strictly more permissive of the *first* post-restart batch, never less safe) but is worth a durable
-    `og.bank_lease` table in a follow-up migration."""
+_LEASE_STATE_SELECT_SQL = "SELECT epoch, seq FROM og.lease_state WHERE bank_id = %(bank_id)s"
 
-    def __init__(self) -> None:
-        self._last: dict[str, tuple[int, int]] = {}
+# Monotonic upsert (merge task, dispatch-live pass): never regresses a bank's recorded (epoch, seq) even
+# under concurrent/out-of-order writers, so a delayed or replayed `record_accepted` call can never make
+# G-13's freshness check MORE permissive than it already was.
+_LEASE_STATE_UPSERT_SQL = """
+INSERT INTO og.lease_state (bank_id, epoch, seq, updated_at)
+VALUES (%(bank_id)s, %(epoch)s, %(seq)s, now())
+ON CONFLICT (bank_id) DO UPDATE SET
+    epoch = EXCLUDED.epoch, seq = EXCLUDED.seq, updated_at = now()
+WHERE (og.lease_state.epoch, og.lease_state.seq) < (EXCLUDED.epoch, EXCLUDED.seq)
+"""
+
+
+class PgLeaseStatePort:
+    """Durable per-bank (epoch, seq) high-water mark in `og.lease_state`
+    (`migrations/0005_lease_state.sql`), so G-13 freshness survives a guardian restart instead of
+    resetting every bank to (0, 0) (the prior `InMemoryLeaseStatePort`'s documented gap). A restart
+    still reads back exactly what the last live guardian process last accepted, closing the "replay a
+    batch right after a restart" window `InMemoryLeaseStatePort` left open (strictly more permissive of
+    the first post-restart batch, not incorrect, but no longer necessary now the table exists)."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
 
     async def last_accepted(self, bank_id: str) -> tuple[int, int]:
-        return self._last.get(bank_id, (0, 0))
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LEASE_STATE_SELECT_SQL, {"bank_id": bank_id})
+            row = await cur.fetchone()
+        return (int(row[0]), int(row[1])) if row else (0, 0)
 
-    def record_accepted(self, bank_id: str, epoch: int, seq: int) -> None:
-        self._last[bank_id] = (epoch, seq)
+    async def record_accepted(self, bank_id: str, epoch: int, seq: int) -> None:
+        """Called only after a PASS verdict (`main.py`'s `tick()`), so a write failure here must never
+        undo an already-finalized signing decision (K7) -- logged, not raised."""
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    _LEASE_STATE_UPSERT_SQL, {"bank_id": bank_id, "epoch": epoch, "seq": seq}
+                )
+                await conn.commit()
+        except Exception:
+            logger.exception(
+                "failed to persist lease_state; next restart may re-permit this (epoch, seq)",
+                extra={"bank_id": bank_id, "epoch": epoch, "seq": seq},
+            )
 
 
 class PgL2InstructionPort:
@@ -323,16 +351,16 @@ def build_pg_ports(
     hubs: HubStatePort,
     *,
     zones_by_bank: dict[str, str] | None = None,
-) -> tuple[GuardianPorts, InMemoryLeaseStatePort]:
-    """Convenience wiring for `main.py`: constructs every Postgres-backed port plus the in-memory lease
-    tracker (returned separately so `main.py` can call `record_accepted` after a PASS verdict).
+) -> tuple[GuardianPorts, PgLeaseStatePort]:
+    """Convenience wiring for `main.py`: constructs every Postgres-backed port plus the durable lease
+    tracker (returned separately so `main.py` can `await record_accepted(...)` after a PASS verdict).
 
     GUARD-02/04: `hubs` is a required argument, not a Postgres default -- guardian's hub-state read must
     always be its OWN telemetry (`opengrid.guardian.mqtt_io.MqttHubStatePort`), never `og.hub_state`
     (the row the engine/fleet processes maintain). There is deliberately no `PgHubStatePort` in this
     module for a caller to reach for by mistake.
     """
-    leases = InMemoryLeaseStatePort()
+    leases = PgLeaseStatePort(pool)
     ports = GuardianPorts(
         clock=ChronyClockPort(),
         proposals=PgProposalPort(pool),

@@ -95,6 +95,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
 
 def _include_routers(app: FastAPI) -> None:
     from opengrid.api.routers import (
+        admin,
         billing,
         contracts,
         dispatch,
@@ -117,6 +118,7 @@ def _include_routers(app: FastAPI) -> None:
         contracts,
         retention,
         safestop,
+        admin,
         scenario,
     ):
         app.include_router(router_module.router)

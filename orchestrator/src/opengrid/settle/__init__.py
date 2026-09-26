@@ -35,6 +35,21 @@ _SECONDS_PER_HOUR = Decimal("3600")
 _SETTLE_STREAM_ID = "settle"
 _DEFAULT_MAX_CONCURRENCY = 20  # BUILD.md S2: many customers/obligations settled concurrently
 
+# Settle idempotency fix: `og.meter_interval.delivered_kwh` is `numeric(14,6)` and `og.pnl.net_value`
+# is `numeric(18,6)` -- Postgres rounds to that precision on write, so a value fetched back is never
+# bit-for-bit equal to a freshly recomputed, un-rounded `Decimal` (e.g. any calculation that divides by
+# `eta_d = 0.9487` yields a long repeating decimal). A strict `!=` comparison against the DB-rounded
+# value therefore looked "changed" on every re-run with IDENTICAL inputs, defeating idempotency and
+# inserting a duplicate row each time. `opengrid.settle.billing.next_version` already gets this right
+# (`_AMOUNT_EPSILON`); the same column-precision-tolerant comparison is used here for the same reason.
+_KWH_EPSILON = Decimal("0.000001")  # numeric(14,6) column precision
+_MONEY_EPSILON = Decimal("0.000001")  # numeric(18,6) column precision
+
+
+def _decimal_changed(existing: Decimal, computed: Decimal, epsilon: Decimal) -> bool:
+    return abs(existing - computed) >= epsilon
+
+
 _logger = logging.getLogger(__name__)
 
 _backend: SettleBackend | None = None
@@ -102,9 +117,11 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
 
     # --- meter_interval: insert-only, versioned by delivered_kwh changing -----------------------
     existing_meter = await backend.fetch_active_meter_interval(obligation_id, interval_start)
-    meter_changed = existing_meter is None or existing_meter.delivered_kwh != metering.delivered_kwh
+    meter_changed = existing_meter is None or _decimal_changed(
+        existing_meter.delivered_kwh, metering.delivered_kwh, _KWH_EPSILON
+    )
     if meter_changed:
-        new_meter_id = await backend.insert_meter_interval(
+        await backend.insert_meter_interval(
             obligation_id=obligation_id,
             interval_start=interval_start,
             interval_end=interval_end,
@@ -113,9 +130,8 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
             source=metering.source,
             quality_flag=metering.quality_flag,
             version=(existing_meter.version + 1) if existing_meter else 1,
+            supersedes=existing_meter.meter_interval_id if existing_meter else None,
         )
-        if existing_meter is not None:
-            await backend.mark_meter_interval_superseded(existing_meter.meter_interval_id, new_meter_id)
         await backend.insert_performance(
             obligation_id=obligation_id,
             interval_start=interval_start,
@@ -169,9 +185,11 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     # a DB partial unique index on (obligation_id, interval_start) WHERE superseded_by IS NULL is the
     # actual guard against a concurrent double-insert, not just this read-then-compare check) --------
     existing_pnl = await backend.fetch_active_pnl(obligation_id, interval_start)
-    pnl_changed = existing_pnl is None or existing_pnl.net_value != pnl.net_value
+    pnl_changed = existing_pnl is None or _decimal_changed(
+        existing_pnl.net_value, pnl.net_value, _MONEY_EPSILON
+    )
     if pnl_changed:
-        new_pnl_id = await backend.insert_pnl(
+        await backend.insert_pnl(
             obligation_id=obligation_id,
             interval_start=interval_start,
             interval_end=interval_end,
@@ -183,9 +201,8 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
             rule_baseline_value=rule_baseline_value,
             forgone_upside=forgone_upside,
             version=(existing_pnl.version + 1) if existing_pnl else 1,
+            supersedes=existing_pnl.pnl_id if existing_pnl else None,
         )
-        if existing_pnl is not None:
-            await backend.mark_pnl_superseded(existing_pnl.pnl_id, new_pnl_id)
 
     # --- invoice lines: insert-only, versioned per (contract, obligation, period, line_type) ----
     performance_factor = (

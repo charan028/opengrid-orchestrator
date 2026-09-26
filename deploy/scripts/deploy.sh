@@ -73,6 +73,17 @@ runuser -u opengrid -- bash -c '
   exec "'"$VENV"'" -m opengrid.platform.db migrate
 '
 
+echo "$(ts) seeding fleet topology (idempotent)" | tee -a "$LOG"
+runuser -u opengrid -- bash -c '
+  set -a
+  . /etc/opengrid/secrets.env
+  . /etc/opengrid/api_keys.env
+  set +a
+  export OG_CONFIG="'"$NEW_RELEASE"'/orchestrator/config/orchestrator.toml"
+  export PYTHONPATH="'"$NEW_RELEASE"'/orchestrator/src"
+  exec "'"$VENV"'" -m opengrid.fleet.seed
+'
+
 echo "$(ts) switching current -> $NEW_RELEASE" | tee -a "$LOG"
 ln -sfn "$NEW_RELEASE" "$CURRENT"
 

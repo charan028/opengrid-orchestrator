@@ -17,12 +17,15 @@ _PASSWORD = "hunter2"  # noqa: S105 -- a test fixture value, asserted to never l
 NOW = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
 
 SPP_PAYLOAD = {
-    "data": [["2026-09-26", "2026-09-26T18:00:00", "LZ_NORTH", "42.17"]],
+    "data": [["2026-09-26", 1, 1, "LZ_NORTH", "LZ", 42.17, False]],
     "fields": [
         {"name": "deliveryDate"},
-        {"name": "deliveryDateTime"},
+        {"name": "deliveryHour"},
+        {"name": "deliveryInterval"},
         {"name": "settlementPoint"},
+        {"name": "settlementPointType"},
         {"name": "settlementPointPrice"},
+        {"name": "DSTFlag"},
     ],
 }
 

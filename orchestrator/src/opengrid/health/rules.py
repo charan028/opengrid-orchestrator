@@ -183,6 +183,32 @@ def evaluate_guardian_timeout_alert(
     )
 
 
+def evaluate_scada_overload_alert(
+    bank_id: str, load_kva: float | None, kva_rating: float, *, thresholds: HealthThresholds
+) -> AlertFinding | None:
+    """ALR-SCADA-OVERLOAD: a bank's latest reported SCADA apparent-power load over its `kva_rating`
+    (the anomaly catalogue's "bank_overload" injection target, `integration-sims/src/ogsim/control/
+    catalogue.py`). `load_kva=None` (no SCADA reading has ever arrived for this bank) is not an
+    overload -- that is `ALR-FEED-STALE`'s/a comms-loss concern, not this rule's."""
+    if load_kva is None or kva_rating <= 0:
+        return None
+    ratio = load_kva / kva_rating
+    severity: AlertSeverity
+    if ratio > thresholds.bank_kva_overload_critical_pct:
+        severity = "critical"
+    elif ratio > thresholds.bank_kva_overload_warning_pct:
+        severity = "warning"
+    else:
+        return None
+    return AlertFinding(
+        rule="ALR-SCADA-OVERLOAD",
+        severity=severity,
+        summary=f"Bank {bank_id} SCADA load {load_kva:.1f} kVA over rating {kva_rating:.1f} kVA ({ratio:.0%})",
+        condition_key=f"ALR-SCADA-OVERLOAD:{bank_id}",
+        detail={"bank_id": bank_id, "load_kva": load_kva, "kva_rating": kva_rating, "ratio": ratio},
+    )
+
+
 def evaluate_reserve_breach_alert(reserve_breach_count: float) -> AlertFinding | None:
     """ALR-RESERVE-BREACH: critical, page-equivalent (A10: must stay 0)."""
     if reserve_breach_count <= 0:

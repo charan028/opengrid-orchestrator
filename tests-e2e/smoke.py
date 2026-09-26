@@ -190,9 +190,12 @@ def check_ui(results: Results) -> None:
 
 
 def check_anomaly_and_alert(results: Results) -> None:
+    # bank_overload (not hub_offline): a single offline hub out of ~2,000 never crosses
+    # ALR-HUB-OFFLINE-RATIO's 5% per-zone threshold, but one bank's SCADA load anomaly directly and
+    # immediately trips ALR-SCADA-OVERLOAD (opengrid.health.rules) for that one bank.
     status_code, body = _post(
         f"{CONTROL_BASE}/api/inject",
-        {"target": "hub", "type": "hub_offline", "params": {}, "duration_s": 30},
+        {"target": "bank-000", "type": "bank_overload", "params": {}, "duration_s": 30},
     )
     if status_code not in (200, 201):
         results.record("A11 anomaly injection", False, f"POST /api/inject -> {status_code}: {body[:200]!r}")

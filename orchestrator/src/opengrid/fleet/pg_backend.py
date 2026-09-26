@@ -5,6 +5,9 @@ database (mirrors `opengrid.trace.pg_backend`, BUILD.md S5a "pure logic separate
 
 from __future__ import annotations
 
+from typing import Any
+
+from psycopg import sql
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.platform import Bank, Hub, HubState
@@ -17,22 +20,31 @@ SELECT hub_id, soc_kwh, p_kw, health, lease_epoch, lease_expires_at, last_comman
        fault_code
 FROM og.hub_state
 """
-_UPSERT_HUB_STATE_SQL = """
-INSERT INTO og.hub_state
-    (hub_id, soc_kwh, p_kw, health, lease_epoch, lease_expires_at, last_command_id, last_seen_at,
-     fault_code)
-VALUES (%(hub_id)s, %(soc_kwh)s, %(p_kw)s, %(health)s, %(lease_epoch)s, %(lease_expires_at)s,
-        %(last_command_id)s, %(last_seen_at)s, %(fault_code)s)
-ON CONFLICT (hub_id) DO UPDATE SET
-    soc_kwh = EXCLUDED.soc_kwh,
-    p_kw = EXCLUDED.p_kw,
-    health = EXCLUDED.health,
-    lease_epoch = EXCLUDED.lease_epoch,
-    lease_expires_at = EXCLUDED.lease_expires_at,
-    last_command_id = EXCLUDED.last_command_id,
-    last_seen_at = EXCLUDED.last_seen_at,
-    fault_code = EXCLUDED.fault_code
-"""
+_UPSERT_HUB_STATE_COLUMNS = (
+    "hub_id",
+    "soc_kwh",
+    "p_kw",
+    "health",
+    "lease_epoch",
+    "lease_expires_at",
+    "last_command_id",
+    "last_seen_at",
+    "fault_code",
+)
+
+_UPSERT_HUB_STATE_CONFLICT_SET = sql.SQL(
+    """
+    ON CONFLICT (hub_id) DO UPDATE SET
+        soc_kwh = EXCLUDED.soc_kwh,
+        p_kw = EXCLUDED.p_kw,
+        health = EXCLUDED.health,
+        lease_epoch = EXCLUDED.lease_epoch,
+        lease_expires_at = EXCLUDED.lease_expires_at,
+        last_command_id = EXCLUDED.last_command_id,
+        last_seen_at = EXCLUDED.last_seen_at,
+        fault_code = EXCLUDED.fault_code
+    """
+)
 _COPY_TELEMETRY_SQL = "COPY og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health) FROM STDIN"
 
 
@@ -74,24 +86,45 @@ class PgFleetBackend:
         return [HubState(**dict(zip(columns, row, strict=True))) for row in rows]
 
     async def upsert_hub_states(self, states: list[HubState]) -> None:
+        """Single multi-row `INSERT ... VALUES (...), (...), ... ON CONFLICT`, not one round trip per
+        hub (merge task, dispatch-live pass: `og-engine`'s 2 s tick calls this for up to ~2,000 hubs
+        every cycle -- one-row-at-a-time `executemany()` here made the flush cycle take far longer than
+        `[allocator].cycle_interval_s`, so every hub's `last_seen_at` was already older than
+        `health.hub_stale_s` by the time the *next* flush classified it, leaving every hub permanently
+        "stale" no matter how fresh its telemetry actually was). Chunked at 500 rows/statement so this
+        still works if `hub_count` grows well past MVP-S's 2,000 (`02b S4.1`'s 10,000-hub load-test
+        note) without hitting Postgres's parameter-count ceiling.
+        """
         if not states:
             return
-        params = [
-            {
-                "hub_id": s.hub_id,
-                "soc_kwh": s.soc_kwh,
-                "p_kw": s.p_kw,
-                "health": s.health,
-                "lease_epoch": s.lease_epoch,
-                "lease_expires_at": s.lease_expires_at,
-                "last_command_id": s.last_command_id,
-                "last_seen_at": s.last_seen_at,
-                "fault_code": s.fault_code,
-            }
-            for s in states
-        ]
+        chunk_size = 500
+        columns_sql = sql.SQL(", ").join(sql.Identifier(c) for c in _UPSERT_HUB_STATE_COLUMNS)
+        row_placeholder = sql.SQL("({})").format(
+            sql.SQL(", ").join([sql.Placeholder()] * len(_UPSERT_HUB_STATE_COLUMNS))
+        )
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.executemany(_UPSERT_HUB_STATE_SQL, params)
+            for start in range(0, len(states), chunk_size):
+                chunk = states[start : start + chunk_size]
+                values_sql = sql.SQL(", ").join([row_placeholder] * len(chunk))
+                statement = sql.SQL(
+                    "INSERT INTO og.hub_state ({columns}) VALUES {values} {on_conflict}"
+                ).format(columns=columns_sql, values=values_sql, on_conflict=_UPSERT_HUB_STATE_CONFLICT_SET)
+                params: list[Any] = []
+                for s in chunk:
+                    params.extend(
+                        (
+                            s.hub_id,
+                            s.soc_kwh,
+                            s.p_kw,
+                            s.health,
+                            s.lease_epoch,
+                            s.lease_expires_at,
+                            s.last_command_id,
+                            s.last_seen_at,
+                            s.fault_code,
+                        )
+                    )
+                await cur.execute(statement, params)
 
     async def copy_telemetry(self, rows: list[TelemetryRow]) -> None:
         if not rows:

@@ -56,6 +56,37 @@ def test_ts_05_06_empty_hub_set() -> None:
     assert water_fill((), 10.0) == {}
 
 
+def test_alloc_06_heterogeneous_cap_pins_the_small_hub_at_its_own_capability() -> None:
+    """ALLOC-06: a hub whose own capability binds before the pool's water level equalizes is pinned
+    exactly at that capability, and the rest of the target flows to the other hub -- the classic
+    water-filling "small cup fills first" behavior. `tau` is chosen so both hubs start with EQUAL
+    weight (2.0 x 1.0 == 100.0 x 0.02) despite wildly different capability, isolating the cap-pinning
+    logic from the weight-proportional-to-cap case (where the split would just be pro-rata by cap)."""
+    small = _hub("small", free_kw=2.0, tau=1.0)
+    large = _hub("large", free_kw=100.0, tau=0.02)
+    out = water_fill((small, large), target_kw=50.0)
+    assert out["small"] == pytest.approx(2.0, abs=1e-6)  # pinned at its own cap, never more
+    assert out["large"] == pytest.approx(48.0, abs=1e-6)  # absorbs the rest
+    assert sum(out.values()) == pytest.approx(50.0, abs=1e-6)
+
+
+def test_alloc_07_all_zero_weights_falls_back_to_pro_rata_by_capability() -> None:
+    """ALLOC-07: when every hub's weight is zero (tau=0 for all), water-filling on a zero weight is
+    undefined; the documented fallback is a pro-rata split by each hub's own free_discharge_kw."""
+    hubs = (_hub("h1", free_kw=10.0, tau=0.0), _hub("h2", free_kw=30.0, tau=0.0))
+    out = water_fill(hubs, target_kw=20.0)
+    # 10:30 capability ratio -> 5:15 split of the 20 kW target.
+    assert out["h1"] == pytest.approx(5.0, abs=1e-6)
+    assert out["h2"] == pytest.approx(15.0, abs=1e-6)
+    assert sum(out.values()) == pytest.approx(20.0, abs=1e-6)
+
+
+def test_alloc_07_all_zero_weights_and_zero_capability_grants_nothing() -> None:
+    hubs = (_hub("h1", free_kw=0.0, tau=0.0), _hub("h2", free_kw=0.0, tau=0.0))
+    out = water_fill(hubs, target_kw=20.0)
+    assert out == {"h1": 0.0, "h2": 0.0}
+
+
 @given(
     caps=st.lists(st.floats(min_value=0.0, max_value=1000.0, allow_nan=False), min_size=1, max_size=25),
     target_frac=st.floats(min_value=0.0, max_value=1.5, allow_nan=False),

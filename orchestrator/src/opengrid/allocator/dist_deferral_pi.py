@@ -81,7 +81,9 @@ class DistDeferralPI:
         beta_x = scada.beta_x if abs(scada.beta_x) > 1e-9 else 1.0
 
         u_raw = n_tilde + _KP * e_db / beta_x + state.integral
-        cap = recharge_headroom(0.0, BankParams(kva_rating=self.bank.kva_rating, reserve_kva=self.bank.reserve_kva))
+        cap = recharge_headroom(
+            0.0, BankParams(kva_rating=self.bank.kva_rating, reserve_kva=self.bank.reserve_kva)
+        )
         u_sat = min(max(u_raw, 0.0), max(cap, 0.0))
 
         # Conditional-integration anti-windup: only integrate while not clipped by saturation.

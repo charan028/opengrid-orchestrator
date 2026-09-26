@@ -108,8 +108,14 @@ def _cli(argv: list[str]) -> int:
     with contextlib.suppress(OSError):  # best-effort chmod on platforms without POSIX permissions
         os.chmod(args.key_out, 0o600)
 
+    # Bug fix (dispatch-live pass): this used to write "<key_id> <hex>\n", but
+    # ogsim.common.crypto.load_public_key/_decode_key_text (the only reader of this file) accepts only a
+    # bare 64-char hex (or base64) string -- the "<key_id> " prefix made the file unparsable. `key_id` is
+    # carried on the wire per-message instead (interfaces/crypto.md S3's `key_id` field on a signed
+    # envelope), never inside the key file itself, matching `opengrid.guardian.keys.keygen`'s own
+    # plain-hex `.pub` format.
     args.pubkey_out.parent.mkdir(parents=True, exist_ok=True)
-    args.pubkey_out.write_text(f"{args.key_id} {pub.hex()}\n", encoding="utf-8")
+    args.pubkey_out.write_text(f"{pub.hex()}\n", encoding="utf-8")
     with contextlib.suppress(OSError):
         os.chmod(args.pubkey_out, 0o644)
 

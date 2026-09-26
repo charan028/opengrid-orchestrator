@@ -38,6 +38,22 @@ def test_ts_05_31_ramp_limited_step_response() -> None:
         assert cur - prev <= max_up_per_tick + 1e-6
 
 
+def test_alloc_09_down_ramp_step_delta_bounded() -> None:
+    """ALLOC-09: once the output is driven high by a sustained disturbance, a sharp drop in need must
+    still ramp DOWN no faster than the PI's own down-ramp rate (`_RAMP_DOWN_KW_PER_MIN`, 150 kW/min ->
+    5 kW/tick at dt_c_s=2s) -- `opengrid.core.physics.apply_ramp_limit`'s `ramp_down_kw_per_s`."""
+    pi = DistDeferralPI(_BANK)
+    state = PiState()
+    for _ in range(30):  # drive the output up and let it settle near its ceiling
+        _, state = pi.step(_sample(10_000.0, error_kw=10_000.0), state, dt_c_s=2.0)
+    prev_output = state.prev_output_kw
+    assert prev_output > 50.0  # sanity: it actually climbed
+
+    output, _next_state = pi.step(_sample(0.0, error_kw=-10_000.0), state, dt_c_s=2.0)
+    max_down_per_tick = 150.0 * (2.0 / 60.0)  # _RAMP_DOWN_KW_PER_MIN * dt_c_s
+    assert prev_output - output <= max_down_per_tick + 1e-6
+
+
 def test_ts_05_32_anti_windup_integral_bounded() -> None:
     pi = DistDeferralPI(_BANK)
     state = PiState()

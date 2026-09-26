@@ -42,6 +42,7 @@ from opengrid.health.rules import (
     evaluate_hub_offline_ratio_alert,
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
+    evaluate_scada_overload_alert,
 )
 from opengrid.platform.config import Config
 from opengrid.platform.process import run_forever
@@ -179,8 +180,13 @@ async def evaluate_alerts() -> None:
     cycle_latency = await _fetch_cycle_latency(now)
     guardian_timeout_rate = await _fetch_guardian_timeout_rate()
     reserve_breach_count = await _fetch_reserve_breach_count()
+    bank_loads = await queries.fetch_bank_loads(pool)
 
     findings = []
+    for bank_id, kva_rating, load_kva in bank_loads:
+        finding = evaluate_scada_overload_alert(bank_id, load_kva, kva_rating, thresholds=_thresholds)
+        if finding:
+            findings.append(finding)
     for feed_status in feed_statuses:
         finding = evaluate_feed_alert(
             feed_status,

@@ -87,29 +87,46 @@ async def test_spp_endpoint_returns_the_documented_envelope(client: httpx.AsyncC
     assert body["_meta"]["currentPage"] == 1
     assert body["fields"] == [
         {"name": "deliveryDate", "dataType": "DATE"},
-        {"name": "deliveryDateTime", "dataType": "TIMESTAMP"},
+        {"name": "deliveryHour", "dataType": "INTEGER"},
+        {"name": "deliveryInterval", "dataType": "INTEGER"},
         {"name": "settlementPoint", "dataType": "STRING"},
-        {"name": "settlementPointPrice", "dataType": "STRING"},
+        {"name": "settlementPointType", "dataType": "STRING"},
+        {"name": "settlementPointPrice", "dataType": "NUMBER"},
+        {"name": "DSTFlag", "dataType": "BOOLEAN"},
     ]
     assert len(body["data"][0]) == len(body["fields"])
-    assert isinstance(body["data"][0][3], str)
+    assert isinstance(body["data"][0][5], float)
+    assert isinstance(body["data"][0][6], bool)
 
 
 async def test_spp_endpoint_defaults_to_load_zone_points(client: httpx.AsyncClient):
     resp = await client.get("/ercot/np6-905-cd/spp_node_zone_hub", headers=_headers())
-    points = {row[2] for row in resp.json()["data"]}
+    points = {row[3] for row in resp.json()["data"]}
     assert points <= {"LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"}
 
 
-async def test_load_endpoint_uses_operating_date_params(client: httpx.AsyncClient):
+async def test_load_endpoint_uses_operating_day_params(client: httpx.AsyncClient):
     resp = await client.get(
         "/ercot/np6-345-cd/act_sys_load_by_wzn",
-        params={"operatingDateFrom": "2026-09-24", "operatingDateTo": "2026-09-26"},
+        params={"operatingDayFrom": "2026-09-24", "operatingDayTo": "2026-09-26"},
         headers=_headers(),
     )
     assert resp.status_code == 200
     fields = [f["name"] for f in resp.json()["fields"]]
-    assert fields == ["operatingDate", "operatingDateTime", "weatherZone", "load"]
+    assert fields == [
+        "operatingDay",
+        "hourEnding",
+        "DSTFlag",
+        "coast",
+        "east",
+        "farWest",
+        "north",
+        "northC",
+        "southern",
+        "southC",
+        "west",
+        "total",
+    ]
 
 
 async def test_admin_price_spike_shows_up_in_spp_response(client: httpx.AsyncClient):
@@ -126,8 +143,8 @@ async def test_admin_price_spike_shows_up_in_spp_response(client: httpx.AsyncCli
     resp = await client.get(
         "/ercot/np6-905-cd/spp_node_zone_hub", params={"settlementPoint": "LZ_NORTH"}, headers=_headers()
     )
-    prices = [row[3] for row in resp.json()["data"]]
-    assert "5000.0" in prices
+    prices = [row[5] for row in resp.json()["data"]]
+    assert 5000.0 in prices
 
 
 async def test_admin_http_5xx_outage_short_circuits_the_route(client: httpx.AsyncClient):
@@ -240,21 +257,21 @@ async def test_admin_anomaly_reverts_deterministically_via_injected_clock():
         active_resp = await client.get(
             "/ercot/np6-905-cd/spp_node_zone_hub", params={"settlementPoint": "LZ_NORTH"}, headers=_headers()
         )
-        active_prices = [row[3] for row in active_resp.json()["data"]]
-        assert "5000.0" in active_prices
+        active_prices = [row[5] for row in active_resp.json()["data"]]
+        assert 5000.0 in active_prices
 
         clock.advance(11.0)  # past the 10s duration -- no real sleep
 
         reverted_resp = await client.get(
             "/ercot/np6-905-cd/spp_node_zone_hub", params={"settlementPoint": "LZ_NORTH"}, headers=_headers()
         )
-        reverted_prices = [row[3] for row in reverted_resp.json()["data"]]
-        assert "5000.0" not in reverted_prices
+        reverted_prices = [row[5] for row in reverted_resp.json()["data"]]
+        assert 5000.0 not in reverted_prices
 
 
 async def test_as_endpoint_uses_ancillary_type_codes(client: httpx.AsyncClient):
     resp = await client.get("/ercot/np4-188-cd/dam_clear_price_for_cap", headers=_headers())
-    ancillary_types = {row[2] for row in resp.json()["data"]}
+    ancillary_types = {row[3] for row in resp.json()["data"]}
     assert ancillary_types == {"REGUP", "REGDN", "RRS", "NSPIN", "ECRS"}
 
 

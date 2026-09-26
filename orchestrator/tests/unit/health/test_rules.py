@@ -18,6 +18,7 @@ from opengrid.health.rules import (
     evaluate_hub_offline_ratio_alert,
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
+    evaluate_scada_overload_alert,
 )
 
 NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
@@ -205,4 +206,27 @@ def test_reserve_breach_alert() -> None:
     finding = evaluate_reserve_breach_alert(1)
     assert finding is not None
     assert finding.rule == "ALR-RESERVE-BREACH"
+    assert finding.severity == "critical"
+
+
+def test_scada_overload_alert_none_when_under_rating() -> None:
+    assert evaluate_scada_overload_alert("bank-000", 50.0, 75.0, thresholds=THRESHOLDS) is None
+
+
+def test_scada_overload_alert_none_when_no_reading_yet() -> None:
+    assert evaluate_scada_overload_alert("bank-000", None, 75.0, thresholds=THRESHOLDS) is None
+
+
+def test_scada_overload_alert_warning_at_rating() -> None:
+    finding = evaluate_scada_overload_alert("bank-000", 80.0, 75.0, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-SCADA-OVERLOAD"
+    assert finding.severity == "warning"
+    assert finding.condition_key == "ALR-SCADA-OVERLOAD:bank-000"
+
+
+def test_scada_overload_alert_critical_matches_default_anomaly_injection() -> None:
+    """integration-sims' bank_overload anomaly defaults to 20% over rating -- must land critical."""
+    finding = evaluate_scada_overload_alert("bank-000", 75.0 * 1.20 + 0.1, 75.0, thresholds=THRESHOLDS)
+    assert finding is not None
     assert finding.severity == "critical"

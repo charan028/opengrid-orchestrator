@@ -231,9 +231,15 @@ class PgSettleBackend:
         source: str,
         quality_flag: QualityFlag,
         version: int,
+        supersedes: UUID | None = None,
     ) -> UUID:
         new_id = uuid4()
         async with self.pool.connection() as conn, conn.cursor() as cur:
+            # Retire the old row FIRST (see the Protocol docstring): the deferred FK (migration 0007)
+            # lets `superseded_by` point at `new_id` before that row exists, validated only when this
+            # `async with` block commits the transaction on exit.
+            if supersedes is not None:
+                await cur.execute(_SUPERSEDE_METER_SQL, {"old_id": supersedes, "new_id": new_id})
             await cur.execute(
                 _INSERT_METER_SQL,
                 {
@@ -249,10 +255,6 @@ class PgSettleBackend:
                 },
             )
         return new_id
-
-    async def mark_meter_interval_superseded(self, old_id: UUID, new_id: UUID) -> None:
-        async with self.pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_SUPERSEDE_METER_SQL, {"old_id": old_id, "new_id": new_id})
 
     async def insert_performance(
         self,
@@ -362,9 +364,13 @@ class PgSettleBackend:
         rule_baseline_value: Decimal | None,
         forgone_upside: Decimal,
         version: int,
+        supersedes: UUID | None = None,
     ) -> UUID:
         new_id = uuid4()
         async with self.pool.connection() as conn, conn.cursor() as cur:
+            # Retire-then-insert, atomically -- see `insert_meter_interval`'s docstring/comment.
+            if supersedes is not None:
+                await cur.execute(_SUPERSEDE_PNL_SQL, {"old_id": supersedes, "new_id": new_id})
             await cur.execute(
                 _INSERT_PNL_SQL,
                 {
@@ -383,10 +389,6 @@ class PgSettleBackend:
                 },
             )
         return new_id
-
-    async def mark_pnl_superseded(self, old_id: UUID, new_id: UUID) -> None:
-        async with self.pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_SUPERSEDE_PNL_SQL, {"old_id": old_id, "new_id": new_id})
 
     async def fetch_rule_baseline_delivered_kwh(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

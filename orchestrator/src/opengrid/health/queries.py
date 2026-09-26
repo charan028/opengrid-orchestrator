@@ -25,6 +25,14 @@ SELECT source, product, last_value_at, last_success_at, consecutive_failures, br
 FROM og.feed_status
 """
 
+_FETCH_BANK_LOADS_SQL = """
+SELECT b.bank_id, b.kva_rating,
+       (SELECT fo.value FROM og.feed_obs fo
+        WHERE fo.source = 'scada' AND fo.product = b.bank_id AND fo.series = 'APPARENT_POWER_KVA'
+        ORDER BY fo.ts DESC LIMIT 1) AS load_kva
+FROM og.bank b
+"""
+
 _FETCH_OPEN_ALERTS_SQL = """
 SELECT id, rule, severity, summary, detail, opened_at, cleared_at, acked_by
 FROM og.alert WHERE cleared_at IS NULL
@@ -76,6 +84,15 @@ async def fetch_feed_statuses(pool: AsyncConnectionPool) -> list[FeedStatus]:
         )
         for r in rows
     ]
+
+
+async def fetch_bank_loads(pool: AsyncConnectionPool) -> list[tuple[str, float, float | None]]:
+    """Returns `(bank_id, kva_rating, load_kva)` for every bank; `load_kva` is `None` if no SCADA
+    reading has ever arrived for it (`ALR-SCADA-OVERLOAD`'s "no reading yet is not an overload" case)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_FETCH_BANK_LOADS_SQL)
+        rows = await cur.fetchall()
+    return [(r[0], float(r[1]), float(r[2]) if r[2] is not None else None) for r in rows]
 
 
 async def fetch_open_alerts(pool: AsyncConnectionPool) -> list[Alert]:
@@ -135,6 +152,7 @@ def condition_key_for(alert: Alert) -> str:
     scope = (
         detail.get("process")
         or detail.get("zone")
+        or detail.get("bank_id")
         or ":".join(str(v) for v in (detail.get("source"), detail.get("product")) if v)
     )
     return f"{alert.rule}:{scope}" if scope else alert.rule

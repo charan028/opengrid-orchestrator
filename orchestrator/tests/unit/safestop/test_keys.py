@@ -117,7 +117,11 @@ def test_cli_keygen_in_process(tmp_path: Path, capsys: pytest.CaptureFixture[str
 
     assert rc == 0
     assert len(key_out.read_bytes()) == 32
-    assert pubkey_out.read_text(encoding="utf-8").startswith("safestop-2026a ")
+    # Bug fix (dispatch-live pass): the pubkey file is bare hex, no "<key_id> " prefix -- ogsim's
+    # loader (ogsim.common.crypto.load_public_key) only accepts a plain 64-char hex/base64 string.
+    pubkey_text = pubkey_out.read_text(encoding="utf-8").strip()
+    assert len(pubkey_text) == 64
+    bytes.fromhex(pubkey_text)  # raises ValueError if not valid hex
     out = capsys.readouterr().out
     assert "key_id=safestop-2026a" in out
     assert "seed_hex=" in out
@@ -156,6 +160,7 @@ def test_keygen_cli_writes_private_and_public_key_files(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert key_out.read_bytes()
     assert len(key_out.read_bytes()) == 32
-    pubkey_text = pubkey_out.read_text(encoding="utf-8")
-    assert pubkey_text.startswith("safestop-2026a ")
+    pubkey_text = pubkey_out.read_text(encoding="utf-8").strip()
+    assert len(pubkey_text) == 64
+    bytes.fromhex(pubkey_text)  # raises ValueError if not valid hex
     assert "seed_hex=" not in pubkey_text  # the seed never lands in the public-key file

@@ -168,7 +168,7 @@ async def main() -> None:
                 proposal = await ports.proposals.fetch(batch.command_batch_id)
                 if proposal is None:
                     continue
-                leases.record_accepted(proposal.bank_id, proposal.epoch, proposal.seq)
+                await leases.record_accepted(proposal.bank_id, proposal.epoch, proposal.seq)
                 await _publish_signed_batch(
                     mqtt_client=mqtt_client,
                     cfg=cfg,

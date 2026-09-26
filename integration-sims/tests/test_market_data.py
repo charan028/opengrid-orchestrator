@@ -1,18 +1,20 @@
 """Tests for ogsim.market.data.MarketData: synthetic-mode row generation and
 anomaly overrides. Uses a fixed `now`, never real wall-clock time.
 
-Field order/names/value types are fixed by interfaces/http/market-api.md."""
+Field order/names/value types are fixed by interfaces/http/market-api.md §1."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from ogsim.market.anomalies import Anomaly, AnomalyStore
 from ogsim.market.config import MarketConfig
 from ogsim.market.data import AS_FIELDS, LOAD_FIELDS, SOLAR_FIELDS, SPP_FIELDS, WIND_FIELDS, MarketData
-from ogsim.market.synthetic import HUBS, LOAD_ZONES
+from ogsim.market.synthetic import HUBS, LOAD_ZONES, WEATHER_ZONES
 
 NOW = datetime(2026, 9, 25, 18, 0, tzinfo=UTC)
+CHICAGO = ZoneInfo("America/Chicago")
 
 
 def make_data(anomalies: AnomalyStore | None = None) -> MarketData:
@@ -23,14 +25,14 @@ def make_data(anomalies: AnomalyStore | None = None) -> MarketData:
 def test_spp_rows_default_to_load_zone_settlement_points():
     data = make_data()
     rows = data.spp_rows(NOW, hours_back=0.25)
-    points = {row[2] for row in rows}
+    points = {row[3] for row in rows}
     assert points == set(LOAD_ZONES)
 
 
 def test_spp_rows_use_hubs_when_settlement_point_type_is_hu():
     data = make_data()
     rows = data.spp_rows(NOW, settlement_point_type="HU", hours_back=0.25)
-    points = {row[2] for row in rows}
+    points = {row[3] for row in rows}
     assert points == set(HUBS)
 
 
@@ -38,19 +40,23 @@ def test_spp_rows_filter_to_one_settlement_point_when_requested():
     data = make_data()
     rows = data.spp_rows(NOW, settlement_point="LZ_NORTH", hours_back=0.25)
     assert rows
-    assert all(row[2] == "LZ_NORTH" for row in rows)
+    assert all(row[3] == "LZ_NORTH" for row in rows)
 
 
-def test_spp_rows_have_the_four_documented_columns_as_strings():
+def test_spp_rows_have_the_seven_documented_columns():
     data = make_data()
     rows = data.spp_rows(NOW, settlement_point="LZ_NORTH", hours_back=0.1)
     assert len(rows[0]) == len(SPP_FIELDS)
-    delivery_date, delivery_datetime, settlement_point, price = rows[-1]
-    assert delivery_date == NOW.date().isoformat()
-    assert "T" in delivery_datetime
+    delivery_date, delivery_hour, delivery_interval, settlement_point, spt, price, dst_flag = rows[-1]
+    local = NOW.astimezone(CHICAGO)
+    assert delivery_date == local.date().isoformat()
+    assert delivery_hour == local.hour + 1
+    assert 1 <= delivery_interval <= 4
     assert settlement_point == "LZ_NORTH"
-    assert isinstance(price, str)
-    assert float(price) > 0
+    assert spt == "LZ"
+    assert isinstance(price, float)
+    assert price > 0
+    assert isinstance(dst_flag, bool)
 
 
 def test_price_spike_overrides_the_latest_spp_row():
@@ -67,7 +73,7 @@ def test_price_spike_overrides_the_latest_spp_row():
     )
     data = make_data(anomalies)
     rows = data.spp_rows(NOW, settlement_point="LZ_NORTH", hours_back=0.25)
-    assert rows[-1][3] == "5000.0"
+    assert rows[-1][5] == 5000.0
 
 
 def test_negative_price_override_is_applied():
@@ -84,7 +90,7 @@ def test_negative_price_override_is_applied():
     )
     data = make_data(anomalies)
     rows = data.spp_rows(NOW, settlement_point="LZ_SOUTH", hours_back=0.25)
-    assert rows[-1][3] == "-75.0"
+    assert rows[-1][5] == -75.0
 
 
 def test_stale_posting_freezes_the_clock_for_the_targeted_product():
@@ -104,30 +110,40 @@ def test_stale_posting_freezes_the_clock_for_the_targeted_product():
     assert rows_now[-1][:3] == rows_later[-1][:3]
 
 
-def test_load_rows_are_tidy_one_row_per_zone_per_hour():
+def test_load_rows_are_wide_one_row_per_hour_with_a_column_per_zone():
     data = make_data()
     rows = data.load_rows(NOW, days_back=0.1)
     assert rows
     assert len(rows[0]) == len(LOAD_FIELDS)
-    zones_seen = {row[2] for row in rows}
-    from ogsim.market.synthetic import WEATHER_ZONES
+    field_names = [name for name, _ in LOAD_FIELDS]
+    zone_start = field_names.index(WEATHER_ZONES[0])
+    row = rows[-1]
+    operating_day, hour_ending, dst_flag = row[0], row[1], row[2]
+    local = NOW.astimezone(CHICAGO)
+    assert operating_day == local.date().isoformat()
+    assert hour_ending == f"{local.hour + 1:02d}:00"
+    assert isinstance(dst_flag, bool)
+    zone_values = row[zone_start : zone_start + len(WEATHER_ZONES)]
+    assert all(isinstance(v, float) for v in zone_values)
+    total = row[field_names.index("total")]
+    assert total == round(sum(zone_values), 1)
 
-    assert zones_seen == set(WEATHER_ZONES)
-    assert isinstance(rows[0][3], str)
 
-
-def test_wind_rows_have_the_three_documented_columns():
+def test_wind_rows_have_the_five_documented_columns():
     data = make_data()
     rows = data.renewable_rows(NOW, "wind", hours_back=2)
     assert rows
     assert len(rows[0]) == len(WIND_FIELDS)
-    posted, actual, forecast = rows[-1]
-    assert "T" in posted
-    assert float(actual) >= 0
-    assert float(forecast) >= 0
+    delivery_date, hour_ending, dst_flag, actual, forecast = rows[-1]
+    local = NOW.astimezone(CHICAGO)
+    assert delivery_date == local.date().isoformat()
+    assert hour_ending == local.hour + 1
+    assert isinstance(dst_flag, bool)
+    assert actual >= 0
+    assert forecast >= 0
 
 
-def test_solar_rows_have_the_three_documented_columns():
+def test_solar_rows_have_the_five_documented_columns():
     data = make_data()
     rows = data.renewable_rows(NOW, "solar", hours_back=2)
     assert rows
@@ -138,8 +154,19 @@ def test_as_rows_use_market_api_ancillary_type_codes():
     data = make_data()
     rows = data.as_rows(NOW, days_back=0.1)
     assert len(rows[0]) == len(AS_FIELDS)
-    services = {row[2] for row in rows}
+    services = {row[3] for row in rows}
     assert services == {"REGUP", "REGDN", "RRS", "NSPIN", "ECRS"}
+
+
+def test_as_rows_hour_ending_is_an_hh_mm_string_with_dst_flag():
+    data = make_data()
+    rows = data.as_rows(NOW, days_back=0.1)
+    local = NOW.astimezone(CHICAGO)
+    delivery_date, hour_ending, dst_flag, _service, mcpc = rows[-1]
+    assert delivery_date == local.date().isoformat()
+    assert hour_ending == f"{local.hour + 1:02d}:00"
+    assert isinstance(dst_flag, bool)
+    assert isinstance(mcpc, float)
 
 
 def test_as_price_jump_overrides_only_the_targeted_service():
@@ -156,10 +183,10 @@ def test_as_price_jump_overrides_only_the_targeted_service():
     )
     data = make_data(anomalies)
     rows = data.as_rows(NOW, days_back=0.1)
-    rrs_prices = [r[3] for r in rows if r[2] == "RRS"]
-    regup_prices = [r[3] for r in rows if r[2] == "REGUP"]
-    assert "900.0" in rrs_prices
-    assert "900.0" not in regup_prices
+    rrs_prices = [r[4] for r in rows if r[3] == "RRS"]
+    regup_prices = [r[4] for r in rows if r[3] == "REGUP"]
+    assert 900.0 in rrs_prices
+    assert 900.0 not in regup_prices
 
 
 def test_eia_response_has_one_row_per_hour_of_window_and_string_values():

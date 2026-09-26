@@ -50,6 +50,34 @@ PRODUCT_PATHS: dict[str, tuple[str, dict[str, str]]] = {
     "np4-188-cd": ("/np4-188-cd/dam_clear_price_for_cap", {}),
 }
 
+# BUILD.md follow-up finding: confirmed live that np6-345-cd/np4-732-cd/np4-737-cd/np4-188-cd return
+# an EMPTY `data` array with no date-range query params (unlike np6-905-cd, which defaults to
+# "latest"). Each needs an explicit lookback window to reliably return its most recent posting; the
+# param names differ per product's own API (also confirmed live -- np6-345-cd rejects
+# `operatingDateFrom/To`, only `operatingDayFrom/To` is accepted).
+_DEFAULT_LOOKBACK_DAYS = 2
+_DATE_RANGE_PARAM_NAMES: dict[str, tuple[str, str]] = {
+    "np6-345-cd": ("operatingDayFrom", "operatingDayTo"),
+    "np4-732-cd": ("postedDatetimeFrom", "postedDatetimeTo"),
+    "np4-737-cd": ("postedDatetimeFrom", "postedDatetimeTo"),
+    "np4-188-cd": ("deliveryDateFrom", "deliveryDateTo"),
+}
+
+
+def _default_date_range_params(product: str, now: datetime) -> dict[str, str]:
+    """A `{from_param: value, to_param: value}` lookback window for products that return no data
+    without one (see `_DATE_RANGE_PARAM_NAMES`); `{}` for products that already default to "latest"
+    (np6-905-cd)."""
+    names = _DATE_RANGE_PARAM_NAMES.get(product)
+    if names is None:
+        return {}
+    from_param, to_param = names
+    start = now - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
+    if from_param.endswith("Datetime"):
+        return {from_param: start.strftime("%Y-%m-%dT%H:%M:%S"), to_param: now.strftime("%Y-%m-%dT%H:%M:%S")}
+    return {from_param: start.date().isoformat(), to_param: now.date().isoformat()}
+
+
 _NORMALIZERS = {
     "np6-905-cd": ercot_spp_to_feed_obs,
     "np6-345-cd": ercot_load_to_feed_obs,
@@ -175,7 +203,8 @@ class ErcotClient:
         now = now or datetime.now(UTC)
         if product not in PRODUCT_PATHS:
             raise ValueError(f"unknown ERCOT product: {product}")
-        path, params = PRODUCT_PATHS[product]
+        path, static_params = PRODUCT_PATHS[product]
+        params = {**static_params, **_default_date_range_params(product, now)}
         url = f"{self.base_url}{path}"
         events: list[KeyRotationEvent] = []
 

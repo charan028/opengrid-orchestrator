@@ -85,8 +85,10 @@ def _shortest_round_trip_digits(x: float) -> tuple[str, int]:
     `x == int(digits) * 10**exponent` exactly, and `digits` is the shortest such string (inherited
     from `repr(x)`, Python's own shortest-round-trip formatter)."""
     sign, digit_tuple, exponent = Decimal(repr(x)).as_tuple()
-    assert sign == 0  # x is positive
-    assert isinstance(exponent, int)  # never 'n'/'N'/'F' for a finite Decimal parsed from repr()
+    if sign != 0 or not isinstance(exponent, int):
+        # Unreachable for a positive finite float's repr(), but narrows the type for mypy --strict
+        # and fails loudly (never silently) if that assumption is ever wrong.
+        raise ValueError(f"unexpected Decimal.as_tuple() for {x!r}: sign={sign!r}, exponent={exponent!r}")
     digits = list(digit_tuple)
     while len(digits) > 1 and digits[-1] == 0:
         digits.pop()

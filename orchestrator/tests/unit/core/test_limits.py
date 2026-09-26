@@ -1,6 +1,7 @@
 from hypothesis import given
 from hypothesis import strategies as st
 
+from opengrid.core import reasons
 from opengrid.core.limits import (
     check_bank_kva,
     check_commitment_lock,
@@ -106,3 +107,98 @@ def test_commitment_lock_as_release_enabled():
 def test_commitment_lock_never_blocks_increase_or_hold():
     r = check_commitment_lock(new_kw=10.0, frozen_kw=10.0, prior_kw=10.0, reason_code=None)
     assert r.ok
+
+
+def test_feeder_ramp_ceiling_firm_event_passes_when_within_ceiling():
+    """CORE-006: a firm event's delta strictly inside the per-minute ceiling passes cleanly (the
+    existing test above only exercises the failing/non-firm cases)."""
+    # ceiling = 100 kW/min * (2s / 60) = ~3.33 kW; 2.0 kW is comfortably within it.
+    r = check_feeder_ramp_ceiling(2.0, dt_s=2.0, feeder_ceiling_kw_per_min=100.0, is_firm_event=True)
+    assert r.ok
+
+
+# --- CORE-005: Hypothesis property tests for the K1/K4/K13 checks ---------------------------------
+
+
+@given(
+    soc_kwh=st.floats(min_value=0, max_value=1000, allow_nan=False),
+    e_kwh=st.floats(min_value=1, max_value=1000, allow_nan=False),
+    r_kwh=st.floats(min_value=0, max_value=999, allow_nan=False),
+    margin_pct=st.floats(min_value=0, max_value=0.5, allow_nan=False),
+)
+def test_check_reserve_floor_property_matches_definition(soc_kwh, e_kwh, r_kwh, margin_pct):
+    """K1: `check_reserve_floor` fails iff `soc_kwh` is strictly below `r_kwh + margin_pct * e_kwh`,
+    for any hub sizing/margin combination -- never lets a command pass below the reserve floor."""
+    params = HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=5.0)
+    result = check_reserve_floor(soc_kwh, params, margin_pct=margin_pct)
+    assert result.ok == (soc_kwh >= r_kwh + margin_pct * e_kwh)
+    if not result.ok:
+        assert result.reason == reasons.R_RESERVE_FLOOR
+
+
+@given(
+    new_kw=st.floats(min_value=-100, max_value=100, allow_nan=False),
+    frozen_kw=st.floats(min_value=0, max_value=100, allow_nan=False),
+    prior_kw=st.floats(min_value=0, max_value=100, allow_nan=False),
+    reason_code=st.sampled_from(
+        [None, *reasons.COMMIT_LOCK_OVERRIDE_REASONS, "R-AS-RELEASE", "R-NOT-A-REAL-REASON"]
+    ),
+    as_release_enabled=st.booleans(),
+)
+def test_check_commitment_lock_property_never_allows_an_unreasoned_reduction(
+    new_kw, frozen_kw, prior_kw, reason_code, as_release_enabled
+):
+    """K13: a reduction below `min(frozen_kw, prior_kw)` is allowed if and only if `reason_code` is one
+    of the documented overrides (or `R-AS-RELEASE` with the audited path enabled) -- for any arrival
+    order/price combination the property tests below and elsewhere in the allocator exercise, this
+    floor-and-allowlist relationship must always hold."""
+    result = check_commitment_lock(
+        new_kw=new_kw,
+        frozen_kw=frozen_kw,
+        prior_kw=prior_kw,
+        reason_code=reason_code,
+        as_release_enabled=as_release_enabled,
+    )
+    floor = min(frozen_kw, prior_kw)
+    if new_kw >= floor - 1e-9:
+        assert result.ok
+        return
+    allowed = reason_code in reasons.COMMIT_LOCK_OVERRIDE_REASONS or (
+        reason_code == reasons.R_AS_RELEASE and as_release_enabled
+    )
+    assert result.ok == allowed
+    if not result.ok:
+        assert result.reason == reasons.R_COMMIT_LOCK_VIOLATION
+
+
+@given(
+    prev_p_kw=st.floats(min_value=-100, max_value=100, allow_nan=False),
+    target_p_kw=st.floats(min_value=-100, max_value=100, allow_nan=False),
+    dt_s=st.floats(min_value=0.1, max_value=60, allow_nan=False),
+    ramp_kw_per_s=st.floats(min_value=0, max_value=50, allow_nan=False),
+)
+def test_check_hub_ramp_property_matches_the_ramp_bound(prev_p_kw, target_p_kw, dt_s, ramp_kw_per_s):
+    """K4/G-04: `check_hub_ramp` fails iff the requested step exceeds `ramp_kw_per_s * dt_s`, for any
+    previous/target setpoint pair (a non-positive rate is unconstrained, matching `apply_ramp_limit`'s
+    own convention when only a single rate is given)."""
+    result = check_hub_ramp(prev_p_kw, target_p_kw, dt_s, ramp_kw_per_s)
+    if ramp_kw_per_s <= 0:
+        assert result.ok
+        return
+    assert result.ok == (abs(target_p_kw - prev_p_kw) <= ramp_kw_per_s * dt_s + 1e-9)
+
+
+@given(
+    fleet_delta_kw=st.floats(min_value=-100_000, max_value=100_000, allow_nan=False),
+    dt_s=st.floats(min_value=0.1, max_value=300, allow_nan=False),
+    is_firm_event=st.booleans(),
+)
+def test_check_fleet_ramp_cap_property_uses_the_right_cap_for_firm_vs_non_firm(
+    fleet_delta_kw, dt_s, is_firm_event
+):
+    """K4/G-05: firm events get the (looser) discretionary cap, non-firm events the tighter one --
+    for any delta/duration, the check's pass/fail must match whichever cap applies."""
+    result = check_fleet_ramp_cap(fleet_delta_kw, dt_s, is_firm_event=is_firm_event)
+    cap_per_min = 50_000.0 if is_firm_event else 10_000.0
+    cap_kw = cap_per_min * (dt_s / 60.0)
+    assert result.ok == (abs(fleet_delta_kw) <= cap_kw + 1e-9)

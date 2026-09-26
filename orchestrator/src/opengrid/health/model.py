@@ -39,6 +39,13 @@ class HealthThresholds:
     hub_offline_ratio_critical: float = 0.20
     guardian_timeout_rate_critical: float = 0.01
     feed_lgv_exhausted_margin_s: float = 0.0  # 0 => LGV window fully elapsed
+    # ALR-SCADA-OVERLOAD (dispatch-live pass): a bank drawing over its kva_rating -- the anomaly
+    # catalogue's "bank_overload" injects exactly this (integration-sims/src/ogsim/control/catalogue.py
+    # id="bank_overload", default kva_over_rating_pct=20.0). Warning at rating itself (100%), critical
+    # once it matches the catalogue's own default injected severity (120%), so the default injection
+    # reliably crosses into critical rather than sitting just under a warning-only threshold.
+    bank_kva_overload_warning_pct: float = 1.00
+    bank_kva_overload_critical_pct: float = 1.20
 
     @property
     def heartbeat_down_after_s(self) -> float:
@@ -73,6 +80,12 @@ class HealthThresholds:
             ),
             guardian_timeout_rate_critical=cfg.get(
                 "health.guardian_timeout_rate_critical", defaults.guardian_timeout_rate_critical
+            ),
+            bank_kva_overload_warning_pct=cfg.get(
+                "health.bank_kva_overload_warning_pct", defaults.bank_kva_overload_warning_pct
+            ),
+            bank_kva_overload_critical_pct=cfg.get(
+                "health.bank_kva_overload_critical_pct", defaults.bank_kva_overload_critical_pct
             ),
         )
 

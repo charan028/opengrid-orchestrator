@@ -30,30 +30,60 @@ non-empty `Authorization` header and may honor a scenario-injected `MARKET_401_K
 ```json
 {
   "data": [
-    ["2026-09-26", "2026-09-26T18:00:00", "LZ_NORTH", "42.17"],
-    ["2026-09-26", "2026-09-26T18:00:00", "LZ_SOUTH", "41.85"]
+    ["2026-09-26", 1, 1, "LZ_NORTH", "LZ", 42.17, false],
+    ["2026-09-26", 1, 1, "LZ_SOUTH", "LZ", 41.85, false]
   ],
   "fields": [
     {"name": "deliveryDate", "dataType": "DATE"},
-    {"name": "deliveryDateTime", "dataType": "TIMESTAMP"},
+    {"name": "deliveryHour", "dataType": "INTEGER"},
+    {"name": "deliveryInterval", "dataType": "INTEGER"},
     {"name": "settlementPoint", "dataType": "STRING"},
-    {"name": "settlementPointPrice", "dataType": "STRING"}
+    {"name": "settlementPointType", "dataType": "STRING"},
+    {"name": "settlementPointPrice", "dataType": "NUMBER"},
+    {"name": "DSTFlag", "dataType": "BOOLEAN"}
   ],
   "_meta": {"totalRecords": 2, "pageSize": 1000, "totalPages": 1, "currentPage": 1}
 }
 ```
 
-`opengrid.feeds` reads `fields[i].name` to map each row's positional array into a dict, so the simulator
-must keep `fields` consistent with `data`'s column order for the product being served. Field-name mapping
-per product (only the columns `feeds.ercot.normalize` actually consumes):
+**Corrected against a live call (BUILD.md follow-up finding)**: the shape above (NP6-905-CD) replaces an
+earlier, incorrect assumption of a single ready-made `deliveryDateTime` column. `opengrid.feeds` reads
+`fields[i].name` to map each row's positional array into a dict, so the simulator must keep `fields`
+consistent with `data`'s column order for the product being served.
+
+**Timestamps are America/Chicago local wall-clock, never UTC and never carrying their own offset.**
+Every product's delivery interval is `deliveryDate`/`operatingDay` + an hour-ending value (`deliveryHour`
+or `hourEnding`, 1-24; `hourEnding` is formatted `"HH:MM"` on some products, a bare integer on others --
+see the table) + an optional 15-minute `deliveryInterval` (1-4) within that hour, localized to UTC using
+`DSTFlag`. `DSTFlag` is `true` only for the one repeated wall-clock hour on the fall-back transition day
+(it is not a general "currently observing DST" indicator) -- `opengrid.feeds.normalize` maps it directly
+onto Python's `datetime.fold` to disambiguate that one ambiguous hour; every other row's UTC offset comes
+from ordinary America/Chicago calendar rules.
+
+Field-name mapping per product (only the columns `feeds.ercot.normalize` actually consumes; columns
+marked "wide" mean one column per named series, not a single generic column):
 
 | Product | Columns consumed |
 |---|---|
-| NP6-905-CD | `deliveryDateTime`, `settlementPoint`, `settlementPointPrice` ($/MWh) |
-| NP6-345-CD | `operatingDateTime` (or `hourEnding` + `operatingDate`), `weatherZone`, `load` (MW) |
-| NP4-732-CD | `postedDatetime`, `actualSystemWideWindOutput` (MW), `windOutputForecastSystemWide` (MW) |
-| NP4-737-CD | `postedDatetime`, `actualSystemWideSolarOutput` (MW), `solarOutputForecastSystemWide` (MW) |
-| NP4-188-CD | `deliveryDate`, `hourEnding`, `ancillaryType` (`REGUP`/`REGDN`/`RRS`/`NSPIN`/`ECRS`), `mcpc` ($/MW-h) |
+| NP6-905-CD | `deliveryDate`, `deliveryHour` (int, hour-ending), `deliveryInterval` (int 1-4), `DSTFlag`, `settlementPoint`, `settlementPointPrice` ($/MWh) |
+| NP6-345-CD | `operatingDay`, `hourEnding` (`"HH:MM"` string, hour-ending), `DSTFlag`, then one column per weather zone (wide): `coast`, `east`, `farWest`, `north`, `northC`, `southern`, `southC`, `west`, `total` (MW; each becomes its own `series`, `null` values skipped) |
+| NP4-732-CD | `deliveryDate`, `hourEnding` (int, hour-ending), `DSTFlag`, `genSystemWide` (actual MW, `null` for a future delivery hour), `STWPFSystemWide` (Short-Term Wind Power Forecast, MW) |
+| NP4-737-CD | `deliveryDate`, `hourEnding` (int, hour-ending), `DSTFlag`, `genSystemWide` (actual MW, `null` for a future delivery hour), `STPPFSystemWide` (Short-Term Photovoltaic Power Forecast, MW) |
+| NP4-188-CD | `deliveryDate`, `hourEnding` (`"HH:MM"` string, hour-ending), `DSTFlag`, `ancillaryType` (`REGUP`/`REGDN`/`RRS`/`NSPIN`/`ECRS`), `MCPC` ($/MW-h) |
+
+**Query params confirmed live** (differ from the table in S1 above for these four products, which
+otherwise return an empty `data` array with no date filter -- NP6-905-CD is the only one of the five that
+defaults to "latest" with no params): NP6-345-CD takes `operatingDayFrom`/`operatingDayTo` (NOT
+`operatingDateFrom`/`operatingDateTo` -- the API rejects those names with a 400), NP4-732-CD/NP4-737-CD
+take `postedDatetimeFrom`/`postedDatetimeTo`, NP4-188-CD takes `deliveryDateFrom`/`deliveryDateTo`.
+`opengrid.feeds.ercot` always sends a 1-day lookback window for these four products (`og-feeds` polls
+frequently enough that this always includes the latest posting).
+
+**Market simulator alignment**: `ogsim.market` was built to the original (incorrect) field-name
+assumptions above; it needs updating to serve the real shapes in this table, including NP6-345-CD's wide
+per-zone format and NP4-732-CD/NP4-737-CD's `genSystemWide`/`STWPFSystemWide`/`STPPFSystemWide` names, and
+to honor the corrected query-param names for those four products. Routed to the `market`/`sims` agents by
+the lead; this file and `opengrid.feeds` are the source of truth for what changed.
 
 ### Error/edge behavior the simulator should reproduce on request (scenario injection)
 

@@ -415,6 +415,22 @@ async def capability(bank_id: str, interval_start: datetime) -> AvailableCapabil
     )
 
 
+def known_bank_ids() -> list[str]:
+    """Every bank the twin has topology for (merge task, dispatch-live pass): the engine's
+    `FleetGateway.bank_ids()` adapter reads this so `opengrid.allocator.run_cycle` covers every real
+    bank each 2 s cycle, not a hardcoded/guessed list."""
+    return list(_banks.keys())
+
+
+def bank_zone(bank_id: str) -> str:
+    """The bank's configured zone (`og.bank.zone`), for the allocator's `BankSnapshot.zone` (ZONE-scoped
+    L2 instructions/safe-stop grouping). Raises `LookupError` if `bank_id` is not a known bank."""
+    bank_rt = _banks.get(bank_id)
+    if bank_rt is None:
+        raise LookupError(f"unknown bank_id: {bank_id}")
+    return bank_rt.zone
+
+
 def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
     """Per-hub eligibility snapshot for every hub on `bank_id` (merge task A3): the hub-level detail
     `capability()`'s bank-aggregate return throws away, needed so `opengrid.engine` can build the
