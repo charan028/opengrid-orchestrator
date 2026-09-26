@@ -9,6 +9,9 @@ running processes did.
 | `dispatch/test_ts04_commitment_lock.py` | Q1 | TS-04-05, -06, -15, -16 (gate-level, ~1 min) |
 | `dispatch/test_ts04_delivery.py` | Q1 | TS-04-07, -11/-13, -12, TS-05-07 (`slow`: waits for a real delivery window) |
 | `safety/test_ts06_guardian_and_safe_stop.py` | Q2 | TS-06-07a, -09, -15, -16, -17, -23, two-person release, TS-07-04, A11 |
+| `decisions/test_d12_k7_as.py` | Q4 | D-12 two-person release by og-op-a/og-op-b, K8 replay of an old RELEASE, K7 veto-rate escalation |
+| `decisions/test_d17_d18_delivery.py` | Q4 | D-17 best-effort SHORTFALL under an L2 BLOCK and its lift; D-18 need-basis G-19 (`slow`) |
+| `decisions/test_as_capacity_hold.py` | Q4 | ERCOT_AS capacity hold: 0 kW until an ERCOT deployment, then back to the hold (`slow`) |
 
 ## Run
 

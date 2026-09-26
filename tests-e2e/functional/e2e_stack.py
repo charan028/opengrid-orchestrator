@@ -87,6 +87,10 @@ def wait_until[T](
         if last:
             return last
         time.sleep(interval_s)
+    # One last look: after a host sleep the monotonic deadline can pass while the condition already holds.
+    last = probe()
+    if last:
+        return last
     raise AssertionError(f"timed out after {timeout_s:.0f}s waiting for {what} (last={last!r})")
 
 
