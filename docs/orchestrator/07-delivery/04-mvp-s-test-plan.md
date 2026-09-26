@@ -103,13 +103,13 @@ run from G3 onward and fails the run on any hit.
 | K4 | Physical envelope: P/kVA/ramp limits, no synchronized fleet steps, firm-event ramp ceiling | `guardian` G-02…G-06 | TS-06-05 |
 | K5 | Grid authority: L2 instructions are hard constraints, never traded for commercial value | `allocator`, `guardian` G-15 | TS-05-14 (new) |
 | K6 | Command freshness: sequence/epoch/lease strictly increasing, stale/duplicate commands rejected | `guardian` G-13, `sim` hub | TS-03-01 |
-| K7 | Degrade, don't trip: TIMEOUT ≠ VETO ≠ STOP; hold → schedule → local autonomy, never an unplanned trip | `guardian`, `sim` hub lease | TS-03-02, TS-06-04 |
+| K7 | Degrade, don't trip: TIMEOUT ≠ VETO ≠ STOP; hold the last setpoint → local autonomy, never an unplanned trip | `guardian`, `sim` hub lease | TS-03-02, TS-06-04 |
 | K8 | Stop authority: a scoped safe stop works with `og-engine` and `og-guardian` both down; stop-only key never releases | `safestop` (independent process) | TS-06-03 |
 | K9 | One loop per quantity: exactly one integrating controller (the `DIST_DEFERRAL` PI) regulates a given physical quantity | `allocator` PI, `guardian` G-03 | TS-05-15 (new) |
 | K10 | Trace before act: no command is signed unless its decision pre-image is durably traced first | `guardian` G-14, `trace` | TS-09-09 (new) |
 | K11 | Verifiable track record: hash-chained trace, configurable retention, verifiable across pruning | `trace` | TS-09-01, TS-09-02 |
 | K12 | Time quality: guardian refuses to sign when its own clock offset from NTP exceeds its limit | `guardian` G-20 | TS-06-18 (new) |
-| K13 | **Commitment lock.** Granted kW for a committed obligation never drops below $\hat y_{o,t}$ except on an L0/L1/L2 reason code or verified infeasibility, each traced; substitution (same obligation, different hub) is allowed, switching (capacity moved to a different obligation) is not | `selector`/`ledger` (freeze), `guardian` G-19 | TS-04-01…04 |
+| K13 | **Commitment lock.** Granted kW for a committed obligation never drops below $\hat y_{o,t}$ except on an L0/L1/L2 reason code or verified infeasibility, each traced; substitution (same obligation, different hub) is allowed, switching (capacity moved to a different obligation) is not. **Best effort (D-17):** once an exception drives a delivering obligation to `SHORTFALL` it keeps receiving its maximum feasible kW (substitution first, never 0 while any is feasible), flagged `AT_RISK`, and gets its full commitment back as soon as the constraint clears. **Need basis (D-18):** a `MEASURED_FEEDBACK` (closed-loop) profile may be granted below its reserved maximum with `R-GRANT-CLOSED-LOOP` when the customer's measured need is lower; the unused reservation is never lent to another obligation, and G-19 vetoes the same reduction for a fixed profile | `selector`/`ledger` (freeze), `guardian` G-19 | TS-04-01…04, TS-04-17, TS-04-18 |
 
 **Retired-numbering cross-reference** (for anyone comparing against an earlier draft of this document): old K4
 ("guardian never edits a value") is now evidence for **K3**; old K5 ("safe-stop never releases") is **K8**; old K6
@@ -124,7 +124,7 @@ numbers as the canonical set and are unchanged.
 | ID | Title | Level | Preconditions | Hypothesis strategy / steps | Expected result (threshold) | A | K | Existing TC |
 |---|---|---|---|---|---|---|---|---|
 | TS-03-01 | Lease/epoch never regresses | P | `sim` hub with a lease/epoch counter; `guardian` epoch authority | Generate random interleavings of batches with epochs drawn from a window around the current epoch, including duplicates and out-of-order delivery, ≥ 10³ cases | A command whose epoch ≤ the hub's last-accepted epoch is always refused/ignored; the hub's accepted-epoch sequence is monotonically non-decreasing in every case | A3, A6 | K9 | — (new; nearest: `TC-FUN-108` islanding exclusion) |
-| TS-03-02 | Fail-to-local-schedule on lease expiry | P | Hub with a signed fallback schedule loaded | Randomize lease expiry time relative to in-flight commands, ≥ 500 cases | Every case: hub state after expiry equals the signed fallback profile for that clock time, never last-command-hold-forever nor an unbounded/undefined output | A6 | K7 | `TC-FUN-108` (islanding) as a related fixture |
+| TS-03-02 | Hold, then local autonomy, on lease expiry | P | Hub with an accepted lease and setpoint | Randomize lease expiry time relative to in-flight commands, ≥ 500 cases | Every case: after expiry the hub holds its last signed setpoint for the configured hold window (`lease_hold_after_expiry_s`), then falls back to local autonomy; never an unbounded/undefined output and never a hold that outlasts the window | A6 | K7 | `TC-FUN-108` (islanding) as a related fixture |
 | TS-04-01 | Commitment lock under randomized call arrivals and prices | P | ≥ 2 obligations of the same tier can be admitted; price series randomized | Generate random arrival times and price paths for a second, higher-value same-tier call while the first is `delivering`, ≥ 10³ cases via Hypothesis `stateful` rules (admit, tick, price-move) | In every case, the earlier-committed obligation's granted kW never drops below $\hat y$ unless an injected L0/L1/L2/infeasibility event accompanies the drop; 0 cases of a price-only reduction | A4, A10 | K13 | — (new; review §3.4 replay fixture) |
 | TS-04-02 | Commitment lock holds cross-tier | P | Obligations from ≥ 2 tiers | Randomize a lower-tier call's value up to and past the committed higher-tier call's value, ≥ 500 cases | The committed obligation is never reduced to serve a lower- or equal-priority new call regardless of relative price | A4, A10 | K13 | — |
 | TS-04-03 | Substitution allowed, switching forbidden | P | One committed obligation, ≥ 2 eligible hubs with spare capacity | Randomly fail/derate the serving hub(s), ≥ 500 cases | The obligation's total granted kW is maintained (or shortfall traced) by swapping hubs; the *obligation identity* receiving the kWh never changes without a reason code | A4, A10 | K13 | — |
@@ -157,12 +157,12 @@ naming where the same content applies at 2,000 rather than 500/10,000 hubs.
 
 | ID | Title | Level | Preconditions | Steps | Expected result | A | K | Existing TC |
 |---|---|---|---|---|---|---|---|---|
-| TS-01-01 | Migrations apply cleanly on a fresh `og_test` DB | U/I | Empty Postgres 17 instance | Run migration set forward, then one rollback/forward cycle | 0 errors; schema matches the frozen data model in `02a`; `alembic`/migration tool reports clean state | A1–A11 (platform) | — | — |
+| TS-01-01 | Migrations apply cleanly on a fresh `og_test` DB | U/I | Empty Postgres 17 instance | Run the migration set forward; run it again. Migrations are forward-only (no rollback; a fix is a new migration) | 0 errors; schema matches the frozen data model in `02a`; the second run applies nothing (`og.schema_migrations` unchanged) | A1–A11 (platform) | — | — |
 | TS-01-02 | Pydantic contracts reject malformed inter-module payloads | U | Contracts package importable | Fuzz each shared model with missing/extra/wrong-typed fields | 100% of malformed payloads raise a validation error before reaching business logic | A4–A9 | — | — |
 | TS-01-03 | `LISTEN/NOTIFY` delivers internal events under load | I | Postgres with `LISTEN/NOTIFY` wired | Publish 10k events/min for 5 min | 0 dropped notifications; consumer lag < 1 s p99 | A2, A4 | — | — |
 | TS-01-04 | Telemetry partition-by-day rolls over correctly at midnight (CT) | I | Telemetry table partitioned | Advance the virtual/system clock across a day boundary while inserting | Rows land in the correct day partition; no insert failures at the boundary | A2 | — | — |
 | TS-01-05 | Nightly `pg_dump` produces a restorable backup | I | `og_test` populated | Run `pg_dump`, drop to a scratch DB, restore | Restore succeeds; row counts match; the trace chain still verifies post-restore | A11 | K11 | — |
-| TS-01-06 | Deploy script is idempotent | I | Server `og-test` | Run `deploy.sh` twice back to back | Second run is a no-op or clean redeploy; all 7 systemd units remain `active (running)` | A11 | — | — |
+| TS-01-06 | Deploy script is idempotent | I | Server `og-test` | Run `deploy.sh` twice back to back | Second run is a no-op or clean redeploy; all 10 systemd units remain `active (running)` | A11 | — | — |
 | TS-01-07 | No duplicated functions (new; static/import-graph check) | U | Full source tree importable; `og.core` package exists per `02b` §12 | Run an import-graph/lint check (e.g. an AST grep) for SoC-step, capability/envelope-limit, product-rule-rounding, Ed25519 sign/verify, and JCS+SHA-256 trace-hashing formulas defined anywhere outside `og.core`; also assert every consumer (`selector`, `allocator`, `fleet`, `guardian`, `sim`, `settle`, `trace`) imports these from `og.core` rather than reimplementing them | 0 matches for a duplicate formula outside `og.core`; the build fails if a second implementation of any `og.core`-owned function is introduced | A4–A11 (build-blocking) | — | — (new; enforces `02b` §12's ownership rule) |
 
 ### 3.2 ES02 — Live feeds & forecast (TS-02-01…07)
@@ -188,9 +188,9 @@ naming where the same content applies at 2,000 rather than 500/10,000 hubs.
 | TS-03-05 | Bank aggregation matches hub sum | U/I | `fleet` bank aggregation | Randomize hub states, aggregate to bank | Bank kW/kVA = Σ member hub values within floating-point tolerance | A2 | — | — |
 | TS-03-06 | Scenario injector: partner call, price spike, feeder overload, comms loss, killed engine | I | `sim`/`grid-sim` scenario panel | Trigger each of the 6 scenario-panel events (delivery plan §4) | Each event is observable end to end (UI, trace) within 1 gate/cycle | A2–A6, A9 | — | — |
 | TS-03-07 | Lease renewal under normal operation | I | `sim` hub, `engine` up | Run 30 min normal cycle | Lease renews every cycle; no unwarranted fallback-schedule activation | A2, A3 | K6 | — |
-| TS-03-08 | Local autonomy is observable and bounded | E | Engine process killed (see §4.6) | Kill `engine`; observe hubs for 60 s | Hubs hold, then follow the signed fallback schedule (K7); no unbounded drift; recovers cleanly on engine restart | A6, A11 | K6, K7 | — |
+| TS-03-08 | Local autonomy is observable and bounded | E | Engine process killed (see §4.6) | Kill `engine`; observe hubs for 60 s | Hubs hold their last setpoint, then fall back to local autonomy (K7); no unbounded drift; recovers cleanly on engine restart | A6, A11 | K6, K7 | — |
 
-### 3.4 ES04 — Contracts, opportunities & commitments (TS-04-05…16)
+### 3.4 ES04 — Contracts, opportunities & commitments (TS-04-05…18)
 
 (TS-04-01…04 are the K13 property tests, §2.1.)
 
@@ -208,8 +208,10 @@ naming where the same content applies at 2,000 rather than 500/10,000 hubs.
 | TS-04-14 | Multi-day contract: re-nomination point allows reselection | I | `FX-CTR-DD`-equivalent multi-day fixture with a declared re-nomination point | Reach the re-nomination point; offer a competing call | Reselection permitted only at that point, for that contract; a competing call between points is refused per K13 | A4, A9, A10 | K13 | — |
 | TS-04-15 | Partial take respects `min_qty`/`increment` (ERCOT AS style) | I | `FX-CTR-AS`-equivalent product rule: `min_qty` 0.1 MW, `increment` 0.1 MW | Offer 0.25 MW of eligible headroom | Selector takes 0.2 MW (rounds down to the increment ≥ `min_qty`), never 0.25 MW directly, never below `min_qty` | A4, A5 | — | — |
 | TS-04-16 | Partial take respects `block`/all-or-nothing (partner style) | I | `FX-CTR-PC`-equivalent all-or-nothing block product | Offer headroom insufficient for the full block | Selector takes 0 (rejects the block), never a partial fraction of an all-or-nothing product | A4, A5 | — | — |
+| TS-04-17 | Best-effort SHORTFALL under an L2 BLOCK (D-17) | E | A committed obligation delivering from ≥ 2 banks | Inject an L2 BLOCK on the bank carrying its largest share; hold it past the SHORTFALL sustain window; then lift it | The obligation reaches `SHORTFALL` and `AT_RISK`; while blocked every cycle grants the feasible remainder (> 0, below the commitment, 0 on the blocked bank); after the lift the full commitment returns within 2 cycles and `AT_RISK` clears | A4, A5, A10 | K13 | `tests-e2e/functional/decisions` |
+| TS-04-18 | Need-basis reduction is corroborated only for a measured profile (D-18) | E | A delivering obligation; its contract's service profile switched between `PLAN` and `MEASURED_FEEDBACK` | Propose a grant below the commitment carrying `R-GRANT-CLOSED-LOOP` for each profile | G-19 vetoes the reduction for the fixed (`PLAN`) profile and does not for `MEASURED_FEEDBACK` | A4, A10 | K13 | `tests-e2e/functional/decisions` |
 
-### 3.5 ES05 — Dispatch (selector, ledger, allocator) (TS-05-04…13)
+### 3.5 ES05 — Dispatch (selector, ledger, allocator) (TS-05-04…13, TS-05-16)
 
 (TS-05-01/02 are the K1/K2 property tests; TS-05-03 tests non-anticipativity, P5, no K tag; TS-05-14/15 are the
 K5/K9 property tests, §2.1.)
@@ -226,8 +228,9 @@ K5/K9 property tests, §2.1.)
 | TS-05-11 | `ERCOT_AS` capacity hold is maintained through the delivery window | I | `FX-CTR-AS`-equivalent AS obligation committed | Run through the hold window with competing headroom pressure | Held capacity never dips below the awarded amount absent an L0–L2/infeasibility event | A5, A10 | K13 | — |
 | TS-05-12 | §7.4 AS forward release is default off | I | Fresh `og-test` config, no explicit override | Attempt to trigger a release path without enabling the flag | 0 releases occur; the release code path is unreachable with the default configuration; explicitly enabling it (test-only) is required to exercise the path at all | A4, A10 | K13 | — |
 | TS-05-13 | §7.4 AS forward release, when explicitly enabled, is audited and bounded | I | Release flag explicitly enabled for this test only | Trigger a release under a qualifying CVaR condition | Release is future-intervals-only, capped, requires a recorded confirmation, and produces a traced buyback event | A4, A9, A10 | K13 | — |
+| TS-05-16 | ERCOT_AS award is a capacity hold | I | An `ERCOT_AS` Non-Spin (4 h) or ECRS (1 h) award committed | Commit the award; observe reservations and grants through the hold window | kW and energy (the full deployment duration) are reserved above the 20% reserve floor; 0 kW discharged until an ERCOT deployment event; revenue settles as a capacity payment | A4, A5, A8 | K1, K13 | `tests-e2e/functional/decisions` |
 
-### 3.6 ES06 — Guardian & safe stop (TS-06-06…23, plus TS-06-18)
+### 3.6 ES06 — Guardian & safe stop (TS-06-06…26, plus TS-06-18)
 
 (TS-06-01/02 are the K3 property tests; TS-06-03 is the K8 property test; TS-06-04 is the K7 property test;
 TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
@@ -252,6 +255,9 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 | TS-06-16 | Scoped safe stop — zone/bank scope | I | Same, scoped to one zone/bank | Trigger zone-scoped stop | Only the targeted zone/bank stops; other zones continue normal dispatch and commitments (K13 unaffected outside the scope) | A3, A4, A10 | K8, K13 | — |
 | TS-06-17 | Guardian TIMEOUT holds last grant | I | Guardian process delayed/unresponsive | Delay guardian response past its deadline | Engine holds the prior grant (no new commands issued); no STOP, no VETO; recovers on guardian response | A3, A6, A10 | K7 | — |
 | TS-06-23 | `og-safestop` engages a fleet stop with `og-guardian` AND `og-engine` both killed (new; the K8 topology proof) | C | `og-safestop` up; `og-guardian` and `og-engine` both killed (see §4.6) | Trigger a fleet-scope stop via the operator path while both other processes are down | The stop still engages within the scoped ramp via `og-safestop` alone; no dependency on the killed processes is observed | A3, A10, A11 | K8 | — (new; proves the design-error fix in `02b` §1.3) |
+| TS-06-24 | Two-person safe-stop release (D-12) | E | Named operators `og-op-a`, `og-op-b` on the guardian allow-list | `og-op-a` engages (two-step) and requests the release; `og-op-a` approves it; then `og-op-b` approves | Self-approval is `403`; the second operator's approval yields a guardian-signed RELEASE relayed by `og-safestop` | A3, A10 | K8 | `tests-e2e/functional/decisions` |
+| TS-06-25 | A replayed RELEASE never lifts a newer stop | E | A released stop, then a newer ENGAGE on the same scope | Re-publish the old RELEASE on its topic and the new stop's topic | The scope stays stopped (hubs reach and stay at 0 kW); a RELEASE lifts only its own `stop_id` | A3, A10 | K8 | `tests-e2e/functional/decisions` |
+| TS-06-26 | Veto-rate escalation requests, never engages, a stop | E | Guardian live | Drive > 5% vetoes per tick on one scope for ≥ 3 ticks, then stop | The scope goes `CONSERVATIVE`; after 3 ticks `ALR-SAFE-STOP-REQUESTED` is raised with an unconfirmed stop proposal and no automatic ENGAGE; recovery clears both | A3, A6, A10 | K7 | `tests-e2e/functional/decisions` |
 
 ### 3.7 ES07 — Health & degraded modes (TS-07-01…06)
 
@@ -317,12 +323,12 @@ TS-06-05 is the K4 property test; TS-06-18 is the K12 property test, §2.1.)
 | TS-N-02 | RT cycle latency at 10,000 hubs (measured) | N | `og-test`, 10,000-hub `sim` | Same as above | Recorded as "measured, not met" if it exceeds 500 ms p99 (delivery-plan cut line 4); not a gate blocker at this scale | A11 |
 | TS-N-03 | UI refresh under live load | N | UI + 2,000 hubs | Measure SSE-to-render latency on all 7 screens during a busy cycle | ≤ 2 s on each screen, p95 | A11 |
 | TS-N-04 | Ingest freshness | N | `feeds` live/replay | Measure time from source publish to `feed_obs` row | Within the source's own refresh cadence + 1 poll interval; freshness badge accurate | A1 |
-| TS-N-05 | Memory per process | N | All 7 systemd units at 2,000 hubs, 1 h | Sample RSS per process every minute | Each process stable (no unbounded growth); total fits the server's ~14 GB free with headroom for Postgres/Mosquitto | A11 |
+| TS-N-05 | Memory per process | N | All 10 systemd units at 2,000 hubs, 1 h | Sample RSS per process every minute | Each process stable (no unbounded growth); total fits the server's ~14 GB free with headroom for Postgres/Mosquitto | A11 |
 | TS-N-06 | 1-hour soak | N/C | Full stack, 2,000 hubs, mixed scenario load | Run 1 h continuously with the scenario panel cycling through injected events | 0 crashes, 0 invariant hits (§2), memory stable, no unbounded queue growth | A10, A11 |
 | TS-N-07 | Postgres restart | C | Full stack up | `systemctl restart postgresql` mid-run | Engine reconnects and rebuilds state from Postgres; no invariant violation during outage or recovery; commitments (K13) intact after recovery | A11 |
 | TS-N-08 | MQTT (Mosquitto) restart | C | Full stack up | `systemctl restart mosquitto` mid-run | `sim` and engine reconnect; hubs fail to local autonomy during the outage (K6/K7) and resume on reconnect; no duplicate/lost commands beyond the replay-cache window | A11 |
 
-### 4.6 Process-kill matrix (7 systemd units)
+### 4.6 Process-kill matrix (10 systemd units: 6 orchestrator + 4 simulator)
 
 `og-safestop` is a separate row from `og-guardian` — this is the deliberate K8 fix (`02b` §1.3): an earlier draft
 colocated them in one process, which meant killing "guardian+safestop" together was the only testable case and hid
@@ -334,7 +340,10 @@ exactly the failure K8 exists to prevent. TS-C-03 and TS-C-03b are now independe
 | `og-engine` (selector+ledger+allocator+fleet twin+forecast) | Hubs hold lease then local autonomy (K6/K7); guardian idle (no new batches to sign); `og-safestop` remains fully able to engage a stop (K8, see TS-06-23); recovers state from Postgres on restart | TS-C-02 | K1, K2, K6, K7, K8, K13 |
 | `og-guardian` (alone; `og-safestop` stays up) | TIMEOUT semantics (K7): engine holds last grant, no new commands execute; `og-safestop` is unaffected and can still engage a stop with no guardian running (K8); restart resumes signing | TS-C-03 | K3, K4, K5, K7, K8 |
 | `og-safestop` (alone; `og-guardian`/`og-engine` stay up) | Normal dispatch is unaffected (K8's independence cuts both ways: the engine/guardian do not depend on `og-safestop` either); a stop attempted while it is down fails closed (visibly refused, not silently accepted) until restart; restart resumes stop-readiness immediately (no state to rebuild — `og-safestop` is stateless beyond `stop_event`/the retained MQTT topic) | TS-C-03b | K8 |
-| `og-sim` (fleet-sim+grid-sim) | MQTT telemetry stops; `fleet` twin marks all hubs stale within one detection cycle; engine holds; no false commands sent into a void; restart resumes telemetry | TS-C-04 | K6 |
+| `og-sim-fleet` | Hub telemetry and acks stop; the `fleet` twin marks hubs stale within one detection cycle and `ALR-SIM-OFFLINE` is raised (hub liveness signal); the engine holds, no commands are sent into a void; restart resumes telemetry | TS-C-04a | K6 |
+| `og-sim-scada` | SCADA bank readings and utility instructions stop; `ALR-SIM-OFFLINE` (SCADA liveness signal); the `DIST_DEFERRAL` PI loop and G-03 fail closed on a stale reading, never act on a frozen value; restart resumes readings | TS-C-04b | K4, K9 |
+| `og-sim-market` | ERCOT/EIA/NWS calls fail; feed staleness accrues exactly as TS-C-01 (breaker, degraded mode "no new commitments"); existing commitments unaffected | TS-C-04c | K13 |
+| `og-sim-control` | Anomaly injection and the scenario runner are unavailable; dispatch, guardian and safe stop are unaffected (no coupling) | TS-C-04d | — |
 | `og-settle` (settle + health evaluator + trace pruning) | M&V/billing/profitability stop advancing; health/heartbeat aggregation stops (Health screen goes stale, itself an observable symptom); no data loss, no double-counted interval on restart (K2); resumes from last processed interval | TS-C-05 | K2 |
 | `og-api` | Operators lose the console; engine/guardian/safestop/dispatch continue unaffected (no coupling); restart restores UI with correct current state | TS-C-06 | — |
 
@@ -385,9 +394,9 @@ level plus lists every K13/guardian-critical row individually, since those carry
 | TS-01-01…07 | A1, A2, A4–A9, A11 | — | ES01 |
 | TS-02-01…07 | A1, A4, A6, A10 | K13 (TS-02-05/07) | ES02 |
 | TS-03-01…08 | A2, A3, A6, A11 | K1, K6, K7 | ES03 |
-| TS-04-01…16 | A3–A5, A9, A10 | K13 (all) | ES04 |
-| TS-05-01…15 | A2–A6, A10 | K1, K2, K4, K5, K9, K13 | ES05 |
-| TS-06-01…23 | A2, A3, A4, A5, A6, A9, A10 | K1, K3, K4, K5, K6, K7, K8, K9, K10, K12, K13 | ES06 |
+| TS-04-01…18 | A3–A5, A9, A10 | K13 (all) | ES04 |
+| TS-05-01…16 | A2–A6, A8, A10 | K1, K2, K4, K5, K9, K13 | ES05 |
+| TS-06-01…26 | A2, A3, A4, A5, A6, A9, A10 | K1, K3, K4, K5, K6, K7, K8, K9, K10, K12, K13 | ES06 |
 | TS-07-01…06 | A2, A6, A10, A11 | K6, K7, K13 | ES07 |
 | TS-08-01…09 | A7, A8, A10 | K2, K11, K13 | ES08 |
 | TS-09-01…09 | A3, A4, A9, A10 | K10, K11, K13 | ES09 |
@@ -462,7 +471,7 @@ bank) and feeder ramp ceilings (K8). Grown to `FX-FLEET-MVPS-10K` only for the s
 - Gates G1–G5 map directly onto the delivery plan's schedule with explicit entry/exit criteria and a documented
   mutation-testing waiver at G3.
 - Non-functional coverage includes RT cycle p99 < 500 ms at 2k hubs (10k measured), UI ≤ 2 s refresh, ingest
-  freshness, per-process memory, an independent kill test for each of the 7 systemd units (including `og-safestop`
+  freshness, per-process memory, an independent kill test for each of the 10 systemd units (including `og-safestop`
   on its own, TS-C-03b) with its expected degraded behaviour, Postgres/MQTT restart, and a 1-hour soak.
 - A static "no duplicated functions" check (TS-01-07, §3.1) fails the build if a SoC/physics, limit-check, hashing
   or product-rule-rounding formula is re-implemented outside `og.core` — see `02b` §12 for the ownership rule this
