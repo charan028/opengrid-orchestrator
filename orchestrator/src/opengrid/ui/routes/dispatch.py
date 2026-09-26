@@ -68,6 +68,7 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
                 "raw_state": state,
             }
         )
+    shown = sum(len(items) for items in columns.values())
     return {
         "columns": [
             {
@@ -79,6 +80,10 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
             for state in PIPELINE_STATES
         ],
         "total": len(obligations),
+        # EXPIRED/REJECTED/SETTLED rows have no column; say so instead of a total that does not add up
+        # to the cards on the board (seen live: "7 obligations" over a board showing 1).
+        "open": shown,
+        "closed": len(obligations) - shown,
         "customer_count": len({row.get("customer_id") or row.get("contract_id") for row in obligations}),
         "generated_at": now.isoformat(),
     }
@@ -138,6 +143,29 @@ def ledger_timeline_view(
     }
 
 
+def _minutes(value: Any) -> str:
+    """An ISO timestamp cut to minutes for display (the raw value keeps microseconds)."""
+    if not value:
+        return "-"
+    try:
+        return datetime.fromisoformat(str(value)).isoformat(timespec="minutes")
+    except ValueError:
+        return str(value)
+
+
+async def _default_bank_id() -> str:
+    """The first real bank id from the fleet, so the ledger timeline opens on a bank that exists (the
+    old fixed placeholder `BANK-0001` matched nothing live). Falls back to the placeholder if the fleet
+    read fails; the screen then shows its degraded banner from the ledger call as before."""
+    try:
+        raw = await get_json("/og/api/fleet/hubs")
+    except ApiUnavailable:
+        return _DEFAULT_BANK_ID
+    hubs = raw.get("items", []) if isinstance(raw, dict) else []
+    bank_ids = sorted({str(h["bank_id"]) for h in hubs if h.get("bank_id")})
+    return bank_ids[0] if bank_ids else _DEFAULT_BANK_ID
+
+
 def plan_view(plan: dict[str, Any] | None) -> dict[str, Any]:
     """Latest selector plan panel: LP mode vs rule-fallback baseline, solver diagnostics (02b S8
     screen 3)."""
@@ -154,6 +182,7 @@ def plan_view(plan: dict[str, Any] | None) -> dict[str, Any]:
         "gate_kind": plan.get("gate_kind"),
         "horizon_start": plan.get("horizon_start"),
         "horizon_end": plan.get("horizon_end"),
+        "horizon_display": f"{_minutes(plan.get('horizon_start'))} to {_minutes(plan.get('horizon_end'))}",
         "solver_status": plan.get("solver_status"),
         "solver_gap_pct": float(solver_gap) * 100 if solver_gap is not None else None,
         "solver_time_ms": plan.get("solver_time_ms"),
@@ -221,9 +250,10 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
 
 
 @router.get("", response_class=HTMLResponse)
-async def dispatch_page(request: Request, bank_id: str = Query(default=_DEFAULT_BANK_ID)) -> HTMLResponse:
+async def dispatch_page(request: Request, bank_id: str | None = Query(default=None)) -> HTMLResponse:
     """Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S)."""
     now = datetime.now(tz=UTC)
+    bank_id = bank_id or await _default_bank_id()
     degraded: str | None = None
     obligations: list[dict[str, Any]] = []
     plan: dict[str, Any] | None = None

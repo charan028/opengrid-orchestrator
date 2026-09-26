@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse
 
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.role import is_operator, role_of
+from opengrid.ui.routes.health import ack_message
 from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
 from opengrid.ui.templating import templates
 
@@ -79,5 +80,7 @@ async def ack_alert(request: Request, alert_id: int = Form(...)) -> HTMLResponse
         alert = await post_json(f"/og/api/alerts/{alert_id}/ack", {})
     except ApiUnavailable as exc:
         logger.warning("control room alert ack failed for alert_id=%s: %s", alert_id, exc)
-        return templates.TemplateResponse(request, "_partials/alert_ack_result.html", {"message": str(exc)})
+        return templates.TemplateResponse(
+            request, "_partials/alert_ack_result.html", {"message": ack_message(exc, alert_id)}
+        )
     return templates.TemplateResponse(request, "_partials/alert_ack_result.html", {"alert": alert})

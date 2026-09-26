@@ -26,8 +26,8 @@
     {% endwith %}
   </div>
   <div class="og-panel" aria-label="Hub health histogram">
-    <h2>Hub health by zone</h2>
-    <div id="hub-health-chart" style="height: 220px;"></div>
+    <h2>Hub health</h2>
+    <div id="hub-health-chart" style="height: 220px;" data-counts='{{ hub_counts|tojson }}'></div>
   </div>
 </section>
 
@@ -35,6 +35,7 @@
   <div class="og-panel" aria-label="Cycle latency">
     <h2>Cycle latency (p50/p99)</h2>
     <div id="cycle-latency-chart" style="height: 200px;"></div>
+    <p class="og-card-meta">No cycle-latency samples in the health payload yet (og-engine exports no metrics).</p>
   </div>
   <div class="og-panel" aria-label="Alerts">
     <h2>Alerts</h2>
@@ -55,12 +56,16 @@
 {% block scripts %}
 <script>
   document.addEventListener("DOMContentLoaded", function () {
-    og.chart("#hub-health-chart", {
-      grid: { left: 40, right: 10, top: 10, bottom: 30 },
-      xAxis: { type: "category", data: [] },
-      yAxis: { type: "value", name: "hubs" },
-      series: [{ type: "bar", data: [] }],
-    });
+    function renderHubHealth(counts) {
+      og.chart("#hub-health-chart", {
+        grid: { left: 40, right: 10, top: 10, bottom: 30 },
+        xAxis: { type: "category", data: Object.keys(counts) },
+        yAxis: { type: "value", name: "hubs" },
+        series: [{ type: "bar", data: Object.keys(counts).map(function (k) { return counts[k]; }) }],
+      });
+    }
+    // First paint from the same `hub_health_counts` the stream re-sends (was empty until the first frame).
+    renderHubHealth(JSON.parse(document.getElementById("hub-health-chart").dataset.counts || "{}"));
     og.chart("#cycle-latency-chart", {
       grid: { left: 50, right: 10, top: 10, bottom: 20 },
       legend: { data: ["p50", "p99"] },
@@ -79,13 +84,7 @@
       document.getElementById("health-updated").textContent = "live";
       document.getElementById("health-updated").dataset.stale = "false";
       if (data && data.hub_health_counts && typeof data.hub_health_counts === "object") {
-        var counts = data.hub_health_counts;
-        og.chart("#hub-health-chart", {
-          grid: { left: 40, right: 10, top: 10, bottom: 30 },
-          xAxis: { type: "category", data: Object.keys(counts) },
-          yAxis: { type: "value", name: "hubs" },
-          series: [{ type: "bar", data: Object.keys(counts).map(function (k) { return counts[k]; }) }],
-        });
+        renderHubHealth(data.hub_health_counts);
       }
     }, {
       onError: function () {
