@@ -39,6 +39,9 @@ INTERVAL = timedelta(minutes=15)
 #: Present only on a deployed OpenGrid host. There the defaults below are the PRODUCTION og-api, simulator
 #: control plane and database, so the suites refuse to run unless every target is set explicitly.
 PRODUCTION_HOST_MARKER = Path("/etc/opengrid")
+#: Regulated-utility territories (K15): a manual operator command is FREE-market work, which G-33 correctly vetoes
+#: on these hubs, so generic guardian scenarios pick competitive-area hubs.
+REGULATED_ZONES = ("LZ_AEN", "LZ_CPS")
 #: The `slow` marker promises a delivery scenario waits at most about this long for its window (conftest.py).
 MAX_DELIVERY_WAIT = timedelta(minutes=20)
 EXPLICIT_TARGETS = ("OG_E2E_API", "OG_E2E_CONTROL", "OG_E2E_DSN")
@@ -402,16 +405,18 @@ class Stack:
         return self.post(f"/fleet/command/{proposed.json()['proposal_id']}/confirm", user=user)
 
     def online_hub(self, *, exclude_banks: tuple[str, ...] = (), idle: bool = False) -> dict[str, Any]:
-        """An online hub (params + live state), outside `exclude_banks`. `idle=True` wants one at 0 kW, i.e.
+        """An online hub (params + live state) in the ERCOT competitive area, outside `exclude_banks`. `idle=True` wants one at 0 kW, i.e.
         not currently driven by the engine, and skips the test when every hub is being dispatched (the
         engine also dispatches uncommitted headroom, so on a busy stack there may be none)."""
         found = self.rows(
             """SELECT h.hub_id, h.bank_id, h.p_kw AS p_limit_kw, h.e_kwh, h.r_kwh, s.soc_kwh, s.p_kw
                FROM og.hub h JOIN og.hub_state s USING (hub_id)
+               JOIN og.bank b ON b.bank_id = h.bank_id
                WHERE s.health = 'online' AND NOT (h.bank_id = ANY(%(x)s))
+                 AND NOT (b.zone = ANY(%(reg)s))
                  AND (NOT %(idle)s OR s.p_kw = 0)
                ORDER BY s.soc_kwh DESC LIMIT 1""",
-            {"x": list(exclude_banks), "idle": idle},
+            {"x": list(exclude_banks), "idle": idle, "reg": list(REGULATED_ZONES)},
         )
         if not found and idle:
             pytest.skip("every online hub is currently dispatched by the engine; no idle hub to command")
@@ -430,6 +435,20 @@ class Stack:
 
     def clear_anomaly(self, anomaly_id: str) -> None:
         self.control("DELETE", f"/api/anomalies/{anomaly_id}")
+
+    def require_committed(
+        self, obligation: dict[str, Any], what: str = "the scenario's baseline offer"
+    ) -> None:
+        """Skip, not fail, when the stack cannot commit at all: since R2 the selector withholds firm commitments
+        from banks without a zone price forecast (NOT_FOR_FIRM) and while NO_NEW_COMMITMENTS is active, which a
+        fresh dev database or a stale feed produces. A scenario can only test the lock once something commits."""
+        if obligation["state"] == "COMMITTED":
+            return
+        modes = [row["mode"] for row in self.rows("SELECT mode FROM og.degraded_mode_state")]
+        pytest.skip(
+            f"{what} was not committed ({obligation['state']}); degraded modes: {modes or 'none'}. The selector "
+            "withholds banks without a zone price forecast (NOT_FOR_FIRM): let the forecast build history"
+        )
 
     def free_window(
         self, intervals: int, *, first_offset: int = 3, last_offset: int = 88

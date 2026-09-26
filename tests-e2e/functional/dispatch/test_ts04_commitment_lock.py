@@ -43,7 +43,7 @@ def test_ts_04_05_same_tier_rising_value_never_displaces_a_committed_obligation(
     started = now_utc()
     start, end = stack.free_window(2)
     _, first = _commit(stack, "ERCOT_ENERGY", "T2", start=start, end=end, kw=80, value=100)
-    assert first["state"] == "COMMITTED", first
+    stack.require_committed(first)
     locked = stack.active_commitments(first["obligation_id"])
     assert locked and all(kw == Decimal("80.000") for kw in locked.values()), locked
 
@@ -75,7 +75,7 @@ def test_ts_04_06_higher_value_lower_tier_call_gets_only_headroom_over_a_firm_co
     started = now_utc()
     start, end = stack.free_window(2)
     _, firm = _commit(stack, "DIST_DEFERRAL", "T1", start=start, end=end, kw=120, value=120)
-    assert firm["state"] == "COMMITTED", firm
+    stack.require_committed(firm)
     locked = stack.active_commitments(firm["obligation_id"])
 
     market_offer, market = _commit(stack, "ERCOT_ENERGY", "T3", start=start, end=end, kw=5000, value=5000)
@@ -108,8 +108,8 @@ def test_ts_04_15_partial_take_respects_min_qty_and_increment(stack: Stack) -> N
 
     obligation = stack.wait_decided(offer)
 
+    stack.require_committed(obligation)
     taken = stack.active_commitments(obligation["obligation_id"])
-    assert obligation["state"] == "COMMITTED", obligation
     for kw in taken.values():
         assert kw >= Decimal(100), taken
         assert kw % Decimal(100) == 0, f"{kw} kW is not a whole number of 100 kW increments"
@@ -143,6 +143,6 @@ def test_ts_04_16_all_or_nothing_block_is_never_partially_taken(stack: Stack) ->
     assert not stack.active_commitments(too_big["obligation_id"])
 
     fits_offer, fits = block_offer(50)
-    assert fits["state"] == "COMMITTED", fits
+    stack.require_committed(fits)
     taken = stack.active_commitments(fits["obligation_id"])
     assert taken and all(kw == fits_offer.requested_kw for kw in taken.values()), taken
