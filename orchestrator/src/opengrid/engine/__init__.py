@@ -37,7 +37,9 @@ from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
 from opengrid.core.timeutil import floor_to_interval
+from opengrid.engine.gates import run_due_gates
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations
+from opengrid.health.queries import raise_alert
 from opengrid.platform.config import Config
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.process import run_forever
@@ -336,31 +338,15 @@ async def _engine_tick(state: _EngineState) -> None:
         pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
         due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
     )
-    for trigger in triggers:
-        logger.info(
-            "running gate", extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
-        )
-        # opengrid.contracts.intake (BUILD.md intake task): generate this gate's OFFERED opportunities
-        # from live feeds/forecast/contract terms *before* the selector runs, so run_gate always has
-        # this gate's candidates rather than relying on demo seed data (qa/merge-notes.md's "zero
-        # opportunity/obligation rows" finding). Degrade, don't trip: a feed/forecast hiccup here must
-        # never block the selector gate itself.
-        try:
-            await intake.run_intake_gate(trigger.gate_kind, trigger.contract_scope, now=now)
-        except Exception:
-            logger.exception(
-                "intake failed ahead of gate -- running the gate anyway with whatever candidates exist",
-                extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope},
-            )
-        # K7 degrade, don't trip: a failed gate must not skip this tick's allocator cycle, which serves
-        # obligations that are already committed.
-        try:
-            await selector.run_gate(trigger.gate_kind, trigger.contract_scope)
-        except Exception:
-            logger.exception(
-                "selector gate failed",
-                extra={"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope},
-            )
+    # A failed gate is traced + alerted and never skips this tick's allocator cycle (K7/K13).
+    await run_due_gates(
+        triggers,
+        now=now,
+        run_intake=intake.run_intake_gate,
+        run_gate=selector.run_gate,
+        trace=state.trace,
+        raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
+    )
 
     if state.lifecycle_backend is not None:
         try:

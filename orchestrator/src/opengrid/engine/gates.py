@@ -1,0 +1,94 @@
+"""Running the due selector gates inside the og-engine tick (02a S3.1), isolated from the tick's 2 s
+dispatch work.
+
+A gate that fails (solver error, commit-time exception, feed problem) must never cost the allocator
+cycle that serves obligations already committed (K7 degrade-don't-trip, K13 commitment lock): each
+failure is logged, traced and raised as an `ALR-SELECTOR-GATE-FAILED` alert, and the tick continues.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from typing import Any, Protocol
+from uuid import UUID
+
+from opengrid.health.model import AlertFinding
+
+logger = logging.getLogger(__name__)
+
+ALR_SELECTOR_GATE_FAILED = "ALR-SELECTOR-GATE-FAILED"
+_GATE_TRACE_STREAM = "engine-gates"
+
+
+class Trigger(Protocol):
+    @property
+    def gate_kind(self) -> Any: ...
+
+    @property
+    def contract_scope(self) -> UUID | None: ...
+
+
+class TraceAppender(Protocol):
+    async def append(
+        self, stream_id: str, decision_type: Any, event_class: str, payload: dict[str, Any], /
+    ) -> object: ...
+
+
+RunIntake = Callable[..., Awaitable[object]]
+RunGate = Callable[..., Awaitable[object]]
+RaiseAlert = Callable[[AlertFinding], Awaitable[object]]
+
+
+async def run_due_gates(
+    triggers: list[Any],
+    *,
+    now: datetime,
+    run_intake: RunIntake,
+    run_gate: RunGate,
+    trace: TraceAppender,
+    raise_alert: RaiseAlert,
+) -> int:
+    """Run intake then the selector gate for each trigger. Returns the number of gates that failed."""
+    failed = 0
+    for trigger in triggers:
+        scope = {"gate_kind": trigger.gate_kind, "contract_scope": trigger.contract_scope}
+        logger.info("running gate", extra=scope)
+        # Intake generates this gate's OFFERED opportunities from live feeds first; a feed hiccup must
+        # not block the gate itself.
+        try:
+            await run_intake(trigger.gate_kind, trigger.contract_scope, now=now)
+        except Exception:
+            logger.exception("intake failed ahead of gate -- running the gate anyway", extra=scope)
+        try:
+            await run_gate(trigger.gate_kind, trigger.contract_scope)
+        except Exception as exc:
+            failed += 1
+            logger.exception("selector gate failed", extra=scope)
+            await _report_gate_failure(trigger, exc, trace=trace, raise_alert=raise_alert)
+    return failed
+
+
+async def _report_gate_failure(
+    trigger: Any, exc: Exception, *, trace: TraceAppender, raise_alert: RaiseAlert
+) -> None:
+    detail: dict[str, Any] = {
+        "gate_kind": trigger.gate_kind,
+        "contract_scope": str(trigger.contract_scope) if trigger.contract_scope else None,
+        "error": type(exc).__name__,
+        "reason_code": getattr(exc, "reason_code", None),
+    }
+    try:
+        await trace.append(_GATE_TRACE_STREAM, "ALERT", "GATE_FAILED", detail)
+        await raise_alert(
+            AlertFinding(
+                rule=ALR_SELECTOR_GATE_FAILED,
+                severity="warning",
+                summary=f"Selector gate {trigger.gate_kind} failed ({type(exc).__name__})",
+                condition_key=f"gate:{trigger.gate_kind}:{detail['contract_scope']}",
+                detail=detail,
+            )
+        )
+    except Exception:
+        logger.exception("failed to trace/alert a selector gate failure", extra=detail)
