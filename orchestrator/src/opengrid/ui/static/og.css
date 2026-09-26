@@ -451,48 +451,6 @@ html:not(.og-settled) .og-content > * {
   display: none;
 }
 
-/* guardian escalations: a requested safe stop is critical, a conservative scope is a caution */
-.og-guardian-attention {
-  border: 1px solid color-mix(in srgb, var(--status-critical) 45%, var(--border));
-  background: color-mix(in srgb, var(--status-critical) 8%, var(--panel));
-  border-radius: var(--radius-sm);
-  padding: 12px 14px;
-}
-
-.og-guardian-attention h2 {
-  margin: 0 0 8px;
-  font-size: 14px;
-}
-
-.og-guardian-attention ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 10px;
-}
-
-.og-guardian-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
-}
-
-.og-guardian-item.is-stop strong { color: var(--status-critical); }
-.og-guardian-item.is-conservative strong { color: var(--status-caution); }
-
-.og-guardian-rule {
-  color: var(--muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.og-guardian-summary {
-  flex-basis: 100%;
-  font-size: 13px;
-}
-
 /* --- panels / grids -------------------------------------------------------------------------- */
 
 .og-grid {
@@ -2275,16 +2233,132 @@ label > select {
 
 .og-alerts-ack-result { margin-top: 8px; font-size: 13px; }
 
-.og-posture-strip {
+/* --- notification centre (owner UX review R3.1): notices live behind the header bell ------------- */
+
+.og-notify { position: relative; display: inline-flex; }
+
+.og-notify-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.og-notify-bell:hover { border-color: var(--accent); }
+.og-notify-bell:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.og-notify-bell.sev-critical { border-color: color-mix(in srgb, var(--status-critical) 60%, var(--border)); }
+.og-notify-bell.sev-warning { border-color: color-mix(in srgb, var(--status-caution) 60%, var(--border)); }
+
+.og-notify-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  background: var(--status-info);
+  color: var(--accent-ink);
+}
+
+.og-notify-bell.sev-critical .og-notify-badge { background: var(--status-critical); color: var(--bg); }
+.og-notify-bell.sev-warning .og-notify-badge { background: var(--status-caution); color: var(--bg); }
+
+.og-notify-panel {
+  position: fixed;
+  inset: 64px 24px auto auto;
+  margin: 0;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(70vh, 640px);
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+}
+
+.og-notify-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.og-notify-head h2 { margin: 0; font-size: 15px; }
+
+.og-notify-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.og-notify-empty { color: var(--muted); font-size: 13px; }
+.og-notify-group { margin-top: 12px; }
+
+.og-notify-group h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.og-notify-group-count { font-variant-numeric: tabular-nums; }
+.og-notify-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.og-notify-item {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 10px;
-  padding: 8px 14px;
-  border: 1px solid color-mix(in srgb, var(--status-caution) 45%, var(--border));
-  background: color-mix(in srgb, var(--status-caution) 10%, var(--panel));
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: 13px;
 }
 
-.og-posture-why { color: var(--muted); font-size: 12px; }
+.og-notify-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--status-info);
+}
+
+.og-notify-item.sev-critical .og-notify-dot { background: var(--status-critical); }
+.og-notify-item.sev-warning .og-notify-dot { background: var(--status-caution); }
+.og-notify-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.og-notify-detail { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.og-notify-times { color: var(--muted); font-variant-numeric: tabular-nums; }
+.og-notify-action { flex: none; padding: 4px 10px; font-size: 12px; }
+.og-notify-more { display: inline-block; margin-top: 6px; font-size: 12px; }
+
+/* the ONE line allowed above the content, only while a critical state is active */
+.og-critical-strip:empty,
+.og-critical-strip[hidden] { display: none; }
+
+.og-critical-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 32px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid color-mix(in srgb, var(--status-critical) 45%, var(--border));
+  background: color-mix(in srgb, var(--status-critical) 12%, var(--panel));
+}
+
+.og-critical-line strong { color: var(--status-critical); overflow: hidden; text-overflow: ellipsis; }

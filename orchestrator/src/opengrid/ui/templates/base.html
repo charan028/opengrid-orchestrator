@@ -37,7 +37,8 @@
     <symbol id="i-octagon" viewBox="0 0 24 24"><path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
     <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
     <symbol id="i-wave" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
-    <symbol id="i-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m10 8 6 4-6 4Z"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
+    <symbol id="i-play"viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m10 8 6 4-6 4Z"/></symbol>
   </svg>
   <div class="og-shell">
     <nav class="og-nav" aria-label="Screens">
@@ -83,8 +84,19 @@
     <div class="og-main">
       <header class="og-header">
         <h1>{% block header_title %}{% endblock %}</h1>
-        <div class="og-header-actions">{% block header_actions %}{% endblock %}</div>
+        <div class="og-header-actions">{% block header_actions %}{% endblock %}
+          {# Notification centre (owner UX review R3.1): every notice lives behind this bell, not above the
+             content. Refreshed every 30 s (not while open) and whenever alerts change. #}
+          <div class="og-notify" id="og-notify" hx-get="{{ base_path }}/alerts/notifications"
+               hx-trigger="load, every 30s[!og.notifyOpen()], og-alerts-changed from:body" hx-swap="innerHTML">
+            <button type="button" class="og-notify-bell sev-none" id="og-notify-bell" disabled aria-label="Notifications (loading)">
+              <svg class="og-icon" aria-hidden="true"><use href="#i-bell"/></svg>
+            </button>
+          </div>
+        </div>
       </header>
+      {# At most one thin line, and only while a CRITICAL state is active (a requested safe stop, a fleet hold). #}
+      <div class="og-critical-strip" id="og-critical-strip" aria-live="assertive" aria-atomic="true"></div>
       <main class="og-content">
         {% if degraded %}
         <div class="og-degraded-banner" role="alert">Degraded: {{ degraded }}</div>

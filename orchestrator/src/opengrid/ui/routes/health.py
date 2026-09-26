@@ -100,13 +100,6 @@ def degraded_modes_of(health: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(str(mode) for mode in raw if mode))
 
 
-def degraded_mode_banner_text(modes: Iterable[str]) -> str | None:
-    """ "Feed stale + Guardian down", or None when nothing is degraded. An unknown mode is shown by its code,
-    never dropped: a degraded system must not look healthy because the console is behind the API."""
-    labels = [DEGRADED_MODE_LABELS.get(mode, mode) for mode in modes]
-    return " + ".join(labels) if labels else None
-
-
 def guardian_attention(alerts: Iterable[Any]) -> list[dict[str, Any]]:
     """The guardian's escalation alerts (ES06-S04), safe-stop requests first. A request links to the Fleet
     screen's two-step safe-stop form prefilled with the requested scope; the operator still proposes and
@@ -116,8 +109,8 @@ def guardian_attention(alerts: Iterable[Any]) -> list[dict[str, Any]]:
         if not isinstance(alert, dict):
             continue
         rule = alert.get("rule")
-        # CONSERVATIVE scopes are summarised by the posture strip (current posture, not alerts); only a
-        # safe-stop REQUEST stays a prominent item here.
+        # CONSERVATIVE scopes come from the guardian's current posture (notification centre, Safety); only
+        # a safe-stop REQUEST is an escalation item here.
         if rule != SAFE_STOP_REQUESTED_RULE:
             continue
         summary = str(alert.get("summary") or "")
@@ -142,19 +135,6 @@ def guardian_attention(alerts: Iterable[Any]) -> list[dict[str, Any]]:
         )
     items.sort(key=lambda item: not item["stop_requested"])
     return items
-
-
-def degraded_context(health: dict[str, Any]) -> dict[str, Any]:
-    """Template context shared by the Health and Control room screens: the degraded-mode banner, the
-    guardian escalations, and the label table the live-stream handler uses (`og.renderDegradedBanner`)."""
-    modes = degraded_modes_of(health)
-    alerts = health.get("alerts") if isinstance(health.get("alerts"), list) else []
-    return {
-        "degraded_modes": modes,
-        "degraded_mode_banner": degraded_mode_banner_text(modes),
-        "degraded_mode_labels": DEGRADED_MODE_LABELS,
-        "guardian_items": guardian_attention(alerts or []),
-    }
 
 
 def _feed_row(entry: dict[str, Any]) -> dict[str, Any]:
@@ -191,9 +171,8 @@ async def health_screen(request: Request) -> HTMLResponse:
     feeds = health.get("feeds", []) if isinstance(health.get("feeds"), list) else []
     alerts = health.get("alerts", []) if isinstance(health.get("alerts"), list) else []
 
-    from opengrid.ui.routes.alerts import panel_context, posture_context
+    from opengrid.ui.routes.alerts import panel_context
 
-    posture = await posture_context()
     return templates.TemplateResponse(
         request,
         "health.html",
@@ -207,14 +186,12 @@ async def health_screen(request: Request) -> HTMLResponse:
             "hub_counts": health.get("hub_health_counts") or {},
             "degraded": degraded,
             "rendered_at": datetime.now(UTC).isoformat(),
-            **degraded_context(health),
             **panel_context(
                 request,
                 list(health.get("alerts") or []) if isinstance(health, dict) else [],
                 panel_id="health",
                 params=dict(request.query_params),
             ),
-            **posture,
         },
     )
 
