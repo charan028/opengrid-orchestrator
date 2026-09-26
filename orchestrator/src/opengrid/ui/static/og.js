@@ -77,7 +77,10 @@
     if (ageS < 3600) {
       return Math.round(ageS / 60) + "m";
     }
-    return Math.round(ageS / 3600) + "h";
+    if (ageS < 172800) {
+      return Math.round(ageS / 3600) + "h";
+    }
+    return Math.round(ageS / 86400) + "d";
   };
 
   /**
