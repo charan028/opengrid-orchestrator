@@ -66,15 +66,6 @@ def _cycles(stack: Stack, obligation_id, since) -> list[dict]:
     return list(cycles.values())[1:-1]  # drop possibly-partial first and last cycles
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (D-17): after the L2 BLOCK is lifted the blocked bank's share never returns -- the obligation stays at "
-        "the best-effort remainder (e.g. 100 of 400 kW) for 60 s+ and stays SHORTFALL/AT_RISK. The sim publishes "
-        "the lift (expires_at = now, seen on the wire), the bank's hubs are online and its reservation is intact. "
-        "Reproduced on a clean dev DB, main @ 434d230."
-    ),
-)
 def test_d17_an_l2_block_gives_best_effort_shortfall_and_the_lift_restores_the_commitment(
     stack: Stack, delivering: tuple[Offer, dict]
 ) -> None:
