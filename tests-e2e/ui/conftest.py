@@ -12,8 +12,10 @@ Two modes, chosen by `OG_UI_BASE_URL`:
   `test_polling_and_live.py` for the live-stack-only update test).
 * set (e.g. `http://localhost:8080`): the tests run against that dev stack unchanged.
 
-Roles: the UI reads `X-OG-Role` (`opengrid.ui.role`); `operator_page`/`viewer_page` set it through the
-browser context's `extra_http_headers`, so every document, htmx and EventSource request carries it.
+Roles: the UI derives the role from the proxy-verified `X-Remote-User` only (`opengrid.ui.role`; a
+client-supplied `X-OG-Role` is ignored). `operator_page`/`viewer_page` set the identity (plus, in fixture
+mode, the proxy secret) through the browser context's `extra_http_headers`, so every document, htmx and
+EventSource request carries it.
 """
 
 from __future__ import annotations
@@ -36,7 +38,6 @@ from fastapi.responses import StreamingResponse
 from playwright.sync_api import Browser, Page
 
 LIVE_BASE_URL_ENV = "OG_UI_BASE_URL"
-ROLE_HEADER = "X-OG-Role"
 # `opengrid.ui.role` trusts `X-Remote-User` only when the request also carries the proxy secret that
 # Apache (or the dev proxy) injects as `X-OG-Proxy-Auth` (`opengrid.api.auth.proxy_authenticated`), and
 # maps the identity to a role through `[api.roles]` on `app.state.config`. Fixture mode sets both.
@@ -189,7 +190,7 @@ def ui_base_url() -> Iterator[str]:
 
 
 def _role_page(browser: Browser, base_url: str, role: str) -> Iterator[Page]:
-    headers = {ROLE_HEADER: role, "X-Remote-User": role}
+    headers = {"X-Remote-User": role}
     if not live_base_url():
         headers[PROXY_AUTH_HEADER] = os.environ.get("OG_API_PROXY_SECRET", PROXY_SECRET)
     context = browser.new_context(base_url=base_url, extra_http_headers=headers)
