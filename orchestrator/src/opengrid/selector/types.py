@@ -74,6 +74,10 @@ class CommittedObligation:
     eligible_bank_ids: tuple[str, ...]
     committed_kw_by_interval: dict[int, float]
     degradation_cost_per_kwh: float = 0.03
+    energy_hold_h: float = 0.0
+    """ERCOT_AS capacity hold (NPRR1282): > 0 means the award does NOT drain the bank each interval;
+    instead the bank must keep `kW x energy_hold_h / eta_d` above its reserve floor (Non-Spin 4 h, ECRS
+    1 h) while the award is held. 0 = an ordinary delivery that discharges its profile."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +108,9 @@ class CandidateOpportunity:
     service_type: str = ""
     """The contract's service type (e.g. DATA_CENTER): PQ-sensitive profiles are capped at their
     PQ-eligible capacity at commit time (WP-D)."""
+    energy_hold_h: float = 0.0
+    """As `CommittedObligation.energy_hold_h`: an ERCOT_AS candidate is selectable only where the bank
+    can hold `kW x energy_hold_h / eta_d` above reserve; it never drains SoC while held."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +134,14 @@ class ModelInputs:
     @property
     def interval_hours(self) -> float:
         return self.interval_minutes / 60.0
+
+    def energy_hold_hours(self) -> dict[str, float]:
+        """ybar key (committed `obligation_id` / candidate `opportunity_id`) -> energy-hold hours: the
+        ERCOT_AS capacity holds that lock kW and stored energy instead of draining SoC (model + validate
+        must agree on exactly this set)."""
+        holds = {co.obligation_id: co.energy_hold_h for co in self.committed if co.energy_hold_h > 0}
+        holds.update({c.opportunity_id: c.energy_hold_h for c in self.candidates if c.energy_hold_h > 0})
+        return holds
 
 
 @dataclass(frozen=True, slots=True)

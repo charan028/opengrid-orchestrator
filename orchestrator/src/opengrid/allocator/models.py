@@ -85,6 +85,15 @@ class ObligationCall:
     #: Already escalated to SHORTFALL mid-window: still dispatched best-effort (owner decision 2026-09-26),
     #: its partial grants carry the shortfall code G-19 corroborates.
     in_shortfall: bool = False
+    #: ERCOT_AS only: ERCOT has deployed this award right now (`og.as_deployment`). An AS award is a
+    #: CAPACITY HOLD: undeployed it is granted 0 kW discharge with its reservation kept (K13), and
+    #: discharges up to `committed_kw` only while deployed.
+    as_deployed: bool = False
+
+    @property
+    def is_as_hold(self) -> bool:
+        """An ERCOT_AS capacity hold not currently deployed: 0 kW, capacity and energy stay locked."""
+        return self.service_type == "ERCOT_AS" and not self.as_deployed
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +167,9 @@ class LedgerView:
 @dataclass(frozen=True, slots=True)
 class Schedule:
     prices: tuple[PriceSignal, ...] = ()
+    #: K7 escalation (og.scope_posture CONSERVATIVE, written by the guardian): banks that get NO new
+    #: uncommitted/market dispatch (headroom export); committed obligations continue under K13 best effort.
+    conservative_bank_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,3 +212,5 @@ class CycleResult:
     grants: tuple[ProposedGrant, ...] = field(default_factory=tuple)
     shortfalls: tuple[ShortfallReport, ...] = field(default_factory=tuple)
     substitutions: tuple[SubstitutionEvent, ...] = field(default_factory=tuple)
+    #: ERCOT_AS obligations held this cycle (undeployed capacity hold: 0 kW, reservation kept).
+    held: tuple[str, ...] = field(default_factory=tuple)

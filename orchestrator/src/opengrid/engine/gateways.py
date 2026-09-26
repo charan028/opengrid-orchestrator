@@ -92,7 +92,18 @@ SELECT r.obligation_id, r.bank_id,
        SUM(r.amount * EXTRACT(EPOCH FROM (r.interval_end - GREATEST(r.interval_start, %(now)s))) / 3600.0)
            AS required_kwh,
        MAX(r.interval_end) AS draw_end,
-       c.customer_id
+       c.customer_id,
+       o.service_type,
+       -- ERCOT_AS energy hold: the award's kW now (or at its start within the look-ahead) and the
+       -- product's full-deployment duration (Non-Spin 240 min, ECRS 60 min: product_rule.duration_minutes).
+       MAX(r.amount) FILTER (WHERE r.interval_start <= %(lookahead_end)s) AS hold_kw,
+       (SELECT MAX(pr.duration_minutes) FROM og.product_rule pr WHERE pr.contract_id = o.contract_id)
+           AS duration_minutes,
+       EXISTS (
+           SELECT 1 FROM og.as_deployment d
+           WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+             AND (d.obligation_id IS NULL OR d.obligation_id = r.obligation_id)
+       ) AS as_deployed
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.contract c ON c.contract_id = o.contract_id
@@ -102,8 +113,20 @@ WHERE r.released_at IS NULL
   AND o.state IN ('COMMITTED', 'DELIVERING', 'SHORTFALL')
   AND o.window_start <= %(lookahead_end)s
   AND r.interval_end > %(now)s
-GROUP BY r.obligation_id, r.bank_id, c.customer_id
+GROUP BY r.obligation_id, r.bank_id, c.customer_id, o.service_type, o.contract_id
 """
+
+#: Full-deployment duration assumed for an ERCOT_AS award whose product rule has none (ECRS, the shortest).
+DEFAULT_AS_DEPLOYMENT_MINUTES = 60
+
+
+def as_energy_hold(now: datetime, hold_kw: object, duration_minutes: object) -> tuple[float, datetime]:
+    """`(kW, draw end)` of an ERCOT_AS award's energy hold: its committed kW sustained for the product's
+    full deployment duration from now. `evaluate_energy_sufficiency` then requires `kW x duration` of
+    deliverable energy, i.e. `kW x duration / eta_d` stored above the reserve floor."""
+    minutes = float(str(duration_minutes)) if duration_minutes else float(DEFAULT_AS_DEPLOYMENT_MINUTES)
+    return float(str(hold_kw)) if hold_kw else 0.0, now + timedelta(minutes=minutes)
+
 
 #: Obligations whose window starts within this many seconds are energy-checked ahead of delivery.
 DEFAULT_ENERGY_LOOKAHEAD_S = 900.0
@@ -114,15 +137,45 @@ DEFAULT_ENERGY_LOOKAHEAD_S = 900.0
 # uses one system-wide price for the $/MWh threshold, per 02a S5.5's single hysteresis/hub.
 _PRICE_PRODUCT = "np6-905-cd"
 
-_LATEST_PRICE_SQL = """
-SELECT value FROM og.feed_obs WHERE source = 'ERCOT' AND product = %(product)s
-ORDER BY ts DESC LIMIT 1
+# The latest real-time SPP per load zone (`series` = LZ_*): each bank is priced at its OWN zone. One price
+# row for every bank (whichever zone happened to be written last) mispriced the whole fleet.
+_LATEST_ZONE_PRICES_SQL = """
+SELECT DISTINCT ON (series) series, value
+FROM og.feed_obs
+WHERE source = 'ERCOT' AND product = %(product)s AND ts > now() - interval '6 hours'
+ORDER BY series, ts DESC, recorded_at DESC
 """
+
+_CONSERVATIVE_SCOPES_SQL = "SELECT scope_kind, scope_ref FROM og.scope_posture WHERE posture = 'CONSERVATIVE'"
+
+
+def _bank_zone(bank_id: str) -> str | None:
+    try:
+        return fleet.bank_zone(bank_id)
+    except LookupError:
+        return None
+
+
+def bank_price(zone: str | None, price_by_zone: dict[str, float]) -> float:
+    """A bank's live $/MWh: its own load zone's SPP; with no zone price, the mean of the zones seen (a
+    documented fallback, never an arbitrary single zone); 0.0 when no price is observed at all."""
+    if zone is not None and zone in price_by_zone:
+        return price_by_zone[zone]
+    load_zones = [v for k, v in price_by_zone.items() if k.startswith("LZ_")] or list(price_by_zone.values())
+    return sum(load_zones) / len(load_zones) if load_zones else 0.0
+
 
 # Active (COMMITTED/DELIVERING) obligations' calls on the given banks for "now" (02a S1's active_calls):
 # the reservation is the K13 frozen floor; obligation/opportunity give service_type/tier/value.
 _ACTIVE_CALLS_SQL = """
-SELECT r.obligation_id, r.bank_id, r.amount, o.service_type, o.tier, op.value_per_mwh, o.state
+SELECT r.obligation_id, r.bank_id, r.amount, o.service_type, o.tier, op.value_per_mwh, o.state,
+       -- ERCOT_AS is a capacity hold: it discharges only while ERCOT has deployed it (og.as_deployment,
+       -- one obligation or every ERCOT_AS award when obligation_id is NULL).
+       EXISTS (
+           SELECT 1 FROM og.as_deployment d
+           WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+             AND (d.obligation_id IS NULL OR d.obligation_id = o.obligation_id)
+       ) AS as_deployed
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
@@ -234,17 +287,38 @@ class EngineScheduleGateway:
 
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
+        self._posture_warned = False
 
     async def schedule(self, bank_ids: Sequence[str]) -> Schedule:
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_LATEST_PRICE_SQL, {"product": _PRICE_PRODUCT})
-            row = await cur.fetchone()
-        if row is None:
+            await cur.execute(_LATEST_ZONE_PRICES_SQL, {"product": _PRICE_PRODUCT})
+            zone_rows = await cur.fetchall()
+        conservative = await self._conservative_scopes()
+        price_by_zone = {str(series): float(value) for series, value in zone_rows}
+        prices = []
+        conservative_banks: set[str] = set()
+        for bank_id in bank_ids:
+            zone = _bank_zone(bank_id)
+            prices.append(PriceSignal(bank_id=bank_id, price_usd_per_mwh=bank_price(zone, price_by_zone)))
+            if ("BANK", bank_id) in conservative or (zone is not None and ("ZONE", zone) in conservative):
+                conservative_banks.add(bank_id)
+        if not price_by_zone:
             logger.warning("no live price observed yet; allocator sees price=0.0 this cycle")
-            price = 0.0
-        else:
-            price = float(row[0])
-        return Schedule(prices=tuple(PriceSignal(bank_id=b, price_usd_per_mwh=price) for b in bank_ids))
+        return Schedule(prices=tuple(prices), conservative_bank_ids=frozenset(conservative_banks))
+
+    async def _conservative_scopes(self) -> set[tuple[str, str]]:
+        """K7 escalation: the guardian's CONSERVATIVE scopes (og.scope_posture, migration 0019). Unreadable
+        (e.g. before 0019 is applied) means none -- never a reason to stop committed dispatch."""
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_CONSERVATIVE_SCOPES_SQL)
+                rows = await cur.fetchall()
+        except Exception:
+            if not self._posture_warned:
+                logger.warning("og.scope_posture unreadable; no CONSERVATIVE scopes applied", exc_info=True)
+                self._posture_warned = True
+            return set()
+        return {(str(kind), str(ref)) for kind, ref in rows}
 
     async def instructions(self, bank_ids: Sequence[str]) -> Sequence[Instruction]:
         instructions: list[Instruction] = []
@@ -283,7 +357,16 @@ class EngineLedgerGateway:
         prior_by_obligation = {str(obligation_id): float(kw) for obligation_id, kw in prior_rows}
 
         calls: list[ObligationCall] = []
-        for obligation_id, bank_id, amount, service_type, tier, value_per_mwh, state in call_rows:
+        for (
+            obligation_id,
+            bank_id,
+            amount,
+            service_type,
+            tier,
+            value_per_mwh,
+            state,
+            as_deployed,
+        ) in call_rows:
             try:
                 eligible_hub_ids = tuple(
                     s.hub_id for s in fleet.hub_capabilities(bank_id) if s.health == "online"
@@ -303,6 +386,7 @@ class EngineLedgerGateway:
                     prior_granted_kw=prior_by_obligation.get(str(obligation_id)),
                     value_per_mwh=float(value_per_mwh) if value_per_mwh is not None else 0.0,
                     in_shortfall=state == "SHORTFALL",
+                    as_deployed=bool(as_deployed),
                 )
             )
         return LedgerView(calls=tuple(calls))
@@ -430,6 +514,7 @@ class EnergySufficiencyGateway:
         # Obligations currently AT_RISK: the trace/alert is written on ENTRY only, not every 2 s cycle.
         self._at_risk: set[str] = set()
         self._alerts_swept = False
+        self.as_hold_ids: set[str] = set()
 
     async def run(self, now: datetime) -> list[EnergySufficiencyResult]:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -440,12 +525,26 @@ class EnergySufficiencyGateway:
 
         # (obligation_id, average kW over the remaining draw, draw end, customer_id) per bank.
         by_bank: dict[str, list[tuple[str, float, datetime, str | None]]] = {}
-        for obligation_id, bank_id, required_kwh, draw_end, customer_id in rows:
-            remaining_h = max((draw_end - now).total_seconds(), 0.0) / 3600.0
-            avg_kw = float(required_kwh) / remaining_h if remaining_h > 0 else 0.0
+        as_holds: set[str] = set()
+        for row in rows:
+            obligation_id, bank_id, required_kwh, draw_end, customer_id = row[:5]
+            service_type, hold_kw, duration_minutes, as_deployed = (*row[5:9], None, None, None, False)[:4]
+            if service_type == "ERCOT_AS":
+                # Energy hold (Frank #6, NPRR1282): an AS award must keep enough energy above the reserve
+                # floor for a FULL deployment of its committed kW -- held or deployed -- not just the kWh
+                # of its remaining window.
+                kw, draw_end = as_energy_hold(now, hold_kw, duration_minutes)
+                if not as_deployed:
+                    as_holds.add(str(obligation_id))
+            else:
+                remaining_h = max((draw_end - now).total_seconds(), 0.0) / 3600.0
+                kw = float(required_kwh) / remaining_h if remaining_h > 0 else 0.0
             by_bank.setdefault(bank_id, []).append(
-                (str(obligation_id), avg_kw, draw_end, str(customer_id) if customer_id else None)
+                (str(obligation_id), kw, draw_end, str(customer_id) if customer_id else None)
             )
+        #: Undeployed AS holds this cycle: energy-short is AT_RISK for them, never a SHORTFALL escalation
+        #: (nothing is being delivered short -- the hold itself is the service).
+        self.as_hold_ids = as_holds
 
         if not self._alerts_swept:
             # Reconcile with alerts a previous engine raised (review #14): an obligation whose alert is

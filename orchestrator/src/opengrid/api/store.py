@@ -221,6 +221,25 @@ class StoreProtocol(Protocol):
         guardian's `requested_at`; defaults to the insert time)."""
         ...
 
+    async def insert_as_deployment(
+        self,
+        *,
+        obligation_id: UUID | None,
+        start_at: datetime,
+        end_at: datetime,
+        requested_by: str,
+        reason: str,
+    ) -> UUID:
+        """An ERCOT_AS deployment (`og.as_deployment`, source OPERATOR): the held award(s) discharge up to
+        their committed kW while it is active. `obligation_id` None deploys every ERCOT_AS award."""
+        ...
+
+    async def list_active_as_deployments(self) -> list[dict[str, Any]]: ...
+
+    async def cancel_as_deployment(self, deployment_id: UUID) -> bool:
+        """End an active deployment now (sets `cancelled_at`; never a delete). False if none active."""
+        ...
+
 
 def _row_or_none(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return rows[0] if rows else None
@@ -679,6 +698,48 @@ class PgStore:
             ),
         )
         return action_id
+
+    # -- ERCOT_AS deployments (og.as_deployment, migration 0020) -----------------------------------
+
+    async def insert_as_deployment(
+        self,
+        *,
+        obligation_id: UUID | None,
+        start_at: datetime,
+        end_at: datetime,
+        requested_by: str,
+        reason: str,
+    ) -> UUID:
+        deployment_id = uuid4()
+        await self._execute(
+            """
+            INSERT INTO og.as_deployment
+                (deployment_id, obligation_id, start_at, end_at, source, requested_by, reason)
+            VALUES (%s, %s, %s, %s, 'OPERATOR', %s, %s)
+            """,
+            (deployment_id, obligation_id, start_at, end_at, requested_by, reason),
+        )
+        return deployment_id
+
+    async def list_active_as_deployments(self) -> list[dict[str, Any]]:
+        return await self._fetch(
+            """
+            SELECT deployment_id, obligation_id, start_at, end_at, source, requested_by, reason
+            FROM og.as_deployment
+            WHERE cancelled_at IS NULL AND end_at > now()
+            ORDER BY start_at
+            """
+        )
+
+    async def cancel_as_deployment(self, deployment_id: UUID) -> bool:
+        updated = await self._execute(
+            """
+            UPDATE og.as_deployment SET cancelled_at = now()
+            WHERE deployment_id = %s AND cancelled_at IS NULL AND end_at > now()
+            """,
+            (deployment_id,),
+        )
+        return updated > 0
 
 
 def jsonb(obj: dict[str, Any]) -> Jsonb:

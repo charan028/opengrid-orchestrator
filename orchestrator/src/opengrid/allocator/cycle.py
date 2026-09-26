@@ -91,6 +91,7 @@ def cycle(
     grants: list[ProposedGrant] = []
     shortfalls: list[ShortfallReport] = []
     substitutions: list[SubstitutionEvent] = []
+    held: list[str] = []
 
     for bank in sorted(fleet_state.banks, key=lambda b: b.bank_id):
         bank_id = bank.bank_id
@@ -135,9 +136,18 @@ def cycle(
         # has already granted each hub and subtract it before the NEXT obligation's water-fill, so no
         # hub is ever granted beyond its own capability across obligations.
         granted_kw_by_hub: dict[str, float] = {}
+        bank_has_as_hold = False
         for call in sorted(calls, key=lambda c: c.obligation_id):
             tier_granted = tier_result.granted_kw.get(call.obligation_id, 0.0)
             reason_code = reasons.R_GRANT_COMMITTED
+
+            if call.is_as_hold:
+                # ERCOT_AS is a capacity hold (NPRR1282): undeployed it discharges nothing. Its tier
+                # allocation stays out of `remaining_headroom` (K13: the capacity stays locked, never
+                # exported), and no shortfall is reported -- holding IS delivering the service.
+                held.append(call.obligation_id)
+                bank_has_as_hold = True
+                continue
 
             if call.service_type == "DIST_DEFERRAL" and not pi_extra_applied and pi_extra_kw > _EPS:
                 tier_granted += pi_extra_kw
@@ -183,6 +193,11 @@ def cycle(
                     )
                 )
 
+        if bank_has_as_hold or bank_id in schedule.conservative_bank_ids:
+            # A held AS award's ENERGY must stay above the reserve floor for a full deployment (Non-Spin
+            # 4 h, ECRS 1 h): spot-exporting the bank's free headroom would spend exactly that energy.
+            # A CONSERVATIVE scope (K7 escalation) takes no new uncommitted/market dispatch either.
+            continue
         spot_kw, new_dwell = price_responsive_schedule(
             remaining_headroom,
             prices_by_bank.get(bank_id, 0.0),
@@ -211,6 +226,7 @@ def cycle(
         grants=tuple(grants),
         shortfalls=tuple(shortfalls),
         substitutions=tuple(substitutions),
+        held=tuple(sorted(set(held))),
     )
 
 

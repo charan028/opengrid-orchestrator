@@ -198,24 +198,54 @@ async def test_schedule_gateway_instructions_from_fleet_twin():
     assert instructions[0].limit_kw == 10.0
 
 
-async def test_schedule_gateway_reads_latest_price_from_feed_obs():
-    cursor = FakeCursor([(23.45,)])
+async def test_schedule_gateway_prices_each_bank_at_its_own_zone():
+    """Architect finding (b): one price row (whichever zone was written last) was applied to every bank.
+    Each bank now gets its own load zone's SPP; a bank with no zone price gets the zones' mean."""
+    await _seed_fleet()  # bank-000 is LZ_NORTH; bank-001 is unknown to the twin
+    cursor = FakeCursor([[("LZ_NORTH", 23.45), ("LZ_WEST", 40.0), ("LZ_SOUTH", 30.0)], []])
     gw = EngineScheduleGateway(pool=FakePool(cursor))
     schedule = await gw.schedule(["bank-000", "bank-001"])
-    assert {p.bank_id for p in schedule.prices} == {"bank-000", "bank-001"}
-    assert all(p.price_usd_per_mwh == 23.45 for p in schedule.prices)
+    by_bank = {p.bank_id: p.price_usd_per_mwh for p in schedule.prices}
+    assert by_bank["bank-000"] == 23.45
+    assert by_bank["bank-001"] == pytest.approx((23.45 + 40.0 + 30.0) / 3)
+    assert schedule.conservative_bank_ids == frozenset()
 
 
 async def test_schedule_gateway_defaults_to_zero_price_when_no_data():
-    gw = EngineScheduleGateway(pool=FakePool(FakeCursor([None])))
+    gw = EngineScheduleGateway(pool=FakePool(FakeCursor([[], []])))
     schedule = await gw.schedule(["bank-000"])
     assert schedule.prices[0].price_usd_per_mwh == 0.0
+
+
+@pytest.mark.parametrize("scope", [("BANK", "bank-000"), ("ZONE", "LZ_NORTH")])
+async def test_schedule_gateway_marks_conservative_scopes(scope):
+    """K7 escalation (og.scope_posture): a CONSERVATIVE bank, or any bank in a CONSERVATIVE zone, gets no
+    new uncommitted dispatch; the allocator reads it from the schedule."""
+    await _seed_fleet()
+    cursor = FakeCursor([[("LZ_NORTH", 20.0)], [scope]])
+    schedule = await EngineScheduleGateway(pool=FakePool(cursor)).schedule(["bank-000"])
+    assert schedule.conservative_bank_ids == frozenset({"bank-000"})
+
+
+async def test_schedule_gateway_survives_a_missing_scope_posture_table():
+    class _Failing(FakeCursor):
+        async def execute(self, sql, params=None):
+            if "scope_posture" in sql:
+                raise RuntimeError('relation "og.scope_posture" does not exist')
+            await super().execute(sql, params)
+
+    await _seed_fleet()
+    schedule = await EngineScheduleGateway(pool=FakePool(_Failing([[("LZ_NORTH", 20.0)]]))).schedule(
+        ["bank-000"]
+    )
+    assert schedule.conservative_bank_ids == frozenset()
+    assert schedule.prices[0].price_usd_per_mwh == 20.0
 
 
 async def test_ledger_gateway_ledger_view_builds_obligation_calls():
     await _seed_fleet()
     obligation_id = uuid4()
-    call_row = (obligation_id, "bank-000", Decimal("3.5"), "HOME", "L1", None, "SHORTFALL")
+    call_row = (obligation_id, "bank-000", Decimal("3.5"), "HOME", "L1", None, "SHORTFALL", False)
     prior_rows: list = []
     cursor = FakeCursor([[call_row], prior_rows])
     gw = EngineLedgerGateway(pool=FakePool(cursor))
@@ -231,6 +261,20 @@ async def test_ledger_gateway_ledger_view_builds_obligation_calls():
     assert call.prior_granted_kw is None
     assert call.value_per_mwh == 0.0
     assert call.in_shortfall  # still dispatched best-effort (owner decision 2026-09-26)
+    assert not call.as_deployed
+
+
+@pytest.mark.parametrize("deployed", [False, True])
+async def test_ledger_gateway_carries_the_as_deployment_flag(deployed):
+    """ERCOT_AS is a capacity hold: the call says whether ERCOT has deployed it right now."""
+    await _seed_fleet()
+    row = (uuid4(), "bank-000", Decimal("100"), "ERCOT_AS", "T2", Decimal("5.37"), "DELIVERING", deployed)
+    view = await EngineLedgerGateway(pool=FakePool(FakeCursor([[row], []]))).ledger_view(
+        ["bank-000"], datetime.now(UTC)
+    )
+    (call,) = view.calls
+    assert call.as_deployed is deployed
+    assert call.is_as_hold is (not deployed)
 
 
 async def test_ledger_gateway_persist_grants_and_version(monkeypatch: pytest.MonkeyPatch):
