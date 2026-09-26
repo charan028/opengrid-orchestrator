@@ -15,12 +15,24 @@ SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 FAST_SPEED = 1_000_000.0  # collapses every step's wait to ~0s so tests run instantly
 
 
-def test_all_six_shipped_scenarios_load_without_error():
+CORE_SCENARIOS = {
+    "bank_overload_and_utility_limit",
+    "compound_stress",
+    "feed_outage_and_stale",
+    "price_spike_during_delivery",
+    "tampered_command",
+    "zone_comms_loss",
+}
+
+
+def test_all_shipped_scenarios_load_without_error():
+    """The six core scenarios plus the DEMO pack (`demo-*.yaml`, docs/demo) all load, with unique names."""
     scenarios = load_scenarios_dir(SCENARIOS_DIR)
     names = {s.name for s in scenarios}
-    assert len(scenarios) == 6
-    assert "price_spike_during_delivery" in names
-    assert "compound_stress" in names
+    assert len(names) == len(scenarios)
+    assert names >= CORE_SCENARIOS
+    demo_files = sorted(SCENARIOS_DIR.glob("demo-*.yaml"))
+    assert len(scenarios) == len(CORE_SCENARIOS) + len(demo_files)
 
 
 def test_missing_scenarios_dir_returns_empty_list(tmp_path: Path):
