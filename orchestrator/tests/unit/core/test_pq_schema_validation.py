@@ -191,6 +191,33 @@ def test_telemetry_without_pq_block_still_matches_schema():
     _assert_valid(msg.model_dump(mode="json"), schema)
 
 
+def test_every_telemetry_schema_property_is_accepted_by_the_model():
+    """R2 incident (2026-09-26): the simulator published lat/lon/charge_pv_kw/charge_grid_kw, which the
+    schema allows, but `Telemetry` (extra="forbid") rejected them, so og-engine and og-guardian dropped
+    every telemetry message. The model must accept every property the wire contract declares."""
+    schema = _load_schema("mqtt/telemetry.schema.json")
+    missing = set(schema["properties"]) - set(mqtt.Telemetry.model_fields)
+    assert not missing, f"telemetry.schema.json properties the Telemetry model rejects: {sorted(missing)}"
+    msg = mqtt.Telemetry.model_validate(
+        {
+            "hub_id": "hub-1",
+            "bank_id": "bank-1",
+            "zone": "LZ_NORTH",
+            "ts": NOW.isoformat(),
+            "soc_kwh": 5.0,
+            "p_kw": 1.0,
+            "health": "online",
+            "seq": 1,
+            "epoch": 1,
+            "lat": 32.675662,
+            "lon": -96.957824,
+            "charge_pv_kw": 0.4,
+            "charge_grid_kw": 0.6,
+        }
+    )
+    _assert_valid(msg.model_dump(mode="json", exclude_none=True), schema)
+
+
 def test_scada_bank_signal_new_enum_values_match_schema():
     schema = _load_schema("mqtt/scada_bank_signal.schema.json")
     for signal, unit in [

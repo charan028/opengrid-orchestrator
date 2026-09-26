@@ -36,7 +36,7 @@ products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"
 # without a deploy (it shares the ERCOT breaker with price/load). Freshness: wind_solar_fresh_s.
 solar_by_region_enabled = true
 
-# Solar share of load (opengrid.feeds.solar_share): which ERCOT solar region(s) cover a load weather zone.
+# Solar share of load (opengrid.feeds.ercot_solar; rule in opengrid.core.solar_share): which ERCOT solar region(s) cover a load weather zone.
 # ERCOT's solar regions and load weather zones are different partitions, so only zones listed here get a
 # zonal share ("total" = system-wide always works). Empty until the mapping is agreed with the lead.
 [feeds.ercot.solar_share_zones]
@@ -52,7 +52,9 @@ user_agent = "OpenGrid-Orchestrator (ops@tocy-net.net)"
 grid_point = "EWX/156,91"
 
 [feeds.staleness]
-ercot_price_fresh_s = 600
+# NP6-905-CD values are stamped at interval START and ERCOT posts after the interval ends, so a healthy
+# feed routinely reads 15-30 min old; 600 s false-flagged NO_NEW_COMMITMENTS (R2, 2026-09-26, lead).
+ercot_price_fresh_s = 2700
 ercot_price_lgv_s = 900
 # NP6-345-CD (actual system load by weather zone) polls hourly (feeds.scheduler.POLL_INTERVAL_S);
 # 1800s (30 min) was tighter than that poll interval itself, so `last_value_at` would routinely read
@@ -62,7 +64,9 @@ ercot_price_lgv_s = 900
 # genuinely a ~13h gap on ERCOT's side that this threshold fix does not paper over). 7200s (2x the poll
 # interval, matching ercot_price_fresh_s's ~2x-of-its-5-min-poll ratio) absorbs one missed/delayed post
 # without false-flagging every routine hour, while still catching a real multi-hour gap like this one.
-ercot_load_fresh_s = 7200
+# R2 (2026-09-26, lead): NP6-345-CD actuals post about a day late, so 7200 s was still unmeetable and held
+# NO_NEW_COMMITMENTS on. 48 h. HEALTH follow-up: load actuals should not gate new commitments at all.
+ercot_load_fresh_s = 172800
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800

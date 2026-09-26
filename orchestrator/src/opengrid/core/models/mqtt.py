@@ -42,6 +42,13 @@ class Telemetry(_Wire):
     p_dis_max_kw: float | None = None
     p_ch_max_kw: float | None = None
     peak_power_budget_kws: float | None = None
+    # Optional, additive fields already in interfaces/mqtt/telemetry.schema.json: hub position (owner UI
+    # request) and the D-28 charge-source split. Accepted on the wire, not persisted yet (charge_* get
+    # columns in migration 0034). R2 hotfix: rejecting them dropped every telemetry message.
+    lat: float | None = None
+    lon: float | None = None
+    charge_pv_kw: float | None = None
+    charge_grid_kw: float | None = None
 
 
 #: The optional discharge-flow telemetry fields, in the one order every persisting caller uses.
