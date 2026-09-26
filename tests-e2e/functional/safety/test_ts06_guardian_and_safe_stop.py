@@ -11,14 +11,18 @@ other scenario keeps away from it.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from e2e_stack import Stack, now_utc, wait_until
 
 pytestmark = pytest.mark.usefixtures("stack")
 
 STOP_BANK = "bank-007"
-OPERATOR_A = "e2e-alice"
-OPERATOR_B = "e2e-bob"
+#: The two named operators of the two-person stop release (decision log D-12; `[api.roles] operator` and
+#: `[guardian] stop_release_authorised_operators` in orchestrator/config/orchestrator.toml).
+OPERATOR_A = os.environ.get("OG_E2E_OPERATOR_A", "og-op-a")
+OPERATOR_B = os.environ.get("OG_E2E_OPERATOR_B", "og-op-b")
 
 
 def _verdict(resp) -> dict:

@@ -34,8 +34,9 @@ the lead; none are committed here, `dev/` is not this WP's path):
   - `[api] allow_non_loopback_bind = true` (og-api runs in a container);
   - `[feeds.ercot] token_url = "http://sim-market:8090/token"`, plus the simulator's test credentials for
     og-feeds (otherwise it logs in to the real ERCOT B2C endpoint);
-  - for the two-person release scenarios: `[api.roles] operator = ["e2e-alice", "e2e-bob"]`,
-    `[guardian] stop_release_authorised_operators = ["e2e-alice", "e2e-bob"]`, and
+  - for the two-person release scenarios, the D-12 test operators `og-op-a` and `og-op-b` (already in
+    `orchestrator/config/orchestrator.toml` `[api.roles] operator` and `[guardian] stop_release_authorised_operators`;
+    override with `OG_E2E_OPERATOR_A` / `OG_E2E_OPERATOR_B`), and
     `[safestop] guardian_public_key_path = "/app/dev/keys/guardian-dev.pub"` (without it og-safestop refuses to
     relay a guardian-signed RELEASE: `GUARDIAN_PUBLIC_KEY_NOT_CONFIGURED`).
 - `dev/.env`: `POSTGRES_PORT` if another Postgres already owns 5432 on the host.
