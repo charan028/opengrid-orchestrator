@@ -26,12 +26,9 @@ SHORTFALL_OR_LOCK_CODES = ("R-SHORTFALL", "R-COMMIT-LOCK-INFEASIBLE", "R-COMMIT-
 @pytest.fixture(scope="module")
 def delivering(stack: Stack) -> Iterator[tuple[Offer, dict]]:
     """One ERCOT_ENERGY obligation committed for a single interval that opens within ~15 minutes, returned
-    once it is DELIVERING (the window is taken from the earliest lightly-loaded interval at least a minute
-    away, so the gate commits it before the window opens)."""
-    earliest = now_utc() + timedelta(seconds=90)
-    start, end = stack.light_window(1, max_committed_kw=500)
-    while start < earliest:
-        start, end = stack.light_window(1, max_committed_kw=500, first_offset=2)
+    once it is DELIVERING (`Stack.delivery_window`: the earliest lightly-loaded interval at least 90 s away, so
+    the gate commits it before it opens; skipped with the load it found if none opens within 20 minutes)."""
+    start, end = stack.delivery_window(max_committed_kw=500)
     contract_id = stack.create_contract("ERCOT_ENERGY", "T2")
     offer = stack.offer(
         contract_id, window_start=start, window_end=end, requested_kw=COMMITTED_KW, value_per_mwh=180

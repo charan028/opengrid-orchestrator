@@ -39,6 +39,8 @@ INTERVAL = timedelta(minutes=15)
 #: Present only on a deployed OpenGrid host. There the defaults below are the PRODUCTION og-api, simulator
 #: control plane and database, so the suites refuse to run unless every target is set explicitly.
 PRODUCTION_HOST_MARKER = Path("/etc/opengrid")
+#: The `slow` marker promises a delivery scenario waits at most about this long for its window (conftest.py).
+MAX_DELIVERY_WAIT = timedelta(minutes=20)
 EXPLICIT_TARGETS = ("OG_E2E_API", "OG_E2E_CONTROL", "OG_E2E_DSN")
 
 #: How long an admission gate normally takes to decide a fresh contract's offer (next 2 s engine tick + solve).
@@ -278,6 +280,68 @@ class Stack:
             timeout_s=timeout_s,
             what=f"a gate decision on opportunity {offer.opportunity_id}",
         )
+
+    def delivery_window(
+        self, *, max_committed_kw: float, lead: timedelta = timedelta(seconds=90)
+    ) -> tuple[datetime, datetime]:
+        """The earliest lightly-loaded single interval that opens at least `lead` from now, for a scenario that
+        waits for a real delivery. Skips, naming the committed load it found, when that interval is further
+        away than MAX_DELIVERY_WAIT: on a loaded stack `light_window` can land hours out, and the `slow` marker
+        promises about 20 minutes."""
+        earliest = now_utc() + lead
+        start, end = self.light_window(1, max_committed_kw=max_committed_kw)
+        if start < earliest:
+            start, end = self.light_window(1, max_committed_kw=max_committed_kw, first_offset=2)
+        if start - now_utc() > MAX_DELIVERY_WAIT:
+            load = self.rows(
+                """SELECT c.interval_start, sum(c.committed_kw) AS kw FROM og.commitment c
+                   WHERE c.interval_start >= %(a)s AND c.interval_start < %(b)s
+                     AND NOT EXISTS (SELECT 1 FROM og.commitment n WHERE n.supersedes = c.commitment_id)
+                   GROUP BY 1 ORDER BY 1""",
+                {"a": quarter(0), "b": start},
+            )
+            summary = ", ".join(f"{r['interval_start']:%H:%M} {r['kw']} kW" for r in load) or "none"
+            pytest.skip(
+                f"no interval with <= {max_committed_kw} kW committed opens within {MAX_DELIVERY_WAIT}; the nearest "
+                f"is {start:%H:%M} UTC. Committed load before it: {summary}. Reset the dev DB or wait."
+            )
+        return start, end
+
+    def cleanup(self) -> None:
+        """Dev stack only: retire what this session created so reruns start clean. Every non-superseded
+        commitment row stays frozen for the selector (K13) whatever the obligation's state, so this deletes the
+        session's FUTURE commitment rows, releases their reservations and expires obligations that had not
+        started, then ends the contracts. Past and in-progress intervals are left as history."""
+        if PRODUCTION_HOST_MARKER.exists() or not self.created_contracts:
+            for contract_id in self.created_contracts:
+                self.end_contract(contract_id)
+            return
+        ids = list(self.created_contracts)
+        with psycopg.connect(self.dsn) as conn:
+            obligations = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT obligation_id FROM og.obligation WHERE contract_id = ANY(%(c)s)", {"c": ids}
+                ).fetchall()
+            ]
+            if obligations:
+                conn.execute(
+                    "DELETE FROM og.commitment WHERE obligation_id = ANY(%(o)s) AND interval_start > now()",
+                    {"o": obligations},
+                )
+                conn.execute(
+                    "UPDATE og.reservation SET released_at = now(), release_reason = 'E2E_CLEANUP' "
+                    "WHERE obligation_id = ANY(%(o)s) AND released_at IS NULL AND interval_start > now()",
+                    {"o": obligations},
+                )
+                conn.execute(
+                    "UPDATE og.obligation SET state = 'EXPIRED', last_reason_code = 'E2E_CLEANUP', updated_at = now() "
+                    "WHERE obligation_id = ANY(%(o)s) AND window_start > now() "
+                    "AND state IN ('OFFERED', 'SELECTED', 'COMMITTED')",
+                    {"o": obligations},
+                )
+        for contract_id in ids:
+            self.end_contract(contract_id)
 
     def light_window(
         self, intervals: int, *, max_committed_kw: float, first_offset: int = 1
