@@ -78,3 +78,15 @@ correctly. The tooling asserts the *specified* behaviour (BUILD.md, 02b S6.4/S6.
     breaker is open, so on a fresh start EIA data appears about an hour after ERCOT starts failing. The
     EIA client itself works with the real key (24 hourly ERCOT demand rows, verified). For a demo
     without ERCOT credentials that is a long wait; consider polling EIA on its own schedule.
+
+
+## Status after main @ c5eda88 (lead's dispatch-live pass, 2026-09-26)
+
+- **Resolved upstream:** item 3 (settle heartbeat key is now `settle`), item 5 (`og-settle` runs
+  `health.run`), item 8 (SCADA readings are persisted to `og.feed_obs`, `ALR-SCADA-OVERLOAD` verified live
+  by the lead), and the `dev/` stack exists, so `runner.py --backend docker` is now runnable.
+- **Still open:** item 1 (`degraded_modes` missing from `GET /og/api/health`), item 2 (`processes[x].status`
+  never `down`), item 4 (api and sims write no heartbeat), item 6/9 (engine serves no `/metrics`), items
+  10-12 (feeds: NWS parser, hotfix branch `hotfix/feeds-nws-updatetime` rebased on this main; ERCOT ROPC
+  credentials; EIA fallback latency), and the G-14 pre-image veto (qa/merge-notes.md section 17 confirms
+  it; docs/demo/NEEDS_FROM_OTHER_OWNERS.md item 10 names the cause).
