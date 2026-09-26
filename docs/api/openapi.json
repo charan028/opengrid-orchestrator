@@ -1,0 +1,3090 @@
+{
+  "components": {
+    "schemas": {
+      "Body_ack_alert_og_alerts_ack_post": {
+        "properties": {
+          "alert_id": {
+            "title": "Alert Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "alert_id"
+        ],
+        "title": "Body_ack_alert_og_alerts_ack_post",
+        "type": "object"
+      },
+      "Body_ack_alert_og_health_alerts_ack_post": {
+        "properties": {
+          "alert_id": {
+            "title": "Alert Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "alert_id"
+        ],
+        "title": "Body_ack_alert_og_health_alerts_ack_post",
+        "type": "object"
+      },
+      "Body_propose_command_og_fleet_command_propose_post": {
+        "properties": {
+          "bank_id": {
+            "default": "",
+            "title": "Bank Id",
+            "type": "string"
+          },
+          "hub_id": {
+            "default": "",
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "p_kw_setpoint": {
+            "title": "P Kw Setpoint",
+            "type": "number"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "p_kw_setpoint",
+          "reason"
+        ],
+        "title": "Body_propose_command_og_fleet_command_propose_post",
+        "type": "object"
+      },
+      "Body_propose_safestop_og_fleet_safestop_propose_post": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_id": {
+            "default": "",
+            "title": "Scope Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "reason"
+        ],
+        "title": "Body_propose_safestop_og_fleet_safestop_propose_post",
+        "type": "object"
+      },
+      "CommandConfirmResult": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "proposal_id": {
+            "format": "uuid",
+            "title": "Proposal Id",
+            "type": "string"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "vetoed_rule_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Vetoed Rule Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "proposal_id",
+          "outcome"
+        ],
+        "title": "CommandConfirmResult",
+        "type": "object"
+      },
+      "CommandProposalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "bank_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank Id"
+          },
+          "hub_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Id"
+          },
+          "p_kw_setpoint": {
+            "title": "P Kw Setpoint",
+            "type": "number"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "p_kw_setpoint",
+          "reason"
+        ],
+        "title": "CommandProposalRequest",
+        "type": "object"
+      },
+      "ContractCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "customer_id": {
+            "format": "uuid",
+            "title": "Customer Id",
+            "type": "string"
+          },
+          "degradation_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0.03",
+            "title": "Degradation Cost"
+          },
+          "end_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End At"
+          },
+          "fallback_allowed": {
+            "default": false,
+            "title": "Fallback Allowed",
+            "type": "boolean"
+          },
+          "penalty_alpha": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Penalty Alpha"
+          },
+          "penalty_beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Penalty Beta"
+          },
+          "penalty_theta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Penalty Theta"
+          },
+          "profile_ref": {
+            "title": "Profile Ref",
+            "type": "string"
+          },
+          "renomination_allowed": {
+            "default": false,
+            "title": "Renomination Allowed",
+            "type": "boolean"
+          },
+          "service_type": {
+            "enum": [
+              "HOME",
+              "ERCOT_ENERGY",
+              "ERCOT_AS",
+              "DIST_DEFERRAL",
+              "PARTNER_CAPACITY"
+            ],
+            "title": "Service Type",
+            "type": "string"
+          },
+          "start_at": {
+            "format": "date-time",
+            "title": "Start At",
+            "type": "string"
+          },
+          "territory_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Territory Id"
+          },
+          "tier": {
+            "enum": [
+              "L0",
+              "L1",
+              "L2",
+              "T1",
+              "T2",
+              "T3",
+              "T4"
+            ],
+            "title": "Tier",
+            "type": "string"
+          },
+          "variant": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variant"
+          }
+        },
+        "required": [
+          "customer_id",
+          "service_type",
+          "tier",
+          "profile_ref",
+          "start_at"
+        ],
+        "title": "ContractCreate",
+        "type": "object"
+      },
+      "ContractStatusUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "enum": [
+              "ACTIVE",
+              "SUSPENDED",
+              "ENDED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ContractStatusUpdate",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "OpportunityCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_id": {
+            "format": "uuid",
+            "title": "Contract Id",
+            "type": "string"
+          },
+          "requested_kw": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Requested Kw"
+          },
+          "window_end": {
+            "format": "date-time",
+            "title": "Window End",
+            "type": "string"
+          },
+          "window_start": {
+            "format": "date-time",
+            "title": "Window Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_id",
+          "window_start",
+          "window_end",
+          "requested_kw"
+        ],
+        "title": "OpportunityCreate",
+        "type": "object"
+      },
+      "ProposalAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_in_s": {
+            "title": "Expires In S",
+            "type": "number"
+          },
+          "proposal_id": {
+            "format": "uuid",
+            "title": "Proposal Id",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_id",
+          "summary",
+          "expires_in_s"
+        ],
+        "title": "ProposalAccepted",
+        "type": "object"
+      },
+      "RetentionPolicyUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "event_class": {
+            "title": "Event Class",
+            "type": "string"
+          },
+          "retention_days": {
+            "exclusiveMinimum": 0.0,
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_class",
+          "retention_days"
+        ],
+        "title": "RetentionPolicyUpdate",
+        "type": "object"
+      },
+      "SafestopConfirmResult": {
+        "additionalProperties": false,
+        "properties": {
+          "engaged": {
+            "title": "Engaged",
+            "type": "boolean"
+          },
+          "proposal_id": {
+            "format": "uuid",
+            "title": "Proposal Id",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "fleet",
+              "zone",
+              "bank"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Id"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          }
+        },
+        "required": [
+          "proposal_id",
+          "scope",
+          "scope_id",
+          "engaged"
+        ],
+        "title": "SafestopConfirmResult",
+        "type": "object"
+      },
+      "SafestopProposalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "fleet",
+              "zone",
+              "bank"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Id"
+          }
+        },
+        "required": [
+          "scope",
+          "reason"
+        ],
+        "title": "SafestopProposalRequest",
+        "type": "object"
+      },
+      "SafestopReleaseRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "SafestopReleaseRequest",
+        "type": "object"
+      },
+      "ScenarioTriggerRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration S"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          },
+          "target_kind": {
+            "default": "sim",
+            "enum": [
+              "sim",
+              "asset",
+              "zone",
+              "bank",
+              "hub"
+            ],
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "target_ref": {
+            "default": "fleet",
+            "title": "Target Ref",
+            "type": "string"
+          }
+        },
+        "title": "ScenarioTriggerRequest",
+        "type": "object"
+      },
+      "TraceVerifyRequest": {
+        "additionalProperties": false,
+        "description": "`class`/`from`/`to` are accepted for forward compatibility with `opengrid.ui`'s call but not\nused to filter what gets verified: a hash chain is verified as a whole stream from its start, so a\ntime/class-filtered subset can't be checked for broken links without producing false failures.\n`stream_id` verifies one stream; omitted, every known stream is verified.",
+        "properties": {
+          "class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "stream_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Id"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          }
+        },
+        "title": "TraceVerifyRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "OpenGrid Orchestrator API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/og/": {
+      "get": {
+        "operationId": "control_room_og__get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Control Room"
+      }
+    },
+    "/og/alerts/ack": {
+      "post": {
+        "description": "Relay to the real `POST /og/api/alerts/{alert_id}/ack` (path param, operator-only) -- the Control\nroom's own copy of the Health screen's ack action (BUILD.md code-review round item 5: control_room.py\npreviously had no ack action at all).",
+        "operationId": "ack_alert_og_alerts_ack_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ack_alert_og_alerts_ack_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ack Alert"
+      }
+    },
+    "/og/api/admin/seed-fleet-topology": {
+      "post": {
+        "operationId": "seed_fleet_topology_og_api_admin_seed_fleet_topology_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Seed Fleet Topology Og Api Admin Seed Fleet Topology Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Seed Fleet Topology",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/og/api/alerts/{alert_id}/ack": {
+      "post": {
+        "description": "Screens 1/5's \"Ack an alert\" action (02b S8) -- acknowledgement only, does not clear the alert\n(clearing is `health`'s job when the underlying condition resolves).",
+        "operationId": "ack_alert_og_api_alerts__alert_id__ack_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alert_id",
+            "required": true,
+            "schema": {
+              "title": "Alert Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ack Alert Og Api Alerts  Alert Id  Ack Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ack Alert",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/og/api/billing/invoice-lines": {
+      "get": {
+        "description": "`format=csv` streams the invoice-line CSV unchanged (02b S7.1); otherwise\n`{\"lines\": [...], \"performance\": [...]}` -- the M&V performance rows for the same period, embedded\nper ui-b's `billing_audit.py` contract rather than a separate endpoint.",
+        "operationId": "invoice_lines_og_api_billing_invoice_lines_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "format": "date",
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "format": "date",
+              "title": "To",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "enum": [
+                "json",
+                "csv"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Invoice Lines",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/og/api/contracts": {
+      "get": {
+        "operationId": "list_contracts_route_og_api_contracts_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "customer_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Customer Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Contracts Route Og Api Contracts Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Contracts Route",
+        "tags": [
+          "contracts"
+        ]
+      },
+      "post": {
+        "operationId": "create_contract_og_api_contracts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContractCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Contract Og Api Contracts Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Contract",
+        "tags": [
+          "contracts"
+        ]
+      }
+    },
+    "/og/api/contracts/{contract_id}": {
+      "get": {
+        "operationId": "get_contract_route_og_api_contracts__contract_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contract_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contract Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Contract Route Og Api Contracts  Contract Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Contract Route",
+        "tags": [
+          "contracts"
+        ]
+      },
+      "patch": {
+        "operationId": "update_contract_status_og_api_contracts__contract_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contract_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contract Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContractStatusUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Contract Status Og Api Contracts  Contract Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Contract Status",
+        "tags": [
+          "contracts"
+        ]
+      }
+    },
+    "/og/api/customers": {
+      "get": {
+        "operationId": "list_customers_og_api_customers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Customers Og Api Customers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Customers",
+        "tags": [
+          "contracts"
+        ]
+      }
+    },
+    "/og/api/dispatch/opportunities": {
+      "get": {
+        "description": "Kanban pipeline: offered -> committed -> delivering -> fulfilled (02b S8 screen 3). Returns\n`Obligation` rows, not `Opportunity` rows: `Opportunity.state` never reaches committed/delivering/\nfulfilled (02a S1.4 vs S1.5) -- see `StoreProtocol.list_obligations`.",
+        "operationId": "list_opportunities_og_api_dispatch_opportunities_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Opportunities Og Api Dispatch Opportunities Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Opportunities",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/dispatch/plan/latest": {
+      "get": {
+        "description": "Latest selector plan and its rationale/value terms (02b S7.1).",
+        "operationId": "latest_plan_og_api_dispatch_plan_latest_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Latest Plan Og Api Dispatch Plan Latest Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Latest Plan",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/fleet/banks/{bank_id}": {
+      "get": {
+        "operationId": "get_bank_og_api_fleet_banks__bank_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bank_id",
+            "required": true,
+            "schema": {
+              "title": "Bank Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Bank Og Api Fleet Banks  Bank Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Bank",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/og/api/fleet/command": {
+      "post": {
+        "description": "Step 1 of 2: validates shape/role only (02b S7.3) -- the guardian check runs at confirm time.",
+        "operationId": "propose_command_og_api_fleet_command_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommandProposalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Propose Command",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/og/api/fleet/command/{proposal_id}/confirm": {
+      "post": {
+        "description": "Step 2 of 2 (02b S7.3): writes the K10 decision pre-image (`decision_type=\"RT_ALLOCATION\"`,\nthe shape `opengrid.guardian.repo.PgProposalPort` reads back) and a `command_batch` header row,\nthen polls `og.verdict` for the independently-running `og-guardian` process's PASS/VETOED/TIMEOUT\nresult -- `api` never signs or evaluates a batch itself (K3: sole signer stays in `og-guardian`).\nA veto is returned as `409`, never silently retried; no verdict within the poll window is a `503`\n(guardian not keeping up or not running), not a silent success.",
+        "operationId": "confirm_command_og_api_fleet_command__proposal_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Proposal Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandConfirmResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Command",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/og/api/fleet/hubs": {
+      "get": {
+        "description": "`{\"items\": [...]}`, matching `opengrid.ui.routes.fleet`/`control_room`'s own parsing\n(`raw.get(\"items\", [])`).",
+        "operationId": "list_hubs_og_api_fleet_hubs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "zone",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Zone"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bank",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bank"
+            }
+          },
+          {
+            "in": "query",
+            "name": "health",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Health"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "exclusiveMinimum": 0,
+              "maximum": 2000,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Hubs Og Api Fleet Hubs Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Hubs",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/og/api/fleet/hubs/{hub_id}": {
+      "get": {
+        "description": "A flat hub+state dict -- `opengrid.ui.templates._partials.hub_drilldown.html` reads\n`hub.hub_id`/`bank_id`/`zone`/`soc_kwh`/`p_kw`/`health`/`lease_epoch`/`lease_expires_at`/\n`last_command_id`/`last_seen_at` directly off the top-level object.",
+        "operationId": "get_hub_og_api_fleet_hubs__hub_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Hub Og Api Fleet Hubs  Hub Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Hub",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/og/api/fleet/stream": {
+      "get": {
+        "operationId": "stream_fleet_og_api_fleet_stream_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "zone",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Zone"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Fleet",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/og/api/fleet/summary": {
+      "get": {
+        "description": "`{\"total\", \"online\", \"stale\", \"offline\"}` counts over the whole registered fleet (task item\nA2: `GET /hubs` paginates at 200/page, so a smoke test counting \"how many of ~2,000 hubs are\nonline\" needs either this O(1) summary or to page through every `/hubs` response -- this is the\nformer; see `StoreProtocol.hub_health_summary`).",
+        "operationId": "fleet_summary_og_api_fleet_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Fleet Summary Og Api Fleet Summary Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Fleet Summary",
+        "tags": [
+          "fleet"
+        ]
+      }
+    },
+    "/og/api/forecast": {
+      "get": {
+        "description": "P10/P50/P90 quantile band, 96 steps (02b S3, S7.1), as parallel arrays --\n`opengrid.ui.routes.markets.forecast_band_view` reads `forecast[\"p10\"/\"p50\"/\"p90\"/\"ts\"]` directly.",
+        "operationId": "forecast_og_api_forecast_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "series_key",
+            "required": true,
+            "schema": {
+              "title": "Series Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "default": "price",
+              "title": "Kind",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Forecast Og Api Forecast Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Forecast",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/og/api/health": {
+      "get": {
+        "description": "Aggregated health for the deploy poll (`deploy/scripts/deploy.sh`, loopback, no auth header),\nthe operator/viewer Health screen, and the Control room's first paint (both reached through\nApache, also loopback by the time they hit this process -- see `opengrid.api.auth`).",
+        "operationId": "get_health_og_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Health Og Api Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Health",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/og/api/ledger/{bank_id}/timeline": {
+      "get": {
+        "description": "Reservation timeline for a bank -- the Gantt-style ledger chart plus the grants/substitutions\nfeed and commitment-lock events (02b S8 screen 3), matching\n`opengrid.ui.routes.dispatch.dispatch_page`'s `{\"reservations\", \"grants\", \"commitments\",\n\"bank_capacity_kw\"}` shape.",
+        "operationId": "ledger_timeline_og_api_ledger__bank_id__timeline_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bank_id",
+            "required": true,
+            "schema": {
+              "title": "Bank Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ledger Timeline Og Api Ledger  Bank Id  Timeline Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ledger Timeline",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/markets/feed-status": {
+      "get": {
+        "description": "Freshness/source-status table (02b S8 screen 4), backed by `feed_status` (02b S2.7).",
+        "operationId": "feed_status_og_api_markets_feed_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Feed Status Og Api Markets Feed Status Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Feed Status",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/og/api/markets/series": {
+      "get": {
+        "operationId": "market_series_og_api_markets_series_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Product"
+            }
+          },
+          {
+            "in": "query",
+            "name": "series_key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Series Key"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Market Series Og Api Markets Series Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Market Series",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/og/api/opportunities": {
+      "post": {
+        "description": "Admission (02a S2.1): creates an `OFFERED` opportunity via `opengrid.contracts.admit`, or `409`\nwith the admission reason code if structurally infeasible.",
+        "operationId": "create_opportunity_og_api_opportunities_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpportunityCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Opportunity Og Api Opportunities Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Opportunity",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/profitability/summary": {
+      "get": {
+        "description": "Per-obligation-interval revenue, energy cost, degradation, penalty, net margin,\nLP-vs-rule-baseline, and forgone-upside-from-lock (02b S7.1, S8 screen 6). Row shape matches\n`opengrid.ui.routes.profitability.profitability_table_view`, which keys rows by `obligation_id`\n(the screen and its own totals/chart aggregate for display, this endpoint does not).",
+        "operationId": "profitability_summary_og_api_profitability_summary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "service",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "in": "query",
+            "name": "day",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Day"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Profitability Summary Og Api Profitability Summary Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Profitability Summary",
+        "tags": [
+          "profitability"
+        ]
+      }
+    },
+    "/og/api/retention": {
+      "get": {
+        "operationId": "get_retention_policy_og_api_retention_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Get Retention Policy Og Api Retention Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Retention Policy",
+        "tags": [
+          "retention"
+        ]
+      },
+      "put": {
+        "operationId": "update_retention_policy_og_api_retention_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionPolicyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Retention Policy Og Api Retention Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Retention Policy",
+        "tags": [
+          "retention"
+        ]
+      }
+    },
+    "/og/api/safestop": {
+      "post": {
+        "description": "Step 1 of 2 (02b S7.1): arms `og-safestop`'s own `ConfirmationBroker` via a PROPOSE\nnotification; nothing stops yet -- a single message can never engage the fleet (TS-10-03).",
+        "operationId": "propose_safestop_og_api_safestop_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SafestopProposalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Propose Safestop",
+        "tags": [
+          "safestop"
+        ]
+      }
+    },
+    "/og/api/safestop/{proposal_id}/confirm": {
+      "post": {
+        "description": "Step 2 of 2 (02b S7.1/S7.3): NOTIFYs CONFIRM, then polls `og.stop_event` for the ENGAGE row\n`og-safestop` inserts on success. No matching event within the poll window means either the\nPROPOSE already expired in `og-safestop`'s own (shorter) `confirm_window_s`, or `og-safestop`\nis not running -- reported as `503`, never assumed to have engaged.",
+        "operationId": "confirm_safestop_og_api_safestop__proposal_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Proposal Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SafestopConfirmResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Safestop",
+        "tags": [
+          "safestop"
+        ]
+      }
+    },
+    "/og/api/safestop/{scope}/{scope_id}/release": {
+      "post": {
+        "description": "Single step in the API shape (02b S7.1: \"release is inherently reversible, engage is not\"), but\n`og-safestop`'s stop-only key always refuses to sign a RELEASE (K8) -- that requires the guardian's\nTier-2 (two-person) co-signed path, not yet built by any agent. Records the attempt for audit and\nreports the gap as `501`, rather than fabricating a signature or silently no-op-ing.",
+        "operationId": "release_safestop_og_api_safestop__scope___scope_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "scope_id",
+            "required": true,
+            "schema": {
+              "title": "Scope Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SafestopReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Release Safestop Og Api Safestop  Scope   Scope Id  Release Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Safestop",
+        "tags": [
+          "safestop"
+        ]
+      }
+    },
+    "/og/api/scenario/{name}": {
+      "post": {
+        "description": "Publishes `{id, target, type, params, start, duration}` to `og/v1/scenario/cmd` (02b S3, S6.2).",
+        "operationId": "trigger_scenario_og_api_scenario__name__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScenarioTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Trigger Scenario Og Api Scenario  Name  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Scenario",
+        "tags": [
+          "scenario"
+        ]
+      }
+    },
+    "/og/api/stream/alerts": {
+      "get": {
+        "operationId": "stream_alerts_og_api_stream_alerts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stream Alerts",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/og/api/stream/control-room": {
+      "get": {
+        "description": "Price/load ticker, fleet MW/MWh, active commitment count, net margin, invariant counters, open\nalerts (02b S7.2, S8 screen 1).",
+        "operationId": "stream_control_room_og_api_stream_control_room_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stream Control Room",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/stream/dispatch": {
+      "get": {
+        "operationId": "stream_dispatch_og_api_stream_dispatch_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stream Dispatch",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/stream/health": {
+      "get": {
+        "operationId": "stream_health_og_api_stream_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stream Health",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/og/api/trace/events": {
+      "get": {
+        "description": "Trace explorer query (02b S7.1, S8 screen 7); `class` is the query param name (matching\n`opengrid.ui`'s call), mapped internally to `event_class`.",
+        "operationId": "trace_events_og_api_trace_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "class",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Class"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "exclusiveMinimum": 0,
+              "maximum": 2000,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Trace Events Og Api Trace Events Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trace Events",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/og/api/trace/verify": {
+      "post": {
+        "description": "Runs `trace.verify()` over `stream_id` (or every known stream) and returns pass/fail plus the\nfirst broken link, if any (02b S7.1).",
+        "operationId": "verify_trace_og_api_trace_verify_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TraceVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Verify Trace Og Api Trace Verify Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Trace",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/og/billing": {
+      "get": {
+        "description": "Billing & audit screen (`/og/billing`, viewer role read-only, on-demand per 02b S8).",
+        "operationId": "billing_page_og_billing_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "class",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Class"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Billing Page"
+      }
+    },
+    "/og/billing/invoice-lines/export.csv": {
+      "get": {
+        "description": "Stream the CSV export by relaying `GET .../invoice-lines?format=csv` from `opengrid.api`\nunchanged (the API owns CSV formatting; the UI only adds the download headers).",
+        "operationId": "export_invoice_lines_csv_og_billing_invoice_lines_export_csv_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Invoice Lines Csv"
+      }
+    },
+    "/og/billing/trace/verify": {
+      "post": {
+        "description": "HTMX partial: runs the chain-verify button, returns the pass/fail fragment (02b S7.1/S8).",
+        "operationId": "run_chain_verify_og_billing_trace_verify_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "class",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Class"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Chain Verify"
+      }
+    },
+    "/og/dispatch": {
+      "get": {
+        "description": "Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S).",
+        "operationId": "dispatch_page_og_dispatch_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "bank_id",
+            "required": false,
+            "schema": {
+              "default": "BANK-0001",
+              "title": "Bank Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dispatch Page"
+      }
+    },
+    "/og/fleet": {
+      "get": {
+        "operationId": "fleet_screen_og_fleet_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "zone",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Zone"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bank",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bank"
+            }
+          },
+          {
+            "in": "query",
+            "name": "health",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Health"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Fleet Screen"
+      }
+    },
+    "/og/fleet/command/propose": {
+      "post": {
+        "description": "Step 1 of 2: relays the operator's target/setpoint/reason to `POST /og/api/fleet/command` and\nrenders the real proposal as an already-open confirm dialog. Guardian evaluation happens at confirm\ntime, not here.",
+        "operationId": "propose_command_og_fleet_command_propose_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_propose_command_og_fleet_command_propose_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Propose Command"
+      }
+    },
+    "/og/fleet/command/{proposal_id}/confirm": {
+      "post": {
+        "description": "Step 2 of 2: relays the confirmation to `POST /og/api/fleet/command/{proposal_id}/confirm` and\nrenders the guardian's pass/veto/timeout/expired result. A 409 veto's body is itself a\n`CommandConfirmResult` (outcome != \"PASS\"), so it renders the same as a successful pass, just with a\ndifferent outcome.",
+        "operationId": "confirm_command_og_fleet_command__proposal_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "title": "Proposal Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Command"
+      }
+    },
+    "/og/fleet/hubs/{hub_id}": {
+      "get": {
+        "operationId": "hub_drilldown_og_fleet_hubs__hub_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Hub Drilldown"
+      }
+    },
+    "/og/fleet/safestop/propose": {
+      "post": {
+        "description": "Step 1 of 2: relays the operator's scope/reason to `POST /og/api/safestop` and renders the real\nproposal as an already-open confirm dialog. Nothing is stopped yet.",
+        "operationId": "propose_safestop_og_fleet_safestop_propose_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_propose_safestop_og_fleet_safestop_propose_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Propose Safestop"
+      }
+    },
+    "/og/fleet/safestop/{proposal_id}/confirm": {
+      "post": {
+        "description": "Step 2 of 2: relays the confirmation to `POST /og/api/safestop/{proposal_id}/confirm` and renders\nthe engaged/timeout/expired result -- never assumes success.",
+        "operationId": "confirm_safestop_og_fleet_safestop__proposal_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "title": "Proposal Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Safestop"
+      }
+    },
+    "/og/health": {
+      "get": {
+        "operationId": "health_screen_og_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Screen"
+      }
+    },
+    "/og/health/alerts/ack": {
+      "post": {
+        "description": "Relay to the real `POST /og/api/alerts/{alert_id}/ack` (path param, operator-only). Shared by the\nHealth screen's own alert list and, via `opengrid.ui.routes.control_room`, the Control room's.",
+        "operationId": "ack_alert_og_health_alerts_ack_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ack_alert_og_health_alerts_ack_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ack Alert"
+      }
+    },
+    "/og/markets": {
+      "get": {
+        "description": "Markets & feeds screen (`/og/markets`, viewer role read-only, 30 s poll not SSE per 02b S8).",
+        "operationId": "markets_page_og_markets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Markets Page"
+      }
+    },
+    "/og/profitability": {
+      "get": {
+        "description": "Profitability screen (`/og/profitability`, viewer role read-only, 30 s poll per 02b S8).",
+        "operationId": "profitability_page_og_profitability_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "service",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "in": "query",
+            "name": "day",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Day"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Profitability Page"
+      }
+    }
+  }
+}
