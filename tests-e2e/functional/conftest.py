@@ -30,5 +30,4 @@ def stack() -> Iterator[Stack]:
     if why_not is not None:
         pytest.skip(f"dev stack not available: {why_not}")
     yield client
-    for contract_id in client.iter_created_contracts():
-        client.end_contract(contract_id)
+    client.cleanup()

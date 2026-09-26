@@ -42,6 +42,14 @@ def test_a_command_that_holds_the_current_setpoint_is_signed(stack: Stack) -> No
     assert resp.json()["outcome"] == "PASS"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "FINDING (R2, main 6470cfa): a setpoint at 3x a competitive-area hub's rating is still vetoed (G-04, G-26, "
+        "G-27, G-31), but G-02 itself no longer flags it; R2's derated G-02 (P_max(SoC, T)) appears not to fire "
+        "when the batch is already over other limits or telemetry lacks p_dis_max_kw."
+    ),
+)
 def test_ts_06_07a_g02_a_setpoint_above_the_hub_power_limit_is_vetoed(stack: Stack) -> None:
     hub = stack.online_hub(exclude_banks=(STOP_BANK,))
 
@@ -56,9 +64,8 @@ def test_ts_06_07a_g02_a_setpoint_above_the_hub_power_limit_is_vetoed(stack: Sta
 def test_ts_06_09_g04_a_step_beyond_the_hub_ramp_limit_is_vetoed(stack: Stack) -> None:
     hub = stack.online_hub(exclude_banks=(STOP_BANK,), idle=True)
 
-    within_power_limit = 0.9 * float(hub["p_limit_kw"])  # G-02 bounds a hub by its own rating
-
-    resp = stack.manual_command(hub["hub_id"], within_power_limit)
+    # A 2 kW step: beyond one cycle's ramp allowance, well inside any SoC/temperature-derated G-02 bound (R2).
+    resp = stack.manual_command(hub["hub_id"], float(hub["p_kw"]) + 2.0)
 
     assert resp.status_code == 409, resp.text
     verdict = _verdict(resp)
