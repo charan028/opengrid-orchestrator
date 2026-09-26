@@ -7,16 +7,16 @@
 
 {% block content %}
 <section class="og-grid" aria-label="Key performance indicators">
-  {% with label='Fleet power', value=health.fleet_mw|default('--'), unit='MW', since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-fleet-mw' %}
+  {% with label='Fleet power', value=(health.fleet_mw if health.fleet_mw is not none else '--'), unit='MW', since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-fleet-mw' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label='Fleet energy', value=health.fleet_mwh|default('--'), unit='MWh', since_iso=health.as_of|default(none), stale_after_s=10 %}
+  {% with label='Fleet energy', value=(health.fleet_mwh if health.fleet_mwh is not none else '--'), unit='MWh', since_iso=health.as_of|default(none), stale_after_s=10 %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label='Active commitments', value=health.active_commitments|default('--'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-active-commitments' %}
+  {% with label='Active commitments', value=(health.active_commitments if health.active_commitments is not none else '--'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-active-commitments' %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
-  {% with label="Today's net margin", value=health.net_margin_usd|default('--'), unit='USD', since_iso=health.as_of|default(none), stale_after_s=30 %}
+  {% with label="Today's net margin", value=(health.net_margin_usd if health.net_margin_usd is not none else '--'), unit='USD', since_iso=health.as_of|default(none), stale_after_s=30 %}
     {% include "_partials/kpi_tile.html" %}
   {% endwith %}
   {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-reserve-breaches' %}

@@ -31,7 +31,7 @@
       <h3>{{ column.label }} <span>{{ column.count }}</span></h3>
       {% for item in column["items"] %}
       <div class="og-kanban-card{% if item.at_risk %} og-at-risk{% endif %}">
-        <div>{{ item.obligation_id }}</div>
+        <div title="{{ item.obligation_id }}" style="font-variant-numeric: tabular-nums;">{{ (item.obligation_id or '')[:8] }}</div>
         <div class="og-card-meta">{{ item.service_type }} &middot; {{ item.tier }} &middot; {{ item.committed_qty_kw }} kW</div>
         <div class="og-card-meta">customer {{ item.customer_id }}</div>
         <div class="og-card-meta">energy margin {{ item.energy_margin_kwh if item.energy_margin_kwh is not none else '-' }} kWh &middot; depletion in {{ item.time_to_depletion_min if item.time_to_depletion_min is not none else '-' }} min</div>
@@ -136,7 +136,8 @@
           var card = document.createElement("div");
           card.className = "og-kanban-card" + (item.at_risk ? " og-at-risk" : "");
           var idLine = document.createElement("div");
-          idLine.textContent = item.obligation_id || "";
+          idLine.textContent = (item.obligation_id || "").slice(0, 8);
+          idLine.title = item.obligation_id || "";
           card.appendChild(idLine);
           var metaLine = document.createElement("div");
           metaLine.className = "og-card-meta";
