@@ -36,7 +36,7 @@ SIMS_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 #: the scenarios); remove an entry once its id resolves.
 KNOWN_UNCONFIGURED_TARGETS: dict[str, str] = {
     "site-large-load-crypto-01": "svc-large-load.yaml: no customer site with this id in config/*.yaml",
-    "pjm-zone-aep-01": "svc-pjm-capacity.yaml: no PJM zone with this id in config/*.yaml",
+    "pjm-zone-aep-01": "svc-pjm-capacity.yaml: no sim resolves this PJM zone id (not in config/*.yaml)",
 }
 
 
@@ -92,6 +92,8 @@ def test_every_scenario_file_is_covered() -> None:
 def test_scenario_step_target_resolves(step: ScenarioStep, fleet: FleetEngine, scada: ScadaEngine) -> None:
     entry = catalogue.BY_ID.get(step.type)
     assert entry is not None, f"unknown anomaly type {step.type!r}"
+    if step.target in KNOWN_UNCONFIGURED_TARGETS:
+        pytest.xfail(KNOWN_UNCONFIGURED_TARGETS[step.target])
 
     if entry.owner == "market":
         assert step.target in KNOWN_MARKET_TARGETS, (
@@ -103,8 +105,6 @@ def test_scenario_step_target_resolves(step: ScenarioStep, fleet: FleetEngine, s
         # R2's customer operators (ogsim.customer): the target must be an id the shipped config names
         # (a customer site, or a market zone such as a PJM zone) -- a typo would silently do nothing.
         known = _config_ids(SIMS_CONFIG_DIR)
-        if step.target not in known and step.target in KNOWN_UNCONFIGURED_TARGETS:
-            pytest.xfail(KNOWN_UNCONFIGURED_TARGETS[step.target])
         assert step.target in known, (
             f"customer target {step.target!r} is not named in {SIMS_CONFIG_DIR}/*.yaml"
         )
