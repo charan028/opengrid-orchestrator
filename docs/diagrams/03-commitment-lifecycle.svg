@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1250" width="1400" height="1250" role="img" aria-label="OpenGrid obligation/commitment lifecycle state machine">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1404" width="1400" height="1404" role="img" aria-label="OpenGrid obligation/commitment lifecycle state machine">
 <title>OpenGrid obligation/commitment lifecycle state machine</title>
 <style>text { font-family: Segoe UI, Arial, Helvetica, sans-serif; }</style>
-<rect x="0" y="0" width="1400" height="1250" fill="#ffffff"/>
+<rect x="0" y="0" width="1400" height="1404" fill="#ffffff"/>
 <defs>
 <marker id="arrow_15803d" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#15803d"/></marker>
 </defs>
@@ -14,7 +14,7 @@
 <rect x="322.8" y="62" width="16" height="13" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
 <text x="342.8" y="73" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >LIVE (production caller found)</text>
 <rect x="561.6" y="62" width="16" height="13" rx="8" ry="8" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.6"/>
-<text x="581.6" y="73" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >defined, NOT driven (0 production callers)</text>
+<text x="581.6" y="73" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >defined, NOT driven (0 production callers) — none remain in this state machine</text>
 <rect x="130" y="96" width="340" height="92" rx="8" ry="8" fill="#e0e7ff" stroke="#4338ca" stroke-width="1.6"/>
 <text x="300.0" y="117" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15" font-weight="700" text-anchor="middle" fill="#0f172a" >OFFERED</text>
 <text x="140" y="137" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >created by contracts.admit()/admit_priced()</text>
@@ -40,8 +40,8 @@
 <rect x="300" y="686" width="250" height="130" rx="8" ry="8" fill="#e0e7ff" stroke="#4338ca" stroke-width="1.6"/>
 <text x="425.0" y="707" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15" font-weight="700" text-anchor="middle" fill="#0f172a" >SHORTFALL</text>
 <text x="310" y="727" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >window_end below threshold, or a</text>
-<text x="310" y="741" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >sustained (60s) L2/infeasible cut</text>
-<text x="310" y="755" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >mid-window; L0/L1 not yet driven</text>
+<text x="310" y="741" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >sustained (60s) L0/L1/L2/infeasible</text>
+<text x="310" y="755" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >cut mid-window — ALL LIVE (NEW)</text>
 <rect x="130" y="858" width="340" height="86" rx="8" ry="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.6"/>
 <text x="300.0" y="879" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15" font-weight="700" text-anchor="middle" fill="#0f172a" >SETTLED</text>
 <text x="140" y="899" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >og-settle has billed this obligation</text>
@@ -94,10 +94,10 @@
 <text x="198.5" y="666.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="middle" fill="#14532d" >LIVE</text>
 <text x="198.5" y="680.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="middle" fill="#14532d" >window_end&lt;=now (NEW)</text>
 <path d="M 368.0 638 L 368.0 660 L 425.0 660 L 425.0 686" fill="none" stroke="#15803d" stroke-width="2" marker-end="url(#arrow_15803d)"/>
-<rect x="311.4" y="641.0" width="170.2" height="49.2" fill="#ffffff" opacity="0.94" rx="3" stroke="#e5e7eb" stroke-width="1"/>
+<rect x="274.5" y="641.0" width="244.1" height="49.2" fill="#ffffff" opacity="0.94" rx="3" stroke="#e5e7eb" stroke-width="1"/>
 <text x="396.5" y="652.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="middle" fill="#14532d" >R-SHORTFALL-THRESHOLD</text>
 <text x="396.5" y="666.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="middle" fill="#14532d" >LIVE</text>
-<text x="396.5" y="680.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="middle" fill="#14532d" >+ L2/INFEASIBLE mid-window</text>
+<text x="396.5" y="680.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="middle" fill="#14532d" >+ L0/L1/L2/INFEASIBLE mid-window (NEW)</text>
 <path d="M 165.0 796 L 165.0 868 L 170 868 L 170 858" fill="none" stroke="#15803d" stroke-width="2" marker-end="url(#arrow_15803d)"/>
 <rect x="95.0" y="820.0" width="83.9" height="49.2" fill="#ffffff" opacity="0.94" rx="3" stroke="#e5e7eb" stroke-width="1"/>
 <text x="100.0" y="831.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="start" fill="#14532d" >R-SETTLED</text>
@@ -108,7 +108,7 @@
 <text x="440.0" y="831.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="start" fill="#14532d" >R-SETTLED</text>
 <text x="440.0" y="845.4" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="start" fill="#14532d" >LIVE</text>
 <text x="440.0" y="859.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="start" fill="#14532d" >settle (NEW)</text>
-<rect x="900" y="96" width="470" height="210" rx="8" ry="8" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
+<rect x="900" y="96" width="470" height="308" rx="8" ry="8" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"/>
 <text x="910" y="117" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >K13 commitment lock</text>
 <text x="910" y="136" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >LOCKED_STATES = {COMMITTED, DELIVERING}</text>
 <text x="910" y="150" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >(state_machine.py:33). While locked, a</text>
@@ -121,57 +121,68 @@
 <text x="910" y="248" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >default). Checked independently in THREE</text>
 <text x="910" y="262" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >places: selector's C24 equality, ledger.</text>
 <text x="910" y="276" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >check_commitment_lock(), guardian G-19.</text>
-<rect x="900" y="326" width="470" height="322" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
-<text x="910" y="347" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Substitution (R-SUBSTITUTION)</text>
-<text x="910" y="366" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >Hub-level, within one bank: allocator.</text>
-<text x="910" y="380" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >cycle()'s water-filling excludes an un-</text>
-<text x="910" y="394" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >healthy hub and re-homes its kW onto</text>
-<text x="910" y="408" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >another eligible hub on the SAME bank —</text>
-<text x="910" y="422" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >LIVE, every 2 s cycle, AND now traced (NEW,</text>
-<text x="910" y="436" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >b0a3688): run_cycle() reads CycleResult.</text>
-<text x="910" y="450" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >substitutions and calls ledger.record_</text>
-<text x="910" y="464" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >substitution_events() (allocator/__init__.py)</text>
-<text x="910" y="478" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >— one SUBSTITUTION trace event per event;</text>
-<text x="910" y="492" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >a recording failure never costs the cycle.</text>
-<text x="910" y="506" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" ></text>
-<text x="910" y="520" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >Bank-level (a DIFFERENT bank entirely):</text>
-<text x="910" y="534" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >allocator.substitute_hub() is now wired (NEW):</text>
-<text x="910" y="548" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >engine.main() calls allocator.configure(ledger)</text>
-<text x="910" y="562" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >at startup, so the old always-None gateway and</text>
-<text x="910" y="576" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >its NotImplementedError are gone. But grep still</text>
-<text x="910" y="590" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >finds ZERO production call sites for substitute_</text>
-<text x="910" y="604" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >hub() itself — wired and callable, never auto-</text>
-<text x="910" y="618" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >matically triggered today.</text>
-<rect x="900" y="668" width="470" height="196" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
-<text x="910" y="689" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >AT_RISK (K1 energy, diagram 02)</text>
-<text x="910" y="708" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >Not a lifecycle state — a boolean column,</text>
-<text x="910" y="722" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >og.obligation.at_risk (migrations/0001),</text>
-<text x="910" y="736" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >alongside state. LIVE (NEW, 01fbd38):</text>
-<text x="910" y="750" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >EnergySufficiencyGateway (engine/gateways.py)</text>
-<text x="910" y="764" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >now calls contracts.set_obligation_at_risk()</text>
-<text x="910" y="778" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >on BOTH edges — True when newly at-risk</text>
-<text x="910" y="792" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >(margin_kwh &lt; 0 after substitution), False</text>
-<text x="910" y="806" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >when an obligation recovers. Set AND cleared</text>
-<text x="910" y="820" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >every cycle; traced + ALR-ENERGY-SHORTFALL-</text>
-<text x="910" y="834" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >RISK alerted on entry only (not every cycle).</text>
-<rect x="900" y="884" width="470" height="240" rx="8" ry="8" fill="#fae8ff" stroke="#b91c1c" stroke-width="1.6"/>
-<text x="910" y="906" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15" font-weight="700" text-anchor="start" fill="#7f1d1d" >Verified finding</text>
-<text x="910" y="926" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >Re-grepped against main @ f3b3365 (was fcaa2ca):</text>
-<text x="910" y="940" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >289d68f/14c4a01 landed R-ADMIT-REJECT (selector.</text>
-<text x="910" y="954" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >commit), R-RENOM-GATE (contracts.renomination,</text>
-<text x="910" y="968" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >called from engine's post-gate callback), and</text>
-<text x="910" y="982" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >FULFILLED/SHORTFALL → SETTLED (settle.close_</text>
-<text x="910" y="996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >settled_obligations). ALL 12 reason-code edges</text>
-<text x="910" y="1010" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >are now LIVE except two: R-COMMIT-LOCK-OVERRIDE-</text>
-<text x="910" y="1024" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >L0/-L1 (device-safety/homeowner-reserve mid-</text>
-<text x="910" y="1038" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >window overrides) still have 0 production callers.</text>
-<text x="910" y="1052" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >The NEW mid-window escalator (engine/escalation.py,</text>
-<text x="910" y="1066" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >60s sustain) drives L2/INFEASIBLE — code-complete,</text>
-<text x="910" y="1080" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >but per the lead not yet observed firing on a real</text>
-<text x="910" y="1094" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >obligation (still open). See README for file:line.</text>
-<rect x="30" y="1154" width="1340" height="76" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
-<text x="46" y="1174" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#111827" >Sources</text>
-<text x="46" y="1192.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >selector/commit.py  ·  engine/{lifecycle,escalation}.py (NEW)  ·  contracts/renomination.py  ·  settle/__init__.py  ·  engine/gateways.py  ·  contracts/{state_machine,lifecycle}.py</text>
-<text x="46" y="1206.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >orchestrator/migrations/0001_init.sql (og.obligation, og.commitment)  ·  00-invariants.md (K13)  ·  02a-mvp-s-spec-engine.md §2.1  ·  snapshot f3b3365 (2026-09-26)</text>
-<text x="46" y="1221.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >Verified by grep -rn: transition_obligation / exercise_renomination_point / set_obligation_at_risk / close_settled_obligations all LIVE; 0 hits remain only for R-COMMIT-LOCK-OVERRIDE-L0 / -L1</text>
+<text x="910" y="290" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" ></text>
+<text x="910" y="304" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >NEW: ERCOT_AS is a capacity HOLD, not a</text>
+<text x="910" y="318" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >discharge — 0 kW grant (R-GRANT-AS-HOLD)</text>
+<text x="910" y="332" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >while undeployed, capacity stays locked</text>
+<text x="910" y="346" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >(allocator/cycle.py); POST .../as-</text>
+<text x="910" y="360" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >deployments discharges it up to committed</text>
+<text x="910" y="374" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >kW for one window (api/routers/dispatch.py).</text>
+<rect x="900" y="424" width="470" height="322" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="910" y="445" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Substitution (R-SUBSTITUTION)</text>
+<text x="910" y="464" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >Hub-level, within one bank: allocator.</text>
+<text x="910" y="478" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >cycle()'s water-filling excludes an un-</text>
+<text x="910" y="492" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >healthy hub and re-homes its kW onto</text>
+<text x="910" y="506" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >another eligible hub on the SAME bank —</text>
+<text x="910" y="520" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >LIVE, every 2 s cycle, AND now traced (NEW,</text>
+<text x="910" y="534" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >b0a3688): run_cycle() reads CycleResult.</text>
+<text x="910" y="548" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >substitutions and calls ledger.record_</text>
+<text x="910" y="562" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >substitution_events() (allocator/__init__.py)</text>
+<text x="910" y="576" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >— one SUBSTITUTION trace event per event;</text>
+<text x="910" y="590" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >a recording failure never costs the cycle.</text>
+<text x="910" y="604" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" ></text>
+<text x="910" y="618" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >Bank-level (a DIFFERENT bank entirely):</text>
+<text x="910" y="632" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >allocator.substitute_hub() is now wired (NEW):</text>
+<text x="910" y="646" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >engine.main() calls allocator.configure(ledger)</text>
+<text x="910" y="660" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >at startup, so the old always-None gateway and</text>
+<text x="910" y="674" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >its NotImplementedError are gone. But grep still</text>
+<text x="910" y="688" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >finds ZERO production call sites for substitute_</text>
+<text x="910" y="702" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >hub() itself — wired and callable, never auto-</text>
+<text x="910" y="716" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >matically triggered today.</text>
+<rect x="900" y="766" width="470" height="196" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
+<text x="910" y="787" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >AT_RISK (K1 energy, diagram 02)</text>
+<text x="910" y="806" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >Not a lifecycle state — a boolean column,</text>
+<text x="910" y="820" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >og.obligation.at_risk (migrations/0001),</text>
+<text x="910" y="834" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >alongside state. LIVE (NEW, 01fbd38):</text>
+<text x="910" y="848" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >EnergySufficiencyGateway (engine/gateways.py)</text>
+<text x="910" y="862" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >now calls contracts.set_obligation_at_risk()</text>
+<text x="910" y="876" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >on BOTH edges — True when newly at-risk</text>
+<text x="910" y="890" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >(margin_kwh &lt; 0 after substitution), False</text>
+<text x="910" y="904" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >when an obligation recovers. Set AND cleared</text>
+<text x="910" y="918" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >every cycle; traced + ALR-ENERGY-SHORTFALL-</text>
+<text x="910" y="932" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#1f2937" >RISK alerted on entry only (not every cycle).</text>
+<rect x="900" y="982" width="470" height="296" rx="8" ry="8" fill="#fae8ff" stroke="#b91c1c" stroke-width="1.6"/>
+<text x="910" y="1004" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15" font-weight="700" text-anchor="start" fill="#7f1d1d" >Verified finding</text>
+<text x="910" y="1024" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >Re-grepped against main @ 434d230 (was f3b3365):</text>
+<text x="910" y="1038" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >4913a95's allocator.cycle.classify_hub_loss() now</text>
+<text x="910" y="1052" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >attributes lost hub capacity to L0 (FAULT hubs)/</text>
+<text x="910" y="1066" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >L1 (reserve-floor-limited healthy hubs)/INFEASIBLE</text>
+<text x="910" y="1080" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >(stale/offline) every cycle, for every bank — not</text>
+<text x="910" y="1094" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >a rare path. Mid-window SHORTFALL (engine/</text>
+<text x="910" y="1108" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >escalation.py) now accepts these K13 reasons</text>
+<text x="910" y="1122" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >directly (947c9f5) with precedence L0&gt;L1&gt;L2&gt;</text>
+<text x="910" y="1136" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >INFEASIBLE. Every one of the 12 reason-code edges</text>
+<text x="910" y="1150" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >in this diagram is now LIVE with a production</text>
+<text x="910" y="1164" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >caller — the state machine has 0 remaining gaps.</text>
+<text x="910" y="1178" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" ></text>
+<text x="910" y="1192" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >Narrower note: L0/L1 run every cycle in code; a</text>
+<text x="910" y="1206" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >live mid-window L0/L1 firing isn't separately</text>
+<text x="910" y="1220" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >confirmed (unlike L2/INFEASIBLE + window-end).</text>
+<text x="910" y="1234" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >See README for file:line and what is still open</text>
+<text x="910" y="1248" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.1" font-weight="normal" text-anchor="start" fill="#7f1d1d" >elsewhere (cycle p99 target, diagram 02).</text>
+<rect x="30" y="1308" width="1340" height="76" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
+<text x="46" y="1328" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#111827" >Sources</text>
+<text x="46" y="1346.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >selector/commit.py  ·  engine/{lifecycle,escalation}.py (NEW)  ·  contracts/renomination.py  ·  settle/__init__.py  ·  engine/gateways.py  ·  contracts/{state_machine,lifecycle}.py</text>
+<text x="46" y="1360.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >orchestrator/migrations/0001_init.sql (og.obligation, og.commitment)  ·  00-invariants.md (K13)  ·  02a-mvp-s-spec-engine.md §2.1  ·  snapshot 434d230 (2026-09-26)</text>
+<text x="46" y="1375.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >Verified by grep -rn: allocator/cycle.py:260 classify_hub_loss(), engine/escalation.py _PRECEDENCE, allocator/cycle.py:147-162 is_as_hold/R-GRANT-AS-HOLD, api/routers/dispatch.py:74 as-deployments</text>
 </svg>

@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1595" width="1400" height="1595" role="img" aria-label="OpenGrid orchestrator system architecture">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1605" width="1400" height="1605" role="img" aria-label="OpenGrid orchestrator system architecture">
 <title>OpenGrid orchestrator system architecture</title>
 <style>text { font-family: Segoe UI, Arial, Helvetica, sans-serif; }</style>
-<rect x="0" y="0" width="1400" height="1595" fill="#ffffff"/>
+<rect x="0" y="0" width="1400" height="1605" fill="#ffffff"/>
 <defs>
 <marker id="arrow_15803d" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#15803d"/></marker>
 <marker id="arrow_374151" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/></marker>
@@ -10,7 +10,7 @@
 <marker id="arrow_b91c1c" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/></marker>
 </defs>
 <text x="30" y="28" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="20" font-weight="700" text-anchor="start" fill="#111827" >OpenGrid Orchestrator — System Architecture</text>
-<text x="30" y="48" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.5" font-weight="normal" text-anchor="start" fill="#475569" >Processes, MQTT topic families, and PostgreSQL 17 (schema og) — as implemented on main @ f3b3365</text>
+<text x="30" y="48" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.5" font-weight="normal" text-anchor="start" fill="#475569" >Processes, MQTT topic families, and PostgreSQL 17 (schema og) — as implemented on main @ 434d230</text>
 <rect x="30" y="58" width="16" height="13" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
 <text x="50" y="69" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#1f2937" >orchestrator process (og-*)</text>
 <rect x="254.32000000000002" y="58" width="16" height="13" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
@@ -30,13 +30,13 @@
 <rect x="30" y="112" width="170" height="100" rx="8" ry="8" fill="#f3f4f6" stroke="#4b5563" stroke-width="1.6"/>
 <text x="40" y="133" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >Operator / browser</text>
 <text x="40" y="153" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >base.tocy-net.net</text>
-<text x="40" y="167" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >Basic Auth:</text>
-<text x="40" y="181" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >operator / viewer /</text>
-<text x="40" y="195" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >tester</text>
+<text x="40" y="167" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >Basic Auth: operator,</text>
+<text x="40" y="181" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >viewer, og-op-a/b,</text>
+<text x="40" y="195" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >og-cust-*, tester</text>
 <rect x="230" y="112" width="1140" height="100" rx="8" ry="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.6"/>
 <text x="800.0" y="133" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#0f172a" >Apache reverse proxy (base.tocy-net.net)</text>
-<text x="260" y="162" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#111827" >Location /og/  →  http://127.0.0.1:8080  (og-api)          Require user: operator, viewer</text>
-<text x="260" y="182" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#111827" >Location /ogsim/ →  http://127.0.0.1:8091 (ogsim.control)    Require user: tester</text>
+<text x="260" y="162" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#111827" >Location /og/  →  http://127.0.0.1:8080  (og-api)   Require user: operator, viewer, og-op-a, og-op-b  ·  sets X-Remote-User + X-OG-Proxy-Auth</text>
+<text x="260" y="182" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#111827" >Location /ogsim/ →  http://127.0.0.1:8091 (ogsim.control)   Require user: tester   ·   /og/api/customer/: og-cust-* (customer API)</text>
 <rect x="30" y="224" width="560" height="140" rx="8" ry="8" fill="#f3f4f6" stroke="#4b5563" stroke-width="1.6"/>
 <text x="40" y="245" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >External live sources (production default)</text>
 <rect x="45" y="258" width="165" height="85" rx="8" ry="8" fill="#f3f4f6" stroke="#4b5563" stroke-width="1.6"/>
@@ -84,30 +84,32 @@
 <text x="245" y="563" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >MILP/LP, F2 rule fallback), ledger</text>
 <text x="245" y="577" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >(K2/K13 sole writer), allocator</text>
 <text x="245" y="591" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >epoch: next_epoch() at startup (K6)</text>
-<text x="245" y="612.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >MQTT sub: tel/#, scada/#, scada/</text>
-<text x="245" y="626.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >instruction/#, scada/wave/+/+/+/#</text>
-<text x="245" y="648.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Writes: hub/bank/hub_state/</text>
-<text x="245" y="662.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >telemetry, contract/opportunity/</text>
-<text x="245" y="676.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >obligation (intake+admit), plan/</text>
-<text x="245" y="690.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >commitment, reservation/grant,</text>
-<text x="245" y="704.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >command_batch, command_ack,</text>
-<text x="245" y="718.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >obligation_energy_status, alert, trace</text>
+<text x="245" y="605" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >/metrics :[metrics].engine_port (NEW)</text>
+<text x="245" y="626.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >MQTT sub: tel/#, scada/#, scada/</text>
+<text x="245" y="640.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >instruction/#, wave/+/+/+/#, ack/cal/+</text>
+<text x="245" y="662.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Writes: hub/bank/hub_state/</text>
+<text x="245" y="676.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >telemetry, contract/opportunity/</text>
+<text x="245" y="690.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >obligation (intake+admit), plan/</text>
+<text x="245" y="704.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >commitment, reservation/grant,</text>
+<text x="245" y="718.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >command_batch, command_ack,</text>
+<text x="245" y="732.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >obligation_energy_status, alert, trace</text>
 <rect x="550" y="450" width="190" height="300" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
 <text x="560" y="471" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-guardian</text>
 <text x="560" y="487" font-family="Consolas, 'Courier New', monospace" font-size="11.2" font-weight="500" text-anchor="start" fill="#334155" >opengrid.guardian.main</text>
-<text x="560" y="507" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Sole signer (K3).</text>
-<text x="560" y="521" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Checks: G-01..G-06, G-09,</text>
-<text x="560" y="535" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >G-13..G-15, G-19-20,</text>
-<text x="560" y="549" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >G-21..G-25 (PQ, NEW)</text>
-<text x="560" y="563" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >(checks.py + pq_checks.py;</text>
-<text x="560" y="577" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >detail: diagram 02)</text>
-<text x="560" y="598.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >MQTT sub: tel/# (own</text>
-<text x="560" y="612.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >cache); pub: cmd/+/batch,</text>
-<text x="560" y="626.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >lease/+</text>
+<text x="560" y="507" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Sole signer (K3). Checks:</text>
+<text x="560" y="521" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >G-01..G-06,G-09,G-13-15,</text>
+<text x="560" y="535" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >G-19-20,G-21..G-25 (PQ)</text>
+<text x="560" y="549" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >(detail: diagram 02)</text>
+<text x="560" y="563" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >K7 escalation + 2-person</text>
+<text x="560" y="577" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >stop RELEASE (NEW, both)</text>
+<text x="560" y="598.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >MQTT sub: tel/#; pub:</text>
+<text x="560" y="612.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >cmd/+/batch, cmd/cal/+,</text>
+<text x="560" y="626.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >lease/+ (own cache)</text>
 <text x="560" y="648.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Reads: command_batch,</text>
 <text x="560" y="662.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >trace, reservation,</text>
 <text x="560" y="676.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >bank, hub_state</text>
-<text x="560" y="690.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Writes: verdict, trace</text>
+<text x="560" y="690.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Writes: verdict, trace,</text>
+<text x="560" y="704.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >scope_posture</text>
 <rect x="755" y="450" width="175" height="300" rx="8" ry="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6"/>
 <text x="765" y="471" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="start" fill="#0f172a" >og-safestop</text>
 <text x="765" y="487" font-family="Consolas, 'Courier New', monospace" font-size="11.2" font-weight="500" text-anchor="start" fill="#334155" >opengrid.safestop.main</text>
@@ -115,9 +117,9 @@
 <text x="765" y="521" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >authority (K8): no</text>
 <text x="765" y="535" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >import of engine or</text>
 <text x="765" y="549" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >guardian</text>
-<text x="765" y="570.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Two-step propose/</text>
-<text x="765" y="584.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >confirm via Postgres</text>
-<text x="765" y="598.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >NOTIFY (see below)</text>
+<text x="765" y="570.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Two-step propose/confirm</text>
+<text x="765" y="584.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >RELEASE relays a signed</text>
+<text x="765" y="598.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >event (2-person, NEW)</text>
 <text x="765" y="620.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >MQTT pub: stop/+/+</text>
 <text x="765" y="634.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >(QoS1, retained)</text>
 <text x="765" y="656.1000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Writes: stop_event,</text>
@@ -150,10 +152,12 @@
 <text x="1160" y="606.4000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >panel operator click)</text>
 <text x="1160" y="628.1000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >R/W: contract/opportunity/</text>
 <text x="1160" y="642.1000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >obligation (CRUD+admit),</text>
-<text x="1160" y="656.1000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >operator_action, alert(ack)</text>
-<text x="1160" y="677.8000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Reads: plan, reservation,</text>
-<text x="1160" y="691.8000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >grant, pnl, invoice_line,</text>
-<text x="1160" y="705.8000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >trace, hub/bank/hub_state</text>
+<text x="1160" y="656.1000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >operator_action, alert(ack),</text>
+<text x="1160" y="670.1000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >as-deployments, safestop</text>
+<text x="1160" y="684.1000000000001" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >release (NEW, 2-person)</text>
+<text x="1160" y="705.8000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >Reads: plan, reservation,</text>
+<text x="1160" y="719.8000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >grant, pnl, invoice_line,</text>
+<text x="1160" y="733.8000000000002" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="400" text-anchor="start" fill="#1f2937" >trace, hub/bank/hub_state</text>
 <path d="M 505 450 L 505 390 L 580 390 L 580 450" fill="none" stroke="#6d28d9" stroke-width="1.7" stroke-dasharray="5,4" marker-end="url(#arrow_6d28d9)"/>
 <rect x="466.7" y="374.0" width="151.7" height="20.4" fill="#ffffff" opacity="0.94" rx="3" stroke="#e5e7eb" stroke-width="1"/>
 <text x="542.5" y="385.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="middle" fill="#4c1d95" >NOTIFY og_command_batch</text>
@@ -181,43 +185,49 @@
 <text x="46" y="994.6999999999996" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#14532d" >pq_envelope, service_profile, pq_waveform_summary, pq_waveform_</text>
 <text x="46" y="1010.9999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#14532d" >  raw_index  —  wave 2 LIVE writes (pq_ingest, diagram 06)</text>
 <text x="46" y="1027.2999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#14532d" >hub_inverter_pq, calibration_attempt, maintenance_work_order,</text>
-<text x="46" y="1043.5999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#6b7280" font-style="italic" >  asset_event  —  built (opengrid.assets), 0 callers (06)</text>
+<text x="46" y="1043.5999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#6b7280" font-style="italic" >  asset_event  —  wired (opengrid.assets), disabled by config (06)</text>
 <rect x="810" y="784" width="560" height="280" rx="8" ry="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.6"/>
 <text x="1090.0" y="808" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="15.5" font-weight="700" text-anchor="middle" fill="#0f172a" >Mosquitto (MQTT)</text>
 <text x="1090.0" y="825" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="middle" fill="#334155" >topic root &lt;root&gt; = og/v1 (prod) | ogtest/&lt;ws&gt; (test workspaces)</text>
 <text x="824" y="846" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >tel/&lt;zone&gt;/&lt;bank&gt;/&lt;hub&gt;</text>
 <text x="1055" y="846" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS0</text>
 <text x="1110" y="846" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine, guardian</text>
-<text x="824" y="862.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >cmd/&lt;bank&gt;/batch</text>
-<text x="1055" y="862.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
-<text x="1110" y="862.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >guardian → sim</text>
-<text x="824" y="878.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >ack/&lt;hub&gt;</text>
-<text x="1055" y="878.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
-<text x="1110" y="878.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine, guardian</text>
-<text x="824" y="894.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >stop/&lt;scope&gt;/&lt;id&gt;</text>
-<text x="1055" y="894.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1 R</text>
-<text x="1110" y="894.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >safestop → sim</text>
-<text x="824" y="910.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >lease/&lt;hub&gt;</text>
-<text x="1055" y="910.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1 R</text>
-<text x="1110" y="910.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >guardian → sim</text>
-<text x="824" y="926.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/&lt;bank&gt;</text>
-<text x="1055" y="926.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS0</text>
-<text x="1110" y="926.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim(scada) → engine (PI)</text>
-<text x="824" y="942.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/instruction/&lt;bank&gt;</text>
-<text x="1055" y="942.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
-<text x="1110" y="942.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim/utility → eng, guard</text>
-<text x="824" y="958.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scenario/cmd</text>
-<text x="1055" y="958.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
-<text x="1110" y="958.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >api, sim-control → sim</text>
-<text x="824" y="974.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/wave/.../summary</text>
-<text x="1055" y="974.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS0</text>
-<text x="1110" y="974.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine (NEW, LIVE)</text>
-<text x="824" y="990.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/wave/.../raw</text>
-<text x="1055" y="990.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS0</text>
-<text x="1110" y="990.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine (NEW, LIVE)</text>
-<text x="824" y="1010.0" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#9ca3af" font-style="italic" >scada/wave/.../request, cmd/cal/&lt;hub&gt;, ack/cal/&lt;hub&gt;</text>
-<text x="824" y="1025.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#9ca3af" font-style="italic" >request: ogsim replies live, but nothing triggers one. cmd/cal+ack/cal: 0 wiring (06)</text>
-<text x="824" y="1045.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#334155" >Users: og_engine, og_guardian, og_safestop, og_sim, og_simctl, og_api</text>
+<text x="824" y="860.8" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >cmd/&lt;bank&gt;/batch</text>
+<text x="1055" y="860.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
+<text x="1110" y="860.8" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >guardian → sim</text>
+<text x="824" y="875.5999999999999" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >ack/&lt;hub&gt;</text>
+<text x="1055" y="875.5999999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
+<text x="1110" y="875.5999999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine, guardian</text>
+<text x="824" y="890.3999999999999" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >stop/&lt;scope&gt;/&lt;id&gt;</text>
+<text x="1055" y="890.3999999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1 R</text>
+<text x="1110" y="890.3999999999999" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >safestop → sim</text>
+<text x="824" y="905.1999999999998" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >lease/&lt;hub&gt;</text>
+<text x="1055" y="905.1999999999998" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1 R</text>
+<text x="1110" y="905.1999999999998" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >guardian → sim</text>
+<text x="824" y="919.9999999999998" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/&lt;bank&gt;</text>
+<text x="1055" y="919.9999999999998" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS0</text>
+<text x="1110" y="919.9999999999998" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim(scada) → engine (PI)</text>
+<text x="824" y="934.7999999999997" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/instruction/&lt;bank&gt;</text>
+<text x="1055" y="934.7999999999997" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
+<text x="1110" y="934.7999999999997" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim/utility → eng, guard</text>
+<text x="824" y="949.5999999999997" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scenario/cmd</text>
+<text x="1055" y="949.5999999999997" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
+<text x="1110" y="949.5999999999997" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >api, sim-control → sim</text>
+<text x="824" y="964.3999999999996" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/wave/.../summary</text>
+<text x="1055" y="964.3999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS0</text>
+<text x="1110" y="964.3999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine (LIVE)</text>
+<text x="824" y="979.1999999999996" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >scada/wave/.../raw</text>
+<text x="1055" y="979.1999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS0</text>
+<text x="1110" y="979.1999999999996" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine (LIVE)</text>
+<text x="824" y="993.9999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >cmd/cal/&lt;hub_id&gt;</text>
+<text x="1055" y="993.9999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
+<text x="1110" y="993.9999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >guardian → sim (LIVE, NEW)</text>
+<text x="824" y="1008.7999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#7c2d12" >ack/cal/&lt;hub_id&gt;</text>
+<text x="1055" y="1008.7999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#92400e" >QoS1</text>
+<text x="1110" y="1008.7999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#334155" >sim → engine (LIVE, NEW)</text>
+<text x="824" y="1027.5999999999995" font-family="Consolas, monospace" font-size="11.2" font-weight="normal" text-anchor="start" fill="#9ca3af" font-style="italic" >scada/wave/.../request — ogsim replies live, but nothing triggers one yet</text>
+<text x="824" y="1043.5999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#334155" >Users: og_engine, og_guardian, og_safestop, og_sim, og_simctl, og_api</text>
+<text x="824" y="1058.5999999999995" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#334155" >Workspaces: ogw_&lt;ws&gt;, readwrite ogtest/&lt;ws&gt;/# only (D-13)</text>
 <path d="M 125.0 750 L 125.0 762 L 93.33333333333334 762 L 93.33333333333334 784" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
 <path d="M 385.0 750 L 385.0 762 L 220.0 762 L 220.0 784" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
 <path d="M 645.0 750 L 645.0 762 L 346.6666666666667 762 L 346.6666666666667 784" fill="none" stroke="#15803d" stroke-width="1.7" marker-end="url(#arrow_15803d)"/>
@@ -234,14 +244,13 @@
 <text x="820" y="1151" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >~2,000 hubs, 40 banks</text>
 <text x="820" y="1165" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >pub: tel/#, ack/#</text>
 <text x="820" y="1179" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >sub: cmd/+/batch,</text>
-<text x="820" y="1193" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >stop/#, lease/+,</text>
-<text x="820" y="1207" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >scenario/cmd</text>
+<text x="820" y="1193" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >cmd/cal/+, stop/#,</text>
+<text x="820" y="1207" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >lease/+, scenario/cmd</text>
 <text x="820" y="1228.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >PQ wave publishing</text>
 <text x="820" y="1242.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >LIVE (NEW): scada/wave/</text>
 <text x="820" y="1256.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >.../{summary,raw} (10s</text>
-<text x="820" y="1270.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >gate). calibration</text>
-<text x="820" y="1284.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >logic built, NOT MQTT-</text>
-<text x="820" y="1298.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >wired (06)</text>
+<text x="820" y="1270.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >gate). calibration loop</text>
+<text x="820" y="1284.7" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="start" fill="#1f2937" >WIRED (NEW, 06)</text>
 <rect x="1002" y="1094" width="176" height="230" rx="8" ry="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.6"/>
 <text x="1012" y="1115" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="12.6" font-weight="700" text-anchor="start" fill="#0f172a" >og-sim-scada</text>
 <text x="1012" y="1131" font-family="Consolas, 'Courier New', monospace" font-size="11" font-weight="500" text-anchor="start" fill="#334155" >ogsim.scada</text>
@@ -274,16 +283,17 @@
 <path d="M 1350 212 L 1350 222 L 1370 222 L 1370 1209.0 L 1370 1209.0" fill="none" stroke="#b91c1c" stroke-width="1.7" marker-end="url(#arrow_b91c1c)"/>
 <rect x="1313.4" y="374.0" width="71.6" height="20.4" fill="#ffffff" opacity="0.94" rx="3" stroke="#e5e7eb" stroke-width="1"/>
 <text x="1380" y="385.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="600" text-anchor="end" fill="#7f1d1d" >HTTP :8091</text>
-<rect x="30" y="1354" width="1340" height="124" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
+<rect x="30" y="1354" width="1340" height="140" rx="8" ry="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.6"/>
 <text x="46" y="1374" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#111827" >Notes</text>
 <text x="46" y="1392" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >Dashed purple arrows are a logical handoff carried through a shared Postgres table + NOTIFY/LISTEN channel, not a direct RPC.</text>
 <text x="46" y="1408" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >og-feeds and og-settle never open an MQTT connection (interfaces/mqtt/topics.md); og-api opens one only to publish scenario/cmd.</text>
 <text x="46" y="1424" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >opengrid.contracts (contract/product_rule/opportunity/obligation) is written from BOTH og-engine (automatic intake) and og-api (operator CRUD + manual admit).</text>
 <text x="46" y="1440" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >SCADA ingest (fleet.ingest_scada_signal) is memory-only; persistence moved to flush() alongside telemetry (NEW, 708182a) -- a per-message commit on the ingest path fell behind under load (live 2026-09-25).</text>
-<text x="46" y="1456" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >og_api subscribes to NO MQTT topic for its SSE streams (interfaces/mqtt/topics.md, fixed this round) -- those poll Postgres directly; its only MQTT use remains the scenario/cmd publish noted above.</text>
-<text x="30" y="1504" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#111827" >Sources</text>
-<text x="30" y="1522.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >BUILD.md §1,4,5 (process table, ports, MQTT users)  ·  orchestrator/config/orchestrator.toml  ·  interfaces/mqtt/topics.md</text>
-<text x="30" y="1536.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >orchestrator/src/opengrid/{feeds,engine,guardian,safestop,settle,api}/main.py and __init__.py  ·  opengrid/api/app.py, routers/scenario.py, routers/fleet.py</text>
-<text x="30" y="1551.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >orchestrator/src/opengrid/platform/mqtt.py  ·  orchestrator/src/opengrid/contracts/__init__.py  ·  pq_ingest/*.py, guardian/{pq_checks,pq_repo}.py, assets/*.py (all NEW, 9153dc2)</text>
-<text x="30" y="1565.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >deploy/apache/opengrid.conf  ·  integration-sims/src/ogsim/{fleet,scada,market,control}/README.md  ·  dev/docker-compose.yml (ports 8080/8090/8091)  ·  dev/mosquitto/opengrid.acl</text>
+<text x="46" y="1456" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >og_api subscribes to NO MQTT topic for its SSE streams (interfaces/mqtt/topics.md) -- those poll Postgres directly; its only MQTT use remains the scenario/cmd publish noted above.</text>
+<text x="46" y="1472" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11.2" font-weight="normal" text-anchor="start" fill="#1f2937" >og-sim-customer (D-11, IN PROGRESS): deploy/RUNBOOK.md lists its systemd unit as installed but not enabled -- integration-sims/src/ogsim/customer has 0 files on this checkout (grep); not drawn as a live box.</text>
+<text x="30" y="1520" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" fill="#111827" >Sources</text>
+<text x="30" y="1538.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >BUILD.md §1,4,5 (process table, ports, MQTT users)  ·  orchestrator/config/orchestrator.toml  ·  interfaces/mqtt/topics.md</text>
+<text x="30" y="1552.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >orchestrator/src/opengrid/{feeds,engine,guardian,safestop,settle,api}/main.py and __init__.py  ·  opengrid/api/app.py, routers/scenario.py, routers/fleet.py</text>
+<text x="30" y="1567.0" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >guardian/{stop_release,escalation,mqtt_io,metrics}.py  ·  api/routers/{dispatch,safestop}.py  ·  engine/{pq_eligibility,metrics}.py  ·  deploy/RUNBOOK.md  ·  snapshot 434d230 (2026-09-26)</text>
+<text x="30" y="1581.5" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="11" font-weight="normal" text-anchor="start" fill="#475569" >deploy/apache/opengrid.conf  ·  integration-sims/src/ogsim/{fleet,scada,market,control}/README.md  ·  dev/docker-compose.yml (ports 8080/8090/8091)  ·  dev/mosquitto/opengrid.acl</text>
 </svg>
