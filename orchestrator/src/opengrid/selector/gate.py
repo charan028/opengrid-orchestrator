@@ -48,6 +48,7 @@ _CATEGORY_BY_SERVICE_TYPE: dict[str, Literal["FIRM", "AS", "MARKET"]] = {
     "HOME": "FIRM",
     "DIST_DEFERRAL": "FIRM",
     "PARTNER_CAPACITY": "FIRM",
+    "DATA_CENTER": "FIRM",  # firm bridging capacity (06-service-profiles S4.b)
     "ERCOT_AS": "AS",
     "ERCOT_ENERGY": "MARKET",
 }

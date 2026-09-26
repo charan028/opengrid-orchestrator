@@ -8,9 +8,9 @@
 # kW, site meter id and bridge duration into the per-contract numbers. Values marked "per contract" in the
 # comments are defaults that a contract may tighten; loosening one is a new profile version (03 S2.7, V-27).
 #
-# Not yet wired: DATA_CENTER is not a registered ServiceType (core/models/engine.py) nor an allowed
-# og.contract.service_type value (migrations/0001_init.sql). The PR that adds this file lists those changes
-# for their owners.
+# Wired: DATA_CENTER is a registered ServiceType (core/models/engine.py) and an allowed og.contract.service_type
+# (migrations/0013_service_type_data_center.sql); the selector treats it as FIRM and settle meters it at the site
+# meter (AMI_INTERVAL).
 
 [profile]
 service_type = "DATA_CENTER"

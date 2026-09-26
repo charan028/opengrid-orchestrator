@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+from opengrid.core.models.engine import ServiceType
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 
 Tier = Literal["T1", "T2", "T3", "T4"]
@@ -72,7 +73,7 @@ class ObligationCall:
 
     obligation_id: str
     bank_id: str
-    service_type: Literal["HOME", "ERCOT_ENERGY", "ERCOT_AS", "DIST_DEFERRAL", "PARTNER_CAPACITY"]
+    service_type: ServiceType
     tier: Tier
     committed_kw: float
     eligible_hub_ids: tuple[str, ...]
