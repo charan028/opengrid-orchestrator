@@ -62,3 +62,19 @@ correctly. The tooling asserts the *specified* behaviour (BUILD.md, 02b S6.4/S6.
    and never `api`/`sim`, and `og.alert` stayed empty through the overload.
 9. **`og-engine` serves no `/metrics`** (item 6) confirmed: `tests-e2e/perf/capture.py` against the live
    stack reports "no histogram found"; only `og-guardian:9103` answers.
+
+## Live feeds against the real APIs (2026-09-26 04:xx Z, real EIA + ERCOT subscription keys)
+
+10. **`og-feeds` cannot ingest the real NWS hourly forecast** (owner: feeds). Two parser assumptions no
+    longer hold against `api.weather.gov`: `properties.updated` is now `updateTime`/`generatedAt`, and
+    hourly periods carry no `skyCover`. The first raised a KeyError that aborted every feeds tick and
+    re-polled NWS every cycle (the poll timer never advanced); the second rejected every period as
+    malformed. Fix with tests on branch **`hotfix/feeds-nws-updatetime`** (2 commits on top of `main`,
+    ready to cherry-pick); with it applied, real NWS temperature/dewpoint rows land within one tick.
+11. **ERCOT public API needs the account username/password** (`ERCOT_API_USER`/`ERCOT_API_PASSWORD`,
+    ROPC token flow), not only the subscription keys; the token endpoint returns 400 without them. The
+    storage-API keys are not used anywhere in this code.
+12. **EIA is a fallback only**, polled when `np6-345-cd`'s own hourly poll comes due while the ERCOT
+    breaker is open, so on a fresh start EIA data appears about an hour after ERCOT starts failing. The
+    EIA client itself works with the real key (24 hourly ERCOT demand rows, verified). For a demo
+    without ERCOT credentials that is a long wait; consider polling EIA on its own schedule.
