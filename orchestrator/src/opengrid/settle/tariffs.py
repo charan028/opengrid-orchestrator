@@ -103,7 +103,7 @@ def grid_charged_kwh_for_delivery(
 ) -> Decimal:
     """The grid-drawn charging kWh one obligation-interval's delivery stands for (09 D5's M1 base):
     the AC energy that had to be charged to discharge `delivered_kwh` (delivered / (eta_c x eta_d)), times
-    the zone's grid share of charging (`ZoneChargeEnergy.grid_share`: behind-the-meter PV surplus never
+    the zone's grid share of charging (`core.solar_share.SolarShare.grid_share`, D-28: solar charging never
     pays M1). Owner decision 2026-09-26: the FULL delivery charge applies to that energy (no Wholesale
     Storage Load or ADER exemption).
 

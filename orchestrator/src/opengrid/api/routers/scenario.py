@@ -52,7 +52,10 @@ async def trigger_scenario(
     validate_payload("scenario_control", payload)
 
     password = os.environ.get(_MQTT_API_PASSWORD_ENV, "")
-    async with build_client(cfg, username="og_api", password=password, process="api-scenario") as client:
+    # A unique client id per request: the broker disconnects an existing session when a second client
+    # connects with the same id, so two concurrent triggers with a fixed id kicked each other off.
+    process = f"api-scenario-{uuid4().hex[:8]}"
+    async with build_client(cfg, username="og_api", password=password, process=process) as client:
         await client.publish(topic(cfg, "scenario/cmd"), payload=_json_bytes(payload), qos=1)
 
     trace_ref = await trace_store.append(

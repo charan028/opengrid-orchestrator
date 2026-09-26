@@ -255,14 +255,22 @@ async def test_pg_proposal_port_malformed_payload_returns_none():
 
 async def test_load_hub_params():
     cursor = FakeCursor(
-        [[("hub-1", 39.2, 7.84, 11.0, 0.9487, 0.9487, 1), ("hub-2", 78.4, 15.68, 20.0, 0.9487, 0.9487, 2)]]
+        [
+            [
+                ("hub-1", 39.2, 7.84, 11.0, 0.9487, 0.9487, 1, False),
+                ("hub-2", 78.4, 15.68, 20.0, 0.9487, 0.9487, 2, False),
+                ("sub-LZ_AEN-00", 40000.0, 8000.0, 20000.0, 0.9381, 0.9381, 2, True),
+            ]
+        ]
     )
     params = await repo.load_hub_params(FakePool(cursor))
-    assert set(params) == {"hub-1", "hub-2"}
+    assert set(params) == {"hub-1", "hub-2", "sub-LZ_AEN-00"}
     assert params["hub-1"].health == "stale"
     assert params["hub-1"].params.p_kw == 11.0
     assert params["hub-1"].params.units == 1
     assert params["hub-2"].params.units == 2  # G-02's per-unit cap is populated, not left None
+    assert not params["hub-2"].params.utility_scale
+    assert params["sub-LZ_AEN-00"].params.utility_scale  # og.asset SUBSTATION: rated at its nameplate
 
 
 # ---------------------------------------------------------------------------------------------------

@@ -30,6 +30,9 @@ class HubParams:
     self_discharge_kwh_per_h: float = DEFAULT_SELF_DISCHARGE_KWH_PER_H
     ramp_kw_per_s: float | None = None  # None = the 02a S6.1 firm default, see `hub_ramp_kw_per_s`
     units: int | None = None  # battery/inverter units in the home when known (G-02 per-unit cap), else None
+    #: A utility-scale asset (og.asset SUBSTATION, e.g. the D-29 20 MW set): its continuous rating is its
+    #: nameplate `p_kw`, never the home per-unit cap. False (a home) unless the caller read otherwise.
+    utility_scale: bool = False
 
 
 def hub_ramp_kw_per_s(params: HubParams) -> float:

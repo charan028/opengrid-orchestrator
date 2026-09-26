@@ -131,3 +131,45 @@ def test_a_conservative_bank_takes_no_headroom_but_keeps_committed_dispatch():
     assert [g for g in result.grants if g.is_headroom] == []
     (grant,) = [g for g in result.grants if g.obligation_id == FIRM_ID]
     assert grant.granted_kw == 30.0
+
+
+TOLL_ID = "8e1cdcde-0000-4000-8000-000000000003"
+
+
+def _toll_call(*, called: bool, kw: float = 40.0) -> ObligationCall:
+    return ObligationCall(
+        obligation_id=TOLL_ID,
+        bank_id="b1",
+        service_type="REGULATED_CAPACITY",  # type: ignore[arg-type]
+        tier="T1",
+        committed_kw=kw,
+        eligible_hub_ids=tuple(f"h{i}" for i in range(10)),
+        as_deployed=called,
+        hold_duration_h=1.5,
+    )
+
+
+def test_an_uncalled_utility_toll_is_held_at_zero_like_an_as_award():
+    """D-29: the toll is held at 0 kW (R-GRANT-AS-HOLD, no shortfall, no headroom out of its energy)."""
+    result = cycle(T, _hold_tight_fleet(), LedgerView(calls=(_toll_call(called=False),)), _PRICED, {}, ())
+    assert result.held == (TOLL_ID,)
+    (hold,) = [g for g in result.grants if g.obligation_id == TOLL_ID]
+    assert hold.granted_kw == 0.0 and hold.reason_code == "R-GRANT-AS-HOLD"
+    assert result.shortfalls == ()
+    assert [g for g in result.grants if g.is_headroom] == []
+
+
+def test_a_called_utility_toll_discharges_its_committed_kw_and_never_charges():
+    """D-29(c): the utility makes discharge calls only; the allocator never proposes charging for it."""
+    result = cycle(T, _fleet(), LedgerView(calls=(_toll_call(called=True),)), Schedule(), {}, ())
+    (grant,) = [g for g in result.grants if g.obligation_id == TOLL_ID]
+    assert grant.granted_kw == 40.0
+    assert all(g.granted_kw >= 0.0 for g in result.grants)
+
+
+def test_null_obligation_deployments_apply_to_ercot_as_only():
+    from opengrid.engine import gateways as gw
+
+    for sql in (gw._ACTIVE_CALLS_SQL, gw._ENERGY_SUFFICIENCY_ROWS_SQL):
+        assert "d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'" in sql
+        assert "d.obligation_id IS NULL OR" not in sql

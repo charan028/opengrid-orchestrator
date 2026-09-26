@@ -45,6 +45,10 @@ def _contract_from_row(row: dict[str, Any]) -> Contract:
         degradation_cost=row["degradation_cost"],
         fallback_allowed=row["fallback_allowed"],
         status=row["status"],
+        # Migration 0025 (two-market model). `.get`: a row read from a query that does not select them, or
+        # a database before 0025, is FREE with no utility -- the column default, never a guess.
+        market=row.get("market") or "FREE",
+        utility_id=row.get("utility_id"),
     )
 
 
@@ -153,8 +157,8 @@ class PgContractsRepo:
                 INSERT INTO og.contract (
                     contract_id, customer_id, service_type, variant, tier, profile_ref, territory_id,
                     start_at, end_at, renomination_allowed, penalty_alpha, penalty_beta, penalty_theta,
-                    degradation_cost, fallback_allowed, status, updated_at
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+                    degradation_cost, fallback_allowed, status, market, utility_id, updated_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
                 ON CONFLICT (contract_id) DO UPDATE SET
                     customer_id = EXCLUDED.customer_id, service_type = EXCLUDED.service_type,
                     variant = EXCLUDED.variant, tier = EXCLUDED.tier, profile_ref = EXCLUDED.profile_ref,
@@ -163,6 +167,7 @@ class PgContractsRepo:
                     penalty_alpha = EXCLUDED.penalty_alpha, penalty_beta = EXCLUDED.penalty_beta,
                     penalty_theta = EXCLUDED.penalty_theta, degradation_cost = EXCLUDED.degradation_cost,
                     fallback_allowed = EXCLUDED.fallback_allowed, status = EXCLUDED.status,
+                    market = EXCLUDED.market, utility_id = EXCLUDED.utility_id,
                     updated_at = now()
                 RETURNING *
                 """,
@@ -183,6 +188,8 @@ class PgContractsRepo:
                     contract.degradation_cost,
                     contract.fallback_allowed,
                     contract.status,
+                    contract.market,
+                    contract.utility_id,
                 ),
             )
             row = await cur.fetchone()

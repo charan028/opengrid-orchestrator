@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+
+from opengrid.contracts.intake.ports import PriceObservation
+
+#: Timestamp the fake gives an AS price with no explicit one: the intake tests' fixed NOW (always fresh).
+DEFAULT_AS_PRICE_TS = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
 
 
 @dataclass
 class FakeMarketDataPort:
     energy_prices: dict[str, float] = field(default_factory=dict)
     as_mcpc: dict[str, float] = field(default_factory=dict)
+    as_mcpc_ts: dict[str, datetime] = field(default_factory=dict)
 
     async def latest_energy_price_usd_per_mwh(self, series_key: str) -> float | None:
         return self.energy_prices.get(series_key)
 
     async def latest_as_mcpc_usd_per_mwh(self, product_code: str) -> float | None:
         return self.as_mcpc.get(product_code)
+
+    async def latest_as_mcpc(self, product_code: str) -> PriceObservation | None:
+        value = self.as_mcpc.get(product_code)
+        if value is None:
+            return None
+        return PriceObservation(value, self.as_mcpc_ts.get(product_code, DEFAULT_AS_PRICE_TS))
 
 
 @dataclass

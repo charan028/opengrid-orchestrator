@@ -25,6 +25,14 @@ ON CONFLICT (source, product, series, ts) DO UPDATE SET
     recorded_at = EXCLUDED.recorded_at
 """
 
+_INSERT_OBS_IF_ABSENT_SQL = """
+INSERT INTO og.feed_obs (source, product, series, ts, value, unit, quality, recorded_at)
+VALUES (%(source)s, %(product)s, %(series)s, %(ts)s, %(value)s, %(unit)s, %(quality)s, %(recorded_at)s)
+ON CONFLICT (source, product, series, ts) DO NOTHING
+"""
+
+_EARLIEST_SQL = "SELECT min(ts) FROM og.feed_obs WHERE source = %(source)s AND product = %(product)s"
+
 _LATEST_SQL = """
 SELECT source, product, series, ts, value, unit, quality, recorded_at
 FROM og.feed_obs
@@ -95,6 +103,38 @@ class FeedStore:
                     for r in rows
                 ],
             )
+
+    async def insert_obs_if_absent(self, rows: list[FeedObs]) -> int:
+        """Insert-only variant of `upsert_obs` for history backfill: a row whose natural key already
+        exists (e.g. written by the live poll) is left untouched. Returns the number of rows inserted."""
+        if not rows:
+            return 0
+        inserted = 0
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            for r in rows:
+                await cur.execute(
+                    _INSERT_OBS_IF_ABSENT_SQL,
+                    {
+                        "source": r.source,
+                        "product": r.product,
+                        "series": r.series,
+                        "ts": r.ts,
+                        "value": r.value,
+                        "unit": r.unit,
+                        "quality": r.quality,
+                        "recorded_at": r.recorded_at,
+                    },
+                )
+                inserted += max(cur.rowcount, 0)
+        return inserted
+
+    async def earliest_ts(self, *, source: str, product: str) -> datetime | None:
+        """Oldest `ts` stored for one source/product (None if none) -- the backfill's default end."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_EARLIEST_SQL, {"source": source, "product": product})
+            row = await cur.fetchone()
+        value = row[0] if row else None
+        return value if isinstance(value, datetime) else None
 
     async def update_status(
         self,

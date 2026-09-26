@@ -45,6 +45,7 @@ from opengrid.health.rules import (
     evaluate_feed_alert,
     evaluate_guardian_timeout_alert,
     evaluate_hub_offline_ratio_alert,
+    evaluate_per_bank_scada_silent_alert,
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
     evaluate_scada_overload_alert,
@@ -53,6 +54,7 @@ from opengrid.health.rules import (
     is_fallback_feed_needed,
     is_firm_blocking_feed,
     is_scada_silent,
+    missing_firm_blocking_feeds,
 )
 from opengrid.platform.config import Config
 from opengrid.platform.process import run_forever
@@ -267,6 +269,7 @@ async def evaluate_alerts() -> None:
     bank_loads = await queries.fetch_bank_loads(pool)
     latest_fleet_seen_at = await queries.fetch_latest_hub_seen_at(pool)
     latest_scada_seen_at = await queries.fetch_latest_scada_obs_at(pool)
+    latest_scada_seen_at_by_bank = await queries.fetch_latest_scada_obs_by_bank(pool)
 
     findings = []
     for bank_id, kva_rating, load_kva in bank_loads:
@@ -312,6 +315,12 @@ async def evaluate_alerts() -> None:
     scada_silent_finding = evaluate_scada_silent_alert(latest_scada_seen_at, now=now, thresholds=_thresholds)
     if scada_silent_finding:
         findings.append(scada_silent_finding)
+    for bank_id, bank_latest_seen_at in latest_scada_seen_at_by_bank:
+        bank_silent_finding = evaluate_per_bank_scada_silent_alert(
+            bank_id, bank_latest_seen_at, now=now, thresholds=_thresholds
+        )
+        if bank_silent_finding:
+            findings.append(bank_silent_finding)
 
     open_alerts = await queries.fetch_open_alerts(pool)
     open_by_key = {queries.condition_key_for(a): a for a in open_alerts}
@@ -360,7 +369,10 @@ async def evaluate_once() -> HealthSnapshot:
     hub_counts_by_zone = aggregate_hub_counts(classified_hubs)
 
     feed_statuses = await queries.fetch_feed_statuses(pool)
-    any_feed_stale = any(
+    # R3 review fix (MEDIUM): a blocking feed with no `feed_status` row at all (fresh DB, or a deleted
+    # row) must count as stale too -- iterating only existing rows silently let a missing row block
+    # nothing, disabling the very protection `firm_blocking_feeds` exists for.
+    any_feed_stale = bool(missing_firm_blocking_feeds(feed_statuses, thresholds=_thresholds)) or any(
         evaluate_feed_alert(
             fs, now=now, thresholds=_thresholds, staleness_threshold_s=_feed_staleness_threshold_s(fs)
         )

@@ -76,26 +76,6 @@ class PnlBreakdown:
 
 
 @dataclass(frozen=True, slots=True)
-class ZoneChargeEnergy:
-    """A load zone's hub charging over a window, from `og.telemetry` (09 D5's M1 fleet-level proxy):
-    the summed charging power of every sample (`p_kw > 0`, charging-positive) and the part of it drawn
-    from the GRID -- charging beyond the home's PV surplus (`pv_kw - home_load_kw`, migration 0027; a
-    NULL PV reading is no PV). Sums over the same samples, so their ratio is the zone's grid share of
-    charging energy whatever the telemetry cadence."""
-
-    charge_kw_sum: Decimal
-    grid_charge_kw_sum: Decimal
-
-    @property
-    def grid_share(self) -> Decimal:
-        """Grid-drawn fraction of charging energy in [0, 1]; 1 (the owner's full-M1 assumption) when the
-        zone did not charge at all in the window."""
-        if self.charge_kw_sum <= 0:
-            return Decimal("1")
-        return min(max(self.grid_charge_kw_sum / self.charge_kw_sum, Decimal("0")), Decimal("1"))
-
-
-@dataclass(frozen=True, slots=True)
 class InvoiceLineDraft:
     """A candidate `og.invoice_line` row before insert-only versioning is resolved (02a S7.3)."""
 

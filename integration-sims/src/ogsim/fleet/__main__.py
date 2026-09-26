@@ -22,6 +22,7 @@ import jsonschema
 from ogsim.common.clock import RealClock
 from ogsim.common.config import load_fleet_config
 from ogsim.common.mqtt_client import AiomqttTransportAdapter, SimMqttClient, mqtt_settings
+from ogsim.fleet.commands import CommandVerdict
 from ogsim.fleet.runtime import (
     FleetEngine,
     load_guardian_public_key,
@@ -155,7 +156,14 @@ async def _dispatch_message(
     elif "/lease/" in topic and data:
         engine.handle_lease_message(parts[-1], data["expires_at"])
     elif topic.endswith("/scenario/cmd"):
-        engine.handle_scenario_cmd(data)
+        # Demo gap #14, 2026-09-26: `tampered_unsigned_command` returns the self-test's
+        # `CommandVerdict` (instead of the usual `ActiveAnomalyStarted`) so its REJECTED ack actually
+        # reaches the orchestrator on the real ack topic, exactly like a genuine rejected command --
+        # see `FleetEngine.handle_scenario_cmd`'s docstring.
+        scenario_result = engine.handle_scenario_cmd(data, public_key)
+        if isinstance(scenario_result, CommandVerdict):
+            ack = engine.build_ack(scenario_result, str(data.get("id", "")), time.time())
+            await client.publish_validated("ack", f"ack/{scenario_result.hub_id}", ack, qos=1)
 
 
 async def _handle_command_batch(

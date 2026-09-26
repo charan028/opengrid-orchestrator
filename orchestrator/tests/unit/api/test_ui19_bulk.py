@@ -71,18 +71,20 @@ def test_single_confirm_executes_through_the_single_hub_path(client, store, fake
     assert store.command_batches == []  # nothing commanded at propose time
 
     resp = _confirm(client, proposal["proposal_id"])
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 202, resp.text
     body = resp.json()
-    assert body["status"] == "EXECUTED"
-    assert body["outcome_counts"] == {"PASS": 4}
+    assert body["status"] == "RAMPING" and body["expires_at"]
+    assert body["outcome_counts"] == {"RAMPING": 4}
     assert [r["hub_id"] for r in body["results"]] == hubs
-    # one command_batch + one MANUAL_COMMAND operator action per hub (the fleet.py path), plus the bulk row
-    assert len(store.command_batches) == 4
-    kinds = [a["target_ref"] for a in store.operator_actions]
-    assert kinds.count(f"bulk:{proposal['proposal_id']}") == 1
-    assert len(store.operator_actions) == 5
+    # ONE manual target for the whole selection (the engine ramps each hub), no one-shot batches
+    assert store.command_batches == []
+    records = asyncio.run(fake_trace_store._backend.fetch_range(STREAM, from_seq=0))
+    (target,) = [r for r in records if r.event_class == "MANUAL_TARGET"]
+    assert target.payload["hub_ids"] == hubs and target.payload["p_kw_target"] == 0.0
+    assert body["manual_target_trace_id"]
+    assert [a["target_ref"] for a in store.operator_actions] == [f"bulk:{proposal['proposal_id']}"]
     assert _steps(fake_trace_store) == ["PROPOSE", "CONFIRM", "RESULT"]
-    assert asyncio.run(fake_trace_store.verify(STREAM)).ok  # concurrent per-hub appends did not fork
+    assert asyncio.run(fake_trace_store.verify(STREAM)).ok
 
 
 def test_committed_obligation_and_fault_require_a_second_confirm(client, store, fake_trace_store) -> None:
@@ -100,8 +102,9 @@ def test_committed_obligation_and_fault_require_a_second_confirm(client, store, 
     assert store.command_batches == []
 
     second = _confirm(client, proposal["proposal_id"])
-    assert second.status_code == 200
-    assert second.json()["status"] == "EXECUTED" and second.json()["hub_count"] == 3
+    assert second.status_code == 202
+    assert second.json()["status"] == "RAMPING" and second.json()["hub_count"] == 3
+    assert store.operator_actions[-1]["approver_ref"] == "operator"
     assert _steps(fake_trace_store) == ["PROPOSE", "CONFIRM_1", "CONFIRM_2", "RESULT"]
     assert _confirm(client, proposal["proposal_id"]).status_code == 404  # consumed
 
@@ -114,15 +117,6 @@ def test_critical_alert_and_reserve_floor_require_a_second_confirm(views, client
     why = {r["hub_id"]: r["reasons"] for r in proposal["double_confirm_reasons"]}
     assert why == {"hub-00007": ["CRITICAL_ALERT"], "hub-00008": ["AT_OR_BELOW_RESERVE"]}
     assert proposal["warnings"] == [{"hub_id": "hub-00009", "warnings": ["HUB_OFFLINE"]}]
-
-
-def test_guardian_veto_is_reported_per_hub(client, store) -> None:
-    store.next_verdict_outcome = "VETOED"
-    store.next_vetoed_rule_ids = ["G-04"]
-    proposal = _propose(client, ["hub-00005", "hub-00006"])
-    body = _confirm(client, proposal["proposal_id"]).json()
-    assert body["outcome_counts"] == {"VETOED": 2}
-    assert body["results"][0]["vetoed_rule_ids"] == ["G-04"]
 
 
 def test_unknown_hub_and_too_many_hubs_are_422(client) -> None:

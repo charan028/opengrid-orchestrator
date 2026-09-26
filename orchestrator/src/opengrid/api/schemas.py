@@ -26,8 +26,10 @@ class _Api(BaseModel):
 class CommandProposalRequest(_Api):
     bank_id: str | None = None
     hub_id: str | None = None
-    p_kw_setpoint: float
+    p_kw_setpoint: float  # the manual target, +charge / -discharge (engine/manual.py)
     reason: str = Field(min_length=1)
+    #: How long the manual target holds (default 15 min, max 4 h); the engine ramps toward it until then.
+    duration_minutes: int | None = Field(default=None, ge=1, le=240)
 
 
 class ProposalAccepted(_Api):

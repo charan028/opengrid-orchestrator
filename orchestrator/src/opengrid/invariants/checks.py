@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from opengrid.core.physics import BankParams, HubParams, bank_capability, hub_capability
+from opengrid.allocator.energy_hold import (
+    DEFAULT_AS_DEPLOYMENT_H,
+    hold_energy_kwh,
+    margin_kwh,
+    stored_above_reserve_kwh,
+)
+from opengrid.allocator.models import HubSnapshot
+from opengrid.core.limits import continuous_power_kw
+from opengrid.core.physics import BankParams, HubParams, bank_capability
 from opengrid.invariants.models import Violation
 
 # Float-compare tolerances, matching `opengrid.core.limits`' own 1e-9-scale epsilons (no separate,
@@ -53,52 +61,32 @@ def find_reserve_breaches(
     return violations
 
 
-def compute_bank_capabilities_kw(
+def compute_bank_rated_capabilities_kw(
     hub_rows: list[tuple[str, float, float, float, float, float, float, float, float, str, int | None]],
 ) -> dict[str, float]:
-    """K2's ceiling: the SAME discharge-capability formula the ledger's admission check uses
-    (`opengrid.core.physics.hub_capability`/`bank_capability`, the pure functions
-    `opengrid.fleet.capability()`/`opengrid.ledger`'s `CapabilityProvider` are themselves built on) --
-    reused here, not re-derived, and NOT the bank's static `kva_rating` nameplate. Verified live: nameplate
-    is always >= the true admitted capability once any hub is offline/low-SoC, so a double-sale that stays
-    under nameplate but over the real capability went completely undetected by the old check.
+    """K2's ceiling: each bank's RATED capability -- the sum of its hubs' unit-capped continuous ratings
+    (`opengrid.core.limits.continuous_power_kw`: 11 kW per unit, 20 kW dual-unit, one unit when unknown),
+    capped by the bank's `kva_rating - reserve_kva` (`opengrid.core.physics.bank_capability`). Both
+    formulas are reused, not re-derived.
 
-    `opengrid.fleet`'s own in-memory capability singleton lives in `og-engine`'s process, not
-    `og-settle`'s (where this package runs) -- this recomputes the identical formula independently from
-    persisted state (`og.hub_state`/`og.hub`/`og.bank`) instead of reaching into another process's
-    private runtime, which `opengrid.invariants`' whole design (independent, read-only, DB-only) requires
-    anyway.
+    Deliberately NOT live capability (owner ruling 2026-09-26): K2 is "the same kW sold twice", decided by
+    overlapping reservations against what the bank can ever deliver. A hub going offline or running low
+    on SoC after commitment shrinks live capability without anything being sold twice -- that is a
+    SHORTFALL (K13), counted there. Comparing against live capability counted every such loss as a double
+    sale (dev stack: K2 rose 0 -> 750 kWh while all hubs were offline). `soc_kwh`/`health` are ignored.
 
     `hub_rows`: `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health,
-    units)` -- one row per hub. `units` (`og.hub.units`, migration 0032; `None` on a database that predates
-    it) feeds `hub_capability`'s unit-capped rating, which fails closed to one unit when unknown. A hub whose persisted `health` (`opengrid.health`'s own classification) is not
-    `"online"` contributes zero discharge capability, matching `opengrid.fleet.capability`'s exclusion
-    rule; every bank appears in the result even if every one of its hubs is excluded (capability 0.0),
-    so a caller's `.get(bank_id, ...)` never has to guess a bank's ceiling from having no rows for it.
+    units)` -- one row per hub (`invariants.queries.fetch_bank_capability_inputs`). Every bank with a hub
+    row appears in the result.
     """
-    discharge_kw_by_bank: dict[str, list[float]] = {}
+    rated_kw_by_bank: dict[str, list[float]] = {}
     bank_params_by_bank: dict[str, BankParams] = {}
-    for (
-        bank_id,
-        kva_rating,
-        reserve_kva,
-        e_kwh,
-        r_kwh,
-        p_kw,
-        eta_c,
-        eta_d,
-        soc_kwh,
-        health,
-        units,
-    ) in hub_rows:
+    for bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, _soc, _health, units in hub_rows:
         bank_params_by_bank.setdefault(bank_id, BankParams(kva_rating=kva_rating, reserve_kva=reserve_kva))
-        if health != "online":
-            continue
         hub_params = HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d, units=units)
-        discharge_kw, _charge_kw = hub_capability(soc_kwh, hub_params)
-        discharge_kw_by_bank.setdefault(bank_id, []).append(discharge_kw)
+        rated_kw_by_bank.setdefault(bank_id, []).append(continuous_power_kw(hub_params))
     return {
-        bank_id: bank_capability(discharge_kw_by_bank.get(bank_id, []), bank_params)
+        bank_id: bank_capability(rated_kw_by_bank.get(bank_id, []), bank_params)
         for bank_id, bank_params in bank_params_by_bank.items()
     }
 
@@ -107,8 +95,9 @@ def find_double_sold(
     rows: list[tuple[str, datetime, datetime, float]],
     capability_by_bank: dict[str, float],
 ) -> list[Violation]:
-    """K2: sum of active reservations on a bank/interval exceeding that interval's TRUE capability
-    (`compute_bank_capabilities_kw`, not the bank's nameplate `kva_rating`) -- "kWh sold twice". `rows`:
+    """K2: sum of active reservations on a bank/interval exceeding the bank's RATED capability
+    (`compute_bank_rated_capabilities_kw`) -- "kWh sold twice". A loss of live capability after
+    commitment is K13's, never K2's. `rows`:
     `(bank_id, interval_start, interval_end, total_reserved_kw)`, already grouped by (bank_id,
     interval_start) in SQL (`invariants.queries`). A bank missing from `capability_by_bank` (no hub rows
     at all) is treated as 0 kW capability -- any reservation there is fully oversold.
@@ -524,37 +513,111 @@ def find_orphan_commitments(
 _AS_HOLD_TOLERANCE_KWH = 1e-6
 
 
-def find_as_hold_violations(
-    rows: list[tuple[str, str, float, int, float]],
-) -> list[Violation]:
-    """AS capacity hold compliance (00-invariants.md S2.6/S6; migration 0020's "an award keeps
-    committed_kw x duration / eta_d above the reserve floor"): while an `og.as_deployment` window covers
-    an ERCOT_AS obligation, the energy actually deliverable from its reserved banks (already net of the
-    reserve floor and discharge efficiency -- `opengrid.core.physics.hub_available_energy_kwh`, summed in
-    SQL) must stay at or above what sustaining `committed_kw` for the product's full `duration_minutes`
-    would draw. A hold that has already fallen below its requirement (e.g. SoC drifted down between
-    deployments, or a hub went offline) is exactly the condition 0020 exists to prevent from being
-    invisible until ERCOT actually calls the award.
+@dataclass(frozen=True, slots=True)
+class HoldReservation:
+    """One active POWER_KW reservation covering `now` (`invariants.queries.fetch_as_hold_inputs`).
+    `deployment_end` is set when an active `og.as_deployment` covers this obligation now (its own row, or
+    a fleet-wide NULL-obligation row for an ERCOT_AS award)."""
 
-    `rows`: `(deployment_id, obligation_id, committed_kw, duration_minutes, held_kwh)` -- `held_kwh`
-    already summed across every bank reserved for that obligation's active interval
-    (`invariants.queries.fetch_as_hold_candidates`); this function only compares it to the requirement.
-    `dedupe_key` is the deployment id: the SAME deployment window falling short across repeated scans is
-    one ongoing violation, not one per run.
+    obligation_id: str
+    bank_id: str
+    kw: float
+    interval_start: datetime
+    interval_end: datetime
+    service_type: str
+    duration_minutes: int | None
+    deployment_id: str | None
+    deployment_end: datetime | None
+
+    @property
+    def is_as(self) -> bool:
+        return self.service_type == "ERCOT_AS"
+
+
+def _energy_owed_kwh(res: HoldReservation, now: datetime, eta_d: float) -> float:
+    """Stored kWh a reservation needs from its bank from `now` on (`allocator.energy_hold.hold_energy_kwh`,
+    reused): a HELD AS award its full deployment (kW x product duration); a DEPLOYED award kW x the
+    deployment's remaining window (never more than the product duration); any other reservation kW x the
+    rest of its interval."""
+    if res.is_as:
+        duration_h = (res.duration_minutes / 60.0) if res.duration_minutes else DEFAULT_AS_DEPLOYMENT_H
+        if res.deployment_end is not None:
+            duration_h = min(duration_h, max((res.deployment_end - now).total_seconds() / 3600.0, 0.0))
+    else:
+        duration_h = max((res.interval_end - now).total_seconds() / 3600.0, 0.0)
+    return hold_energy_kwh(res.kw, duration_h, eta_d)
+
+
+def find_as_hold_violations(
+    reservations: list[HoldReservation],
+    hubs_by_bank: dict[str, list[HubSnapshot]],
+    *,
+    now: datetime,
+) -> list[Violation]:
+    """AS capacity hold compliance (00-invariants.md S2.6/S6, migration 0020; NPRR1282): every committed
+    ERCOT_AS award must keep, on the banks it reserves, the stored energy its obligation needs -- measured
+    the same way the allocator protects it (`opengrid.allocator.energy_hold`, reused, not re-derived):
+
+    - HELD (no active deployment): `committed kW x product duration / eta_d` -- the case this check
+      exists for: a hold that erodes while undeployed stays invisible until ERCOT calls it;
+    - DEPLOYED: `kW x remaining deployment window / eta_d`;
+    - per bank, the energy available is stored energy above reserve on healthy hubs with a live SoC,
+      minus the G-01-ENERGY margin, minus what EVERY OTHER active reservation on that bank owes (other
+      holds in full, firm reservations for the rest of their interval) -- another obligation's claim on
+      the same kWh can never mask a shortfall.
+
+    One violation per award short of its need across its banks. `dedupe_key`: the deployment id while
+    deployed, else `held|<obligation>|<interval_start>` -- one ongoing condition, not one per run.
     """
+    by_bank: dict[str, list[HoldReservation]] = {}
+    for res in reservations:
+        by_bank.setdefault(res.bank_id, []).append(res)
+
+    available_by_bank: dict[str, tuple[float, float]] = {}  # bank -> (available stored kWh, eta_d)
+    for bank_id in by_bank:
+        live = [h for h in hubs_by_bank.get(bank_id, []) if h.soc_kwh is not None and h.is_healthy]
+        eta_d = sum(h.eta_d for h in live) / len(live) if live else 1.0
+        available_by_bank[bank_id] = (stored_above_reserve_kwh(live) - margin_kwh(live), eta_d)
+
+    awards: dict[str, list[HoldReservation]] = {}
+    for res in reservations:
+        if res.is_as:
+            awards.setdefault(res.obligation_id, []).append(res)
+
     violations = []
-    for deployment_id, obligation_id, committed_kw, duration_minutes, held_kwh in rows:
-        required_kwh = committed_kw * (duration_minutes / 60.0)
-        if held_kwh < required_kwh - _AS_HOLD_TOLERANCE_KWH:
+    for obligation_id, own in awards.items():
+        required_kwh = 0.0
+        available_kwh = 0.0
+        for res in own:
+            bank_available, eta_d = available_by_bank[res.bank_id]
+            others = sum(
+                _energy_owed_kwh(o, now, eta_d)
+                for o in by_bank[res.bank_id]
+                if o.obligation_id != obligation_id
+            )
+            required_kwh += _energy_owed_kwh(res, now, eta_d)
+            available_kwh += max(bank_available - others, 0.0)
+        if available_kwh < required_kwh - _AS_HOLD_TOLERANCE_KWH:
+            first = own[0]
+            deployed = first.deployment_id is not None
             violations.append(
                 Violation(
-                    scope={"deployment_id": deployment_id, "obligation_id": obligation_id},
-                    dedupe_key=deployment_id,
+                    scope={
+                        "obligation_id": obligation_id,
+                        "deployment_id": first.deployment_id,
+                        "banks": sorted({r.bank_id for r in own}),
+                    },
+                    dedupe_key=(
+                        str(first.deployment_id)
+                        if deployed
+                        else f"held|{obligation_id}|{first.interval_start.isoformat()}"
+                    ),
                     detail={
-                        "committed_kw": committed_kw,
-                        "duration_minutes": duration_minutes,
+                        "state": "DEPLOYED" if deployed else "HELD",
+                        "committed_kw": sum(r.kw for r in own),
+                        "duration_minutes": first.duration_minutes,
                         "required_kwh": required_kwh,
-                        "held_kwh": held_kwh,
+                        "available_kwh": available_kwh,
                     },
                 )
             )
@@ -625,15 +688,24 @@ def find_flow_limit_violations(
 
 
 def find_anchor_staleness_violation(
-    *, last_published_at: datetime | None, now: datetime, max_age_s: float
+    *,
+    last_published_at: datetime | None,
+    now: datetime,
+    max_age_s: float,
+    never_anchored_grace_until: datetime | None = None,
 ) -> Violation | None:
     """K11 external anchoring verification: the chain head hash must actually have been published
     (`opengrid.trace.anchoring.publish_anchor`) within `max_age_s` (the task brief's "every 15 min",
     passed with headroom by the caller -- see `invariants.__init__`'s own cadence constant). `None`
     (never anchored yet) is reported as stale rather than silently skipped -- a database that has NEVER
-    anchored is exactly the fail-safe gap this check exists to catch, not a clean state.
+    anchored is exactly the fail-safe gap this check exists to catch, not a clean state -- but only once
+    `never_anchored_grace_until` has passed: a freshly built database has had no chance to anchor yet
+    (R2 rebuild, 2026-09-26: ANCHOR_FRESHNESS = 1 before the first publish), so the writer gets the same
+    `max_age_s` to produce its first anchor that it gets between any two.
     """
     if last_published_at is None:
+        if never_anchored_grace_until is not None and now < never_anchored_grace_until:
+            return None
         return Violation(
             scope={"check": "anchor_freshness"},
             dedupe_key="never_anchored",

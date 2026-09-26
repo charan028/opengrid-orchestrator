@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 import opengrid.fleet as fleet
 from opengrid.core.models.platform import FeedStatus, Heartbeat
 from opengrid.core.physics import HubParams
@@ -22,6 +24,7 @@ from opengrid.health.rules import (
     evaluate_hub_offline_ratio_alert,
     evaluate_limit_proximity_alert,
     evaluate_meter_export_limit_alert,
+    evaluate_per_bank_scada_silent_alert,
     evaluate_process_down_alert,
     evaluate_reserve_breach_alert,
     evaluate_scada_overload_alert,
@@ -31,6 +34,7 @@ from opengrid.health.rules import (
     is_fallback_feed_needed,
     is_firm_blocking_feed,
     is_scada_silent,
+    missing_firm_blocking_feeds,
 )
 from opengrid.platform.config import Config
 
@@ -532,6 +536,13 @@ def test_ercot_price_series_is_firm_blocking_by_default() -> None:
     assert is_firm_blocking_feed(fs, thresholds=THRESHOLDS) is True
 
 
+def test_ercot_as_clearing_price_is_firm_blocking_by_default() -> None:
+    """R3 review fix (HIGH): AS intake values offers at the DAM clearing price (np4-188-cd) -- a stale
+    clearing price must block new commitments exactly like the real-time energy price does."""
+    fs = FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=None)
+    assert is_firm_blocking_feed(fs, thresholds=THRESHOLDS) is True
+
+
 def test_ercot_load_actuals_are_not_firm_blocking() -> None:
     """The defect: ERCOT system-load ACTUALS (np6-345-cd, a daily product) used to block
     NO_NEW_COMMITMENTS when stale even though it feeds no firm pricing."""
@@ -549,18 +560,122 @@ def test_eia_fallback_is_not_firm_blocking() -> None:
     assert is_firm_blocking_feed(fs, thresholds=THRESHOLDS) is False
 
 
-def test_firm_blocking_feeds_is_config_driven() -> None:
-    custom = HealthThresholds(firm_blocking_feeds=frozenset({"NWS:nws-hourly"}))
+def test_firm_blocking_feed_check_is_case_normalised() -> None:
+    """A directly-constructed `HealthThresholds` (bypassing `from_config`, e.g. in a test) need not have
+    pre-normalised entries -- membership is normalised at comparison time too."""
+    custom = HealthThresholds(firm_blocking_feeds=frozenset({"nws:NWS-HOURLY"}))
     ercot_price = FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=None)
     nws = FeedStatus(source="NWS", product="nws-hourly", last_value_at=None)
     assert is_firm_blocking_feed(ercot_price, thresholds=custom) is False
     assert is_firm_blocking_feed(nws, thresholds=custom) is True
 
 
-def test_firm_blocking_feeds_from_config() -> None:
-    cfg = Config({"health": {"firm_blocking_feeds": ["ERCOT:np6-905-cd", "NWS:nws-hourly"]}})
+def test_firm_blocking_feeds_from_config_adds_to_defaults() -> None:
+    cfg = Config({"health": {"firm_blocking_feeds": ["NWS:nws-hourly"]}})
     thresholds = HealthThresholds.from_config(cfg)
-    assert thresholds.firm_blocking_feeds == frozenset({"ERCOT:np6-905-cd", "NWS:nws-hourly"})
+    assert thresholds.firm_blocking_feeds == frozenset(
+        {"ERCOT:NP6-905-CD", "ERCOT:NP4-188-CD", "NWS:NWS-HOURLY"}
+    )
+
+
+def test_firm_blocking_feeds_replace_true_discards_defaults() -> None:
+    cfg = Config(
+        {
+            "health": {
+                "firm_blocking_feeds": ["NWS:nws-hourly"],
+                "firm_blocking_feeds_replace": True,
+            }
+        }
+    )
+    thresholds = HealthThresholds.from_config(cfg)
+    assert thresholds.firm_blocking_feeds == frozenset({"NWS:NWS-HOURLY"})
+
+
+def test_firm_blocking_feeds_bare_string_raises() -> None:
+    cfg = Config({"health": {"firm_blocking_feeds": "ERCOT:np6-905-cd"}})
+    with pytest.raises(ValueError, match="firm_blocking_feeds"):
+        HealthThresholds.from_config(cfg)
+
+
+def test_firm_blocking_feeds_malformed_entry_raises() -> None:
+    cfg = Config({"health": {"firm_blocking_feeds": ["ERCOT"]}})
+    with pytest.raises(ValueError, match="firm_blocking_feeds"):
+        HealthThresholds.from_config(cfg)
+
+
+def test_firm_blocking_feeds_empty_replace_rejected_by_default() -> None:
+    cfg = Config({"health": {"firm_blocking_feeds": [], "firm_blocking_feeds_replace": True}})
+    with pytest.raises(ValueError, match="empty"):
+        HealthThresholds.from_config(cfg)
+
+
+def test_firm_blocking_feeds_empty_replace_allowed_when_explicit() -> None:
+    cfg = Config(
+        {
+            "health": {
+                "firm_blocking_feeds": [],
+                "firm_blocking_feeds_replace": True,
+                "firm_blocking_feeds_allow_empty": True,
+            }
+        }
+    )
+    thresholds = HealthThresholds.from_config(cfg)
+    assert thresholds.firm_blocking_feeds == frozenset()
+
+
+def test_missing_firm_blocking_feed_row_counts_as_missing() -> None:
+    """R3 review fix (MEDIUM): a blocking feed with no `feed_status` row at all (fresh DB, or a deleted
+    row) must be reported as missing -- the caller then treats it the same as a stale reading."""
+    assert missing_firm_blocking_feeds([], thresholds=THRESHOLDS) == THRESHOLDS.firm_blocking_feeds
+
+
+def test_missing_firm_blocking_feeds_empty_when_all_present() -> None:
+    feed_statuses = [
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW),
+        FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=NOW),
+    ]
+    assert missing_firm_blocking_feeds(feed_statuses, thresholds=THRESHOLDS) == frozenset()
+
+
+def test_missing_firm_blocking_feeds_reports_only_the_absent_ones() -> None:
+    feed_statuses = [FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW)]
+    assert missing_firm_blocking_feeds(feed_statuses, thresholds=THRESHOLDS) == frozenset(
+        {"ERCOT:NP4-188-CD"}
+    )
+
+
+# --- ALR-SCADA-SILENT-BANK (R3 review fix) ----------------------------------------------------------
+
+
+def test_per_bank_scada_silent_none_on_cold_start() -> None:
+    assert evaluate_per_bank_scada_silent_alert("bank-000", None, now=NOW, thresholds=THRESHOLDS) is None
+
+
+def test_per_bank_scada_silent_none_when_fresh() -> None:
+    fresh = NOW - timedelta(seconds=5)
+    assert evaluate_per_bank_scada_silent_alert("bank-000", fresh, now=NOW, thresholds=THRESHOLDS) is None
+
+
+def test_per_bank_scada_silent_warns_past_threshold() -> None:
+    old = NOW - timedelta(seconds=THRESHOLDS.scada_silent_s + 1)
+    finding = evaluate_per_bank_scada_silent_alert("bank-000", old, now=NOW, thresholds=THRESHOLDS)
+    assert finding is not None
+    assert finding.rule == "ALR-SCADA-SILENT-BANK"
+    assert finding.severity == "warning"
+    assert finding.condition_key == "ALR-SCADA-SILENT-BANK:bank-000"
+    assert finding.detail["scope_kind"] == "BANK"
+    assert finding.detail["scope_ref"] == "bank-000"
+
+
+def test_per_bank_scada_silent_is_independent_per_bank() -> None:
+    """Two different banks get two independently-deduped condition keys -- one bank's silence alert
+    doesn't collide with another's (the rate-limiting the review asked for)."""
+    old = NOW - timedelta(seconds=THRESHOLDS.scada_silent_s + 1)
+    finding_a = evaluate_per_bank_scada_silent_alert("bank-000", old, now=NOW, thresholds=THRESHOLDS)
+    finding_b = evaluate_per_bank_scada_silent_alert("bank-001", old, now=NOW, thresholds=THRESHOLDS)
+    assert finding_a is not None
+    assert finding_b is not None
+    assert finding_a.condition_key != finding_b.condition_key
 
 
 # --- ALR-SIM-OFFLINE (defect fix) -------------------------------------------------------------------

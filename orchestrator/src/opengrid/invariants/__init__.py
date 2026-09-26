@@ -42,7 +42,7 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.invariants import checks, queries
+from opengrid.invariants import anchor_alerts, checks, queries
 from opengrid.invariants import trace_verify as _trace_verify
 from opengrid.invariants.models import (
     CHECK_ANCHOR_FRESHNESS,
@@ -89,6 +89,9 @@ _cadence: Cadence | None = None
 _trace_cadence: Cadence | None = None
 _anchor_cadence: Cadence | None = None
 _anchor_interval_s: float = _DEFAULT_ANCHOR_INTERVAL_S
+#: When configure() ran: the anchor writer's first publish is due from here, so ANCHOR_FRESHNESS gives a
+#: never-anchored database one staleness window from this instant before flagging it.
+_configured_at: datetime | None = None
 _config: Config | None = None
 _k2_lookback_s: float = _DEFAULT_K2_LOOKBACK_S
 _k13_max_grant_gap_s: float = checks.DEFAULT_K13_MAX_GRANT_GAP_S
@@ -106,6 +109,7 @@ def configure(pool: AsyncConnectionPool, cfg: Config) -> None:
         _trace_cadence, \
         _anchor_cadence, \
         _anchor_interval_s, \
+        _configured_at, \
         _config, \
         _k2_lookback_s, \
         _k13_max_grant_gap_s, \
@@ -120,6 +124,7 @@ def configure(pool: AsyncConnectionPool, cfg: Config) -> None:
     )
     _anchor_interval_s = float(cfg.get("trace.anchor_interval_s", _DEFAULT_ANCHOR_INTERVAL_S))
     _anchor_cadence = Cadence(_anchor_interval_s)
+    _configured_at = _now()
     _k2_lookback_s = float(cfg.get("invariants.k2_lookback_s", _DEFAULT_K2_LOOKBACK_S))
     _k13_max_grant_gap_s = float(
         cfg.get("invariants.k13_max_grant_gap_s", checks.DEFAULT_K13_MAX_GRANT_GAP_S)
@@ -157,7 +162,15 @@ async def run_due() -> None:
 
     Not configured (module never wired, e.g. a unit test of `health` alone), or a DB/backend error inside
     either check family, is a logged no-op, never an exception raised into the health evaluator that
-    called this hook -- this checker must never take down the health cycle it piggybacks on (K7)."""
+    called this hook -- this checker must never take down the health cycle it piggybacks on (K7).
+
+    The anchor publish runs FIRST, so on a fresh process the first anchor exists before the
+    ANCHOR_FRESHNESS check in `run_once` looks for it."""
+    if _anchor_cadence is not None and _anchor_cadence.due():
+        try:
+            await run_anchor_publish_once()
+        except Exception:
+            logger.exception("invariants.run_anchor_publish_once failed")
     if _cadence is not None and _cadence.due():
         try:
             await run_once()
@@ -168,11 +181,6 @@ async def run_due() -> None:
             await run_trace_verify_once()
         except Exception:
             logger.exception("invariants.run_trace_verify_once failed")
-    if _anchor_cadence is not None and _anchor_cadence.due():
-        try:
-            await run_anchor_publish_once()
-        except Exception:
-            logger.exception("invariants.run_anchor_publish_once failed")
 
 
 async def run_once() -> dict[str, CheckOutcome]:
@@ -288,15 +296,15 @@ async def _run_reserve_breach_check(pool: AsyncConnectionPool, now: datetime) ->
 
 
 async def _run_double_sold_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:
-    """K2: compares each bank/interval's summed reservations against that bank's TRUE capability
-    (`checks.compute_bank_capabilities_kw`, reusing `opengrid.core.physics`'s hub/bank capability
-    formula), not the bank's static `kva_rating` nameplate (adversarial-review fix)."""
+    """K2: compares each bank/interval's summed reservations against that bank's RATED capability
+    (`checks.compute_bank_rated_capabilities_kw`: unit-capped hub ratings within the bank's kVA). Live
+    capability (offline hubs, SoC) is deliberately not used: its loss after commitment is K13's."""
     start = time.perf_counter()
     state = await queries.get_check_state(pool, CHECK_K2_DOUBLE_SOLD)
     horizon_start = now - timedelta(seconds=_k2_lookback_s)
     rows = await queries.fetch_reservation_aggregates(pool, horizon_start=horizon_start)
     hub_rows = await queries.fetch_bank_capability_inputs(pool)
-    capability_by_bank = checks.compute_bank_capabilities_kw(hub_rows)
+    capability_by_bank = checks.compute_bank_rated_capabilities_kw(hub_rows)
     violations = checks.find_double_sold(rows, capability_by_bank)
     outcome = CheckOutcome(
         CHECK_K2_DOUBLE_SOLD, tuple(violations), {"horizon_start": horizon_start.isoformat()}
@@ -487,13 +495,13 @@ async def _run_territory_check(pool: AsyncConnectionPool, now: datetime) -> Chec
 
 
 async def _run_as_hold_check(pool: AsyncConnectionPool, now: datetime) -> CheckOutcome:
-    """AS capacity hold compliance (migration 0020): re-scans every currently-active `og.as_deployment`
-    window every run (bounded by how many deployments can be simultaneously active, not a growing
-    history) -- there is no meaningful watermark for "is this still true right now"."""
+    """AS capacity hold compliance (migration 0020): re-scans every committed ERCOT_AS award's banks every
+    run -- held and deployed alike, netting the other reservations on those banks. There is no meaningful
+    watermark for "is this still true right now"."""
     start = time.perf_counter()
     state = await queries.get_check_state(pool, CHECK_AS_HOLD)
-    rows = await queries.fetch_as_hold_candidates(pool, now=now)
-    violations = checks.find_as_hold_violations(rows)
+    reservations, hubs_by_bank = await queries.fetch_as_hold_inputs(pool, now=now)
+    violations = checks.find_as_hold_violations(reservations, hubs_by_bank, now=now)
     outcome = CheckOutcome(CHECK_AS_HOLD, tuple(violations), {})
     newly_inserted = await _persist_and_meter(
         pool,
@@ -538,8 +546,14 @@ async def _run_anchor_freshness_check(pool: AsyncConnectionPool, now: datetime) 
     start = time.perf_counter()
     state = await queries.get_check_state(pool, CHECK_ANCHOR_FRESHNESS)
     last_published_at = await queries.fetch_latest_anchor_published_at(pool)
+    max_age_s = _anchor_interval_s * _ANCHOR_STALE_MULTIPLIER
     violation = checks.find_anchor_staleness_violation(
-        last_published_at=last_published_at, now=now, max_age_s=_anchor_interval_s * _ANCHOR_STALE_MULTIPLIER
+        last_published_at=last_published_at,
+        now=now,
+        max_age_s=max_age_s,
+        never_anchored_grace_until=(
+            _configured_at + timedelta(seconds=max_age_s) if _configured_at is not None else None
+        ),
     )
     violations = [violation] if violation is not None else []
     outcome = CheckOutcome(CHECK_ANCHOR_FRESHNESS, tuple(violations), {})
@@ -558,12 +572,23 @@ async def _run_anchor_freshness_check(pool: AsyncConnectionPool, now: datetime) 
 async def run_anchor_publish_once() -> anchoring.AnchorResult:
     """K11 external anchoring (task brief: publish the chain head hash outside the database every ~15
     min). Reuses `TraceStore.checkpoint()`/`opengrid.trace.anchoring.publish_anchor` -- this function is
-    only the scheduling wrapper `run_due()`'s own `_anchor_cadence` calls."""
+    only the scheduling wrapper `run_due()`'s own `_anchor_cadence` calls.
+
+    A write failure (primary copy: nothing anchored; secondary copy: one copy only) raises a health alert
+    (`invariants.anchor_alerts`) as well as the exception/log, and a clean publish clears it."""
     pool = _require_pool()
     trace_store = _require_trace_store()
     if _config is None:
         raise RuntimeError("opengrid.invariants.configure() must be called before use")
-    return await anchoring.publish_anchor(pool, trace_store, _config)
+    try:
+        result = await anchoring.publish_anchor(pool, trace_store, _config)
+    except OSError as exc:
+        await anchor_alerts.record_publish_outcome(pool, primary_error=str(exc), secondary_written=False)
+        raise
+    await anchor_alerts.record_publish_outcome(
+        pool, primary_error=None, secondary_written=result.secondary_path is not None
+    )
+    return result
 
 
 async def run_trace_verify_once() -> _trace_verify.TraceVerifyOutcome:

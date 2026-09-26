@@ -24,7 +24,7 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -125,7 +125,14 @@ ORDER BY seq DESC LIMIT 1
 """
 
 
-_ALL_HUB_PARAMS_SQL = "SELECT hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d, units FROM og.hub"
+#: `utility_scale`: the hub's bank is an og.asset SUBSTATION (migration 0025; the D-29 20 MW set is a one-hub
+#: bank) -- rated at its nameplate, never the home per-unit cap.
+_ALL_HUB_PARAMS_SQL = """
+SELECT h.hub_id, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, h.units,
+       EXISTS (SELECT 1 FROM og.asset a WHERE a.bank_id = h.bank_id AND a.asset_class = 'SUBSTATION')
+           AS utility_scale
+FROM og.hub h
+"""
 
 
 async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
@@ -138,12 +145,20 @@ async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
         rows = await cur.fetchall()
     return {
         hub_id: HubSnapshot(
-            params=HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d, units=units),
+            params=HubParams(
+                e_kwh=e_kwh,
+                r_kwh=r_kwh,
+                p_kw=p_kw,
+                eta_c=eta_c,
+                eta_d=eta_d,
+                units=units,
+                utility_scale=bool(utility_scale),
+            ),
             soc_kwh=0.0,
             prev_p_kw=0.0,
             health="stale",
         )
-        for hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d, units in rows
+        for hub_id, e_kwh, r_kwh, p_kw, eta_c, eta_d, units, utility_scale in rows
     }
 
 
@@ -289,11 +304,14 @@ _SERVICE_TYPE_SQL = "SELECT service_type FROM og.obligation WHERE obligation_id 
 
 # The engine's coverage rule (migration 0020): an uncancelled deployment covering now, for this
 # obligation or for every AS award (obligation_id NULL).
+#: The engine's own coverage rule (engine.gateways, D-29): a deployment names its obligation, and a NULL
+#: obligation_id covers every ERCOT_AS award -- never a REGULATED_CAPACITY utility toll, which is deployed
+#: only by a row naming it. An unknown obligation matches nothing.
 _AS_DEPLOYMENT_ACTIVE_SQL = """
 SELECT EXISTS (
-    SELECT 1 FROM og.as_deployment d
+    SELECT 1 FROM og.as_deployment d JOIN og.obligation o ON o.obligation_id = %(obligation_id)s
     WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
-      AND (d.obligation_id IS NULL OR d.obligation_id = %(obligation_id)s)
+      AND (d.obligation_id = o.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
 )
 """
 
@@ -317,10 +335,66 @@ class PgAsAwardPort:
         return bool(row and row[0])
 
 
-_OPEN_ALERTS_SQL = """
-SELECT id FROM og.alert
-WHERE rule = %(rule)s AND cleared_at IS NULL AND detail ->> 'condition_key' = %(condition_key)s
+#: An open alert's condition key: the one this port stores in `detail`, else rebuilt from its scope (the
+#: structured columns of migration 0031, or `detail`'s scope keys) -- so an alert raised without the stored
+#: key (an older writer) is still found, deduplicated and cleared instead of staying open forever.
+_ALERT_KEY_SQL = """coalesce(
+    detail ->> 'condition_key',
+    scope_kind || ':' || scope_ref,
+    (detail ->> 'scope_kind') || ':' || (detail ->> 'scope_ref')
+)"""
+#: Live operator targets (the payload contract of `engine.manual`: `hub_ids`, `expires_at`), read by the
+#: guardian itself. Over the same 24 h horizon the engine reads; a malformed `expires_at` fails the read,
+#: which the caller treats as "no evidence" (VETO), never as a target.
+_MANUAL_TARGET_HUBS_SQL = """
+SELECT DISTINCT h.hub_id
+FROM og.trace t
+CROSS JOIN LATERAL jsonb_array_elements_text(t.payload -> 'hub_ids') AS h(hub_id)
+WHERE t.event_class = 'MANUAL_TARGET' AND t.created_at > now() - interval '24 hours'
+  AND (t.payload ->> 'expires_at')::timestamptz > now()
+  AND h.hub_id = ANY(%(hub_ids)s)
 """
+
+
+class ConfigMobileUnitPort:
+    """G-35 (D-31) from SERVICES' home-station registry (`config/service_profiles/mobile_storage_home_stations
+    .toml`, read by `selector.gate.load_mobile_units`, the one reader of that file). A mobile unit is a
+    single-hub bank; its id is listed under `[[assignment]]`. No location or deployment-schedule source exists
+    yet (the requested `og.mobile_deployment` table), so whether a unit is at its home station is UNKNOWN,
+    which G-35 treats as away: a mobile unit is never charged until that source lands (fail closed)."""
+
+    def __init__(self, mobile_ids: Iterable[str]) -> None:
+        self._mobile = frozenset(mobile_ids)
+
+    def is_mobile(self, hub_or_bank_id: str) -> bool:
+        return hub_or_bank_id in self._mobile
+
+    async def at_home_station(self, hub_id: str) -> bool | None:
+        return None
+
+
+class PgManualTargetPort:
+    """G-19 R-OPERATOR-OVERRIDE: the guardian's own read of live MANUAL_TARGET trace events."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def manual_target_hubs(self, hub_ids: list[str]) -> set[str]:
+        if not hub_ids:
+            return set()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_MANUAL_TARGET_HUBS_SQL, {"hub_ids": hub_ids})
+            rows = await cur.fetchall()
+        return {str(row[0]) for row in rows}
+
+
+_OPEN_ALERTS_SQL = f"""
+SELECT id FROM og.alert
+WHERE rule = %(rule)s AND cleared_at IS NULL AND {_ALERT_KEY_SQL} = %(condition_key)s
+"""  # noqa: S608 -- _ALERT_KEY_SQL is a fixed module-level literal
+_OPEN_ALERT_KEYS_SQL = f"""
+SELECT DISTINCT {_ALERT_KEY_SQL} FROM og.alert WHERE rule = %(rule)s AND cleared_at IS NULL
+"""  # noqa: S608 -- _ALERT_KEY_SQL is a fixed module-level literal
 
 
 class PgAlertPort:
@@ -363,6 +437,12 @@ class PgAlertPort:
 
         for alert_id in await self._open_ids(rule, condition_key):
             await clear_alert(self._pool, alert_id)
+
+    async def open_condition_keys(self, rule: str) -> list[str]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_OPEN_ALERT_KEYS_SQL, {"rule": rule})
+            rows = await cur.fetchall()
+        return [str(row[0]) for row in rows if row[0] is not None]
 
 
 _UPSERT_POSTURE_SQL = """
@@ -1009,6 +1089,7 @@ def build_pg_ports(
         as_awards=PgAsAwardPort(pool),
         topology=topology,
         territory=territory,
+        manual_targets=PgManualTargetPort(pool),
         pq=PqPorts(
             envelopes=PgPqEnvelopeStatePort(pool),
             measurements=PgPqMeasurementPort(pool),

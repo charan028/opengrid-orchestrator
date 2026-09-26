@@ -44,6 +44,23 @@ def test_trigger_scenario_publishes_and_traces(client, _fake_mqtt, fake_store) -
     assert fake_store.operator_actions[-1]["action_kind"] == "MANUAL_COMMAND"
 
 
+def test_each_trigger_uses_its_own_mqtt_client_id(client, monkeypatch) -> None:
+    """REVIEW-FIX: a fixed `api-scenario` id made concurrent triggers kick each other off the broker."""
+    processes: list[str] = []
+
+    def fake_build_client(*_args: Any, **kwargs: Any) -> _FakeMqttClient:
+        processes.append(kwargs["process"])
+        return _FakeMqttClient()
+
+    monkeypatch.setattr("opengrid.api.routers.scenario.build_client", fake_build_client)
+    body = {"target_kind": "sim", "target_ref": "fleet", "params": {"price_usd_per_mwh": 5000}}
+    for _ in range(2):
+        resp = client.post("/og/api/scenario/MARKET_PRICE_SPIKE", headers=OPERATOR_HEADERS, json=body)
+        assert resp.status_code == 200
+    assert len(processes) == 2 and len(set(processes)) == 2
+    assert all(p.startswith("api-scenario-") for p in processes)
+
+
 def test_trigger_scenario_requires_operator(client, _fake_mqtt) -> None:
     resp = client.post("/og/api/scenario/MARKET_PRICE_SPIKE", headers=VIEWER_HEADERS, json={})
     assert resp.status_code == 403

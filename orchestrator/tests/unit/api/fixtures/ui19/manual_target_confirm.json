@@ -1,0 +1,7 @@
+{
+  "status": "RAMPING",
+  "trace_id": "0192f3a4-5b6c-7d8e-9f00-112233445566",
+  "expires_at": "2026-09-26T23:15:00+00:00",
+  "hub_ids": ["hub-00012", "hub-00052"],
+  "p_kw_target": -5.0
+}

@@ -16,6 +16,7 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.allocator.models import HubSnapshot
 from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS, R_AS_RELEASE, R_SUBSTITUTION
 from opengrid.invariants import checks
 from opengrid.invariants.models import CheckState, InvariantsSummary, Violation
@@ -99,7 +100,7 @@ async def fetch_reservation_aggregates(
     rolling lookback/lookahead window, not the reservation table's full history -- past-and-settled
     intervals carry no live one-buyer risk). Bounded by the partial index on `released_at IS NULL`
     (`ix_reservation_bank_interval`) plus the `interval_start` filter. Returns EVERY grouping in the
-    window, violating or not -- `invariants.checks.find_double_sold` (given `compute_bank_capabilities_kw`'s
+    window, violating or not -- `invariants.checks.find_double_sold` (given `compute_bank_rated_capabilities_kw`'s
     result) decides which exceed the bank's TRUE capability."""
     sql = """
         SELECT r.bank_id, r.interval_start, r.interval_end, SUM(r.amount)::float8
@@ -124,12 +125,10 @@ _HUB_UNITS_COLUMN_SQL = """
 async def fetch_bank_capability_inputs(
     pool: AsyncConnectionPool,
 ) -> list[tuple[str, float, float, float, float, float, float, float, float, str, int | None]]:
-    """K2's capability inputs (adversarial-review fix): one row per hub, everything
-    `checks.compute_bank_capabilities_kw` needs to reproduce the ledger's own admission-time capability
-    formula (`opengrid.core.physics.hub_capability`/`bank_capability`) from persisted state, instead of
-    the bank's static `kva_rating` nameplate the old check compared against (nameplate over-states real
-    capability whenever any hub is offline or low on SoC, so a double-sale that stayed under nameplate
-    but over the real ceiling went undetected).
+    """K2's capability inputs: one row per hub, everything `checks.compute_bank_rated_capabilities_kw`
+    needs for each bank's RATED capability (unit-capped hub ratings within the bank's kVA). `soc_kwh` and
+    `health` are still returned for callers/diagnostics but K2 ignores them (owner ruling 2026-09-26: a
+    live capability loss after commitment is K13's, not a double sale).
 
     Bounded by hub count, which is fixed by the fleet's own size (`opengrid.fleet.seed`) -- this does NOT
     grow with reservation/obligation volume the way the rest of this package's fetches are bounded by a
@@ -441,40 +440,90 @@ async def fetch_territory_candidates(
     return typed, new_watermark
 
 
-async def fetch_as_hold_candidates(
-    pool: AsyncConnectionPool, *, now: datetime
-) -> list[tuple[str, str, float, int, float]]:
-    """AS capacity hold (migration 0020): every currently-active `og.as_deployment` window, joined to its
-    obligation's active commitment (the interval covering `now`), the product's `duration_minutes`
-    (`og.opportunity.product_rule_id` -> `og.product_rule`), and the deliverable energy
-    (`opengrid.core.physics.hub_available_energy_kwh`'s formula, summed in SQL) held across every bank
-    reserved for that obligation's active interval. Bounded by the partial index on `og.as_deployment`'s
-    `cancelled_at IS NULL` window plus one active commitment/reservation per obligation -- the number of
-    simultaneously-active AS deployments, not fleet or trace volume.
+_HOLD_RESERVATIONS_SQL = """
+    WITH as_banks AS (
+        SELECT DISTINCT r.bank_id
+        FROM og.reservation r
+        JOIN og.obligation o ON o.obligation_id = r.obligation_id
+        JOIN og.commitment c ON c.obligation_id = r.obligation_id AND c.supersedes IS NULL
+            AND c.interval_start = r.interval_start
+        WHERE o.service_type = 'ERCOT_AS' AND r.released_at IS NULL AND r.kind = 'POWER_KW'
+          AND r.interval_start <= %(now)s AND r.interval_end > %(now)s
+    )
+    SELECT r.obligation_id::text, r.bank_id, r.amount::float8, r.interval_start, r.interval_end,
+           o.service_type, pr.duration_minutes, d.deployment_id::text, d.end_at
+    FROM og.reservation r
+    JOIN as_banks ab ON ab.bank_id = r.bank_id
+    JOIN og.obligation o ON o.obligation_id = r.obligation_id
+    LEFT JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
+    LEFT JOIN og.product_rule pr ON pr.product_rule_id = op.product_rule_id
+    LEFT JOIN LATERAL (
+        SELECT dd.deployment_id, dd.end_at FROM og.as_deployment dd
+        WHERE dd.cancelled_at IS NULL AND dd.start_at <= %(now)s AND dd.end_at > %(now)s
+          AND (dd.obligation_id = o.obligation_id OR (dd.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
+        ORDER BY dd.end_at DESC LIMIT 1
+    ) d ON true
+    WHERE r.released_at IS NULL AND r.kind = 'POWER_KW'
+      AND r.interval_start <= %(now)s AND r.interval_end > %(now)s
+"""
 
-    Returns `(deployment_id, obligation_id, committed_kw, duration_minutes, held_kwh)`; `checks.
-    find_as_hold_violations` decides which fall short.
-    """
-    sql = """
-        SELECT d.deployment_id::text, o.obligation_id::text, c.committed_kw::float8, pr.duration_minutes,
-               COALESCE(SUM(GREATEST(hs.soc_kwh - h.r_kwh, 0) * h.eta_d), 0)::float8 AS held_kwh
-        FROM og.as_deployment d
-        JOIN og.obligation o ON o.obligation_id = d.obligation_id
-        JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
-        JOIN og.product_rule pr ON pr.product_rule_id = op.product_rule_id
-        JOIN og.commitment c ON c.obligation_id = o.obligation_id AND c.supersedes IS NULL
-            AND c.interval_start <= %(now)s AND c.interval_end > %(now)s
-        JOIN og.reservation r ON r.obligation_id = o.obligation_id AND r.released_at IS NULL
-            AND r.interval_start = c.interval_start
-        JOIN og.hub h ON h.bank_id = r.bank_id
-        JOIN og.hub_state hs ON hs.hub_id = h.hub_id
-        WHERE d.cancelled_at IS NULL AND d.start_at <= %(now)s AND d.end_at > %(now)s
-        GROUP BY d.deployment_id, o.obligation_id, c.committed_kw, pr.duration_minutes
-    """
+_HOLD_HUBS_SQL = """
+    SELECT h.hub_id, h.bank_id, h.e_kwh, h.r_kwh, h.eta_d, hs.soc_kwh, hs.health
+    FROM og.hub h
+    JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+    WHERE h.bank_id = ANY(%(bank_ids)s)
+"""
+
+
+async def fetch_as_hold_inputs(
+    pool: AsyncConnectionPool, *, now: datetime
+) -> tuple[list[checks.HoldReservation], dict[str, list[HubSnapshot]]]:
+    """AS capacity hold inputs (migration 0020): every active POWER_KW reservation covering `now` on any
+    bank that carries a COMMITTED ERCOT_AS award -- the award's own and every other obligation's, so
+    `checks.find_as_hold_violations` can net competing claims -- each with its product duration and the
+    active `og.as_deployment` covering it (if any); plus those banks' hubs as `HubSnapshot`s (live SoC,
+    reserve, capacity, efficiency, health) for `opengrid.allocator.energy_hold`'s accounting.
+
+    Held awards are included whether or not a deployment is active (the old query saw only deployed
+    ones). Bounded by the banks holding an AS award now and their current-interval reservations (the
+    `released_at IS NULL` partial index), not by reservation history."""
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(sql, {"now": now})
-        rows = await cur.fetchall()
-    return [(r[0], r[1], float(r[2]), int(r[3]), float(r[4])) for r in rows]
+        await cur.execute(_HOLD_RESERVATIONS_SQL, {"now": now})
+        res_rows = await cur.fetchall()
+        bank_ids = sorted({str(r[1]) for r in res_rows})
+        hub_rows: list[Any] = []
+        if bank_ids:
+            await cur.execute(_HOLD_HUBS_SQL, {"bank_ids": bank_ids})
+            hub_rows = list(await cur.fetchall())
+    reservations = [
+        checks.HoldReservation(
+            obligation_id=str(r[0]),
+            bank_id=str(r[1]),
+            kw=float(r[2]),
+            interval_start=r[3],
+            interval_end=r[4],
+            service_type=str(r[5]),
+            duration_minutes=int(r[6]) if r[6] is not None else None,
+            deployment_id=r[7],
+            deployment_end=r[8],
+        )
+        for r in res_rows
+    ]
+    hubs_by_bank: dict[str, list[HubSnapshot]] = {}
+    for hub_id, bank_id, e_kwh, r_kwh, eta_d, soc_kwh, health in hub_rows:
+        hubs_by_bank.setdefault(str(bank_id), []).append(
+            HubSnapshot(
+                hub_id=str(hub_id),
+                bank_id=str(bank_id),
+                free_discharge_kw=0.0,
+                health="OK" if health == "online" else "STALE",
+                soc_kwh=float(soc_kwh) if soc_kwh is not None else None,
+                reserve_kwh=float(r_kwh),
+                e_kwh=float(e_kwh),
+                eta_d=float(eta_d),
+            )
+        )
+    return reservations, hubs_by_bank
 
 
 # --- K11 external anchoring: freshness verification ---------------------------------------------------

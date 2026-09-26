@@ -107,6 +107,8 @@ class HubCapabilitySnapshot(NamedTuple):
     peak_power_budget_kws: float | None = None
     # Battery/inverter units in the home (og.hub.units, migration 0032): G-02's per-unit cap.
     units: int | None = None
+    #: The hub's bank is an og.asset SUBSTATION (D-29 toll): rated at nameplate, not the home unit cap.
+    utility_scale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,8 +200,10 @@ _thresholds: HealthThresholds = HealthThresholds(
 _hubs: dict[str, _HubRuntime] = {}
 _banks: dict[str, _BankRuntime] = {}
 _pending_telemetry: list[TelemetryRow] = []
-_bank_scada: dict[str, ScadaBankSignal] = {}
-_pending_scada: dict[str, ScadaBankSignal] = {}  # latest unpersisted reading per bank, for `flush`
+_bank_scada: dict[tuple[str, str], ScadaBankSignal] = {}  # (bank_id, signal) -> latest reading
+_pending_scada: dict[
+    tuple[str, str], ScadaBankSignal
+] = {}  # latest unpersisted per (bank, signal), for `flush`
 _pending_acks: list[Ack] = []  # hub acknowledgements not yet written, for `flush`
 _utility_instructions: dict[str, ScadaUtilityInstruction] = {}
 
@@ -254,6 +258,7 @@ async def load_topology() -> None:
                 eta_c=hub.eta_c,
                 eta_d=hub.eta_d,
                 units=hub.units,
+                utility_scale=hub.utility_scale,
             ),
         )
         bank_rt = banks_by_id.get(hub.bank_id)
@@ -364,7 +369,7 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
         except Exception as exc:
             failure = failure or exc
             for signal in scada:  # keep a newer reading that arrived meanwhile
-                _pending_scada.setdefault(signal.bank_id, signal)
+                _pending_scada.setdefault((signal.bank_id, signal.signal), signal)
     acks, _pending_acks[:] = list(_pending_acks), []
     if acks:
         try:
@@ -410,6 +415,8 @@ async def flush(*, now: datetime | None = None) -> FlushStats:
                 p_dis_max_kw=runtime.flow.get("p_dis_max_kw"),
                 p_ch_max_kw=runtime.flow.get("p_ch_max_kw"),
                 peak_power_budget_kws=runtime.flow.get("peak_power_budget_kws"),
+                charge_pv_kw=runtime.flow.get("charge_pv_kw"),
+                charge_grid_kw=runtime.flow.get("charge_grid_kw"),
             )
         )
 
@@ -453,13 +460,20 @@ async def ingest_scada_signal(payload: dict[str, Any]) -> None:
     here: a per-message commit on the MQTT ingest path fell behind under load (live 2026-09-26) and
     delayed every hub's telemetry by minutes."""
     signal = ScadaBankSignal.model_validate(payload)
-    _bank_scada[signal.bank_id] = signal
-    _pending_scada[signal.bank_id] = signal
+    # Keyed per (bank, signal): a bank reports several signals each tick (APPARENT_POWER_KVA and the signed
+    # REAL_POWER_KW the guardian's reverse-flow checks need); keyed per bank only, the last one clobbered
+    # the others and only one reached og.feed_obs.
+    _bank_scada[(signal.bank_id, signal.signal)] = signal
+    _pending_scada[(signal.bank_id, signal.signal)] = signal
 
 
-def bank_scada_signal(bank_id: str) -> ScadaBankSignal | None:
-    """Latest stored SCADA reading for `bank_id`, or `None` if none has ever arrived."""
-    return _bank_scada.get(bank_id)
+def bank_scada_signal(bank_id: str, signal: str | None = None) -> ScadaBankSignal | None:
+    """Latest stored SCADA reading of `signal` for `bank_id` (any signal, the newest, when `signal` is
+    None), or `None` if none has arrived."""
+    if signal is not None:
+        return _bank_scada.get((bank_id, signal))
+    readings = [s for (bank, _name), s in _bank_scada.items() if bank == bank_id]
+    return max(readings, key=lambda s: s.ts) if readings else None
 
 
 async def ingest_ack(payload: dict[str, Any]) -> None:
@@ -537,8 +551,8 @@ async def capability(bank_id: str, interval_start: datetime) -> AvailableCapabil
 
     max_discharge_kw = bank_capability(discharge_kw, bank_rt.params)
 
-    scada = _bank_scada.get(bank_id)
-    bank_load_kva = scada.value if scada is not None and scada.signal == "APPARENT_POWER_KVA" else 0.0
+    scada = _bank_scada.get((bank_id, "APPARENT_POWER_KVA"))
+    bank_load_kva = scada.value if scada is not None else 0.0
     headroom_kw = recharge_headroom(bank_load_kva, bank_rt.params)
     max_charge_kw = min(charge_kw, headroom_kw)
 
@@ -656,6 +670,7 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
                 p_ch_max_kw=flow.get("p_ch_max_kw"),
                 peak_power_budget_kws=flow.get("peak_power_budget_kws"),
                 units=runtime.params.units,
+                utility_scale=runtime.params.utility_scale,
             )
         )
     return snapshots

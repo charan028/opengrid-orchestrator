@@ -5,10 +5,15 @@ from __future__ import annotations
 
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.contracts.intake.ports import AS_PRICE_PRODUCT, ENERGY_PRICE_PRODUCT, FEED_SOURCE_ERCOT
+from opengrid.contracts.intake.ports import (
+    AS_PRICE_PRODUCT,
+    ENERGY_PRICE_PRODUCT,
+    FEED_SOURCE_ERCOT,
+    PriceObservation,
+)
 
 _LATEST_OBS_SQL = """
-SELECT value FROM og.feed_obs
+SELECT value, ts FROM og.feed_obs
 WHERE source = %(source)s AND product = %(product)s AND series = %(series)s
 ORDER BY ts DESC LIMIT 1
 """
@@ -31,3 +36,12 @@ class PgMarketDataPort:
 
     async def latest_as_mcpc_usd_per_mwh(self, product_code: str) -> float | None:
         return await self._latest(product=AS_PRICE_PRODUCT, series=product_code)
+
+    async def latest_as_mcpc(self, product_code: str) -> PriceObservation | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _LATEST_OBS_SQL,
+                {"source": FEED_SOURCE_ERCOT, "product": AS_PRICE_PRODUCT, "series": product_code},
+            )
+            row = await cur.fetchone()
+            return PriceObservation(float(row[0]), row[1]) if row else None

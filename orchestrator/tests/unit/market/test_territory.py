@@ -134,3 +134,20 @@ def test_property_regulated_obligations_never_leave_their_territory(
             assert territory == "ERCOT_COMPETITIVE" or (
                 access and territory in ("AUSTIN_ENERGY", "CPS_ENERGY")
             )
+
+
+# --- NOIE zones (issue #36 point 4; not yet labelled in tdsp_tariffs.toml, owner decision pending) -----
+
+
+def test_noie_serves_neither_market() -> None:
+    assert check_territory(AE, "NOIE") == R_TERRITORY_OUTSIDE
+    assert check_territory(CPS, "NOIE") == R_TERRITORY_OUTSIDE
+    assert check_territory(FREE, "NOIE") == R_TERRITORY_NO_FREE_ACCESS
+    # The access flag is a regulated customer's contract term; it never opens a NOIE zone to ERCOT.
+    assert check_territory(FREE, "NOIE", free_access=True) == R_TERRITORY_NO_FREE_ACCESS
+
+
+def test_territory_of_zone_returns_noie() -> None:
+    owners = {**ZONES, "LZ_LCRA": "NOIE"}
+    assert territory_of_zone("LZ_LCRA", owners) == "NOIE"  # type: ignore[arg-type]
+    assert territory_of_zone("LZ_LCRA", ZONES) == "ERCOT_COMPETITIVE"  # regulated-only map: unchanged

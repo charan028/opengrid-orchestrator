@@ -1,0 +1,13 @@
+{
+  "proposal_id": "0192f3a4-0000-7000-8000-000000000b01",
+  "status": "RAMPING",
+  "hub_count": 2,
+  "outcome_counts": {"RAMPING": 2},
+  "results": [
+    {"hub_id": "hub-00005", "outcome": "RAMPING"},
+    {"hub_id": "hub-00006", "outcome": "RAMPING"}
+  ],
+  "manual_target_trace_id": "0192f3a4-5b6c-7d8e-9f00-112233445577",
+  "expires_at": "2026-09-26T23:15:00+00:00",
+  "trace_id": "0192f3a4-5b6c-7d8e-9f00-112233445588"
+}

@@ -21,7 +21,11 @@ hub_count: 10000
 bank_count: 200
 zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
 
-telemetry_interval_s: 2.0
+# V-32, OWNER DECISION 2026-09-26: 10 s is the spec's normal telemetry cadence (disk-load
+# reduction); physics still ticks every 2 s independently (FleetConfig.physics_tick_interval_s).
+# At 10,000 hubs this cuts the telemetry message rate 5x vs. the old 2 s cadence.
+telemetry_interval_s: 10.0
+physics_tick_interval_s: 2.0
 lease_ttl_s: 30.0
 lease_hold_after_expiry_s: 5.0
 stop_ramp_s: 4.0
@@ -60,14 +64,14 @@ inverter_pq:
   ride_through_class_default: CATEGORY_III
   calibration_rate_limit_s: 86400.0
 
-# Waveform summary/raw generation -- at 10,000 hubs the summary message rate is ~1,000 msg/s at the
-# default 10s summary_interval_s (see fleet.yaml's comment on the wave-2 bandwidth fix); the scale-test
-# plan measures this directly (telemetry write rate) rather than assuming it holds at 5x scale.
+# Waveform summary/raw generation -- V-32, 2026-09-26: summary_interval_s is now 30s (was 10s), same
+# change as fleet.yaml/scada.yaml, cutting the summary message rate 3x at 10,000 hubs on top of that;
+# the scale-test plan measures the actual rate directly rather than assuming it holds at 5x scale.
 wave:
   harmonic_detail_interval_s: 30.0
   harmonic_detail_delta_pct: 1.0
   raw_audit_sample_pct_per_min: 1.0
   sync_source: ptp
   sync_quality_ns: 50.0
-  summary_interval_s: 10.0
+  summary_interval_s: 30.0
   summary_delta_pct: 1.0

@@ -6,12 +6,13 @@ router.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
 from opengrid.api.store import (
+    AlertQuery,
     BankAggregate,
     FeedStatusRow,
     ForecastPoint,
@@ -69,6 +70,12 @@ class FakeStore:
     as_deployments: dict[UUID, dict[str, Any]] = field(default_factory=dict)
     #: obligation_id -> {service_type, state, duration_minutes} for `get_as_award`.
     as_awards: dict[UUID, dict[str, Any]] = field(default_factory=dict)
+    #: trace_id -> {hub_id: p_kw_target}: which hubs a MANUAL_TARGET still controls (live_manual_target_hubs).
+    manual_target_hubs: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: (scope_kind, scope_ref) -> og.owner_charge_window row (D-30).
+    charge_windows: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    #: ("HUB", hub_id) / ("BANK", bank_id) -> {hub_id, bank_id, zone, feeder_id, substation_id}.
+    topology: dict[tuple[str, str | None], dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.alerts = [
@@ -415,6 +422,86 @@ class FakeStore:
         )
         return action_id
 
+    async def list_charge_windows(self) -> list[dict[str, Any]]:
+        order = ["FLEET", "PROVIDER", "ZONE", "SUBSTATION", "FEEDER", "BANK", "HUB"]
+        return [
+            dict(row)
+            for _key, row in sorted(
+                self.charge_windows.items(), key=lambda kv: (order.index(kv[0][0]), kv[0][1])
+            )
+        ]
+
+    async def set_charge_window(
+        self, scope_kind: str, scope_ref: str, windows: list[str], *, updated_by: str
+    ) -> None:
+        self.charge_windows[(scope_kind, scope_ref)] = {
+            "scope_kind": scope_kind,
+            "scope_ref": scope_ref,
+            "windows": list(windows),
+            "updated_by": updated_by,
+            "updated_at": datetime(2026, 9, 26, 18, 0, tzinfo=UTC),
+        }
+
+    async def delete_charge_window(self, scope_kind: str, scope_ref: str) -> bool:
+        return self.charge_windows.pop((scope_kind, scope_ref), None) is not None
+
+    async def charge_window_topology(
+        self, *, hub_id: str | None, bank_id: str | None
+    ) -> dict[str, Any] | None:
+        key = ("HUB", hub_id) if hub_id is not None else ("BANK", bank_id)
+        return self.topology.get(key)
+
+    async def live_manual_targets(self) -> list[dict[str, Any]]:
+        now = datetime.now(UTC)
+        return [
+            {
+                "hub_id": hub_id,
+                "p_kw_target": kw,
+                "issued_at": now,
+                "expires_at": now + timedelta(minutes=15),
+                "trace_id": UUID(trace_id),
+                "proposer": "operator",
+                "reason": "demo",
+            }
+            for trace_id, hubs in self.manual_target_hubs.items()
+            for hub_id, kw in hubs.items()
+        ]
+
+    async def live_manual_target_hubs(self, trace_id: UUID) -> dict[str, float]:
+        """Test-set manual_target_hubs[trace_id] (the SQL itself runs in the integration suite)."""
+        return dict(self.manual_target_hubs.get(str(trace_id), {}))
+
+    async def alert_ack_states(self, alert_ids: list[int]) -> dict[int, str | None]:
+        return {a.id: a.acked_by for a in self.alerts if a.id is not None and a.id in alert_ids}
+
+    def _matching_alerts(self, query: AlertQuery) -> list[Alert]:
+        def ok(a: Alert) -> bool:
+            return (
+                (not query.open_only or a.cleared_at is None)
+                and (query.severity is None or a.severity == query.severity)
+                and (query.rule is None or a.rule == query.rule)
+                and (query.scope_kind is None or a.scope_kind == query.scope_kind)
+                and (query.scope_ref is None or a.scope_ref == query.scope_ref)
+            )
+
+        return sorted((a for a in self.alerts if ok(a)), key=lambda a: (a.opened_at, a.id or 0), reverse=True)
+
+    async def query_alerts(self, query: AlertQuery, *, limit: int, offset: int) -> tuple[list[Alert], int]:
+        matching = self._matching_alerts(query)
+        return matching[offset : offset + limit], len(matching)
+
+    async def alert_group_counts(self, query: AlertQuery) -> list[dict[str, Any]]:
+        counts: dict[tuple[str, str | None, str | None], int] = {}
+        for a in self._matching_alerts(query):
+            key = (a.rule, a.scope_kind, a.scope_ref)
+            counts[key] = counts.get(key, 0) + 1
+        return [
+            {"rule": r, "scope_kind": k, "scope_ref": s, "count": n}
+            for (r, k, s), n in sorted(
+                counts.items(), key=lambda kv: (-kv[1], kv[0][0], str(kv[0][1]), str(kv[0][2]))
+            )
+        ]
+
     async def insert_as_deployment(self, *, obligation_id, start_at, end_at, requested_by, reason) -> UUID:
         deployment_id = uuid4()
         self.as_deployments[deployment_id] = {
@@ -430,7 +517,15 @@ class FakeStore:
         return deployment_id
 
     async def get_as_award(self, obligation_id) -> dict[str, Any] | None:
-        return self.as_awards.get(obligation_id)
+        award = self.as_awards.get(obligation_id)
+        if award is None:
+            return None
+        now = datetime.now(UTC)
+        active = any(
+            not d["cancelled"] and d["start_at"] <= now < d["end_at"] and d["obligation_id"] == obligation_id
+            for d in self.as_deployments.values()
+        )
+        return {**award, "has_active_deployment": active}
 
     async def list_active_as_deployments(self) -> list[dict[str, Any]]:
         now = datetime.now(UTC)

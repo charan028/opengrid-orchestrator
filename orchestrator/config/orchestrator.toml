@@ -34,7 +34,8 @@ products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"
 # product page; per-region field names (gen<Region>/STPPF<Region>) UNCONFIRMED against a live response.
 # System-wide solar (actual + STPPF forecast) is NP4-737-CD above. Set false to stop polling NP4-745-CD
 # without a deploy (it shares the ERCOT breaker with price/load). Freshness: wind_solar_fresh_s.
-solar_by_region_enabled = true
+# OFF until the per-region field names are confirmed against a live NP4-745-CD response (R2 review).
+solar_by_region_enabled = false
 
 # Solar share of load (opengrid.feeds.ercot_solar; rule in opengrid.core.solar_share): which ERCOT solar region(s) cover a load weather zone.
 # ERCOT's solar regions and load weather zones are different partitions, so only zones listed here get a
@@ -82,6 +83,22 @@ as_price_fresh_s = 93600
 # closed-loop controllers are confirmed live for a deployment. R-ADMIT-REJECT otherwise.
 data_center = false
 
+[contracts.intake]
+# ERCOT_AS intake values offers at the latest np4-188-cd clearing price only if that price is at most this
+# old (by og.feed_obs.ts). Older: no AS offers this gate, traced INTAKE_SKIPPED / R-AS-PRICE-STALE. Default
+# is np4-188-cd's own window (26 h), the same as [feeds].as_price_fresh_s.
+as_price_max_age_s = 93600
+
+[contracts.tolling]
+# D-29 utility tolling (opengrid.contracts.tolling): one obligation per day for the utility's window,
+# America/Chicago wall clock. The window length must equal the TOLLING contract's product-rule duration
+# (90 min), else nothing is reserved (logged). days_ahead = 1: today's window (if not started) + tomorrow's.
+# days = "ALL" or "WEEKDAYS". Read once at og-engine startup; a malformed value stops the engine.
+window_start = "16:30"
+window_end = "18:00"
+days_ahead = 1
+days = "ALL"
+
 [forecast]
 horizon_hours = 24
 resolution_min = 15
@@ -95,8 +112,9 @@ price_series = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST", "LZ_AEN", "LZ_C
 load_series = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST", "LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"]
 
 [fleet]
-# NOTE: hub_count/banks/telemetry_interval_s/lease_ttl_s here are descriptive only -- no orchestrator
-# code reads them today (the seeded topology's actual hub_count/bank_count/zone_blocks come from
+# NOTE: hub_count/banks/lease_ttl_s here are descriptive only -- no orchestrator code reads them
+# today. `telemetry_interval_s` IS read: opengrid.fleet counts a hub "fresh" for zone telemetry
+# coverage while its last report is under 2x this interval (02b S6.6). (The seeded topology's actual hub_count/bank_count/zone_blocks come from
 # `integration-sims/config/fleet.yaml`, read read-only by `opengrid.fleet.seed`, its module docstring
 # explains why). `zones` IS read directly, by `opengrid.forecast.service.compute_and_persist` (its
 # `[forecast].price_series`/`load_series` fallback) -- keep it in sync with the zones actually seeded.
@@ -108,7 +126,8 @@ zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"]
 # forecast computes their price/load series, e.g.:
 #   zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST", "LZ_AEN", "LZ_CPS"]
 # Also add `[zone_territory]` entries in tdsp_tariffs.toml for any new regulated zone (see that file).
-telemetry_interval_s = 2
+# Must match the simulator's hub telemetry cadence (integration-sims fleet config): 10 s from R3.
+telemetry_interval_s = 10
 lease_ttl_s = 30
 banks_per_feeder = 5
 
@@ -141,10 +160,30 @@ stop_release_authorised_operators = ["og-op-a", "og-op-b"]
 # until real mappings exist (the 5 kVA default vetoes most discharge). G-28 feeder defaults stay in code
 # (thermal 10 MW x 0.95 = 9.5 MW, reverse 3 MW).
 unmapped_xfmr_kva_per_home = 25
+# 09 S2.6 fail closed on missing topology: a feeder with no og.feeder_limit row vetoes any G-28 increase
+# instead of taking the defaults above. false for R3 (the sim fleet has no topology rows yet); true at go-live.
+fail_closed_missing_topology = false
+# G-28/29/30 on unsigned SCADA kVA (no REAL_POWER_KW yet): |kW| >= pf * kVA once hub telemetry rules out
+# export. 0 = strict (no assumption).
+scada_min_power_factor = 0.0
+
+[guardian.feeder_ramp_ceiling_kw_per_min_by_feeder]
+# G-06 per-feeder ramp ceilings (kW/min); every other feeder keeps the 3 MW/min default. The Austin
+# substation battery set (D-29 utility toll, dev/seed/market_model_seed.sql) sits alone on its own
+# feeder: 20 MW/min lets a 20 MW firm toll call reach full output within one minute.
+"feeder-sub-LZ_AEN-00" = 20000
 
 [trace]
 # K11 journal: every process constructing a PgTraceBackend journals here (opengrid-writable).
 journal_path = "/var/lib/opengrid/trace_journal.jsonl"
+# K11 external anchors (opengrid.trace.anchoring, published by og-settle's invariants hook every
+# anchor_interval_s). Must be absolute: og-* units run with ProtectSystem=strict, so the relative default
+# (var/anchors under the read-only code tree) can never be written. The secondary copy lives on the
+# backup tree (opengrid-owned; must be in og-settle's ReadWritePaths). The signing key is provisioned by
+# live-path under /etc/opengrid; while it is absent, anchors publish unsigned (logged).
+anchor_dir = "/var/lib/opengrid/anchors"
+anchor_secondary_dir = "/srv/ogbackup/anchors"
+anchor_key_path = "/etc/opengrid/trace_anchor_ed25519.key"
 
 [safestop]
 key_path = "/etc/opengrid/safestop_ed25519.key"
@@ -193,8 +232,11 @@ output_per_mtok = 20.0
 engine_metrics_url = "http://127.0.0.1:9101/metrics"
 heartbeat_interval_s = 5
 heartbeat_miss_threshold = 3
-hub_stale_s = 6
-hub_offline_s = 30
+# Hub telemetry every 10 s (owner, R3, V-32; was 2 s): stale after 2.5 missed reports, offline after 6.
+hub_stale_s = 25
+hub_offline_s = 60
+# ALR-SIM-OFFLINE: no hub telemetry and no SCADA reading for this long (>= 6 telemetry intervals).
+sim_offline_s = 90
 
 [retention]
 "trace.selection".days = 90
@@ -264,3 +306,15 @@ flush_interval_s = 2.0
 blob_store_dir = "/var/lib/opengrid/pq_waveform"
 # og.hub_inverter_pq characterization from measured summaries (one batched pass per interval).
 characterization_interval_s = 300.0
+
+[selector.owner_charge_windows]
+# D-30 owner grid-charging windows (CT, may wrap midnight), per utility_id or bank_id. The Fleet page's
+# og.owner_charge_window rows (migration 0038) win over these; these win over the built-in default.
+AUSTIN_ENERGY = ["22:00-06:00"]
+
+[market_sim]
+# og-feeds AS-deployment poller against the market simulator: off until the lead switches it on.
+as_deployment_poll = false
+base_url = "http://127.0.0.1:8090"
+as_deployment_poll_interval_s = 10
+as_deployment_lease_s = 60

@@ -97,6 +97,22 @@ def test_market_columns_are_read_without_requiring_migration_0025():
         assert "c.market" not in sql
 
 
+def test_ercot_solar_share_uses_core_ids_and_the_core_ratio():
+    """The plan's ERCOT source reads core's feed ids and computes the share with core's one formula:
+    clamped to [0, 1], no share of a non-positive load, missing values skipped."""
+    import inspect
+
+    from opengrid.core import solar_share as core
+
+    assert "ERCOT_SOLAR_PRODUCT = " not in inspect.getsource(db)  # the ids live in core only
+    assert db.ERCOT_SOLAR_PRODUCT is core.ERCOT_SOLAR_PRODUCT
+    assert "%(load_product)s" in db._ERCOT_SOLAR_SHARE_SQL and core.ERCOT_SOLAR_PRODUCT == "np4-737-cd"
+    shares = db.ercot_shares_from_rows(
+        [(12, 9_000.0, 60_000.0), (13, -5.0, 50_000.0), (14, 1.0, 0.0), (15, None, 1.0)]
+    )
+    assert shares == {12: 0.15, 13: 0.0}
+
+
 def test_hold_floor_query_and_retention_prune_shape():
     assert "hold_floor_kwh[" in db._HOLD_FLOORS_SQL and "1 + floor(" in db._HOLD_FLOORS_SQL
     assert "ORDER BY bank_id, created_at DESC" in db._HOLD_FLOORS_SQL

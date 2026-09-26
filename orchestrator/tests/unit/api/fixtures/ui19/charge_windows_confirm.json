@@ -1,0 +1,7 @@
+{
+  "scope_kind": "ZONE",
+  "scope_ref": "LZ_NORTH",
+  "old_windows": null,
+  "windows": ["21:30-05:30"],
+  "trace_id": "<uuid>"
+}

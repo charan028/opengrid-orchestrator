@@ -31,6 +31,8 @@ _SCHEMA_NAMES = {
     # lead so ogsim.customer can reuse SimMqttClient.publish_batch/publish_validated unchanged.
     "customer_site_meter": "customer_site_meter.schema.json",
     "pipeline_corridor_current": "pipeline_corridor_current.schema.json",
+    # DeviceInfo (R3, OWNER DECISION, 2026-09-26): retained device-identity message, <root>/hub/<hub_id>/info.
+    "device_info": "device_info.schema.json",
 }
 
 

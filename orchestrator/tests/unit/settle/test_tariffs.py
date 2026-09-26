@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from opengrid.settle.models import ZoneChargeEnergy
 from opengrid.settle.tariffs import (
     TdspTariff,
     grid_charged_kwh_for_delivery,
@@ -21,12 +20,6 @@ from opengrid.settle.tariffs import (
 )
 
 _TARIFFS_PATH = Path(__file__).resolve().parents[4] / "orchestrator" / "config" / "tdsp_tariffs.toml"
-
-
-def test_grid_share_is_the_grid_fraction_of_charging_and_full_when_nothing_charged():
-    assert ZoneChargeEnergy(Decimal("400"), Decimal("100")).grid_share == Decimal("0.25")
-    assert ZoneChargeEnergy(Decimal("0"), Decimal("0")).grid_share == Decimal("1")  # owner: assume full M1
-    assert ZoneChargeEnergy(Decimal("10"), Decimal("12")).grid_share == Decimal("1")  # clamped
 
 
 def test_grid_charged_kwh_for_delivery_is_the_energy_charged_for_it_times_the_grid_share():

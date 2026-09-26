@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 # missing, never as compliant (K1's stale-data pattern). `wave.WaveConfig.summary_interval_s`'s new
 # MVP-scale default is 10 s (S9 wave-2 build report), so this defaults to 20 s -- callers on a tighter
 # per-contract cadence should pass their own value rather than relying on this default.
-DEFAULT_FRESHNESS_S = 20.0
+# R3 (owner, 2026-09-26): summaries every 30 s to cut disk load, so the default is 2 x 30 s.
+DEFAULT_FRESHNESS_S = 60.0
 
 # S5.2 step 1 / S3.2(a): the tightest active envelope's own field is a hard UPPER bound (imbalance,
 # voltage band, freq tolerance, THD) except pf_min, which is a hard LOWER bound (a smaller pf_min is

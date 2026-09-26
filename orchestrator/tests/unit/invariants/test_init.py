@@ -5,10 +5,13 @@ with `invariants.queries` monkeypatched -- no real Postgres, mirroring
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
 import opengrid.invariants as invariants
+from opengrid.allocator.models import HubSnapshot
+from opengrid.invariants import checks
 from opengrid.invariants.models import (
     CHECK_ANCHOR_FRESHNESS,
     CHECK_AS_HOLD,
@@ -24,6 +27,7 @@ from opengrid.invariants.models import (
     CheckState,
 )
 from opengrid.platform.config import Config
+from opengrid.trace import anchoring
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,7 +55,7 @@ class _FakeQueries:
         self.orphan_commitment_rows: list[tuple] = []
 
         self.territory_candidates: list[tuple] = []
-        self.as_hold_candidates: list[tuple] = []
+        self.as_hold_inputs: tuple[list, dict] = ([], {})
         self.flow_limit_candidates: list[tuple] = []
         self.latest_anchor_published_at = None
 
@@ -108,8 +112,8 @@ class _FakeQueries:
             self.territory_candidates[-1][6] if self.territory_candidates else None
         )
 
-    async def fetch_as_hold_candidates(self, pool, *, now):
-        return self.as_hold_candidates
+    async def fetch_as_hold_inputs(self, pool, *, now):
+        return self.as_hold_inputs
 
     async def fetch_flow_limit_candidates(self, pool):
         return self.flow_limit_candidates
@@ -161,6 +165,7 @@ def fake_queries(monkeypatch: pytest.MonkeyPatch) -> _FakeQueries:
 
 
 async def test_run_once_reports_zero_on_clean_data(fake_queries: _FakeQueries) -> None:
+    invariants._configured_at = NOW - timedelta(days=1)  # long past the first-anchor grace window
     outcomes = await invariants.run_once()
 
     assert outcomes[CHECK_K1_RESERVE_BREACH].count == 0
@@ -173,7 +178,7 @@ async def test_run_once_reports_zero_on_clean_data(fake_queries: _FakeQueries) -
     assert outcomes[CHECK_K15_TERRITORY].count == 0
     assert outcomes[CHECK_AS_HOLD].count == 0
     assert outcomes[CHECK_FLOW_LIMIT].count == 0
-    assert outcomes[CHECK_ANCHOR_FRESHNESS].count == 1  # never anchored yet -- reported stale, not skipped
+    assert outcomes[CHECK_ANCHOR_FRESHNESS].count == 1  # never anchored after the grace -- stale, not skipped
     assert len(fake_queries.upserts) == 11  # every check persisted its result
 
 
@@ -204,7 +209,7 @@ async def test_run_once_k1_loops_until_a_short_batch_catches_up(
 
 async def test_run_once_detects_seeded_double_sold_using_true_capability(fake_queries: _FakeQueries) -> None:
     fake_queries.reservation_agg_rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 700.0)]
-    # A hub row that makes compute_bank_capabilities_kw resolve bank-000's true capability to 600 kW (enough
+    # A hub row that makes compute_bank_rated_capabilities_kw resolve bank-000's rated capability to 600 kW (enough
     # stored energy to sustain its rating for the whole interval: capability is energy-limited, ES03-S05).
     # 30 dual-unit homes (20 kW each, the G-02 unit cap) = 600 kW.
     fake_queries.bank_capability_inputs = [
@@ -424,7 +429,27 @@ async def test_run_once_detects_seeded_territory_violation(fake_queries: _FakeQu
 
 
 async def test_run_once_detects_seeded_as_hold_violation(fake_queries: _FakeQueries) -> None:
-    fake_queries.as_hold_candidates = [("dep-1", "ob-1", 100.0, 240, 250.0)]  # needs 400 kWh, has 250
+    # A held Non-Spin award of 100 kW (240 min) on a bank with ~250 kWh above reserve: needs ~422 kWh.
+    hold = checks.HoldReservation(
+        obligation_id="ob-1",
+        bank_id="bank-000",
+        kw=100.0,
+        interval_start=NOW,
+        interval_end=NOW + timedelta(minutes=15),
+        service_type="ERCOT_AS",
+        duration_minutes=240,
+        deployment_id=None,
+        deployment_end=None,
+    )
+    hub = HubSnapshot(
+        hub_id="hub-1",
+        bank_id="bank-000",
+        free_discharge_kw=0.0,
+        soc_kwh=300.0,
+        reserve_kwh=50.0,
+        e_kwh=400.0,
+    )
+    fake_queries.as_hold_inputs = ([hold], {"bank-000": [hub]})
 
     outcomes = await invariants.run_once()
 
@@ -472,16 +497,97 @@ async def test_run_due_also_publishes_an_anchor_when_due(monkeypatch: pytest.Mon
     assert calls["n"] == 1
 
 
-async def test_run_anchor_publish_once_delegates_to_anchoring(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = {}
+def _anchor_result(secondary: str | None) -> anchoring.AnchorResult:
+    return anchoring.AnchorResult(
+        anchor_id=uuid4(),
+        checkpoint_id=None,
+        checkpoint_hash="h",
+        primary_path="/var/lib/opengrid/anchors/a.json",
+        secondary_path=secondary,
+        signed=False,
+    )
+
+
+@pytest.fixture
+def recorded_anchor_outcomes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    recorded: list[dict[str, object]] = []
+
+    async def _record(pool, **kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(invariants.anchor_alerts, "record_publish_outcome", _record)
+    return recorded
+
+
+async def test_run_anchor_publish_once_delegates_to_anchoring(
+    monkeypatch: pytest.MonkeyPatch, recorded_anchor_outcomes: list[dict[str, object]]
+) -> None:
+    expected = _anchor_result("/srv/ogbackup/anchors/a.json")
 
     async def _fake_publish_anchor(pool, trace_store, cfg):
-        captured["called"] = True
-        return "sentinel-result"
+        return expected
 
     monkeypatch.setattr(invariants.anchoring, "publish_anchor", _fake_publish_anchor)
 
-    result = await invariants.run_anchor_publish_once()
+    assert await invariants.run_anchor_publish_once() is expected
+    assert recorded_anchor_outcomes == [{"primary_error": None, "secondary_written": True}]
 
-    assert captured["called"] is True
-    assert result == "sentinel-result"
+
+async def test_a_primary_anchor_write_failure_raises_an_alert_and_the_error(
+    monkeypatch: pytest.MonkeyPatch, recorded_anchor_outcomes: list[dict[str, object]]
+) -> None:
+    async def _fail(pool, trace_store, cfg):
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'var/anchors'")
+
+    monkeypatch.setattr(invariants.anchoring, "publish_anchor", _fail)
+
+    with pytest.raises(OSError):
+        await invariants.run_anchor_publish_once()
+    assert recorded_anchor_outcomes[0]["primary_error"] is not None
+
+
+async def test_a_missing_secondary_copy_is_recorded(
+    monkeypatch: pytest.MonkeyPatch, recorded_anchor_outcomes: list[dict[str, object]]
+) -> None:
+    async def _primary_only(pool, trace_store, cfg):
+        return _anchor_result(None)
+
+    monkeypatch.setattr(invariants.anchoring, "publish_anchor", _primary_only)
+
+    await invariants.run_anchor_publish_once()
+    assert recorded_anchor_outcomes == [{"primary_error": None, "secondary_written": False}]
+
+
+async def test_anchor_freshness_tolerates_a_fresh_database_until_the_first_window_passes(
+    fake_queries: _FakeQueries,
+) -> None:
+    """R2 rebuild regression: a fresh DB has no anchor yet. Within one staleness window (2 x interval) of
+    the checker starting, "never anchored" is not a violation; after it, it is."""
+    invariants._anchor_interval_s = 900.0
+    invariants._configured_at = NOW - timedelta(seconds=1799)
+    assert (await invariants.run_once())[CHECK_ANCHOR_FRESHNESS].count == 0
+    invariants._configured_at = NOW - timedelta(seconds=1801)
+    assert (await invariants.run_once())[CHECK_ANCHOR_FRESHNESS].count == 1
+
+
+async def test_run_due_publishes_the_anchor_before_running_the_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    async def _publish() -> None:
+        order.append("publish")
+
+    async def _checks() -> dict[str, object]:
+        order.append("checks")
+        return {}
+
+    monkeypatch.setattr(invariants, "run_anchor_publish_once", _publish)
+    monkeypatch.setattr(invariants, "run_once", _checks)
+    invariants._anchor_cadence.due = lambda: True  # type: ignore[union-attr]
+    invariants._cadence.due = lambda: True  # type: ignore[union-attr]
+    invariants._trace_cadence.due = lambda: False  # type: ignore[union-attr]
+
+    await invariants.run_due()
+
+    assert order == ["publish", "checks"]

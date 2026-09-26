@@ -143,8 +143,11 @@ def test_an_idle_conservative_scope_clears_after_the_idle_window():
 
 
 class _Recorder:
+    """Posture + alert ports; alerts behave like `PgAlertPort` (raise is a no-op while one is open)."""
+
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
+        self.open: set[tuple[str, str]] = set()
 
     async def set_posture(self, kind, ref, *, posture, veto_ratio, consecutive, stop_requested):
         self.calls.append(("posture", kind, ref, posture, consecutive, stop_requested))
@@ -154,9 +157,14 @@ class _Recorder:
 
     async def raise_alert(self, rule, severity, summary, condition_key, detail):
         self.calls.append(("raise", rule, severity, condition_key))
+        self.open.add((rule, condition_key))
 
     async def clear_alert(self, rule, condition_key):
         self.calls.append(("clear", rule, condition_key))
+        self.open.discard((rule, condition_key))
+
+    async def open_condition_keys(self, rule):
+        return sorted(key for r, key in self.open if r == rule)
 
 
 async def _apply(tracker, recorder, outcomes):
@@ -208,6 +216,57 @@ def test_the_hysteresis_settings_are_read_from_config():
     assert cfg.escalation_clear_after_good_ticks == 5 and cfg.escalation_clear_ratio_factor == 0.25
     defaults = load_guardian_config(Config({}))
     assert defaults.escalation_clear_after_good_ticks == 3 and defaults.escalation_clear_ratio_factor == 0.5
+
+
+async def test_an_escalation_alert_left_open_for_a_normal_scope_is_cleared():
+    """Base 2026-09-26: ALR-SCOPE-CONSERVATIVE stayed open after its scope went NORMAL (a missed clear, or a
+    guardian restart losing the tracker). The next tick clears it and sets the posture back to NORMAL."""
+    tracker, rec = EscalationTracker(), _Recorder()
+    rec.open = {(CONSERVATIVE_ALERT_RULE, "BANK:bank-000"), (STOP_REQUEST_ALERT_RULE, "BANK:bank-000")}
+
+    await _apply(tracker, rec, _tick(0))
+
+    assert rec.open == set()
+    assert ("posture", "BANK", "bank-000", "NORMAL", 0, False) in rec.calls
+
+
+async def test_a_conservative_scope_keeps_its_alert_and_never_raises_a_duplicate():
+    tracker, rec = EscalationTracker(), _Recorder()
+    for vetoed in (50, 4, 50, 4):  # stays CONSERVATIVE (4 % is not a good tick), count 2: no stop request
+        await _apply(tracker, rec, _tick(vetoed))
+
+    assert rec.open == {(CONSERVATIVE_ALERT_RULE, "BANK:bank-000")}
+    assert [c for c in rec.calls if c[0] == "raise" and c[1] == CONSERVATIVE_ALERT_RULE] == [
+        ("raise", CONSERVATIVE_ALERT_RULE, "warning", "BANK:bank-000")
+    ]
+    assert not any(c[0] == "clear" for c in rec.calls)
+
+
+async def test_a_failed_clear_of_one_alert_still_clears_the_other():
+    tracker, rec = EscalationTracker(clear_after_good_ticks=1), _Recorder()
+    await _apply(tracker, rec, _tick(50))
+    rec.open.add((STOP_REQUEST_ALERT_RULE, "BANK:bank-000"))
+    real_clear = rec.clear_alert
+
+    async def flaky_clear(rule, condition_key):
+        if rule == CONSERVATIVE_ALERT_RULE:
+            raise RuntimeError("db hiccup")
+        await real_clear(rule, condition_key)
+
+    rec.clear_alert = flaky_clear  # type: ignore[method-assign]
+    await _apply(tracker, rec, _tick(0))
+
+    assert (STOP_REQUEST_ALERT_RULE, "BANK:bank-000") not in rec.open
+
+
+def test_pg_alert_port_matches_alerts_by_stored_key_or_by_scope():
+    """An alert without the stored `condition_key` (an older writer) is still found by its scope, so it is
+    deduplicated and cleared instead of staying open forever."""
+    from opengrid.guardian import repo
+
+    assert "detail ->> 'condition_key'" in repo._OPEN_ALERTS_SQL
+    assert "scope_kind || ':' || scope_ref" in repo._OPEN_ALERTS_SQL
+    assert "scope_kind || ':' || scope_ref" in repo._OPEN_ALERT_KEYS_SQL
 
 
 def test_the_guardian_escalation_path_has_no_way_to_engage_a_stop():

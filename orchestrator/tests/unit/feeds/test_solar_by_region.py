@@ -1,17 +1,26 @@
 """D-28 solar share measured: NP4-745-CD regional solar ingestion (through the existing ERCOT client, auth
-and scheduler) and the `opengrid.feeds.solar_share` read helper, against a fake HTTP transport."""
+and scheduler) and the `opengrid.feeds.ercot_solar` read helper (ratio: `opengrid.core.solar_share`), against a fake
+HTTP transport."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import httpx
 import pytest
 
 from opengrid.core.models.platform import FeedObs
+from opengrid.core.solar_share import ercot_solar_share_of_load, solar_share
 from opengrid.feeds import disabled_ercot_products
 from opengrid.feeds.ercot import PRODUCT_PATHS, SOLAR_BY_REGION_PRODUCT, ErcotClient, KeyRotationEvent
+from opengrid.feeds.ercot_solar import (
+    SYSTEM_AREA,
+    ercot_solar_share,
+    hour_start,
+    zone_regions_from_config,
+)
 from opengrid.feeds.normalize import (
     SOLAR_REGIONS,
     FeedDataError,
@@ -20,13 +29,6 @@ from opengrid.feeds.normalize import (
     solar_forecast_series,
 )
 from opengrid.feeds.scheduler import POLL_INTERVAL_S, FeedsScheduler
-from opengrid.feeds.solar_share import (
-    SYSTEM_ZONE,
-    hour_start,
-    solar_share_of_load,
-    solar_share_ratio,
-    zone_regions_from_config,
-)
 from opengrid.feeds.staleness import threshold_s_for_product
 from opengrid.feeds.token_bucket import TokenBucket
 
@@ -228,30 +230,38 @@ class _FakeWindow:
 HOUR = datetime(2026, 9, 26, 17, 0, tzinfo=UTC)
 
 
-def test_solar_share_ratio() -> None:
-    assert solar_share_ratio(20_000.0, 50_000.0) == pytest.approx(0.4)
-    assert solar_share_ratio(-5.0, 40_000.0) == 0.0  # night-time auxiliary draw floors at zero
-    assert solar_share_ratio(1.0, 0.0) is None
+def test_core_ercot_solar_share_of_load() -> None:
+    assert ercot_solar_share_of_load(Decimal(20_000), Decimal(50_000)) == Decimal("0.4")
+    assert ercot_solar_share_of_load(Decimal(-5), Decimal(40_000)) == 0  # night-time auxiliary draw
+    assert ercot_solar_share_of_load(Decimal(9), Decimal(5)) == 1  # a share never exceeds 100%
+    assert ercot_solar_share_of_load(Decimal(1), Decimal(0)) is None
     assert hour_start(HOUR + timedelta(minutes=37, seconds=5)) == HOUR
 
 
 @pytest.mark.asyncio
 async def test_system_share_uses_actual_solar_over_total_load() -> None:
     window = _FakeWindow({"solar_actual": 20_000.0, "solar_forecast": 25_000.0, "total": 50_000.0}, HOUR)
-    share = await solar_share_of_load(SYSTEM_ZONE, HOUR + timedelta(minutes=30), window=window)
+    share = await ercot_solar_share(SYSTEM_AREA, HOUR + timedelta(minutes=30), window=window)
     assert share is not None
-    assert share.share == pytest.approx(0.4)
+    assert share.share == Decimal("0.4")
     assert share.solar_basis == "actual"
     assert share.hour_start == HOUR
+    # Feeds the D-28 priority as source 2 when no hub telemetry reports.
+    assert (
+        solar_share(
+            measured_charge_kw_sum=Decimal(0), measured_solar_kw_sum=Decimal(0), ercot_solar_share=share.share
+        ).source
+        == "ERCOT_SOLAR"
+    )
 
 
 @pytest.mark.asyncio
 async def test_system_share_falls_back_to_forecast_solar_when_no_actual() -> None:
     window = _FakeWindow({"solar_forecast": 25_000.0, "total": 50_000.0}, HOUR)
-    share = await solar_share_of_load(SYSTEM_ZONE, HOUR, window=window)
+    share = await ercot_solar_share(SYSTEM_AREA, HOUR, window=window)
     assert share is not None
     assert share.solar_basis == "forecast"
-    assert share.share == pytest.approx(0.5)
+    assert share.share == Decimal("0.5")
 
 
 @pytest.mark.asyncio
@@ -264,24 +274,24 @@ async def test_zone_share_sums_mapped_regions() -> None:
         },
         HOUR,
     )
-    share = await solar_share_of_load(
+    share = await ercot_solar_share(
         "farWest", HOUR, zone_regions={"farWest": ("FarWest", "NorthWest")}, window=window
     )
     assert share is not None
-    assert share.solar_mw == 4_000.0
-    assert share.share == pytest.approx(0.8)
+    assert share.solar_mw == Decimal(4_000)
+    assert share.share == Decimal("0.8")
 
 
 @pytest.mark.asyncio
 async def test_share_is_none_when_not_measurable() -> None:
     window = _FakeWindow({"solar_actual": 20_000.0}, HOUR)  # no posted load (e.g. a future hour)
-    assert await solar_share_of_load(SYSTEM_ZONE, HOUR, window=window) is None
+    assert await ercot_solar_share(SYSTEM_AREA, HOUR, window=window) is None
     # An unmapped weather zone: no guessed region pairing.
-    assert await solar_share_of_load("coast", HOUR, window=_FakeWindow({"coast": 1.0}, HOUR)) is None
+    assert await ercot_solar_share("coast", HOUR, window=_FakeWindow({"coast": 1.0}, HOUR)) is None
     # A mapped zone with one region missing: no partial (understated) sum.
     partial = _FakeWindow({solar_actual_series("FarWest"): 3_000.0, "farWest": 5_000.0}, HOUR)
     assert (
-        await solar_share_of_load(
+        await ercot_solar_share(
             "farWest", HOUR, zone_regions={"farWest": ("FarWest", "NorthWest")}, window=partial
         )
         is None

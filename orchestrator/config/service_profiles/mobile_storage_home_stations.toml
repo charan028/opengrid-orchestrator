@@ -1,0 +1,60 @@
+# Home-station registry for MOBILE_STORAGE units (owner decision D-31, 2026-09-26:
+# docs/orchestrator/07-delivery/11-decision-log.md). Config-first per the lead's 2026-09-26 R3.1
+# instruction: no `og.mobile_home_station` DB table exists yet -- see
+# docs/orchestrator/07-delivery/14-additional-services.md S2 "Home-station model" for the DDL this
+# config is standing in for, and the migration number request to the lead. Until that migration lands,
+# this file (plus `dev/seed/services_seed.sql`'s comment cross-reference) is the source of truth for
+# which depot a given mobile unit charges at.
+#
+# D-31, restated: a mobile unit (truck) is NEVER charged from the fleet -- not from home batteries, not
+# from any other fleet asset, not from a customer deployment site's hubs. It charges ONLY while parked at
+# one of the home stations below, from THAT STATION's own grid connection, priced at that station's own
+# zone/tariff (never the deployment site's price, never a fleet bank's charging economics). While
+# charging, the unit is at its home station and is NOT available for service; it becomes available again
+# only after it leaves for a deployment with whatever state of charge it left with.
+#
+# Each [[home_station]] entry is one depot, near a distribution or power substation (task brief), a
+# mobile unit may charge at. Each [[assignment]] binds a mobile unit (`bank_id`, matching `og.bank.
+# bank_id`/`og.hub.hub_id`'s id space -- a mobile unit is a single-hub bank) to its home station; a unit's
+# home station changes only by an explicit re-assignment (a deployment RELOCATES the unit's customer
+# site, never its home station).
+#
+# OPTIMIZER wiring (2026-09-26 R3.1, `opengrid.selector.gate.load_banks`/`bank_market_terms`): for every
+# `bank_id` listed under `[[assignment]]`, set `BankSnapshot.is_mobile = True` and `BankSnapshot.zone =`
+# that assignment's `home_station_id`'s `zone` (an inner join on `home_station_id`, both tables in THIS
+# file) -- NEVER `og.bank.zone`, which is meaningless/stale for a relocating trailer. `home_station_intervals`
+# has NO source yet (no deployment-schedule table -- see the migration ask below): pass `None` explicitly,
+# which `BankSnapshot.charging_allowed()` already documents as "unknown: no charging at all" -- fail
+# closed (never wrongly charge a mobile unit) until the real per-deployment schedule exists. A `bank_id`
+# with no `[[assignment]]` row here is not mobile (`is_mobile` stays `False`, unchanged behavior).
+#
+# Migration requested (assign a number, lead): `og.mobile_home_station` (home_station_id PK, zone,
+# utility_id nullable, lat, lon, charger_kw) + `og.hub.is_mobile boolean NOT NULL DEFAULT false` +
+# `og.hub.home_station_id text NULL REFERENCES og.mobile_home_station` (additive-only, mirrors this
+# file's two tables 1:1) + a new `og.mobile_deployment` (deployment_id PK, bank_id, home_station_id,
+# site_id NULL, starts_at, ends_at NULL) recording each charge-at-station/deploy-to-site leg, so
+# `home_station_intervals` can finally be derived as "horizon intervals with no `og.mobile_deployment`
+# row whose `site_id IS NOT NULL` covering them" -- the real, schedule-driven answer this config only
+# approximates today.
+
+[[home_station]]
+home_station_id = "hs-austin-north-01"
+zone = "LZ_AEN"                       # ERCOT load zone (or a regulated utility's zone) billing this depot
+utility_id = ""                       # empty = free-market (ERCOT); set to a `UtilityId` for a regulated depot
+lat = 30.401
+lon = -97.719
+charger_kw = 150.0
+notes = "Depot near the Parmer Lane distribution substation."
+
+[[home_station]]
+home_station_id = "hs-permian-basin-01"
+zone = "LZ_WEST"
+utility_id = ""
+lat = 31.987
+lon = -102.078
+charger_kw = 150.0
+notes = "Depot near a distribution substation serving the Permian Basin drilling corridor."
+
+[[assignment]]
+bank_id = "trailer-mb-01"             # og.bank.bank_id / og.hub.hub_id -- a mobile unit is a single-hub bank
+home_station_id = "hs-austin-north-01"

@@ -80,6 +80,8 @@ def build_cycle_extras(
     *,
     asset_service: Any,
     set_at_risk: Callable[..., Awaitable[object]],
+    excluded_hub_ids: Callable[[], frozenset[str]] | None = None,
+    operator_hub_ids: Callable[[], frozenset[str]] | None = None,
 ) -> EngineCycleExtras:
     """The engine's cycle extras. The closed-loop runner (and so the S5.4 ladder fed by its PCC readings)
     exists when site ingest or closed-loop control is on; control itself only with
@@ -112,4 +114,6 @@ def build_cycle_extras(
         enforce_territory=settings.enforce_territory,
         flow_limits=settings.flow_limits,
         flow_topology=FlowTopology(pool, settings.flow_limits),
+        excluded_hub_ids=excluded_hub_ids,
+        operator_hub_ids=operator_hub_ids,
     )

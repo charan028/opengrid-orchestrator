@@ -21,8 +21,13 @@ checkpoint forward always still passes (02a S8.3).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
+import sys
+import uuid
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,6 +39,9 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.tracehash import ChainRecord
+
+if sys.platform != "win32":  # production is Linux; the Windows dev venv only imports this module
+    import fcntl
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +117,84 @@ def _journal_line_to_entry(line: str) -> _JournalEntry:
         return _JournalEntry(**data)
     except (json.JSONDecodeError, TypeError) as exc:
         raise JournalCorruptError(f"unparseable trace journal line: {line!r}") from exc
+
+
+# --- cross-process journal locking ------------------------------------------------------------------
+#
+# The journal is SHARED: engine, guardian, feeds, settle, api, invariants and lifecycle all construct a
+# `PgTraceBackend` with the same `[trace].journal_path`. Every read, append and read-insert-rewrite
+# (replay) therefore runs under an advisory `flock` on a sidecar `<journal>.lock` file:
+#
+# * the lock lives on a sidecar, never on the journal itself, because replay swaps the journal's inode
+#   (`os.replace`) and a lock on the old inode would protect nothing;
+# * appends take LOCK_EX briefly and fsync;
+# * replay snapshots the journal under LOCK_SH, inserts WITHOUT holding any lock, then takes LOCK_EX,
+#   RE-READS the journal and rewrites it minus exactly the entries it applied (by trace_id). An append
+#   that landed while it was inserting is in that re-read, so it survives (the lost-entry race this
+#   fixes). The lock is never held across a database round trip: during an outage a pool connect can
+#   wait its full timeout, and holding the lock through it would serialise every process's trace
+#   appends behind every other process's failed replay;
+# * readers take LOCK_SH, so they never see a half-written line or a half-swapped file.
+#
+# Async callers acquire with LOCK_NB and a short sleep between attempts rather than a blocking flock:
+# that never stalls the event loop while another process holds the lock across its DB round trips, and
+# it stays cancellable (a blocking flock in a worker thread would keep waiting after cancellation and
+# then hold the lock with nobody to release it). Closing the descriptor releases the lock.
+
+_LOCK_POLL_S = 0.001
+_LOCK_POLL_MAX_S = 0.01
+
+
+def _lock_path_for(journal_path: Path) -> Path:
+    return journal_path.with_name(journal_path.name + ".lock")
+
+
+def _open_lock_file(lock_path: Path) -> int:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o660)
+
+
+@contextlib.contextmanager
+def _journal_lock_sync(journal_path: Path, *, exclusive: bool) -> Iterator[None]:
+    """Blocking lock for the synchronous callers (`pending_count`); held only for a file read."""
+    fd = _open_lock_file(_lock_path_for(journal_path))
+    try:
+        if sys.platform != "win32":
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.asynccontextmanager
+async def _journal_lock(journal_path: Path, *, exclusive: bool) -> AsyncIterator[None]:
+    """Non-blocking, cancellable acquisition of the journal lock for async callers."""
+    fd = _open_lock_file(_lock_path_for(journal_path))
+    try:
+        if sys.platform != "win32":
+            mode = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+            delay = _LOCK_POLL_S
+            while True:
+                try:
+                    fcntl.flock(fd, mode)
+                    break
+                except BlockingIOError:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, _LOCK_POLL_MAX_S)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Make a rename in `directory` durable (POSIX: the rename lives in the directory's own inode)."""
+    if sys.platform == "win32":
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 _LAST_HEAD_SQL = """
@@ -194,9 +280,11 @@ class PgTraceBackend:
     has already computed this record's hash before calling either method, so the chain stays internally
     consistent even while journaled; only its DURABLE HOME moves. Every successful DB call opportunistically
     drains any pending journal first (`_drain_journal_if_pending`), so recovery is automatic on the next
-    call this process instance makes -- no separate replay process or cross-process journal sharing is
-    needed. `replay()`/`pending_count()` are also exposed directly for a caller (e.g.
-    `opengrid.invariants`) that wants to force/observe this."""
+    call any process makes -- no separate replay process is needed. The journal file is shared by every
+    process configured with the same `[trace].journal_path`; all access is serialised by an advisory
+    lock on `<journal>.lock` (see "cross-process journal locking" above), so one process's replay can
+    never drop another's append. `replay()`/`pending_count()` are also exposed directly for a caller
+    (e.g. `opengrid.invariants`) that wants to force/observe this."""
 
     def __init__(self, pool: AsyncConnectionPool, *, journal_path: Path | None = None) -> None:
         self._pool = pool
@@ -228,13 +316,13 @@ class PgTraceBackend:
                 extra={"stream_id": stream_id},
                 exc_info=True,
             )
-            return self._fallback_last_head(stream_id)
+            return await self._fallback_last_head(stream_id)
         result = (-1, None) if row is None else (row[0], row[1])
         self._last_known_head[stream_id] = result
         return result
 
-    def _fallback_last_head(self, stream_id: str) -> tuple[int, str | None]:
-        journaled = self._journal_tail(stream_id)
+    async def _fallback_last_head(self, stream_id: str) -> tuple[int, str | None]:
+        journaled = await self._journal_tail(stream_id)
         if journaled is not None:
             return journaled
         cached = self._last_known_head.get(stream_id)
@@ -286,7 +374,7 @@ class PgTraceBackend:
                     extra={"stream_id": stream_id, "seq": seq},
                     exc_info=True,
                 )
-                self._append_journal(
+                await self._append_journal(
                     _JournalEntry(
                         trace_id=str(trace_id),
                         stream_id=stream_id,
@@ -304,12 +392,18 @@ class PgTraceBackend:
 
     # --- K11 fail-safe journal: append-only local file, replayed in order on recovery -----------------
 
-    def _append_journal(self, entry: _JournalEntry) -> None:
-        self._journal_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._journal_path.open("a", encoding="utf-8") as fh:
-            fh.write(_journal_entry_to_line(entry) + "\n")
+    async def _append_journal(self, entry: _JournalEntry) -> None:
+        """Append one line under the exclusive journal lock, and fsync it: this is the only durable copy
+        of the row until Postgres is back."""
+        async with _journal_lock(self._journal_path, exclusive=True):
+            self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._journal_path.open("a", encoding="utf-8") as fh:
+                fh.write(_journal_entry_to_line(entry) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
 
-    def _read_journal(self) -> list[_JournalEntry]:
+    def _read_journal_locked(self) -> list[_JournalEntry]:
+        """Parse the journal. The caller must hold the journal lock (shared or exclusive)."""
         if not self._journal_path.exists():
             return []
         entries = []
@@ -320,17 +414,20 @@ class PgTraceBackend:
                     entries.append(_journal_line_to_entry(stripped))
         return entries
 
-    def _journal_tail(self, stream_id: str) -> tuple[int, str | None] | None:
+    async def _journal_tail(self, stream_id: str) -> tuple[int, str | None] | None:
+        async with _journal_lock(self._journal_path, exclusive=False):
+            entries = self._read_journal_locked()
         last: _JournalEntry | None = None
-        for entry in self._read_journal():
+        for entry in entries:
             if entry.stream_id == stream_id:
                 last = entry
         return None if last is None else (last.seq, last.record_hash)
 
     def pending_count(self) -> int:
         """How many trace rows are currently journaled, not yet in Postgres -- a lag/health signal for
-        `opengrid.invariants`."""
-        return len(self._read_journal())
+        `opengrid.invariants`. Synchronous, so it takes the shared lock blocking (a file read only)."""
+        with _journal_lock_sync(self._journal_path, exclusive=False):
+            return len(self._read_journal_locked())
 
     async def _drain_journal_if_pending(self) -> None:
         """Opportunistic self-heal: if anything is journaled, try to flush it before this call's own DB
@@ -345,17 +442,19 @@ class PgTraceBackend:
         a partially-successful prior replay) is treated as already-replayed, not an error. Stops at the
         first record that still fails for a reason OTHER than "already applied" (the DB is still down),
         leaving it and everything after it in the journal for the next attempt. Returns the count
-        actually replayed (including ones found already-applied)."""
-        entries = self._read_journal()
+        actually replayed (including ones found already-applied).
+
+        Safe against every other process sharing the journal: the snapshot is read under the shared
+        lock, the inserts run with no lock held, and the rewrite happens under the exclusive lock over a
+        FRESH read, removing only the entries this call applied (by trace_id). Anything appended in the
+        meantime -- or left by a concurrent replayer -- is kept. Two replayers racing on the same entry
+        both see it as applied (the second gets the UNIQUE violation), and both remove it."""
+        async with _journal_lock(self._journal_path, exclusive=False):
+            entries = self._read_journal_locked()
         if not entries:
             return 0
-        remaining: list[_JournalEntry] = []
-        replayed = 0
-        stop = False
+        applied: set[str] = set()
         for entry in entries:
-            if stop:
-                remaining.append(entry)
-                continue
             try:
                 async with self._pool.connection() as conn, conn.cursor() as cur:
                     await cur.execute(
@@ -374,26 +473,41 @@ class PgTraceBackend:
                         },
                     )
                     await conn.commit()
-                replayed += 1
+                applied.add(entry.trace_id)
             except psycopg.errors.UniqueViolation:
-                replayed += 1  # already applied by an earlier partial replay
+                applied.add(entry.trace_id)  # already applied (earlier partial replay, or another process)
             except Exception:
                 logger.warning("trace journal replay stopped: DB still unavailable", exc_info=True)
-                remaining.append(entry)
-                stop = True
-        self._rewrite_journal(remaining)
-        if replayed:
-            logger.info(
-                "trace journal replay progress", extra={"replayed": replayed, "remaining": len(remaining)}
-            )
-        return replayed
+                break
+        if not applied:
+            return 0  # the DB is still down: nothing to remove, so no rewrite churn
+        async with _journal_lock(self._journal_path, exclusive=True):
+            current = self._read_journal_locked()
+            remaining = [entry for entry in current if entry.trace_id not in applied]
+            self._rewrite_journal_locked(remaining)
+        logger.info(
+            "trace journal replay progress", extra={"replayed": len(applied), "remaining": len(remaining)}
+        )
+        return len(applied)
 
-    def _rewrite_journal(self, entries: list[_JournalEntry]) -> None:
-        tmp_path = self._journal_path.with_suffix(".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fh:
-            for entry in entries:
-                fh.write(_journal_entry_to_line(entry) + "\n")
-        tmp_path.replace(self._journal_path)
+    def _rewrite_journal_locked(self, entries: list[_JournalEntry]) -> None:
+        """Atomically replace the journal with `entries`. The caller must hold the exclusive lock. The
+        temp name is unique per process and call, and both the file and the directory entry are fsynced
+        so a crash leaves either the old journal or the new one, never a truncated one."""
+        tmp_path = self._journal_path.with_name(
+            f"{self._journal_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                for entry in entries:
+                    fh.write(_journal_entry_to_line(entry) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self._journal_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        _fsync_dir(self._journal_path.parent)
 
     async def exists_preimage(self, decision_ref: UUID) -> bool:
         async with self._pool.connection() as conn, conn.cursor() as cur:

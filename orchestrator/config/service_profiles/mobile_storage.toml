@@ -13,9 +13,18 @@
 # carried as the deployment's starting condition for M&V, not a control-law parameter).
 #
 # Wired: MOBILE_STORAGE is a registered ServiceType (core/models/engine.py, migration 0025, MARKET-MODEL
-# owned). NOT yet wired (wiring lines in the SERVICES agent's 2026-09-26 report): opengrid.settle.
-# baselines.METER_SOURCE_BY_SERVICE (settle owner) and opengrid.selector.gate._CATEGORY_BY_SERVICE_TYPE
-# (optimizer owner) both need a "MOBILE_STORAGE" entry.
+# owned); opengrid.settle.baselines.METER_SOURCE_BY_SERVICE and opengrid.selector.gate.
+# _CATEGORY_BY_SERVICE_TYPE ("FIRM") are both wired (settle/optimizer owned).
+#
+# OWNER DECISION D-31 (2026-09-26, docs/orchestrator/07-delivery/11-decision-log.md): a mobile unit is
+# NEVER charged from the fleet -- not from home batteries, not from any other fleet asset, not from a
+# customer deployment site's hubs. It charges ONLY while parked at its registered home station (a depot
+# near a distribution or power substation), from that station's own grid connection, priced at that
+# station's own zone/tariff. See [home_station] below and config/service_profiles/
+# mobile_storage_home_stations.toml for the home-station registry (config-first: no DB table exists yet,
+# see 14-additional-services.md S2 for the requested migration). `opengrid.selector.types.BankSnapshot.
+# is_mobile`/`.home_station_intervals`/`.charging_allowed()` already enforce this at the planning layer
+# (optimizer owner, wired); DISPATCH and SAFETY wiring lines are in this profile's owning report/doc.
 
 [profile]
 service_type = "MOBILE_STORAGE"
@@ -43,6 +52,15 @@ failure_behaviour = "HOLD_THEN_SCHEDULE"       # S2.5 element-8 library value
 tracking_mode = "COMPLIANCE_BAND"
 compliance_band_pct = 95.0                     # meter-after/meter-before style band, matches NCLR (03 S2.6)
 relocatable = true                             # site_id changes per deployment; the fleet asset does not
+charge_source = "HOME_STATION_ONLY"            # D-31: never the fleet, never the deployment site's hubs
+
+[home_station]
+# D-31. `chargeable_from_fleet = false` is the profile-level statement optimizer/dispatch/guardian all key
+# off of (mirrors `BankSnapshot.is_mobile` at the planning layer); `registry` is this profile's home-station
+# config (config-first per the lead's 2026-09-26 R3.1 instruction -- no DB table exists yet).
+chargeable_from_fleet = false
+registry = "config/service_profiles/mobile_storage_home_stations.toml"
+charging_priced_at = "HOME_STATION_TARIFF"     # the ASSIGNED home station's zone/tariff, never the site's
 
 [instantiation]
 # ramp_limit (kW/min) = committed_kw * 60 / response_time_s, so committed kW is reachable within

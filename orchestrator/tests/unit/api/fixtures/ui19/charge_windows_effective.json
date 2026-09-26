@@ -1,0 +1,7 @@
+{
+  "hub_id": "hub-00012",
+  "bank_id": "bank-007",
+  "tz": "America/Chicago",
+  "windows": ["01:00-04:00", "13:00-14:00"],
+  "source": {"scope_kind": "BANK", "scope_ref": "bank-007"}
+}

@@ -46,6 +46,16 @@ class _FakeClient:
     async def subscribe(self, suffix: str, qos: int = 1) -> None:
         self.subscriptions.append(suffix)
 
+    async def publish_validated(
+        self, schema_name: str, suffix: str, message: dict[str, Any], qos: int = 0, retain: bool = False
+    ) -> None:
+        pass  # device-info publish at connect (bug fix, 2026-09-26, R3): not this test's concern
+
+    async def publish_batch(
+        self, schema_name: str, items: list[tuple[str, dict[str, Any]]], qos: int = 0
+    ) -> None:
+        pass
+
 
 @pytest.fixture
 def engine() -> FleetEngine:

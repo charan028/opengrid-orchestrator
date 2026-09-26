@@ -13,6 +13,8 @@ read).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 #: `opengrid.feeds.ercot`'s product codes (PRODUCT_PATHS) -- the same strings `og.feed_obs.product`
@@ -21,6 +23,15 @@ from typing import Protocol
 ENERGY_PRICE_PRODUCT = "np6-905-cd"
 AS_PRICE_PRODUCT = "np4-188-cd"
 FEED_SOURCE_ERCOT = "ERCOT"
+
+
+@dataclass(frozen=True, slots=True)
+class PriceObservation:
+    """One og.feed_obs price: its value and its observation timestamp (og.feed_obs.ts, the delivery
+    interval; a day-ahead AS price can be up to a day in the future)."""
+
+    value_usd_per_mwh: float
+    ts: datetime
 
 
 class MarketDataPort(Protocol):
@@ -37,4 +48,9 @@ class MarketDataPort(Protocol):
         """Most recent `np4-188-cd` (day-ahead AS clearing price) observation whose `series` equals
         `product_code` (ERCOT's `ancillaryType`, e.g. `"REGUP"`/`"NONSPIN"` -- the same string a
         contract's `og.product_rule.product_code` carries for an ERCOT_AS contract)."""
+        ...
+
+    async def latest_as_mcpc(self, product_code: str) -> PriceObservation | None:
+        """latest_as_mcpc_usd_per_mwh with the observation's timestamp, so intake can refuse a stale
+        clearing price ([contracts.intake].as_price_max_age_s)."""
         ...

@@ -1,0 +1,25 @@
+{
+  "results": [
+    {
+      "alert_id": 1,
+      "outcome": "acked"
+    },
+    {
+      "alert_id": 3,
+      "outcome": "acked"
+    },
+    {
+      "alert_id": 4,
+      "outcome": "already_acked"
+    },
+    {
+      "alert_id": 99,
+      "outcome": "not_found"
+    }
+  ],
+  "counts": {
+    "acked": 2,
+    "already_acked": 1,
+    "not_found": 1
+  }
+}

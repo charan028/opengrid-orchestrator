@@ -39,7 +39,7 @@ from opengrid.market.territory import (
     territory_of_zone,
 )
 
-G02, G05, G26, G27, G28, G29, G30, G31, G32, G33 = (
+G02, G05, G26, G27, G28, G29, G30, G31, G32, G33, G34 = (
     "G-02",
     "G-05",
     "G-26",
@@ -50,6 +50,7 @@ G02, G05, G26, G27, G28, G29, G30, G31, G32, G33 = (
     "G-31",
     "G-32",
     "G-33",
+    "G-34",
 )
 
 
@@ -270,7 +271,8 @@ def check_aggregate_flow(
     ref: str,
 ) -> CheckOutcome:
     """-R_rev <= L + (this cycle's accumulated change across banks) <= rho F. A stale or missing reading, or
-    an unknown limit, vetoes any batch that increases |this cycle's change| and passes relief."""
+    an unknown limit, vetoes any batch that increases |this cycle's change| and passes relief. A flow known
+    only as an interval (unsigned SCADA) is checked at both ends, each with its own relief."""
     load, lower, upper = flow.flow_kw, flow.lower_kw, flow.upper_kw
     if (
         load is None
@@ -282,15 +284,19 @@ def check_aggregate_flow(
         if abs(cycle_delta_kw) > abs(prior_cycle_delta_kw) + 1e-9:
             return CheckOutcome(rule_id, False, "FLOW_UNKNOWN", ref)
         return CheckOutcome.passed(rule_id, hub_id=ref)
-    result = core_limits.check_flow_band(
-        load + prior_cycle_delta_kw,
-        load + cycle_delta_kw,
-        lower,
-        upper,
-        reverse_reason=reverse_reason,
-        forward_reason=forward_reason,
-    )
-    return CheckOutcome(rule_id, result.ok, result.reason, ref)
+    ends = (load,) if flow.flow_low_kw is None else (flow.flow_low_kw, load)
+    for now in ends:
+        result = core_limits.check_flow_band(
+            now + prior_cycle_delta_kw,
+            now + cycle_delta_kw,
+            lower,
+            upper,
+            reverse_reason=reverse_reason,
+            forward_reason=forward_reason,
+        )
+        if not result.ok:
+            return CheckOutcome(rule_id, False, result.reason, ref)
+    return CheckOutcome.passed(rule_id, hub_id=ref)
 
 
 def check_g29_poi(poi: PoiLimit, batch_setpoint_kw: float) -> CheckOutcome:
@@ -301,6 +307,19 @@ def check_g29_poi(poi: PoiLimit, batch_setpoint_kw: float) -> CheckOutcome:
 
 
 # --- G-33 territory (K15) -----------------------------------------------------------------------------------
+
+
+def is_idle(item: ProposedItem) -> bool:
+    """A 0 kW item: it can neither export into nor import from any market."""
+    return abs(item.p_kw_setpoint) <= 1e-9
+
+
+def check_hub_in_bank(item: ProposedItem, bank_id: str, hub_bank: str | None) -> CheckOutcome:
+    """G-34: every item's hub sits on the proposal's bank per the guardian's own og.hub read (an unknown
+    hub fails closed). The batch's lease, epoch/seq and every bank-level check are scoped to `bank_id`."""
+    if hub_bank is not None and hub_bank == bank_id:
+        return CheckOutcome.passed(G34, hub_id=item.hub_id)
+    return CheckOutcome(G34, False, reasons.R_HUB_NOT_IN_BANK, item.hub_id)
 
 
 def obligation_market_ref(row: ObligationMarket | None) -> MarketRef | None:
@@ -323,7 +342,11 @@ def check_g33_territory(
     free_access: bool,
 ) -> CheckOutcome:
     """K15/G-33: `market.check_territory` (the ONE predicate) on the guardian's own reads. Headroom (no
-    obligation) is FREE."""
+    obligation) is FREE. A 0 kW item serves no market (the engine's own territory-block items are 0 kW
+    grants carrying the R-TERRITORY-* reason) and passes; a non-zero setpoint is always checked, whatever
+    its reason code."""
+    if is_idle(item):
+        return CheckOutcome.passed(G33, hub_id=item.hub_id)
     reason = check_territory(ref, territory_of_zone(zone, zone_territory), free_access=free_access)
     if reason is None:
         return CheckOutcome.passed(G33, hub_id=item.hub_id)

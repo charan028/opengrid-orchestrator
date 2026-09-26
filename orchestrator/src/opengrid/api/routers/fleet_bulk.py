@@ -1,34 +1,29 @@
-"""Bulk manual commands (Gitea #19): propose one setpoint for many hubs, confirm, and -- when any
+"""Bulk manual targets (Gitea #19): propose one setpoint for many hubs, confirm, and -- when any
 selected hub serves a committed obligation or is FAULT/critical -- confirm a second time.
 
-Every hub's command goes through the EXISTING single-hub path, `opengrid.api.routers.fleet`'s
-`propose_command` + `confirm_command` (K10 decision pre-image, `command_batch` header, guardian verdict
-poll). This module never builds a batch, signs, or evaluates anything itself (K3: og-guardian stays the
-sole signer). Each step of the bulk flow is traced as an operator action.
-
-Hubs on the same bank run one after another (the single-hub path stamps `seq` from the wall clock);
-banks run concurrently up to `[api.bulk_commands].concurrency`. Trace appends are serialised within the
-bulk run, since every per-hub confirm appends to the same `operator_action:<user>` stream.
+On the final confirm the whole selection becomes ONE manual target through the single-hub path's own
+writer, `opengrid.api.routers.fleet.issue_manual_target` (a K10 `MANUAL_TARGET` trace event plus the
+`og.operator_action` row). The engine then ramps every hub toward it within G-04, each step signed by
+og-guardian (engine/manual.py); this module never builds a batch, signs, or evaluates anything itself
+(K3). Each step of the bulk flow is also traced as an operator action (`OPERATOR_BULK_COMMAND`).
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from opengrid.api.auth import Identity, current_identity
 from opengrid.api.deps import get_config, get_proposals, get_store, get_trace_store
 from opengrid.api.proposals import PROPOSAL_TTL_S, ProposalExpiredError, ProposalStore
 from opengrid.api.routers import fleet
-from opengrid.api.schemas import CommandProposalRequest
 from opengrid.api.store import StoreProtocol
 from opengrid.api.views_ext import (
     ExtViewsProtocol,
@@ -50,7 +45,6 @@ BULK_ACTION: Final = "api.write"
 _STREAM_PREFIX: Final = "operator_action:"
 _EVENT_CLASS: Final = "OPERATOR_BULK_COMMAND"
 _DEFAULT_MAX_HUBS = 500
-_DEFAULT_CONCURRENCY = 8
 
 #: Why a bulk command needs a second confirmation (#19).
 REASON_COMMITTED_OBLIGATION: Final = "SERVES_COMMITTED_OBLIGATION"
@@ -66,8 +60,10 @@ class BulkCommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     hub_ids: list[str] = Field(min_length=1)
-    p_kw_setpoint: float
+    p_kw_setpoint: float  # the manual target, +charge / -discharge
     reason: str = Field(min_length=1)
+    #: How long the manual target holds (default 15 min, max 4 h).
+    duration_minutes: int | None = Field(default=None, ge=1, le=240)
 
 
 @dataclass(slots=True)
@@ -124,26 +120,6 @@ async def require_bulk_command(
         )
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=decision.reason)
     return identity
-
-
-class _SerialisedTraceStore(TraceStore):
-    """Serialises `append` for the concurrent per-hub confirms of one bulk run: they all append to the
-    same `operator_action:<user>` stream, and `TraceStore.append` reads the head then writes seq+1."""
-
-    def __init__(self, inner: TraceStore) -> None:
-        self._inner = inner
-        self._lock = asyncio.Lock()
-
-    async def append(
-        self,
-        stream_id: str,
-        decision_type: str,
-        event_class: str,
-        payload: dict[str, Any],
-        reason_codes: list[str] | None = None,
-    ) -> TraceRecordRef:
-        async with self._lock:
-            return await self._inner.append(stream_id, decision_type, event_class, payload, reason_codes)
 
 
 async def _trace_step(
@@ -246,11 +222,13 @@ async def confirm_bulk(
     store: Annotated[StoreProtocol, Depends(get_store)],
     cfg: Annotated[Config, Depends(get_config)],
     identity: Annotated[Identity, Depends(require_bulk_command)],
+    response: Response,
 ) -> dict[str, Any]:
     """Step 2 (and 3). With `requires_double_confirm`, the first confirm only records itself and returns
-    `status=AWAITING_SECOND_CONFIRM`; the second executes. Execution returns per-hub outcomes (`PASS`,
-    `VETOED`/`PARTLY_VETOED`/`TIMEOUT` from the guardian, `NO_VERDICT` if it did not answer in time,
-    `ERROR`); it is `200` even when some hubs were vetoed -- the counts say so."""
+    `status=AWAITING_SECOND_CONFIRM`; the second executes: one MANUAL_TARGET for every selected hub
+    (`status=RAMPING`, each hub `RAMPING`, with the target's `manual_target_trace_id` and `expires_at`;
+    cancel with `POST /og/api/fleet/manual-targets/{manual_target_trace_id}/cancel`). Per-step guardian
+    verdicts now happen cycle by cycle in the engine, not at confirm time."""
     try:
         proposal = proposals.peek(proposal_id, kind=BULK_PROPOSAL_KIND)
     except ProposalExpiredError as exc:
@@ -276,98 +254,37 @@ async def confirm_bulk(
     proposals.pop(proposal_id, kind=BULK_PROPOSAL_KIND)
     step = "CONFIRM_2" if state.requires_double_confirm else "CONFIRM"
     confirm_ref = await _trace_step(trace_store, identity, step, {"proposal_id": str(proposal_id)})
-    concurrency = max(1, int(cfg.get("api.bulk_commands.concurrency", _DEFAULT_CONCURRENCY)))
-    results = await _execute(state, proposal_id, proposals, trace_store, store, identity, concurrency)
-    outcome_counts = Counter(r["outcome"] for r in results)
+    response.status_code = status.HTTP_202_ACCEPTED  # executed: the engine is now ramping (single-hub parity)
+    first = state.confirmations[0]["operator"] if state.confirmations else identity.user
+    issued = await fleet.issue_manual_target(
+        trace_store,
+        store,
+        operator=first,
+        hub_ids=state.hub_ids,
+        p_kw_target=state.request.p_kw_setpoint,
+        reason=f"{state.request.reason} [bulk {proposal_id}]",
+        duration_minutes=state.request.duration_minutes,
+        target_ref=f"bulk:{proposal_id}",
+        extra={"proposal_id": str(proposal_id), "bulk": True},
+        approver=identity.user,
+    )
     result_ref = await _trace_step(
         trace_store,
         identity,
         "RESULT",
         {
             "proposal_id": str(proposal_id),
-            "outcome_counts": dict(outcome_counts),
+            "manual_target_trace_id": issued["trace_id"],
             "confirm_trace_id": str(confirm_ref.trace_id),
         },
     )
-    first = state.confirmations[0]["operator"] if state.confirmations else identity.user
-    await store.insert_operator_action(
-        operator_ref=first,
-        action_kind="MANUAL_COMMAND",
-        target_ref=f"bulk:{proposal_id}",
-        tier="TIER1",
-        reason=state.request.reason,
-        trace_id=result_ref.trace_id,
-        confirmed_at=datetime.now(UTC),
-        approver_ref=identity.user,
-    )
     return {
         "proposal_id": str(proposal_id),
-        "status": "EXECUTED",
-        "hub_count": len(results),
-        "outcome_counts": dict(outcome_counts),
-        "results": results,
+        "status": "RAMPING",
+        "hub_count": len(state.hub_ids),
+        "outcome_counts": {"RAMPING": len(state.hub_ids)},
+        "results": [{"hub_id": h, "outcome": "RAMPING"} for h in state.hub_ids],
+        "manual_target_trace_id": issued["trace_id"],
+        "expires_at": issued["expires_at"],
         "trace_id": str(result_ref.trace_id),
     }
-
-
-async def _execute(
-    state: BulkProposal,
-    proposal_id: UUID,
-    proposals: ProposalStore,
-    trace_store: TraceStore,
-    store: StoreProtocol,
-    identity: Identity,
-    concurrency: int,
-) -> list[dict[str, Any]]:
-    serial_trace = _SerialisedTraceStore(trace_store)
-    semaphore = asyncio.Semaphore(concurrency)
-    by_bank: dict[str, list[str]] = defaultdict(list)
-    for hub_id in state.hub_ids:
-        by_bank[state.bank_by_hub[hub_id]].append(hub_id)
-    results: dict[str, dict[str, Any]] = {}
-    reason = f"{state.request.reason} [bulk {proposal_id}]"
-
-    async def _one(hub_id: str) -> dict[str, Any]:
-        single = CommandProposalRequest(
-            hub_id=hub_id, p_kw_setpoint=state.request.p_kw_setpoint, reason=reason
-        )
-        try:
-            accepted = await fleet.propose_command(single, proposals, identity)
-            confirmed = await fleet.confirm_command(
-                accepted.proposal_id, proposals, serial_trace, store, identity
-            )
-        except HTTPException as exc:
-            return _failed(hub_id, exc)
-        except Exception as exc:
-            logger.exception("bulk command failed for one hub", extra={"hub_id": hub_id})
-            return {"hub_id": hub_id, "outcome": "ERROR", "detail": str(exc)}
-        return {
-            "hub_id": hub_id,
-            "outcome": confirmed.outcome,
-            "vetoed_rule_ids": confirmed.vetoed_rule_ids,
-            "trace_id": str(confirmed.trace_id) if confirmed.trace_id else None,
-        }
-
-    async def _bank(hub_ids: list[str]) -> None:
-        async with semaphore:
-            for hub_id in hub_ids:
-                results[hub_id] = await _one(hub_id)
-
-    await asyncio.gather(*(_bank(hubs) for hubs in by_bank.values()))
-    return [results[h] for h in state.hub_ids]
-
-
-def _failed(hub_id: str, exc: HTTPException) -> dict[str, Any]:
-    detail = exc.detail
-    if exc.status_code == status.HTTP_409_CONFLICT and isinstance(detail, dict):
-        return {
-            "hub_id": hub_id,
-            "outcome": detail.get("outcome", "VETOED"),
-            "vetoed_rule_ids": detail.get("vetoed_rule_ids", []),
-            "trace_id": str(detail["trace_id"]) if detail.get("trace_id") else None,
-        }
-    outcome = {
-        status.HTTP_503_SERVICE_UNAVAILABLE: "NO_VERDICT",
-        status.HTTP_404_NOT_FOUND: "NOT_FOUND",
-    }.get(exc.status_code, "ERROR")
-    return {"hub_id": hub_id, "outcome": outcome, "detail": str(detail)}

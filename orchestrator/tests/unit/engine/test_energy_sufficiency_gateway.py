@@ -434,3 +434,70 @@ async def test_the_as_energy_hold_includes_the_guardians_one_percent_floor(monke
     (result,) = await gateway.run(NOW)
 
     assert result.required_kwh == pytest.approx(5.0 + 0.01 * 39.2 * 0.9487)
+
+
+async def test_a_utility_toll_holds_energy_for_its_90_minute_call(monkeypatch, _patch_alert_raising):
+    """D-29: the toll (REGULATED_CAPACITY / TOLLING) is a capacity hold like ERCOT_AS; its energy hold uses
+    the product rule's 90 min, and an uncalled toll short of it is AT_RISK, never escalated."""
+    obligation_id = uuid4()
+    rows = [
+        (
+            obligation_id,
+            "bank-01",
+            1.25,
+            NOW + timedelta(minutes=15),
+            uuid4(),
+            "REGULATED_CAPACITY",
+            10.0,
+            90,
+            False,
+        )
+    ]
+    monkeypatch.setattr(
+        gw.fleet,
+        "hub_capabilities",
+        lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=39.2, e_kwh=39.2)],
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+    (result,) = await gateway.run(NOW)
+    assert result.required_kwh == pytest.approx(10.0 * 1.5 + 0.01 * 39.2 * 0.9487)
+    assert gateway.as_hold_ids == {str(obligation_id)}
+
+
+async def test_a_deployed_award_needs_only_the_rest_of_its_call(monkeypatch, _patch_alert_raising):
+    """Review R3: while deployed, kW x (end_at - now) capped by the product duration -- not a fresh full
+    duration, which escalated a correctly delivering award to SHORTFALL. Held: the full duration."""
+    deployed_id, held_id = uuid4(), uuid4()
+    rows = [
+        (
+            deployed_id,
+            "bank-01",
+            1.0,
+            NOW + timedelta(minutes=15),
+            uuid4(),
+            "ERCOT_AS",
+            10.0,
+            240,
+            True,
+            NOW + timedelta(minutes=30),
+        ),
+        (held_id, "bank-02", 1.0, NOW + timedelta(minutes=15), uuid4(), "ERCOT_AS", 10.0, 240, False, None),
+    ]
+    monkeypatch.setattr(
+        gw.fleet,
+        "hub_capabilities",
+        lambda bank_id: [_FakeHubCap("h1", bank_id, 20.0, soc_kwh=1000.0, e_kwh=1000.0)],
+    )
+    gateway = gw.EnergySufficiencyGateway(_FakePool(rows), TraceStore(_FakeTraceBackend()))
+    results = {r.obligation_id: r for r in await gateway.run(NOW)}
+    margin = 0.01 * 1000.0 * 0.9487
+    assert results[str(deployed_id)].required_kwh == pytest.approx(10.0 * 0.5 + margin)
+    assert results[str(held_id)].required_kwh == pytest.approx(10.0 * 4.0 + margin)
+    assert gateway.as_hold_ids == {str(held_id)}
+
+
+def test_as_energy_hold_caps_the_remaining_call_at_the_product_duration():
+    kw, end = gw.as_energy_hold(NOW, 5.0, 60, NOW + timedelta(hours=3))
+    assert (kw, end) == (5.0, NOW + timedelta(minutes=60))
+    assert gw.as_energy_hold(NOW, 5.0, 60, NOW + timedelta(minutes=10))[1] == NOW + timedelta(minutes=10)
+    assert gw.as_energy_hold(NOW, 5.0, 60)[1] == NOW + timedelta(minutes=60)

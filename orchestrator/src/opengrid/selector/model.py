@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 import highspy
 import numpy as np
 
-from opengrid.selector.types import ModelInputs
+from opengrid.selector.types import BankSnapshot, ModelInputs
 from opengrid.selector.value import wear_usd_per_kwh
 
 _EPS = 1e-9
@@ -53,11 +53,17 @@ TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH = 1.0
 #: An ERCOT_AS energy hold keeps this fraction of the bank's capacity above reserve too: the guardian's
 #: G-01-ENERGY floor at lease end (else the last leases of a full deployment are vetoed).
 AS_HOLD_FLOOR_FRACTION = 0.01
-#: 09 S1.2 M^sol: price of each kWh of solar-share shortfall below a regulated contract's floor (the
-#: contract's green premium; default $0.50/kWh): the floor binds unless solar is unavailable.
-SOLAR_FLOOR_SLACK_USD_PER_KWH = 0.50
 _MIN_MEANINGFUL_KW = 1e-6  # below this, treat capacity as exactly 0 -- avoids HiGHS "tiny coefficient"
 # numerical errors on pathologically small (but nonzero) capacity readings.
+
+
+def _wash_pays(bank: BankSnapshot, price_usd_per_mwh: float, t: int) -> bool:
+    """Whether buying one grid kWh and selling what it stores in the same interval would pay or tie:
+    eta_c * eta_d * (price - wear) >= the grid charging cost. Only at deeply negative prices (or with no
+    losses, wear or M1 at all) -- elsewhere the LP nets the two and no wash guard is needed."""
+    round_trip = bank.eta_c * bank.eta_d
+    sale = round_trip * (price_usd_per_mwh / 1000.0 - wear_usd_per_kwh(bank))
+    return sale >= bank.charge_cost_usd_per_kwh(price_usd_per_mwh, t) - _EPS
 
 
 def _clamped(kw: float) -> float:
@@ -183,10 +189,18 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
     def _bank_cap_at(bank_id: str, t: int) -> float:
         return _clamped(bank_by_id[bank_id].max_discharge_kw.get(t, 0.0))
 
+    mobile_ids = inputs.mobile_service_ids()
+
+    def _may_serve(obligation_id: str, bank_id: str) -> bool:
+        # D-31 (`ModelInputs.may_serve`, inlined over the id set for speed at fleet scale).
+        return bank_id in bank_by_id and (obligation_id not in mobile_ids or bank_by_id[bank_id].is_mobile)
+
     for co in inputs.committed:
         for t, kw in co.committed_kw_by_interval.items():
             eligible = [
-                b for b in co.eligible_bank_ids if b in bank_by_id and t in bank_by_id[b].max_discharge_kw
+                b
+                for b in co.eligible_bank_ids
+                if _may_serve(co.obligation_id, b) and t in bank_by_id[b].max_discharge_kw
             ]
             if not eligible:
                 continue
@@ -200,7 +214,9 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
         eligible_by_t: dict[int, list[str]] = {}
         for t in c.window_intervals:
             eligible = [
-                b for b in c.eligible_bank_ids if b in bank_by_id and t in bank_by_id[b].max_discharge_kw
+                b
+                for b in c.eligible_bank_ids
+                if _may_serve(c.opportunity_id, b) and t in bank_by_id[b].max_discharge_kw
             ]
             eligible_by_t[t] = eligible
             for b in eligible:
@@ -262,8 +278,6 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
     for (obligation_id, bank_id, t), var in ybar_vars.items():
         if obligation_id in regulated_ids:
             regulated_by_bt.setdefault((bank_id, t), []).append(var)
-    # 09 C27 solar share floor, per (territory, scenario): terms of sum(g_sol - phi * (g_sol + g_grid)).
-    solar_floor_terms: dict[tuple[str, str], list[tuple[highspy.highs_var, float]]] = {}
 
     soc_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
     charge_vars: dict[tuple[str, int, str], highspy.highs_var] = {}
@@ -286,7 +300,8 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
             highs.addConstr(soc_vars[bank.bank_id, first_t, scenario.scenario] == bank.initial_soc_kwh)
 
             for t in intervals:
-                charge_cap_kw = _clamped(bank.max_charge_kw.get(t, 0.0))
+                # D-31: a mobile unit charges (grid or solar) only while at its home station.
+                charge_cap_kw = _clamped(bank.max_charge_kw.get(t, 0.0)) if bank.charging_allowed(t) else 0.0
                 charge = highs.addVariable(lb=0.0, ub=charge_cap_kw if bank.grid_charge_allowed(t) else 0.0)
                 charge_vars[bank.bank_id, t, scenario.scenario] = charge
                 charging: list[tuple[highspy.highs_var, float]] = [(charge, 1.0)]
@@ -297,25 +312,23 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     solar_charge_vars[bank.bank_id, t, scenario.scenario] = solar
                     charging.append((solar, 1.0))
                     rows.add(-highspy.kHighsInf, charge_cap_kw, charging)
-                if bank.solar_share_floor > 0.0 and bank.territory is not None:
-                    phi = bank.solar_share_floor
-                    terms = solar_floor_terms.setdefault((bank.territory, scenario.scenario), [])
-                    terms.append((charge, -phi * dt_h))
-                    if solar_kw > 0.0:
-                        terms.append(
-                            (solar_charge_vars[bank.bank_id, t, scenario.scenario], (1.0 - phi) * dt_h)
-                        )
                 headroom = h_vars[bank.bank_id, t, scenario.scenario]
                 cap_kw = _bank_cap_at(bank.bank_id, t)
                 headroom_cap_kw = cap_kw if bank.free_market_access else 0.0
-                if charge_cap_kw > 0.0 and headroom_cap_kw > 0.0:
-                    # No arbitrage wash (owner rule): grid charging and headroom sale in the same
-                    # interval share one envelope -- selling what is bought in the same interval and
-                    # market only burns losses, M1 and wear.
+                if (
+                    charge_cap_kw > 0.0
+                    and headroom_cap_kw > 0.0
+                    and bank.grid_charge_allowed(t)
+                    and _wash_pays(bank, scenario.price_at(bank.bank_id, t), t)
+                ):
+                    # No arbitrage wash (owner rule): never buy from the grid and sell headroom in the same
+                    # interval and market. Elsewhere netting strictly beats it (losses, wear, M1), so the
+                    # either/or binary is added only where a wash could pay or tie (deeply negative prices).
+                    buying = highs.addBinary()
+                    integer_vars.append(buying)
+                    rows.add(-highspy.kHighsInf, 0.0, [(charge, 1.0), (buying, -charge_cap_kw)])
                     rows.add(
-                        -highspy.kHighsInf,
-                        1.0,
-                        [(charge, 1.0 / charge_cap_kw), (headroom, 1.0 / headroom_cap_kw)],
+                        -highspy.kHighsInf, headroom_cap_kw, [(headroom, 1.0), (buying, headroom_cap_kw)]
                     )
                 if charge_cap_kw > 0.0 and cap_kw > 0.0:
                     for delivery in regulated_by_bt.get((bank.bank_id, t), []):
@@ -379,14 +392,6 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                 >= bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh
             )
 
-    # C27 soft solar floor: per territory and scenario, over the horizon (month-to-date carry-in is not
-    # modelled yet). The slack is priced at the contract's green premium.
-    solar_floor_slacks: list[tuple[str, highspy.highs_var]] = []
-    for (_territory, scenario_name), terms in solar_floor_terms.items():
-        slack = highs.addVariable(lb=0.0)
-        solar_floor_slacks.append((scenario_name, slack))
-        rows.add(0.0, highspy.kHighsInf, [*terms, (slack, 1.0)])
-
     base_row = rows.flush(highs)
     capacity_rows = {key: base_row + position for key, position in capacity_positions.items()}
     soc_balance_rows = {key: base_row + position for key, position in soc_balance_positions.items()}
@@ -432,8 +437,6 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                     _add_cost(costs, solar, -weight * (price / 1000.0 if solar_cost is None else solar_cost))
 
     probability_by_scenario: dict[str, float] = {s.scenario: s.probability for s in inputs.scenarios}
-    for scenario_name, slack in solar_floor_slacks:
-        _add_cost(costs, slack, -probability_by_scenario[scenario_name] * SOLAR_FLOOR_SLACK_USD_PER_KWH)
     for scenario_name, slack in hold_slack_vars:
         _add_cost(
             costs, slack, -probability_by_scenario[scenario_name] * TERMINAL_SHORTFALL_PENALTY_USD_PER_KWH

@@ -28,6 +28,7 @@ from ogsim.fleet.calibration import (
     current_offsets,
 )
 from ogsim.fleet.commands import CommandVerdict, build_ack, evaluate_batch, utc_now_from_epoch
+from ogsim.fleet.device_info import build_device_info_messages
 from ogsim.fleet.lease import HoldTracker, lease_expiry_from_message
 from ogsim.fleet.pq import (
     PQ_ANOMALY_TYPES,
@@ -86,8 +87,25 @@ class FleetEngine:
         self.holds = HoldTracker(config.lease_hold_after_expiry_s)
         self._last_tick_at: float | None = None
 
-    def handle_scenario_cmd(self, raw: dict[str, Any]) -> ActiveAnomalyStarted | None:
+    def handle_scenario_cmd(
+        self, raw: dict[str, Any], guardian_public_key: Ed25519PublicKey | None = None
+    ) -> ActiveAnomalyStarted | CommandVerdict | None:
+        """`guardian_public_key` is optional (default `None`, matching every pre-existing caller/test
+        that doesn't need it) and used ONLY by `tampered_unsigned_command` (demo gap #14, 2026-09-26):
+        that anomaly's whole point -- proving a forged/unsigned command is rejected -- was previously
+        unobservable, since `FleetEngine.self_test_tampered_unsigned_command` existed but was never
+        invoked here, so no REJECTED ack ever reached the orchestrator to trace. Returns the resulting
+        `CommandVerdict` (instead of `ActiveAnomalyStarted`) so the caller
+        (`ogsim.fleet.__main__._dispatch_message`) can build and publish its ack, exactly as it already
+        does for a real command batch."""
         cmd = parse_scenario_cmd(raw)
+        if cmd.catalogue_type == "tampered_unsigned_command":
+            if guardian_public_key is None:
+                return None
+            bank_id = self._resolve_bank_id_for_self_test(cmd.target_ref)
+            if bank_id is None:
+                return None
+            return self.self_test_tampered_unsigned_command(bank_id, guardian_public_key)
         if cmd.catalogue_type == "replace_inverter":
             replace_inverter(
                 self.pq,
@@ -291,7 +309,10 @@ class FleetEngine:
         return verdicts
 
     def tick(self, now: float) -> None:
-        dt_s = self.config.telemetry_interval_s if self._last_tick_at is None else now - self._last_tick_at
+        # First tick's dt_s falls back to the PHYSICS cadence (V-32, 2026-09-26), not
+        # `telemetry_interval_s` -- those two are independent (see `physics_tick_interval_s`'s
+        # docstring): a fleet publishing telemetry every 10 s still physics-ticks every 2 s.
+        dt_s = self.config.physics_tick_interval_s if self._last_tick_at is None else now - self._last_tick_at
         self._last_tick_at = now
         self.anomalies.tick(now)
         self.anomalies.accumulate_drift(dt_s)
@@ -453,6 +474,23 @@ class FleetEngine:
         idx = self.state.hub_index.get(verdict.hub_id)
         return None if idx is None else round(float(self.state.p_kw_applied[idx]), 4)
 
+    def _resolve_bank_id_for_self_test(self, target_ref: str) -> str | None:
+        """`tampered_unsigned_command`'s catalogue `target_kind` is "hub or bank" (also accepting a
+        zone or `*`, per BUILD.md's anomaly-catalogue target conventions) -- `None` only when nothing
+        in the fleet matches `target_ref` at all."""
+        if target_ref in self.state.hub_index:
+            idx = self.state.hub_index[target_ref]
+            return self.state.bank_ids[idx]
+        if target_ref in self.state.bank_ids:
+            return target_ref
+        if target_ref in ("*", ""):
+            return self.state.bank_ids[0] if self.state.bank_ids else None
+        if target_ref in self.state.zones:
+            for bank_id, zone in zip(self.state.bank_ids, self.state.zones, strict=True):
+                if zone == target_ref:
+                    return bank_id
+        return None
+
     def self_test_tampered_unsigned_command(
         self, bank_id: str, public_key: Ed25519PublicKey
     ) -> CommandVerdict:
@@ -505,10 +543,19 @@ def load_safestop_public_key(config: FleetConfig) -> Ed25519PublicKey:
 async def run_fleet(
     client: SimMqttClient, engine: FleetEngine, clock: Clock, public_key: Ed25519PublicKey
 ) -> None:
-    """Async shell: subscribes to inbound topics, ticks `engine` on
-    `config.telemetry_interval_s`, and publishes telemetry. Intended to run
-    under `asyncio.gather` alongside a message-consuming task (which
-    publishes acks as command batches arrive).
+    """Async shell: subscribes to inbound topics, PHYSICS-ticks `engine` on
+    `config.physics_tick_interval_s` (fixed, 2 s default), and publishes telemetry on the SEPARATE,
+    slower `config.telemetry_interval_s` cadence (OWNER DECISION, 2026-09-26, V-32: 10 s in the
+    shipped fleet.yaml, to cut disk load -- see `physics_tick_interval_s`'s docstring for why these
+    two are independent: a stop ramp, or anything else keyed to `dt_s`, must keep working at its
+    normal rate regardless of how often telemetry is published). Intended to run under
+    `asyncio.gather` alongside a message-consuming task (which publishes acks as command batches
+    arrive).
+
+    Event-driven exception to the slower cadence: any hub whose `health`/`fault_code` changed since
+    the last telemetry publish forces an immediate publish of the WHOLE batch (simplest correct
+    option -- per-hub partial batches would need a wire-shape change) rather than waiting out the
+    rest of `telemetry_interval_s`, so a fault is never masked by the slower default cadence.
 
     One tick's body (physics step + publish) is wrapped in its own
     try/except: a single bad tick -- a transient publish failure, a
@@ -528,18 +575,43 @@ async def run_fleet(
     # calibration commands, handled by `FleetEngine.handle_calibration_command` (already
     # implemented, this file's own docstring above -- only the subscribe was missing).
     await client.subscribe("cmd/cal/+", qos=1)
+    # DeviceInfo (R3, OWNER DECISION, 2026-09-26): retained, QoS 1, once per connect -- every field is
+    # a pure function of the hub's own static build-time data (see device_info.py's module
+    # docstring), so nothing at runtime currently re-triggers this; a future change-trigger can call
+    # `build_device_info_messages` again unchanged.
+    for suffix, message in build_device_info_messages(engine.state, engine.config, clock.now()):
+        await client.publish_validated("device_info", suffix, message, qos=1, retain=True)
+    last_telemetry_publish_at: float | None = None
+    last_health_snapshot: tuple[str, ...] | None = None
+    last_fault_snapshot: tuple[str | None, ...] | None = None
     while True:
         now = clock.now()
         try:
             engine.tick(now)
-            await client.publish_batch("telemetry", engine.telemetry_messages(now), qos=0)
+            health_snapshot = tuple(engine.state.health)
+            fault_snapshot = tuple(engine.state.fault_code)
+            health_or_fault_changed = last_health_snapshot is not None and (
+                health_snapshot != last_health_snapshot or fault_snapshot != last_fault_snapshot
+            )
+            telemetry_due = (
+                last_telemetry_publish_at is None
+                or now - last_telemetry_publish_at >= engine.config.telemetry_interval_s
+            )
+            if telemetry_due or health_or_fault_changed:
+                await client.publish_batch("telemetry", engine.telemetry_messages(now), qos=0)
+                last_telemetry_publish_at = now
+            last_health_snapshot = health_snapshot
+            last_fault_snapshot = fault_snapshot
             # WP-H (06-service-profiles-and-power-quality.md S6.4/S7.4): periodic PQ
             # waveform summary (fast sub-block every tick, harmonic-detail sub-block
             # gated by HarmonicDetailScheduler) plus this sim's own rotating audit
             # sample of raw captures (S6.4b trigger policy item iii) -- a triggered
-            # capture request is handled separately, in `_dispatch_message` below.
+            # capture request is handled separately, in `_dispatch_message` below. Both are
+            # independently rate-gated by their own schedulers (S6.4a's now-30s default,
+            # 2026-09-26), so evaluating them every PHYSICS tick (not every telemetry publish) is
+            # correct -- they simply produce nothing on a tick that isn't due.
             await client.publish_batch("pq_waveform_summary", engine.wave_summary_messages(now), qos=0)
             await client.publish_batch("pq_waveform_raw", engine.wave_rotating_audit_captures(now), qos=1)
         except Exception:
             logger.exception("fleet tick failed; continuing telemetry loop")
-        await clock.sleep(engine.config.telemetry_interval_s)
+        await clock.sleep(engine.config.physics_tick_interval_s)

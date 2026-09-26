@@ -23,13 +23,16 @@ CPS_BLOCK_DISABLED = ZoneBlockConfig(zone="LZ_CPS", banks=10, homes_per_bank=50,
 @pytest.fixture
 def base_config():
     # Hermetic: no substation history file, so both engines use the synthetic base (the server has one,
-    # where the per-bank base is the history mean split over the bank count).
+    # where the per-bank base is the history mean split over the bank count). `substation_assets=()`:
+    # this file is about ZONE BLOCKS specifically -- the shipped scada.yaml's own substation asset
+    # (D-29(b)) is covered by test_scada_substation_asset.py instead, so it's isolated out here.
     return replace(
         load_scada_config(),
         mqtt=MQTT,
         bank_count=40,
         zones=("LZ_NORTH", "LZ_SOUTH"),
         history_tsv_path="/nonexistent/substation_history.tsv",
+        substation_assets=(),
     )
 
 
@@ -46,7 +49,7 @@ def test_disabled_zone_blocks_do_not_change_the_base_bank_roster(base_config) ->
 def test_shipped_scada_config_ships_blocks_disabled() -> None:
     config = load_scada_config()
     assert all(not block.enabled for block in config.zone_blocks)
-    assert {block.zone for block in config.zone_blocks} == {"LZ_AEN", "LZ_CPS"}
+    assert {block.zone for block in config.zone_blocks} == {"LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"}
 
 
 # ---------------------------------------------------------------------------
@@ -70,13 +73,15 @@ def test_aen_block_enabled_covers_bank_040_through_049(aen_config) -> None:
 def test_aen_block_banks_emit_signals_each_under_kva_rating(aen_config) -> None:
     engine = ScadaEngine(aen_config, seed=1)
     signals, _instructions = engine.tick(0.0)
-    signals_by_topic = dict(signals)
+    # Bug fix, 2026-09-26 (R3): `tick()` now publishes both APPARENT_POWER_KVA and REAL_POWER_KW on
+    # the same `scada/<bank_id>` topic, so a plain `dict(signals)` would collapse to just one of them.
+    kva_by_topic = {topic: m for topic, m in signals if m["signal"] == "APPARENT_POWER_KVA"}
 
     for i in range(40, 50):
         bank_id = f"bank-{i:03d}"
         topic = f"scada/{bank_id}"
-        assert topic in signals_by_topic, f"no signal published for AEN bank {bank_id}"
-        msg = signals_by_topic[topic]
+        assert topic in kva_by_topic, f"no APPARENT_POWER_KVA signal published for AEN bank {bank_id}"
+        msg = kva_by_topic[topic]
         assert msg["bank_id"] == bank_id
         assert msg["signal"] == "APPARENT_POWER_KVA"
         assert 0.0 <= msg["value"] < 600.0
@@ -127,7 +132,8 @@ def test_tick_does_not_raise_a_shape_mismatch_with_blocks_enabled(aen_config) ->
     happen once a block was enabled."""
     engine = ScadaEngine(aen_config, seed=1)
     signals, instructions = engine.tick(0.0)
-    assert len(signals) == 50
+    # 2 signals per bank now (APPARENT_POWER_KVA + REAL_POWER_KW, bug fix 2026-09-26, R3).
+    assert len(signals) == 50 * 2
 
 
 def test_background_load_per_bank_share_matches_base_fleet_semantics(base_config, aen_config) -> None:

@@ -34,14 +34,27 @@ _SCADA_QUALITY_TO_FEED_OBS: dict[str, str] = {
     "comm_fail": "STALE",
 }
 
-_LOAD_HUBS_SQL = "SELECT hub_id, bank_id, zone, e_kwh, r_kwh, p_kw, eta_c, eta_d, lat, lon, units FROM og.hub"
-_LOAD_BANKS_SQL = "SELECT bank_id, zone, kva_rating, reserve_kva, feeder_id FROM og.bank"
-_LOAD_HUB_STATES_SQL = """
-SELECT hub_id, soc_kwh, p_kw, health, lease_epoch, lease_expires_at, last_command_id, last_seen_at,
-       fault_code, home_load_kw, pv_kw, meter_kw, cell_temp_c, p_dis_max_kw, p_ch_max_kw,
-       peak_power_budget_kws
-FROM og.hub_state
+# utility_scale mirrors guardian.repo._ALL_HUB_PARAMS_SQL: the hub's bank is an og.asset SUBSTATION.
+_LOAD_HUBS_SQL = """
+SELECT h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, h.lat, h.lon, h.units,
+       EXISTS (SELECT 1 FROM og.asset a WHERE a.bank_id = h.bank_id AND a.asset_class = 'SUBSTATION')
+FROM og.hub h
 """
+_LOAD_HUBS_COLUMNS = (
+    "hub_id",
+    "bank_id",
+    "zone",
+    "e_kwh",
+    "r_kwh",
+    "p_kw",
+    "eta_c",
+    "eta_d",
+    "lat",
+    "lon",
+    "units",
+    "utility_scale",
+)
+_LOAD_BANKS_SQL = "SELECT bank_id, zone, kva_rating, reserve_kva, feeder_id FROM og.bank"
 _UPSERT_HUB_STATE_COLUMNS = (
     "hub_id",
     "soc_kwh",
@@ -54,30 +67,23 @@ _UPSERT_HUB_STATE_COLUMNS = (
     "fault_code",
     *FLOW_TELEMETRY_FIELDS,
 )
-
-_UPSERT_HUB_STATE_CONFLICT_SET = sql.SQL(
-    """
-    ON CONFLICT (hub_id) DO UPDATE SET
-        soc_kwh = EXCLUDED.soc_kwh,
-        p_kw = EXCLUDED.p_kw,
-        health = EXCLUDED.health,
-        lease_epoch = EXCLUDED.lease_epoch,
-        lease_expires_at = EXCLUDED.lease_expires_at,
-        last_command_id = EXCLUDED.last_command_id,
-        last_seen_at = EXCLUDED.last_seen_at,
-        fault_code = EXCLUDED.fault_code,
-        home_load_kw = EXCLUDED.home_load_kw,
-        pv_kw = EXCLUDED.pv_kw,
-        meter_kw = EXCLUDED.meter_kw,
-        cell_temp_c = EXCLUDED.cell_temp_c,
-        p_dis_max_kw = EXCLUDED.p_dis_max_kw,
-        p_ch_max_kw = EXCLUDED.p_ch_max_kw,
-        peak_power_budget_kws = EXCLUDED.peak_power_budget_kws
-    """
+# Every optional telemetry column (FLOW_TELEMETRY_FIELDS: flow 0027, charge source 0034) comes from that one
+# tuple, so the SELECT, the upsert and the COPY can never disagree on the column list.
+_LOAD_HUB_STATES_SQL = sql.SQL("SELECT {} FROM og.hub_state").format(
+    sql.SQL(", ").join(sql.Identifier(column) for column in _UPSERT_HUB_STATE_COLUMNS)
 )
-_COPY_TELEMETRY_SQL = (
-    "COPY og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health, home_load_kw, pv_kw, meter_kw, "
-    "cell_temp_c, p_dis_max_kw, p_ch_max_kw, peak_power_budget_kws) FROM STDIN"
+
+_UPSERT_HUB_STATE_CONFLICT_SET = sql.SQL("ON CONFLICT (hub_id) DO UPDATE SET {}").format(
+    sql.SQL(", ").join(
+        sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(column), sql.Identifier(column))
+        for column in _UPSERT_HUB_STATE_COLUMNS[1:]  # every column but the conflict key
+    )
+)
+_COPY_TELEMETRY_SQL = sql.SQL("COPY og.telemetry ({}) FROM STDIN").format(
+    sql.SQL(", ").join(
+        sql.Identifier(column)
+        for column in ("hub_id", "ts", "soc_kwh", "p_kw", "seq", "epoch", "health", *FLOW_TELEMETRY_FIELDS)
+    )
 )
 
 # Telemetry, hub_state and SCADA readings are soft state re-sent every 2 s: their transactions commit
@@ -97,20 +103,7 @@ class PgFleetBackend:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_LOAD_HUBS_SQL)
             rows = await cur.fetchall()
-        columns = (
-            "hub_id",
-            "bank_id",
-            "zone",
-            "e_kwh",
-            "r_kwh",
-            "p_kw",
-            "eta_c",
-            "eta_d",
-            "lat",
-            "lon",
-            "units",
-        )
-        return [Hub(**dict(zip(columns, row, strict=True))) for row in rows]
+        return [Hub(**dict(zip(_LOAD_HUBS_COLUMNS, row, strict=True))) for row in rows]
 
     async def load_banks(self) -> list[Bank]:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -123,19 +116,7 @@ class PgFleetBackend:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_LOAD_HUB_STATES_SQL)
             rows = await cur.fetchall()
-        columns = (
-            "hub_id",
-            "soc_kwh",
-            "p_kw",
-            "health",
-            "lease_epoch",
-            "lease_expires_at",
-            "last_command_id",
-            "last_seen_at",
-            "fault_code",
-            *FLOW_TELEMETRY_FIELDS,
-        )
-        return [HubState(**dict(zip(columns, row, strict=True))) for row in rows]
+        return [HubState(**dict(zip(_UPSERT_HUB_STATE_COLUMNS, row, strict=True))) for row in rows]
 
     async def upsert_hub_states(self, states: list[HubState]) -> None:
         """Single multi-row `INSERT ... VALUES (...), (...), ... ON CONFLICT`, not one round trip per

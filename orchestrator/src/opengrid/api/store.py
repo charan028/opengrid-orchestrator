@@ -86,6 +86,34 @@ class HealthSnapshot:
     open_alerts: list[Alert]
 
 
+@dataclass(frozen=True, slots=True)
+class AlertQuery:
+    """Filters for `GET /og/api/alerts` (all optional; `open_only` defaults to open alerts)."""
+
+    open_only: bool = True
+    severity: str | None = None
+    rule: str | None = None
+    scope_kind: str | None = None
+    scope_ref: str | None = None
+
+    def where(self) -> tuple[str, tuple[Any, ...]]:
+        """A parameterised `WHERE` clause (fixed fragments only; values always bound, never inlined)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if self.open_only:
+            clauses.append("cleared_at IS NULL")
+        for column, value in (
+            ("severity", self.severity),
+            ("rule", self.rule),
+            ("scope_kind", self.scope_kind),
+            ("scope_ref", self.scope_ref),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = %s")
+                params.append(value)
+        return ("WHERE " + " AND ".join(clauses) if clauses else ""), tuple(params)
+
+
 class StoreProtocol(Protocol):
     """The interface routers depend on -- `PgStore` in production, a fake in unit tests."""
 
@@ -178,6 +206,52 @@ class StoreProtocol(Protocol):
 
     async def ack_alert(self, alert_id: int, *, operator: str) -> Alert | None: ...
 
+    async def list_charge_windows(self) -> list[dict[str, Any]]:
+        """Every `og.owner_charge_window` row (D-30): `scope_kind, scope_ref, windows, updated_by,
+        updated_at`, least specific scope first."""
+        ...
+
+    async def set_charge_window(
+        self, scope_kind: str, scope_ref: str, windows: list[str], *, updated_by: str
+    ) -> None:
+        """Insert or replace one scope's windows."""
+        ...
+
+    async def delete_charge_window(self, scope_kind: str, scope_ref: str) -> bool:
+        """Remove one scope's override; False if there was none."""
+        ...
+
+    async def charge_window_topology(
+        self, *, hub_id: str | None, bank_id: str | None
+    ) -> dict[str, Any] | None:
+        """`{hub_id, bank_id, zone, feeder_id, substation_id}` of a hub or a bank (None if unknown), for
+        `opengrid.core.charge_windows.resolve`."""
+        ...
+
+    async def live_manual_targets(self) -> list[dict[str, Any]]:
+        """Every hub under a live manual target: `hub_id, p_kw_target, issued_at, expires_at, trace_id,
+        proposer, reason` (same rule as `live_manual_target_hubs`)."""
+        ...
+
+    async def live_manual_target_hubs(self, trace_id: UUID) -> dict[str, float]:
+        """`{hub_id: p_kw_target}` for the hubs whose CURRENT manual target (newest MANUAL_TARGET per hub
+        by `issued_at`, not yet expired -- `opengrid.engine.manual`'s rule) is the event `trace_id`."""
+        ...
+
+    async def alert_ack_states(self, alert_ids: list[int]) -> dict[int, str | None]:
+        """`{id: acked_by}` for the ids that exist (`acked_by` None = not yet acked) -- one read for the
+        bulk ack's per-id outcome; missing ids are absent."""
+        ...
+
+    async def query_alerts(self, query: AlertQuery, *, limit: int, offset: int) -> tuple[list[Alert], int]:
+        """One page of alerts matching `query` (newest first, scope columns included) and the total match
+        count."""
+        ...
+
+    async def alert_group_counts(self, query: AlertQuery) -> list[dict[str, Any]]:
+        """`[{rule, scope_kind, scope_ref, count}]` over the alerts matching `query`, largest first."""
+        ...
+
     async def current_ledger_version(self) -> int:
         """Read-only: the highest `ledger_version` ever written to `og.reservation`, used only to
         stamp a manually-proposed `command_batch` header (`opengrid.ledger` owns the real allocator
@@ -237,13 +311,39 @@ class StoreProtocol(Protocol):
     async def list_active_as_deployments(self) -> list[dict[str, Any]]: ...
 
     async def get_as_award(self, obligation_id: UUID) -> dict[str, Any] | None:
-        """`{service_type, state, duration_minutes}` of an obligation (its product rule's full-deployment
-        duration), or None if it does not exist -- the AS deployment route's validation read."""
+        """`{service_type, state, variant, duration_minutes, has_active_deployment}` of an obligation, or
+        None if it does not exist -- the AS deployment / utility call route's validation read. `variant` is
+        its contract's (e.g. TOLLING); `duration_minutes` is the full-deployment duration of the obligation's
+        OWN product rule (its opportunity's `product_rule_id`), None when unknown; `has_active_deployment`
+        is true while an active `og.as_deployment` already covers it (its own row, or a fleet-wide row for
+        an ERCOT_AS award)."""
         ...
 
     async def cancel_as_deployment(self, deployment_id: UUID) -> bool:
         """End an active deployment now (sets `cancelled_at`; never a delete). False if none active."""
         ...
+
+
+#: The live manual target per hub. Mirrors `opengrid.engine.manual.parse_targets` (newest `issued_at` per
+#: hub wins, expired ignored) in SQL, because og-api must not import the engine package (it pulls the
+#: allocator and guardian modules). `{extra}` is one fixed filter fragment, never caller input.
+_LIVE_MANUAL_TARGETS_SQL = """
+    SELECT hub_id, p_kw_target, issued_at, expires_at, trace_id, proposer, reason FROM (
+        SELECT h.hub_id, t.trace_id, (t.payload ->> 'p_kw_target')::float8 AS p_kw_target,
+               COALESCE((t.payload ->> 'issued_at')::timestamptz, t.created_at) AS issued_at,
+               (t.payload ->> 'expires_at')::timestamptz AS expires_at,
+               t.payload ->> 'proposer' AS proposer, t.payload ->> 'reason' AS reason,
+               row_number() OVER (
+                   PARTITION BY h.hub_id
+                   ORDER BY COALESCE((t.payload ->> 'issued_at')::timestamptz, t.created_at) DESC
+               ) AS rn
+        FROM og.trace t
+        CROSS JOIN LATERAL jsonb_array_elements_text(t.payload -> 'hub_ids') AS h(hub_id)
+        WHERE t.event_class = 'MANUAL_TARGET' AND t.created_at > now() - interval '24 hours'
+    ) latest
+    WHERE rn = 1 AND expires_at > now() {extra}
+    ORDER BY hub_id
+"""
 
 
 def _row_or_none(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -308,7 +408,11 @@ class PgStore:
             """
             SELECT h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw AS rated_p_kw, h.eta_c, h.eta_d,
                    h.lat, h.lon, s.soc_kwh, s.p_kw, s.health, s.lease_epoch, s.lease_expires_at,
-                   s.last_command_id, s.last_seen_at, s.fault_code
+                   s.last_command_id, s.last_seen_at, s.fault_code,
+                   -- hub detail drawer (migrations 0032/0036): asset dates and device-reported identity
+                   h.units, h.installed_at, h.last_serviced_at, h.serial_number, h.manufacturer, h.model,
+                   h.firmware_version, h.hardware_revision, h.commissioned_at, h.inverter_model,
+                   h.device_info_at
             FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id WHERE h.hub_id = %s
             """,
             (hub_id,),
@@ -596,6 +700,90 @@ class PgStore:
         row = _row_or_none(rows)
         return Alert(**row) if row is not None else None
 
+    async def list_charge_windows(self) -> list[dict[str, Any]]:
+        return await self._fetch(
+            """
+            SELECT scope_kind, scope_ref, windows, updated_by, updated_at FROM og.owner_charge_window
+            ORDER BY array_position(
+                ARRAY['FLEET','PROVIDER','ZONE','SUBSTATION','FEEDER','BANK','HUB'], scope_kind), scope_ref
+            """
+        )
+
+    async def set_charge_window(
+        self, scope_kind: str, scope_ref: str, windows: list[str], *, updated_by: str
+    ) -> None:
+        await self._execute(
+            """
+            INSERT INTO og.owner_charge_window (scope_kind, scope_ref, windows, updated_by, updated_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (scope_kind, scope_ref) DO UPDATE SET
+                windows = EXCLUDED.windows, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
+            """,
+            (scope_kind, scope_ref, windows, updated_by),
+        )
+
+    async def delete_charge_window(self, scope_kind: str, scope_ref: str) -> bool:
+        deleted = await self._execute(
+            "DELETE FROM og.owner_charge_window WHERE scope_kind = %s AND scope_ref = %s",
+            (scope_kind, scope_ref),
+        )
+        return deleted > 0
+
+    async def charge_window_topology(
+        self, *, hub_id: str | None, bank_id: str | None
+    ) -> dict[str, Any] | None:
+        rows = await self._fetch(
+            """
+            SELECT h.hub_id, b.bank_id, b.zone, b.feeder_id,
+                   (SELECT a.substation_id FROM og.asset a
+                    WHERE a.bank_id = b.bank_id AND a.substation_id IS NOT NULL
+                    ORDER BY a.asset_id LIMIT 1) AS substation_id
+            FROM og.bank b
+            LEFT JOIN og.hub h ON h.bank_id = b.bank_id AND h.hub_id = %s
+            WHERE (%s::text IS NOT NULL AND h.hub_id IS NOT NULL) OR (%s::text IS NULL AND b.bank_id = %s)
+            LIMIT 1
+            """,
+            (hub_id, hub_id, hub_id, bank_id),
+        )
+        return _row_or_none(rows)
+
+    async def live_manual_targets(self) -> list[dict[str, Any]]:
+        return await self._fetch(_LIVE_MANUAL_TARGETS_SQL.format(extra=""))
+
+    async def live_manual_target_hubs(self, trace_id: UUID) -> dict[str, float]:
+        rows = await self._fetch(_LIVE_MANUAL_TARGETS_SQL.format(extra="AND trace_id = %s"), (trace_id,))
+        return {str(r["hub_id"]): float(r["p_kw_target"]) for r in rows}
+
+    async def alert_ack_states(self, alert_ids: list[int]) -> dict[int, str | None]:
+        if not alert_ids:
+            return {}
+        rows = await self._fetch("SELECT id, acked_by FROM og.alert WHERE id = ANY(%s)", (alert_ids,))
+        return {int(row["id"]): row["acked_by"] for row in rows}
+
+    async def query_alerts(self, query: AlertQuery, *, limit: int, offset: int) -> tuple[list[Alert], int]:
+        where, params = query.where()
+        rows = await self._fetch(
+            f"""
+            SELECT id, rule, severity, summary, detail, opened_at, cleared_at, acked_by, scope_kind, scope_ref
+            FROM og.alert {where} ORDER BY opened_at DESC, id DESC LIMIT %s OFFSET %s
+            """,  # noqa: S608 -- `where` is built from fixed fragments; every value is a bound parameter
+            (*params, limit, offset),
+        )
+        total = await self._fetch(f"SELECT count(*) AS n FROM og.alert {where}", params)  # noqa: S608
+        return [Alert(**row) for row in rows], int(total[0]["n"]) if total else 0
+
+    async def alert_group_counts(self, query: AlertQuery) -> list[dict[str, Any]]:
+        where, params = query.where()
+        return await self._fetch(
+            f"""
+            SELECT rule, scope_kind, scope_ref, count(*) AS count
+            FROM og.alert {where}
+            GROUP BY rule, scope_kind, scope_ref
+            ORDER BY count(*) DESC, rule, scope_kind, scope_ref
+            """,  # noqa: S608 -- see query_alerts
+            params,
+        )
+
     # -- manual command batch header / verdict polling (02b S7.1/S7.3) ------------------------------
 
     async def current_ledger_version(self) -> int:
@@ -736,10 +924,18 @@ class PgStore:
         return _row_or_none(
             await self._fetch(
                 """
-                SELECT o.service_type, o.state,
-                       (SELECT MAX(pr.duration_minutes) FROM og.product_rule pr
-                        WHERE pr.contract_id = o.contract_id) AS duration_minutes
-                FROM og.obligation o WHERE o.obligation_id = %s
+                SELECT o.service_type, o.state, c.variant, pr.duration_minutes,
+                       EXISTS (
+                           SELECT 1 FROM og.as_deployment d
+                           WHERE d.cancelled_at IS NULL AND d.start_at <= now() AND d.end_at > now()
+                             AND (d.obligation_id = o.obligation_id
+                                  OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
+                       ) AS has_active_deployment
+                FROM og.obligation o
+                JOIN og.contract c ON c.contract_id = o.contract_id
+                LEFT JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
+                LEFT JOIN og.product_rule pr ON pr.product_rule_id = op.product_rule_id
+                WHERE o.obligation_id = %s
                 """,
                 (obligation_id,),
             )

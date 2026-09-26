@@ -34,7 +34,9 @@ def _telemetry_schema() -> dict:
 def test_telemetry_messages_include_discharge_flow_fields_and_validate(engine: FleetEngine) -> None:
     engine.tick(now=0.0)
     messages = engine.telemetry_messages(now=0.0)
-    assert len(messages) == 4
+    # Not a hardcoded 4: the shipped fleet.yaml's substation asset (D-29(b)) adds one more hub on top
+    # of this fixture's hub_count=4 override.
+    assert len(messages) == len(engine.state.hub_ids)
 
     schema = _telemetry_schema()
     for _topic, msg in messages:

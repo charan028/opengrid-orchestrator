@@ -201,3 +201,70 @@ def test_tampered_unsigned_command_selftest_is_rejected(engine: FleetEngine) -> 
     verdict = engine.self_test_tampered_unsigned_command(bank_id, public_key)
     assert verdict.accepted is False
     assert verdict.reject_reason == "BAD_SIGNATURE"
+
+
+# ---- demo gap #14, 2026-09-26: tampered_unsigned_command had no observable effect ----------------
+# The self-test above always worked in isolation; it was simply never invoked when the anomaly
+# actually started, and no rejected ack ever reached the orchestrator to trace.
+
+
+def _inject_tampered_unsigned_command(engine: FleetEngine, target: str, guardian_public_key):
+    raw = {
+        "id": str(uuid.uuid4()),
+        "target": {"kind": "hub" if target in engine.state.hub_index else "bank", "ref": target},
+        "type": "FLEET_TAMPERED_UNSIGNED_COMMAND",
+        "params": {},
+        "start": datetime.fromtimestamp(0.0, tz=UTC).isoformat(),
+        "duration_s": 0,
+    }
+    return engine.handle_scenario_cmd(raw, guardian_public_key)
+
+
+def test_tampered_unsigned_command_on_anomaly_start_returns_a_rejected_verdict(
+    engine: FleetEngine,
+) -> None:
+    guardian_key = Ed25519PrivateKey.generate()
+    hub_id = engine.state.hub_ids[0]
+
+    verdict = _inject_tampered_unsigned_command(engine, hub_id, guardian_key.public_key())
+
+    assert verdict is not None
+    assert verdict.accepted is False
+    assert verdict.reject_reason == "BAD_SIGNATURE"
+    assert verdict.hub_id is not None
+
+
+def test_tampered_unsigned_command_resolves_a_bank_target_too(engine: FleetEngine) -> None:
+    guardian_key = Ed25519PrivateKey.generate()
+    bank_id = engine.state.bank_ids[0]
+
+    verdict = _inject_tampered_unsigned_command(engine, bank_id, guardian_key.public_key())
+
+    assert verdict is not None
+    assert verdict.accepted is False
+
+
+def test_tampered_unsigned_command_without_a_public_key_is_inert(engine: FleetEngine) -> None:
+    """`handle_scenario_cmd`'s `guardian_public_key` is optional (every pre-existing caller that
+    doesn't pass one must keep working unchanged) -- omitting it must not raise, it just skips the
+    self-test entirely."""
+    hub_id = engine.state.hub_ids[0]
+    assert _inject_tampered_unsigned_command_no_key(engine, hub_id) is None
+
+
+def _inject_tampered_unsigned_command_no_key(engine: FleetEngine, target: str):
+    raw = {
+        "id": str(uuid.uuid4()),
+        "target": {"kind": "hub", "ref": target},
+        "type": "FLEET_TAMPERED_UNSIGNED_COMMAND",
+        "params": {},
+        "start": datetime.fromtimestamp(0.0, tz=UTC).isoformat(),
+        "duration_s": 0,
+    }
+    return engine.handle_scenario_cmd(raw)
+
+
+def test_tampered_unsigned_command_unknown_target_returns_none(engine: FleetEngine) -> None:
+    guardian_key = Ed25519PrivateKey.generate()
+    result = _inject_tampered_unsigned_command(engine, "no-such-hub-or-bank", guardian_key.public_key())
+    assert result is None

@@ -129,10 +129,12 @@ def _seed_scenario_rows(dsn: str, *, bank_id: str, hub_id: str) -> dict[str, str
         )
 
         # --- K1: a telemetry row below reserve while discharging, on a real seeded hub -------------
+        # Stamped 2 minutes back: K1 holds back the newest `k1_safety_margin_s` (default 30 s) for late
+        # writes, so a row at `now` is only seen when the rest of the test happens to take over 30 s.
         cur.execute(
             "INSERT INTO og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health) "
             "VALUES (%s, %s, 0.5, -5.0, 1, 1, 'online')",
-            (hub_id, now),
+            (hub_id, now - timedelta(minutes=2)),
         )
 
         # --- K2: reservations on one real seeded bank summing above its kva_rating -----------------

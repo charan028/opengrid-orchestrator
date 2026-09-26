@@ -56,9 +56,24 @@ def test_seed_applies_idempotently(dsn: str) -> None:
         ).fetchone()
         assert contract == ("REGULATED_CAPACITY", "REGULATED", "AUSTIN_ENERGY")
         asset = conn.execute(
-            "SELECT asset_class, zone, p_kw, e_kwh FROM og.asset WHERE asset_id = 'sub-aen-01'"
+            "SELECT asset_class, zone, bank_id, status FROM og.asset WHERE asset_id = 'sub-LZ_AEN-00'"
         ).fetchone()
-        assert asset is not None and asset[0] == "SUBSTATION" and asset[1] == "LZ_AEN"
+        assert asset == ("SUBSTATION", "LZ_AEN", "bank-sub-LZ_AEN-00", "ACTIVE")
+        rule = conn.execute(
+            "SELECT min_qty_kw, duration_minutes FROM og.product_rule WHERE contract_id = %s",
+            (DEMO_CONTRACT,),
+        ).fetchone()
+        assert rule is not None and (int(rule[0]), rule[1]) == (24000, 90)
+        variant = conn.execute(
+            "SELECT variant FROM og.contract WHERE contract_id = %s", (DEMO_CONTRACT,)
+        ).fetchone()
+        assert variant == ("TOLLING",)
+        price = conn.execute(
+            "SELECT capacity_price_usd_per_kw FROM og.utility WHERE utility_id = 'AUSTIN_ENERGY'"
+        ).fetchone()
+        assert price is not None and int(price[0]) == 102
+        hub = conn.execute("SELECT bank_id, p_kw FROM og.hub WHERE hub_id = 'sub-LZ_AEN-00'").fetchone()
+        assert hub == ("bank-sub-LZ_AEN-00", 20000.0)
 
 
 @pytest.mark.parametrize(

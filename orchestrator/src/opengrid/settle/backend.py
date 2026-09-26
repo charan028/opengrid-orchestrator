@@ -15,12 +15,12 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from opengrid.core.models.market import Utility, UtilityId
+from opengrid.core.solar_share import SolarShare
 from opengrid.settle.models import (
     InvoiceLineDraft,
     ObligationSettlementContext,
     PowerSample,
     QualityFlag,
-    ZoneChargeEnergy,
 )
 
 
@@ -107,14 +107,14 @@ class SettleBackend(Protocol):
         default, so a missing reading never manufactures a penalty)."""
         ...
 
-    async def fetch_zone_charge_energy(
+    async def fetch_zone_solar_share(
         self, zone: str, window_start: datetime, window_end: datetime
-    ) -> ZoneChargeEnergy:
-        """09 D5's M1 fleet-level proxy: every hub in `zone`'s charging over `[window_start, window_end)`
-        from `og.telemetry`, split into total and grid-drawn (beyond the home's PV surplus). Only ever
+    ) -> SolarShare:
+        """D-28 solar share of `zone`'s charging over `[window_start, window_end)`, by
+        `opengrid.core.solar_share` (the one rule the selector's plan uses too): the reporting hubs'
+        telemetry, else ERCOT's solar share, else the 30% assumption -- with the source used. Only ever
         called for a zone that resolves to a TDSP (never a regulated zone). `settle()` turns its
-        `grid_share` into the obligation-interval's grid-charged kWh
-        (`tariffs.grid_charged_kwh_for_delivery`)."""
+        `grid_share` into the obligation-interval's grid-charged kWh (`tariffs.grid_charged_kwh_for_delivery`)."""
         ...
 
     async def fetch_shortfall_risk_open(

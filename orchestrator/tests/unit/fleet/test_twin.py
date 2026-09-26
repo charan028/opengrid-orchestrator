@@ -130,6 +130,10 @@ async def test_discharge_flow_telemetry_reaches_the_snapshot_hub_state_and_telem
             "pv_kw": 0.0,
             "p_ch_max_kw": 6.0,
             "peak_power_budget_kws": 900.0,
+            "charge_pv_kw": 2.5,
+            "charge_grid_kw": 1.5,
+            "lat": 32.7,
+            "lon": -96.9,
         }
     )
     await fleet.ingest_telemetry({**base, "hub_id": "h2", "ts": now, "seq": 1, "epoch": 1})
@@ -143,7 +147,64 @@ async def test_discharge_flow_telemetry_reaches_the_snapshot_hub_state_and_telem
     assert states["h1"].meter_kw == 1.2 and states["h1"].peak_power_budget_kws == 900.0
     assert states["h2"].meter_kw is None
     row = next(r for r in backend.copied_rows if r.hub_id == "h1")
-    assert dict(zip(FLOW_TELEMETRY_FIELDS, row.flow, strict=True))["home_load_kw"] == 3.4
+    persisted = dict(zip(FLOW_TELEMETRY_FIELDS, row.flow, strict=True))
+    assert persisted["home_load_kw"] == 3.4
+    # D-28 charge-source split (migration 0034) reaches og.telemetry and og.hub_state; lat/lon are accepted
+    # on the wire but not persisted per sample (og.hub holds the position).
+    assert persisted["charge_pv_kw"] == 2.5 and persisted["charge_grid_kw"] == 1.5
+    assert "lat" not in persisted
+    assert states["h1"].charge_pv_kw == 2.5 and states["h1"].charge_grid_kw == 1.5
+    assert states["h2"].charge_pv_kw is None
+
+
+async def test_a_substation_hub_carries_utility_scale_into_params_and_snapshot() -> None:
+    """REVIEW-FIX (D-29): without utility_scale the 20 MW toll set would be capped at the 11 kW home unit."""
+    toll = Hub(
+        hub_id="sub-1",
+        bank_id="bank-1",
+        zone="LZ_AEN",
+        e_kwh=40000.0,
+        r_kwh=8000.0,
+        p_kw=20000.0,
+        utility_scale=True,
+    )
+    backend = FakeFleetBackend(hubs=[toll, _hub("h1")], banks=[_bank()])
+    await _seed(backend)
+    now = datetime.now(UTC)
+    base = {"bank_id": "bank-1", "zone": "LZ_AEN", "soc_kwh": 20000.0, "p_kw": 0.0, "health": "online"}
+    await fleet.ingest_telemetry({**base, "hub_id": "sub-1", "ts": now, "seq": 1, "epoch": 1})
+    await fleet.ingest_telemetry({**base, "hub_id": "h1", "ts": now, "seq": 1, "epoch": 1, "soc_kwh": 5.0})
+    snaps = {s.hub_id: s for s in fleet.hub_capabilities("bank-1")}
+    assert snaps["sub-1"].utility_scale is True
+    assert snaps["h1"].utility_scale is False
+
+
+async def test_two_scada_signals_for_one_bank_in_one_tick_are_both_kept_and_flushed() -> None:
+    """R3 (FLEET-SIM / GUARDIAN-FLOW): APPARENT_POWER_KVA and the signed REAL_POWER_KW for the same bank in
+    one tick must both reach og.feed_obs; keyed per bank only, the second clobbered the first."""
+    backend = FakeFleetBackend(hubs=[_hub("h1")], banks=[_bank()])
+    await _seed(backend)
+    ts = datetime.now(UTC)
+    kva = {
+        "bank_id": "bank-1",
+        "signal": "APPARENT_POWER_KVA",
+        "value": 420.0,
+        "unit": "kVA",
+        "quality": "good",
+    }
+    kw = {"bank_id": "bank-1", "signal": "REAL_POWER_KW", "value": -150.0, "unit": "kW", "quality": "good"}
+    await fleet.ingest_scada_signal({**kva, "ts": ts})
+    await fleet.ingest_scada_signal({**kw, "ts": ts + timedelta(milliseconds=5)})
+
+    kva_signal = fleet.bank_scada_signal("bank-1", "APPARENT_POWER_KVA")
+    assert kva_signal is not None and kva_signal.value == 420.0
+    real_signal = fleet.bank_scada_signal("bank-1", "REAL_POWER_KW")
+    assert real_signal is not None and real_signal.value == -150.0
+    newest = fleet.bank_scada_signal("bank-1")  # no signal given: the newest reading of any signal
+    assert newest is not None and newest.signal == "REAL_POWER_KW"
+
+    await fleet.flush()
+    assert sorted(s.signal for s in backend.recorded_scada) == ["APPARENT_POWER_KVA", "REAL_POWER_KW"]
 
 
 async def test_bank_feeder_reports_the_banks_feeder_or_none() -> None:

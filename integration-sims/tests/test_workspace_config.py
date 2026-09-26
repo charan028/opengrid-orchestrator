@@ -192,7 +192,9 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     assert all(not block.enabled for block in fleet.zone_blocks)
     assert {block.zone for block in fleet.zone_blocks} == {"LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"}
     assert [a.asset_id for a in fleet.substation_assets] == ["sub-LZ_AEN-00"]
-    assert fleet.substation_assets[0].enabled is False
+    # OWNER DECISION D-29(b), 2026-09-26: the Austin substation asset is enabled for the utility toll
+    # demo (its zone_blocks/LZ_AEN home-fleet block above stays disabled independently).
+    assert fleet.substation_assets[0].enabled is True
     assert (fleet.substation_assets[0].rated_mw, fleet.substation_assets[0].duration_h) == (20.0, 2.0)
 
 

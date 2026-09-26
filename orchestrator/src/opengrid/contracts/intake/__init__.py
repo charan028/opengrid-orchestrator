@@ -35,6 +35,7 @@ Obligations nobody selected still expire at their gate via `opengrid.contracts.e
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -54,9 +55,16 @@ from opengrid.contracts.intake import ancillary, deferral, energy
 from opengrid.contracts.intake.ports import MarketDataPort
 from opengrid.contracts.lifecycle import expire_unselected
 from opengrid.contracts.repository import ContractsRepo
+from opengrid.contracts.tolling import (
+    TollingConfig,
+    is_tolling_contract,
+    run_tolling_contract,
+    tolling_config_from,
+)
 from opengrid.core.models.engine import Contract, Opportunity, ProductRule
 from opengrid.core.products import ProductRule as RoundingRule
 from opengrid.core.products import round_quantity
+from opengrid.core.reasons import R_AS_PRICE_STALE
 from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
@@ -120,6 +128,8 @@ class _IntakeState:
     market: MarketDataPort
     forecast_scenarios: ForecastScenariosFn | None
     energy_series_key: str
+    tolling: TollingConfig
+    as_price_max_age_s: float = 93_600.0
 
 
 _state: _IntakeState | None = None
@@ -133,6 +143,8 @@ def configure(
     forecast_scenarios: ForecastScenariosFn | None = None,
     energy_series_key: str = DEFAULT_ENERGY_SERIES_KEY,
     bank_zone: str | None = None,
+    tolling: TollingConfig | None = None,
+    as_price_max_age_s: float | None = None,
 ) -> None:
     """Wire this module's dependencies once at process startup (`opengrid.engine.main`, alongside
     `opengrid.contracts.configure`). `forecast_scenarios` is injected (not a direct
@@ -157,7 +169,41 @@ def configure(
         market=market,
         forecast_scenarios=forecast_scenarios,
         energy_series_key=resolved_energy_series_key,
+        tolling=tolling if tolling is not None else _tolling_config_at_startup(),
+        as_price_max_age_s=(
+            as_price_max_age_s if as_price_max_age_s is not None else _as_price_max_age_at_startup()
+        ),
     )
+
+
+def _tolling_config_at_startup() -> TollingConfig:
+    """[contracts.tolling] of the process's own OG_CONFIG file, read once when intake is configured
+    (og-engine startup). No OG_CONFIG (unit tests, tools) means the documented defaults
+    (16:30-18:00 America/Chicago, today + 1 day, every day). A malformed block raises: the engine
+    refuses to start rather than reserve the wrong window (D-29)."""
+    if not os.environ.get("OG_CONFIG"):
+        return TollingConfig()
+    from opengrid.platform.config import load_config
+
+    return tolling_config_from(load_config())
+
+
+#: Default AS clearing-price freshness bound: np4-188-cd's own window (a day-ahead price posted once a
+#: day, the same 26 h as [feeds].as_price_fresh_s).
+DEFAULT_AS_PRICE_MAX_AGE_S = 93_600.0
+
+
+def _as_price_max_age_at_startup() -> float:
+    """[contracts.intake].as_price_max_age_s from OG_CONFIG, read once at configuration; the default
+    without OG_CONFIG or without the key. Must be > 0 (a malformed value stops configuration)."""
+    value = DEFAULT_AS_PRICE_MAX_AGE_S
+    if os.environ.get("OG_CONFIG"):
+        from opengrid.platform.config import load_config
+
+        value = float(load_config().get("contracts.intake.as_price_max_age_s", DEFAULT_AS_PRICE_MAX_AGE_S))
+    if value <= 0:
+        raise ValueError(f"[contracts.intake].as_price_max_age_s must be > 0, got {value}")
+    return value
 
 
 def reset_for_testing() -> None:
@@ -209,6 +255,10 @@ async def _generate_for_contract(state: _IntakeState, contract: Contract, now: d
         # K1 reserve is an L1 envelope constraint (opengrid.core.limits.check_reserve_floor), never a
         # sellable opportunity -- nothing to generate, nothing to trace as a rejection.
         return []
+    if is_tolling_contract(contract):
+        # D-29: a utility toll is reserved once per day for the utility's window (opengrid.contracts.tolling),
+        # through the same admission path; idempotent, so running it at every gate is harmless.
+        return await run_tolling_contract(state.repo, state.trace, contract, now=now, config=state.tolling)
     if contract.service_type == "PARTNER_CAPACITY":
         # Event-driven only (module docstring): POST /og/api/opportunities or the control plane's
         # partner-call scenario admits these directly; a 15-minute gate has nothing to poll for.
@@ -354,9 +404,36 @@ async def _intake_as(
 ) -> list[Opportunity]:
     if rule is None:
         return []
-    mcpc = await state.market.latest_as_mcpc_usd_per_mwh(rule.product_code)
-    if mcpc is None:
+    observation = await state.market.latest_as_mcpc(rule.product_code)
+    if observation is None:
         return []
+    age_s = (now - observation.ts).total_seconds()
+    if age_s > state.as_price_max_age_s:
+        # A stopped np4-188-cd feed must never value new AS offers at an old clearing price.
+        logger.warning(
+            "intake: AS clearing price stale; no AS offers this gate",
+            extra={
+                "contract_id": str(contract.contract_id),
+                "product_code": rule.product_code,
+                "age_s": age_s,
+            },
+        )
+        await state.trace.append(
+            f"intake-{contract.contract_id}",
+            "ALERT",
+            "INTAKE_SKIPPED",
+            {
+                "contract_id": str(contract.contract_id),
+                "service_type": contract.service_type,
+                "product_code": rule.product_code,
+                "price_ts": observation.ts.isoformat(),
+                "age_s": age_s,
+                "max_age_s": state.as_price_max_age_s,
+            },
+            [R_AS_PRICE_STALE],
+        )
+        return []
+    mcpc = observation.value_usd_per_mwh
     rounding_rule = rounding_rule_for(rule)
     candidates = ancillary.compute_as_candidates(now=now, mcpc_usd_per_mwh=mcpc, rule=rounding_rule)
     created: list[Opportunity] = []

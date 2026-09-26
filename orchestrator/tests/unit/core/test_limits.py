@@ -70,6 +70,16 @@ def test_unknown_unit_count_fails_closed_to_one_unit():
     assert continuous_power_kw(HubParams(e_kwh=39.2, r_kwh=7.84, p_kw=5.0)) == 5.0  # p_kw below the cap binds
 
 
+def test_a_utility_scale_asset_is_rated_at_its_nameplate_not_the_home_unit_cap():
+    """D-29: the 20 MW substation set is one hub; the home unit rules (11 kW per unit) apply to homes only."""
+    substation = HubParams(e_kwh=40000.0, r_kwh=8000.0, p_kw=20000.0, units=2, utility_scale=True)
+    assert continuous_power_kw(substation) == 20000.0
+    assert check_hub_power(-20000.0, substation).ok
+    assert not check_hub_power(-20001.0, substation).ok
+    home_seeded_at_20_mw = HubParams(e_kwh=40000.0, r_kwh=8000.0, p_kw=20000.0, units=2)
+    assert continuous_power_kw(home_seeded_at_20_mw) == 20.0  # without the asset flag: the home rules
+
+
 def test_out_of_range_unit_count_fails_closed_to_one_unit():
     assert unit_rating_kw(3) == 11.0
     assert unit_rating_kw(0) == 11.0

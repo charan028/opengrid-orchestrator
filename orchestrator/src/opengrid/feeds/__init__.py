@@ -22,7 +22,7 @@ import httpx
 
 from opengrid.core.models.platform import FeedObs
 from opengrid.feeds.eia import EiaClient
-from opengrid.feeds.ercot import DEFAULT_TOKEN_URL, SOLAR_BY_REGION_PRODUCT, ErcotClient
+from opengrid.feeds.ercot import SOLAR_BY_REGION_PRODUCT, ercot_client_from_config
 from opengrid.feeds.nws import NwsClient
 from opengrid.feeds.scheduler import FeedsScheduler
 from opengrid.feeds.store import FeedStore
@@ -88,15 +88,7 @@ def _build_scheduler(
     nws_cfg = cfg.get("feeds.nws", {})
     staleness_cfg = cfg.get("feeds.staleness", {})
 
-    ercot = ErcotClient(
-        base_url=ercot_cfg["base_url"],
-        username_env=ercot_cfg["username_env"],
-        password_env=ercot_cfg["password_env"],
-        primary_key_env=ercot_cfg["subscription_key_env"],
-        secondary_key_env=ercot_cfg.get("subscription_key_secondary_env", "ERCOT_PUBLIC_API_KEY_SECONDARY"),
-        http_client=http_client,
-        token_url=ercot_cfg.get("token_url", DEFAULT_TOKEN_URL),
-    )
+    ercot = ercot_client_from_config(ercot_cfg, http_client)
     eia = EiaClient(
         base_url=eia_cfg["base_url"],
         api_key_env=eia_cfg["api_key_env"],

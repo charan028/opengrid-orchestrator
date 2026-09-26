@@ -583,3 +583,86 @@ def test_hub_units_come_from_the_registry_else_from_the_rating() -> None:
         "d2", kw=20.0, soc_kwh=60.0, reserve_kwh=15.68, e_kwh=78.4, cell_temp_c=25.0, units=1
     )
     assert flow_limits.derated_discharge_kw(single_registered) == pytest.approx(11.0)
+
+
+def test_headroom_stops_at_the_selectors_hard_floor_and_the_as_floor_whichever_is_higher() -> None:
+    hubs = _energy_hubs(10, 20.0)  # 10 x (7.84 + 20) kWh = 278.4 kWh stored
+    lease_s = 30.0
+    to_kw = ETA / (lease_s / 3600.0)
+    # Plan floor alone (no AS award): stored - floor.
+    assert energy_hold.headroom_energy_cap_kw(hubs, [], lease_s, plan_floor_kwh=270.0) == pytest.approx(
+        8.4 * to_kw
+    )
+    # Plan floor above the stored energy: none.
+    assert energy_hold.headroom_energy_cap_kw(hubs, [], lease_s, plan_floor_kwh=300.0) == 0.0
+    # AS floor higher than the plan floor: the AS floor binds.
+    hold = _as_call(40.0, duration_h=4.0)
+    as_only = energy_hold.headroom_energy_cap_kw(hubs, [hold], lease_s)
+    assert energy_hold.headroom_energy_cap_kw(hubs, [hold], lease_s, plan_floor_kwh=100.0) == pytest.approx(
+        as_only
+    )
+    # In the cycle: the schedule's published floor caps headroom.
+    fleet = FleetState(hubs=hubs, banks=(_bank(cap=100.0),))
+    schedule = Schedule(
+        prices=(PriceSignal("b1", 500.0, threshold_usd_per_mwh=50.0),), hold_floor_kwh={"b1": 278.4}
+    )
+    assert _headroom(cycle(T, fleet, LedgerView(calls=()), schedule, {}, ())) == 0.0
+
+
+def test_a_called_award_holds_energy_only_for_the_rest_of_its_call() -> None:
+    """Review R3 (allocator side): held -> full duration; called -> remaining deployment, capped."""
+    held = _as_call(40.0, duration_h=4.0)
+    called = ObligationCall(
+        "as-1",
+        "b1",
+        "ERCOT_AS",
+        "T1",
+        40.0,
+        ("h0",),
+        as_deployed=True,
+        hold_duration_h=4.0,
+        deployment_remaining_h=0.5,
+    )
+    long_call = ObligationCall(
+        "as-2",
+        "b1",
+        "ERCOT_AS",
+        "T1",
+        40.0,
+        ("h0",),
+        as_deployed=True,
+        hold_duration_h=1.0,
+        deployment_remaining_h=3.0,
+    )
+    assert energy_hold.hold_duration_h(held) == 4.0
+    assert energy_hold.hold_duration_h(called) == 0.5
+    assert energy_hold.hold_duration_h(long_call) == 1.0
+    hubs = _energy_hubs(10, 20.0)
+    assert energy_hold.headroom_energy_cap_kw(hubs, [called], 30.0) > energy_hold.headroom_energy_cap_kw(
+        hubs, [held], 30.0
+    )
+
+
+def test_a_shortfall_caused_by_an_operator_target_carries_the_operator_override() -> None:
+    """R-OPERATOR-OVERRIDE: a live manual target took hubs the obligation needed on this bank."""
+    from opengrid.core.reasons import R_OPERATOR_OVERRIDE
+
+    hubs = tuple(_hub(f"h{i}", kw=10.0) for i in range(3))
+    fleet = FleetState(hubs=hubs, banks=(_bank(cap=30.0),))
+    ledger = LedgerView(calls=(_call("o1", 30.0, ("h0", "h1", "h2")),))
+    result = cycle(
+        T,
+        fleet,
+        ledger,
+        Schedule(),
+        {},
+        (),
+        excluded_hub_ids=frozenset({"h0"}),
+        operator_hub_ids=frozenset({"h0"}),
+    )
+    (grant,) = result.grants
+    assert grant.granted_kw == pytest.approx(20.0) and grant.reason_code == R_OPERATOR_OVERRIDE
+    assert {s.reason_code for s in result.shortfalls} == {R_OPERATOR_OVERRIDE}
+    # A veto exclusion alone is not an operator override.
+    vetoed = cycle(T, fleet, ledger, Schedule(), {}, (), excluded_hub_ids=frozenset({"h0"}))
+    assert vetoed.grants[0].reason_code != R_OPERATOR_OVERRIDE

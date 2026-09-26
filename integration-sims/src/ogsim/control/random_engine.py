@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -31,6 +32,8 @@ import numpy as np
 
 from ogsim.control.injector import Injector
 from ogsim.control.random_config import ParamRange, RandomEngineConfig, TypeRandomConfig
+
+logger = logging.getLogger(__name__)
 
 SECONDS_PER_HOUR = 3600.0
 MAX_ARRIVALS_PER_PLAN = 100_000  # guards against a pathological rate_per_hour input
@@ -64,15 +67,37 @@ def _resolve_pause_state_path(explicit: str | None) -> Path:
 
 
 def load_persisted_paused(path: Path) -> bool | None:
-    """The last explicitly-persisted pause state, or `None` if the file is absent/unreadable (never
-    raises -- a corrupt or missing state file just means "no persisted override," not a crash)."""
+    """The last explicitly-persisted pause state.
+
+    Returns `None` only when no state file has ever been written (a fresh install / first run) --
+    `config/random.yaml`'s own `paused:` default wins, same as before this fix.
+
+    R3.1 LOW-review fix, 2026-09-26: if the state file EXISTS but cannot be read or parsed (disk
+    corruption, a truncated write, a permissions change) this used to also return `None`, which
+    made the engine fail OPEN -- silently resuming random injection even though an operator may have
+    paused it. That is backwards for a "quiet hours" safety switch: it now fails CLOSED (returns
+    `True`, paused) and logs a warning, so a corrupt state file can never silently un-pause the sim.
+    Never raises."""
+    if not path.exists():
+        return None
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
+        value = data.get("paused")
+        if isinstance(value, bool):
+            return value
+        logger.warning(
+            "pause state file %s exists but has no boolean 'paused' field; failing closed (paused=True)",
+            path,
+        )
+        return True
     except (OSError, json.JSONDecodeError):
-        return None
-    value = data.get("paused")
-    return bool(value) if isinstance(value, bool) else None
+        logger.warning(
+            "pause state file %s exists but is unreadable/corrupt; failing closed (paused=True)",
+            path,
+            exc_info=True,
+        )
+        return True
 
 
 def save_persisted_paused(path: Path, paused: bool) -> None:

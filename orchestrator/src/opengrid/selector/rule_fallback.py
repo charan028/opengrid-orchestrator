@@ -35,12 +35,19 @@ def rule_fallback_f2(inputs: ModelInputs) -> ExtractedPlan:
     allocation: dict[tuple[str, str, int], float] = {}
 
     for co in inputs.committed:
+        banks = tuple(b for b in co.eligible_bank_ids if inputs.may_serve(co.obligation_id, b))  # D-31
         for t, kw in co.committed_kw_by_interval.items():
-            _greedy_take(allocation, remaining, co.obligation_id, co.eligible_bank_ids, t, kw)
+            _greedy_take(allocation, remaining, co.obligation_id, banks, t, kw)
 
     selected_x: dict[str, bool] = {}
     selected_q: dict[str, float] = {}
-    for c in sorted(inputs.candidates, key=_category_key):
+    for candidate in sorted(inputs.candidates, key=_category_key):
+        c = replace(
+            candidate,
+            eligible_bank_ids=tuple(
+                b for b in candidate.eligible_bank_ids if inputs.may_serve(candidate.opportunity_id, b)
+            ),
+        )
         quantity = _feasible_quantity(c, remaining)
         if c.variable_kind == "BINARY":
             selected_x[c.opportunity_id] = quantity > _TOL

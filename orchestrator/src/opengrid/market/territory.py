@@ -19,10 +19,12 @@ from typing import Final
 from opengrid.core.models.engine import Contract
 from opengrid.core.models.market import (
     ERCOT_COMPETITIVE,
+    NOIE,
     UTILITY_IDS,
     Market,
     Territory,
     UtilityId,
+    ZoneOwner,
 )
 
 #: The asset sits outside the regulated utility's territory (K15 a), or a regulated-territory asset
@@ -105,9 +107,10 @@ def market_of_contract(contract: Contract) -> MarketRef:
     )
 
 
-def territory_of_zone(zone: str | None, zone_territory: Mapping[str, UtilityId]) -> Territory | None:
-    """The territory of an asset in settlement zone `zone`: the regulated utility that owns the zone in
-    `tdsp_tariffs.toml`'s `[zone_territory]` table, else the ERCOT competitive area when the zone is a
+def territory_of_zone(zone: str | None, zone_territory: Mapping[str, ZoneOwner]) -> Territory | None:
+    """The territory of an asset in settlement zone `zone`: the regulated utility (or `NOIE`) that owns
+    the zone in `tdsp_tariffs.toml`'s `[zone_territory]` table (`market.config.load_zone_owners`; the
+    older `load_zone_territory` map has regulated zones only), else the ERCOT competitive area when the zone is a
     known competitive load zone (`LZ_*`). `None` when `zone` is missing or not recognisable -- callers
     treat `None` as not eligible for anything (K15 fail-safe)."""
     if not zone:
@@ -125,7 +128,7 @@ def utility_of_territory(territory: str | None) -> UtilityId | None:
     return next((u for u in UTILITY_IDS if u == territory), None)
 
 
-_KNOWN_TERRITORIES: Final = frozenset({*UTILITY_IDS, ERCOT_COMPETITIVE})
+_KNOWN_TERRITORIES: Final = frozenset({*UTILITY_IDS, ERCOT_COMPETITIVE, NOIE})
 
 
 def check_territory(
@@ -140,7 +143,9 @@ def check_territory(
     - `R-TERRITORY-UNKNOWN`: the market or the asset's territory is unknown (fail closed);
     - `R-TERRITORY-OUTSIDE`: REG(u) served by an asset outside u's territory;
     - `R-TERRITORY-NO-FREE-ACCESS`: FREE (or headroom) served by an asset inside a regulated territory
-      whose utility has not granted wholesale access (`free_access`, default false, 09 OQ-5).
+      whose utility has not granted wholesale access (`free_access`, default false, 09 OQ-5), or by
+      an asset in a NOIE zone (never, whatever `free_access` says). A NOIE asset serving REG(u) is
+      `R-TERRITORY-OUTSIDE`: a NOIE zone is in no customer utility's territory.
 
     Headroom (no obligation) is FREE: pass `FREE`. `free_access` is the access flag of the utility
     that owns `asset_territory` (ignored for competitive-area assets). `asset_territory` may be a raw
@@ -149,6 +154,10 @@ def check_territory(
         return R_TERRITORY_UNKNOWN
     if ref.market == "REGULATED":
         return None if asset_territory == ref.utility_id else R_TERRITORY_OUTSIDE
-    if asset_territory == ERCOT_COMPETITIVE or free_access:
+    if asset_territory == ERCOT_COMPETITIVE:
+        return None
+    # A NOIE zone never takes FREE (ERCOT) opportunities, whatever the access flag says: the flag is a
+    # regulated utility's contract term, and a NOIE is not our customer.
+    if free_access and asset_territory != NOIE:
         return None
     return R_TERRITORY_NO_FREE_ACCESS

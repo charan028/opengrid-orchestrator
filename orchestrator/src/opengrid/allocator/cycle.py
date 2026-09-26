@@ -88,6 +88,8 @@ def cycle(
     pq: PqDispatchContext | None = None,
     enforce_territory: bool = False,
     flow_limits: FlowLimits = _NO_FLOW_LIMITS,
+    excluded_hub_ids: frozenset[str] = frozenset(),
+    operator_hub_ids: frozenset[str] = frozenset(),
 ) -> CycleResult:
     """Run one S1-S7 cycle across every bank in `fleet_state`.
 
@@ -106,6 +108,11 @@ def cycle(
     - `enforce_territory`: K15 -- each obligation only on banks its market may use (`market.
       check_territory`), FREE headroom only where the territory allows it; unknown fails closed.
     - `flow_limits`: 09 S1.9 F1-F3 caps.
+    - `excluded_hub_ids`: K4 fail-safe after a guardian item veto: these hubs are unavailable this cycle
+      (their kW moves to other hubs of the same obligation, recorded as a substitution) and their free kW
+      comes off their bank's capability.
+    - `operator_hub_ids`: the excluded hubs held by a live operator target (`engine.manual`); a shortfall on
+      their bank carries R-OPERATOR-OVERRIDE.
     """
     cycle_id = cycle_id or t.isoformat()
     pi_states = {} if pi_states is None else pi_states
@@ -121,6 +128,11 @@ def cycle(
     # its bank's capability, so the tiers never allocate kW the hubs cannot deliver.
     flow_cut_by_bank: dict[str, float] = {}
     for hub in fleet_state.hubs:
+        if hub.hub_id in excluded_hub_ids and hub.is_healthy:
+            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + max(
+                hub.free_discharge_kw, 0.0
+            )
+            hub = hub.evolve(health="LAGGING", free_discharge_kw=0.0)
         if flow_limits.enabled:
             hub = with_topology(hub, flow_limits)
         sustainable = _cap_sustainable_discharge(hub, lease_ttl_s)
@@ -167,6 +179,10 @@ def cycle(
         # K13 exception behind any shortfall on this bank: an L2 instruction binds first; otherwise the
         # dominant cause among device faults (L0), the reserve floor (L1) and unknown-state hubs.
         hub_loss_reason = classify_hub_loss(bank_hubs)
+        if operator_hub_ids and any(h.hub_id in operator_hub_ids for h in bank_hubs):
+            # A live operator target took hubs of this bank: any short obligation here carries the operator
+            # override (G-19 corroborates it against the live MANUAL_TARGET on the bank).
+            hub_loss_reason = reasons.R_OPERATOR_OVERRIDE
         shortfall_reason = reasons.R_COMMIT_LOCK_OVERRIDE_L2 if bank_id in l2_banks else hub_loss_reason
         tier_result = allocate_tiers(bank_id, calls, cap, shortfall_reason=shortfall_reason)
         bank_shortfalls = list(tier_result.shortfalls)
@@ -345,6 +361,7 @@ def cycle(
             enforce_territory=enforce_territory,
             flow_limits=flow_limits,
             territory_blocks=territory_blocks,
+            plan_floor_kwh=schedule.hold_floor_kwh.get(bank_id),
         )
         if spot_kw > _EPS:
             grants.append(
@@ -399,6 +416,7 @@ def _headroom_kw(
     enforce_territory: bool,
     flow_limits: FlowLimits,
     territory_blocks: list[TerritoryBlock],
+    plan_floor_kwh: float | None = None,
 ) -> float:
     """S6: the bank's FREE headroom discharge this cycle.
 
@@ -414,10 +432,11 @@ def _headroom_kw(
         if block is not None:
             territory_blocks.append(TerritoryBlock(bank_id, None, block))
             return 0.0
-    as_awards = [c for c in calls if c.service_type == "ERCOT_AS"]
-    if as_awards:
+    as_awards = [c for c in calls if c.is_capacity_hold]
+    if as_awards or plan_floor_kwh is not None:
         remaining_headroom = min(
-            remaining_headroom, headroom_energy_cap_kw(bank_hubs, as_awards, lease_ttl_s)
+            remaining_headroom,
+            headroom_energy_cap_kw(bank_hubs, as_awards, lease_ttl_s, plan_floor_kwh=plan_floor_kwh),
         )
     if flow_limits.enabled:
         hub_room = sum(

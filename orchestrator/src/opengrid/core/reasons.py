@@ -49,6 +49,23 @@ R_GRANT_AS_HOLD = "R-GRANT-AS-HOLD"
 R_SHORTFALL_BANK_CAPACITY = "R-SHORTFALL-BANK-CAPACITY"
 R_SHORTFALL_NO_SUBSTITUTE = "R-SHORTFALL-NO-SUBSTITUTE"
 R_SHORTFALL_L2_INSTRUCTION = "R-SHORTFALL-L2-INSTRUCTION"
+#: An obligation in SHORTFALL whose delivery has been restored (the engine's recovery path).
+R_SHORTFALL_RESTORED = "R-SHORTFALL-RESTORED"
+#: G-35 (D-31): a MOBILE_STORAGE unit charges only at its home station, from the station's own connection --
+#: any charge while it is away (or its location is unknown) is vetoed.
+R_MOBILE_CHARGE_AWAY_FROM_HOME_STATION = "R-MOBILE-CHARGE-AWAY-FROM-HOME-STATION"
+#: An ancillary-service award priced on a stale MCPC (contracts intake, MARKET-MODEL).
+R_AS_PRICE_STALE = "R-AS-PRICE-STALE"
+#: A hub the guardian vetoed at item level (GUARDIAN_VERDICT `vetoed_hub_ids`), excluded from the re-solve.
+R_HUB_VETO_EXCLUDED = "R-HUB-VETO-EXCLUDED"
+
+# --- Manual operator setpoints (engine.manual; trace event_class MANUAL_TARGET) ------------------------
+#: A hub's item stepping toward a live operator target within G-04 (no obligation).
+R_MANUAL_RAMP = "R-MANUAL-RAMP"
+#: An obligation reduced because a live operator target took hubs it was served from. The guardian's G-19
+#: signs it only when its own read shows a live MANUAL_TARGET on the bank and the bank's capability without
+#: those hubs is below the commitment floor.
+R_OPERATOR_OVERRIDE = "R-OPERATOR-OVERRIDE"
 
 #: A best-effort partial grant after a mid-window SHORTFALL (owner decision 2026-09-26) carries the shortfall
 #: reason; this is the K13 lock-exception it stands for. One copy, for the engine's escalation and the
@@ -104,3 +121,4 @@ R_DEGRADED_NO_NEW_COMMIT = "R-DEGRADED-NO-NEW-COMMIT"
 
 # --- Gateway/dependency timeout handling (ALLOC-05: allocator run_cycle) --------------------------
 R_GATEWAY_TIMEOUT = "R-GATEWAY-TIMEOUT"
+R_HUB_NOT_IN_BANK = "R-HUB-NOT-IN-BANK"  # G-34: an item's hub is not on the proposal's bank (og.hub)

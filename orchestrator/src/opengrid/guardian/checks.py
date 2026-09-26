@@ -310,6 +310,39 @@ def check_g19_territory_block(obligation_id: str, *, guardian_block: str | None)
     return CheckOutcome("G-19", False, "TERRITORY_INELIGIBLE_UNVERIFIED", obligation_id=obligation_id)
 
 
+def check_g19_operator_override(
+    obligation_id: str,
+    *,
+    manual_target_hubs: frozenset[str],
+    capability_without_manual_upper_kw: float | None,
+    committed_floor_kw: float,
+) -> CheckOutcome:
+    """K13 x manual operator setpoints: a reduction because a live operator target (MANUAL_TARGET) took hubs a
+    commitment was served from is signed only if the guardian's OWN read shows such a target on this bank AND
+    the bank's upper-bound capability without the operator-owned hubs is below the commitment floor (no
+    substitute hub could have kept it). Otherwise VETO."""
+    if not manual_target_hubs:
+        return CheckOutcome("G-19", False, "OPERATOR_OVERRIDE_NO_LIVE_TARGET", obligation_id=obligation_id)
+    if (
+        capability_without_manual_upper_kw is None
+        or capability_without_manual_upper_kw >= committed_floor_kw - 1e-9
+    ):
+        return CheckOutcome("G-19", False, "OPERATOR_OVERRIDE_UNVERIFIED", obligation_id=obligation_id)
+    return CheckOutcome.passed("G-19")
+
+
+def check_g35_mobile_charge(
+    hub_id: str, p_kw_setpoint: float, *, is_mobile: bool, at_home_station: bool | None
+) -> CheckOutcome:
+    """G-35 (D-31): a MOBILE_STORAGE unit is never charged from the fleet or at a deployment site -- only at
+    its home station, from that station's own connection. VETO any charging setpoint (p > 0) on a mobile unit
+    unless the guardian's own read says it is at its home station; an unknown location counts as away (fail
+    closed). Discharge and 0 kW are not G-35's concern."""
+    if not is_mobile or p_kw_setpoint <= 1e-9 or at_home_station is True:
+        return CheckOutcome.passed("G-35", hub_id=hub_id)
+    return CheckOutcome("G-35", False, reasons.R_MOBILE_CHARGE_AWAY_FROM_HOME_STATION, hub_id)
+
+
 def g19_lock_reason(reason_code: str | None) -> str | None:
     """The K13 lock exception a batch reason stands for. A best-effort partial grant after a mid-window
     SHORTFALL carries the shortfall reason (`core.reasons.LOCK_REASON_BY_SHORTFALL`); it is judged, and
@@ -352,8 +385,10 @@ def check_g19_need_basis(
     return CheckOutcome.passed("G-19")
 
 
-#: `og.obligation.service_type` of an ancillary-service award, held until ERCOT deploys it.
+#: `og.obligation.service_type`s held at 0 kW with R-GRANT-AS-HOLD until deployed (og.as_deployment): an ERCOT
+#: ancillary-service award, and a REGULATED_CAPACITY utility toll (D-29, deployed only per obligation).
 AS_SERVICE_TYPE = "ERCOT_AS"
+HOLD_SERVICE_TYPES = frozenset({AS_SERVICE_TYPE, "REGULATED_CAPACITY"})
 
 
 def check_g19_as_hold(
@@ -365,7 +400,7 @@ def check_g19_as_hold(
     a reduction needs the normal override/shortfall reasons -- and (c) no other obligation on the bank is
     granted beyond its own commitment (the held reservation is not being used). `deployment_active` None
     means no read: VETO."""
-    if service_type != AS_SERVICE_TYPE:
+    if service_type not in HOLD_SERVICE_TYPES:
         return CheckOutcome("G-19", False, "AS_HOLD_NOT_AN_AS_AWARD", obligation_id=obligation_id)
     if deployment_active is None or deployment_active:
         return CheckOutcome("G-19", False, "AS_HOLD_WHILE_DEPLOYED", obligation_id=obligation_id)

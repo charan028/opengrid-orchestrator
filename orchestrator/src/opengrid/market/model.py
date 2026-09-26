@@ -13,10 +13,18 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from opengrid.core.models.market import ERCOT_COMPETITIVE, Asset, Territory, Utility, UtilityId
+from opengrid.core.models.market import (
+    ERCOT_COMPETITIVE,
+    NOIE,
+    Asset,
+    Territory,
+    Utility,
+    UtilityId,
+    ZoneOwner,
+)
 from opengrid.core.timeutil import to_market_tz
 from opengrid.market.charging import ChargingCost, regulated_charging_cost
-from opengrid.market.config import DEFAULT_UTILITIES, load_zone_territory
+from opengrid.market.config import DEFAULT_UTILITIES, load_zone_owners
 from opengrid.market.free_charging import free_charging_cost
 from opengrid.market.territory import (
     MarketModelError,
@@ -40,7 +48,7 @@ class MarketModel:
     def __init__(
         self,
         *,
-        zone_territory: Mapping[str, UtilityId],
+        zone_territory: Mapping[str, ZoneOwner],
         utilities: Mapping[UtilityId, Utility],
         banks: Iterable[tuple[str, str]],
         assets: Sequence[Asset] = (),
@@ -134,6 +142,10 @@ class MarketModel:
         territory = territory_of_zone(zone, self._zone_territory)
         if territory is None:
             raise MarketModelError(f"unknown zone {zone!r}")
+        if territory == NOIE:
+            # No charging model exists for a NOIE zone (not our customer utility, no TDSP tariff). Callers
+            # must treat a NOIE bank like an unknown one before asking for its charging cost.
+            raise MarketModelError(f"zone {zone!r} is NOIE: no charging model (K15: serves neither market)")
         utility_id = utility_of_territory(territory)
         if utility_id is not None:
             return regulated_charging_cost(self.utility(utility_id), zone, interval, solar_share=solar_share)
@@ -166,7 +178,7 @@ def load_market_model(
         dict(DEFAULT_UTILITIES) if utilities is None else {u.utility_id: u for u in utilities}
     )
     return MarketModel(
-        zone_territory=load_zone_territory(path),
+        zone_territory=load_zone_owners(path),
         utilities=utility_map,
         banks=banks,
         assets=assets,

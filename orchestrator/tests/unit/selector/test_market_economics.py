@@ -161,8 +161,9 @@ def test_bank_market_terms_resolve_m1_territory_and_regulated_tariff():
     assert (north.territory, north.free_market_access) == ("ERCOT_COMPETITIVE", True)
     assert north.delivery_charge_usd_per_kwh == pytest.approx(0.060295)
     assert north.charge_price_usd_per_kwh == {}
-    # Austin Energy: no M1, no FREE access (default); grid kWh at the off-peak TOU rate, solar at the
-    # utility's solar price, a 30% solar floor, grid charging only in the off-peak period (D-22).
+    # Austin Energy (a utility-toll bank): no M1, no FREE access (default); grid kWh at the TOU rate for
+    # the interval, solar at the utility's solar price; charging not tied to the utility's off-peak
+    # window (D-29 c) -- only to the owner's schedule, here the D-30 built-in default.
     assert (aen.territory, aen.free_market_access, aen.delivery_charge_usd_per_kwh) == (
         "AUSTIN_ENERGY",
         False,
@@ -170,13 +171,35 @@ def test_bank_market_terms_resolve_m1_territory_and_regulated_tariff():
     )
     assert aen.charge_price_usd_per_kwh[0] == pytest.approx(0.02677)
     assert aen.solar_cost_usd_per_kwh == pytest.approx(0.040)
-    assert aen.solar_share_floor == pytest.approx(0.30)
-    assert aen.grid_charge_intervals == frozenset({0, 1})  # Monday 00:00-00:30 CT is off-peak
-    assert north.grid_charge_intervals is None and north.solar_share_floor == 0.0
+    assert aen.grid_charge_intervals == frozenset({0, 1})  # D-30 default 22:00-06:00 covers 00:00-00:30 CT
+    assert north.grid_charge_intervals is None
+
+    # The owner's schedule (a utility entry, overridden per bank) is what restricts toll-bank charging.
+    windows = {("PROVIDER", "AUSTIN_ENERGY"): ["00:15-01:00"], ("BANK", "b-cps"): ["23:00-00:15"]}
+    scheduled = bank_market_terms(_market(), zones, tuple(zones), H0, 2, None, windows)
+    assert scheduled["b-aen"].grid_charge_intervals == frozenset({1})  # 00:15 CT
+    assert scheduled["b-cps"].grid_charge_intervals == frozenset({0})  # 00:00 CT, inside 23:00-00:15
+    assert scheduled["b-north"].grid_charge_intervals is None  # competitive area: not a toll bank
     assert terms["b-cps"].territory == "CPS_ENERGY"
     # Unknown zone: fail closed.
     assert (odd.territory, odd.free_market_access) == (None, False)
     assert all(t.wear_usd_per_kwh == pytest.approx(0.03) for t in terms.values())
+
+
+def test_a_noie_bank_is_treated_like_an_unknown_territory_and_never_crashes_the_gate():
+    """D-29(d): LCRA/Rayburn-style NOIE zones exist in the territory table but serve neither market."""
+    market = MarketModel(
+        zone_territory={"LZ_LCRA": "NOIE"}, utilities=DEFAULT_UTILITIES, banks=[("b-lcra", "LZ_LCRA")]
+    )
+    (term,) = bank_market_terms(market, {"b-lcra": "LZ_LCRA"}, ("b-lcra",), H0, 2).values()
+    assert (term.free_market_access, term.charge_price_usd_per_kwh, term.delivery_charge_usd_per_kwh) == (
+        False,
+        {},
+        0.0,
+    )
+    free = binary_candidate("free", 10.0, 50.0, (0,), ("b-lcra",))
+    (candidate,), () = prepare_obligations((free,), (), market)
+    assert candidate.eligible_bank_ids == ()
 
 
 def test_prepare_obligations_enforces_territory_and_prices_regulated_capacity():
@@ -194,9 +217,11 @@ def test_prepare_obligations_enforces_territory_and_prices_regulated_capacity():
     assert c_reg.eligible_bank_ids == ("b-aen",)  # K15 a: only the utility's own territory
     assert c_bad.eligible_bank_ids == ()  # inconsistent market: fail closed
     assert co.eligible_bank_ids == ("b-cps",)
-    # $75/kW-yr held for one hour = 75/8760 $/kW-h = $8.5616/MWh-held.
-    assert c_reg.value_per_mwh == pytest.approx(75.0 / 8760.0 * 1000.0)
-    assert regulated_value_per_mwh(DEFAULT_UTILITIES["CPS_ENERGY"]) == pytest.approx(45.0 / 8760.0 * 1000.0)
+    # The utility's $/kW-yr held for one hour = price/8760 $/kW-h, as $/MWh-held ($102 for AE, D-29 a).
+    ae_price = float(DEFAULT_UTILITIES["AUSTIN_ENERGY"].capacity_price_usd_per_kw or 0)
+    assert c_reg.value_per_mwh == pytest.approx(ae_price / 8760.0 * 1000.0)
+    cps = DEFAULT_UTILITIES["CPS_ENERGY"]
+    assert regulated_value_per_mwh(cps) == pytest.approx(float(cps.capacity_price_usd_per_kw or 0) / 8.76)
 
 
 def test_headroom_is_barred_for_a_bank_without_free_market_access():
@@ -362,5 +387,5 @@ def test_every_service_type_has_a_selector_category():
 
 def test_regulated_capacity_is_a_capacity_hold():
     assert as_energy_hold_h("REGULATED_CAPACITY", 120) == 2.0
-    assert as_energy_hold_h("REGULATED_CAPACITY", None) == 1.0
+    assert as_energy_hold_h("REGULATED_CAPACITY", None) == 1.5  # D-29: the toll is a 90-min product
     assert as_energy_hold_h("PIPELINE_AC", 120) == 0.0

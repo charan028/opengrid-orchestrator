@@ -62,6 +62,14 @@ INSERT INTO og.service_profile (
 ) ON CONFLICT (service_profile_id) DO NOTHING;
 
 -- ---- MOBILE_STORAGE (config/service_profiles/mobile_storage.toml), 500 kW trailer, first deployment ---
+--
+-- D-31 (2026-09-26): this trailer (hub_id 'trailer-mb-01', matching integration-sims/scenarios/
+-- svc-mobile-storage.yaml) is assigned to home station 'hs-austin-north-01' in config/service_profiles/
+-- mobile_storage_home_stations.toml -- NOT a DB row, since no og.mobile_home_station table exists yet
+-- (config-first per the lead's 2026-09-26 R3.1 instruction; see 14-additional-services.md S2 for the
+-- requested migration: og.mobile_home_station + og.hub.is_mobile/home_station_id). This trailer is never
+-- charged from og.hub/og.bank fleet assets; it charges only at that home station, at that station's zone
+-- ('LZ_AEN') tariff, never the deployment site's.
 
 INSERT INTO og.contract (
     contract_id, customer_id, service_type, variant, tier, profile_ref, start_at, end_at,

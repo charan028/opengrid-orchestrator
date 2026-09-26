@@ -233,3 +233,99 @@ async def test_a_territory_claim_without_a_territory_read_is_vetoed(fakes, guard
     verdict = await service.evaluate_and_sign(make_batch_row(proposal))
 
     assert "G-19" in verdict.vetoed_rule_ids
+
+
+# --- manual operator targets (MANUAL_TARGET, R-OPERATOR-OVERRIDE, R-MANUAL-RAMP) ----------------------------
+
+
+class _ManualTargets:
+    def __init__(self, hubs: set[str], *, fail: bool = False) -> None:
+        self.hubs, self.fail = hubs, fail
+
+    async def manual_target_hubs(self, hub_ids):
+        if self.fail:
+            raise RuntimeError("malformed expires_at")
+        return {h for h in hub_ids if h in self.hubs}
+
+
+def _manual_world(
+    fakes, config, seed, reason: str, targets: _ManualTargets | None, *, frozen_kw: str = "8.0"
+):
+    """An 8 kW commitment granted 2 kW; members hub-a and hub-b, 5 kW each at 25 C (10 kW together)."""
+    proposal, _ = _reduced(fakes, reason, frozen_kw=frozen_kw)
+    _members(fakes, {"hub-a": _hub(temp_c=25.0), "hub-b": _hub(temp_c=25.0)})
+    service = service_with(fakes, config, seed)
+    service.ports = replace(fakes.as_ports(), manual_targets=targets)
+    return service, proposal
+
+
+async def test_operator_override_is_signed_when_a_live_target_took_the_capability(
+    fakes, guardian_config, signing_seed
+):
+    """hub-a is operator-owned: without it the bank offers 5 kW < 8 kW committed, so R-OPERATOR-OVERRIDE passes."""
+    service, proposal = _manual_world(
+        fakes, guardian_config, signing_seed, "R-OPERATOR-OVERRIDE", _ManualTargets({"hub-a"})
+    )
+    assert "G-19" not in (await service.evaluate_and_sign(make_batch_row(proposal))).vetoed_rule_ids
+
+
+async def test_operator_override_without_a_live_target_is_vetoed(fakes, guardian_config, signing_seed):
+    service, proposal = _manual_world(
+        fakes, guardian_config, signing_seed, "R-OPERATOR-OVERRIDE", _ManualTargets(set())
+    )
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+    assert "G-19" in verdict.vetoed_rule_ids and "OPERATOR_OVERRIDE_NO_LIVE_TARGET" in _reasons(fakes)
+
+
+async def test_operator_override_when_the_rest_of_the_bank_could_deliver_is_vetoed(
+    fakes, guardian_config, signing_seed
+):
+    service, proposal = _manual_world(
+        fakes,
+        guardian_config,
+        signing_seed,
+        "R-OPERATOR-OVERRIDE",
+        _ManualTargets({"hub-a"}),
+        frozen_kw="4.0",
+    )
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+    assert "G-19" in verdict.vetoed_rule_ids and "OPERATOR_OVERRIDE_UNVERIFIED" in _reasons(fakes)
+
+
+async def test_a_failed_manual_target_read_is_never_evidence(fakes, guardian_config, signing_seed):
+    service, proposal = _manual_world(
+        fakes, guardian_config, signing_seed, "R-OPERATOR-OVERRIDE", _ManualTargets({"hub-a"}, fail=True)
+    )
+    assert "G-19" in (await service.evaluate_and_sign(make_batch_row(proposal))).vetoed_rule_ids
+
+
+async def test_an_infeasible_claim_is_corroborated_without_the_operator_owned_hubs(
+    fakes, guardian_config, signing_seed
+):
+    """The allocator treats operator-owned hubs as unavailable: its INFEASIBLE claim (10 kW bank, 8 kW floor)
+    is true once hub-a's live target is taken into account, and false without it."""
+    service, proposal = _manual_world(
+        fakes, guardian_config, signing_seed, "R-COMMIT-LOCK-INFEASIBLE", _ManualTargets({"hub-a"})
+    )
+    assert "G-19" not in (await service.evaluate_and_sign(make_batch_row(proposal))).vetoed_rule_ids
+
+    no_target, proposal2 = _manual_world(
+        fakes, guardian_config, signing_seed, "R-COMMIT-LOCK-INFEASIBLE", None
+    )
+    assert "G-19" in (await no_target.evaluate_and_sign(make_batch_row(proposal2))).vetoed_rule_ids
+
+
+async def test_manual_ramp_items_are_signed_under_the_ordinary_item_checks(
+    fakes, guardian_config, signing_seed
+):
+    """R-MANUAL-RAMP items carry no obligation: nothing in G-19 applies, G-01/G-02/G-04 check them per item."""
+    ok = replace(make_proposal(), items=[ProposedItem("hub-0001", 3.0, "R-MANUAL-RAMP")])
+    wire_default_passing_scenario(fakes, ok)
+    assert (
+        await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(make_batch_row(ok))
+    ).outcome == "PASS"
+
+    over = replace(make_proposal(seq=2), items=[ProposedItem("hub-0001", 999.0, "R-MANUAL-RAMP")])
+    wire_default_passing_scenario(fakes, over)
+    verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(make_batch_row(over))
+    assert "G-02" in verdict.vetoed_rule_ids and verdict.signature is None

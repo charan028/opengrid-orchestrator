@@ -115,6 +115,12 @@ class GuardianConfig:
     default_feeder_thermal_kw: float | None = 10_000.0
     default_feeder_reverse_kw: float | None = 3_000.0
     substation_pct: float = 0.95  # G-29 rho
+    #: 09 S2.6 fail closed: a feeder with no og.feeder_limit row has UNKNOWN limits (G-28 vetoes any
+    #: increase) instead of the static defaults above. False for R3: the sim fleet has no topology rows yet.
+    flow_fail_closed_missing_topology: bool = False
+    #: G-28/29/30 on an unsigned SCADA kVA reading m: the power factor floor that bounds |kW| >= pf * m once
+    #: the hub telemetry rules out export. 0 = no assumption (strict).
+    scada_min_power_factor: float = 0.0
 
 
 def _clock_source(value: object) -> ClockSource:
@@ -216,7 +222,17 @@ def load_guardian_config(cfg: Config) -> GuardianConfig:
             cfg.get("guardian.flow.default_feeder_reverse_kw", 3_000.0)
         ),
         substation_pct=float(cfg.get("guardian.flow.substation_pct", 0.95)),
+        flow_fail_closed_missing_topology=bool(cfg.get("guardian.flow.fail_closed_missing_topology", False)),
+        scada_min_power_factor=_power_factor(cfg.get("guardian.flow.scada_min_power_factor", 0.0)),
     )
+
+
+def _power_factor(value: object) -> float:
+    pf = float(str(value))
+    if not 0.0 <= pf <= 1.0:
+        msg = f"guardian.flow.scada_min_power_factor must be within [0, 1], got {value!r}"
+        raise ValueError(msg)
+    return pf
 
 
 def _optional_float(value: object) -> float | None:

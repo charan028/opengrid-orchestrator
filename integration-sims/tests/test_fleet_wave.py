@@ -494,7 +494,10 @@ def test_capture_request_expired_true_past_deadline() -> None:
 def test_engine_wave_summary_messages_validate(engine: FleetEngine) -> None:
     engine.tick(0.0)
     messages = engine.wave_summary_messages(0.0)
-    assert len(messages) == engine.config.hub_count
+    # Not `engine.config.hub_count`: the shipped fleet.yaml's substation asset (D-29(b), unrelated to
+    # PQ summary content -- flag to MERGE if this line conflicts with wp/K-pq-fidelity) adds one hub on
+    # top of this fixture's hub_count=8 override.
+    assert len(messages) == len(engine.state.hub_ids)
     for suffix, msg in messages:
         assert suffix.startswith("scada/wave/") and suffix.endswith("/summary")
         validate("pq_waveform_summary", msg)

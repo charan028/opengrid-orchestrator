@@ -92,7 +92,7 @@ def test_activation_gate_and_flags_default_off_and_read_from_config() -> None:
     assert on.data_center_activation and on.site_ingest_enabled and on.closed_loop_enabled
     assert on.dc_target_import_kw == {"site-1": 400.0}
     assert on.wear_usd_per_kwh == 0.02
-    assert on.flow_limits == FlowLimits(enabled=False, xfmr_kva={"x1": 50.0})
+    assert on.flow_limits == FlowLimits(enabled=False, default_export_limit_kw=20.0, xfmr_kva={"x1": 50.0})
 
 
 def test_engine_main_passes_the_activation_setting_to_contracts() -> None:
@@ -616,3 +616,413 @@ def test_a_zero_kw_territory_grant_carries_its_reason_into_the_batch() -> None:
         "b1", [_g("0", obligation=uuid4(), reason="R-TERRITORY-OUTSIDE")], fleet_module=fleet
     )
     assert [(i["reason_code"], i["obligation_granted_kw"]) for i in items] == [("R-TERRITORY-OUTSIDE", "0")]
+
+
+# --- lead items 9/10: restore after a best-effort shortfall, commitment-lock events, hold floor ------------
+
+
+class _RecCursor(_Cursor):
+    pass
+
+
+class _CommitConn(_Conn):
+    async def commit(self):
+        return None
+
+
+class _CommitPool:
+    def __init__(self, cursor: _Cursor) -> None:
+        self._conn = _CommitConn(cursor)
+
+    def connection(self):
+        return self._conn
+
+
+def _lock_events(cursor: _Cursor) -> list[tuple[str, str]]:
+    return [
+        (p["obligation_id"], p["reason_code"])
+        for sql, p in cursor.executed
+        if "INSERT INTO og.commitment" in sql
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shortfall_restored_traces_writes_a_lock_event_and_clears_at_risk(monkeypatch) -> None:
+    from opengrid import contracts
+
+    oid = str(uuid4())
+    flags: list[tuple[str, bool, str]] = []
+
+    async def set_at_risk(obligation_id, at_risk, *, reason_code, payload=None):
+        flags.append((str(obligation_id), at_risk, reason_code))
+
+    async def persist(cycle_id, records):
+        return None
+
+    async def version():
+        return 1
+
+    monkeypatch.setattr(contracts, "set_obligation_at_risk", set_at_risk)
+    monkeypatch.setattr(gw.ledger, "persist_grants", persist)
+    monkeypatch.setattr(gw.ledger, "ledger_version", version)
+    monkeypatch.setattr(gw.fleet, "hub_capabilities", lambda bank_id: [])
+    trace = FakeTrace()
+    row = (oid, "b1", Decimal("40"), "PARTNER_CAPACITY", "T1", None, "SHORTFALL", False, None)
+    cursor = _Cursor([[row], [], []] * 3)
+    ledger_gw = gw.EngineLedgerGateway(_CommitPool(cursor), trace)  # type: ignore[arg-type]
+    from opengrid.allocator.models import ShortfallReport
+
+    # Cycle 1: still short under an L2 limit -> lock event with the L2 override reason.
+    await ledger_gw.ledger_view(["b1"], NOW)
+    await ledger_gw.persist_grants("c1", [ProposedGrant("b1", 10.0, oid)])
+    await ledger_gw.record_shortfalls(
+        "c1", [ShortfallReport(oid, "b1", 30.0, "R-COMMIT-LOCK-OVERRIDE-L2")], now=NOW
+    )
+    # Cycle 2: the limit is gone -> served in full -> restored.
+    await ledger_gw.ledger_view(["b1"], NOW)
+    await ledger_gw.persist_grants("c2", [ProposedGrant("b1", 40.0, oid)])
+    await ledger_gw.record_shortfalls("c2", [], now=NOW)
+    # Cycle 3: still full -> nothing new.
+    await ledger_gw.ledger_view(["b1"], NOW)
+    await ledger_gw.persist_grants("c3", [ProposedGrant("b1", 40.0, oid)])
+    await ledger_gw.record_shortfalls("c3", [], now=NOW)
+
+    assert _lock_events(cursor) == [(oid, "R-COMMIT-LOCK-OVERRIDE-L2"), (oid, gw.R_SHORTFALL_RESTORED)]
+    assert [c for c in trace.classes() if c == "SHORTFALL_RESTORED"] == ["SHORTFALL_RESTORED"]
+    assert flags == [(oid, False, gw.R_SHORTFALL_RESTORED)]
+
+
+@pytest.mark.asyncio
+async def test_lock_events_map_detail_codes_and_record_substitutions_once_per_interval() -> None:
+    from opengrid.allocator.models import ShortfallReport, SubstitutionEvent
+
+    oid = str(uuid4())
+    cursor = _Cursor([])
+    ledger_gw = gw.EngineLedgerGateway(_CommitPool(cursor), FakeTrace())  # type: ignore[arg-type]
+    for _ in range(3):
+        await ledger_gw.record_shortfalls(
+            "c", [ShortfallReport(oid, "b1", 5.0, "R-COMMIT-LOCK-OVERRIDE-L0")], now=NOW
+        )
+        await ledger_gw.record_substitution_events("c", [SubstitutionEvent(oid, "b1", ("h1",), ("h2",))])
+    assert sorted(_lock_events(cursor)) == sorted(
+        [(oid, "R-COMMIT-LOCK-OVERRIDE-L0"), (oid, "R-SUBSTITUTION")]
+    )
+    assert gw.lock_reason_of("R-SHORTFALL-L2-INSTRUCTION") == "R-COMMIT-LOCK-OVERRIDE-L2"
+    sql = gw._LOCK_EVENT_SQL
+    assert "supersedes" in sql and "c.commitment_id" in sql and "c.committed_kw" in sql
+
+
+def test_an_expired_l2_instruction_no_longer_binds() -> None:
+    from opengrid.core.models.mqtt import ScadaUtilityInstruction
+
+    base = {
+        "instruction_id": uuid4(),
+        "bank_id": "b1",
+        "kind": "LIMIT",
+        "limit_kw": 5.0,
+        "issued_at": NOW,
+        "issued_by": "u",
+    }
+    assert gw.instruction_active(ScadaUtilityInstruction(**base), NOW)
+    assert gw.instruction_active(ScadaUtilityInstruction(**base, expires_at=NOW + timedelta(minutes=5)), NOW)
+    assert not gw.instruction_active(
+        ScadaUtilityInstruction(**base, expires_at=NOW - timedelta(seconds=1)), NOW
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_gateway_drops_expired_instructions(monkeypatch) -> None:
+    from opengrid.core.models.mqtt import ScadaUtilityInstruction
+
+    expired = ScadaUtilityInstruction(
+        instruction_id=uuid4(),
+        bank_id="b1",
+        kind="LIMIT",
+        limit_kw=5.0,
+        issued_at=NOW - timedelta(hours=1),
+        expires_at=NOW - timedelta(minutes=30),
+        issued_by="u",
+    )
+    monkeypatch.setattr(gw.fleet, "utility_instruction", lambda bank_id: expired)
+    assert await gw.EngineScheduleGateway(_Pool(_Cursor([]))).instructions(["b1"]) == ()
+
+
+def test_best_effort_obligation_gets_its_full_commitment_once_the_cause_clears() -> None:
+    """K13 best effort: short under an L2 LIMIT; the next cycle without it grants the full commitment."""
+    from opengrid.allocator.cycle import cycle
+    from opengrid.allocator.models import BankSnapshot, Instruction, Schedule
+
+    hubs = tuple(HubSnapshot(f"h{i}", "b1", 10.0, soc_kwh=1e6, reserve_kwh=0.0, e_kwh=1e6) for i in range(4))
+    fleet_state = FleetState(hubs=hubs, banks=(BankSnapshot("b1", 40.0, kva_rating=40.0),))
+    call = ObligationCall(
+        "o1", "b1", "PARTNER_CAPACITY", "T1", 40.0, tuple(h.hub_id for h in hubs), in_shortfall=True
+    )
+    limited = cycle(
+        NOW, fleet_state, LedgerView((call,)), Schedule(), {}, (Instruction("BANK", "b1", "LIMIT", 10.0),)
+    )
+    (short,) = limited.grants
+    assert short.granted_kw == 10.0 and short.reason_code == "R-SHORTFALL-L2-INSTRUCTION"
+    restored = cycle(NOW, fleet_state, LedgerView((call,)), Schedule(), {}, ())
+    (full,) = restored.grants
+    assert full.granted_kw == 40.0 and full.reason_code == reasons.R_GRANT_COMMITTED
+    assert restored.shortfalls == ()
+
+
+@pytest.mark.asyncio
+async def test_hold_floor_in_process_then_db_after_restart_throttled() -> None:
+    calls: list[list[str]] = []
+
+    async def db(bank_ids, at):
+        calls.append(list(bank_ids))
+        return {"b2": 222.0}
+
+    schedule_gw = gw.EngineScheduleGateway(
+        _Pool(_Cursor([])),
+        hold_floor_in_process=lambda bank_id, at: 111.0 if bank_id == "b1" else None,
+        hold_floor_db=db,
+    )
+    assert await schedule_gw._hold_floors(["b1", "b2", "b3"]) == {"b1": 111.0, "b2": 222.0}
+    assert await schedule_gw._hold_floors(["b1", "b2", "b3"]) == {"b1": 111.0, "b2": 222.0}
+    assert calls == [["b2", "b3"]]  # read once, then cached for HOLD_FLOOR_DB_REFRESH_S
+
+
+@pytest.mark.asyncio
+async def test_ledger_view_carries_the_remaining_deployment_of_a_called_award(monkeypatch) -> None:
+    oid = str(uuid4())
+    monkeypatch.setattr(gw.fleet, "hub_capabilities", lambda bank_id: [])
+    row = (
+        oid,
+        "b1",
+        Decimal("40"),
+        "ERCOT_AS",
+        "T2",
+        None,
+        "DELIVERING",
+        True,
+        240,
+        NOW + timedelta(minutes=45),
+    )
+    view = await gw.EngineLedgerGateway(_Pool(_Cursor([[row], [], []]))).ledger_view(["b1"], NOW)
+    (call,) = view.calls
+    assert call.deployment_remaining_h == pytest.approx(0.75)
+    assert call.hold_duration_h == 4.0
+
+
+# --- review R3: K4 veto fail-safe, shared G-26 default, market refresh, utility scale ----------------------
+
+
+def test_the_export_default_is_the_guardians_own_key() -> None:
+    assert dispatch_settings(Config({})).flow_limits.default_export_limit_kw == 20.0
+    cfg = Config({"guardian": {"flow": {"default_export_limit_kw": 7.5}}})
+    assert dispatch_settings(cfg).flow_limits.default_export_limit_kw == 7.5
+    unknown = Config({"guardian": {"flow": {"default_export_limit_kw": "unknown"}}})
+    assert dispatch_settings(unknown).flow_limits.default_export_limit_kw is None
+
+
+def test_hubs_in_a_verdict_come_from_vetoed_hub_ids_and_violations() -> None:
+    from opengrid.engine.veto import hubs_in_verdict
+
+    payload = {
+        "vetoed_hub_ids": ["h1"],
+        "violations": [{"rule_id": "G-02", "hub_id": "h2"}, {"rule_id": "G-03"}],
+    }
+    assert hubs_in_verdict(payload) == {"h1", "h2"}
+    assert hubs_in_verdict({"violations": [{"rule_id": "G-13", "hub_id": None}]}) == set()
+
+
+def test_exclusions_last_n_cycles_and_restart_on_repeat() -> None:
+    from opengrid.engine.veto import HubVetoExclusions
+
+    ex = HubVetoExclusions(exclude_cycles=3)
+    assert ex.exclude({"h1"}) == {"h1"}
+    ex.next_cycle()
+    ex.next_cycle()
+    assert ex.active() == frozenset({"h1"})
+    assert ex.exclude({"h1"}) == set()  # already excluded: count restarts
+    for _ in range(2):
+        ex.next_cycle()
+    assert ex.active() == frozenset({"h1"})
+    ex.next_cycle()
+    assert ex.active() == frozenset()
+
+
+class _FakeVerdicts:
+    def __init__(self, outcomes: dict, hubs: dict, *, arrive_after: int = 0) -> None:
+        self._outcomes, self._hubs, self._polls, self._after = outcomes, hubs, 0, arrive_after
+
+    async def outcomes(self, batch_ids):
+        self._polls += 1
+        if self._polls <= self._after:
+            return {}
+        return {b: self._outcomes[b] for b in batch_ids if b in self._outcomes}
+
+    async def vetoed_hubs(self, batch_ids):
+        return {b: self._hubs.get(b, set()) for b in batch_ids}
+
+
+@pytest.mark.asyncio
+async def test_a_partly_vetoed_bank_is_retried_once_without_its_vetoed_hubs() -> None:
+    from types import SimpleNamespace
+
+    from opengrid.engine.veto import HubVetoExclusions
+
+    b1, b2, b3 = uuid4(), uuid4(), uuid4()
+    reader = _FakeVerdicts(
+        {b1: "PARTLY_VETOED", b2: "PASS", b3: "VETOED"},
+        {b1: {"h7"}, b3: set()},  # b3: batch-level veto
+    )
+    trace = FakeTrace()
+    state = SimpleNamespace(
+        verdict_reader=reader, veto_exclusions=HubVetoExclusions(), pending_verdicts={}, trace=trace
+    )
+    banks = await engine.handle_vetoes(
+        state, {b1: "bank-1", b2: "bank-2", b3: "bank-3"}, wait_s=0.0, cycle_id="c"
+    )
+    assert banks == ["bank-1"]  # only the bank whose verdict names hubs is re-proposed
+    assert state.veto_exclusions.active() == frozenset({"h7"})
+    assert trace.appended[0][2] == "HUB_VETO_EXCLUDED" and trace.appended[0][4] == ["R-HUB-VETO-EXCLUDED"]
+
+
+@pytest.mark.asyncio
+async def test_late_verdicts_are_kept_for_the_next_cycle() -> None:
+    from types import SimpleNamespace
+
+    from opengrid.engine.veto import HubVetoExclusions
+
+    b1 = uuid4()
+    reader = _FakeVerdicts({b1: "PARTLY_VETOED"}, {b1: {"h1"}}, arrive_after=100)
+    state = SimpleNamespace(
+        verdict_reader=reader, veto_exclusions=HubVetoExclusions(), pending_verdicts={}, trace=FakeTrace()
+    )
+    assert await engine.handle_vetoes(state, {b1: "bank-1"}, wait_s=0.0, cycle_id="c") == []
+    assert state.pending_verdicts == {b1: "bank-1"}
+
+
+def test_excluded_hubs_get_no_items_and_the_retry_substitutes_them() -> None:
+    from opengrid.allocator.cycle import cycle
+    from opengrid.allocator.models import BankSnapshot, Schedule
+
+    fleet = _Fleet([_HubCap("h0", "b1", 10.0), _HubCap("h1", "b1", 10.0)])
+    items = engine._distribute_hub_items(
+        "b1", [_g("10", obligation=uuid4())], fleet_module=fleet, excluded_hub_ids=frozenset({"h0"})
+    )
+    assert {i["hub_id"] for i in items} == {"h1"}
+    hubs = tuple(HubSnapshot(f"h{i}", "b1", 10.0, soc_kwh=1e6, reserve_kwh=0.0, e_kwh=1e6) for i in range(3))
+    call = ObligationCall("o1", "b1", "PARTNER_CAPACITY", "T1", 15.0, ("h0", "h1", "h2"))
+    result = cycle(
+        NOW,
+        FleetState(hubs, (BankSnapshot("b1", 30.0, kva_rating=30.0),)),
+        LedgerView((call,)),
+        Schedule(),
+        {},
+        (),
+        excluded_hub_ids=frozenset({"h0"}),
+    )
+    (grant,) = result.grants
+    assert grant.granted_kw == pytest.approx(15.0)  # served in full by h1/h2
+    (event,) = result.substitutions
+    assert event.from_hub_ids == ("h0",)
+
+
+@pytest.mark.asyncio
+async def test_market_model_refresh_swaps_the_model(monkeypatch) -> None:
+    from opengrid.engine import wiring
+
+    sentinel = object()
+    monkeypatch.setattr(wiring, "load_fleet_market_model", lambda fleet_module: sentinel)
+    gateway = gw.EngineFleetGateway()
+    await engine.refresh_market_model(gateway, object())
+    assert gateway._market is sentinel
+
+
+def test_utility_scale_banks_are_rated_at_nameplate() -> None:
+    from opengrid.allocator import flow_limits
+
+    big = HubSnapshot(
+        "s1",
+        "b-sub",
+        20000.0,
+        soc_kwh=30000.0,
+        reserve_kwh=8000.0,
+        e_kwh=40000.0,
+        rated_kw=20000.0,
+        cell_temp_c=25.0,
+        utility_scale=True,
+    )
+    assert flow_limits.derated_discharge_kw(big) == pytest.approx(20000.0)
+    home = HubSnapshot(
+        "h1", "b1", 11.0, soc_kwh=30.0, reserve_kwh=7.84, e_kwh=39.2, rated_kw=20000.0, cell_temp_c=25.0
+    )
+    assert flow_limits.derated_discharge_kw(home) < 100.0
+    gw.set_utility_scale_banks({"b-sub"})
+    try:
+        assert gw.is_utility_scale_bank("b-sub") and not gw.is_utility_scale_bank("b1")
+
+        @dataclass
+        class _Sub(_HubCap):
+            rated_kw: float = 20000.0
+            soc_kwh: float = 30000.0
+            reserve_kwh: float = 8000.0
+            e_kwh: float = 40000.0
+            cell_temp_c: float = 25.0
+
+        assert engine._derated_room_kw(_Sub("s1", "b-sub", 20000.0)) == pytest.approx(20000.0)
+    finally:
+        gw.set_utility_scale_banks(set())
+
+
+# --- DEVICE-INFO: retained per-hub message routed off the hot path ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_device_info_is_routed_to_a_background_worker_not_the_ingest_path() -> None:
+    from opengrid.engine.background import BackgroundIngest
+
+    queued: list[dict] = []
+
+    async def handler(item):
+        queued.append(item)
+
+    worker = BackgroundIngest("device-info", handler)
+    cfg = Config({"mqtt": {"topic_root": "og/v1"}})
+    client = _FakeMqtt([("og/v1/hub/hub-00001/info", {"hub_id": "hub-00001", "firmware": "1.2.3"})])
+    await engine._mqtt_ingest_loop(client, cfg, raw_worker=None, device_info_worker=worker)  # type: ignore[arg-type]
+    assert "og/v1/hub/+/info" in client.subscribed
+    assert queued == []  # only queued by the ingest loop; handled by the worker's own task
+    import asyncio
+
+    task = asyncio.create_task(worker.run())
+    await worker.drain()
+    task.cancel()
+    assert queued == [
+        {"topic": "og/v1/hub/hub-00001/info", "payload": {"hub_id": "hub-00001", "firmware": "1.2.3"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_device_info_handler_calls_upsert_or_drops_until_the_module_exists(monkeypatch) -> None:
+    import importlib
+    import types
+
+    calls: list[tuple] = []
+
+    async def upsert(pool, msg):
+        calls.append((pool, msg))
+
+    fake = types.ModuleType("opengrid.fleet.device_info")
+    fake.upsert_device_info = upsert  # type: ignore[attr-defined]
+    real_import = importlib.import_module
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name, *a: fake if name == "opengrid.fleet.device_info" else real_import(name, *a),
+    )
+    handler = engine.make_device_info_handler("pool")
+    await handler({"topic": "t", "payload": {"hub_id": "h1"}})
+    assert calls == [("pool", {"hub_id": "h1"})]
+
+    def missing(name, *a):
+        raise ImportError(name)
+
+    monkeypatch.setattr(importlib, "import_module", missing)
+    await engine.make_device_info_handler("pool")({"topic": "t", "payload": {}})  # logged, dropped, no raise

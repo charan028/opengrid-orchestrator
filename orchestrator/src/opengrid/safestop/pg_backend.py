@@ -15,7 +15,10 @@ from typing import Any, Literal
 from uuid import UUID
 
 import psycopg
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+
+from opengrid.safestop.backend import OutboxEntry
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,24 @@ WHERE action = 'ENGAGE' AND scope_kind = 'BANK' AND scope_ref = %(bank_id)s
   AND initiator_kind = 'UTILITY' AND strpos(reason, %(instruction_id)s) > 0
 LIMIT 1
 """
+
+
+# K8 durable publish outbox (migration 0035): queued once per (stop_id, action), drained in seq order.
+_ENQUEUE_SQL = """
+INSERT INTO og.stop_outbox (stop_id, action, topic_suffix, payload)
+VALUES (%(stop_id)s, %(action)s, %(topic_suffix)s, %(payload)s)
+ON CONFLICT ON CONSTRAINT stop_outbox_once DO NOTHING
+"""
+_PENDING_SQL = """
+SELECT seq, stop_id, action, topic_suffix, payload FROM og.stop_outbox
+WHERE published_at IS NULL ORDER BY seq LIMIT %(limit)s
+"""
+_MARK_PUBLISHED_SQL = (
+    "UPDATE og.stop_outbox SET published_at = now(), attempts = attempts + 1 WHERE seq = %(seq)s"
+)
+_RECORD_FAILURE_SQL = (
+    "UPDATE og.stop_outbox SET attempts = attempts + 1, last_error = %(error)s WHERE seq = %(seq)s"
+)
 
 
 @dataclass
@@ -115,6 +136,42 @@ class PgStopEventBackend:
             await cur.execute(_LATEST_ACTION_SQL, {"scope_kind": scope_kind, "scope_ref": scope_ref})
             row = await cur.fetchone()
             return None if row is None else str(row[0])
+
+    async def enqueue_publication(
+        self,
+        *,
+        stop_id: UUID,
+        action: Literal["ENGAGE", "RELEASE"],
+        topic_suffix: str,
+        payload: dict[str, Any],
+    ) -> None:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _ENQUEUE_SQL,
+                {
+                    "stop_id": stop_id,
+                    "action": action,
+                    "topic_suffix": topic_suffix,
+                    "payload": Jsonb(payload),
+                },
+            )
+
+    async def pending_publications(self, *, limit: int) -> list[OutboxEntry]:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_PENDING_SQL, {"limit": limit})
+            rows = await cur.fetchall()
+        return [
+            OutboxEntry(seq=int(r[0]), stop_id=r[1], action=r[2], topic_suffix=str(r[3]), payload=dict(r[4]))
+            for r in rows
+        ]
+
+    async def mark_published(self, seq: int) -> None:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_MARK_PUBLISHED_SQL, {"seq": seq})
+
+    async def record_publish_failure(self, seq: int, error: str) -> None:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_RECORD_FAILURE_SQL, {"seq": seq, "error": error[:500]})
 
     async def has_l2_engage(self, instruction_id: UUID, bank_id: str) -> bool:
         """Whether a UTILITY-initiated BANK ENGAGE for this utility L2 instruction is already recorded

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 
@@ -215,8 +215,22 @@ class ErcotClient:
         now = now or datetime.now(UTC)
         if product not in PRODUCT_PATHS:
             raise ValueError(f"unknown ERCOT product: {product}")
-        path, static_params = PRODUCT_PATHS[product]
+        _path, static_params = PRODUCT_PATHS[product]
         params = {**static_params, **_default_date_range_params(product, now)}
+        page = await self.fetch_page(product, params=params, now=now)
+        return page.observations, page.rotation_events
+
+    async def fetch_page(
+        self, product: str, *, params: dict[str, str], now: datetime | None = None
+    ) -> ErcotPage:
+        """One page of `product` with caller-supplied query `params` (replacing the product's static
+        and default date-range params entirely), normalized, plus ERCOT's `_meta.totalPages`. The live
+        poll (`fetch_product`) and the history backfill (`tools/ercot_backfill.py`) share this one
+        auth/key-rotation/normalization path."""
+        now = now or datetime.now(UTC)
+        if product not in PRODUCT_PATHS:
+            raise ValueError(f"unknown ERCOT product: {product}")
+        path, _static_params = PRODUCT_PATHS[product]
         url = f"{self.base_url}{path}"
         events: list[KeyRotationEvent] = []
 
@@ -266,6 +280,37 @@ class ErcotClient:
                     raise FeedHttpError(exc.status_code, mask_secrets(str(exc), request_secrets)) from None
             payload = response.json()
             normalizer = _NORMALIZERS[product]
-            return normalizer(payload, product=product, recorded_at=now), events
+            return ErcotPage(
+                observations=normalizer(payload, product=product, recorded_at=now),
+                rotation_events=events,
+                total_pages=_total_pages(payload),
+            )
 
         raise ErcotAuthError(f"ERCOT authentication failed for product {product!r}")
+
+
+def ercot_client_from_config(ercot_cfg: dict[str, Any], http_client: httpx.AsyncClient) -> ErcotClient:
+    """The one place an `ErcotClient` is built from a `[feeds.ercot]` config table (og-feeds and the
+    history backfill tool share it, so both use the same env-var names and token URL)."""
+    return ErcotClient(
+        base_url=ercot_cfg["base_url"],
+        username_env=ercot_cfg["username_env"],
+        password_env=ercot_cfg["password_env"],
+        primary_key_env=ercot_cfg["subscription_key_env"],
+        secondary_key_env=ercot_cfg.get("subscription_key_secondary_env", "ERCOT_PUBLIC_API_KEY_SECONDARY"),
+        http_client=http_client,
+        token_url=ercot_cfg.get("token_url", DEFAULT_TOKEN_URL),
+    )
+
+
+@dataclass
+class ErcotPage:
+    observations: list[FeedObs]
+    rotation_events: list[KeyRotationEvent]
+    total_pages: int  # ERCOT `_meta.totalPages`; 1 when the response carries no paging metadata
+
+
+def _total_pages(payload: object) -> int:
+    meta = payload.get("_meta") if isinstance(payload, dict) else None
+    total = meta.get("totalPages") if isinstance(meta, dict) else None
+    return total if isinstance(total, int) and not isinstance(total, bool) and total > 0 else 1

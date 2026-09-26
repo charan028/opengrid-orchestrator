@@ -133,7 +133,10 @@ class ServiceTransformer:
 @dataclass(frozen=True, slots=True)
 class AggregateFlow:
     """A feeder head, substation transformer or territory boundary: the guardian's own reading of its flow
-    (import-positive, None = no reading) and its limits (None = unknown: any increase is vetoed)."""
+    (import-positive, None = no reading) and its limits (None = unknown: any increase is vetoed).
+
+    With a signed measurement `flow_kw` is exact. From an unsigned (kVA) reading the flow is an interval:
+    `flow_kw` is its import-side end and `flow_low_kw` its export-side end, and both are checked."""
 
     ref: str
     flow_kw: float | None
@@ -141,6 +144,7 @@ class AggregateFlow:
     lower_kw: float | None  # -R_rev
     upper_kw: float | None  # rho * rating
     banks: tuple[str, ...] = ()
+    flow_low_kw: float | None = None  # export-side worst case; None = `flow_kw` is exact
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +160,10 @@ class GridTopologyPort(Protocol):
     """09 S2.6: static premise, transformer, feeder and substation data plus the guardian's own flow reads."""
 
     async def hub_site(self, hub_id: str) -> HubSite | None: ...
+
+    async def hub_bank(self, hub_id: str) -> str | None:
+        """The bank og.hub places the hub on; None for a hub the topology does not know (fail closed)."""
+        ...
 
     async def transformer(self, transformer_id: str) -> ServiceTransformer | None: ...
 
@@ -318,6 +326,10 @@ class AlertPort(Protocol):
 
     async def clear_alert(self, rule: str, condition_key: str) -> None: ...
 
+    async def open_condition_keys(self, rule: str) -> list[str]:
+        """The `condition_key`s of every open alert of `rule` (escalation reconciliation)."""
+        ...
+
 
 class ScopePosturePort(Protocol):
     """ES06-S04: the per-scope posture og-guardian publishes (`og.scope_posture`) and the safe-stop REQUEST
@@ -344,6 +356,24 @@ class AsAwardPort(Protocol):
 
     async def deployment_active(self, obligation_id: UUID) -> bool:
         """An uncancelled og.as_deployment covering now, for this obligation or for every AS award."""
+        ...
+
+
+class MobileUnitPort(Protocol):
+    """D-31 / G-35: which hubs are MOBILE_STORAGE units, and whether each is at its home station now."""
+
+    def is_mobile(self, hub_or_bank_id: str) -> bool: ...
+
+    async def at_home_station(self, hub_id: str) -> bool | None:
+        """True at its home station, False away, None unknown (G-35 treats unknown as away)."""
+        ...
+
+
+class ManualTargetPort(Protocol):
+    """The guardian's own read of live operator targets (`og.trace` MANUAL_TARGET events, not expired)."""
+
+    async def manual_target_hubs(self, hub_ids: list[str]) -> set[str]:
+        """Which of `hub_ids` a live (unexpired) MANUAL_TARGET currently covers."""
         ...
 
 
@@ -455,3 +485,9 @@ class GuardianPorts:
     topology: GridTopologyPort | None = None
     # None: G-33 (K15 territory) is not wired. Production always wires it.
     territory: TerritoryPort | None = None
+    # None: no manual-target read, so no R-OPERATOR-OVERRIDE reduction is ever corroborated (VETO), and
+    # capability evidence counts operator-owned hubs as available.
+    manual_targets: ManualTargetPort | None = None
+    # None: no mobile-unit registry wired, so G-35 has nothing to check (no hub is known to be mobile).
+    # Production always wires it (`guardian.main`).
+    mobile_units: MobileUnitPort | None = None

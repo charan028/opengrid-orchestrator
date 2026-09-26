@@ -10,9 +10,12 @@ the real poll timeouts, and can be toggled off to exercise the 503 "not running"
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from .conftest import OPERATOR_HEADERS
+from .conftest import OPERATOR_HEADERS, VIEWER_HEADERS
+from .fakes import SAMPLE_HUB_ID
 
 
 def _propose_command(client) -> str:
@@ -25,39 +28,99 @@ def _propose_command(client) -> str:
     return resp.json()["proposal_id"]
 
 
-def test_command_confirm_success(client, fake_store) -> None:
+def _manual_targets(fake_trace_store) -> list[dict]:
+    records = []
+    for stream in ("operator_action:operator",):
+        records += asyncio.run(fake_trace_store._backend.fetch_range(stream, from_seq=0))
+    return [r.payload for r in records if r.event_class == "MANUAL_TARGET"]
+
+
+def test_command_confirm_records_a_manual_target_for_the_engine_to_ramp(
+    client, fake_store, fake_trace_store
+) -> None:
+    """Confirm no longer sends a one-shot batch (always vetoed by G-04's step bound): it records a K10
+    MANUAL_TARGET for the engine to ramp toward (engine/manual.py) and answers 202 RAMPING."""
     proposal_id = _propose_command(client)
     resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     body = resp.json()
-    assert body["outcome"] == "PASS"
-    assert body["trace_id"] is not None
+    assert body["status"] == "RAMPING" and body["trace_id"] and body["expires_at"]
+    assert body["hub_ids"] == [SAMPLE_HUB_ID]  # the bank selection resolved to its hubs
+    (target,) = _manual_targets(fake_trace_store)
+    assert target["hub_ids"] == [SAMPLE_HUB_ID] and target["p_kw_target"] == 3.5
+    issued, expires = (datetime.fromisoformat(target[k]) for k in ("issued_at", "expires_at"))
+    assert expires - issued == timedelta(minutes=15)  # the default hold
+    assert target["proposer"] == "operator" and target["reason"] == "demo"
+    assert fake_store.command_batches == []  # no one-shot batch any more
     assert fake_store.operator_actions[-1]["action_kind"] == "MANUAL_COMMAND"
-    assert fake_store.command_batches[-1].cycle_id == "MANUAL"
 
 
-def test_command_confirm_veto_is_409(client, fake_store) -> None:
-    fake_store.next_verdict_outcome = "VETOED"
-    fake_store.next_vetoed_rule_ids = ["G-19"]
+def test_command_duration_override_is_bounded(client, fake_trace_store) -> None:
+    resp = client.post(
+        "/og/api/fleet/command",
+        headers=OPERATOR_HEADERS,
+        json={"hub_id": SAMPLE_HUB_ID, "p_kw_setpoint": -5.0, "reason": "peak", "duration_minutes": 90},
+    )
+    proposal_id = resp.json()["proposal_id"]
+    assert (
+        client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS).status_code
+        == 202
+    )
+    (target,) = _manual_targets(fake_trace_store)
+    issued, expires = (datetime.fromisoformat(target[k]) for k in ("issued_at", "expires_at"))
+    assert expires - issued == timedelta(minutes=90) and target["p_kw_target"] == -5.0
+    too_long = client.post(
+        "/og/api/fleet/command",
+        headers=OPERATOR_HEADERS,
+        json={"hub_id": SAMPLE_HUB_ID, "p_kw_setpoint": -5.0, "reason": "x", "duration_minutes": 241},
+    )
+    assert too_long.status_code == 422
+
+
+def test_an_unknown_hub_is_404_at_confirm(client) -> None:
+    resp = client.post(
+        "/og/api/fleet/command",
+        headers=OPERATOR_HEADERS,
+        json={"hub_id": "hub-nope", "p_kw_setpoint": 1, "reason": "x"},
+    )
+    confirm = client.post(
+        f"/og/api/fleet/command/{resp.json()['proposal_id']}/confirm", headers=OPERATOR_HEADERS
+    )
+    assert confirm.status_code == 404
+
+
+def test_a_manual_target_can_be_cancelled(client, fake_store, fake_trace_store) -> None:
     proposal_id = _propose_command(client)
-    resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
-    assert resp.status_code == 409
-    assert resp.json()["detail"]["outcome"] == "VETOED"
-    assert "G-19" in resp.json()["detail"]["vetoed_rule_ids"]
+    trace_id = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS).json()[
+        "trace_id"
+    ]
+    fake_store.manual_target_hubs[trace_id] = {SAMPLE_HUB_ID: 3.5}
+    listed = client.get("/og/api/fleet/manual-targets", headers=VIEWER_HEADERS).json()["items"]
+    assert [(i["hub_id"], i["trace_id"]) for i in listed] == [(SAMPLE_HUB_ID, trace_id)]
+
+    resp = client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "CANCELLED" and resp.json()["hub_ids"] == [SAMPLE_HUB_ID]
+    cancel = _manual_targets(fake_trace_store)[-1]
+    assert cancel["hub_ids"] == [SAMPLE_HUB_ID] and cancel["cancels"] == trace_id
+    assert cancel["expires_at"] == cancel["issued_at"]  # expires now: newest target wins, and it is over
+
+    fake_store.manual_target_hubs.clear()  # no longer controls any hub
+    assert (
+        client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS).status_code
+        == 404
+    )
 
 
-def test_command_confirm_no_verdict_is_503(client, fake_store, monkeypatch) -> None:
-    """og-guardian never inserts a verdict (e.g. not running) -- polling must time out honestly."""
-    monkeypatch.setattr("opengrid.api.routers.fleet._VERDICT_POLL_TIMEOUT_S", 0.05)
-    monkeypatch.setattr("opengrid.api.routers.fleet._VERDICT_POLL_INTERVAL_S", 0.01)
-
-    async def _no_verdict(command_batch_id):
-        return None
-
-    monkeypatch.setattr(fake_store, "get_verdict", _no_verdict)
+def test_viewer_cannot_confirm_or_cancel(client) -> None:
     proposal_id = _propose_command(client)
-    resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
-    assert resp.status_code == 503
+    assert (
+        client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=VIEWER_HEADERS).status_code == 403
+    )
+    assert (
+        client.post(f"/og/api/fleet/manual-targets/{uuid4()}/cancel", headers=VIEWER_HEADERS).status_code
+        == 403
+    )
 
 
 def test_command_confirm_unknown_proposal_404(client) -> None:
@@ -68,7 +131,7 @@ def test_command_confirm_unknown_proposal_404(client) -> None:
 def test_command_confirm_is_single_use(client) -> None:
     proposal_id = _propose_command(client)
     first = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
-    assert first.status_code == 200
+    assert first.status_code == 202
     second = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
     assert second.status_code == 404
 

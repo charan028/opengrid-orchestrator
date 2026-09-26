@@ -237,3 +237,35 @@ async def test_substitute_hub_uses_the_configured_ledger_gateway(monkeypatch: py
     await substitute_hub("o1", "h1", "h2", reasons.R_SUBSTITUTION)
 
     assert ledger.substitutions == [("o1", "h1", "h2", reasons.R_SUBSTITUTION)]
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_can_re_solve_only_the_vetoed_banks() -> None:
+    """K4 fail-safe re-proposal: `only_bank_ids` re-solves just those banks."""
+    hubs = tuple(
+        HubSnapshot(
+            hub_id=f"h{b}", bank_id=b, free_discharge_kw=50.0, soc_kwh=1e6, reserve_kwh=0.0, e_kwh=1e6
+        )
+        for b in ("b1", "b2")
+    )
+    banks = tuple(BankSnapshot(bank_id=b, capability_kw=50.0, kva_rating=50.0) for b in ("b1", "b2"))
+    calls = tuple(
+        ObligationCall(
+            obligation_id=f"o-{b}",
+            bank_id=b,
+            service_type="PARTNER_CAPACITY",
+            tier="T1",
+            committed_kw=10.0,
+            eligible_hub_ids=(f"h{b}",),
+        )
+        for b in ("b1", "b2")
+    )
+    fleet = FakeFleetGateway(FleetState(hubs=hubs, banks=banks), ("b1", "b2"))
+    grants = await run_cycle(
+        "cycle-1-r1",
+        fleet=fleet,
+        ledger=FakeLedgerGateway(LedgerView(calls=calls)),
+        now=_T0,
+        only_bank_ids=["b2"],
+    )
+    assert [g.bank_id for g in grants] == ["b2"]

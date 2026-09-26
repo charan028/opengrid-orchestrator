@@ -55,6 +55,8 @@ class EngineCycleExtras:
         enforce_territory: bool = True,
         flow_limits: FlowLimits | None = None,
         flow_topology: FlowTopology | None = None,
+        excluded_hub_ids: Callable[[], frozenset[str]] | None = None,
+        operator_hub_ids: Callable[[], frozenset[str]] | None = None,
     ) -> None:
         self._trace = trace
         self._pq_context = pq_context
@@ -63,6 +65,8 @@ class EngineCycleExtras:
         self._enforce_territory = enforce_territory
         self._flow_limits = flow_limits or FlowLimits()
         self._flow_topology = flow_topology
+        self._excluded_hub_ids = excluded_hub_ids or frozenset
+        self._operator_hub_ids = operator_hub_ids or frozenset
         self._reduced: set[tuple[str, str]] = set()
         self._blocked: set[tuple[str, str | None, str]] = set()
         self._last_pq: PqDispatchContext = PqDispatchContext()
@@ -91,6 +95,8 @@ class EngineCycleExtras:
             pq=pq,
             enforce_territory=self._enforce_territory,
             flow_limits=flow_limits,
+            excluded_hub_ids=self._excluded_hub_ids(),
+            operator_hub_ids=self._operator_hub_ids(),
         )
 
     async def observe(self, result: CycleResult, ledger_view: LedgerView, now: datetime) -> None:

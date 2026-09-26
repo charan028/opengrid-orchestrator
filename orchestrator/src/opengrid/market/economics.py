@@ -299,6 +299,9 @@ ILLUSTRATIVE_ETA_RT = Decimal("0.9")
 ILLUSTRATIVE_CYCLES_PER_YEAR = Decimal("300")
 ILLUSTRATIVE_ENERGY_VALUE_USD_PER_KWH = Decimal("0.1288")  # AE value of solar, Oct 2026
 ILLUSTRATIVE_OM_FRAC = Decimal("0.03")
+#: 08 S3c's Power Partner-like capacity price. Deliberately NOT the live Austin Energy term ($102/kW-yr
+#: tolling since D-29): the S3c table is a fixed reference and must reproduce as published.
+ILLUSTRATIVE_CAPACITY_PRICE_USD_PER_KW_YR = Decimal("75")
 
 
 def illustrative_home_unit_inputs() -> UnitEconomicsInputs:
@@ -313,7 +316,7 @@ def illustrative_home_unit_inputs() -> UnitEconomicsInputs:
         charged_kwh_per_cycle=HOME_UNIT_USABLE_KWH,
         eta_rt=ILLUSTRATIVE_ETA_RT,
         cycles_per_year=ILLUSTRATIVE_CYCLES_PER_YEAR,
-        capacity_price_usd_per_kw_yr=ae.capacity_price_usd_per_kw or _ZERO,
+        capacity_price_usd_per_kw_yr=ILLUSTRATIVE_CAPACITY_PRICE_USD_PER_KW_YR,
         energy_value_usd_per_kwh=ILLUSTRATIVE_ENERGY_VALUE_USD_PER_KWH,
         charging_cost_usd_per_kwh=c_in,
         om_frac_of_capex=ILLUSTRATIVE_OM_FRAC,

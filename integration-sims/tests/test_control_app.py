@@ -28,6 +28,25 @@ async def client(tmp_path: Path) -> AsyncIterator[httpx.AsyncClient]:
         random_pause_state_path=tmp_path / "random_pause_state.json",
     )
     transport = httpx.ASGITransport(app=app)
+    # R3.1 LOW-review fix, 2026-09-26: every state-changing POST/DELETE now requires the
+    # X-OGSim-Request CSRF header (app.py's `_require_csrf_header`) -- sent here as a default header
+    # so the tests above (which predate the CSRF check and cover unrelated behaviour) keep working
+    # unchanged. The dedicated CSRF tests below build their own client without this default.
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://control.test", headers={"X-OGSim-Request": "1"}
+    ) as c:
+        yield c
+
+
+@pytest.fixture
+async def client_no_csrf_header(tmp_path: Path) -> AsyncIterator[httpx.AsyncClient]:
+    """Same app, but with NO default CSRF header -- for tests proving the header is actually enforced."""
+    app = create_app(
+        scenarios_dir=SCENARIOS_DIR,
+        random_config_path=RANDOM_CONFIG,
+        random_pause_state_path=tmp_path / "random_pause_state.json",
+    )
+    transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://control.test") as c:
         yield c
 
@@ -241,3 +260,58 @@ async def test_index_has_visible_error_handling_for_scenario_load_failures(
     text = resp.text
     assert 'id="scenarioError"' in text
     assert "could not load scenarios" in text
+
+
+# ---- R3.1 LOW-review fix, 2026-09-26: state-changing POST/DELETE endpoints require a CSRF header ---
+
+
+async def test_get_endpoints_do_not_require_the_csrf_header(client_no_csrf_header: httpx.AsyncClient):
+    """Only state-changing requests are gated -- GET must keep working with no header at all."""
+    resp = await client_no_csrf_header.get("/api/random/status")
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("POST", "/api/inject", {"type": "price_spike", "target": "*", "duration": 60.0}),
+        ("POST", "/api/scenarios/does-not-exist/run", {"speed": 1.0}),
+        ("POST", "/api/scenarios/does-not-exist/stop", None),
+        ("POST", "/api/scenarios/stop-all", None),
+        ("POST", "/api/random/pause", None),
+        ("POST", "/api/random/resume", None),
+        ("POST", "/api/random/profile", {"profile": "chaos"}),
+        ("POST", "/api/random/sims/market", {"enabled": False}),
+        ("DELETE", "/api/anomalies/does-not-exist", None),
+    ],
+)
+async def test_state_changing_endpoint_rejects_a_request_with_no_csrf_header(
+    client_no_csrf_header: httpx.AsyncClient, method: str, path: str, json_body: dict | None
+):
+    resp = await client_no_csrf_header.request(method, path, json=json_body)
+    assert resp.status_code == 403
+
+
+async def test_state_changing_endpoint_rejects_the_wrong_csrf_header_value(
+    client_no_csrf_header: httpx.AsyncClient,
+):
+    resp = await client_no_csrf_header.post("/api/random/pause", headers={"X-OGSim-Request": "yes-please"})
+    assert resp.status_code == 403
+
+
+async def test_state_changing_endpoint_accepts_the_correct_csrf_header(
+    client_no_csrf_header: httpx.AsyncClient,
+):
+    resp = await client_no_csrf_header.post("/api/random/pause", headers={"X-OGSim-Request": "1"})
+    assert resp.status_code == 200
+
+
+async def test_control_page_fetch_helper_sends_the_csrf_header_on_non_get_requests(
+    client: httpx.AsyncClient,
+):
+    """The page itself (templates/index.html's `fetchJson`) must send the header on every non-GET
+    request, or every button on the deployed page would start 403ing the moment this ships."""
+    resp = await client.get("/")
+    text = resp.text
+    assert "X-OGSim-Request" in text
+    assert "method !== 'GET'" in text

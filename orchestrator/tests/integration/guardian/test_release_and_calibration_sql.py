@@ -51,34 +51,75 @@ async def test_service_profile_query_runs(pool):
     assert await repo.PgServiceProfilePort(pool).setpoint_source(uuid4()) is None
 
 
-async def test_as_award_queries_follow_the_engine_coverage_rule(pool):
-    """R-GRANT-AS-HOLD reads: an all-AS deployment (obligation_id NULL) covering now counts for any award;
-    a cancelled one does not."""
+async def _obligation(pool, service_type: str):
     from uuid import uuid4
 
-    port = repo.PgAsAwardPort(pool)
-    award = uuid4()
-    assert await port.service_type(award) is None
+    contract_id, opportunity_id, obligation_id = uuid4(), uuid4(), uuid4()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """INSERT INTO og.contract (contract_id, customer_id, service_type, tier, profile_ref, start_at,
+                                        penalty_alpha, penalty_beta, penalty_theta, degradation_cost)
+               VALUES (%s, %s, %s, 'T2', 'it-guard@1', now(), 0.01, 0.5, 0.05, 0.03)""",
+            (contract_id, uuid4(), service_type),
+        )
+        await cur.execute(
+            """INSERT INTO og.opportunity (opportunity_id, contract_id, window_start, window_end, requested_kw)
+               VALUES (%s, %s, now() - interval '1 hour', now() + interval '1 hour', 10)""",
+            (opportunity_id, contract_id),
+        )
+        await cur.execute(
+            """INSERT INTO og.obligation (obligation_id, opportunity_id, contract_id, service_type, tier,
+                                          window_start, window_end, committed_qty_kw, state)
+               VALUES (%s, %s, %s, %s, 'T2', now() - interval '1 hour', now() + interval '1 hour', 10,
+                       'DELIVERING')""",
+            (obligation_id, opportunity_id, contract_id, service_type),
+        )
+        await conn.commit()
+    return obligation_id
+
+
+async def _deployment(pool, obligation_id) -> object:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             "INSERT INTO og.as_deployment (obligation_id, start_at, end_at, source, reason)"
-            " VALUES (NULL, now() - interval '1 minute', now() + interval '5 minutes', 'SCENARIO', 'it-guard')"
-            " RETURNING deployment_id"
+            " VALUES (%s, now() - interval '1 minute', now() + interval '5 minutes', 'SCENARIO', 'it-guard')"
+            " RETURNING deployment_id",
+            (obligation_id,),
         )
         row = await cur.fetchone()
-        assert row is not None
         await conn.commit()
+    assert row is not None
+    return row[0]
+
+
+async def test_as_award_queries_follow_the_engine_coverage_rule(pool):
+    """R-GRANT-AS-HOLD reads, the engine's own coverage rule (D-29): an all-AS deployment (obligation_id NULL)
+    covers every ERCOT_AS award but no other service (a utility toll is deployed only by a row naming it);
+    a row naming the obligation covers it; a cancelled one does not."""
+    from uuid import uuid4
+
+    port = repo.PgAsAwardPort(pool)
+    assert await port.service_type(uuid4()) is None
+    award = await _obligation(pool, "ERCOT_AS")
+    other = await _obligation(pool, "ERCOT_ENERGY")
+    assert await port.service_type(award) == "ERCOT_AS"
+    all_as = await _deployment(pool, None)
+    deployments = [all_as]
     try:
         assert await port.deployment_active(award) is True
+        assert await port.deployment_active(other) is False  # a NULL row never covers a non-AS service
+        assert await port.deployment_active(uuid4()) is False  # an unknown obligation matches nothing
+        deployments.append(await _deployment(pool, other))
+        assert await port.deployment_active(other) is True  # its own row does
         async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "UPDATE og.as_deployment SET cancelled_at = now() WHERE deployment_id = %s", (row[0],)
+                "UPDATE og.as_deployment SET cancelled_at = now() WHERE deployment_id = %s", (all_as,)
             )
             await conn.commit()
         assert await port.deployment_active(award) is False
     finally:
         async with pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute("DELETE FROM og.as_deployment WHERE deployment_id = %s", (row[0],))
+            await cur.execute("DELETE FROM og.as_deployment WHERE deployment_id = ANY(%s)", (deployments,))
             await conn.commit()
 
 
@@ -126,3 +167,31 @@ async def test_flow_topology_and_territory_queries_run(pool):
     assert await territory.obligation_market(uuid4()) is None
     assert await territory.free_access("AUSTIN_ENERGY") in (True, False)
     assert await territory.hub_zone("no-such-hub") is None
+
+
+async def test_manual_target_read_sees_only_live_targets(pool):
+    """G-19 R-OPERATOR-OVERRIDE evidence: the guardian's own read of MANUAL_TARGET trace events (the
+    `engine.manual` payload contract). Expired targets and hubs not asked about are not returned."""
+    from uuid import uuid4
+
+    port = repo.PgManualTargetPort(pool)
+    live, gone = f"hub-it-{uuid4().hex[:6]}", f"hub-it-{uuid4().hex[:6]}"
+    stream = f"it-manual-{uuid4().hex[:8]}"
+    async with pool.connection() as conn, conn.cursor() as cur:
+        for seq, (hub, minutes) in enumerate(((live, 10), (gone, -10))):
+            await cur.execute(
+                """INSERT INTO og.trace (trace_id, stream_id, seq, decision_type, event_class, payload, hash)
+                   VALUES (%s, %s, %s, 'OPERATOR_ACTION', 'MANUAL_TARGET',
+                           jsonb_build_object('hub_ids', jsonb_build_array(%s::text), 'p_kw_target', -5.0,
+                                              'expires_at', (now() + make_interval(mins => %s))::text),
+                           %s)""",
+                (uuid4(), stream, seq, hub, minutes, uuid4().hex),
+            )
+        await conn.commit()
+    try:
+        assert await port.manual_target_hubs([live, gone, "hub-unrelated"]) == {live}
+        assert await port.manual_target_hubs([]) == set()
+    finally:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("DELETE FROM og.trace WHERE stream_id = %s", (stream,))
+            await conn.commit()

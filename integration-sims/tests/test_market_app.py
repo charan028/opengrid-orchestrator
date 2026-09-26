@@ -312,6 +312,51 @@ async def test_admin_anomaly_reverts_deterministically_via_injected_clock():
         assert 5000.0 not in reverted_prices
 
 
+async def test_admin_anomaly_revert_has_no_real_wall_clock_dependence():
+    """Regression test (build phase, 2026-09-26): `test_admin_anomaly_reverts_deterministically_via_
+    injected_clock` above intermittently failed depending on the REAL wall-clock time it happened to
+    run at, because `routes_admin.inject_anomaly` called `AnomalyStore.sweep_expired()` with no `now`
+    argument, defaulting to real `time.time()` instead of the injected fake clock -- once the real
+    clock drifted far enough past the fake clock's `start + duration + EXPIRY_GRACE_PERIOD_S` window,
+    the anomaly was swept the instant it was injected, before any caller ever observed it as active.
+    Fixed by passing `rt.now().timestamp()` explicitly. This test pins the fake clock to a date FAR
+    from whatever the real wall clock reads (deliberately in the past AND, separately, in the future)
+    to prove the outcome no longer depends on the gap between them at all."""
+    for fake_now in (datetime(2000, 1, 1, tzinfo=UTC), datetime(2099, 1, 1, tzinfo=UTC)):
+        clock = _FakeClock(fake_now)
+        cfg = MarketConfig(data_mode="synthetic", seed=7, test_users={TEST_USER: TEST_PASSWORD})
+        app = create_app(cfg, clock=clock)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://market.test") as client:
+            await client.post(
+                "/admin/anomalies",
+                json={
+                    "id": "revert-1",
+                    "type": "price_spike",
+                    "target": "np6-905-cd",
+                    "params": {"value_usd_per_mwh": 5000.0},
+                    "duration": 10.0,
+                },
+            )
+            active_resp = await client.get(
+                "/ercot/np6-905-cd/spp_node_zone_hub",
+                params={"settlementPoint": "LZ_NORTH"},
+                headers=_headers(),
+            )
+            active_prices = [row[5] for row in active_resp.json()["data"]]
+            assert 5000.0 in active_prices, f"anomaly never became active with fake clock at {fake_now}"
+
+            clock.advance(11.0)  # past the 10s duration -- no real sleep
+
+            reverted_resp = await client.get(
+                "/ercot/np6-905-cd/spp_node_zone_hub",
+                params={"settlementPoint": "LZ_NORTH"},
+                headers=_headers(),
+            )
+            reverted_prices = [row[5] for row in reverted_resp.json()["data"]]
+            assert 5000.0 not in reverted_prices, f"anomaly never reverted with fake clock at {fake_now}"
+
+
 async def test_as_endpoint_uses_ancillary_type_codes(client: httpx.AsyncClient):
     resp = await client.get("/ercot/np4-188-cd/dam_clear_price_for_cap", headers=_headers())
     ancillary_types = {row[3] for row in resp.json()["data"]}

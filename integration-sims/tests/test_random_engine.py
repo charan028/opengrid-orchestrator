@@ -159,11 +159,36 @@ def test_missing_pause_state_file_uses_the_config_default(tmp_path) -> None:
     assert engine.config.paused is True  # falls through to the config's own default, unchanged
 
 
-def test_corrupt_pause_state_file_does_not_crash(tmp_path) -> None:
+def test_corrupt_pause_state_file_fails_closed_paused_and_does_not_crash(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R3.1 LOW-review fix, 2026-09-26: a corrupt (unparseable) state file used to fall through to
+    the config's own default (fail OPEN) -- if that default happened to be unpaused, a disk
+    corruption or truncated write would silently resume random injection. It must fail CLOSED
+    (paused) instead, with a warning logged, regardless of the config's own `paused:` default."""
     state_path = tmp_path / "corrupt.json"
     state_path.write_text("{not valid json", encoding="utf-8")
-    engine = RandomEngine(Injector(), RandomEngineConfig(seed=1), pause_state_path=str(state_path))
-    assert engine.config.paused is False  # falls back to the config default rather than raising
+    with caplog.at_level("WARNING"):
+        engine = RandomEngine(
+            Injector(), RandomEngineConfig(seed=1, paused=False), pause_state_path=str(state_path)
+        )
+    assert engine.config.paused is True  # fails closed even though the config default is unpaused
+    assert any("unreadable/corrupt" in record.message for record in caplog.records)
+
+
+def test_pause_state_file_with_a_non_boolean_paused_field_fails_closed(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Valid JSON but a malformed/missing 'paused' field (e.g. a future schema change, or a
+    half-written file) must also fail closed, not silently fall through to the config default."""
+    state_path = tmp_path / "malformed.json"
+    state_path.write_text('{"paused": "not-a-bool"}', encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        engine = RandomEngine(
+            Injector(), RandomEngineConfig(seed=1, paused=False), pause_state_path=str(state_path)
+        )
+    assert engine.config.paused is True
+    assert any("boolean 'paused' field" in record.message for record in caplog.records)
 
 
 def _engine_with_type(**config_overrides: object) -> tuple[RandomEngine, Injector]:

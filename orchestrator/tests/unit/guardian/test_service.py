@@ -14,6 +14,7 @@ from uuid import uuid4
 import pytest
 
 from opengrid.core.crypto import generate_keypair, verify_payload
+from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import L2Instruction, ProposedItem
 
@@ -928,6 +929,24 @@ async def test_another_obligation_within_its_commitment_does_not_block_an_as_hol
     assert (await service.evaluate_and_sign(make_batch_row(proposal))).outcome == "PASS"
 
 
+async def test_a_regulated_capacity_toll_hold_is_corroborated_like_an_as_award(
+    fakes, guardian_config, signing_seed
+):
+    """D-29: DISPATCH holds a REGULATED_CAPACITY utility toll at 0 kW with R-GRANT-AS-HOLD until its own
+    og.as_deployment row is active; G-19 signs the hold, and vetoes it while the toll is deployed."""
+    proposal, toll_id = _as_hold_batch(fakes)
+    held = _as_hold_service(
+        fakes, guardian_config, signing_seed, _AsAwards({toll_id: "REGULATED_CAPACITY"}, set())
+    )
+    assert (await held.evaluate_and_sign(make_batch_row(proposal))).outcome == "PASS"
+
+    deployed = _as_hold_service(
+        fakes, guardian_config, signing_seed, _AsAwards({toll_id: "REGULATED_CAPACITY"}, {toll_id})
+    )
+    verdict = await deployed.evaluate_and_sign(make_batch_row(replace(proposal, seq=proposal.seq + 1)))
+    assert "G-19" in verdict.vetoed_rule_ids and "AS_HOLD_WHILE_DEPLOYED" in _g19_reasons(fakes)
+
+
 @pytest.mark.parametrize("service_type", ["ERCOT_ENERGY", "PIPELINE", None])
 async def test_as_hold_claimed_on_a_non_as_obligation_is_vetoed(
     fakes, guardian_config, signing_seed, service_type
@@ -1114,6 +1133,39 @@ async def test_a_failed_verdict_trace_is_counted_and_alerted_and_the_verdict_sta
     assert verdict.outcome == "PASS" and verdict.signature is not None
     assert guardian_trace_verdict_failures_total._value.get() == before + 1
     assert alerts.calls == [("raise", "ALR-TRACE-VERDICT-WRITE-FAILED", "warning")]
+
+
+async def test_the_verdict_trace_lists_every_hub_with_an_item_level_veto(
+    fakes, guardian_config, signing_seed
+):
+    """DISPATCH's K4 re-solve: `violations` keeps one example hub per (rule, reason); `vetoed_hub_ids` is the
+    full list of hubs vetoed at item level."""
+    items = [
+        ProposedItem("hub-0001", 999.0, "SELECTOR"),
+        ProposedItem("hub-0002", 999.0, "SELECTOR"),
+        ProposedItem("hub-0003", 1.0, "SELECTOR"),
+    ]
+    proposal = replace(make_proposal(), items=items)
+    wire_default_passing_scenario(fakes, proposal)
+    fakes.banks.banks[BANK_ID] = make_bank_snapshot(bank_load_kva=10.0, kva_rating=10_000.0)
+
+    await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(make_batch_row(proposal))
+
+    payload = fakes.trace.appended[-1][1]
+    assert payload["vetoed_hub_ids"] == ["hub-0001", "hub-0002"]
+    assert len([v for v in payload["violations"] if v["rule_id"] == "G-02"]) == 1  # the summary stays compact
+
+
+def test_vetoed_hub_ids_ignores_batch_level_rules():
+    from opengrid.guardian.service import vetoed_hub_ids
+
+    violations = [
+        CheckOutcome("G-02", False, "HUB_POWER_LIMIT", "hub-b"),
+        CheckOutcome("G-02", False, "HUB_POWER_LIMIT", "hub-a"),
+        CheckOutcome("G-03", False, "BANK_KVA_LIMIT", "bank-1"),
+        CheckOutcome("G-19", False, "X", obligation_id="o-1"),
+    ]
+    assert vetoed_hub_ids(violations) == ["hub-a", "hub-b"]
 
 
 async def test_a_written_verdict_trace_raises_no_alert(fakes, guardian_config, signing_seed):

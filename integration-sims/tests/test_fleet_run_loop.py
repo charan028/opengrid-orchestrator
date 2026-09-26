@@ -34,12 +34,21 @@ class _FakeBatchClient:
         default_factory=list
     )
     fail_next: bool = False
+    publish_validated_calls: list[tuple[str, str, dict[str, Any], int, bool]] = field(default_factory=list)
 
     def topic(self, suffix: str) -> str:
         return f"{self.topic_root}/{suffix}"
 
     async def subscribe(self, suffix: str, qos: int = 1) -> None:
         self.subscriptions.append(suffix)
+
+    async def publish_validated(
+        self, schema_name: str, suffix: str, message: dict[str, Any], qos: int = 0, retain: bool = False
+    ) -> None:
+        # Device-info records this call (bug fix, 2026-09-26, R3) -- distinct from `publish_batch`
+        # so `_PUBLISHES_PER_TICK`'s per-tick accounting below is unaffected (this fires once, at
+        # connect, before the tick loop starts).
+        self.publish_validated_calls.append((schema_name, suffix, message, qos, retain))
 
     async def publish_batch(
         self, schema_name: str, items: list[tuple[str, dict[str, Any]]], qos: int = 0
@@ -54,14 +63,31 @@ class _FakeBatchClient:
         return [items for schema, items in self.publish_batches_by_schema if schema == "telemetry"]
 
 
-# `run_fleet` makes one `publish_batch` call per tick for each of: telemetry, the
-# WP-H PQ waveform summary, and the WP-H rotating raw-capture audit sample (S6.4/S7.4).
+# `run_fleet` makes one `publish_batch` call per PHYSICS tick for each of: the WP-H PQ waveform
+# summary and the WP-H rotating raw-capture audit sample (S6.4/S7.4) -- both independently rate-gated
+# by their own schedulers, so evaluating them every physics tick is correct even though telemetry
+# itself now only publishes every `telemetry_interval_s` (V-32, 2026-09-26: decoupled from the 2 s
+# physics tick, see `FleetConfig.physics_tick_interval_s`'s docstring).
+_PUBLISHES_PER_PHYSICS_TICK_EXCLUDING_TELEMETRY = 2
+# When telemetry IS due on a given physics tick (e.g. the very first tick, or once
+# telemetry_interval_s has actually elapsed), all three publish together.
 _PUBLISHES_PER_TICK = 3
 
 
 @pytest.fixture
 def engine() -> FleetEngine:
-    config = dc_replace(load_fleet_config(), mqtt=MQTT, hub_count=4, bank_count=1, zones=("LZ_NORTH",))
+    # Explicit cadences (not just inherited from the shipped fleet.yaml) so this test's timing math
+    # is stable regardless of future config changes: a 5:1 telemetry:physics ratio, matching
+    # production (V-32, 2026-09-26).
+    config = dc_replace(
+        load_fleet_config(),
+        mqtt=MQTT,
+        hub_count=4,
+        bank_count=1,
+        zones=("LZ_NORTH",),
+        physics_tick_interval_s=2.0,
+        telemetry_interval_s=10.0,
+    )
     return FleetEngine(config, seed=1)
 
 
@@ -74,33 +100,46 @@ def guardian_key_stub() -> Any:
     return Ed25519PrivateKey.generate().public_key()
 
 
-async def test_run_fleet_publishes_telemetry_every_tick_indefinitely(engine: FleetEngine) -> None:
+async def test_run_fleet_physics_ticks_every_2s_but_telemetry_only_every_10s(
+    engine: FleetEngine,
+) -> None:
+    """V-32, 2026-09-26: physics (and the wave/PQ-audit publishes, both independently rate-gated by
+    their own schedulers) run on `physics_tick_interval_s` (2 s); telemetry only publishes once
+    `telemetry_interval_s` (10 s, a 5:1 ratio in this fixture) has actually elapsed."""
     client = _FakeBatchClient()
     clock = FakeClock()
     task = asyncio.create_task(run_fleet(client, engine, clock, guardian_key_stub()))
     try:
-        # Let the loop reach its first `clock.sleep` (first tick already published), then advance
-        # through several more intervals -- each advance must produce exactly one more publish.
         for _ in range(50):
-            await asyncio.sleep(0)
-        for tick in range(1, 6):
-            clock.advance(engine.config.telemetry_interval_s)
+            await asyncio.sleep(0)  # let the loop reach its first sleep (first tick already published)
+        assert len(client.telemetry_batches()) == 1  # always publishes on the very first tick
+
+        ratio = round(engine.config.telemetry_interval_s / engine.config.physics_tick_interval_s)
+        assert ratio == 5
+        for physics_tick in range(1, ratio):  # physics ticks 2..5: telemetry not yet due
+            clock.advance(engine.config.physics_tick_interval_s)
             for _ in range(50):
                 await asyncio.sleep(0)
-            assert len(client.publish_batches) == (tick + 1) * _PUBLISHES_PER_TICK, (
-                "expected one telemetry + one PQ-summary + one PQ-raw-audit publish per elapsed interval"
+            assert len(client.telemetry_batches()) == 1, (
+                f"telemetry re-published early at tick {physics_tick + 1}"
             )
+            # Every physics tick still publishes the wave summary + raw-audit batches.
+            assert len(client.publish_batches_by_schema) == (physics_tick + 1) * 2 + 1
+
+        clock.advance(engine.config.physics_tick_interval_s)  # the 5th physics tick: telemetry is due
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert len(client.telemetry_batches()) == 2
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    assert len(client.publish_batches) == 6 * _PUBLISHES_PER_TICK
     # Every published telemetry batch actually carries telemetry for the fleet's hubs.
-    telemetry_batches = client.telemetry_batches()
-    assert len(telemetry_batches) == 6
-    for batch in telemetry_batches:
-        assert len(batch) == engine.config.hub_count
+    for batch in client.telemetry_batches():
+        # Not `engine.config.hub_count`: a config-driven substation asset (D-29(b)) adds hubs on top
+        # of the base home-fleet count, so the real fleet size is `len(engine.state.hub_ids)`.
+        assert len(batch) == len(engine.state.hub_ids)
 
 
 async def test_run_fleet_survives_a_transient_publish_failure_and_keeps_ticking(

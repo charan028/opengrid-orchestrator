@@ -20,6 +20,7 @@ from opengrid.health.model import (
     HubHealthState,
     ProcessHealth,
     ProcessStatus,
+    normalize_feed_key,
 )
 
 
@@ -136,14 +137,36 @@ def evaluate_feed_alert(
     return None
 
 
+def _normalized_firm_blocking_feeds(thresholds: HealthThresholds) -> frozenset[str]:
+    """`thresholds.firm_blocking_feeds` re-normalised at comparison time: `HealthThresholds.from_config`
+    already normalises via `_resolve_firm_blocking_feeds`, but a directly-constructed `HealthThresholds`
+    (e.g. in tests, or a future caller) may not have -- normalising here too means membership checks are
+    correct either way, not just when the config path was used."""
+    return frozenset(normalize_feed_key(*entry.split(":", 1)) for entry in thresholds.firm_blocking_feeds)
+
+
 def is_firm_blocking_feed(feed_status: FeedStatus, *, thresholds: HealthThresholds) -> bool:
     """R3 hotfix: whether `feed_status` is one of the feeds `NO_NEW_COMMITMENTS` (02b S6.5 row 1) may
-    gate on -- `thresholds.firm_blocking_feeds`, keyed `"{source}:{product}"`. Every feed still raises its
-    own `ALR-FEED-STALE`/`ALR-FEED-LGV-EXHAUSTED` regardless of this check (see `evaluate_feed_alert`,
-    called unconditionally); this only narrows which stale feeds are allowed to block new commitments --
-    previously ANY stale feed did, including ERCOT system-load ACTUALS (np6-345-cd), NWS and the EIA
-    fallback, none of which feed firm pricing, which blocked production commitments for no reason."""
-    return f"{feed_status.source}:{feed_status.product}" in thresholds.firm_blocking_feeds
+    gate on -- `thresholds.firm_blocking_feeds`, keyed by `normalize_feed_key(source, product)`. Every
+    feed still raises its own `ALR-FEED-STALE`/`ALR-FEED-LGV-EXHAUSTED` regardless of this check (see
+    `evaluate_feed_alert`, called unconditionally); this only narrows which stale feeds are allowed to
+    block new commitments -- previously ANY stale feed did, including ERCOT system-load ACTUALS
+    (np6-345-cd), NWS and the EIA fallback, none of which feed firm pricing, which blocked production
+    commitments for no reason."""
+    key = normalize_feed_key(feed_status.source, feed_status.product)
+    return key in _normalized_firm_blocking_feeds(thresholds)
+
+
+def missing_firm_blocking_feeds(
+    feed_statuses: Iterable[FeedStatus], *, thresholds: HealthThresholds
+) -> frozenset[str]:
+    """R3 review fix (MEDIUM): the `NO_NEW_COMMITMENTS` feed-staleness check used to only iterate
+    EXISTING `feed_status` rows, so a blocking feed with NO row at all (a fresh database, or a deleted
+    row) was silently treated as fine -- it blocked nothing, disabling the very protection
+    `firm_blocking_feeds` exists for. Returns the subset of `thresholds.firm_blocking_feeds` that have no
+    matching `feed_status` row; a non-empty result must be treated the same as a stale reading."""
+    present = {normalize_feed_key(fs.source, fs.product) for fs in feed_statuses}
+    return _normalized_firm_blocking_feeds(thresholds) - present
 
 
 def is_fallback_feed_needed(
@@ -234,6 +257,38 @@ def evaluate_scada_silent_alert(
         condition_key="ALR-SCADA-SILENT",
         detail={
             "latest_scada_seen_at": latest_scada_seen_at.isoformat() if latest_scada_seen_at else None,
+        },
+    )
+
+
+def evaluate_per_bank_scada_silent_alert(
+    bank_id: str, latest_seen_at: datetime | None, *, now: datetime, thresholds: HealthThresholds
+) -> AlertFinding | None:
+    """ALR-SCADA-SILENT-BANK (warning, DM-09 / ES07-S02, R3 review fix): a single bank's own SCADA
+    reading has gone silent for over `scada_silent_s`, even while OTHER banks keep reporting.
+
+    The fleet-wide `evaluate_scada_silent_alert` (critical) only looks at the FRESHEST reading across the
+    whole fleet, so one bank's feed silently dying while every other bank keeps reporting never moved that
+    freshest timestamp and was invisible -- this per-bank check is independent and stays alongside the
+    fleet-wide one (both can be open at once). Cold start (`latest_seen_at=None`, this bank has never
+    reported) is not silent, same rule as `is_scada_silent`.
+
+    Rate-limited for free: `condition_key` is scoped per bank (`ALR-SCADA-SILENT-BANK:{bank_id}`), so
+    `evaluate_alerts()`'s usual raise-once/clear-on-resolve wiring only raises it once per bank per
+    silence episode, not every cycle.
+    """
+    if latest_seen_at is None or not is_stale(latest_seen_at, thresholds.scada_silent_s, now=now):
+        return None
+    return AlertFinding(
+        rule="ALR-SCADA-SILENT-BANK",
+        severity="warning",
+        summary=f"Bank {bank_id} SCADA silent for over {thresholds.scada_silent_s:.0f}s (DM-09)",
+        condition_key=f"ALR-SCADA-SILENT-BANK:{bank_id}",
+        detail={
+            "bank_id": bank_id,
+            "scope_kind": "BANK",
+            "scope_ref": bank_id,
+            "latest_seen_at": latest_seen_at.isoformat(),
         },
     )
 

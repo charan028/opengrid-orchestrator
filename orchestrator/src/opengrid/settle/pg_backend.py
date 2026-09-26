@@ -8,6 +8,7 @@ Kept separate from `opengrid.settle.backend` so the Protocol + pure orchestratio
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -20,6 +21,15 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.market import Utility, UtilityId
 from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK
+from opengrid.core.solar_share import (
+    ERCOT_SOLAR_ACTUAL_SERIES,
+    ERCOT_SOLAR_PRODUCT,
+    ERCOT_SYSTEM_LOAD_PRODUCT,
+    ERCOT_SYSTEM_LOAD_SERIES,
+    SolarShare,
+    solar_part_of_charge_kw,
+    solar_share,
+)
 from opengrid.settle.backend import (
     ExistingInvoiceLineRow,
     ExistingMeterInterval,
@@ -33,7 +43,6 @@ from opengrid.settle.models import (
     PenaltyParams,
     PowerSample,
     QualityFlag,
-    ZoneChargeEnergy,
 )
 
 _FETCH_CONTEXT_SQL = """
@@ -180,21 +189,66 @@ GROUP BY b.m
 ORDER BY b.m
 """
 
-#: 09 D5's M1 delivery charge, fleet-level proxy per load zone (review fix 2026-09-26: the previous
-#: per-obligation query only counted charging DURING the obligation's own delivery interval, when its banks
-#: are discharging, so M1 settled at ~$0). Every charging sample of every hub in the zone over the window
-#: (`p_kw > 0` is charging -- `_FETCH_TELEMETRY_SQL` meters discharge as `-p_kw`): the charging power, and
-#: the part of it the grid supplied, i.e. beyond the home's PV surplus (`pv_kw - home_load_kw`, migration
-#: 0027; NULL PV = no PV, NULL home load = none, so all PV counts as surplus). Summed over the same samples,
-#: so `ZoneChargeEnergy.grid_share` is cadence-independent.
-_FETCH_ZONE_CHARGE_SQL = """
-SELECT
-    coalesce(sum(t.p_kw), 0) AS charge_kw_sum,
-    coalesce(sum(greatest(
-        t.p_kw - greatest(coalesce(t.pv_kw, 0) - greatest(coalesce(t.home_load_kw, 0), 0), 0), 0
-    )), 0) AS grid_charge_kw_sum
+#: M1 / D-28 source 1 (`opengrid.core.solar_share`): the zone's charging samples (`p_kw > 0` is charging --
+#: `_FETCH_TELEMETRY_SQL` meters discharge as `-p_kw`) from hubs that REPORT PV (`pv_kw`, migration 0027). A
+#: hub with no PV reading does not report -- it is left out (then ERCOT, then 30%), never counted as zero PV.
+#: Averaged per hub and 15 minutes (with the sample count as weight) so a day of 2 s samples stays a few rows
+#: per hub; the per-sample solar part is then taken by the core rule itself, never re-derived in SQL.
+_FETCH_ZONE_PV_CHARGING_SQL = """
+SELECT count(*) AS n, avg(t.p_kw) AS charge_kw, avg(t.pv_kw) AS pv_kw, avg(t.home_load_kw) AS home_load_kw,
+       NULL::double precision AS charge_pv_kw, NULL::double precision AS charge_grid_kw
 FROM og.telemetry t JOIN og.hub h USING (hub_id)
-WHERE h.zone = %(zone)s AND t.ts >= %(window_start)s AND t.ts < %(window_end)s AND t.p_kw > 0
+WHERE h.zone = %(zone)s AND t.ts >= %(window_start)s AND t.ts < %(window_end)s
+  AND t.p_kw > 0 AND t.pv_kw IS NOT NULL
+GROUP BY t.hub_id, date_trunc('hour', t.ts), floor(extract(minute FROM t.ts) / 15)
+"""
+
+#: The same, once migration 0034 adds the hub's own charge split (`og.telemetry.charge_pv_kw` /
+#: `charge_grid_kw`): a sample reporting the split OR PV counts as reporting, and the core rule prefers the
+#: split over PV minus home load. Chosen by a column-existence check (`_TELEMETRY_SPLIT_COLUMNS_SQL`).
+_FETCH_ZONE_SPLIT_CHARGING_SQL = """
+SELECT count(*) AS n, avg(t.p_kw) AS charge_kw, avg(t.pv_kw) AS pv_kw, avg(t.home_load_kw) AS home_load_kw,
+       avg(t.charge_pv_kw) AS charge_pv_kw, avg(t.charge_grid_kw) AS charge_grid_kw
+FROM og.telemetry t JOIN og.hub h USING (hub_id)
+WHERE h.zone = %(zone)s AND t.ts >= %(window_start)s AND t.ts < %(window_end)s
+  AND t.p_kw > 0 AND (t.pv_kw IS NOT NULL OR t.charge_pv_kw IS NOT NULL OR t.charge_grid_kw IS NOT NULL)
+GROUP BY t.hub_id, date_trunc('hour', t.ts), floor(extract(minute FROM t.ts) / 15)
+"""
+
+#: Both split columns present on og.telemetry (migration 0034)?
+_TELEMETRY_SPLIT_COLUMNS_SQL = """
+SELECT count(*) = 2 AS present FROM information_schema.columns
+WHERE table_schema = 'og' AND table_name = 'telemetry' AND column_name IN ('charge_pv_kw', 'charge_grid_kw')
+"""
+#: How long a column-existence answer is reused, so a migration applied while og-settle runs is picked up.
+_COLUMN_CHECK_TTL_S = 300.0
+
+#: D-28 source 2: ERCOT's solar share of system load (the feeds named in `core.solar_share`, shared with
+#: the selector -- a settled window is past, so actual solar, never forecast) for the window's hours, weighted
+#: by the zone's charging in each hour (charging is mostly overnight, when the solar share is ~0); the plain
+#: hourly average when the zone did not charge in any hour with a share. NULL when the feed has nothing.
+_FETCH_ERCOT_SOLAR_SHARE_SQL = """
+WITH share AS (
+    SELECT date_trunc('hour', s.ts) AS hr, avg(s.value / nullif(l.value, 0)) AS share
+    FROM og.feed_obs s
+    JOIN og.feed_obs l
+      ON l.source = 'ERCOT' AND l.product = %(load_product)s AND l.series = %(load_series)s
+     AND date_trunc('hour', l.ts) = date_trunc('hour', s.ts)
+    WHERE s.source = 'ERCOT' AND s.product = %(product)s AND s.series = %(series)s
+      AND s.ts >= %(window_start)s AND s.ts < %(window_end)s
+    GROUP BY 1
+),
+charge AS (
+    SELECT date_trunc('hour', t.ts) AS hr, sum(t.p_kw) AS kw
+    FROM og.telemetry t JOIN og.hub h USING (hub_id)
+    WHERE h.zone = %(zone)s AND t.ts >= %(window_start)s AND t.ts < %(window_end)s AND t.p_kw > 0
+    GROUP BY 1
+)
+SELECT coalesce(
+    (SELECT sum(c.kw * s.share) / nullif(sum(c.kw), 0) FROM charge c JOIN share s USING (hr)
+     WHERE s.share IS NOT NULL),
+    (SELECT avg(share) FROM share)
+) AS share
 """
 
 #: ALR-ENERGY-SHORTFALL-RISK open for the obligation at any time in the interval. The rule's detail
@@ -342,7 +396,13 @@ WHERE utility_id = %(utility_id)s
 
 
 _logger = logging.getLogger(__name__)
-_ZONE_CHARGE_CACHE_MAX = 256  # (zone, window) entries; cleared wholesale when full
+_SOLAR_SHARE_CACHE_MAX = 256  # (zone, window) entries; cleared wholesale when full
+
+
+def _dec_or_none(value: object) -> Decimal | None:
+    return None if value is None else Decimal(str(value))
+
+
 _ZERO = Decimal("0")
 _KWH_PER_MWH = Decimal("1000")
 
@@ -393,9 +453,23 @@ class PgSettleBackend:
     process, per `opengrid.platform.db.make_pool`."""
 
     pool: AsyncConnectionPool
-    _zone_charge_cache: dict[tuple[str, datetime, datetime], ZoneChargeEnergy] = field(
+    _solar_share_cache: dict[tuple[str, datetime, datetime], SolarShare] = field(
         default_factory=dict, compare=False, repr=False
     )
+    #: "split" -> (monotonic checked-at, telemetry has charge_pv_kw/charge_grid_kw)
+    _column_check: dict[str, tuple[float, bool]] = field(default_factory=dict, compare=False, repr=False)
+
+    async def _telemetry_has_charge_split(self, cur: Any) -> bool:
+        """Guarded read: migration 0034's split columns exist (dict-row cursor), re-checked every few minutes."""
+        cached = self._column_check.get("split")
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < _COLUMN_CHECK_TTL_S:
+            return cached[1]
+        await cur.execute(_TELEMETRY_SPLIT_COLUMNS_SQL)
+        row = await cur.fetchone()
+        present = bool(row["present"]) if row else False
+        self._column_check["split"] = (now, present)
+        return present
 
     async def fetch_context(
         self, obligation_id: UUID, interval_start: datetime | None = None
@@ -717,28 +791,56 @@ class PgSettleBackend:
         # this interval rather than fabricate one (BUILD.md S5a: "no silent fallbacks").
         return None
 
-    async def fetch_zone_charge_energy(
+    async def fetch_zone_solar_share(
         self, zone: str, window_start: datetime, window_end: datetime
-    ) -> ZoneChargeEnergy:
-        # Cached per (zone, window): settle asks for the same trailing window for every obligation of a
-        # zone in a cycle, and the scan covers a whole day of that zone's charging samples.
+    ) -> SolarShare:
+        # Cached per (zone, window): settle asks for the same hour-aligned trailing window for every
+        # obligation of a zone, and the scan covers a whole day of that zone's charging samples.
         key = (zone, window_start, window_end)
-        cached = self._zone_charge_cache.get(key)
+        cached = self._solar_share_cache.get(key)
         if cached is not None:
             return cached
+        params = {"zone": zone, "window_start": window_start, "window_end": window_end}
+        charge_sum, solar_sum = Decimal("0"), Decimal("0")
+        ercot: Decimal | None = None
         async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            split = await self._telemetry_has_charge_split(cur)
             await cur.execute(
-                _FETCH_ZONE_CHARGE_SQL, {"zone": zone, "window_start": window_start, "window_end": window_end}
+                _FETCH_ZONE_SPLIT_CHARGING_SQL if split else _FETCH_ZONE_PV_CHARGING_SQL, params
             )
-            row = await cur.fetchone()
-        energy = ZoneChargeEnergy(
-            charge_kw_sum=Decimal(str(row["charge_kw_sum"])) if row else Decimal("0"),
-            grid_charge_kw_sum=Decimal(str(row["grid_charge_kw_sum"])) if row else Decimal("0"),
+            for row in await cur.fetchall():
+                n, charge_kw = Decimal(row["n"]), _dec_or_none(row["charge_kw"]) or Decimal("0")
+                solar_kw = solar_part_of_charge_kw(
+                    charge_kw,
+                    charge_pv_kw=_dec_or_none(row["charge_pv_kw"]),
+                    charge_grid_kw=_dec_or_none(row["charge_grid_kw"]),
+                    pv_kw=_dec_or_none(row["pv_kw"]),
+                    home_load_kw=_dec_or_none(row["home_load_kw"]),
+                )
+                if solar_kw is None:  # cannot happen for a PV-reporting row; never guessed if it does
+                    continue
+                charge_sum += charge_kw * n
+                solar_sum += solar_kw * n
+            if charge_sum <= 0:  # only then is source 2 needed (source 1 wins whenever it exists)
+                await cur.execute(
+                    _FETCH_ERCOT_SOLAR_SHARE_SQL,
+                    {
+                        **params,
+                        "product": ERCOT_SOLAR_PRODUCT,
+                        "series": ERCOT_SOLAR_ACTUAL_SERIES,
+                        "load_product": ERCOT_SYSTEM_LOAD_PRODUCT,
+                        "load_series": ERCOT_SYSTEM_LOAD_SERIES,
+                    },
+                )
+                ercot_row = await cur.fetchone()
+                ercot = _dec_or_none(ercot_row["share"]) if ercot_row else None
+        share = solar_share(
+            measured_charge_kw_sum=charge_sum, measured_solar_kw_sum=solar_sum, ercot_solar_share=ercot
         )
-        if len(self._zone_charge_cache) >= _ZONE_CHARGE_CACHE_MAX:
-            self._zone_charge_cache.clear()
-        self._zone_charge_cache[key] = energy
-        return energy
+        if len(self._solar_share_cache) >= _SOLAR_SHARE_CACHE_MAX:
+            self._solar_share_cache.clear()
+        self._solar_share_cache[key] = share
+        return share
 
     async def fetch_shortfall_risk_open(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

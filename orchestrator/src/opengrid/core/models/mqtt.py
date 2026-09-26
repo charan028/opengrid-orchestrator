@@ -43,15 +43,16 @@ class Telemetry(_Wire):
     p_ch_max_kw: float | None = None
     peak_power_budget_kws: float | None = None
     # Optional, additive fields already in interfaces/mqtt/telemetry.schema.json: hub position (owner UI
-    # request) and the D-28 charge-source split. Accepted on the wire, not persisted yet (charge_* get
-    # columns in migration 0034). R2 hotfix: rejecting them dropped every telemetry message.
+    # request, not persisted: og.hub has the static position) and the D-28 charge-source split (persisted
+    # via FLOW_TELEMETRY_FIELDS, migration 0034). R2 hotfix: rejecting them dropped every telemetry message.
     lat: float | None = None
     lon: float | None = None
     charge_pv_kw: float | None = None
     charge_grid_kw: float | None = None
 
 
-#: The optional discharge-flow telemetry fields, in the one order every persisting caller uses.
+#: The optional per-hub telemetry fields persisted to og.telemetry and og.hub_state (discharge flow, 0027;
+#: charge source, 0034), in the one order every persisting caller uses.
 FLOW_TELEMETRY_FIELDS: tuple[str, ...] = (
     "home_load_kw",
     "pv_kw",
@@ -60,6 +61,9 @@ FLOW_TELEMETRY_FIELDS: tuple[str, ...] = (
     "p_dis_max_kw",
     "p_ch_max_kw",
     "peak_power_budget_kws",
+    # D-28 charge-source split (migration 0034): persisted with the flow fields in og.telemetry/og.hub_state.
+    "charge_pv_kw",
+    "charge_grid_kw",
 )
 
 

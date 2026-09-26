@@ -1,0 +1,6 @@
+{
+  "status": "CANCELLED",
+  "trace_id": "0192f3a4-5b6c-7d8e-9f00-aabbccddeeff",
+  "cancels": "0192f3a4-5b6c-7d8e-9f00-112233445566",
+  "hub_ids": ["hub-00012", "hub-00052"]
+}

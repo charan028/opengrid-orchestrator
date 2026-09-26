@@ -13,6 +13,7 @@ import pytest
 
 from opengrid.core.models.engine import ServiceType
 from opengrid.core.models.market import Market, Utility, UtilityId
+from opengrid.core.solar_share import PLANNING_SOLAR_SHARE, SolarShare
 from opengrid.core.tracehash import ChainRecord
 from opengrid.settle.backend import (
     ExistingInvoiceLineRow,
@@ -27,7 +28,6 @@ from opengrid.settle.models import (
     PenaltyParams,
     PowerSample,
     QualityFlag,
-    ZoneChargeEnergy,
 )
 from opengrid.trace.store import TraceStore
 
@@ -58,8 +58,8 @@ class FakeSettleBackend:
     performance_rows: dict[tuple[UUID, datetime], tuple[Decimal | None, bool]] = field(default_factory=dict)
     pending: list[tuple[UUID, datetime, datetime]] = field(default_factory=list)
     settleable: list[UUID] = field(default_factory=list)
-    #: per-zone charging over any window (M1's grid share); an absent zone charged nothing
-    zone_charge: dict[str, ZoneChargeEnergy] = field(default_factory=dict)
+    #: per-zone D-28 solar share over any window (M1's grid share); an absent zone takes the 30% assumption
+    zone_solar_share: dict[str, SolarShare] = field(default_factory=dict)
     zone_charge_calls: list[tuple[str, datetime, datetime]] = field(default_factory=list)
     pnl_delivery_charge: dict[tuple[UUID, datetime], Decimal] = field(default_factory=dict)
 
@@ -193,11 +193,11 @@ class FakeSettleBackend:
     ) -> Decimal | None:
         return self.obligations[obligation_id].measured_need_kwh
 
-    async def fetch_zone_charge_energy(
+    async def fetch_zone_solar_share(
         self, zone: str, window_start: datetime, window_end: datetime
-    ) -> ZoneChargeEnergy:
+    ) -> SolarShare:
         self.zone_charge_calls.append((zone, window_start, window_end))
-        return self.zone_charge.get(zone, ZoneChargeEnergy(Decimal("0"), Decimal("0")))
+        return self.zone_solar_share.get(zone, SolarShare(PLANNING_SOLAR_SHARE, "ASSUMPTION"))
 
     async def fetch_shortfall_risk_open(
         self, obligation_id: UUID, interval_start: datetime, interval_end: datetime

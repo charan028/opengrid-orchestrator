@@ -41,9 +41,9 @@ user_agent = "OpenGrid-Orchestrator (ops@tocy-net.net)"
 grid_point = "EWX/156,91"
 
 [feeds.staleness]
-ercot_price_fresh_s = 600
+ercot_price_fresh_s = 2700  # same as production (R2: 600 flapped on interval-start stamps)
 ercot_price_lgv_s = 900
-ercot_load_fresh_s = 1800
+ercot_load_fresh_s = 172800  # same as production (NP6-345-CD posts about a day late)
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800

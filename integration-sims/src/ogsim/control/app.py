@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -58,6 +58,19 @@ class SimEnabledBody(BaseModel):
 #: page is served from the domain root -- behind Apache's `/ogsim/` ProxyPass, every button called the
 #: wrong (unprefixed) URL and 404'd.
 BASE_PATH_ENV = "OGSIM_CONTROL_BASE_PATH"
+
+#: R3.1 LOW-review fix, 2026-09-26: every state-changing endpoint below (POST/DELETE) had no CSRF
+#: check -- there's no cookie-based auth here, but the operator's browser session still has no
+#: protection against a third-party page silently issuing these requests. Requiring this custom
+#: header blocks a plain cross-site <form>/fetch: a browser refuses to let cross-origin JS set an
+#: arbitrary header without a CORS preflight, and this app grants no CORS origin, so only same-origin
+#: JS (the control page's own fetchJson(), templates/index.html) can ever send it.
+CSRF_HEADER_NAME = "x-ogsim-request"
+
+
+def _require_csrf_header(request: Request) -> None:
+    if request.headers.get(CSRF_HEADER_NAME) != "1":
+        raise HTTPException(status_code=403, detail=f"missing/invalid {CSRF_HEADER_NAME} header")
 
 
 def _base_path(request: Request) -> str:
@@ -118,7 +131,7 @@ def create_app(
     async def list_anomalies(request: Request, source: InjectionSource | None = None) -> dict[str, Any]:
         return {"active": [r.to_dict() for r in injector(request).active(source=source)]}
 
-    @app.post("/api/inject", response_model=None)
+    @app.post("/api/inject", response_model=None, dependencies=[Depends(_require_csrf_header)])
     async def inject(request: Request, body: InjectBody) -> JSONResponse | dict[str, Any]:
         try:
             record = await injector(request).inject(
@@ -139,7 +152,7 @@ def create_app(
             return JSONResponse(status_code=422, content={"error": str(exc)})
         return {"ok": True, "anomaly": record.to_dict()}
 
-    @app.delete("/api/anomalies/{anomaly_id}")
+    @app.delete("/api/anomalies/{anomaly_id}", dependencies=[Depends(_require_csrf_header)])
     async def cancel(request: Request, anomaly_id: str) -> dict[str, bool]:
         found = await injector(request).cancel(anomaly_id)
         return {"ok": found}
@@ -158,7 +171,7 @@ def create_app(
             ]
         }
 
-    @app.post("/api/scenarios/{name}/run", response_model=None)
+    @app.post("/api/scenarios/{name}/run", response_model=None, dependencies=[Depends(_require_csrf_header)])
     async def run_named_scenario(
         request: Request, name: str, body: ScenarioRunBody
     ) -> JSONResponse | dict[str, Any]:
@@ -172,7 +185,7 @@ def create_app(
         running[name] = asyncio.create_task(run_scenario(injector(request), match, speed=body.speed))
         return {"ok": True, "scenario": name, "steps": len(match.steps)}
 
-    @app.post("/api/scenarios/{name}/stop", response_model=None)
+    @app.post("/api/scenarios/{name}/stop", response_model=None, dependencies=[Depends(_require_csrf_header)])
     async def stop_named_scenario(request: Request, name: str) -> JSONResponse | dict[str, Any]:
         """Demo gap #18, 2026-09-26: cancels `name`'s pending steps (if its scenario task is still
         running) AND ends every anomaly it already injected -- `run_named_scenario`'s asyncio task
@@ -188,7 +201,7 @@ def create_app(
         ended = await stop_scenario_anomalies(injector(request), name)
         return {"ok": True, "scenario": name, "task_cancelled": task_cancelled, "anomalies_ended": ended}
 
-    @app.post("/api/scenarios/stop-all")
+    @app.post("/api/scenarios/stop-all", dependencies=[Depends(_require_csrf_header)])
     async def stop_all_scenarios(request: Request) -> dict[str, Any]:
         """Demo gap #18: stops every scenario this process has ever run (its task, if still running,
         plus every still-active anomaly it injected) -- not limited to scenarios currently tracked as
@@ -217,24 +230,24 @@ def create_app(
     async def random_status(request: Request) -> dict[str, Any]:
         return random_engine(request).status()
 
-    @app.post("/api/random/pause")
+    @app.post("/api/random/pause", dependencies=[Depends(_require_csrf_header)])
     async def random_pause(request: Request) -> dict[str, Any]:
         random_engine(request).pause()
         return random_engine(request).status()
 
-    @app.post("/api/random/resume")
+    @app.post("/api/random/resume", dependencies=[Depends(_require_csrf_header)])
     async def random_resume(request: Request) -> dict[str, Any]:
         random_engine(request).resume()
         return random_engine(request).status()
 
-    @app.post("/api/random/profile", response_model=None)
+    @app.post("/api/random/profile", response_model=None, dependencies=[Depends(_require_csrf_header)])
     async def random_profile(request: Request, body: ProfileBody) -> JSONResponse | dict[str, Any]:
         if body.profile not in INTENSITY_PROFILES:
             return JSONResponse(status_code=422, content={"error": f"unknown profile '{body.profile}'"})
         random_engine(request).set_profile(body.profile)
         return random_engine(request).status()
 
-    @app.post("/api/random/sims/{sim}")
+    @app.post("/api/random/sims/{sim}", dependencies=[Depends(_require_csrf_header)])
     async def random_sim_enabled(request: Request, sim: str, body: SimEnabledBody) -> dict[str, Any]:
         random_engine(request).set_sim_enabled(sim, body.enabled)
         return random_engine(request).status()

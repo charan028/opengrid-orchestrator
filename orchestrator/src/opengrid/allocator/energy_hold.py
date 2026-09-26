@@ -30,10 +30,13 @@ _EPS = 1e-9
 
 
 def hold_duration_h(call: ObligationCall) -> float:
-    """The award's full-deployment duration in hours (its product rule's, else ECRS's 1 h)."""
-    if call.hold_duration_h is not None and call.hold_duration_h > 0:
-        return call.hold_duration_h
-    return DEFAULT_AS_DEPLOYMENT_H
+    """Hours of energy the award must keep: while held, its full-deployment duration (its product rule's,
+    else ECRS's 1 h); while called, only the rest of the active deployment, capped by that duration."""
+    full = call.hold_duration_h if call.hold_duration_h is not None and call.hold_duration_h > 0 else None
+    full_h = full if full is not None else DEFAULT_AS_DEPLOYMENT_H
+    if call.as_deployed and call.deployment_remaining_h is not None:
+        return min(full_h, max(call.deployment_remaining_h, 0.0))
+    return full_h
 
 
 def hold_energy_kwh(hold_kw: float, duration_h: float, eta_d: float) -> float:
@@ -58,18 +61,29 @@ def stored_above_reserve_kwh(hubs: Iterable[HubSnapshot]) -> float:
 
 
 def headroom_energy_cap_kw(
-    hubs: Sequence[HubSnapshot], holds: Sequence[ObligationCall], lease_ttl_s: float
+    hubs: Sequence[HubSnapshot],
+    holds: Sequence[ObligationCall],
+    lease_ttl_s: float,
+    *,
+    plan_floor_kwh: float | None = None,
 ) -> float:
-    """The most headroom discharge (kW) a bank may take over one lease without eroding its AS holds:
-    stored energy above `reserve + 1% x e_kwh + sum(kW x duration / eta_d)` spread over the lease.
+    """The most headroom discharge (kW) a bank may take over one lease without eroding its holds:
+    stored energy above the higher of
+    - this module's AS floor, `reserve + 1% x e_kwh + sum(kW x duration / eta_d)` (with an AS award), and
+    - the selector plan's published hard floor e^hold (`plan_floor_kwh`, bank SoC in kWh; 09 S1.8/F7),
+    spread over the lease.
 
-    0 when there is no energy above the hold floor (including when no hub reports a live SoC)."""
+    0 when there is no energy above the floor (including when no hub reports a live SoC)."""
     live = [h for h in hubs if h.soc_kwh is not None and h.reserve_kwh is not None and h.is_healthy]
     if not live:
         return 0.0
     eta_d = sum(h.eta_d for h in live) / len(live)
     held_kwh = sum(hold_energy_kwh(c.committed_kw, hold_duration_h(c), eta_d) for c in holds)
-    excess_kwh = stored_above_reserve_kwh(live) - margin_kwh(live) - held_kwh
+    margin = margin_kwh(live) if holds else 0.0
+    excess_kwh = stored_above_reserve_kwh(live) - margin - held_kwh
+    if plan_floor_kwh is not None:
+        stored_kwh = sum(h.soc_kwh or 0.0 for h in live)
+        excess_kwh = min(excess_kwh, stored_kwh - plan_floor_kwh)
     lease_h = lease_ttl_s / 3600.0
     if excess_kwh <= _EPS or lease_h <= 0:
         return 0.0

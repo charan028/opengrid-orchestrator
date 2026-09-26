@@ -41,6 +41,11 @@ FROM og.bank b
 
 _FETCH_LATEST_HUB_SEEN_AT_SQL = "SELECT MAX(last_seen_at) FROM og.hub_state"
 _FETCH_LATEST_SCADA_OBS_AT_SQL = "SELECT MAX(ts) FROM og.feed_obs WHERE source = 'scada'"
+# `og.feed_obs.product` holds the bank_id for SCADA rows (see `_FETCH_BANK_LOADS_SQL`'s join above) --
+# ALR-SCADA-SILENT-BANK (R3 review fix) needs the freshest reading PER bank, not just the fleet-wide max.
+_FETCH_LATEST_SCADA_OBS_BY_BANK_SQL = """
+SELECT product AS bank_id, MAX(ts) AS latest_seen_at FROM og.feed_obs WHERE source = 'scada' GROUP BY product
+"""
 
 _FETCH_DEGRADED_MODES_SQL = "SELECT mode, since FROM og.degraded_mode_state"
 _INSERT_DEGRADED_MODE_SQL = """
@@ -165,6 +170,17 @@ async def fetch_latest_scada_obs_at(pool: AsyncConnectionPool) -> datetime | Non
         await cur.execute(_FETCH_LATEST_SCADA_OBS_AT_SQL)
         row = await cur.fetchone()
     return row[0] if row is not None else None
+
+
+async def fetch_latest_scada_obs_by_bank(pool: AsyncConnectionPool) -> list[tuple[str, datetime]]:
+    """`(bank_id, latest_seen_at)` for every bank that has ever had a SCADA reading -- `ALR-SCADA-SILENT-
+    BANK`'s (R3 review fix) per-bank counterpart to `fetch_latest_scada_obs_at`'s fleet-wide max. A bank
+    with no reading at all simply doesn't appear (cold start, not evidence of that bank's SCADA being
+    silent -- same rule as the fleet-wide check)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_FETCH_LATEST_SCADA_OBS_BY_BANK_SQL)
+        rows = await cur.fetchall()
+    return [(r[0], r[1]) for r in rows]
 
 
 async def fetch_degraded_modes(pool: AsyncConnectionPool) -> list[tuple[str, datetime]]:

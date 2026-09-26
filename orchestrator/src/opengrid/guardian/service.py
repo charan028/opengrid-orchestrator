@@ -15,6 +15,7 @@ import logging
 import math
 import time
 from collections import OrderedDict
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -60,10 +61,15 @@ from opengrid.platform.metrics import guardian_clock_offset_ms, guardian_verdict
 logger = logging.getLogger(__name__)
 
 _MAX_CYCLE_HISTORY = 64  # bound the in-memory ramp accumulators; MVP-S runs a 2s cycle, never GC-free
+_Staged = list[tuple[OrderedDict[Any, float], Any, float]]
+#: The accumulator deltas (store, key, delta) of the batch being evaluated; None outside `evaluate_and_sign`.
+_STAGED: ContextVar[_Staged | None] = ContextVar("guardian_staged_accumulators", default=None)
 _MAX_EVALUATED_PROPOSALS = 256
 #: K12: raised while G-20 holds every signature.
 CLOCK_ALERT_RULE = "ALR-CLOCK-QUALITY"  # > one tick's pending batches (main.py fetches at most 50 per tick)
-_ITEM_LEVEL_RULES = frozenset({"G-01", "G-01-ENERGY", "G-02", "G-04", "G-24", "G-26", "G-27", "G-31", "G-33"})
+_ITEM_LEVEL_RULES = frozenset(
+    {"G-01", "G-01-ENERGY", "G-02", "G-04", "G-24", "G-26", "G-27", "G-31", "G-33", "G-35"}
+)
 #: G-27: hubs checked as a group of one because they have no service-transformer mapping.
 XFMR_UNMAPPED_ALERT_RULE = "ALR-XFMR-UNMAPPED"
 #: K11: a verdict's GUARDIAN_VERDICT trace row could not be written (the verdict itself stands).
@@ -84,6 +90,10 @@ class _OverrideEvidence:
     #: the upper bound over only the hubs passing G-24 for a PQ-sensitive obligation; None when the bank has
     #: no active non-default PQ envelope (or no PQ reads)
     pq_capability_upper_kw: float | None = None
+    #: hubs a live operator target (MANUAL_TARGET) owns on this bank, and the bank's upper-bound capability
+    #: without them (None: no target, or no read)
+    manual_target_hubs: frozenset[str] = frozenset()
+    capability_without_manual_upper_kw: float | None = None
 
 
 #: G-24's required ride-through class for a PQ-sensitive (non-default-envelope) obligation: the only such
@@ -109,6 +119,35 @@ def _violation_summary(violations: list[CheckOutcome]) -> list[dict[str, str | N
                 "obligation_id": v.obligation_id,
             }
     return list(seen.values())[:_MAX_TRACED_VIOLATIONS]
+
+
+def manual_charge_territory_exempt(
+    proposal: ProposedBatch, outcomes: list[CheckOutcome]
+) -> list[CheckOutcome]:
+    """D-29c: in a regulated/toll territory the utility makes the DISCHARGE calls, so an operator's manual
+    discharge there stays vetoed by G-33 (headroom market) unless tied to that utility's obligation -- but a
+    manual CHARGE or a 0 kW hold (owner schedule, maintenance) is allowed. Drops the G-33 outcome of a hub
+    whose no-obligation items are all R-MANUAL-RAMP at setpoint >= 0; every other outcome (G-34, obligation
+    items, manual discharge, headroom) is kept as the territory check made it."""
+    unobligated: dict[str, list[ProposedItem]] = {}
+    for item in proposal.items:
+        if item.obligation_id is None:
+            unobligated.setdefault(item.hub_id, []).append(item)
+    exempt = {
+        hub_id
+        for hub_id, items in unobligated.items()
+        if all(i.reason_code == reasons.R_MANUAL_RAMP and i.p_kw_setpoint >= 0 for i in items)
+    }
+    return [
+        o for o in outcomes if not (o.rule_id == "G-33" and o.obligation_id is None and o.hub_id in exempt)
+    ]
+
+
+def vetoed_hub_ids(violations: list[CheckOutcome]) -> list[str]:
+    """Every hub with an item-level veto (`_ITEM_LEVEL_RULES`), sorted and uncapped -- the full list
+    DISPATCH's K4 re-solve excludes (`R-HUB-VETO-EXCLUDED`). `_violation_summary` keeps only one example hub
+    per (rule, reason); this is the complete set."""
+    return sorted({v.hub_id for v in violations if v.rule_id in _ITEM_LEVEL_RULES and v.hub_id is not None})
 
 
 def _iso_z(dt: datetime) -> str:
@@ -138,7 +177,22 @@ class GuardianService:
     async def evaluate_and_sign(self, batch: CommandBatchRow) -> Verdict:
         """Run every applicable G-check against independently-read state; PASS signs, any veto returns
         VETOED/PARTLY_VETOED, and a processing timeout (or a G-20 clock-quality failure) returns
-        TIMEOUT -- all three are holds, never a stop (K7)."""
+        TIMEOUT -- all three are holds, never a stop (K7).
+
+        The per-cycle accumulators (G-05 fleet and gross step, G-06/G-32 feeder, G-28/29/30 flows) only
+        ever count batches that were signed: this batch's deltas are staged while it is checked and
+        committed on PASS, dropped on VETOED, PARTLY_VETOED or TIMEOUT."""
+        token = _STAGED.set([])
+        try:
+            verdict = await self._evaluate(batch)
+            staged = _STAGED.get()
+            if verdict.outcome == "PASS" and staged:
+                self._commit_accumulators(staged)
+            return verdict
+        finally:
+            _STAGED.reset(token)
+
+    async def _evaluate(self, batch: CommandBatchRow) -> Verdict:
         started = self.monotonic_fn()
         verdict_id = uuid4()
 
@@ -269,7 +323,8 @@ class GuardianService:
             violations.append(g13)
 
         violations.extend(await self._check_hubs_and_bank(proposal))
-        violations.extend(await self._check_territory(proposal))
+        violations.extend(manual_charge_territory_exempt(proposal, await self._check_territory(proposal)))
+        violations.extend(await self._check_mobile_units(proposal))
         violations.extend(await self._check_power_quality(proposal))
         violations.extend(await self._check_l2_boundary(proposal))
         violations.extend(await self._check_commitment_lock(proposal))
@@ -557,15 +612,31 @@ class GuardianService:
             logger.exception("failed to raise %s", XFMR_UNMAPPED_ALERT_RULE)
 
     async def _check_territory(self, proposal: ProposedBatch) -> list[CheckOutcome]:
-        """G-33/K15: every item's hub territory against its obligation's market (headroom is FREE), via
-        `market.check_territory` on the guardian's own contract and zone reads."""
+        """G-34: every item's hub is on the proposal's bank (the guardian's own og.hub read, via the topology).
+        G-33/K15: every non-idle item's hub territory against its obligation's market (headroom is FREE), via
+        `market.check_territory` on the guardian's own contract and zone reads. A 0 kW item (the engine's
+        own territory-block grant) serves no market and is not looked up."""
+        violations: list[CheckOutcome] = []
+        topology = self.ports.topology
+        if topology is not None:
+            seen: set[str] = set()
+            for item in proposal.items:
+                if item.hub_id in seen:
+                    continue
+                seen.add(item.hub_id)
+                g34 = flow_checks.check_hub_in_bank(
+                    item, proposal.bank_id, await topology.hub_bank(item.hub_id)
+                )
+                if not g34.ok:
+                    violations.append(g34)
         port = self.ports.territory
         if port is None:
-            return []
+            return violations
         zone_territory = port.zone_territory()
         markets: dict[UUID, MarketRef | None] = {}
-        violations: list[CheckOutcome] = []
         for item in proposal.items:
+            if flow_checks.is_idle(item):
+                continue
             if item.obligation_id is None:
                 ref: MarketRef | None = flow_checks.HEADROOM_MARKET
             else:
@@ -937,6 +1008,25 @@ class GuardianService:
                 extra={"calibration_id": str(proposed.calibration_id)},
             )
 
+    async def _check_mobile_units(self, proposal: ProposedBatch) -> list[CheckOutcome]:
+        """G-35 (D-31): no charging setpoint on a MOBILE_STORAGE unit away from its home station. Judged on
+        each hub's net setpoint (the sum of its items, what the hub executes). A hub is mobile when it, or the
+        single-hub bank it is on, is in the registry."""
+        port = self.ports.mobile_units
+        if port is None:
+            return []
+        bank_mobile = port.is_mobile(proposal.bank_id)
+        violations: list[CheckOutcome] = []
+        for item in checks.hub_setpoints(proposal.items):
+            mobile = bank_mobile or port.is_mobile(item.hub_id)
+            at_home = await port.at_home_station(item.hub_id) if mobile and item.p_kw_setpoint > 0 else None
+            outcome = checks.check_g35_mobile_charge(
+                item.hub_id, item.p_kw_setpoint, is_mobile=mobile, at_home_station=at_home
+            )
+            if not outcome.ok:
+                violations.append(outcome)
+        return violations
+
     async def _check_l2_boundary(self, proposal: ProposedBatch) -> list[CheckOutcome]:
         instruction = await self.ports.l2_instructions.active_instruction(proposal.bank_id)
         aggregate_abs_kw = sum(abs(item.p_kw_setpoint) for item in proposal.items)
@@ -1017,6 +1107,22 @@ class GuardianService:
                 if not territory.ok:
                     violations.append(territory)
                 continue
+            if reason_code == reasons.R_OPERATOR_OVERRIDE and checks.g19_reduction_below_floor(
+                new_kw, frozen_kw, prior_kw
+            ):
+                # An operator's live manual target took hubs this commitment was served from: signed only on
+                # the guardian's own MANUAL_TARGET read and capability without those hubs.
+                if evidence is None:
+                    evidence = await self._override_evidence(proposal)
+                overridden = checks.check_g19_operator_override(
+                    obligation_key,
+                    manual_target_hubs=evidence.manual_target_hubs,
+                    capability_without_manual_upper_kw=evidence.capability_without_manual_upper_kw,
+                    committed_floor_kw=committed_floor_kw,
+                )
+                if not overridden.ok:
+                    violations.append(overridden)
+                continue
             # A best-effort partial grant after a mid-window SHORTFALL carries the shortfall reason; it is
             # the override it maps to, and is corroborated below exactly like one.
             reason_code = checks.g19_lock_reason(reason_code)
@@ -1050,6 +1156,17 @@ class GuardianService:
                 pq_capability_upper_kw=evidence.pq_capability_upper_kw if pq_floor_kw is not None else None,
                 pq_floor_kw=pq_floor_kw,
             )
+            if not corroborated.ok and reason_code in checks.CAPABILITY_OVERRIDE_REASONS:
+                # An INFEASIBLE claim made while an operator target owns some of the bank's hubs (the
+                # allocator treats them as unavailable): corroborated on the capability without them.
+                operator = checks.check_g19_operator_override(
+                    obligation_key,
+                    manual_target_hubs=evidence.manual_target_hubs,
+                    capability_without_manual_upper_kw=evidence.capability_without_manual_upper_kw,
+                    committed_floor_kw=committed_floor_kw,
+                )
+                if operator.ok:
+                    continue
             if not corroborated.ok:
                 violations.append(corroborated)
         return violations
@@ -1106,6 +1223,9 @@ class GuardianService:
             kw, is_seen = self._evidence_kw(hub, policy, lease_h)
             if kw is not None:
                 (seen if is_seen else unseen_upper).append(kw)
+        manual_hubs, without_manual_kw = await self._manual_target_evidence(
+            proposal.bank_id, bank, policy, lease_h
+        )
         return _OverrideEvidence(
             l2_instruction_active=instruction is not None,
             bank_capability_kw=bank_capability(seen, bank.params),
@@ -1113,7 +1233,40 @@ class GuardianService:
             pq_capability_upper_kw=await self._pq_capability_upper_kw(
                 proposal.bank_id, bank, policy, lease_h
             ),
+            manual_target_hubs=manual_hubs,
+            capability_without_manual_upper_kw=without_manual_kw,
         )
+
+    async def _manual_target_evidence(
+        self, bank_id: str, bank: BankSnapshot, policy: flow_checks.FlowPolicy, lease_h: float
+    ) -> tuple[frozenset[str], float | None]:
+        """Live operator targets on this bank (the guardian's own read of MANUAL_TARGET trace events) and the
+        bank's upper-bound capability WITHOUT those operator-owned hubs -- what the allocator could still
+        serve a commitment from. `(empty, None)`: no targets, or no read (a failed read is never evidence)."""
+        port, members_port = self.ports.manual_targets, self.ports.bank_members
+        if port is None or members_port is None:
+            return frozenset(), None
+        hub_ids = await members_port.member_hub_ids(bank_id)
+        try:
+            manual = frozenset(await port.manual_target_hubs(hub_ids))
+        except Exception:
+            logger.exception(
+                "manual-target read failed: no operator-override evidence", extra={"bank_id": bank_id}
+            )
+            return frozenset(), None
+        if not manual:
+            return frozenset(), None
+        remaining: list[float] = []
+        for hub_id in hub_ids:
+            if hub_id in manual:
+                continue
+            hub = await self.ports.hubs.snapshot(hub_id)
+            if hub is None:
+                continue
+            kw, _seen = self._evidence_kw(hub, policy, lease_h)
+            if kw is not None:
+                remaining.append(kw)
+        return manual, bank_capability(remaining, bank.params)
 
     def _evidence_kw(
         self, hub: HubSnapshot, policy: flow_checks.FlowPolicy, lease_h: float
@@ -1189,12 +1342,30 @@ class GuardianService:
 
     @staticmethod
     def _accumulate(store: OrderedDict[Any, float], key: Any, delta: float) -> float:
+        """The cycle's cumulative value for `key` including this batch's `delta`. Inside `evaluate_and_sign`
+        the delta is only staged (committed on PASS, see there); outside it, it is committed at once."""
+        staged = _STAGED.get()
+        if staged is None:
+            return GuardianService._commit(store, key, delta)
+        pending = sum(d for s, k, d in staged if s is store and k == key)
+        staged.append((store, key, delta))
+        return store.get(key, 0.0) + pending + delta
+
+    @staticmethod
+    def _commit(store: OrderedDict[Any, float], key: Any, delta: float) -> float:
         total = store.get(key, 0.0) + delta
         store[key] = total
         store.move_to_end(key)
         while len(store) > _MAX_CYCLE_HISTORY:
             store.popitem(last=False)
         return total
+
+    @staticmethod
+    def _commit_accumulators(staged: _Staged) -> None:
+        """A signed batch's staged deltas become part of its cycle's accumulators."""
+        for store, key, delta in staged:
+            GuardianService._commit(store, key, delta)
+        staged.clear()
 
     @staticmethod
     def _classify(violations: list[CheckOutcome]) -> VerdictOutcome:
@@ -1299,6 +1470,7 @@ class GuardianService:
         raises; returns False on failure (see `_finalize` for why a PASS still stands)."""
         payload = verdict.model_dump(mode="json")
         payload["violations"] = _violation_summary(violations)
+        payload["vetoed_hub_ids"] = vetoed_hub_ids(violations)
         try:
             await self.ports.trace.append_verdict(verdict.command_batch_id, payload)
         except Exception:

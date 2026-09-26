@@ -7,8 +7,9 @@ process verifies and relays (`relay_guardian_release`) but can never create or a
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -20,6 +21,7 @@ from opengrid.safestop.backend import (
     InitiatorKind,
     ReleaseHousekeepingBackend,
     StopEventBackend,
+    StopOutboxBackend,
     StopPublisher,
 )
 from opengrid.safestop.events import Scope, build_engage_event, stop_topic_suffix, wire_stop_topic_suffix
@@ -63,6 +65,11 @@ class SafestopService:
     trace: TraceAppender | None = None
     #: The guardian's Ed25519 public key (32 raw bytes). None: no RELEASE is ever relayed (fail closed).
     guardian_public_key: bytes | None = None
+    #: K8 durable publish outbox (og.stop_outbox, migration 0035). Set in production (main.py): every
+    #: accepted ENGAGE/RELEASE is queued and (re)published until the broker acknowledges it, in acceptance
+    #: order, including after a broker reconnect. None: publish directly (a failed publish raises).
+    outbox: StopOutboxBackend | None = None
+    _drain_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     async def engage(
         self,
@@ -117,7 +124,7 @@ class SafestopService:
         )
 
         topic_suffix = stop_topic_suffix(scope, scope_ref, stop_id)
-        await self.publisher.publish_retained(topic_suffix, event.model_dump(mode="json"))
+        await self._publish(stop_id, "ENGAGE", topic_suffix, event.model_dump(mode="json"))
         logger.info(
             "safe stop engaged",
             extra={"scope": scope, "scope_ref": scope_ref, "stop_id": str(stop_id)},
@@ -148,9 +155,9 @@ class SafestopService:
             await self.trace.append(
                 "safestop", "SAFE_STOP", "SAFE_STOP", dict(event), reason_codes=["SAFE_STOP_RELEASE"]
             )
-        await self.publisher.publish_retained(
-            wire_stop_topic_suffix(parsed.scope, parsed.scope_id, parsed.stop_id), dict(event)
-        )
+        topic_suffix = wire_stop_topic_suffix(parsed.scope, parsed.scope_id, parsed.stop_id)
+        if self.outbox is None:
+            await self.publisher.publish_retained(topic_suffix, dict(event))
         scope_kind = _WIRE_TO_KIND[parsed.scope]
         await self.backend.insert_stop_event(
             stop_event_id=uuid4(),
@@ -163,11 +170,51 @@ class SafestopService:
             approver_ref=parsed.approver_ref,
             signature=signature,
         )
+        if self.outbox is not None:
+            # Recorded first, then queued: the outbox (not the guardian's re-hand-off) now owns delivery.
+            await self._publish(parsed.stop_id, "RELEASE", topic_suffix, dict(event))
         logger.info(
             "guardian-signed stop RELEASE published",
             extra={"scope": scope_kind, "scope_ref": parsed.scope_id, "stop_id": str(parsed.stop_id)},
         )
         return True
+
+    async def _publish(
+        self, stop_id: UUID, action: Literal["ENGAGE", "RELEASE"], topic_suffix: str, payload: dict[str, Any]
+    ) -> None:
+        """Without an outbox: publish now (a failure raises). With one: queue durably, then drain -- a
+        publish that cannot happen now (broker down) is NOT an error for the caller: the stop is accepted
+        and recorded, and is published, in order, as soon as the broker is back (`drain_outbox`)."""
+        if self.outbox is None:
+            await self.publisher.publish_retained(topic_suffix, payload)
+            return
+        await self.outbox.enqueue_publication(
+            stop_id=stop_id, action=action, topic_suffix=topic_suffix, payload=payload
+        )
+        await self.drain_outbox()
+
+    async def drain_outbox(self, *, batch: int = 100) -> int:
+        """K8: publish every queued stop event the broker has not acknowledged, oldest first, marking each
+        once its QoS 1 publish returned (the broker's PUBACK). Stops at the first failure so order is never
+        broken; the rest go on the next drain (after a reconnect, or the next tick). Serialised, so
+        concurrent callers never interleave. Returns how many were published."""
+        if self.outbox is None:
+            return 0
+        published = 0
+        async with self._drain_lock:
+            for entry in await self.outbox.pending_publications(limit=batch):
+                try:
+                    await self.publisher.publish_retained(entry.topic_suffix, entry.payload)
+                except Exception as exc:
+                    await self.outbox.record_publish_failure(entry.seq, str(exc))
+                    logger.warning(
+                        "stop publication queued until the broker is back",
+                        extra={"stop_id": str(entry.stop_id), "action": entry.action, "error": str(exc)},
+                    )
+                    break
+                await self.outbox.mark_published(entry.seq)
+                published += 1
+        return published
 
     async def clear_released_retained(
         self, housekeeping: ReleaseHousekeepingBackend, *, retain_s: float

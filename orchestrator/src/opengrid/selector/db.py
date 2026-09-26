@@ -11,12 +11,21 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.solar_share import (
+    ERCOT_SOLAR_ACTUAL_SERIES,
+    ERCOT_SOLAR_FORECAST_SERIES,
+    ERCOT_SOLAR_PRODUCT,
+    ERCOT_SYSTEM_LOAD_PRODUCT,
+    ERCOT_SYSTEM_LOAD_SERIES,
+    ercot_solar_share_of_load,
+)
 from opengrid.core.timeutil import to_utc
 from opengrid.health.queries import fetch_degraded_modes
 from opengrid.platform.config import load_config
@@ -229,21 +238,28 @@ _HOLD_FLOORS_SQL = """
     ORDER BY bank_id, created_at DESC
 """
 
-#: D-28 source 2: ERCOT's published solar production (FOLLOWUPS' feed, `og.feed_obs`) as a share of
-#: ERCOT system load (`np6-345-cd`, series `total`), per America/Chicago hour over the trailing week.
-#: Product/series ids to be confirmed with FOLLOWUPS; an absent feed simply yields no rows.
-ERCOT_SOLAR_PRODUCT = "np4-745-cd"
-ERCOT_SOLAR_SERIES = "SYSTEM"
+#: D-28 source 2 for the PLAN: ERCOT system solar (ids in `core.solar_share`) and system load, per
+#: America/Chicago hour: the STPPF `solar_forecast` over the next 24 h when published, else the trailing
+#: week's `solar_actual`; load is the trailing week's same-hour mean (NP6-345-CD has actuals only). The
+#: share itself is `core.solar_share.ercot_solar_share_of_load`. An absent feed yields no rows.
 _ERCOT_SOLAR_SHARE_SQL = """
-    SELECT extract(hour FROM s.ts AT TIME ZONE 'America/Chicago')::int AS hour,
-           avg(s.value / nullif(l.value, 0)) AS share
-    FROM og.feed_obs s
-    JOIN og.feed_obs l
-      ON l.source = 'ERCOT' AND l.product = 'np6-345-cd' AND l.series = 'total'
-     AND date_trunc('hour', l.ts) = date_trunc('hour', s.ts)
-    WHERE s.source = 'ERCOT' AND s.product = %(product)s AND s.series = %(series)s
-      AND s.ts > now() - interval '7 days'
-    GROUP BY 1
+    WITH load AS (
+        SELECT extract(hour FROM ts AT TIME ZONE 'America/Chicago')::int AS hour, avg(value) AS mw
+        FROM og.feed_obs
+        WHERE source = 'ERCOT' AND product = %(load_product)s AND series = %(load_series)s
+          AND ts > now() - interval '7 days'
+        GROUP BY 1
+    ), solar AS (
+        SELECT extract(hour FROM ts AT TIME ZONE 'America/Chicago')::int AS hour,
+               avg(value) FILTER (WHERE series = %(actual)s AND ts <= now()) AS actual_mw,
+               avg(value) FILTER (WHERE series = %(forecast)s AND ts > now()) AS forecast_mw
+        FROM og.feed_obs
+        WHERE source = 'ERCOT' AND product = %(product)s AND series IN (%(actual)s, %(forecast)s)
+          AND ts > now() - interval '7 days' AND ts <= now() + interval '24 hours'
+        GROUP BY 1
+    )
+    SELECT s.hour, coalesce(s.forecast_mw, s.actual_mw) AS solar_mw, l.mw AS load_mw
+    FROM solar s JOIN load l USING (hour)
 """
 
 #: Retention of `og.plan_energy_value` (about 40 rows per gate): only the newest plan is ever read.
@@ -304,15 +320,53 @@ async def load_hold_floors_kwh(bank_ids: list[str], at: datetime) -> dict[str, f
         return {str(row[0]): float(row[1]) async for row in cur if row[1] is not None}
 
 
+#: D-30: the owner's grid-charging windows, edited from the Fleet page (FOLLOWUPS' migration 0038).
+_OWNER_CHARGE_WINDOWS_SQL = "SELECT scope_kind, scope_ref, windows FROM og.owner_charge_window"
+
+
+async def load_owner_charge_window_rows() -> dict[tuple[str, str], list[str]]:
+    """Read-only: `(scope_kind, scope_ref) -> windows` (`"22:00-06:00"` strings, America/Chicago) from
+    `og.owner_charge_window` (scope kinds FLEET, PROVIDER, ZONE, SUBSTATION, FEEDER, BANK, HUB). Raises
+    when the table is absent (migration 0038 not applied): the caller falls back to config."""
+    rows: dict[tuple[str, str], list[str]] = {}
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_OWNER_CHARGE_WINDOWS_SQL)
+        async for scope_kind, scope_ref, windows in cur:
+            rows[str(scope_kind), str(scope_ref)] = [str(w) for w in (windows or [])]
+    return rows
+
+
 async def load_ercot_solar_share_by_hour() -> dict[int, float]:
     """D-28 source 2: `local hour -> ERCOT solar share of system load` (trailing week); empty when the
     feed is absent. Callers treat an error as no ERCOT source."""
     pool = await get_pool()
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            _ERCOT_SOLAR_SHARE_SQL, {"product": ERCOT_SOLAR_PRODUCT, "series": ERCOT_SOLAR_SERIES}
+            _ERCOT_SOLAR_SHARE_SQL,
+            {
+                "product": ERCOT_SOLAR_PRODUCT,
+                "actual": ERCOT_SOLAR_ACTUAL_SERIES,
+                "forecast": ERCOT_SOLAR_FORECAST_SERIES,
+                "load_product": ERCOT_SYSTEM_LOAD_PRODUCT,
+                "load_series": ERCOT_SYSTEM_LOAD_SERIES,
+            },
         )
-        return {int(row[0]): float(row[1]) async for row in cur if row[1] is not None}
+        rows = [row async for row in cur]
+    return ercot_shares_from_rows(rows)
+
+
+def ercot_shares_from_rows(rows: list[tuple[Any, Any, Any]]) -> dict[int, float]:
+    """`(hour, solar_mw, load_mw)` rows -> `hour -> share`, by the one formula in core; an hour without
+    a measurable share (missing value, no positive load) is left out."""
+    shares: dict[int, float] = {}
+    for hour, solar_mw, load_mw in rows:
+        if solar_mw is None or load_mw is None:
+            continue
+        share = ercot_solar_share_of_load(Decimal(str(solar_mw)), Decimal(str(load_mw)))
+        if share is not None:
+            shares[int(hour)] = float(share)
+    return shares
 
 
 async def prune_plan_energy_value(keep_days: int = ENERGY_VALUE_RETENTION_DAYS) -> int:

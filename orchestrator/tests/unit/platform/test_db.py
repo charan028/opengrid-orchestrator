@@ -28,6 +28,7 @@ def test_build_dsn_raises_when_password_env_unset(monkeypatch):
 
 def test_build_dsn_uses_defaults_and_env_password(monkeypatch):
     monkeypatch.delenv("OG_DB_USER", raising=False)
+    monkeypatch.delenv("OG_DB_PORT", raising=False)  # workspace runs set it (tools/ws_env.sh)
     monkeypatch.setenv("OG_DB_PASSWORD", "s3cret")
     dsn = build_dsn(_cfg(database="og"))
     parsed = conninfo_to_dict(dsn)
@@ -36,6 +37,15 @@ def test_build_dsn_uses_defaults_and_env_password(monkeypatch):
     assert parsed["user"] == DEFAULT_POSTGRES_USER
     assert parsed["password"] == "s3cret"  # noqa: S105 -- asserting the test fixture's own literal
     assert parsed["dbname"] == "og"
+
+
+def test_og_db_port_overrides_the_configured_port(monkeypatch):
+    """Workspace runs go to the disposable test cluster (tools/ws_env.sh sets OG_DB_PORT=5433)."""
+    monkeypatch.setenv("OG_DB_PASSWORD", "s3cret")
+    monkeypatch.setenv("OG_DB_PORT", "5433")
+    assert conninfo_to_dict(build_dsn(_cfg(database="og")))["port"] == "5433"
+    monkeypatch.delenv("OG_DB_PORT")
+    assert conninfo_to_dict(build_dsn(_cfg(database="og")))["port"] == str(DEFAULT_POSTGRES_PORT)
 
 
 def test_build_dsn_quotes_special_characters_in_password(monkeypatch):

@@ -111,7 +111,16 @@ function showToast(msg, isError) {
 }
 
 async function fetchJson(url, options) {
-  const resp = await fetch(url, options);
+  // R3.1 LOW-review fix, 2026-09-26: every state-changing (non-GET) request must carry this custom
+  // header -- app.py's `_require_csrf_header` rejects any POST/DELETE without it. A plain cross-site
+  // <form>/fetch cannot set an arbitrary header without triggering a CORS preflight this app does not
+  // allow, so this blocks a third-party page from silently POSTing here as the operator's browser.
+  const opts = options || {};
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    opts.headers = Object.assign({}, opts.headers, {'X-OGSim-Request': '1'});
+  }
+  const resp = await fetch(url, opts);
   let data = null;
   try { data = await resp.json(); } catch (e) { /* non-JSON body */ }
   if (!resp.ok) {

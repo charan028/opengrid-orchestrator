@@ -1,0 +1,67 @@
+{
+  "total": 4,
+  "limit": 100,
+  "offset": 0,
+  "alerts": [
+    {
+      "id": 1,
+      "rule": "ALR-FEED-STALE",
+      "severity": "warning",
+      "summary": "ALR-FEED-STALE ERCOT:np6-905-cd",
+      "opened_at": "2026-09-26T16:59:00+00:00",
+      "acked_by": null,
+      "scope_kind": "FEED",
+      "scope_ref": "ERCOT:np6-905-cd"
+    },
+    {
+      "id": 2,
+      "rule": "ALR-FEED-STALE",
+      "severity": "warning",
+      "summary": "ALR-FEED-STALE ERCOT:np6-905-cd",
+      "opened_at": "2026-09-26T16:58:00+00:00",
+      "acked_by": null,
+      "scope_kind": "FEED",
+      "scope_ref": "ERCOT:np6-905-cd"
+    },
+    {
+      "id": 3,
+      "rule": "ALR-PROCESS-DOWN",
+      "severity": "critical",
+      "summary": "ALR-PROCESS-DOWN engine",
+      "opened_at": "2026-09-26T16:57:00+00:00",
+      "acked_by": null,
+      "scope_kind": "PROCESS",
+      "scope_ref": "engine"
+    },
+    {
+      "id": 4,
+      "rule": "ALR-HUB-OFFLINE",
+      "severity": "warning",
+      "summary": "ALR-HUB-OFFLINE bank-007",
+      "opened_at": "2026-09-26T16:56:00+00:00",
+      "acked_by": "operator",
+      "scope_kind": "BANK",
+      "scope_ref": "bank-007"
+    }
+  ],
+  "groups": [
+    {
+      "rule": "ALR-FEED-STALE",
+      "scope_kind": "FEED",
+      "scope_ref": "ERCOT:np6-905-cd",
+      "count": 2
+    },
+    {
+      "rule": "ALR-HUB-OFFLINE",
+      "scope_kind": "BANK",
+      "scope_ref": "bank-007",
+      "count": 1
+    },
+    {
+      "rule": "ALR-PROCESS-DOWN",
+      "scope_kind": "PROCESS",
+      "scope_ref": "engine",
+      "count": 1
+    }
+  ]
+}

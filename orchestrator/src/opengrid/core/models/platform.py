@@ -26,6 +26,9 @@ class Hub(_Row):
     lon: float | None = None
     # Battery/inverter units in the home (migration 0032): 1 = 11 kW, 2 = 20 kW dual-unit (G-02 unit cap).
     units: int = 1
+    # Derived, not a column: the hub's bank is an og.asset SUBSTATION (0025; D-29 utility toll), so it is
+    # rated at nameplate p_kw, never the home per-unit cap.
+    utility_scale: bool = False
 
 
 class Bank(_Row):
@@ -55,6 +58,9 @@ class HubState(_Row):
     p_dis_max_kw: float | None = None
     p_ch_max_kw: float | None = None
     peak_power_budget_kws: float | None = None
+    # D-28 charge-source split (migration 0034); None until a hub reports it.
+    charge_pv_kw: float | None = None
+    charge_grid_kw: float | None = None
 
 
 class Heartbeat(_Row):

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/device_info.schema.json",
+  "title": "DeviceInfo",
+  "description": "Hub (or substation asset) -> engine, published RETAINED on <root>/hub/<hub_id>/info, QoS 1, when the device connects and again if any field changes. New additive topic, 2026-09-26 (R3, OWNER DECISION) -- needs an ACL grant for og_sim to publish `hub/#` (not previously in its publish scope; tel/#, scada/#, ack/# were).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "hub_id", "serial_number", "manufacturer", "model", "firmware_version", "hardware_revision",
+    "install_date", "commissioning_date", "asset_class", "units", "rated_kw", "rated_kwh",
+    "reserve_floor_pct", "lat", "lon", "inverter_model", "ts"
+  ],
+  "properties": {
+    "hub_id": { "type": "string", "minLength": 1 },
+    "serial_number": { "type": "string", "minLength": 1, "description": "Deterministic, e.g. BP-<zone>-<index>." },
+    "manufacturer": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "firmware_version": { "type": "string", "minLength": 1 },
+    "hardware_revision": { "type": "string", "minLength": 1 },
+    "install_date": { "type": "string", "format": "date" },
+    "commissioning_date": { "type": "string", "format": "date" },
+    "asset_class": {
+      "type": "string",
+      "enum": ["HOME_BESS", "SUBSTATION_BESS"],
+      "description": "D11 asset classes: a home hub (single- or dual-unit) vs. a substation-sited battery-set asset."
+    },
+    "units": { "type": "integer", "enum": [1, 2], "description": "1 for a single-unit home hub, 2 for a dual-unit home hub. Always 1 for a substation asset (one PCS/battery-set unit)." },
+    "rated_kw": { "type": "number", "exclusiveMinimum": 0 },
+    "rated_kwh": { "type": "number", "exclusiveMinimum": 0 },
+    "reserve_floor_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+    "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+    "inverter_model": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time" }
+  }
+}

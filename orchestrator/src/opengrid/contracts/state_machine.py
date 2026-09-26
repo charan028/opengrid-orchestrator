@@ -8,7 +8,8 @@ only reachable states are `DELIVERING` (no exception needed) and, from `DELIVERI
 `SHORTFALL` -- and `SHORTFALL` is only reachable with one of the four allowed override/infeasible
 reason codes (or the disabled `R-AS-RELEASE`, checked separately by `opengrid.core.limits
 .check_commitment_lock` when a `commitment` row is superseded). There is no path out of
-`COMMITTED`/`DELIVERING` that skips a reason code.
+`COMMITTED`/`DELIVERING` that skips a reason code. A `SHORTFALL` obligation served in full again goes
+back to `DELIVERING` with `R-SHORTFALL-RESTORED` (the only way out of `SHORTFALL` besides `SETTLED`).
 """
 
 from __future__ import annotations
@@ -57,6 +58,9 @@ _TRANSITIONS: dict[ObligationState, dict[ObligationState, frozenset[str] | None]
         "SETTLED": None,
     },
     "SHORTFALL": {
+        # Owner decision 2026-09-26 (K13 best effort): once the constraint clears and the obligation is
+        # served its full committed kW again, it returns to DELIVERING (and is locked again).
+        "DELIVERING": frozenset({"R-SHORTFALL-RESTORED"}),
         "SETTLED": None,
     },
     "REJECTED": {},

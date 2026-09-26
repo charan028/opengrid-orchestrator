@@ -20,7 +20,7 @@ from ogsim.common.scenario import parse_scenario_cmd, utc_timestamp
 from ogsim.scada.aggregation import BankTelemetryBuffer, bank_load_kw, kw_to_kva
 from ogsim.scada.anomalies import SCADA_ANOMALY_TYPES, ScadaAnomalyManager
 from ogsim.scada.background import BackgroundLoadModel
-from ogsim.scada.instructions import OverloadRule, limit_instruction
+from ogsim.scada.instructions import OverloadRule, lift_instruction, limit_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +41,36 @@ class ScadaEngine:
         # before this fix (still exactly `bank-000..039`) until a block is turned on.
         self.bank_ids, self.zones = bank_topology(config.bank_count, config.zones, config.zone_blocks)
         self.kva_rating = {b: config.bank_kva_rating_default for b in self.bank_ids}
-        self.buffers: dict[str, BankTelemetryBuffer] = {b: BankTelemetryBuffer() for b in self.bank_ids}
         # Per-bank background load, scaled consistently with the existing per-bank fix
-        # (background.py's own docstring/history-mean division): sized to the FULL bank
-        # roster above (base + enabled blocks), not just config.bank_count, so a block's banks
-        # get their own ~1/len(bank_ids) share instead of either going unmodeled or replaying
-        # the whole substation's history mean onto each of them.
+        # (background.py's own docstring/history-mean division): sized to the HOME bank roster only
+        # (base + enabled zone blocks) -- a substation asset (below) is Base-owned generation/storage,
+        # not a feeder segment with ~50 homes' worth of residential background load, so it must never
+        # get a share of this model.
+        self._home_bank_count = len(self.bank_ids)
         self.background = BackgroundLoadModel(
-            len(self.bank_ids), config.base_load_kw_default, config.history_tsv_path, self.rng
+            self._home_bank_count, config.base_load_kw_default, config.history_tsv_path, self.rng
         )
+        # Substation-sited battery-set assets (D11 SUBSTATION_BESS; OWNER DECISION D-29(b),
+        # 2026-09-26): each enabled entry is its own bank, appended after every home bank, mirroring
+        # `ogsim.fleet.state._substation_segment`'s `bank-<asset_id>` id scheme exactly so telemetry
+        # ingested under that bank_id (published by `ogsim.fleet` as `bank-sub-LZ_AEN-00`, etc.)
+        # actually lands in this engine's own buffer for it. Its kVA rating is derived from
+        # `rated_mw`, not `bank_kva_rating_default` (a 600 kVA feeder-segment number would trip the
+        # overload rule on a 20 MW asset from the first real reading).
+        for asset in config.substation_assets:
+            if not asset.enabled:
+                continue
+            bank_id = f"bank-{asset.asset_id}"
+            self.bank_ids.append(bank_id)
+            self.zones.append(asset.zone)
+            self.kva_rating[bank_id] = kw_to_kva(asset.rated_mw * 1000.0)
+        self.buffers: dict[str, BankTelemetryBuffer] = {b: BankTelemetryBuffer() for b in self.bank_ids}
         self.anomalies = ScadaAnomalyManager(self.bank_ids, self.zones)
-        self.overload_rule = OverloadRule(config.overload_consecutive_samples)
+        self.overload_rule = OverloadRule(
+            config.overload_consecutive_samples,
+            clear_samples=config.overload_clear_samples,
+            max_duration_s=config.overload_limit_max_duration_s,
+        )
 
     def ingest_telemetry(self, hub_id: str, bank_id: str, p_kw: float) -> None:
         buffer = self.buffers.get(bank_id)
@@ -77,10 +96,9 @@ class ScadaEngine:
         """Returns `(bank_signal_messages, instruction_messages)` as
         `(topic_suffix, message)` pairs for this tick."""
         self.anomalies.tick(now)
-        # Sized to the full bank roster (base + enabled blocks, see __init__), matching
-        # `self.background`'s own shape -- `config.bank_count` alone under-sized this once a
-        # block was enabled, which would raise a numpy broadcast error in `load_kw` below.
-        noise = self.rng.normal(0.0, self.config.base_load_kw_default * 0.02, size=len(self.bank_ids))
+        # Sized to the HOME bank roster only (base + enabled zone blocks) -- see __init__'s
+        # `_home_bank_count` comment for why a substation bank never gets a background-load share.
+        noise = self.rng.normal(0.0, self.config.base_load_kw_default * 0.02, size=self._home_bank_count)
         background_kw = self.background.load_kw(now, noise)
 
         signals: list[tuple[str, dict[str, Any]]] = []
@@ -89,7 +107,8 @@ class ScadaEngine:
             modifiers = self.anomalies.modifiers[bank_id]
             if modifiers.suppressed:
                 continue
-            real_kw = bank_load_kw(self.buffers[bank_id].net_battery_kw(), float(background_kw[i]))
+            bg_kw = float(background_kw[i]) if i < self._home_bank_count else 0.0
+            real_kw = bank_load_kw(self.buffers[bank_id].net_battery_kw(), bg_kw)
             value_kw, quality = self.anomalies.apply_reading(bank_id, real_kw, "good", now)
             kva = kw_to_kva(value_kw)
             ts = utc_timestamp(now + modifiers.time_skew_s)
@@ -106,11 +125,40 @@ class ScadaEngine:
                     },
                 )
             )
+            # Live bug fix, 2026-09-26 (R3, taken off Frank's #39 to avoid a duplicate): the guardian
+            # now fails closed on unknown flow direction (G-30 vetoes discharge increases in
+            # regulated territories without a signed real-power series). `value_kw` here is the same
+            # post-anomaly reading the kVA signal above derives from (background load + net battery
+            # power), so its sign is already the correct convention: + = the bank imports from the
+            # feeder, - = export. Same ts/quality as the kVA signal; includes the substation bank
+            # (this loop already covers every entry in self.bank_ids, home banks and substation
+            # banks alike -- no separate branch needed).
+            signals.append(
+                (
+                    f"scada/{bank_id}",
+                    {
+                        "bank_id": bank_id,
+                        "signal": "REAL_POWER_KW",
+                        "value": round(value_kw, 3),
+                        "unit": "kW",
+                        "quality": quality,
+                        "ts": ts,
+                    },
+                )
+            )
             pending = self.anomalies.take_pending_instruction(bank_id)
             if pending is not None:
                 instructions.append((f"scada/instruction/{bank_id}", self._instruction_message(pending, now)))
-            elif self.overload_rule.observe(bank_id, kva, self.kva_rating[bank_id]):
+            elif self.overload_rule.observe(bank_id, kva, self.kva_rating[bank_id], now):
                 msg = limit_instruction(
+                    str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
+                )
+                instructions.append((f"scada/instruction/{bank_id}", msg))
+            elif self.overload_rule.check_lift(bank_id, kva, self.kva_rating[bank_id], now):
+                # Bug fix, 2026-09-26 (R3): the auto-issued LIMIT above used to never expire, leaving
+                # a bank_overload demo capped at 90% of rating forever. Lifted once the overload
+                # clears for `clear_samples` readings, or after `max_duration_s`, whichever first.
+                msg = lift_instruction(
                     str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
                 )
                 instructions.append((f"scada/instruction/{bank_id}", msg))

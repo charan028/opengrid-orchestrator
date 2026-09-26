@@ -13,12 +13,11 @@ stopped still engages: stops are per `stop_id`, each needs its own guardian Tier
 utility instruction must not be silently absorbed by an earlier stop that might be released first.
 
 `handle_instruction` is pure apart from the two injected callables, so it is unit-tested without MQTT
-or Postgres; `run_l2_instruction_listener` is the thin MQTT loop `main.py` runs as a background task.
+or Postgres; `build_l2_session` is the thin MQTT session `main.py` runs as a background task.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -26,11 +25,10 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-import aiomqtt
-
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
 from opengrid.platform.config import Config
 from opengrid.platform.mqtt import build_client, topic, validate_payload
+from opengrid.platform.mqtt_session import MqttSession
 from opengrid.safestop.events import is_safe_scope_ref
 
 logger = logging.getLogger(__name__)
@@ -159,7 +157,7 @@ async def handle_instruction(
     return "ENGAGED"
 
 
-async def run_l2_instruction_listener(
+def build_l2_session(
     cfg: Config,
     *,
     username: str,
@@ -167,44 +165,37 @@ async def run_l2_instruction_listener(
     engage_fn: EngageFn,
     already_acted_fn: AlreadyActedFn,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-    reconnect_delay_s: float = DEFAULT_RECONNECT_DELAY_S,
-) -> None:
-    """Subscribe to `<root>/scada/instruction/+` for the process lifetime on its own MQTT connection
-    (`L2_PROCESS_NAME`), reconnecting after a broker error. Parsing follows
-    `opengrid.guardian.mqtt_io.run_telemetry_listener` (JSON -> schema -> model), without importing it."""
+    min_backoff_s: float = DEFAULT_RECONNECT_DELAY_S,
+) -> MqttSession:
+    """The utility L2 instruction listener: `<root>/scada/instruction/+` (QoS 1) on its own connection
+    (`L2_PROCESS_NAME`), kept up across broker disconnects by `MqttSession` (backoff from `min_backoff_s`,
+    the same client id, never two clients at once; `og_mqtt_reconnects_total{client="safestop-l2"}`).
+    Parsing follows `opengrid.guardian.mqtt_io`'s input handler (JSON -> schema -> model), without importing
+    it. `main.py` runs it and fails closed while it is down."""
     handled: set[UUID] = set()
     instruction_prefix = topic(cfg, "scada/instruction/")
-    while True:
-        try:
-            async with build_client(
-                cfg, username=username, password=password, process=L2_PROCESS_NAME
-            ) as client:
-                await client.subscribe(topic(cfg, INSTRUCTION_TOPIC_SUFFIX), qos=1)
-                async for message in client.messages:
-                    payload = message.payload
-                    if not isinstance(payload, bytes | bytearray) or not payload:
-                        continue  # empty payload = a retained clear, not an instruction
-                    msg_topic = str(message.topic)
-                    topic_bank_id = (
-                        msg_topic[len(instruction_prefix) :]
-                        if msg_topic.startswith(instruction_prefix)
-                        else None
-                    )
-                    await handle_instruction(
-                        bytes(payload),
-                        now=clock(),
-                        handled=handled,
-                        engage_fn=engage_fn,
-                        already_acted_fn=already_acted_fn,
-                        topic_bank_id=topic_bank_id,
-                    )
-        except aiomqtt.MqttError as exc:
-            logger.warning(
-                "utility L2 instruction listener disconnected; reconnecting",
-                extra={"error": str(exc), "delay_s": reconnect_delay_s},
-            )
-            await asyncio.sleep(reconnect_delay_s)
-        except Exception:
-            # Never let the safety listener die silently (K7): log, back off, resubscribe.
-            logger.exception("utility L2 instruction listener failed; restarting")
-            await asyncio.sleep(reconnect_delay_s)
+
+    async def on_message(message: Any) -> None:
+        payload = message.payload
+        if not isinstance(payload, bytes | bytearray) or not payload:
+            return  # empty payload = a retained clear, not an instruction
+        msg_topic = str(message.topic)
+        topic_bank_id = (
+            msg_topic[len(instruction_prefix) :] if msg_topic.startswith(instruction_prefix) else None
+        )
+        await handle_instruction(
+            bytes(payload),
+            now=clock(),
+            handled=handled,
+            engage_fn=engage_fn,
+            already_acted_fn=already_acted_fn,
+            topic_bank_id=topic_bank_id,
+        )
+
+    return MqttSession(
+        lambda: build_client(cfg, username=username, password=password, process=L2_PROCESS_NAME),
+        name=L2_PROCESS_NAME,
+        subscriptions=[(topic(cfg, INSTRUCTION_TOPIC_SUFFIX), 1)],
+        on_message=on_message,
+        min_backoff_s=min_backoff_s,
+    )

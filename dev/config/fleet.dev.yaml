@@ -17,7 +17,11 @@ hub_count: 200
 bank_count: 8
 zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
 
-telemetry_interval_s: 2.0
+# V-32, OWNER DECISION 2026-09-26: 10 s is the spec's normal telemetry cadence (disk-load
+# reduction); physics (SoC, stop ramp, lease/autonomy) still ticks every 2 s independently
+# (see FleetConfig.physics_tick_interval_s's docstring) -- matches integration-sims/config/fleet.yaml.
+telemetry_interval_s: 10.0
+physics_tick_interval_s: 2.0
 lease_ttl_s: 30.0
 lease_hold_after_expiry_s: 5.0
 stop_ramp_s: 4.0

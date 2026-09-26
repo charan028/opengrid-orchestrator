@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -28,7 +28,15 @@ from opengrid.allocator.gateways import (
     ScadaGateway,
     ScheduleGateway,
 )
-from opengrid.allocator.models import CycleExtras, CycleResult, DwellState, PiState, ProposedGrant, Schedule
+from opengrid.allocator.models import (
+    CycleExtras,
+    CycleResult,
+    DwellState,
+    FleetState,
+    PiState,
+    ProposedGrant,
+    Schedule,
+)
 from opengrid.core.models.engine import Grant
 
 __all__ = ["configure", "cycle", "hub_allocations", "run_cycle", "substitute_hub"]
@@ -81,6 +89,7 @@ async def run_cycle(
     extras_gateway: CycleExtrasGateway | None = None,
     now: datetime | None = None,
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
+    only_bank_ids: Sequence[str] | None = None,
 ) -> list[Grant]:
     """One S1-S7 allocation cycle (02a S5.1-S5.2): builds this cycle's `grant` rows for every bank,
     honoring frozen commitments (K13), reserve/P/kVA/ramp limits (K1/K4), and the one-loop-per-quantity
@@ -103,9 +112,18 @@ async def run_cycle(
 
     try:
         bank_ids = list(await _with_gateway_timeout(fleet.bank_ids(), gateway_name="fleet.bank_ids"))
+        if only_bank_ids is not None:
+            # A same-cycle re-proposal (K4 veto fail-safe) re-solves only the vetoed banks.
+            wanted = set(only_bank_ids)
+            bank_ids = [b for b in bank_ids if b in wanted]
         fleet_state = await _with_gateway_timeout(
             fleet.fleet_state(bank_ids, t), gateway_name="fleet.fleet_state"
         )
+        if only_bank_ids is not None:
+            fleet_state = FleetState(
+                hubs=tuple(h for h in fleet_state.hubs if h.bank_id in wanted),
+                banks=tuple(b for b in fleet_state.banks if b.bank_id in wanted),
+            )
         ledger_view = await _with_gateway_timeout(
             ledger.ledger_view(bank_ids, t), gateway_name="ledger.ledger_view"
         )
@@ -156,6 +174,8 @@ async def run_cycle(
         pq=extras.pq,
         enforce_territory=extras.enforce_territory,
         flow_limits=extras.flow_limits,
+        excluded_hub_ids=extras.excluded_hub_ids | extras.operator_hub_ids,
+        operator_hub_ids=extras.operator_hub_ids,
         lease_ttl_s=lease_ttl_s,
     )
     _last_hub_allocations.clear()

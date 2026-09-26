@@ -24,6 +24,7 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.reasons import R_AS_HOLD_SHORT
+from opengrid.core.solar_share import SolarShare
 from opengrid.market.capacity import regulated_capacity_payment
 from opengrid.market.charging import regulated_charging_cost
 from opengrid.market.config import DEFAULT_UTILITIES
@@ -242,6 +243,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     is_regulated_market = ctx.market == "REGULATED"
     charging_cost_per_kwh = ctx.charging_cost_per_kwh
     delivery_charge = Decimal("0")
+    m1_solar_share: SolarShare | None = None  # D-28 share behind M1, recorded on the trace when used
     regulated_capacity_amount: Decimal | None = None
     if is_regulated_market and ctx.utility_id is not None:
         utility = await backend.fetch_utility(ctx.utility_id)
@@ -273,21 +275,22 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
         # tdsp_tariffs.toml at startup (configure()'s tdsp_tariffs/zone_default_tdsp) -- never a
         # guessed rate. A zone with no TDSP (regulated LZ_AEN/LZ_CPS, LCRA/co-op, unmapped) is never
         # queried and settles M1 at 0. Owner decision: the FULL charge on grid-drawn charging energy,
-        # i.e. the energy this delivery had to be charged with, times the zone's grid (non-PV) share of
-        # charging over the trailing window (`tariffs.grid_charged_kwh_for_delivery`). ---------------
+        # i.e. the energy this delivery had to be charged with, times the zone's grid share of charging
+        # over the trailing window -- D-28's solar share (`opengrid.core.solar_share`, the same rule the
+        # selector plans with): measured hub telemetry, else ERCOT's solar share, else 30%. -------------
         tdsp = tdsp_for_zone(_zone_default_tdsp, ctx.zone)
         tariff = resolve_tariff(_tdsp_tariffs, tdsp, interval_start.date())
         if tariff is not None and ctx.zone is not None and metering.delivered_kwh > 0:
             # Hour-aligned so every interval (and obligation) of the zone in that hour shares one scan.
             window_end = interval_end.replace(minute=0, second=0, microsecond=0)
-            zone_charge = await backend.fetch_zone_charge_energy(
+            m1_solar_share = await backend.fetch_zone_solar_share(
                 ctx.zone, window_end - M1_GRID_SHARE_WINDOW, window_end
             )
             grid_charged_kwh = grid_charged_kwh_for_delivery(
                 metering.delivered_kwh,
                 eta_c=ctx.eta_d,  # og.hub carries eta_c = eta_d (0.9487 each); the context holds eta_d only
                 eta_d=ctx.eta_d,
-                grid_share=zone_charge.grid_share,
+                grid_share=m1_solar_share.grid_share,
             )
             delivery_charge = m1_delivery_charge(grid_charged_kwh, tariff)
 
@@ -444,6 +447,8 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
                 "wholesale_price_flag": ctx.wholesale_price_flag,
                 "need_basis_compliant": need_basis_compliant,
                 "delivery_charge": str(pnl.delivery_charge),
+                "m1_solar_share": str(m1_solar_share.share) if m1_solar_share is not None else None,
+                "m1_solar_share_source": m1_solar_share.source if m1_solar_share is not None else None,
                 "as_hold_short": R_AS_HOLD_SHORT in settlement_reasons,
             },
             reason_codes=settlement_reasons or None,

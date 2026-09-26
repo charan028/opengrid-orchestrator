@@ -50,6 +50,7 @@ class _FakeQueries:
         # ALR-SIM-OFFLINE aren't affected by it.
         self.latest_fleet_seen_at: datetime | None = None
         self.latest_scada_seen_at: datetime | None = None
+        self.latest_scada_seen_at_by_bank: list[tuple[str, datetime]] = []
         self.degraded_mode_state: dict[str, datetime] = {}
         self._next_alert_id = 1
 
@@ -75,6 +76,9 @@ class _FakeQueries:
 
     async def fetch_latest_scada_obs_at(self, pool):
         return self.latest_scada_seen_at
+
+    async def fetch_latest_scada_obs_by_bank(self, pool):
+        return self.latest_scada_seen_at_by_bank
 
     async def fetch_degraded_modes(self, pool):
         return list(self.degraded_mode_state.items())
@@ -428,6 +432,51 @@ async def test_evaluate_alerts_clears_scada_silent_once_reading_resumes(fake_que
     assert not any(a.rule == "ALR-SCADA-SILENT" for a in fake_queries.open_alerts)
 
 
+async def test_evaluate_alerts_raises_per_bank_scada_silent_while_fleet_wide_is_fresh(
+    fake_queries: _FakeQueries,
+) -> None:
+    """R3 review fix: one bank's SCADA feed going silent while every other bank keeps reporting must
+    raise the per-bank warning even though the fleet-wide freshest reading (from the other banks) never
+    goes stale, so the fleet-wide ALR-SCADA-SILENT never fires."""
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.latest_scada_seen_at = NOW  # fleet-wide freshest reading is fine
+    fake_queries.latest_scada_seen_at_by_bank = [
+        ("bank-000", NOW),  # reporting fine
+        ("bank-001", NOW - timedelta(seconds=health._thresholds.scada_silent_s + 1)),  # gone silent
+    ]
+
+    await health.evaluate_alerts()
+
+    assert "ALR-SCADA-SILENT" not in fake_queries.raised  # fleet-wide check stays quiet
+    assert "ALR-SCADA-SILENT-BANK:bank-001" in fake_queries.raised
+    assert "ALR-SCADA-SILENT-BANK:bank-000" not in fake_queries.raised
+    bank_alert = next(a for a in fake_queries.open_alerts if a.rule == "ALR-SCADA-SILENT-BANK")
+    assert bank_alert.severity == "warning"
+
+
+async def test_evaluate_alerts_clears_per_bank_scada_silent_once_bank_recovers(
+    fake_queries: _FakeQueries,
+) -> None:
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.latest_scada_seen_at = NOW
+    fake_queries.latest_scada_seen_at_by_bank = [
+        ("bank-001", NOW - timedelta(seconds=health._thresholds.scada_silent_s + 1)),
+    ]
+    await health.evaluate_alerts()
+    assert any(a.rule == "ALR-SCADA-SILENT-BANK" for a in fake_queries.open_alerts)
+
+    fake_queries.latest_scada_seen_at_by_bank = [("bank-001", NOW)]  # bank-001 recovers
+    await health.evaluate_alerts()
+
+    assert not any(a.rule == "ALR-SCADA-SILENT-BANK" for a in fake_queries.open_alerts)
+
+
 async def test_evaluate_once_persists_dist_deferral_open_loop_when_scada_silent(
     fake_queries: _FakeQueries,
 ) -> None:
@@ -436,6 +485,10 @@ async def test_evaluate_once_persists_dist_deferral_open_loop_when_scada_silent(
     fake_queries.heartbeats = [
         Heartbeat(process=p, pid=1, ts=NOW, status="ok")
         for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.feed_statuses = [
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW),
+        FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=NOW),
     ]
     fake_queries.latest_scada_seen_at = NOW - timedelta(seconds=health._thresholds.scada_silent_s + 1)
 
@@ -478,6 +531,12 @@ async def test_evaluate_once_returns_snapshot_with_degraded_mode(fake_queries: _
         for p in ("feeds", "guardian", "safestop", "settle", "api")
     ]  # engine missing -> HOLD_LOCAL_AUTONOMY
     fake_queries.hub_rows = [("LZ_NORTH", "hub-1", NOW, None, "online")]
+    # Fresh rows for both default firm-blocking feeds, isolating this test from the R3 review fix that
+    # treats a MISSING blocking-feed row as stale (tested separately below).
+    fake_queries.feed_statuses = [
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW),
+        FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=NOW),
+    ]
 
     snapshot = await health.evaluate_once()
 
@@ -494,6 +553,10 @@ async def test_evaluate_once_clears_persisted_degraded_mode_on_resolve(fake_quer
         Heartbeat(process=p, pid=1, ts=NOW, status="ok")
         for p in ("feeds", "guardian", "safestop", "settle", "api")
     ]  # engine still missing -> HOLD_LOCAL_AUTONOMY
+    fake_queries.feed_statuses = [
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW),
+        FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=NOW),
+    ]
     await health.evaluate_once()
     assert set(fake_queries.degraded_mode_state) == {"HOLD_LOCAL_AUTONOMY"}
 
@@ -522,6 +585,10 @@ async def test_evaluate_once_no_new_commitments_only_from_firm_blocking_feeds(
         FeedStatus(source="ERCOT", product="np6-345-cd", last_value_at=ancient),
         FeedStatus(source="NWS", product="nws-hourly", last_value_at=ancient),
         FeedStatus(source="EIA", product="eia-demand", last_value_at=ancient),
+        # Both default firm-blocking feeds present and fresh, so the missing-row fix doesn't also
+        # trigger NO_NEW_COMMITMENTS here -- this test isolates "a non-blocking feed is stale".
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW),
+        FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=NOW),
     ]
 
     snapshot = await health.evaluate_once()
@@ -531,16 +598,57 @@ async def test_evaluate_once_no_new_commitments_only_from_firm_blocking_feeds(
 
 
 async def test_evaluate_once_no_new_commitments_when_ercot_price_stale(fake_queries: _FakeQueries) -> None:
-    """The one feed that must still gate NO_NEW_COMMITMENTS by default: ERCOT's real-time price series."""
+    """The feeds that must still gate NO_NEW_COMMITMENTS by default: ERCOT's real-time price series and
+    the AS DAM clearing price (R3 review fix, HIGH)."""
     fake_queries.heartbeats = [
         Heartbeat(process=p, pid=1, ts=NOW, status="ok")
         for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
     ]
     fake_queries.feed_statuses = [
         FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW - timedelta(days=1)),
+        FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=NOW),  # fresh: isolates price alone
     ]
 
     snapshot = await health.evaluate_once()
 
     assert "NO_NEW_COMMITMENTS" in snapshot.degraded_modes
     assert "NO_NEW_COMMITMENTS" in fake_queries.degraded_mode_state
+
+
+async def test_evaluate_once_no_new_commitments_when_as_clearing_price_stale(
+    fake_queries: _FakeQueries,
+) -> None:
+    """R3 review fix (HIGH): a stale AS DAM clearing price (np4-188-cd) must also block new commitments
+    -- AS intake values offers at its MCPC, so a stale clearing price is exactly as much a firm-pricing
+    problem as a stale real-time energy price."""
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.feed_statuses = [
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW),  # fresh: isolates AS alone
+        FeedStatus(source="ERCOT", product="np4-188-cd", last_value_at=NOW - timedelta(hours=27)),
+    ]
+
+    snapshot = await health.evaluate_once()
+
+    assert "NO_NEW_COMMITMENTS" in snapshot.degraded_modes
+
+
+async def test_evaluate_once_no_new_commitments_when_blocking_feed_row_missing(
+    fake_queries: _FakeQueries,
+) -> None:
+    """R3 review fix (MEDIUM): a fresh database (or a deleted row) has NO `feed_status` row at all for a
+    firm-blocking feed -- that must count as stale, not as "nothing to check"."""
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.feed_statuses = [
+        FeedStatus(source="ERCOT", product="np6-905-cd", last_value_at=NOW),
+        # np4-188-cd has no row at all.
+    ]
+
+    snapshot = await health.evaluate_once()
+
+    assert "NO_NEW_COMMITMENTS" in snapshot.degraded_modes

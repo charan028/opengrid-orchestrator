@@ -27,6 +27,15 @@ def annual_capacity_price(price_usd_per_kw: Decimal, basis: CapacityPaymentBasis
     return price_usd_per_kw * _MONTHS_PER_YEAR if basis == "USD_PER_KW_MONTH" else price_usd_per_kw
 
 
+def capacity_value_usd_per_mwh(price_usd_per_kw: Decimal | None, basis: CapacityPaymentBasis) -> Decimal:
+    """The capacity price as $ per MWh held (one kW held for one hour): what a regulated capacity
+    opportunity's `value_per_mwh` carries, so `value x kW x hours / 1000` is exactly the pro-rated
+    payment. A missing price is 0 (the caller logs it; never a guessed rate)."""
+    if price_usd_per_kw is None:
+        return _ZERO
+    return annual_capacity_price(price_usd_per_kw, basis) / HOURS_PER_YEAR * Decimal("1000")
+
+
 def regulated_capacity_payment(
     *,
     committed_kw: Decimal,

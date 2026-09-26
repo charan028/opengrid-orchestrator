@@ -10,9 +10,12 @@ import argparse
 import os
 import re
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import psycopg
+import psycopg.errors
 from psycopg.conninfo import make_conninfo
 from psycopg_pool import AsyncConnectionPool
 
@@ -30,6 +33,7 @@ DEFAULT_POOL_MAX_SIZE = 8
 POOL_OPEN_TIMEOUT_S = 10.0  # PLAT-004: og-* processes must not hang forever waiting for Postgres
 
 _ENV_DB_USER = "OG_DB_USER"
+_ENV_DB_PORT = "OG_DB_PORT"
 _ENV_DB_PASSWORD = "OG_DB_PASSWORD"  # noqa: S105 -- this is the env VAR NAME, never a secret value
 
 
@@ -39,7 +43,9 @@ def build_dsn(cfg: Config) -> str:
     silent empty-password fallback. PLAT-003: `psycopg.conninfo.make_conninfo` handles quoting/escaping
     (a password containing a space or `=` previously produced a malformed/misparsed DSN)."""
     host = cfg.get("postgres.host", DEFAULT_POSTGRES_HOST)
-    port = cfg.get("postgres.port", DEFAULT_POSTGRES_PORT)
+    # OG_DB_PORT (like OG_DB for the database) lets tools/ws_env.sh send workspace runs to the separate
+    # disposable test cluster (port 5433) without touching the shared test.toml.
+    port = os.environ.get(_ENV_DB_PORT) or cfg.get("postgres.port", DEFAULT_POSTGRES_PORT)
     database = cfg.postgres_database
     user = os.environ.get(_ENV_DB_USER, DEFAULT_POSTGRES_USER)
     password = resolve_secret(_ENV_DB_PASSWORD)
@@ -72,12 +78,37 @@ CREATE TABLE IF NOT EXISTS og.schema_migrations (
 """
 
 
-def migrate_sync(dsn: str, migrations_dir: Path = MIGRATIONS_DIR) -> list[str]:
+#: Deploys migrate while the previous release still writes og.telemetry/og.hub_state every 2 s. A DDL
+#: statement waiting on those tables' locks would queue every later writer behind it and stall the engine,
+#: so a blocked migration gives up fast (lock_timeout) and is retried a few times with backoff; a runaway
+#: statement is bounded too (statement_timeout).
+MIGRATION_LOCK_TIMEOUT = "5s"
+MIGRATION_STATEMENT_TIMEOUT = "15min"
+MIGRATION_LOCK_RETRIES = 3
+MIGRATION_RETRY_BACKOFF_S = (2.0, 4.0, 8.0)
+# Session-level (not SET LOCAL) so the settings hold across every per-file transaction.
+_SET_TIMEOUTS_SQL = "SET lock_timeout = '5s'; SET statement_timeout = '15min'"
+
+
+class MigrationLockTimeoutError(RuntimeError):
+    """A migration could not take its locks within `MIGRATION_LOCK_TIMEOUT` on every attempt."""
+
+
+def migrate_sync(
+    dsn: str,
+    migrations_dir: Path = MIGRATIONS_DIR,
+    *,
+    lock_retries: int = MIGRATION_LOCK_RETRIES,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[str]:
     """Synchronous migration runner (used by the CLI and by integration tests' setup). Returns the
-    list of filenames applied in this call."""
+    list of filenames applied in this call. Each file runs in its own transaction under
+    `lock_timeout`/`statement_timeout`; a file that hits the lock timeout is rolled back and retried
+    up to `lock_retries` more times, then `MigrationLockTimeoutError` is raised (nothing half-applied)."""
     applied: list[str] = []
     with psycopg.connect(dsn, autocommit=False) as conn:
         with conn.cursor() as cur:
+            cur.execute(_SET_TIMEOUTS_SQL)
             cur.execute(_ENSURE_TABLE_SQL)
         conn.commit()
 
@@ -89,10 +120,23 @@ def migrate_sync(dsn: str, migrations_dir: Path = MIGRATIONS_DIR) -> list[str]:
             if path.name in already:
                 continue
             sql = path.read_text(encoding="utf-8")
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                cur.execute("INSERT INTO og.schema_migrations (filename) VALUES (%s)", (path.name,))
-            conn.commit()
+            for attempt in range(lock_retries + 1):
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(sql)
+                        cur.execute("INSERT INTO og.schema_migrations (filename) VALUES (%s)", (path.name,))
+                    conn.commit()
+                    break
+                except psycopg.errors.LockNotAvailable as exc:
+                    conn.rollback()
+                    if attempt >= lock_retries:
+                        raise MigrationLockTimeoutError(
+                            f"{path.name}: locks not available within {MIGRATION_LOCK_TIMEOUT} "
+                            f"after {lock_retries + 1} attempts"
+                        ) from exc
+                    backoff = MIGRATION_RETRY_BACKOFF_S[min(attempt, len(MIGRATION_RETRY_BACKOFF_S) - 1)]
+                    print(f"{path.name}: lock timeout, retrying in {backoff:g}s", file=sys.stderr)
+                    sleep(backoff)
             applied.append(path.name)
     return applied
 

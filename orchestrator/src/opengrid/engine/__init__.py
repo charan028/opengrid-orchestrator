@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import logging
+import os
+import signal
 import time
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
@@ -40,7 +43,14 @@ from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.limits import derated_power_bounds_kw
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import HubParams, apply_ramp_limit
-from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS, R_GRANT_AS_HOLD, R_GRANT_CLOSED_LOOP
+from opengrid.core.reasons import (
+    COMMIT_LOCK_OVERRIDE_REASONS,
+    R_GRANT_AS_HOLD,
+    R_GRANT_CLOSED_LOOP,
+    R_HUB_VETO_EXCLUDED,
+    R_MANUAL_RAMP,
+    R_OPERATOR_OVERRIDE,
+)
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine import metrics as engine_metrics
 from opengrid.engine import pq_eligibility
@@ -53,9 +63,28 @@ from opengrid.engine.gates import (
     gate_failure_matches,
     run_due_gates,
 )
+from opengrid.engine.gateways import is_utility_scale_bank, load_utility_scale_banks, set_utility_scale_banks
 from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations, resolve_stuck_selected
+from opengrid.engine.manual import ManualTarget, ManualTargetSource, manual_items
+from opengrid.engine.mqtt_supervisor import (
+    DEFAULT_BACKOFF_INITIAL_S,
+    DEFAULT_BACKOFF_MAX_S,
+    DEFAULT_GIVE_UP_S,
+    DEFAULT_INGEST_DOWN_HEARTBEAT_S,
+    EXIT_MQTT_INGEST_LOST,
+    IngestHealth,
+    supervise_ingest,
+)
 from opengrid.engine.settings import dispatch_settings
+from opengrid.engine.veto import (
+    DEFAULT_VERDICT_WAIT_S,
+    HubVetoExclusions,
+    PgVerdictReader,
+    VerdictReader,
+    vetoed_banks,
+    wait_for_verdicts,
+)
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.market.territory import TERRITORY_REASONS
@@ -211,7 +240,7 @@ def _ramped_setpoint_kw(hub: Any, target_kw: float, cycle_interval_s: float | No
 #: closed-loop grant whose controller asks for nothing this cycle.
 _ZERO_KW_REASONS = frozenset({R_GRANT_AS_HOLD, R_GRANT_CLOSED_LOOP}) | TERRITORY_REASONS
 #: Reasons a committed grant below its commitment carries onto its hub items (G-19 judges them).
-_ITEM_REASONS = COMMIT_LOCK_OVERRIDE_REASONS | {R_GRANT_CLOSED_LOOP}
+_ITEM_REASONS = COMMIT_LOCK_OVERRIDE_REASONS | {R_GRANT_CLOSED_LOOP, R_OPERATOR_OVERRIDE}
 
 
 def _as_hold_items(
@@ -262,7 +291,11 @@ def _derated_room_kw(hub: Any) -> float:
         return free
     bounds = derated_power_bounds_kw(
         HubParams(
-            e_kwh=e_kwh, r_kwh=reserve, p_kw=rated, units=hub_units(rated, getattr(hub, "units", None))
+            e_kwh=e_kwh,
+            r_kwh=reserve,
+            p_kw=rated,
+            units=hub_units(rated, getattr(hub, "units", None)),
+            utility_scale=bool(getattr(hub, "utility_scale", False)) or is_utility_scale_bank(hub.bank_id),
         ),
         soc,
         getattr(hub, "cell_temp_c", None),
@@ -278,6 +311,7 @@ def _distribute_hub_items(
     fleet_module: Any,
     cycle_interval_s: float | None = None,
     hub_allocations: Mapping[tuple[str, str], Mapping[str, float]] | None = None,
+    excluded_hub_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """S8 command build (02a S1.10: "per-hub detail ... derivable from the command log referenced by
     command_batch_id"): distribute each bank-level `Grant`'s kW across the bank's currently-online hubs,
@@ -292,7 +326,9 @@ def _distribute_hub_items(
     (`hub_allocations`, all PQ-eligible); those hubs take no other grant's item this cycle.
     """
     hubs = [
-        h for h in fleet_module.hub_capabilities(bank_id) if h.health == "online" and h.free_discharge_kw > 0
+        h
+        for h in fleet_module.hub_capabilities(bank_id)
+        if h.health == "online" and h.free_discharge_kw > 0 and h.hub_id not in excluded_hub_ids
     ]
     items: list[dict[str, object]] = []
     if not hubs or sum(h.free_discharge_kw for h in hubs) <= 0:
@@ -361,6 +397,8 @@ async def propose_batch_to_guardian(
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
     cycle_interval_s: float | None = None,
     hub_allocations: Mapping[tuple[str, str], Mapping[str, float]] | None = None,
+    excluded_hub_ids: frozenset[str] = frozenset(),
+    manual_targets: Mapping[str, ManualTarget] | None = None,
 ) -> UUID | None:
     """Build this bank's command-batch summary, durably write its `RT_ALLOCATION` decision pre-image to
     the trace FIRST (K10), then persist `og.command_batch` (carrying that SAME trace row's id as
@@ -369,8 +407,17 @@ async def propose_batch_to_guardian(
     S17's incident: previously no `RT_ALLOCATION` trace row was written at all, `trace_pre_image_id` was
     always `None`, and every verdict VETOed on G-14 `PROPOSAL_NOT_FOUND`). Returns the new
     `command_batch_id`, or `None` if there is nothing to propose (empty grant set -- nothing changed
-    this cycle, no reason to wake the guardian)."""
-    if not grants:
+    this cycle, no reason to wake the guardian).
+
+    `manual_targets`: live operator setpoints (`engine.manual`): their hubs get only their ramped
+    R-MANUAL-RAMP item, never a dispatch share."""
+    extra_items = manual_items(
+        bank_id,
+        manual_targets or {},
+        fleet_module.hub_capabilities(bank_id) if manual_targets else [],
+        lambda hub, target_kw: _ramped_setpoint_kw(hub, target_kw, cycle_interval_s),
+    )
+    if not grants and not extra_items:
         return None
 
     command_batch_id = uuid4()
@@ -382,7 +429,9 @@ async def propose_batch_to_guardian(
         fleet_module=fleet_module,
         cycle_interval_s=cycle_interval_s,
         hub_allocations=hub_allocations,
+        excluded_hub_ids=excluded_hub_ids | frozenset(manual_targets or {}),
     )
+    items.extend(extra_items)
     trace_payload = {
         "command_batch_id": str(command_batch_id),
         "bank_id": bank_id,
@@ -456,6 +505,19 @@ class _EngineState:
     escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
     short_flagged: set[str] = field(default_factory=set)  # obligations flagged AT_RISK for a shortfall
     pq_flush: Cadence | None = None
+    #: MQTT ingest connectivity (`engine.mqtt_supervisor`); the heartbeat stops once it is down too long.
+    ingest_health: IngestHealth | None = None
+    ingest_down_heartbeat_s: float = DEFAULT_INGEST_DOWN_HEARTBEAT_S
+    #: K4 veto fail-safe: verdict reader (None = off), hub exclusions, the wait for verdicts, and batches
+    #: proposed last cycle whose verdicts had not arrived yet (`batch_id -> bank_id`).
+    verdict_reader: VerdictReader | None = None
+    veto_exclusions: HubVetoExclusions = field(default_factory=HubVetoExclusions)
+    verdict_wait_s: float = DEFAULT_VERDICT_WAIT_S
+    pending_verdicts: dict[UUID, str] = field(default_factory=dict)
+    #: Operator setpoints ramped by the engine (`engine.manual`); None = off.
+    manual_source: ManualTargetSource | None = None
+    manual_targets: dict[str, ManualTarget] = field(default_factory=dict)
+    manual_traced: set[str] = field(default_factory=set)
     gate_task: asyncio.Task[int] | None = None
     gate_backlog: list[GateTrigger] = field(
         default_factory=list
@@ -710,6 +772,11 @@ async def beat_if_ticking(state: Any, *, monotonic_now: float | None = None) -> 
     last = state.last_tick_at
     if last is None or now - last > 3 * state.cycle_interval_s:
         return False
+    # MQTT ingest down too long: the twin is going stale, so og-engine must read as down (ALR-PROCESS-DOWN).
+    ingest = getattr(state, "ingest_health", None)
+    limit_s = getattr(state, "ingest_down_heartbeat_s", DEFAULT_INGEST_DOWN_HEARTBEAT_S)
+    if ingest is not None and ingest.down_for_s(now) > limit_s:
+        return False
     await write_heartbeat(state.heartbeat_pool, PROCESS_NAME)
     return True
 
@@ -729,6 +796,137 @@ async def persist_fleet_state(state: Any) -> None:
         if flush_lag is not None:
             flush_lag.mark_ok()
     await _flush_pq_summaries(state)
+
+
+def manual_bank_ids(targets: Mapping[str, ManualTarget], fleet_module: Any) -> list[str]:
+    """Banks with at least one hub under a live manual target (each gets a batch even with no grant)."""
+    banks: set[str] = set()
+    for hub_id in targets:
+        bank_id = hub_bank_id(fleet_module, hub_id)
+        if bank_id is not None:
+            banks.add(bank_id)
+    return sorted(banks)
+
+
+def hub_bank_id(fleet_module: Any, hub_id: str) -> str | None:
+    for bank_id in fleet_module.known_bank_ids():
+        if any(h.hub_id == hub_id for h in fleet_module.hub_capabilities(bank_id)):
+            return str(bank_id)
+    return None
+
+
+async def trace_new_manual_targets(state: Any, cycle_id: str) -> None:
+    """Record once per target that the engine adopted it and ramps it (R-MANUAL-RAMP)."""
+    current = {t.trace_id for t in state.manual_targets.values()}
+    for target_id in sorted(current - state.manual_traced):
+        hubs = sorted(h for h, t in state.manual_targets.items() if t.trace_id == target_id)
+        target = state.manual_targets[hubs[0]]
+        try:
+            await state.trace.append(
+                f"manual-{target_id}",
+                "OPERATOR_ACTION",
+                "MANUAL_RAMP",
+                {
+                    "cycle_id": cycle_id,
+                    "target_trace_id": target_id,
+                    "hub_ids": hubs,
+                    "p_kw_target": target.p_kw_target,
+                    "expires_at": target.expires_at.isoformat(),
+                },
+                reason_codes=[R_MANUAL_RAMP],
+            )
+        except Exception:
+            logger.exception("could not trace a manual ramp", extra={"target_trace_id": target_id})
+    state.manual_traced = current
+
+
+async def refresh_market_model(fleet_gateway: Any, fleet_module: Any, pool: Any = None) -> None:
+    """Rebuild the K15 market model from the fleet twin and tdsp_tariffs.toml (re-zoning, market changes).
+    A failed rebuild keeps the current model."""
+    from opengrid.engine.wiring import load_fleet_market_model
+
+    fleet_gateway.set_market_model(load_fleet_market_model(fleet_module))
+    if pool is not None:
+        banks = await load_utility_scale_banks(pool)
+        if banks is not None:
+            set_utility_scale_banks(banks)
+
+
+async def handle_vetoes(state: Any, proposed: dict[UUID, str], *, wait_s: float, cycle_id: str) -> list[str]:
+    """K4 fail-safe (`engine.veto`): wait up to `wait_s` for the verdicts of `proposed` (batch -> bank),
+    exclude the hubs any PARTLY_VETOED/VETOED verdict names (traced R-HUB-VETO-EXCLUDED), and return the
+    banks to re-propose now. Verdicts still missing are kept for the next cycle."""
+    reader: VerdictReader | None = state.verdict_reader
+    if reader is None:
+        return []
+    outcomes = await wait_for_verdicts(reader, list(proposed), wait_s=wait_s)
+    state.pending_verdicts = {b: bank for b, bank in proposed.items() if b not in outcomes}
+    by_bank = await vetoed_banks(reader, outcomes, proposed)
+    for bank_id, hubs in sorted(by_bank.items()):
+        new = state.veto_exclusions.exclude(hubs)
+        try:
+            await state.trace.append(
+                f"allocator-{bank_id}",
+                "RT_ALLOCATION",
+                "HUB_VETO_EXCLUDED",
+                {
+                    "cycle_id": cycle_id,
+                    "bank_id": bank_id,
+                    "hub_ids": sorted(hubs),
+                    "newly_excluded": sorted(new),
+                },
+                reason_codes=[R_HUB_VETO_EXCLUDED],
+            )
+        except Exception:
+            logger.exception("could not trace a vetoed-hub exclusion", extra={"bank_id": bank_id})
+    return sorted(by_bank)
+
+
+async def repropose_banks(
+    state: Any, bank_ids: list[str], *, cycle_id: str, now: datetime, fleet_module: Any
+) -> None:
+    """Re-solve and re-propose `bank_ids` once, in this cycle, without the excluded hubs (their kW moves to
+    other hubs of the same obligation, K13). A fresh `seq` and cycle id keep G-13 and grant ids distinct."""
+    from opengrid import allocator
+
+    retry_cycle_id = f"{cycle_id}-r1"
+    state.cycle_seq += 1
+    grants = await allocator.run_cycle(
+        retry_cycle_id,
+        fleet=state.fleet_gateway,
+        ledger=state.ledger_gateway,
+        scada_gateway=state.scada_gateway,
+        schedule_gateway=state.schedule_gateway,
+        extras_gateway=state.extras_gateway,
+        now=now,
+        lease_ttl_s=state.lease_ttl_s,
+        only_bank_ids=bank_ids,
+    )
+    hub_allocations = allocator.hub_allocations()
+    grants_by_bank: dict[str, list[Grant]] = {}
+    for grant in grants:
+        grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
+
+    async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
+        await propose_batch_to_guardian(
+            backend=state.backend,
+            trace=state.trace,
+            fleet_module=fleet_module,
+            cycle_id=retry_cycle_id,
+            bank_id=bank_id,
+            grants=bank_grants,
+            ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+            epoch=state.epoch,
+            seq=state.cycle_seq,
+            now=now,
+            lease_ttl_s=state.lease_ttl_s,
+            cycle_interval_s=state.cycle_interval_s,
+            hub_allocations=hub_allocations,
+            excluded_hub_ids=state.veto_exclusions.active(),
+            manual_targets=state.manual_targets,
+        )
+
+    await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
 
 
 async def _engine_tick(state: _EngineState) -> None:
@@ -763,6 +961,17 @@ async def _engine_tick(state: _EngineState) -> None:
             except Exception:
                 logger.exception("obligation lifecycle step failed", extra={"cycle_id": cycle_id})
 
+    state.veto_exclusions.next_cycle()
+    if state.pending_verdicts:
+        # Verdicts that arrived after last cycle's wait: exclude their vetoed hubs from this cycle.
+        with phase("late_verdicts"):
+            await handle_vetoes(state, dict(state.pending_verdicts), wait_s=0.0, cycle_id=cycle_id)
+
+    if state.manual_source is not None:
+        with phase("manual_targets"):
+            state.manual_targets = await state.manual_source.targets(now)
+            await trace_new_manual_targets(state, cycle_id)
+
     with phase("allocator"):
         grants = await allocator.run_cycle(
             cycle_id,
@@ -786,9 +995,13 @@ async def _engine_tick(state: _EngineState) -> None:
         grants_by_bank: dict[str, list[Grant]] = {}
         for grant in grants:
             grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
+        for bank_id in manual_bank_ids(state.manual_targets, fleet):
+            grants_by_bank.setdefault(bank_id, [])
+
+        proposed: dict[UUID, str] = {}
 
         async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
-            await propose_batch_to_guardian(
+            batch_id = await propose_batch_to_guardian(
                 backend=state.backend,
                 trace=state.trace,
                 fleet_module=fleet,
@@ -802,10 +1015,21 @@ async def _engine_tick(state: _EngineState) -> None:
                 lease_ttl_s=state.lease_ttl_s,
                 cycle_interval_s=state.cycle_interval_s,
                 hub_allocations=hub_allocations,
+                excluded_hub_ids=state.veto_exclusions.active(),
+                manual_targets=state.manual_targets,
             )
+            if batch_id is not None:
+                proposed[batch_id] = bank_id
 
         with phase("propose"):
             await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+        if state.verdict_reader is not None and proposed:
+            with phase("veto_retry"):
+                retry_banks = await handle_vetoes(
+                    state, proposed, wait_s=state.verdict_wait_s, cycle_id=cycle_id
+                )
+                if retry_banks:
+                    await repropose_banks(state, retry_banks, cycle_id=cycle_id, now=now, fleet_module=fleet)
     else:
         logger.warning(
             "guardian unavailable this cycle -- holding, no new batches proposed",
@@ -904,6 +1128,8 @@ async def main(cfg: Config) -> None:
     from opengrid.platform.mqtt import build_client
     from opengrid.pq_ingest.blob_store import FileBlobStore
     from opengrid.pq_ingest.pg_backend import PgPqIngestBackend
+    from opengrid.selector import db as selector_db
+    from opengrid.selector import energy_value as selector_energy_value
     from opengrid.site_ingest.pg_backend import PgSiteIngestBackend
 
     configure_logging(PROCESS_NAME)
@@ -990,6 +1216,8 @@ async def main(cfg: Config) -> None:
             stored_energy_value=stored_energy_value_reader(),
             wear_usd_per_kwh=settings.wear_usd_per_kwh,
             m1_by_zone=load_m1_by_zone(),
+            hold_floor_in_process=selector_energy_value.hold_floor_kwh,
+            hold_floor_db=selector_db.load_hold_floors_kwh,
         )
         allocator_mod.configure(ledger_gateway)
         from opengrid.assets.repo import PgCalibrationAckGuard
@@ -1001,12 +1229,23 @@ async def main(cfg: Config) -> None:
         # commits one beyond that capacity (fail closed until the first refresh).
         pq_eligibility.configure(pq_eligibility.load_profile_configs())
         selector_gate.configure_pq_capacity(pq_eligibility.eligible_kw)
+        manual_source = ManualTargetSource(
+            pool,
+            bank_of_hub=lambda hub_id: hub_bank_id(fleet_mod, hub_id),
+            zone_of_bank=lambda bank_id: fleet_mod.bank_zone(bank_id),
+        )
+        banks_at_start = await load_utility_scale_banks(pool)
+        if banks_at_start is not None:
+            set_utility_scale_banks(banks_at_start)
+        veto_exclusions = HubVetoExclusions(exclude_cycles=settings.veto_exclude_cycles)
         extras_gateway = build_cycle_extras(
             pool,
             trace_store,
             settings,
             asset_service=asset_service,
             set_at_risk=contracts_mod.set_obligation_at_risk,
+            excluded_hub_ids=veto_exclusions.active,
+            operator_hub_ids=manual_source.active_hub_ids,
         )
         flush_lag = engine_metrics.FlushLag()
         flush_lag.bind()
@@ -1025,6 +1264,10 @@ async def main(cfg: Config) -> None:
             scada_gateway=scada_gateway,
             schedule_gateway=schedule_gateway,
             extras_gateway=extras_gateway,
+            verdict_reader=PgVerdictReader(pool) if settings.veto_retry_enabled else None,
+            veto_exclusions=veto_exclusions,
+            verdict_wait_s=settings.verdict_wait_s,
+            manual_source=manual_source,
             energy_sufficiency_gateway=EnergySufficiencyGateway(
                 pool,
                 trace_store,
@@ -1042,83 +1285,118 @@ async def main(cfg: Config) -> None:
         logger.info("engine epoch", extra={"epoch": state.epoch})
 
         mqtt_password = resolve_secret("OG_MQTT_ENGINE_PASSWORD")
-        async with build_client(
-            cfg, username="og_engine", password=mqtt_password, process="engine"
-        ) as client:
-            raw_worker = BackgroundIngest("pq-raw", ingest_raw_capture_off_loop)
-            raw_task = asyncio.create_task(raw_worker.run())
-            cal_worker = BackgroundIngest(
-                "calibration-ack", make_calibration_ack_handler(asset_service, PgCalibrationAckGuard(pool))
-            )
-            cal_task = asyncio.create_task(cal_worker.run())
-            summary_worker = BackgroundIngest(
-                "pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX
-            )
-            summary_task = asyncio.create_task(summary_worker.run())
-            ingest_task = asyncio.create_task(
-                _mqtt_ingest_loop(
+        ingest_health = IngestHealth()
+        state.ingest_health = ingest_health
+        state.ingest_down_heartbeat_s = float(
+            cfg.get("mqtt.ingest_down_heartbeat_s", DEFAULT_INGEST_DOWN_HEARTBEAT_S)
+        )
+        fatal_exit: list[int] = []
+
+        def _give_up() -> None:
+            # Last resort: exit non-zero through the normal shutdown path so systemd restarts og-engine.
+            fatal_exit.append(EXIT_MQTT_INGEST_LOST)
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except (OSError, ValueError):
+                os._exit(EXIT_MQTT_INGEST_LOST)
+
+        raw_worker = BackgroundIngest("pq-raw", ingest_raw_capture_off_loop)
+        raw_task = asyncio.create_task(raw_worker.run())
+        cal_worker = BackgroundIngest(
+            "calibration-ack", make_calibration_ack_handler(asset_service, PgCalibrationAckGuard(pool))
+        )
+        cal_task = asyncio.create_task(cal_worker.run())
+        summary_worker = BackgroundIngest("pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX)
+        summary_task = asyncio.create_task(summary_worker.run())
+        device_info_worker = BackgroundIngest("device-info", make_device_info_handler(pool))
+        device_info_task = asyncio.create_task(device_info_worker.run())
+        # One client at a time, rebuilt with the same client id after every disconnect (reconnect
+        # with backoff; the loop resubscribes on each connection).
+        ingest_task = asyncio.create_task(
+            supervise_ingest(
+                lambda: build_client(cfg, username="og_engine", password=mqtt_password, process="engine"),
+                lambda client: _mqtt_ingest_loop(
                     client,
                     cfg,
                     raw_worker,
                     cal_worker,
                     summary_worker,
                     site_ingest_on=settings.site_ingest_enabled,
-                )
+                    device_info_worker=device_info_worker,
+                ),
+                ingest_health,
+                on_give_up=_give_up,
+                backoff_initial_s=float(cfg.get("mqtt.reconnect_initial_s", DEFAULT_BACKOFF_INITIAL_S)),
+                backoff_max_s=float(cfg.get("mqtt.reconnect_max_s", DEFAULT_BACKOFF_MAX_S)),
+                give_up_after_s=float(cfg.get("mqtt.ingest_give_up_s", DEFAULT_GIVE_UP_S)),
             )
-            ingest_task.add_done_callback(_log_ingest_exit)
-            lag_probe = state.latency.lag_probe
-            lag_task = asyncio.create_task(lag_probe.run()) if lag_probe is not None else raw_task
-            persist_task = asyncio.create_task(
-                run_periodic("fleet-persist", state.cycle_interval_s, lambda: persist_fleet_state(state))
+        )
+        ingest_task.add_done_callback(_log_ingest_exit)
+        lag_probe = state.latency.lag_probe
+        lag_task = asyncio.create_task(lag_probe.run()) if lag_probe is not None else raw_task
+        persist_task = asyncio.create_task(
+            run_periodic("fleet-persist", state.cycle_interval_s, lambda: persist_fleet_state(state))
+        )
+        characterize_task = asyncio.create_task(
+            run_periodic(
+                "pq-characterize",
+                float(
+                    cfg.get(
+                        "pq_ingest.characterization_interval_s",
+                        pq_mod.DEFAULT_CHARACTERIZATION_INTERVAL_S,
+                    )
+                ),
+                characterize_hubs,
+                initial_delay_s=STARTUP_QUIET_S,
             )
-            characterize_task = asyncio.create_task(
-                run_periodic(
-                    "pq-characterize",
-                    float(
-                        cfg.get(
-                            "pq_ingest.characterization_interval_s",
-                            pq_mod.DEFAULT_CHARACTERIZATION_INTERVAL_S,
-                        )
-                    ),
-                    characterize_hubs,
-                    initial_delay_s=STARTUP_QUIET_S,
-                )
+        )
+        pq_elig_task = asyncio.create_task(
+            run_periodic("pq-eligibility", PQ_ELIGIBILITY_REFRESH_S, lambda: pq_eligibility.refresh(pool))
+        )
+        heartbeat_task = asyncio.create_task(
+            run_periodic("heartbeat", state.cycle_interval_s, lambda: beat_if_ticking(state))
+        )
+        market_task = asyncio.create_task(
+            run_periodic(
+                "market-model",
+                settings.market_refresh_s,
+                lambda: refresh_market_model(fleet_gateway, fleet_mod, pool),
+                initial_delay_s=settings.market_refresh_s,
             )
-            pq_elig_task = asyncio.create_task(
-                run_periodic("pq-eligibility", PQ_ELIGIBILITY_REFRESH_S, lambda: pq_eligibility.refresh(pool))
+        )
+        site_flush_task = asyncio.create_task(
+            run_periodic(
+                "site-ingest-flush",
+                float(cfg.get("site_ingest.flush_interval_s", site_ingest_mod.DEFAULT_FLUSH_INTERVAL_S)),
+                site_ingest_mod.flush_readings,
             )
-            heartbeat_task = asyncio.create_task(
-                run_periodic("heartbeat", state.cycle_interval_s, lambda: beat_if_ticking(state))
+            if settings.site_ingest_enabled
+            else asyncio.sleep(0)
+        )
+        try:
+            await run_forever(
+                lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
             )
-            site_flush_task = asyncio.create_task(
-                run_periodic(
-                    "site-ingest-flush",
-                    float(cfg.get("site_ingest.flush_interval_s", site_ingest_mod.DEFAULT_FLUSH_INTERVAL_S)),
-                    site_ingest_mod.flush_readings,
-                )
-                if settings.site_ingest_enabled
-                else asyncio.sleep(0)
+        finally:
+            background = (
+                raw_task,
+                cal_task,
+                summary_task,
+                lag_task,
+                persist_task,
+                heartbeat_task,
+                characterize_task,
+                pq_elig_task,
+                site_flush_task,
+                market_task,
+                device_info_task,
             )
-            try:
-                await run_forever(
-                    lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
-                )
-            finally:
-                background = (
-                    raw_task,
-                    cal_task,
-                    summary_task,
-                    lag_task,
-                    persist_task,
-                    heartbeat_task,
-                    characterize_task,
-                    pq_elig_task,
-                    site_flush_task,
-                )
-                for task in {ingest_task, *background}:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
+            for task in {ingest_task, *background}:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        if fatal_exit:
+            raise SystemExit(fatal_exit[0])
     finally:
         await pool.close()
 
@@ -1183,6 +1461,29 @@ async def ingest_raw_capture_off_loop(payload: dict[str, Any]) -> None:
     await pq_ingest.ingest_raw_capture(payload)
 
 
+#: FLEET-SIM's retained DEVICE-INFO topic under the MQTT root (to confirm); `[mqtt].device_info_topic`.
+DEFAULT_DEVICE_INFO_TOPIC = "hub/+/info"
+
+
+def make_device_info_handler(pool: Any) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+    """Background handler for a DEVICE-INFO message: `opengrid.fleet.device_info.upsert_device_info(pool,
+    msg)` (FOLLOWUPS). Until that module lands, messages are logged once and dropped."""
+    warned: list[bool] = []
+
+    async def _handle(item: dict[str, Any]) -> None:
+        try:
+            # By name: the module lands separately (FOLLOWUPS); no static import to go stale either way.
+            device_info = importlib.import_module("opengrid.fleet.device_info")
+        except ImportError:
+            if not warned:
+                logger.warning("opengrid.fleet.device_info not available; DEVICE-INFO messages dropped")
+                warned.append(True)
+            return
+        await device_info.upsert_device_info(pool, item["payload"])
+
+    return _handle
+
+
 def _log_ingest_exit(task: asyncio.Task[None]) -> None:
     """The MQTT ingest task must never end silently: without it the fleet twin goes stale and every
     hub drops out of dispatch while the engine tick still looks healthy (no process restart follows)."""
@@ -1200,6 +1501,7 @@ async def _mqtt_ingest_loop(
     summary_worker: BackgroundIngest | None = None,
     *,
     site_ingest_on: bool = False,
+    device_info_worker: BackgroundIngest | None = None,
 ) -> None:
     """Subscribe to `<root>/tel/#`, `<root>/scada/#`, `<root>/scada/instruction/#` (topics.md) and route
     validated payloads into the fleet twin. Split out of `main` so it runs concurrently with the 2 s
@@ -1229,12 +1531,19 @@ async def _mqtt_ingest_loop(
     if site_ingest_on:
         await client.subscribe(topic(cfg, "site/#"))
         await client.subscribe(topic(cfg, "corridor/#"))
+    # Retained battery DEVICE-INFO (sent on connect): handed to a background worker, never blocking
+    # telemetry. The topic is `[mqtt].device_info_topic` (FLEET-SIM defines it; default `hub/+/info`).
+    device_info_topic = topic(cfg, str(cfg.get("mqtt.device_info_topic", DEFAULT_DEVICE_INFO_TOPIC)))
+    if device_info_worker is not None:
+        await client.subscribe(device_info_topic)
 
     async for message in client.messages:
         msg_topic = str(message.topic)
         try:
             payload = json.loads(message.payload)
-            if site_ingest_on and message.topic.matches(site_topic):
+            if device_info_worker is not None and message.topic.matches(device_info_topic):
+                device_info_worker.submit({"topic": msg_topic, "payload": payload})
+            elif site_ingest_on and message.topic.matches(site_topic):
                 site_ingest.ingest_site_meter(payload, topic=msg_topic, root=cfg.mqtt_topic_root)
             elif site_ingest_on and message.topic.matches(corridor_topic):
                 site_ingest.ingest_corridor_current(payload, topic=msg_topic, root=cfg.mqtt_topic_root)

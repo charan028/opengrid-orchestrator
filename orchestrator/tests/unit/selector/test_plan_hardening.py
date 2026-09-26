@@ -1,5 +1,6 @@
 """R3 hardening (lead 2026-09-26): the published hard hold floor, the measured solar/grid charging split
-(D-22, D-28), the no-wash-trade rule, stored-energy retention and wear on expected AS deployment."""
+(D-28) with toll-bank charging on the owner's schedule (D-29 c), the no-wash-trade rule, stored-energy
+retention and wear on expected AS deployment."""
 
 from __future__ import annotations
 
@@ -13,7 +14,12 @@ import pytest
 from opengrid.core.solar_share import PLANNING_SOLAR_SHARE, solar_part_of_charge_kw, solar_share
 from opengrid.selector import energy_value, solar_history
 from opengrid.selector.extract import extract_plan
-from opengrid.selector.gate import expected_deployment_share, plan_analytics_rows, solve_gate
+from opengrid.selector.gate import (
+    expected_deployment_share,
+    owner_charge_intervals,
+    plan_analytics_rows,
+    solve_gate,
+)
 from opengrid.selector.model import build_mode_o_model
 from opengrid.selector.solve import highs_solve
 from opengrid.selector.types import BankSnapshot, ModelInputs, ScenarioPrice, SolverSettings
@@ -95,7 +101,7 @@ def test_plan_headroom_never_goes_below_the_hold_floor():
         assert plan.soc_by_bank_interval_scenario["B1", t, "P50"] >= series.hold_floor_kwh[t - 1] - 1e-6
 
 
-# --- 2. solar / grid charging split (D-22, D-28) --------------------------------------------------------
+# --- 2. solar / grid charging split (D-28, D-29 c) ------------------------------------------------------
 
 
 def test_core_solar_part_uses_the_hubs_own_split_then_pv_surplus_else_unknown():
@@ -174,32 +180,39 @@ def test_competitive_bank_charges_pv_surplus_before_grid_and_pv_pays_no_m1():
     assert series.solar_share[0] == 0.5 and series.solar_share_source[0] == "TELEMETRY"
 
 
-def test_regulated_bank_meets_the_30_percent_solar_floor_and_charges_grid_only_at_night():
-    """Night grid at 2 cents (t=0), utility solar at 4 cents only at t=1, day grid barred (D-22). The bank
-    buys 20 kWh; the soft floor makes at least 30% of it solar although grid is cheaper."""
+def test_toll_bank_charges_from_local_solar_or_on_the_owner_schedule_not_the_utility_window():
+    """D-29(c): a utility-toll bank charges from local solar when available, and from the grid only in
+    the owner's charge window (here t=1, where grid costs 5 cents -- not the utility's cheaper t=0 night
+    rate, which is outside the owner's schedule). No 30% floor is enforced (30% is only the D-28
+    fallback share). It must buy 20 kWh for its 80 kW delivery at t=2."""
     bank = _bank(
         n=3,
         initial_soc_kwh=10.0,
         max_charge_kw=dict.fromkeys(range(3), 80.0),
-        charge_price_usd_per_kwh=dict.fromkeys(range(3), 0.02),
-        grid_charge_intervals=frozenset({0}),
-        solar_charge_kw={1: 80.0},
+        charge_price_usd_per_kwh={0: 0.02, 1: 0.05, 2: 0.05},
+        grid_charge_intervals=frozenset({1}),
+        solar_charge_kw={1: 20.0},
         solar_cost_usd_per_kwh=0.04,
-        solar_share_floor=0.30,
         territory="AUSTIN_ENERGY",
         free_market_access=False,
     )
-    # 80 kW for 15 min = 20 kWh delivered at t=2; the bank starts at its reserve, so it must buy 20 kWh.
     need = replace(committed("reg", {2: 80.0}, ("B1",)), market="REGULATED", utility_id="AUSTIN_ENERGY")
     inputs = _inputs(bank, {0: 0.0, 1: 0.0, 2: 0.0}, committed_=[need])
     outcome, plan = _solve(inputs)
 
-    grid = sum(plan.charge_by_bank_interval_scenario.values()) * 0.25
-    solar = sum(plan.solar_charge_by_bank_interval_scenario.values()) * 0.25
     assert outcome.status == "OPTIMAL"
-    assert grid + solar == pytest.approx(20.0, abs=1e-6)
-    assert solar >= 0.30 * (grid + solar) - 1e-6
-    assert plan.charge_by_bank_interval_scenario["B1", 1, "P50"] == pytest.approx(0.0)  # no day grid
+    assert plan.charge_by_bank_interval_scenario["B1", 0, "P50"] == pytest.approx(0.0)  # outside schedule
+    assert plan.solar_charge_by_bank_interval_scenario["B1", 1, "P50"] == pytest.approx(20.0)  # solar first
+    assert plan.charge_by_bank_interval_scenario["B1", 1, "P50"] == pytest.approx(60.0)  # rest, in window
+
+
+def test_owner_charge_window_parsing_wraps_midnight():
+    start = datetime(2026, 9, 28, 3, 30, tzinfo=UTC)  # 22:30 CT Sunday
+    assert owner_charge_intervals(["22:00-07:00"], start, 4) == frozenset({0, 1, 2, 3})
+    assert owner_charge_intervals(["23:00-23:30"], start, 4) == frozenset({2, 3})
+    assert owner_charge_intervals([], start, 4) == frozenset()
+    with pytest.raises(ValueError):
+        owner_charge_intervals(["late"], start, 4)
 
 
 # --- 3. no wash trade -----------------------------------------------------------------------------------
@@ -219,21 +232,23 @@ def test_no_charging_while_a_bank_delivers_a_regulated_obligation():
         _o, plan = _solve(_inputs(_bank(n=1, initial_soc_kwh=500.0), prices, committed_=[delivery]))
         assert plan.charge_by_bank_interval_scenario["B1", 0, "P50"] == pytest.approx(
             expected_cap, abs=1e-6
-        ), (
-            share,
-            market,
-        )
+        ), (share, market)
 
 
-def test_grid_charging_and_headroom_sale_share_one_envelope():
-    """No arbitrage wash: at a neutral price (no losses, no wear, no M1) the LP is indifferent, and the
-    guard row keeps grid charge and headroom sale within one combined envelope in every interval."""
-    inputs = _inputs(_bank(n=2, initial_soc_kwh=500.0), {0: 40.0, 1: 40.0})
-    _o, plan = _solve(inputs)
-    for t in range(2):
-        g = plan.charge_by_bank_interval_scenario["B1", t, "P50"]
-        h = plan.headroom_schedule["B1", t, "P50"]
-        assert g / 100.0 + h / 100.0 <= 1.0 + 1e-9
+def test_no_wash_where_it_would_pay_or_tie():
+    """No arbitrage wash, exactly: with no losses, wear or M1 a wash ties (the LP would be indifferent),
+    and at a deeply negative price a lossy bank would EARN by charging and selling at once (burning
+    energy through losses). The either/or guard forbids both."""
+    tie = _inputs(_bank(n=2, initial_soc_kwh=500.0), {0: 40.0, 1: 40.0})
+    burn = _inputs(
+        _bank(n=1, initial_soc_kwh=500.0, eta_c=0.9, eta_d=0.9, wear_usd_per_kwh=0.0), {0: -2_000.0}
+    )
+    for inputs in (tie, burn):
+        _o, plan = _solve(inputs)
+        for t in inputs.intervals:
+            g = plan.charge_by_bank_interval_scenario["B1", t, "P50"]
+            h = plan.headroom_schedule["B1", t, "P50"]
+            assert min(g, h) <= 1e-6, (t, g, h)
 
 
 def test_at_real_parameters_the_plan_never_charges_and_sells_in_the_same_interval():

@@ -53,8 +53,64 @@ HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
         "ALR-METER-EXPORT-LIMIT",
         "ALR-TEMPERATURE-LIMIT",
         "ALR-SCADA-SILENT",
+        "ALR-SCADA-SILENT-BANK",
     }
 )
+
+
+def normalize_feed_key(source: str, product: str) -> str:
+    """Canonical `"SOURCE:product"` form for `HealthThresholds.firm_blocking_feeds` membership --
+    case-normalised (uppercased) so a config typo like `"ercot:NP6-905-CD"` still matches the runtime
+    `FeedStatus.source`/`.product` pair (R3 review fix)."""
+    return f"{source.strip()}:{product.strip()}".upper()
+
+
+#: R3 review fix (HIGH): the AS DAM clearing price (np4-188-cd) also feeds firm pricing -- AS intake
+#: values offers at its MCPC, so a stale clearing price must block new commitments exactly like the
+#: real-time energy price does. Its own staleness *window* is unaffected (still `AS_PRICE_FRESH_S`,
+#: `opengrid.feeds.staleness.threshold_s_for_product`); only its membership in the blocking set changed.
+_DEFAULT_FIRM_BLOCKING_FEEDS: frozenset[str] = frozenset(
+    {normalize_feed_key("ERCOT", "np6-905-cd"), normalize_feed_key("ERCOT", "np4-188-cd")}
+)
+
+
+def _resolve_firm_blocking_feeds(cfg: Config, defaults: frozenset[str]) -> frozenset[str]:
+    """Validates and resolves `[health].firm_blocking_feeds` (R3 review fix):
+
+    - must be a list of `"SOURCE:product"` strings -- a bare string (a config author forgetting the
+      list brackets, e.g. `firm_blocking_feeds = "ERCOT:np6-905-cd"`) raises rather than being silently
+      iterated character-by-character;
+    - every entry is case-normalised (`normalize_feed_key`);
+    - configured entries ADD to `defaults` unless `health.firm_blocking_feeds_replace = true`;
+    - the resolved set must not be empty unless `health.firm_blocking_feeds_allow_empty = true` -- an
+      empty set means NO feed ever blocks `NO_NEW_COMMITMENTS`, which must be an explicit, deliberate
+      choice, not an accident (e.g. a typo'd `firm_blocking_feeds_replace = true` with an empty list).
+    """
+    raw = cfg.get("health.firm_blocking_feeds", None)
+    if raw is None:
+        return defaults
+    if isinstance(raw, str):
+        raise ValueError(
+            'health.firm_blocking_feeds must be a list of "SOURCE:product" strings, not a bare string '
+            f'({raw!r}) -- wrap it in a list, e.g. ["{raw}"]'
+        )
+    configured_keys: set[str] = set()
+    for entry in raw:
+        parts = str(entry).split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(
+                f'health.firm_blocking_feeds entries must be "SOURCE:product" strings, got {entry!r}'
+            )
+        configured_keys.add(normalize_feed_key(*parts))
+    configured = frozenset(configured_keys)
+    replace = bool(cfg.get("health.firm_blocking_feeds_replace", False))
+    resolved = configured if replace else (defaults | configured)
+    if not resolved and not bool(cfg.get("health.firm_blocking_feeds_allow_empty", False)):
+        raise ValueError(
+            "health.firm_blocking_feeds resolved to an empty set -- no feed would ever block "
+            "NO_NEW_COMMITMENTS. Set health.firm_blocking_feeds_allow_empty = true if this is intended."
+        )
+    return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,11 +165,13 @@ class HealthThresholds:
     # ERCOT primary is healthy, see `is_fallback_feed_needed`) blocked production commitments for no
     # reason. Only a feed in this set blocks new commitments when stale; every feed still raises its own
     # `ALR-FEED-STALE`/`ALR-FEED-LGV-EXHAUSTED` regardless of membership here -- this only narrows the
-    # gate, not the alerting. Keyed as `"{source}:{product}"` (matching `FeedStatus.source`/`.product`).
-    # Default: the ERCOT real-time price series (np6-905-cd) -- the firm-pricing input `forecast.scenarios`
-    # /`selector.gate` need fresh. Config-driven so the architect can extend it as more feeds are
-    # confirmed to be genuine firm-pricing inputs.
-    firm_blocking_feeds: frozenset[str] = field(default_factory=lambda: frozenset({"ERCOT:np6-905-cd"}))
+    # gate, not the alerting. Keyed as `normalize_feed_key(source, product)` (case-normalised
+    # `"SOURCE:PRODUCT"`). Default: the ERCOT real-time price series (np6-905-cd) and the AS DAM clearing
+    # price (np4-188-cd, R3 review fix -- AS intake values offers at its MCPC) -- the firm-pricing inputs
+    # `forecast.scenarios`/`selector.gate`/AS intake need fresh. Config-driven (see
+    # `_resolve_firm_blocking_feeds`) so the architect can extend it as more feeds are confirmed to be
+    # genuine firm-pricing inputs.
+    firm_blocking_feeds: frozenset[str] = field(default_factory=lambda: _DEFAULT_FIRM_BLOCKING_FEEDS)
 
     @property
     def heartbeat_down_after_s(self) -> float:
@@ -165,9 +223,7 @@ class HealthThresholds:
                 "health.limit_proximity_sustained_cycles", defaults.limit_proximity_sustained_cycles
             ),
             scada_silent_s=cfg.get("health.scada_silent_s", defaults.scada_silent_s),
-            firm_blocking_feeds=frozenset(
-                cfg.get("health.firm_blocking_feeds", sorted(defaults.firm_blocking_feeds))
-            ),
+            firm_blocking_feeds=_resolve_firm_blocking_feeds(cfg, defaults.firm_blocking_feeds),
         )
 
 

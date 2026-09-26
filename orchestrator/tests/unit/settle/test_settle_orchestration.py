@@ -12,8 +12,9 @@ import pytest
 
 import opengrid.settle as settle_module
 from opengrid.core.models.market import Utility
+from opengrid.core.solar_share import SolarShare
 from opengrid.settle import run_trace_pruning_cycle, settle
-from opengrid.settle.models import PenaltyParams, PowerSample, ZoneChargeEnergy
+from opengrid.settle.models import PenaltyParams, PowerSample
 from opengrid.settle.tariffs import TdspTariff
 from opengrid.trace import TraceStore
 
@@ -321,7 +322,7 @@ async def test_m1_delivery_charge_applies_the_full_charge_to_the_energy_charged_
     delivering 1 kWh needed 1 / (0.9487 x 0.9487) kWh of grid charging, charged the FULL $0.060295/kWh --
     even though the zone did not charge during the delivery interval itself."""
     _configure_oncor(fake_backend, fake_trace_store)
-    fake_backend.zone_charge["LZ_NORTH"] = ZoneChargeEnergy(Decimal("500"), Decimal("500"))  # all grid
+    fake_backend.zone_solar_share["LZ_NORTH"] = SolarShare(Decimal("0"), "TELEMETRY")  # all grid
     obligation_id = uuid4()
     fake_backend.obligations[obligation_id] = FakeObligationSetup(
         context=make_context(obligation_id=obligation_id, committed_kw=Decimal("4"), zone="LZ_NORTH"),
@@ -341,7 +342,7 @@ async def test_m1_excludes_the_pv_surplus_share_of_charging(
     fake_backend: FakeSettleBackend, fake_trace_store: TraceStore
 ):
     _configure_oncor(fake_backend, fake_trace_store)
-    fake_backend.zone_charge["LZ_NORTH"] = ZoneChargeEnergy(Decimal("400"), Decimal("100"))  # 25 % grid
+    fake_backend.zone_solar_share["LZ_NORTH"] = SolarShare(Decimal("0.75"), "TELEMETRY")  # 25 % grid
     obligation_id = uuid4()
     fake_backend.obligations[obligation_id] = FakeObligationSetup(
         context=make_context(obligation_id=obligation_id, committed_kw=Decimal("4"), zone="LZ_NORTH"),
@@ -351,7 +352,35 @@ async def test_m1_excludes_the_pv_surplus_share_of_charging(
     await settle(obligation_id, _INTERVAL_START, _INTERVAL_END)
 
     full = Decimal("1") / (Decimal("0.9487") * Decimal("0.9487")) * Decimal("0.060295")
-    assert fake_backend.pnl_delivery_charge[(obligation_id, _INTERVAL_START)] == full * Decimal("0.25")
+    assert abs(
+        fake_backend.pnl_delivery_charge[(obligation_id, _INTERVAL_START)] - full * Decimal("0.25")
+    ) < Decimal("1e-15")
+    (record,) = fake_trace_store._backend.streams["settle"]
+    assert (record.payload["m1_solar_share"], record.payload["m1_solar_share_source"]) == (
+        "0.75",
+        "TELEMETRY",
+    )
+
+
+async def test_m1_without_any_solar_source_takes_the_30_percent_assumption_and_records_it(
+    fake_backend: FakeSettleBackend, fake_trace_store: TraceStore
+):
+    """D-28 last fallback: no reporting hub and no ERCOT share -> 30 % solar, 70 % of the charge pays M1."""
+    _configure_oncor(fake_backend, fake_trace_store)  # the fake has no share for the zone: ASSUMPTION
+    obligation_id = uuid4()
+    fake_backend.obligations[obligation_id] = FakeObligationSetup(
+        context=make_context(obligation_id=obligation_id, committed_kw=Decimal("4"), zone="LZ_NORTH"),
+        samples=_flat_samples("4", _INTERVAL_START),
+    )
+
+    await settle(obligation_id, _INTERVAL_START, _INTERVAL_END)
+
+    full = Decimal("1") / (Decimal("0.9487") * Decimal("0.9487")) * Decimal("0.060295")
+    assert abs(
+        fake_backend.pnl_delivery_charge[(obligation_id, _INTERVAL_START)] - full * Decimal("0.70")
+    ) < Decimal("1e-15")
+    (record,) = fake_trace_store._backend.streams["settle"]
+    assert record.payload["m1_solar_share_source"] == "ASSUMPTION"
 
 
 async def test_m1_is_zero_when_nothing_was_delivered(
@@ -388,7 +417,7 @@ async def test_no_delivery_charge_for_a_regulated_or_unmapped_zone(
         ],
         zone_default_tdsp={"LZ_NORTH": "ONCOR"},  # LZ_AUSTIN deliberately absent
     )
-    fake_backend.zone_charge["LZ_AUSTIN"] = ZoneChargeEnergy(Decimal("500"), Decimal("500"))
+    fake_backend.zone_solar_share["LZ_AUSTIN"] = SolarShare(Decimal("0"), "TELEMETRY")
     obligation_id = uuid4()
     fake_backend.obligations[obligation_id] = FakeObligationSetup(
         context=make_context(obligation_id=obligation_id, committed_kw=Decimal("4"), zone="LZ_AUSTIN"),

@@ -11,9 +11,44 @@ import pytest
 from ogsim.common.config import load_scada_config
 from ogsim.common.scenario import WIRE_TYPE_TO_CATALOGUE_ID
 from ogsim.common.schemas import validate
+from ogsim.scada.anomalies import normalize_bank_ref
 from ogsim.scada.runtime import ScadaEngine
 
+_BANK_IDS = [f"bank-{i:03d}" for i in range(3)]
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["bank-001", "BANK_001", "bank_001", "BANK-001", "bank001", "BANK001", " BANK_001 "],
+)
+def test_normalize_bank_ref_accepts_common_placeholder_shapes(ref: str) -> None:
+    assert normalize_bank_ref(ref, _BANK_IDS) == "bank-001"
+
+
+def test_normalize_bank_ref_zero_pads_a_short_digit_run() -> None:
+    assert normalize_bank_ref("BANK_1", _BANK_IDS) == "bank-001"
+
+
+def test_normalize_bank_ref_rejects_an_out_of_range_index() -> None:
+    assert normalize_bank_ref("BANK_999", _BANK_IDS) is None
+
+
+def test_normalize_bank_ref_rejects_a_non_bank_ref() -> None:
+    assert normalize_bank_ref("hub-00001", _BANK_IDS) is None
+    assert normalize_bank_ref("LZ_NORTH", _BANK_IDS) is None
+
+
 _CATALOGUE_ID_TO_WIRE_TYPE = {v: k for k, v in WIRE_TYPE_TO_CATALOGUE_ID.items()}
+
+
+def _kva_message(signals, bank_id: str) -> dict:
+    """The APPARENT_POWER_KVA message for `bank_id` (bug fix, 2026-09-26, R3: `tick()` now also
+    publishes a REAL_POWER_KW message on the SAME topic `scada/<bank_id>`, so a plain `dict(signals)`
+    collapses to whichever of the two was appended last -- tests that care about the kVA reading
+    specifically must filter by `signal`, not rely on topic-keyed dict collapse)."""
+    return next(
+        m for topic, m in signals if topic == f"scada/{bank_id}" and m["signal"] == "APPARENT_POWER_KVA"
+    )
 
 
 @pytest.fixture
@@ -49,6 +84,33 @@ def test_bank_overload_inflates_reading_and_reverts(engine: ScadaEngine) -> None
     engine.tick(1.0)
     assert engine.anomalies.modifiers[bank_id].overload_pct == 50.0
     engine.tick(11.0)
+    assert engine.anomalies.modifiers[bank_id].overload_pct == 0.0
+
+
+def test_bank_overload_via_a_placeholder_ref_raises_kva_above_rating_for_its_duration(
+    engine: ScadaEngine,
+) -> None:
+    """Live bug fix, 2026-09-26 (FLEET-SIM, e2e A11 regression: "a bank_overload injection from
+    ogsim.control never changes the SCADA sim's readings"). Root cause: shipped scenario files name
+    banks in an uppercase/underscore placeholder format (e.g. `BANK_07`) that never exact-matched this
+    sim's real `bank-NNN` ids, so `_resolve_targets` silently resolved to zero banks. This targets
+    `bank-000` as `BANK_00` -- exactly that mismatched shape -- and proves the reported kVA actually
+    rises above the bank's rating for the anomaly's duration, then drops back after it ends."""
+    bank_id = engine.bank_ids[0]  # "bank-000"
+    placeholder_ref = "BANK_00"
+    rating = engine.kva_rating[bank_id]
+    # Big enough that background load (~200 kW default, well under a 600 kVA rating) times the
+    # multiplier clears the rating with room to spare, so this isn't sensitive to the noise draw.
+    _inject(engine, "bank_overload", placeholder_ref, {"kva_over_rating_pct": 300.0}, 0.0, 10.0)
+
+    signals, _ = engine.tick(1.0)
+    value = dict(signals)[f"scada/{bank_id}"]["value"]
+    assert value > rating
+
+    engine.tick(11.0)  # past the 10 s duration
+    signals_after, _ = engine.tick(12.0)
+    value_after = dict(signals_after)[f"scada/{bank_id}"]["value"]
+    assert value_after <= rating
     assert engine.anomalies.modifiers[bank_id].overload_pct == 0.0
 
 
@@ -96,8 +158,8 @@ def test_out_of_range_value_overrides_and_reverts(engine: ScadaEngine) -> None:
     bank_id = engine.bank_ids[0]
     _inject(engine, "out_of_range_value", bank_id, {"value": -1.0}, 0.0, 10.0)
     signals, _ = engine.tick(1.0)
-    assert dict(signals)[f"scada/{bank_id}"]["value"] == pytest.approx(1.0 / 0.98, abs=1e-3)
-    assert dict(signals)[f"scada/{bank_id}"]["quality"] == "out_of_range"
+    assert _kva_message(signals, bank_id)["value"] == pytest.approx(1.0 / 0.98, abs=1e-3)
+    assert _kva_message(signals, bank_id)["quality"] == "out_of_range"
     engine.tick(11.0)
     assert engine.anomalies.modifiers[bank_id].out_of_range_value is None
 
@@ -264,6 +326,61 @@ def test_time_skew_offsets_timestamp_and_reverts(engine: ScadaEngine) -> None:
     assert engine.anomalies.modifiers[bank_id].time_skew_s == 0.0
 
 
+# ---- REAL_POWER_KW signal: live bug fix, 2026-09-26, R3 (taken off Frank's #39) -------------------
+# The guardian now fails closed on unknown flow direction (G-30 vetoes discharge increases in
+# regulated territories, e.g. Austin, without a signed real-power series).
+
+
+def test_every_tick_publishes_both_kva_and_kw_signals_per_bank(engine: ScadaEngine) -> None:
+    bank_id = engine.bank_ids[0]
+    signals, _instructions = engine.tick(0.0)
+    bank_signals = [m for topic, m in signals if topic == f"scada/{bank_id}"]
+    assert {m["signal"] for m in bank_signals} == {"APPARENT_POWER_KVA", "REAL_POWER_KW"}
+
+
+def test_real_power_kw_signal_shape_and_units(engine: ScadaEngine) -> None:
+    bank_id = engine.bank_ids[0]
+    signals, _instructions = engine.tick(0.0)
+    kw_msg = next(m for topic, m in signals if topic == f"scada/{bank_id}" and m["signal"] == "REAL_POWER_KW")
+    assert kw_msg["bank_id"] == bank_id
+    assert kw_msg["unit"] == "kW"
+    assert kw_msg["quality"] == "good"
+    validate("scada_bank_signal", kw_msg)
+
+
+def test_real_power_kw_signal_uses_the_same_ts_and_quality_as_the_kva_signal(engine: ScadaEngine) -> None:
+    bank_id = engine.bank_ids[0]
+    _inject(engine, "bad_quality_flag", bank_id, {}, 0.0, 10.0)
+    signals, _instructions = engine.tick(1.0)
+    kva_msg = _kva_message(signals, bank_id)
+    kw_msg = next(m for topic, m in signals if topic == f"scada/{bank_id}" and m["signal"] == "REAL_POWER_KW")
+    assert kw_msg["ts"] == kva_msg["ts"]
+    assert kw_msg["quality"] == kva_msg["quality"] == "out_of_range"
+
+
+def test_real_power_kw_sign_is_positive_for_import_negative_for_export(engine: ScadaEngine) -> None:
+    """+ = the bank imports from the feeder (net charging/consuming), - = export (net discharging)."""
+    bank_id = engine.bank_ids[0]
+    engine.ingest_telemetry("some-hub", bank_id, -50.0)  # discharging -> exporting
+    signals, _instructions = engine.tick(0.0)
+    kw_msg = next(m for topic, m in signals if topic == f"scada/{bank_id}" and m["signal"] == "REAL_POWER_KW")
+    kva_msg = _kva_message(signals, bank_id)
+    # The KVA reading is always non-negative (apparent power magnitude); the KW reading carries the
+    # actual signed flow direction the guardian needs.
+    assert kva_msg["value"] >= 0.0
+    assert kw_msg["value"] < kva_msg["value"]  # net export pulls the real-power reading down
+
+
+def test_real_power_kw_covers_the_substation_bank_too(engine: ScadaEngine) -> None:
+    """The same tick() loop already covers every bank in self.bank_ids -- no separate branch needed
+    for a substation bank once one is configured (see test_scada_substation_asset.py for a dedicated
+    substation-asset fixture; here we just confirm the general loop has no home-bank-only special
+    case for REAL_POWER_KW)."""
+    signals, _instructions = engine.tick(0.0)
+    kw_bank_ids = {m["bank_id"] for topic, m in signals if m["signal"] == "REAL_POWER_KW"}
+    assert kw_bank_ids == set(engine.bank_ids)
+
+
 def test_auto_limit_rule_fires_on_sustained_overload(engine: ScadaEngine) -> None:
     bank_id = engine.bank_ids[0]
     # 700% (8x baseline feeder load) comfortably clears the 600 kVA feeder-segment rating
@@ -273,3 +390,81 @@ def test_auto_limit_rule_fires_on_sustained_overload(engine: ScadaEngine) -> Non
     engine.tick(1.0)
     _, instructions = engine.tick(2.0)
     assert dict(instructions)[f"scada/instruction/{bank_id}"]["kind"] == "LIMIT"
+    assert dict(instructions)[f"scada/instruction/{bank_id}"]["expires_at"] is None
+
+
+# ---- auto LIMIT lift: bug fix, 2026-09-26, R3 (the auto LIMIT never expired before this) ----------
+
+
+def test_auto_limit_lifts_after_clear_samples_once_the_overload_ends(engine: ScadaEngine) -> None:
+    bank_id = engine.bank_ids[0]
+    assert engine.overload_rule.clear_samples == 3  # shipped scada.yaml default
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 0.0, 4.0)
+    engine.tick(1.0)
+    _, issue_instructions = engine.tick(2.0)  # 2nd consecutive overloaded sample -> LIMIT
+    assert dict(issue_instructions)[f"scada/instruction/{bank_id}"]["kind"] == "LIMIT"
+
+    # The anomaly's own duration (4s) ends the overload; readings 4/5/6 are the 3 consecutive
+    # clear_samples back under rating.
+    _, clear_1 = engine.tick(4.0)
+    assert f"scada/instruction/{bank_id}" not in dict(clear_1)
+    _, clear_2 = engine.tick(5.0)
+    assert f"scada/instruction/{bank_id}" not in dict(clear_2)
+    _, clear_3 = engine.tick(6.0)
+    lift_msg = dict(clear_3)[f"scada/instruction/{bank_id}"]
+    assert lift_msg["kind"] == "LIMIT"  # no separate lift kind on the wire
+    assert lift_msg["expires_at"] is not None
+    assert lift_msg["expires_at"] <= lift_msg["issued_at"]  # already expired on arrival
+    validate("scada_utility_instruction", lift_msg)
+
+
+def test_auto_limit_clear_streak_resets_on_a_still_overloaded_reading(engine: ScadaEngine) -> None:
+    """A single reading back over rating during the clear streak must not count toward
+    clear_samples -- the lift needs `clear_samples` CONSECUTIVE clear readings."""
+    bank_id = engine.bank_ids[0]
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 0.0, 4.0)
+    engine.tick(1.0)
+    engine.tick(2.0)  # LIMIT issued
+
+    _, clear_1 = engine.tick(4.0)
+    assert f"scada/instruction/{bank_id}" not in dict(clear_1)
+    # Re-inject a fresh overload sample before the clear streak completes.
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 5.0, 1.0)
+    _, still_overloaded = engine.tick(5.0)
+    assert f"scada/instruction/{bank_id}" not in dict(still_overloaded)  # no re-issue (still locked)
+
+    # Clear streak must restart from zero, not continue from 1.
+    _, clear_1_again = engine.tick(7.0)
+    assert f"scada/instruction/{bank_id}" not in dict(clear_1_again)
+    _, clear_2_again = engine.tick(8.0)
+    assert f"scada/instruction/{bank_id}" not in dict(clear_2_again)
+    _, clear_3_again = engine.tick(9.0)
+    assert dict(clear_3_again)[f"scada/instruction/{bank_id}"]["expires_at"] is not None
+
+
+def test_auto_limit_lifts_after_max_duration_even_if_overload_never_clears() -> None:
+    """Bounded worst case: a stuck bank_overload anomaly must not cap the bank forever -- the LIMIT
+    lifts after overload_limit_max_duration_s regardless."""
+    config = replace(
+        load_scada_config(),
+        bank_count=2,
+        zones=("LZ_NORTH", "LZ_SOUTH"),
+        history_tsv_path="/nonexistent/no-history.tsv",
+        overload_consecutive_samples=2,
+        overload_clear_samples=1000,  # effectively unreachable -- only max_duration_s can lift
+        overload_limit_max_duration_s=10.0,
+    )
+    engine = ScadaEngine(config, seed=7)
+    bank_id = engine.bank_ids[0]
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 0.0, 3600.0)
+    engine.tick(1.0)
+    _, issue_instructions = engine.tick(2.0)
+    assert dict(issue_instructions)[f"scada/instruction/{bank_id}"]["kind"] == "LIMIT"
+
+    _, before_max = engine.tick(8.0)  # still overloaded, within max_duration_s of the issue at t=2
+    assert f"scada/instruction/{bank_id}" not in dict(before_max)
+
+    _, at_max = engine.tick(12.0)  # 10s elapsed since issue (t=2) -> forced lift
+    lift_msg = dict(at_max)[f"scada/instruction/{bank_id}"]
+    assert lift_msg["kind"] == "LIMIT"
+    assert lift_msg["expires_at"] is not None

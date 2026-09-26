@@ -23,11 +23,34 @@ zone_blocks:
     banks: 10
     homes_per_bank: 50
     enabled: false
+  - zone: LZ_LCRA
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+  - zone: LZ_RAYBN
+    banks: 10
+    homes_per_bank: 50
+    enabled: false
+
+# Substation-sited battery-set assets: must mirror fleet.yaml's own substation_assets: entry for
+# entry (asset_id/zone/enabled), so ogsim.scada measures exactly the substation banks ogsim.fleet
+# simulates. OWNER DECISION D-29(b), 2026-09-26: the Austin substation is enabled for the utility
+# toll demo.
+substation_assets:
+  - asset_id: sub-LZ_AEN-00
+    zone: LZ_AEN
+    rated_mw: 20.0
+    enabled: true
 
 publish_interval_s: 2.0
 # feeder segment (~50 homes), not a single distribution transformer.
 bank_kva_rating_default: 600.0
 overload_consecutive_samples: 3
+# Bug fix, 2026-09-26 (R3): the auto-issued overload LIMIT never expired, leaving a bank_overload
+# demo capped at 90% of rating forever. It now lifts after EITHER this many consecutive
+# back-under-rating readings, or overload_limit_max_duration_s -- whichever comes first.
+overload_clear_samples: 3
+overload_limit_max_duration_s: 900.0  # 15 min
 base_load_kw_default: 200.0
 
 # Seeded from substation_load_kw in this file when present on the server;

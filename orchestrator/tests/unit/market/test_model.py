@@ -11,7 +11,14 @@ import pytest
 
 from opengrid.core.models.market import Asset
 from opengrid.market import FREE, MarketModelError, MarketRef, load_market_model
-from opengrid.market.config import AUSTIN_ENERGY, DEFAULT_UTILITIES, load_zone_territory, parse_zone_territory
+from opengrid.market.config import (
+    AUSTIN_ENERGY,
+    DEFAULT_UTILITIES,
+    load_zone_owners,
+    load_zone_territory,
+    parse_zone_owners,
+    parse_zone_territory,
+)
 from opengrid.market.model import MarketModel
 
 CT = ZoneInfo("America/Chicago")
@@ -103,3 +110,66 @@ def test_charging_cost_fails_closed(model: MarketModel) -> None:
     no_cps = MarketModel(zone_territory={"LZ_CPS": "CPS_ENERGY"}, utilities={}, banks=[])
     with pytest.raises(MarketModelError):
         no_cps.charging_cost("LZ_CPS", night)
+
+
+# --- NOIE zones --------------------------------------------------------------------------------------
+
+_NOIE_TOML = """
+[[tariff]]
+tdsp = "ONCOR"
+effective_from = "2026-09-01"
+volumetric_usd_per_kwh = 0.060295
+load_zones = ["LZ_NORTH"]
+
+[zone_default_tdsp]
+LZ_NORTH = "ONCOR"
+
+[zone_territory]
+LZ_AEN = { utility = "AUSTIN_ENERGY", market = "REGULATED", delivery_charge = "NONE" }
+LZ_LCRA = { utility = "LCRA", market = "NOIE", delivery_charge = "NONE" }
+LZ_RAYBN = { utility = "RAYBURN_COUNTRY_EC", market = "FREE", delivery_charge = "NONE" }
+"""
+
+
+@pytest.fixture
+def noie_model(tmp_path: Path) -> MarketModel:
+    (tmp_path / "tdsp_tariffs.toml").write_text(_NOIE_TOML, encoding="utf-8")
+    banks = [
+        ("bank-000", "LZ_NORTH"),
+        ("bank-040", "LZ_AEN"),
+        ("bank-060", "LZ_LCRA"),
+        ("bank-070", "LZ_RAYBN"),
+    ]
+    return load_market_model(banks=banks, config_path=tmp_path / "orchestrator.toml")
+
+
+def test_zone_owners_include_noie_and_regulated_map_does_not(tmp_path: Path) -> None:
+    (tmp_path / "t.toml").write_text(_NOIE_TOML, encoding="utf-8")
+    assert load_zone_owners(tmp_path / "t.toml") == {"LZ_AEN": "AUSTIN_ENERGY", "LZ_LCRA": "NOIE"}
+    assert load_zone_territory(tmp_path / "t.toml") == {"LZ_AEN": "AUSTIN_ENERGY"}
+
+
+def test_zone_owners_reject_unknown_market_label() -> None:
+    with pytest.raises(ValueError, match="unknown market"):
+        parse_zone_owners({"LZ_X": {"utility": "X", "market": "NOIE_TYPO"}})
+
+
+def test_repo_config_has_no_noie_zone_yet() -> None:
+    """LCRA/RAYBN stay FREE until the owner decides (issue #36 point 4): nothing changes today."""
+    owners = load_zone_owners(CONFIG_DIR / "tdsp_tariffs.toml")
+    assert "NOIE" not in owners.values()
+
+
+def test_noie_bank_serves_neither_market(noie_model: MarketModel) -> None:
+    assert noie_model.territory_of_bank("bank-060") == "NOIE"
+    assert noie_model.territory_of_bank("bank-070") == "ERCOT_COMPETITIVE"  # FREE label: competitive
+    assert noie_model.eligible_bank_ids(FREE) == {"bank-000", "bank-070"}
+    assert noie_model.eligible_bank_ids(MarketRef("REGULATED", "AUSTIN_ENERGY")) == {"bank-040"}
+    assert not noie_model.free_access("NOIE")
+
+
+def test_noie_charging_cost_is_an_explicit_error(noie_model: MarketModel) -> None:
+    with pytest.raises(MarketModelError, match="NOIE"):
+        noie_model.charging_cost(
+            "LZ_LCRA", datetime(2026, 9, 28, 3, 0, tzinfo=CT), wholesale_usd_per_kwh=Decimal("0.02")
+        )

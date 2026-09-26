@@ -2,7 +2,7 @@
 
 Two directions:
 1. **Independent reads** (BUILD.md: "It reads its own hub telemetry, subscribe `<root>/tel/#`").
-   `MqttHubStatePort` is guardian's OWN telemetry cache, filled by `run_telemetry_listener` -- it never
+   `MqttHubStatePort` is guardian's OWN telemetry cache, filled by `build_input_session` -- it never
    reads `og.hub_state` (the row `opengrid.fleet`/`engine` maintain), because K1/K4's guarantee depends
    on guardian checking a value nobody else could have altered on the way in. The same listener feeds
    `MqttL2InstructionPort` from `<root>/scada/instruction/<bank_id>` (K5/G-15 and G-19's L2 override
@@ -18,22 +18,32 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-
-import aiomqtt
+from typing import Any
 
 from opengrid.core.models.mqtt import CommandBatch, Lease, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.pq import CalibrationCommand
 from opengrid.guardian.ports import HubFlowTelemetry, HubSnapshot, L2Instruction, Reading
 from opengrid.platform.config import Config
 from opengrid.platform.mqtt import topic, validate_payload
+from opengrid.platform.mqtt_session import MqttPublisher, MqttSession
 
 logger = logging.getLogger(__name__)
 
-#: Hub telemetry fields the flow-limit checks read (09 S2.6; `HubFlowTelemetry`).
-FLOW_TELEMETRY_FIELDS = ("meter_kw", "pv_kw", "cell_temp_c", "p_dis_max_kw", "p_ch_max_kw", "peak_budget_kws")
+#: Hub telemetry fields the flow-limit checks read (09 S2.6): `HubFlowTelemetry` field -> wire field of
+#: `core.models.mqtt.Telemetry` / telemetry.schema.json. R2 review fix: the peak budget is
+#: `peak_power_budget_kws` on the wire; reading a `peak_budget_kws` attribute that never exists left G-31's
+#: budget None, so every above-continuous setpoint was vetoed.
+FLOW_TELEMETRY_FIELDS: dict[str, str] = {
+    "meter_kw": "meter_kw",
+    "pv_kw": "pv_kw",
+    "cell_temp_c": "cell_temp_c",
+    "p_dis_max_kw": "p_dis_max_kw",
+    "p_ch_max_kw": "p_ch_max_kw",
+    "peak_budget_kws": "peak_power_budget_kws",
+}
 
 
 class MqttHubStatePort:
@@ -72,8 +82,8 @@ class MqttHubStatePort:
         now = self._monotonic()
         self._received_at[message.hub_id] = now
         flow = self._flow.setdefault(message.hub_id, {})
-        for name in FLOW_TELEMETRY_FIELDS:
-            value = getattr(message, name, None)  # additive telemetry fields (09 S2.6) as FLEET-SIM adds them
+        for name, wire_name in FLOW_TELEMETRY_FIELDS.items():
+            value = getattr(message, wire_name, None)  # additive telemetry fields (09 S2.6)
             if isinstance(value, int | float) and math.isfinite(float(value)):
                 flow[name] = (float(value), now)
 
@@ -131,42 +141,57 @@ class MqttL2InstructionPort:
         return L2Instruction(kind=instruction.kind, limit_kw=instruction.limit_kw)
 
 
-async def run_telemetry_listener(
+def guardian_input_handler(
+    cfg: Config, cache: MqttHubStatePort, l2_instructions: MqttL2InstructionPort | None = None
+) -> Callable[[Any], Awaitable[None]]:
+    """The guardian's own input messages: hub telemetry into `cache`, utility instructions into
+    `l2_instructions`. A malformed message is logged and skipped, never fatal (K7)."""
+    instruction_prefix = topic(cfg, "scada/instruction/")
+
+    async def handle(message: Any) -> None:
+        payload = message.payload
+        if not isinstance(payload, bytes | bytearray):
+            return
+        msg_topic = str(message.topic)
+        try:
+            data = json.loads(payload)
+            if l2_instructions is not None and msg_topic.startswith(instruction_prefix):
+                validate_payload("scada_utility_instruction", data)
+                l2_instructions.ingest(ScadaUtilityInstruction.model_validate(data))
+            else:
+                validate_payload("telemetry", data)
+                cache.ingest(Telemetry.model_validate(data))
+        except Exception:
+            logger.exception("dropping malformed guardian input message", extra={"topic": msg_topic})
+
+    return handle
+
+
+def build_input_session(
     cfg: Config,
     cache: MqttHubStatePort,
     *,
     username: str,
     password: str,
     l2_instructions: MqttL2InstructionPort | None = None,
-) -> None:
-    """Subscribe to `<root>/tel/#` (and, with `l2_instructions`, `<root>/scada/instruction/+`) for the
-    process lifetime. Runs as a background task from `main.py`; a malformed message is logged and
-    skipped, never fatal (K7)."""
-    from opengrid.platform.mqtt import build_client
+) -> MqttSession:
+    """The guardian's input connection (`guardian-tel`): `<root>/tel/#` and, with `l2_instructions`,
+    `<root>/scada/instruction/+`, kept up across broker disconnects (reconnect with backoff under the same
+    client id). `main.py` holds signing while it is down (`input_session.connected`)."""
+    from opengrid.platform import mqtt as platform_mqtt
 
-    instruction_prefix = topic(cfg, "scada/instruction/")
-    async with build_client(cfg, username=username, password=password, process="guardian-tel") as client:
-        await client.subscribe(topic(cfg, "tel/#"))
-        if l2_instructions is not None:
-            await client.subscribe(topic(cfg, "scada/instruction/+"))
-        async for message in client.messages:
-            payload = message.payload
-            if not isinstance(payload, bytes | bytearray):
-                continue
-            msg_topic = str(message.topic)
-            try:
-                data = json.loads(payload)
-                if l2_instructions is not None and msg_topic.startswith(instruction_prefix):
-                    validate_payload("scada_utility_instruction", data)
-                    l2_instructions.ingest(ScadaUtilityInstruction.model_validate(data))
-                else:
-                    validate_payload("telemetry", data)
-                    cache.ingest(Telemetry.model_validate(data))
-            except Exception:
-                logger.exception("dropping malformed guardian input message", extra={"topic": msg_topic})
+    subscriptions = [(topic(cfg, "tel/#"), 0)]
+    if l2_instructions is not None:
+        subscriptions.append((topic(cfg, "scada/instruction/+"), 1))
+    return MqttSession(
+        lambda: platform_mqtt.build_client(cfg, username=username, password=password, process="guardian-tel"),
+        name="guardian-tel",
+        subscriptions=subscriptions,
+        on_message=guardian_input_handler(cfg, cache, l2_instructions),
+    )
 
 
-async def publish_command_batch(client: aiomqtt.Client, cfg: Config, batch: CommandBatch) -> None:
+async def publish_command_batch(client: MqttPublisher, cfg: Config, batch: CommandBatch) -> None:
     """Publish the guardian-signed batch to `<root>/cmd/<bank_id>/batch` (QoS 1, not retained)."""
     validate_payload("command_batch", batch.model_dump(mode="json"))
     await client.publish(
@@ -178,7 +203,7 @@ async def publish_command_batch(client: aiomqtt.Client, cfg: Config, batch: Comm
 
 
 async def publish_calibration_command(
-    client: aiomqtt.Client, cfg: Config, command: CalibrationCommand
+    client: MqttPublisher, cfg: Config, command: CalibrationCommand
 ) -> None:
     """Publish a guardian-signed calibration command to `<root>/cmd/cal/<hub_id>` (QoS 1, not retained;
     S6.7). The published JSON is exactly the model the signature was computed over."""
@@ -191,7 +216,7 @@ async def publish_calibration_command(
     )
 
 
-async def publish_lease(client: aiomqtt.Client, cfg: Config, lease: Lease) -> None:
+async def publish_lease(client: MqttPublisher, cfg: Config, lease: Lease) -> None:
     """Publish/renew the retained lease for `hub_id` on `<root>/lease/<hub_id>` (QoS 1, retained)."""
     validate_payload("lease", lease.model_dump(mode="json"))
     await client.publish(

@@ -157,6 +157,42 @@ systemctl restart og-feeds        # picks up a config.toml [feeds.*] change
 systemctl restart og-sim-market   # picks up a change to the simulated market fixture/replay mode
 ```
 
+**Production is on the live ERCOT/EIA/NWS APIs (R2, 2026-09-26).** Switching `og-feeds` to the market
+simulator is planned for R3 and is **not done without the lead's OK**. When approved, the edit is:
+
+```toml
+[feeds.ercot]
+base_url  = "http://127.0.0.1:8090/ercot"
+token_url = "http://127.0.0.1:8090/token"   # the sim's stand-in for the B2C ROPC endpoint
+solar_by_region_enabled = false             # the sim serves no np4-745-cd route
+[feeds.eia]
+base_url = "http://127.0.0.1:8090/eia"
+[feeds.nws]
+base_url = "http://127.0.0.1:8090/nws"
+```
+
+Then `systemctl restart og-feeds`. Before flipping, point `ERCOT_API_USER`/`ERCOT_API_PASSWORD` at a
+sim test user rather than sending the real ERCOT account to the simulator. Simulated observations land
+in the same `og.feed_obs` rows the forecast learns from, so the forecast history mixes live and
+simulated prices after a switch. Switching back means reverting the four `base_url`/`token_url` lines
+and restarting `og-feeds` again.
+
+## Austin (LZ_AEN) sim override
+
+The repo's `integration-sims/config/{fleet,scada}.yaml` ship every zone block disabled (tests pin
+that). Production enables only LZ_AEN (owner approval 2026-09-26) through generated copies:
+
+- `/etc/opengrid/sim/fleet.yaml` and `/etc/opengrid/sim/scada.yaml` (root:opengrid 640), generated
+  from the release's files with only the LZ_AEN block enabled;
+- drop-ins `/etc/systemd/system/og-sim-{fleet,scada}.service.d/austin.conf` setting
+  `OGSIM_FLEET_CONFIG` / `OGSIM_SCADA_CONFIG` to those copies.
+
+**Regenerate both copies on every deploy that changes either repo yaml**; otherwise the sims keep
+running the old topology. The AEN hubs/banks were seeded with `OG_FLEET_SIM_CONFIG=/etc/opengrid/sim/fleet.yaml
+python -m opengrid.fleet.seed`; `deploy.sh`'s own seed step uses the repo yaml and is additive, so it
+leaves the AEN rows in place. To turn Austin off, remove the two drop-ins, `systemctl daemon-reload`,
+and restart `ogsim.target`; the og.hub rows stay and read offline.
+
 ## Apache route
 
 `/etc/apache2/conf-available/opengrid.conf` (enabled via `a2enconf opengrid`) proxies:

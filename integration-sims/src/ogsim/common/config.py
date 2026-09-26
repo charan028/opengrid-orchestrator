@@ -229,7 +229,15 @@ class FleetConfig:
     hub_count: int = 2000
     bank_count: int = 40
     zones: tuple[str, ...] = DEFAULT_ZONES
-    telemetry_interval_s: float = 2.0
+    # OWNER DECISION, 2026-09-26 (V-32): 10 s is the spec's normal telemetry cadence (disk-load
+    # reduction); this built-in default now matches shipped fleet.yaml/scada.yaml so
+    # `test_shipped_yaml_matches_the_built_in_defaults` holds without an explicit override.
+    telemetry_interval_s: float = 10.0
+    # The fleet's PHYSICS step (SoC, stop ramp, lease/autonomy) always runs on this cadence,
+    # independent of `telemetry_interval_s` -- shipped fleet.yaml publishes telemetry every 10 s
+    # while still physics-ticking every 2 s, so a stop ramp (or anything else keyed to `dt_s`) is
+    # unaffected by how often telemetry is published.
+    physics_tick_interval_s: float = 2.0
     lease_ttl_s: float = 30.0
     lease_hold_after_expiry_s: float = 5.0
     stop_ramp_s: float = 4.0
@@ -286,7 +294,9 @@ class FleetConfig:
     wave_sync_quality_ns: float = 50.0
     # S9 wave-2 fix: gates the summary message itself (not just its harmonic-detail
     # sub-block) to this cadence/deadband -- see fleet.yaml's `wave:` block comment.
-    wave_summary_interval_s: float = 10.0
+    # V-32, 2026-09-26: 30 s matches shipped fleet.yaml (10 -> 30 s, alongside the telemetry
+    # cadence reduction) so the built-in default and shipped YAML agree.
+    wave_summary_interval_s: float = 30.0
     wave_summary_delta_pct: float = 1.0
 
     def public_key_path(self) -> str:
@@ -324,6 +334,7 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         bank_count=int(raw.get("bank_count", defaults.bank_count)),
         zones=tuple(raw.get("zones", defaults.zones)),
         telemetry_interval_s=float(raw.get("telemetry_interval_s", defaults.telemetry_interval_s)),
+        physics_tick_interval_s=float(raw.get("physics_tick_interval_s", defaults.physics_tick_interval_s)),
         lease_ttl_s=float(raw.get("lease_ttl_s", defaults.lease_ttl_s)),
         lease_hold_after_expiry_s=float(
             raw.get("lease_hold_after_expiry_s", defaults.lease_hold_after_expiry_s)
@@ -460,6 +471,11 @@ class ScadaConfig:
     # Feeder segment (~50 homes), not a single distribution transformer.
     bank_kva_rating_default: float = BANK_KVA_RATING_DEFAULT
     overload_consecutive_samples: int = 3
+    # Bug fix, 2026-09-26 (R3): the auto-issued overload LIMIT never expired. It now lifts after
+    # EITHER this many consecutive back-under-rating readings, or `overload_limit_max_duration_s`,
+    # whichever comes first (`ogsim.scada.instructions.OverloadRule`).
+    overload_clear_samples: int = 3
+    overload_limit_max_duration_s: float = 900.0  # 15 min
     history_tsv_path: str = "/var/lib/opengrid/import/mariadb_history_signals.tsv"
     base_load_kw_default: float = 200.0
     # Optional extra load-zone blocks (see `ZoneBlockConfig`'s docstring) -- mirrors
@@ -468,6 +484,11 @@ class ScadaConfig:
     # config files) so `ScadaEngine`'s bank roster covers exactly the banks `ogsim.fleet`
     # actually seeds -- empty/all-disabled by default, so the base fleet is unchanged.
     zone_blocks: tuple[ZoneBlockConfig, ...] = ()
+    # Optional substation-sited battery-set assets (D11 SUBSTATION_BESS; mirrors
+    # `FleetConfig.substation_assets`, same manual-duplication-across-config-files pattern as
+    # `zone_blocks` above) -- OWNER DECISION D-29(b), 2026-09-26: `ogsim.scada` must also measure a
+    # substation asset once it's enabled, not just `ogsim.fleet`. Empty by default.
+    substation_assets: tuple[SubstationAssetConfig, ...] = ()
 
 
 def load_scada_config(path: str | None = None) -> ScadaConfig:
@@ -483,9 +504,14 @@ def load_scada_config(path: str | None = None) -> ScadaConfig:
         overload_consecutive_samples=int(
             raw.get("overload_consecutive_samples", defaults.overload_consecutive_samples)
         ),
+        overload_clear_samples=int(raw.get("overload_clear_samples", defaults.overload_clear_samples)),
+        overload_limit_max_duration_s=float(
+            raw.get("overload_limit_max_duration_s", defaults.overload_limit_max_duration_s)
+        ),
         history_tsv_path=str(raw.get("history_tsv_path", defaults.history_tsv_path)),
         base_load_kw_default=float(raw.get("base_load_kw_default", defaults.base_load_kw_default)),
         zone_blocks=_zone_blocks_from_raw(raw.get("zone_blocks", [])),
+        substation_assets=_substation_assets_from_raw(raw.get("substation_assets", [])),
     )
 
 

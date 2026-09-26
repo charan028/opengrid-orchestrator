@@ -11,7 +11,13 @@ hub_count: 2000
 bank_count: 40
 zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
 
-telemetry_interval_s: 2.0
+# OWNER DECISION, 2026-09-26 (V-32): 10 s is the spec's normal telemetry-publish cadence (cuts disk
+# load on the base server) -- the fleet's PHYSICS tick (SoC step, stop ramp, lease/autonomy) stays at
+# physics_tick_interval_s (2 s) regardless; see FleetConfig.physics_tick_interval_s's docstring. A
+# hub whose health/fault_code changes still publishes telemetry immediately, event-driven, rather
+# than waiting out the rest of this interval (ogsim.fleet.runtime.run_fleet).
+telemetry_interval_s: 10.0
+physics_tick_interval_s: 2.0
 lease_ttl_s: 30.0
 lease_hold_after_expiry_s: 5.0
 stop_ramp_s: 4.0
@@ -75,19 +81,21 @@ zone_blocks:
 # SUBSTATION_BESS; `ogsim.common.config.SubstationAssetConfig`). Configurable and OFF by default, same
 # as the zone_blocks above -- a substation asset is its own one-hub "bank"
 # (`ogsim.fleet.state._substation_segment`), not part of the home-fleet numbering, so enabling it adds
-# one extra simulated hub on top of `hub_count`. Left `enabled: false` here deliberately: several
-# fixed-hub-count tests/tools (benchmark, wave, scada-roster parity) assume the shipped production
-# fleet.yaml's hub set is exactly `hub_count`, the same reason the AEN/CPS/LCRA/RAYBN zone blocks above
-# ship disabled too. The Austin config's substation asset (LZ_AEN, 20 MW / 2 h) is demonstrated end to
-# end in `integration-sims/tests/test_fleet_substation_asset.py` with `enabled: true`; flip the flag
-# below the same way to actually run one. Coordinate `asset_id` with the MARKET-MODEL agent's
-# `og.asset` model before wiring the orchestrator side to it (see the FLEET-SIM build report).
+# one extra simulated hub on top of `hub_count`.
+#
+# ENABLED (OWNER DECISION D-29(b), 2026-09-26): the utility toll demo needs a live Austin substation
+# asset. This adds exactly one extra simulated hub (`sub-LZ_AEN-00`, bank `bank-sub-LZ_AEN-00`) on top
+# of the base `hub_count` -- fixed-hub-count tests/tools that assumed the shipped fleet.yaml's hub set
+# was exactly `hub_count` (benchmark, wave, scada-roster parity, etc.) have been updated to derive the
+# count from `len(engine.state.hub_ids)` instead of a hardcoded/`config.hub_count` assumption; see the
+# FLEET-SIM build report for the exact list. `asset_id`/bank id are coordinated with the MARKET-MODEL
+# agent's `og.asset` model (same report has the seed/DB wiring live-path needs).
 substation_assets:
   - asset_id: sub-LZ_AEN-00
     zone: LZ_AEN
     rated_mw: 20.0
     duration_h: 2.0
-    enabled: false
+    enabled: true
 
 guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
 # Local/dev override (hex or base64 32-byte Ed25519 public key), takes
@@ -114,15 +122,16 @@ inverter_pq:
 # summary_interval_s/summary_delta_pct (S9 wave-2 fix): gates the summary MESSAGE ITSELF, not
 # just its harmonic-detail sub-block -- the old behaviour published a full summary every
 # telemetry_interval_s (2.0s default) regardless, which is the ~1,000 msg/s at 2,000 hubs that
-# stalled opengrid.pq_ingest's one-insert-per-message path. 10s sits at the slow end of the
-# 2-10s L-RT telemetry cadence band (03 §3.1) and stays within §5.4's monitoring-cadence
-# requirement. At 2,000 hubs this is ~200 msg/s; at 10,000 hubs, ~1,000 msg/s (see the wave-2
-# build report for the full bandwidth math).
+# stalled opengrid.pq_ingest's one-insert-per-message path. OWNER DECISION, 2026-09-26 (V-32): now
+# 30s (was 10s), matching the same telemetry-cadence-driven disk-load reduction as
+# telemetry_interval_s above -- still within §5.4's monitoring-cadence requirement. At 2,000 hubs
+# this is now ~65 msg/s; at 10,000 hubs, ~330 msg/s (see the wave-2 build report for the full
+# bandwidth math at the old 10s cadence).
 wave:
   harmonic_detail_interval_s: 30.0
   harmonic_detail_delta_pct: 1.0
   raw_audit_sample_pct_per_min: 1.0
   sync_source: ptp
   sync_quality_ns: 50.0
-  summary_interval_s: 10.0
+  summary_interval_s: 30.0
   summary_delta_pct: 1.0

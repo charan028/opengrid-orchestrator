@@ -13,22 +13,27 @@ import dataclasses
 import json
 import logging
 import multiprocessing
+import os
+import time
+import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Literal, get_args
 from uuid import UUID, uuid4
 
 from opengrid import forecast, ledger
 from opengrid.core.models.engine import Plan
-from opengrid.core.models.market import ERCOT_COMPETITIVE, Utility
+from opengrid.core.models.market import ERCOT_COMPETITIVE, Utility, UtilityId
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.reasons import R_DEGRADED_NO_NEW_COMMIT
 from opengrid.core.solar_share import SolarShare
-from opengrid.core.timeutil import floor_to_interval
+from opengrid.core.timeutil import floor_to_interval, to_market_tz
+from opengrid.fleet import bank_feeder as fleet_bank_feeder
 from opengrid.fleet import capability as fleet_capability
 from opengrid.fleet import hub_capabilities as fleet_hub_capabilities
 from opengrid.fleet import rated_discharge_kw as fleet_rated_discharge_kw
@@ -38,9 +43,10 @@ from opengrid.market import (
     MarketRef,
     load_market_model,
     market_of,
-    regulated_capacity_payment,
 )
+from opengrid.market.capacity import capacity_value_usd_per_mwh
 from opengrid.market.territory import utility_of_territory
+from opengrid.platform.config import load_config
 from opengrid.selector import db, energy_value, solar_history
 from opengrid.selector.commit import (
     commit_candidate,
@@ -96,6 +102,9 @@ AS_EXPECTED_DEPLOYMENT_SHARE = 0.02
 
 #: Full-deployment duration for an ERCOT_AS award whose product rule has none (ECRS 1 h, the shortest).
 DEFAULT_AS_HOLD_MINUTES = 60.0
+#: D-29(a): a utility toll (REGULATED_CAPACITY / TOLLING) is a 90-min product: 0 kW until called
+#: (DISPATCH), with 90 min of its reserved kW held as energy. Used when its product rule has no duration.
+DEFAULT_TOLL_HOLD_MINUTES = 90.0
 
 #: 09 S1.2 c^deg by asset class, $ per AC kWh discharged: homes $0.03 (A-DE-16). Every `og.bank` is a
 #: home bank today; substation assets ($0.015, OQ-15) join with the asset registry.
@@ -115,7 +124,10 @@ def as_energy_hold_h(service_type: object, duration_minutes: object) -> float:
         and service_type not in _CAPACITY_HOLD_SERVICE_TYPES
     ):
         return 0.0
-    minutes = float(str(duration_minutes)) if duration_minutes else DEFAULT_AS_HOLD_MINUTES
+    default = (
+        DEFAULT_TOLL_HOLD_MINUTES if service_type in _CAPACITY_HOLD_SERVICE_TYPES else DEFAULT_AS_HOLD_MINUTES
+    )
+    minutes = float(str(duration_minutes)) if duration_minutes else default
     return minutes / 60.0
 
 
@@ -329,22 +341,193 @@ class BankMarketTerms:
     charge_price_usd_per_kwh: dict[int, float]
     free_market_access: bool
     solar_cost_usd_per_kwh: float | None = None
-    solar_share_floor: float = 0.0
     grid_charge_intervals: frozenset[int] | None = None
     solar_shares: Mapping[int, SolarShare] = dataclasses.field(default_factory=dict)
 
 
-#: Utility tariff periods in which a regulated bank may charge from the grid (owner, D-22: "the rest at
-#: the night rate"): AE's TOU off-peak (nights and weekends), CPS's night rate.
-_GRID_CHARGE_PERIODS = frozenset({"OFF_PEAK", "NIGHT"})
+#: Owner decisions D-29(c) / D-30: a utility-toll bank charges from the grid on the OWNER's schedule (or
+#: from local solar), not at the utility's direction. Windows are `"HH:MM-HH:MM"` (America/Chicago, may
+#: wrap midnight), per utility or per bank (a bank's own entry wins), from, in order:
+#:   1. `og.owner_charge_window` (edited on the Fleet page; FOLLOWUPS' migration 0038);
+#:   2. config `[selector.owner_charge_windows]` (`{utility_id or bank_id = [...]}`);
+#:   3. the built-in default `DEFAULT_OWNER_CHARGE_WINDOWS` (D-30: 22:00-06:00).
+OWNER_CHARGE_WINDOWS_KEY = "selector.owner_charge_windows"
+DEFAULT_OWNER_CHARGE_WINDOWS: tuple[str, ...] = ("22:00-06:00",)
+#: The DB windows are re-read at most this often (every gate in practice: gates run every 15 min).
+OWNER_CHARGE_WINDOWS_CACHE_S = 60.0
+
+
+def _minutes(clock: str) -> int:
+    hours, minutes = clock.strip().split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def owner_charge_intervals(
+    windows: Sequence[str], horizon_start: datetime, n_intervals: int
+) -> frozenset[int]:
+    """The horizon intervals whose local start falls in any owner window ("22:00-07:00" wraps midnight).
+    A malformed window raises ValueError (config error: never silently allow or bar charging)."""
+    spans = []
+    for window in windows:
+        start, end = window.split("-")
+        spans.append((_minutes(start), _minutes(end)))
+    allowed = set()
+    for t in range(n_intervals):
+        local = to_market_tz(horizon_start + timedelta(minutes=INTERVAL_MINUTES * t))
+        now_min = local.hour * 60 + local.minute
+        for start_min, end_min in spans:
+            inside = (
+                start_min <= now_min < end_min
+                if start_min < end_min
+                else (now_min >= start_min or now_min < end_min)
+            )
+            if inside:
+                allowed.add(t)
+                break
+    return frozenset(allowed)
+
+
+def config_owner_charge_windows() -> dict[str, list[str]]:
+    """`[selector.owner_charge_windows]` from the orchestrator config; {} when unset or unreadable."""
+    try:
+        raw = load_config().get(OWNER_CHARGE_WINDOWS_KEY, {}) or {}
+    except Exception:
+        logger.warning("selector: orchestrator config unreadable; no configured owner charge windows")
+        return {}
+    return {str(key): [str(w) for w in value] for key, value in dict(raw).items()}
+
+
+#: One owner charge window set, keyed by (scope_kind, scope_ref) as in `og.owner_charge_window`.
+ScopedWindows = Mapping[tuple[str, str], Sequence[str]]
+
+
+def config_windows_as_scopes(config: Mapping[str, Sequence[str]]) -> dict[tuple[str, str], list[str]]:
+    """Config keys are a utility id (PROVIDER scope) or a bank id (BANK scope)."""
+    utility_ids = set(get_args(UtilityId))
+    return {
+        ("PROVIDER" if key in utility_ids else "BANK", str(key)): list(value) for key, value in config.items()
+    }
+
+
+def resolve_owner_charge_windows(
+    scoped: ScopedWindows,
+    *,
+    bank_id: str,
+    feeder: str | None,
+    zone: str | None,
+    provider: str | None,
+) -> Sequence[str] | None:
+    """D-30: the most specific scope with windows wins, BANK > FEEDER > ZONE > PROVIDER > FLEET (any FLEET
+    row). None: no window at any scope (the caller applies the built-in default). HUB (the plan is per
+    bank) and SUBSTATION (no bank -> substation map here yet) are not consulted.
+
+    Interim: to be replaced by FOLLOWUPS' shared resolver (`opengrid.core.charge_windows`) once it lands;
+    callers go through this one function."""
+    for scope in (("BANK", bank_id), ("FEEDER", feeder), ("ZONE", zone), ("PROVIDER", provider)):
+        if scope[1] is not None and (scope[0], scope[1]) in scoped:
+            return scoped[scope[0], scope[1]]
+    for (kind, _ref), windows in scoped.items():
+        if kind == "FLEET":
+            return windows
+    return None
+
+
+_owner_windows_cache: tuple[float, dict[tuple[str, str], list[str]]] | None = None
+
+
+async def load_owner_charge_windows() -> dict[tuple[str, str], list[str]]:
+    """D-30 owner charge windows for this gate: `og.owner_charge_window`'s rows over the config's, re-read
+    at most every `OWNER_CHARGE_WINDOWS_CACHE_S`. A missing table (0038 not applied) or DB error is config
+    only; `bank_market_terms` applies the built-in default where no scope has a window."""
+    global _owner_windows_cache
+    now = time.monotonic()
+    if _owner_windows_cache is not None and now - _owner_windows_cache[0] < OWNER_CHARGE_WINDOWS_CACHE_S:
+        return _owner_windows_cache[1]
+    try:
+        db_rows = await db.load_owner_charge_window_rows()
+    except Exception:
+        logger.warning("selector: og.owner_charge_window unreadable; config/default windows", exc_info=True)
+        db_rows = {}
+    merged = config_windows_as_scopes(config_owner_charge_windows())
+    merged.update(db_rows)
+    _owner_windows_cache = (now, merged)
+    return merged
+
+
+def _bank_feeder(bank_id: str) -> str | None:
+    try:
+        return fleet_bank_feeder(bank_id)
+    except LookupError:
+        return None
+
+
+def clear_owner_charge_windows_cache() -> None:
+    """Forget the cached windows (tests; an operator edit shows at the next gate after 60 s anyway)."""
+    global _owner_windows_cache
+    _owner_windows_cache = None
+
+
+#: D-31 home-station registry (SERVICES), config-first until its DB table lands.
+MOBILE_HOME_STATIONS_FILE = Path("service_profiles") / "mobile_storage_home_stations.toml"
+
+
+def resolve_mobile_home_stations_path() -> Path:
+    """Next to `OG_CONFIG` (as `tdsp_tariffs.toml`), else this checkout's `orchestrator/config`."""
+    og_config = os.environ.get("OG_CONFIG")
+    base = Path(og_config).parent if og_config else Path(__file__).resolve().parents[3] / "config"
+    return base / MOBILE_HOME_STATIONS_FILE
+
+
+def parse_mobile_home_stations(raw: Mapping[str, Any]) -> dict[str, str]:
+    """`bank_id -> home station zone` for every `[[assignment]]` (joined to its `[[home_station]]`). An
+    assignment to an unknown station raises: never silently treat a truck as a fleet bank (D-31)."""
+    zone_by_station = {str(s["home_station_id"]): str(s["zone"]) for s in raw.get("home_station", [])}
+    out: dict[str, str] = {}
+    for assignment in raw.get("assignment", []):
+        station = str(assignment["home_station_id"])
+        if station not in zone_by_station:
+            raise ValueError(
+                f"mobile unit {assignment['bank_id']} assigned to unknown home station {station}"
+            )
+        out[str(assignment["bank_id"])] = zone_by_station[station]
+    return out
+
+
+def load_mobile_units() -> dict[str, str]:
+    """D-31 mobile units and their home-station zones. No file = no mobile units; a malformed file
+    raises (a config error fails the gate loudly)."""
+    path = resolve_mobile_home_stations_path()
+    if not path.exists():
+        return {}
+    with path.open("rb") as fh:
+        return parse_mobile_home_stations(tomllib.load(fh))
+
+
+async def load_bank_zones(bank_ids: Sequence[str]) -> dict[str, str]:
+    """Each bank's zone: `og.bank.zone`, except a mobile unit's, which is its HOME STATION's (D-31: it
+    charges there, at that station's zone/tariff; `og.bank.zone` is meaningless for a relocating unit)."""
+    zones = await db.load_bank_zones(list(bank_ids)) if bank_ids else {}
+    mobile = load_mobile_units()
+    return {bank_id: mobile.get(bank_id, zone) for bank_id, zone in zones.items()}
+
+
+def mark_mobile_units(banks: tuple[BankSnapshot, ...], mobile: Mapping[str, str]) -> tuple[BankSnapshot, ...]:
+    """Flag the mobile units (D-31). Their home-station schedule has no source yet, so
+    `home_station_intervals` is None: they never charge until one exists (fail closed)."""
+    return tuple(
+        dataclasses.replace(bank, is_mobile=True, home_station_intervals=None)
+        if bank.bank_id in mobile
+        else bank
+        for bank in banks
+    )
 
 
 async def load_market(bank_ids: tuple[str, ...]) -> tuple[MarketModel, dict[str, str]]:
     """The gate's `opengrid.market.MarketModel` (territories, utilities, TDSP tariffs from
-    `tdsp_tariffs.toml`) over the banks' `og.bank.zone`, plus that zone map. A missing tariffs file
-    raises (config error, the gate fails loudly): without the territory table a regulated zone would be
-    priced as the competitive market."""
-    zone_by_bank = await db.load_bank_zones(list(bank_ids))
+    `tdsp_tariffs.toml`) over the banks' zones (`load_bank_zones`), plus that zone map. A missing tariffs
+    file raises (config error, the gate fails loudly): without the territory table a regulated zone would
+    be priced as the competitive market."""
+    zone_by_bank = await load_bank_zones(bank_ids)
     return load_market_model(banks=list(zone_by_bank.items())), zone_by_bank
 
 
@@ -355,6 +538,8 @@ def bank_market_terms(
     horizon_start: datetime,
     n_intervals: int,
     solar_shares: Mapping[str, Mapping[int, SolarShare]] | None = None,
+    owner_charge_windows: ScopedWindows | None = None,
+    feeder_by_bank: Mapping[str, str | None] | None = None,
 ) -> dict[str, BankMarketTerms]:
     """Pure: each bank's territory, M1 and charging terms from the `MarketModel` (the single owner of
     the territory predicate and the charging-cost model; M1 resolves through `settle.tariffs`).
@@ -362,14 +547,16 @@ def bank_market_terms(
     - ERCOT competitive area: grid kWh at the zone price + the TDSP's M1 (`MarketModel.charging_cost`'s
       `delivery_usd_per_kwh`; the zone price itself is per scenario, so it is added in the model); PV
       surplus at its forgone export credit, no M1.
-    - Regulated territory (Austin Energy, CPS Energy): grid kWh at the utility's grid rate, and only in
-      its night / off-peak period (D-22); solar kWh at the utility's solar price; a 30% solar floor; no
-      M1; no FREE headroom unless the utility granted wholesale access (K15 b).
+    - Regulated territory (Austin Energy, CPS Energy; utility-toll banks): grid kWh at the utility's grid
+      rate, in the owner's charge windows (D-29 c, `owner_charge_windows`; unrestricted without one);
+      solar kWh at the utility's solar price, as available (D-28 measured share); no M1; no FREE
+      headroom unless the utility granted wholesale access (K15 b).
     - Unknown zone or territory: no FREE headroom and (`prepare_obligations`) no obligation: K15 fails
       closed.
 
     `solar_shares` is each bank's D-28 measured share per interval (`solar_history.planned_shares`)."""
     shares = solar_shares or {}
+    windows = owner_charge_windows or {}
     out: dict[str, BankMarketTerms] = {}
     for bank_id in bank_ids:
         zone = zone_by_bank.get(bank_id)
@@ -377,12 +564,16 @@ def bank_market_terms(
         delivery = 0.0
         charge_price: dict[int, float] = {}
         solar_cost: float | None = None
-        floor = 0.0
         grid_intervals: frozenset[int] | None = None
-        if territory is None or zone is None:
+        if (
+            territory is None
+            or zone is None
+            or (territory != ERCOT_COMPETITIVE and utility_of_territory(territory) is None)
+        ):
+            # Unknown, or NOIE (a co-op/municipal zone that is not our customer): serves neither market.
             logger.warning(
-                "selector: bank has no known territory; it serves nothing this gate (K15 fail-closed)",
-                extra={"bank_id": bank_id, "zone": zone},
+                "selector: bank has no usable territory; it serves nothing this gate (K15 fail-closed)",
+                extra={"bank_id": bank_id, "zone": zone, "territory": territory},
             )
         elif territory == ERCOT_COMPETITIVE:
             cost = market.charging_cost(zone, horizon_start, wholesale_usd_per_kwh=Decimal("0"))
@@ -390,18 +581,22 @@ def bank_market_terms(
                 logger.warning("selector: no TDSP tariff for zone; M1 priced at 0", extra={"zone": zone})
             delivery = float(cost.delivery_usd_per_kwh)
         else:
-            allowed: set[int] = set()
             for t in range(n_intervals):
                 cost = market.charging_cost(
                     zone, horizon_start + timedelta(minutes=INTERVAL_MINUTES * t), solar_share=Decimal("0")
                 )
                 charge_price[t] = float(cost.grid_energy_usd_per_kwh)
                 solar_cost = float(cost.solar_usd_per_kwh)
-                if cost.period in _GRID_CHARGE_PERIODS:
-                    allowed.add(t)
-            grid_intervals = frozenset(allowed)
-            utility_id = utility_of_territory(territory)
-            floor = float(market.utility(utility_id).solar_share_floor) if utility_id else 0.0
+            schedule = resolve_owner_charge_windows(
+                windows,
+                bank_id=bank_id,
+                feeder=(feeder_by_bank or {}).get(bank_id),
+                zone=zone,
+                provider=utility_of_territory(territory),
+            )
+            grid_intervals = owner_charge_intervals(
+                schedule if schedule is not None else DEFAULT_OWNER_CHARGE_WINDOWS, horizon_start, n_intervals
+            )
         out[bank_id] = BankMarketTerms(
             zone=zone,
             territory=territory,
@@ -410,7 +605,6 @@ def bank_market_terms(
             charge_price_usd_per_kwh=charge_price,
             free_market_access=market.free_access(territory),
             solar_cost_usd_per_kwh=solar_cost,
-            solar_share_floor=floor,
             grid_charge_intervals=grid_intervals,
             solar_shares=shares.get(bank_id, {}),
         )
@@ -465,7 +659,6 @@ def apply_market_terms(
                 charge_price_usd_per_kwh=term.charge_price_usd_per_kwh,
                 free_market_access=term.free_market_access,
                 solar_cost_usd_per_kwh=term.solar_cost_usd_per_kwh,
-                solar_share_floor=term.solar_share_floor,
                 grid_charge_intervals=term.grid_charge_intervals,
                 solar_charge_kw={
                     t: float(s.share) * bank.max_charge_kw.get(t, 0.0)
@@ -603,18 +796,14 @@ async def freeze_new_selection(
 
 
 def regulated_value_per_mwh(utility: Utility) -> float:
-    """The utility's capacity price as $ per MWh-held (one kW held for one hour,
-    `market.regulated_capacity_payment`), so the objective's `value x kW x dt` term pays exactly the
-    pro-rated capacity payment (09 S1.5 stage R)."""
+    """The utility's capacity price as $ per MWh-held (`market.capacity.capacity_value_usd_per_mwh`, the
+    one owner), so the objective's `value x kW x dt` term pays exactly the pro-rated capacity payment
+    (09 S1.5 stage R)."""
     if utility.capacity_price_usd_per_kw is None:
-        return 0.0
-    per_kw_hour = regulated_capacity_payment(
-        committed_kw=Decimal("1"),
-        price_usd_per_kw=utility.capacity_price_usd_per_kw,
-        basis=utility.payment_basis,
-        hours=Decimal("1"),
-    )
-    return float(per_kw_hour * 1000)
+        logger.warning(
+            "regulated utility has no capacity price; valued at 0", extra={"utility": utility.utility_id}
+        )
+    return float(capacity_value_usd_per_mwh(utility.capacity_price_usd_per_kw, utility.payment_basis))
 
 
 async def load_scenarios(
@@ -627,7 +816,7 @@ async def load_scenarios(
     last (LZ_WEST). Now only `kind == "price"` points count; each bank gets its own load zone's path,
     and the fleet path (for a bank with no zone path) is the mean of the zones."""
     points = await forecast.scenarios(horizon_start, horizon_end)
-    zone_by_bank = await db.load_bank_zones(list(bank_ids)) if bank_ids else {}
+    zone_by_bank = await load_bank_zones(bank_ids)
     scenarios = scenarios_from_points(points, horizon_start, zone_by_bank)
     unpriced = sorted(
         {zone for bank_id, zone in zone_by_bank.items() if not _has_zone_path(scenarios, bank_id)}
@@ -706,6 +895,7 @@ async def load_committed(
                     committed_kw_by_interval=by_index,
                     energy_hold_h=as_energy_hold_h(term.get("service_type"), term.get("duration_minutes")),
                     expected_deployment_share=expected_deployment_share(term.get("service_type")),
+                    service_type=str(term.get("service_type") or ""),
                     value_per_mwh=float(value) if value is not None else 0.0,
                     market="REGULATED" if term.get("market") == "REGULATED" else "FREE",
                     utility_id=term.get("utility_id"),
@@ -956,8 +1146,19 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         await load_market(bank_ids),
     )
     shares = await load_solar_shares(zone_by_bank, horizon_start, n_intervals, now)
+    banks = mark_mobile_units(banks, load_mobile_units())
     banks = apply_market_terms(
-        banks, bank_market_terms(market, zone_by_bank, bank_ids, horizon_start, n_intervals, shares)
+        banks,
+        bank_market_terms(
+            market,
+            zone_by_bank,
+            bank_ids,
+            horizon_start,
+            n_intervals,
+            shares,
+            await load_owner_charge_windows(),
+            {bank_id: _bank_feeder(bank_id) for bank_id in bank_ids},
+        ),
     )
     candidates, committed = prepare_obligations(candidates, committed, market)
     # 02b S6.5 row 1: no new selection on stale data. The structural (pre-freeze) eligibility is kept for

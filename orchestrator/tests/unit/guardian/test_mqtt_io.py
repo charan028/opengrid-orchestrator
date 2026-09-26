@@ -42,7 +42,7 @@ class FakeSubscribeClient:
         self._messages = messages
         self.subscribed: list[str] = []
 
-    async def subscribe(self, topic_filter: str) -> None:
+    async def subscribe(self, topic_filter: str, qos: int = 0) -> None:
         self.subscribed.append(topic_filter)
 
     @property
@@ -165,13 +165,15 @@ async def test_run_telemetry_listener_ingests_valid_and_skips_malformed(monkeypa
     fake_client = FakeSubscribeClient(messages)
 
     def fake_build_client(cfg, *, username, password, process):
+        assert process == "guardian-tel"
         return fake_client
 
     import opengrid.platform.mqtt as platform_mqtt
 
     monkeypatch.setattr(platform_mqtt, "build_client", fake_build_client)
 
-    await mqtt_io.run_telemetry_listener(_cfg(), cache, username="og_guardian", password="x")
+    session = mqtt_io.build_input_session(_cfg(), cache, username="og_guardian", password="x")
+    await session.run(max_connections=1)  # the fake's stream ends after its messages
 
     snap = await cache.snapshot("hub-1")
     assert snap is not None and snap.soc_kwh == 12.0
@@ -273,9 +275,10 @@ async def test_listener_routes_utility_instructions_to_the_guardians_own_l2_port
 
     monkeypatch.setattr(platform_mqtt, "build_client", lambda cfg, **kwargs: fake_client)
 
-    await mqtt_io.run_telemetry_listener(
+    session = mqtt_io.build_input_session(
         _cfg(), cache, username="og_guardian", password="x", l2_instructions=l2
     )
+    await session.run(max_connections=1)
 
     assert "ogtest/guard/scada/instruction/+" in fake_client.subscribed
     assert await l2.active_instruction("bank-1") is not None
@@ -328,3 +331,68 @@ async def test_an_old_fault_report_is_stale_too():
     clock["t"] = 61.0
     old = await cache.snapshot("hub-1")
     assert old is not None and old.health == "stale"
+
+
+# --- MQTT fail closed (review 2026-09-26: an ingest loop that never reconnects) -------------------------------
+
+
+class _Session:
+    def __init__(self, name: str, connected: bool, down_s: float = 0.0) -> None:
+        self.name, self.connected, self._down_s = name, connected, down_s
+
+    def down_for_s(self) -> float:
+        return self._down_s
+
+
+def test_guardian_holds_signing_while_an_mqtt_connection_is_down_and_exits_after_the_limit():
+    import pytest
+
+    from opengrid.guardian.main import mqtt_inputs_ready
+
+    up = _Session("guardian", True)
+    assert mqtt_inputs_ready(_Session("guardian-tel", True), up, exit_after_s=60.0)
+    assert not mqtt_inputs_ready(_Session("guardian-tel", False, 5.0), up, exit_after_s=60.0)
+    assert not mqtt_inputs_ready(
+        _Session("guardian-tel", True), _Session("guardian", False, 5.0), exit_after_s=60.0
+    )
+    with pytest.raises(SystemExit):
+        mqtt_inputs_ready(_Session("guardian-tel", False, 61.0), up, exit_after_s=60.0)
+
+
+async def test_the_input_subscription_comes_back_after_a_broker_disconnect(monkeypatch):
+    """Simulated disconnect: the first connection drops mid-stream (MqttError), the session reconnects under
+    the same process id, resubscribes, and the telemetry after the reconnect still reaches the cache."""
+    import aiomqtt
+
+    import opengrid.platform.mqtt as platform_mqtt
+
+    cache = mqtt_io.MqttHubStatePort(_seed("hub-1"))
+    batches = [
+        [],
+        [FakeMessage("ogtest/guard/tel/z/bank-1/hub-1", _telemetry("hub-1").model_dump_json().encode())],
+    ]
+    built: list[str] = []
+
+    class _Dropping(FakeSubscribeClient):
+        async def _aiter(self):
+            for m in self._messages:
+                yield m
+            raise aiomqtt.MqttError("Disconnected during message iteration")
+
+    def fake_build_client(cfg, *, username, password, process):
+        built.append(process)
+        return _Dropping(batches.pop(0))
+
+    monkeypatch.setattr(platform_mqtt, "build_client", fake_build_client)
+    session = mqtt_io.build_input_session(_cfg(), cache, username="og_guardian", password="x")
+    session._sleep = _no_sleep  # type: ignore[method-assign]
+
+    await session.run(max_connections=2)
+
+    assert built == ["guardian-tel", "guardian-tel"]
+    snap = await cache.snapshot("hub-1")
+    assert snap is not None and snap.health == "online"
+
+
+async def _no_sleep(_s: float) -> None:
+    return None

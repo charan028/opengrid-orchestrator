@@ -1,13 +1,12 @@
-"""Fleet monitoring & control (02b S7.1, S8 screen 2): hub/bank read models, manual command
-two-step confirmation through the guardian, and the sampled fleet SSE stream.
+"""Fleet monitoring & control (02b S7.1, S8 screen 2): hub/bank read models, manual target
+two-step confirmation (the engine ramps it, the guardian signs each step), and the sampled fleet SSE stream.
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sse_starlette.sse import EventSourceResponse
@@ -15,20 +14,16 @@ from sse_starlette.sse import EventSourceResponse
 from opengrid.api.auth import Identity, require_operator, require_viewer
 from opengrid.api.deps import get_config, get_proposals, get_store, get_trace_store
 from opengrid.api.proposals import ProposalExpiredError, ProposalStore
-from opengrid.api.schemas import CommandConfirmResult, CommandProposalRequest, ProposalAccepted
+from opengrid.api.routers import charge_windows as _charge_windows
+from opengrid.api.schemas import CommandProposalRequest, ProposalAccepted
 from opengrid.api.sse import sse_response
 from opengrid.api.store import StoreProtocol
-from opengrid.core.crypto import sha256_hex_of_json
-from opengrid.core.models.engine import CommandBatchRow
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
 router = APIRouter(prefix="/og/api/fleet", tags=["fleet"])
 
 _COMMAND_PROPOSAL_KIND = "fleet_command"
-_COMMAND_VALIDITY_S = 30
-_VERDICT_POLL_INTERVAL_S = 0.2
-_VERDICT_POLL_TIMEOUT_S = 3.0
 
 
 @router.get("/hubs")
@@ -115,7 +110,13 @@ async def stream_fleet(
     return sse_response(request, interval_s=1.0, heartbeat_s=cfg.get("api.sse_heartbeat_s", 15), fetch=fetch)
 
 
-# -- manual command, two-step confirmation (02b S7.1/S7.3) -------------------------------------------
+# -- manual target, two-step confirmation (02b S7.1/S7.3; engine-side ramp, engine/manual.py) ----------
+
+#: How long a confirmed manual target holds when the operator gives no duration, and the longest allowed.
+DEFAULT_TARGET_MINUTES = 15
+MAX_TARGET_MINUTES = 240
+MANUAL_TARGET_EVENT = "MANUAL_TARGET"
+_MAX_BANK_HUBS = 2000
 
 
 @router.post("/command", status_code=status.HTTP_202_ACCEPTED)
@@ -124,7 +125,7 @@ async def propose_command(
     proposals: Annotated[ProposalStore, Depends(get_proposals)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> ProposalAccepted:
-    """Step 1 of 2: validates shape/role only (02b S7.3) -- the guardian check runs at confirm time."""
+    """Step 1 of 2: validates shape/role only (02b S7.3); nothing is commanded until confirm."""
     if not body.bank_id and not body.hub_id:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="bank_id or hub_id is required")
     target = body.bank_id or body.hub_id
@@ -133,118 +134,171 @@ async def propose_command(
     return ProposalAccepted(proposal_id=proposal.proposal_id, summary=summary, expires_in_s=60.0)
 
 
-@router.post("/command/{proposal_id}/confirm")
+@router.post("/command/{proposal_id}/confirm", status_code=status.HTTP_202_ACCEPTED)
 async def confirm_command(
     proposal_id: UUID,
     proposals: Annotated[ProposalStore, Depends(get_proposals)],
     trace_store: Annotated[TraceStore, Depends(get_trace_store)],
     store: Annotated[StoreProtocol, Depends(get_store)],
     identity: Annotated[Identity, Depends(require_operator)],
-) -> CommandConfirmResult:
-    """Step 2 of 2 (02b S7.3): writes the K10 decision pre-image (`decision_type="RT_ALLOCATION"`,
-    the shape `opengrid.guardian.repo.PgProposalPort` reads back) and a `command_batch` header row,
-    then polls `og.verdict` for the independently-running `og-guardian` process's PASS/VETOED/TIMEOUT
-    result -- `api` never signs or evaluates a batch itself (K3: sole signer stays in `og-guardian`).
-    A veto is returned as `409`, never silently retried; no verdict within the poll window is a `503`
-    (guardian not keeping up or not running), not a silent success.
-    """
+) -> dict[str, Any]:
+    """Step 2 of 2: records the confirmed setpoint as a MANUAL_TARGET (K10 trace event, the contract in
+    `opengrid.engine.manual`) for the hub, or for every hub of the selected bank. The ENGINE then ramps
+    each hub toward it within G-04 every cycle, each step signed by the guardian, until `expires_at`
+    (live finding: a one-shot manual command was always vetoed by G-04's step bound). Returns 202
+    `{"status": "RAMPING", "trace_id", "expires_at", "hub_ids"}`; cancel with
+    `POST /manual-targets/{trace_id}/cancel`."""
     proposal = _pop_or_404(proposals, proposal_id, kind=_COMMAND_PROPOSAL_KIND)
     body: CommandProposalRequest = proposal.body
+    hub_ids = await _resolve_hub_ids(store, body)
+    return await issue_manual_target(
+        trace_store,
+        store,
+        operator=identity.user,
+        hub_ids=hub_ids,
+        p_kw_target=body.p_kw_setpoint,
+        reason=body.reason,
+        duration_minutes=body.duration_minutes,
+        target_ref=body.bank_id or hub_ids[0],
+        extra={"proposal_id": str(proposal_id)},
+    )
 
-    bank_id = await _resolve_bank_id(store, body)
-    lease_epoch = await _resolve_lease_epoch(store, body)
-    command_batch_id = uuid4()
+
+async def issue_manual_target(
+    trace_store: TraceStore,
+    store: StoreProtocol,
+    *,
+    operator: str,
+    hub_ids: list[str],
+    p_kw_target: float,
+    reason: str,
+    duration_minutes: int | None,
+    target_ref: str,
+    extra: dict[str, Any] | None = None,
+    approver: str | None = None,
+) -> dict[str, Any]:
+    """The ONE write path for an operator's manual target (single and bulk confirm): the MANUAL_TARGET
+    trace event first (K10), then the `og.operator_action` row. `p_kw_target` is +charge / -discharge."""
+    minutes = duration_minutes or DEFAULT_TARGET_MINUTES
+    if not 1 <= minutes <= MAX_TARGET_MINUTES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"duration_minutes must be 1..{MAX_TARGET_MINUTES}"
+        )
     now = datetime.now(UTC)
-    expires_at = now + timedelta(seconds=_COMMAND_VALIDITY_S)
-    item_payload = {
-        "hub_id": body.hub_id or bank_id,
-        "p_kw_setpoint": body.p_kw_setpoint,
-        "reason_code": "MANUAL_OPERATOR",
-    }
-    allocation_payload = {
-        "command_batch_id": str(command_batch_id),
-        "bank_id": bank_id,
-        "cycle_id": "MANUAL",
-        "epoch": lease_epoch,
-        "seq": int(now.timestamp()),
-        "issued_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "ledger_version": await store.current_ledger_version(),
-        "items": [item_payload],
-        "is_firm_event": False,
-        "reason": body.reason,
-        "proposer": identity.user,
-    }
+    expires_at = now + timedelta(minutes=minutes)
     trace_ref = await trace_store.append(
-        stream_id=f"operator_action:{identity.user}",
-        decision_type="RT_ALLOCATION",
-        event_class="RT_ALLOCATION",
-        payload=allocation_payload,
+        stream_id=f"operator_action:{operator}",
+        decision_type="OPERATOR_ACTION",
+        event_class=MANUAL_TARGET_EVENT,
+        payload={
+            "hub_ids": hub_ids,
+            "p_kw_target": float(p_kw_target),
+            "issued_at": now.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "proposer": operator,
+            "reason": reason,
+            **(extra or {}),
+        },
         reason_codes=["MANUAL_OPERATOR"],
     )
-    batch = CommandBatchRow(
-        command_batch_id=command_batch_id,
-        cycle_id="MANUAL",
-        ledger_version=allocation_payload["ledger_version"],
-        submission_id=str(proposal_id),
-        command_count=1,
-        merkle_root=sha256_hex_of_json(item_payload),
-        trace_pre_image_id=trace_ref.trace_id,
+    await store.insert_operator_action(
+        operator_ref=operator,
+        action_kind="MANUAL_COMMAND",
+        target_ref=target_ref,
+        tier="TIER1",
+        reason=reason,
+        trace_id=trace_ref.trace_id,
+        confirmed_at=now,
+        approver_ref=approver,
     )
-    await store.insert_command_batch(batch)
+    return {
+        "status": "RAMPING",
+        "trace_id": str(trace_ref.trace_id),
+        "expires_at": expires_at.isoformat(),
+        "hub_ids": hub_ids,
+        "p_kw_target": float(p_kw_target),
+    }
+
+
+@router.get("/manual-targets")
+async def list_manual_targets(
+    store: Annotated[StoreProtocol, Depends(get_store)],
+    _identity: Annotated[Identity, Depends(require_viewer)],
+) -> dict[str, Any]:
+    """Hubs under a live manual target (newest per hub, not expired): `{"items": [{hub_id, p_kw_target,
+    issued_at, expires_at, trace_id, proposer, reason}]}`. The ramp rate is the engine's, not listed."""
+    rows = await store.live_manual_targets()
+    return {
+        "items": [
+            {
+                **row,
+                "trace_id": str(row["trace_id"]),
+                "issued_at": row["issued_at"].isoformat(),
+                "expires_at": row["expires_at"].isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/manual-targets/{trace_id}/cancel")
+async def cancel_manual_target(
+    trace_id: UUID,
+    trace_store: Annotated[TraceStore, Depends(get_trace_store)],
+    store: Annotated[StoreProtocol, Depends(get_store)],
+    identity: Annotated[Identity, Depends(require_operator)],
+) -> dict[str, Any]:
+    """End a manual target now: appends a MANUAL_TARGET for the hubs it still controls with
+    `expires_at = now` (newest target per hub wins in `engine.manual.parse_targets`, so they return to
+    the allocator next cycle). Hubs a NEWER target has since taken over are left alone. 404 when the
+    target is unknown or no longer controls any hub."""
+    now = datetime.now(UTC)
+    live = await store.live_manual_target_hubs(trace_id)
+    hub_ids = sorted(live)
+    if not hub_ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no live manual target with that trace id")
+    trace_ref = await trace_store.append(
+        stream_id=f"operator_action:{identity.user}",
+        decision_type="OPERATOR_ACTION",
+        event_class=MANUAL_TARGET_EVENT,
+        payload={
+            "hub_ids": hub_ids,
+            "p_kw_target": live[hub_ids[0]],
+            "issued_at": now.isoformat(),
+            "expires_at": now.isoformat(),
+            "proposer": identity.user,
+            "reason": "cancel",
+            "cancels": str(trace_id),
+        },
+        reason_codes=["MANUAL_OPERATOR"],
+    )
     await store.insert_operator_action(
         operator_ref=identity.user,
         action_kind="MANUAL_COMMAND",
-        target_ref=bank_id,
+        target_ref=f"cancel:{trace_id}",
         tier="TIER1",
-        reason=body.reason,
+        reason="cancel manual target",
         trace_id=trace_ref.trace_id,
         confirmed_at=now,
     )
-
-    verdict = await _poll_for_verdict(store, command_batch_id)
-    if verdict is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="no guardian verdict within the poll window -- og-guardian may not be running",
-        )
-    result = CommandConfirmResult(
-        proposal_id=proposal_id,
-        outcome=verdict.outcome,
-        vetoed_rule_ids=verdict.vetoed_rule_ids,
-        trace_id=trace_ref.trace_id,
-    )
-    if verdict.outcome != "PASS":
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=result.model_dump(mode="json"))
-    return result
+    return {
+        "status": "CANCELLED",
+        "trace_id": str(trace_ref.trace_id),
+        "cancels": str(trace_id),
+        "hub_ids": hub_ids,
+    }
 
 
-async def _resolve_bank_id(store: StoreProtocol, body: CommandProposalRequest) -> str:
-    if body.bank_id:
-        return body.bank_id
-    hub = await store.get_hub(body.hub_id) if body.hub_id else None
-    if hub is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="hub not found")
-    bank_id: str = hub["bank_id"]
-    return bank_id
-
-
-async def _resolve_lease_epoch(store: StoreProtocol, body: CommandProposalRequest) -> int:
-    if not body.hub_id:
-        return 0
-    hub = await store.get_hub(body.hub_id)
-    return int(hub["lease_epoch"]) if hub is not None else 0
-
-
-async def _poll_for_verdict(store: StoreProtocol, command_batch_id: UUID) -> Any:
-    elapsed = 0.0
-    while elapsed < _VERDICT_POLL_TIMEOUT_S:
-        verdict = await store.get_verdict(command_batch_id)
-        if verdict is not None:
-            return verdict
-        await asyncio.sleep(_VERDICT_POLL_INTERVAL_S)
-        elapsed += _VERDICT_POLL_INTERVAL_S
-    return None
+async def _resolve_hub_ids(store: StoreProtocol, body: CommandProposalRequest) -> list[str]:
+    """The hubs a proposal targets: the one hub (must exist), or every hub of the bank (at least one)."""
+    if body.hub_id:
+        if await store.get_hub(body.hub_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="hub not found")
+        return [body.hub_id]
+    hubs = await store.list_hubs(zone=None, bank_id=body.bank_id, health=None, limit=_MAX_BANK_HUBS, offset=0)
+    if not hubs:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="bank not found or has no hubs")
+    return [str(h["hub_id"]) for h in hubs]
 
 
 def _pop_or_404(proposals: ProposalStore, proposal_id: UUID, *, kind: str) -> Any:
@@ -254,3 +308,8 @@ def _pop_or_404(proposals: ProposalStore, proposal_id: UUID, *, kind: str) -> An
         raise HTTPException(status.HTTP_410_GONE, detail="proposal expired, propose again") from exc
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="unknown proposal") from exc
+
+
+# D-30: the owner charge-window endpoints live in their own module but under this router's prefix
+# (`/og/api/fleet/charge-windows`), so they are served wherever the fleet router is mounted.
+router.include_router(_charge_windows.router)

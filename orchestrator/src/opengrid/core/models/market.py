@@ -22,9 +22,14 @@ from pydantic import BaseModel, ConfigDict
 
 Market = Literal["REGULATED", "FREE"]
 UtilityId = Literal["AUSTIN_ENERGY", "CPS_ENERGY"]
-#: Where an asset sits: inside a regulated utility's service territory, or the ERCOT competitive area.
-Territory = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "ERCOT_COMPETITIVE"]
+#: Where an asset sits: inside a regulated utility's service territory, the ERCOT competitive area, or a
+#: NOIE zone (a non-opt-in entity: a co-op or municipal utility outside retail choice that is not one of
+#: our regulated customers). A NOIE asset serves neither market until the owner decides otherwise.
+Territory = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "ERCOT_COMPETITIVE", "NOIE"]
 ERCOT_COMPETITIVE: Territory = "ERCOT_COMPETITIVE"
+NOIE: Territory = "NOIE"
+#: What `[zone_territory]` can assign a zone to: a regulated utility customer, or NOIE.
+ZoneOwner = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "NOIE"]
 AssetClass = Literal["HOME_BANK", "SUBSTATION"]
 CapacityPaymentBasis = Literal["USD_PER_KW_MONTH", "USD_PER_KW_YEAR"]
 ChargingTariffKind = Literal["TOU_OFF_PEAK", "NIGHT_RATE"]

@@ -65,6 +65,26 @@ _AS_DEPLOYMENT_MAX_MINUTES = 240
 #: Obligation states an AS award can be deployed in (a held award inside its window).
 _DEPLOYABLE_STATES = frozenset({"COMMITTED", "DELIVERING", "SHORTFALL"})
 
+#: D-29: a utility's discharge call on a tolling agreement (REGULATED_CAPACITY, contract variant TOLLING)
+#: is issued through the same route, capped by the obligation's own product rule (TOLLING: 90 min).
+_UTILITY_CALL_SERVICE_TYPE = "REGULATED_CAPACITY"
+_UTILITY_CALL_VARIANT = "TOLLING"
+#: `og.as_deployment.source`'s CHECK (migration 0020) has no UTILITY value, so a utility call is recorded
+#: as OPERATOR (the operator issues it) with this marker leading the reason.
+UTILITY_CALL_REASON_PREFIX = "utility call"
+
+
+def _deployment_kind(award: dict[str, Any]) -> str | None:
+    """`"AS"` for an ERCOT_AS award, `"UTILITY_CALL"` for a tolling obligation, None otherwise."""
+    if award["service_type"] == "ERCOT_AS":
+        return "AS"
+    if (
+        award["service_type"] == _UTILITY_CALL_SERVICE_TYPE
+        and str(award.get("variant") or "").upper() == _UTILITY_CALL_VARIANT
+    ):
+        return "UTILITY_CALL"
+    return None
+
 
 class AsDeploymentCreate(BaseModel):
     """Operator-triggered ERCOT_AS deployment of ONE award (the demo's stand-in for an ERCOT deployment
@@ -86,8 +106,13 @@ async def create_as_deployment(
 ) -> dict[str, Any]:
     """Deploy one held ERCOT_AS award now: while active, the allocator discharges it up to its committed
     kW (an AS award is otherwise a 0 kW capacity hold). The award must exist, be ERCOT_AS and be
-    deployable now (404/409 otherwise), and the duration is capped by its product (ECRS 60 min, Non-Spin
-    240). Traced before it takes effect (K10)."""
+    deployable now (404/409 otherwise), the duration is capped by the obligation's own product rule (ECRS
+    60 min, Non-Spin 240; 409 when it has none), and a second deployment while one is active is refused
+    (409, no chaining). Traced before it takes effect (K10).
+
+    D-29: the same route issues a utility's discharge call on a tolling obligation (REGULATED_CAPACITY,
+    contract variant TOLLING) -- same checks, capped by its product rule (TOLLING 90 min), recorded as
+    source OPERATOR with a reason starting "utility call"."""
     if body.obligation_id is None:
         detail = (
             "a fleet-wide AS deployment needs a two-person approval and is not supported; deploy one award"
@@ -100,11 +125,27 @@ async def create_as_deployment(
     award = await store.get_as_award(body.obligation_id)
     if award is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no such obligation")
-    if award["service_type"] != "ERCOT_AS":
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="obligation is not an ERCOT_AS award")
+    kind = _deployment_kind(award)
+    if kind is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="obligation is not an ERCOT_AS award or a tolling obligation"
+        )
     if award["state"] not in _DEPLOYABLE_STATES:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"award is {award['state']}, not deployable")
-    max_minutes = int(award.get("duration_minutes") or _AS_DEPLOYMENT_MAX_MINUTES)
+    if award.get("has_active_deployment"):
+        # R2 review: no chaining -- a second deployment on top of an active one would extend the call
+        # past the product's own limit.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="an active deployment already covers this obligation"
+        )
+    if not award.get("duration_minutes"):
+        # R2 review: the cap is the obligation's OWN product rule; with none, nothing bounds the call.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="the obligation's product has no deployment duration; cannot cap it",
+        )
+    max_minutes = int(award["duration_minutes"])
+    reason = f"{UTILITY_CALL_REASON_PREFIX}: {body.reason}" if kind == "UTILITY_CALL" else body.reason
     if body.duration_minutes > max_minutes:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -121,7 +162,8 @@ async def create_as_deployment(
             "decision_ref": target,
             "start_at": start_at.isoformat(),
             "end_at": end_at.isoformat(),
-            "reason": body.reason,
+            "reason": reason,
+            "kind": kind,
         },
     )
     deployment_id = await store.insert_as_deployment(
@@ -129,14 +171,14 @@ async def create_as_deployment(
         start_at=start_at,
         end_at=end_at,
         requested_by=identity.user,
-        reason=body.reason,
+        reason=reason,
     )
     await store.insert_operator_action(
         operator_ref=identity.user,
         action_kind="MANUAL_COMMAND",
-        target_ref=f"AS_DEPLOYMENT:{target}",
+        target_ref=f"{'UTILITY_CALL' if kind == 'UTILITY_CALL' else 'AS_DEPLOYMENT'}:{target}",
         tier="TIER1",
-        reason=body.reason,
+        reason=reason,
         trace_id=trace_ref.trace_id,
         confirmed_at=start_at,
     )
@@ -146,6 +188,7 @@ async def create_as_deployment(
         "start_at": start_at.isoformat(),
         "end_at": end_at.isoformat(),
         "trace_id": str(trace_ref.trace_id),
+        "kind": kind,
     }
 
 

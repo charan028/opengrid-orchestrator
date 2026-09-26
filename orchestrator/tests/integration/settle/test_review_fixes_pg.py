@@ -11,6 +11,7 @@ Every row is keyed by a unique id and removed again; nothing outside this test's
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -20,6 +21,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.limits import check_hub_power
+from opengrid.core.solar_share import ERCOT_SOLAR_ACTUAL_SERIES, ERCOT_SOLAR_PRODUCT
 from opengrid.guardian import repo as guardian_repo
 from opengrid.platform.config import load_config
 from opengrid.platform.db import MIGRATIONS_DIR, build_dsn, migrate_sync
@@ -108,32 +110,146 @@ async def test_migration_0032_is_idempotent(pool):
 # --- M1 zone charge energy ----------------------------------------------------------------------------------
 
 
-async def test_zone_charge_energy_nets_the_pv_surplus(pool):
+async def _telemetry(pool, rows: list[tuple[str, datetime, Decimal, Decimal | None, Decimal | None]]) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        for i, (hub, ts, p_kw, pv_kw, load_kw) in enumerate(rows):
+            await cur.execute(
+                """INSERT INTO og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health, pv_kw, home_load_kw)
+                   VALUES (%s, %s, 20, %s, %s, 1, 'online', %s, %s)""",
+                (hub, ts, p_kw, i, pv_kw, load_kw),
+            )
+
+
+async def test_zone_solar_share_from_reporting_hubs_only(pool):
+    """D-28 source 1: only hubs that report PV count. A hub with no PV reading does not report -- it is
+    left out, never treated as zero PV."""
+    zone = f"LZ_RVFX_{uuid4().hex[:6].upper()}"
+    reporting, silent = f"hub-rvfx-{uuid4().hex[:8]}", f"hub-rvfx-{uuid4().hex[:8]}"
+    bank_id = await _bank_with_hubs(pool, zone, [(reporting, 39.2, 11.0), (silent, 39.2, 11.0)])
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    try:
+        await _telemetry(
+            pool,
+            [
+                (reporting, start, Decimal("8"), Decimal("5"), Decimal("1")),  # PV surplus 4 of 8 kW charging
+                (
+                    reporting,
+                    start + timedelta(minutes=20),
+                    Decimal("8"),
+                    Decimal("0"),
+                    None,
+                ),  # PV 0: all grid
+                (
+                    reporting,
+                    start + timedelta(minutes=40),
+                    Decimal("-5"),
+                    Decimal("9"),
+                    Decimal("0"),
+                ),  # discharge
+                (silent, start, Decimal("8"), None, None),  # no PV reading: not a reporting sample
+            ],
+        )
+        share = await PgSettleBackend(pool).fetch_zone_solar_share(zone, start, start + timedelta(hours=1))
+        assert (share.share, share.source) == (Decimal("0.25"), "TELEMETRY")  # 4 solar of 16 kW
+        assert share.grid_share == Decimal("0.75")
+    finally:
+        await _drop(pool, bank_id)
+
+
+async def test_pv_path_is_used_when_the_split_columns_are_absent(pool):
+    """Without migration 0034's columns the PV-minus-home-load query runs (forced here: the column check is
+    pre-answered 'absent', so this path is exercised even on a database that already has them)."""
     zone = f"LZ_RVFX_{uuid4().hex[:6].upper()}"
     hub = f"hub-rvfx-{uuid4().hex[:8]}"
     bank_id = await _bank_with_hubs(pool, zone, [(hub, 39.2, 11.0)])
-    start = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    try:
+        await _telemetry(pool, [(hub, start, Decimal("10"), Decimal("6"), Decimal("1"))])  # surplus 5 of 10
+        backend = PgSettleBackend(pool)
+        backend._column_check["split"] = (time.monotonic(), False)
+        share = await backend.fetch_zone_solar_share(zone, start, start + timedelta(hours=1))
+        assert (share.share, share.source) == (Decimal("0.5"), "TELEMETRY")
+    finally:
+        await _drop(pool, bank_id)
+
+
+async def test_the_hubs_own_charge_split_wins_when_the_columns_exist(pool):
+    """With `og.telemetry.charge_pv_kw`/`charge_grid_kw` (migration 0034; added here for the test if the
+    workspace database predates it, and dropped again) the hub's own split is used over PV minus home load,
+    and a sample reporting only the split (no PV) counts as reporting."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'og' "
+            "AND table_name = 'telemetry' AND column_name IN ('charge_pv_kw', 'charge_grid_kw')"
+        )
+        added = (await cur.fetchone())[0] == 0
+        if added:
+            await cur.execute(
+                "ALTER TABLE og.telemetry ADD COLUMN charge_pv_kw double precision, "
+                "ADD COLUMN charge_grid_kw double precision"
+            )
+    zone = f"LZ_RVFX_{uuid4().hex[:6].upper()}"
+    split_pv, split_grid = f"hub-rvfx-{uuid4().hex[:8]}", f"hub-rvfx-{uuid4().hex[:8]}"
+    bank_id = await _bank_with_hubs(pool, zone, [(split_pv, 39.2, 11.0), (split_grid, 39.2, 11.0)])
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
     try:
         async with pool.connection() as conn, conn.cursor() as cur:
-            rows = [
-                (0, Decimal("8"), Decimal("5"), Decimal("1")),  # 8 kW charging, PV surplus 4 -> 4 from grid
-                (1, Decimal("8"), None, None),  # no PV reading: all 8 from grid
-                (2, Decimal("-5"), Decimal("9"), Decimal("0")),  # discharging: not charging at all
-            ]
-            for i, p_kw, pv_kw, load_kw in rows:
+            # split_pv: 10 kW charging, 2 kW of it from PV by its own split although PV surplus says 5
+            # split_grid: 10 kW charging, 7 from the grid, no PV reading at all -> 3 solar
+            for hub, pv_kw, charge_pv, charge_grid in (
+                (split_pv, 6.0, 2.0, None),
+                (split_grid, None, None, 7.0),
+            ):
                 await cur.execute(
-                    """INSERT INTO og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health, pv_kw, home_load_kw)
-                       VALUES (%s, %s, 20, %s, %s, 1, 'online', %s, %s)""",
-                    (hub, start + timedelta(minutes=i), p_kw, i, pv_kw, load_kw),
+                    """INSERT INTO og.telemetry (hub_id, ts, soc_kwh, p_kw, seq, epoch, health, pv_kw,
+                                                 home_load_kw, charge_pv_kw, charge_grid_kw)
+                       VALUES (%s, %s, 20, 10, 1, 1, 'online', %s, 1, %s, %s)""",
+                    (hub, start, pv_kw, charge_pv, charge_grid),
                 )
-        backend = PgSettleBackend(pool)
-        energy = await backend.fetch_zone_charge_energy(zone, start, start + timedelta(hours=1))
-        assert energy.charge_kw_sum == Decimal("16")
-        assert energy.grid_charge_kw_sum == Decimal("12")
-        assert energy.grid_share == Decimal("0.75")
+        share = await PgSettleBackend(pool).fetch_zone_solar_share(zone, start, start + timedelta(hours=1))
+        assert (share.share, share.source) == (Decimal("0.25"), "TELEMETRY")  # (2 + 3) solar of 20 kW
+    finally:
+        await _drop(pool, bank_id)
+        if added:
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "ALTER TABLE og.telemetry DROP COLUMN charge_pv_kw, DROP COLUMN charge_grid_kw"
+                )
 
-        empty = await backend.fetch_zone_charge_energy("LZ_NOWHERE", start, start + timedelta(hours=1))
-        assert empty.charge_kw_sum == 0 and empty.grid_share == Decimal("1")
+
+async def test_zone_solar_share_falls_back_to_ercot_then_to_30_percent(pool):
+    zone = f"LZ_RVFX_{uuid4().hex[:6].upper()}"
+    silent = f"hub-rvfx-{uuid4().hex[:8]}"
+    bank_id = await _bank_with_hubs(pool, zone, [(silent, 39.2, 11.0)])
+    # og_t_rvfx is this workspace's own database: no feed writes ERCOT rows into it.
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=3)
+    try:
+        await _telemetry(pool, [(silent, start, Decimal("8"), None, None)])  # charging, but reports no PV
+        backend = PgSettleBackend(pool)
+        assumed = await backend.fetch_zone_solar_share(zone, start, start + timedelta(hours=1))
+        assert (assumed.share, assumed.source) == (Decimal("0.30"), "ASSUMPTION")
+
+        async with pool.connection() as conn, conn.cursor() as cur:
+            for product, series, value in (
+                (ERCOT_SOLAR_PRODUCT, ERCOT_SOLAR_ACTUAL_SERIES, 20000.0),
+                ("np6-345-cd", "total", 50000.0),
+            ):
+                await cur.execute(
+                    """INSERT INTO og.feed_obs (source, product, series, ts, value, unit, quality)
+                       VALUES ('ERCOT', %s, %s, %s, %s, 'MW', 'GOOD')""",
+                    (product, series, start + timedelta(minutes=5), value),
+                )
+        try:
+            ercot = await PgSettleBackend(pool).fetch_zone_solar_share(
+                zone, start, start + timedelta(hours=1)
+            )
+            assert (ercot.share, ercot.source) == (Decimal("0.4"), "ERCOT_SOLAR")
+        finally:
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM og.feed_obs WHERE source = 'ERCOT' AND ts = %s",
+                    (start + timedelta(minutes=5),),
+                )
     finally:
         await _drop(pool, bank_id)
 

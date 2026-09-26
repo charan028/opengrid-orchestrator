@@ -12,7 +12,7 @@ Request intake (02b S8's two-step `POST /og/api/safestop` then `/confirm`): `og-
 `engage()` after a matching CONFIRM arrives within `confirm_window_s` of the PROPOSE -- a single
 message can never stop the fleet (TS-10-03).
 
-Utility L2 intake (K5/K8): a background task (`l2_intake.run_l2_instruction_listener`, its own MQTT
+Utility L2 intake (K5/K8): a background task (`l2_intake.build_l2_session`, its own MQTT
 connection `safestop-l2`) engages a BANK stop on every unexpired BLOCK/ESTOP `ScadaUtilityInstruction`,
 once per instruction id.
 """
@@ -33,6 +33,7 @@ from opengrid.platform.db import make_pool
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.log import configure_logging
 from opengrid.platform.mqtt import build_client
+from opengrid.platform.mqtt_session import MqttSession
 from opengrid.platform.process import run_forever
 from opengrid.safestop.confirmation import (
     ConfirmationBroker,
@@ -40,7 +41,7 @@ from opengrid.safestop.confirmation import (
     UnknownProposalError,
 )
 from opengrid.safestop.keys import load_signing_key
-from opengrid.safestop.l2_intake import run_l2_instruction_listener
+from opengrid.safestop.l2_intake import build_l2_session
 from opengrid.safestop.mqtt_publish import AiomqttStopPublisher
 from opengrid.safestop.pg_backend import PgStopEventBackend, listen_for_requests, retry_trace_conflict
 from opengrid.safestop.service import SafestopService
@@ -60,6 +61,8 @@ GUARDIAN_PUBLIC_KEY_LENGTH = 32
 #: hub may be offline and still hold its in-memory stop set; after that a reconnecting hub that lost its
 #: memory starts unstopped anyway, which is correct once the stop is released.
 DEFAULT_RELEASE_RETAIN_S = 86_400.0
+#: K8 fail closed: seconds the stop publish connection may stay down before the process exits for a restart.
+DEFAULT_MQTT_DOWN_EXIT_S = 30.0
 
 
 async def _handle_request(payload: dict[str, Any], broker: ConfirmationBroker) -> None:
@@ -144,50 +147,81 @@ async def main(cfg: Config | None = None) -> None:
 
     heartbeat_interval_s = float(cfg.get("health.heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S))
 
-    async with build_client(
-        cfg, username=mqtt_username, password=mqtt_password, process="safestop"
-    ) as client:
-        publisher = AiomqttStopPublisher(client=client, config=cfg)
-        service = SafestopService(
-            stop_key, backend, publisher, trace, guardian_public_key=load_guardian_public_key(cfg)
+    # K8: the stop publish connection survives broker disconnects (reconnect with backoff under the same
+    # client id, never two clients at once); while it is down the heartbeat stops, and past
+    # `safestop.mqtt_down_exit_s` the process exits so systemd restarts it.
+    client = MqttSession(
+        lambda: build_client(cfg, username=mqtt_username, password=mqtt_password, process="safestop"),
+        name="safestop",
+    )
+    mqtt_down_exit_s = float(cfg.get("safestop.mqtt_down_exit_s", DEFAULT_MQTT_DOWN_EXIT_S))
+    publisher = AiomqttStopPublisher(client=client, config=cfg)
+    service = SafestopService(
+        stop_key, backend, publisher, trace, guardian_public_key=load_guardian_public_key(cfg), outbox=backend
+    )
+    # K8 durable outbox: every (re)connect re-publishes, in order, whatever the broker has not acknowledged
+    # yet -- including stops engaged while it was down, and anything queued before a restart.
+    client.on_connect = service.drain_outbox
+    client_task = asyncio.create_task(client.run())
+    safestop.configure_service(service)
+    release_retain_s = float(cfg.get("safestop.release_retain_s", DEFAULT_RELEASE_RETAIN_S))
+
+    intake_task = asyncio.create_task(_request_intake_loop(pool, broker))
+
+    async def _l2_engage(bank_id: str, reason: str, initiator_ref: str) -> UUID:
+        return await retry_trace_conflict(
+            lambda: service.engage("BANK", bank_id, reason, initiator_ref, initiator_kind="UTILITY")
         )
-        safestop.configure_service(service)
-        release_retain_s = float(cfg.get("safestop.release_retain_s", DEFAULT_RELEASE_RETAIN_S))
 
-        intake_task = asyncio.create_task(_request_intake_loop(pool, broker))
+    l2_session = build_l2_session(
+        cfg,
+        username=mqtt_username,
+        password=mqtt_password,
+        engage_fn=_l2_engage,
+        already_acted_fn=backend.has_l2_engage,
+    )
+    l2_task = asyncio.create_task(l2_session.run())
+    try:
 
-        async def _l2_engage(bank_id: str, reason: str, initiator_ref: str) -> UUID:
-            return await retry_trace_conflict(
-                lambda: service.engage("BANK", bank_id, reason, initiator_ref, initiator_kind="UTILITY")
-            )
+        async def _tick() -> None:
+            broker.discard_expired()
+            if not stop_path_ready(client, l2_session, exit_after_s=mqtt_down_exit_s):
+                return  # no heartbeat while stops cannot be published (health sees safestop down)
+            await write_heartbeat(pool, PROCESS_NAME)
+            try:
+                await service.drain_outbox()  # backstop: anything still queued (e.g. a publish mid-drop)
+            except Exception:
+                logger.exception("stop outbox drain failed; retried next tick")
+            try:
+                await service.clear_released_retained(backend, retain_s=release_retain_s)
+            except Exception:
+                logger.exception("retained stop-topic housekeeping failed; retried next tick")
 
-        l2_task = asyncio.create_task(
-            run_l2_instruction_listener(
-                cfg,
-                username=mqtt_username,
-                password=mqtt_password,
-                engage_fn=_l2_engage,
-                already_acted_fn=backend.has_l2_engage,
-            )
+        await run_forever(_tick, interval_s=heartbeat_interval_s, process_name=PROCESS_NAME)
+    finally:
+        for task in (intake_task, l2_task, client_task):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await pool.close()
+        safestop.configure_service(None)
+
+
+def stop_path_ready(*sessions: MqttSession, exit_after_s: float) -> bool:
+    """K8 fail closed: True while the stop publish connection and the utility L2 listener are both up. While
+    one is down (reconnecting) the process writes no heartbeat (health sees og-safestop down); once one has
+    been down longer than `exit_after_s` this raises `SystemExit` so systemd restarts og-safestop."""
+    down = [s for s in sessions if not s.connected]
+    if not down:
+        return True
+    down_s = max(s.down_for_s() for s in down)
+    names = ",".join(s.name for s in down)
+    logger.error("safestop MQTT connection down", extra={"clients": names, "down_s": round(down_s, 1)})
+    if down_s > exit_after_s:
+        raise SystemExit(
+            f"og-safestop MQTT connection(s) {names} down for {down_s:.0f}s: exiting for restart"
         )
-        try:
-
-            async def _tick() -> None:
-                broker.discard_expired()
-                await write_heartbeat(pool, PROCESS_NAME)
-                try:
-                    await service.clear_released_retained(backend, retain_s=release_retain_s)
-                except Exception:
-                    logger.exception("retained stop-topic housekeeping failed; retried next tick")
-
-            await run_forever(_tick, interval_s=heartbeat_interval_s, process_name=PROCESS_NAME)
-        finally:
-            for task in (intake_task, l2_task):
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-            await pool.close()
-            safestop.configure_service(None)
+    return False
 
 
 def _entrypoint() -> None:

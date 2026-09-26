@@ -23,6 +23,9 @@ from opengrid.settle.services_extra import mobile_deployment_availability_pct
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 PROFILE_PATH = _REPO_ROOT / "orchestrator" / "config" / "service_profiles" / "mobile_storage.toml"
+HOME_STATIONS_PATH = (
+    _REPO_ROOT / "orchestrator" / "config" / "service_profiles" / "mobile_storage_home_stations.toml"
+)
 INTERFACES_DIR = _REPO_ROOT / "interfaces"
 
 REFERENCE_COMMITTED_KW = 500.0
@@ -204,3 +207,63 @@ def test_deployment_availability_pct_full_and_partial_window() -> None:
 
     assert mobile_deployment_availability_pct(240, 240) == Decimal("1")
     assert mobile_deployment_availability_pct(120, 240) == Decimal("0.5")
+
+
+# =========================================================================================================
+# D-31 (2026-09-26, docs/orchestrator/07-delivery/11-decision-log.md): a mobile unit is never charged
+# from the fleet, only at its registered home station, priced at that station's tariff.
+# =========================================================================================================
+
+
+def test_d31_never_chargeable_from_fleet() -> None:
+    profile = _load_profile()
+    assert profile["home_station"]["chargeable_from_fleet"] is False
+    assert profile["control"]["charge_source"] == "HOME_STATION_ONLY"
+
+
+def test_d31_home_station_registry_is_referenced_and_exists() -> None:
+    home_station = _load_profile()["home_station"]
+    registry_relpath = home_station["registry"]
+    assert registry_relpath == "config/service_profiles/mobile_storage_home_stations.toml"
+    assert HOME_STATIONS_PATH.exists()
+
+
+def test_d31_charging_priced_at_the_home_station_not_the_deployment_site() -> None:
+    home_station = _load_profile()["home_station"]
+    assert home_station["charging_priced_at"] == "HOME_STATION_TARIFF"
+
+
+def test_d31_home_station_registry_parses_and_has_required_fields() -> None:
+    with HOME_STATIONS_PATH.open("rb") as handle:
+        registry = tomllib.load(handle)
+    stations = registry["home_station"]
+    assert len(stations) >= 1
+    required = {"home_station_id", "zone", "lat", "lon", "charger_kw"}
+    for station in stations:
+        assert required <= set(station)
+    station_ids = {s["home_station_id"] for s in stations}
+    assert len(station_ids) == len(stations)  # no duplicate home_station_id
+
+
+def test_d31_home_station_assignments_reference_a_defined_station() -> None:
+    with HOME_STATIONS_PATH.open("rb") as handle:
+        registry = tomllib.load(handle)
+    station_ids = {s["home_station_id"] for s in registry["home_station"]}
+    assignments = registry["assignment"]
+    assert len(assignments) >= 1
+    for assignment in assignments:
+        assert assignment["home_station_id"] in station_ids
+        assert assignment["bank_id"]  # og.bank.bank_id / og.hub.hub_id -- what OPTIMIZER keys is_mobile on
+
+
+def test_d31_optimizer_can_join_bank_id_to_a_zone_via_home_station_id() -> None:
+    """The exact join OPTIMIZER's `load_banks`/`bank_market_terms` needs (2026-09-26 R3.1 message to
+    OPTIMIZER): assignment.bank_id -> assignment.home_station_id -> home_station.zone. Every assigned
+    bank_id must resolve to exactly one zone this way."""
+    with HOME_STATIONS_PATH.open("rb") as handle:
+        registry = tomllib.load(handle)
+    zone_by_station = {s["home_station_id"]: s["zone"] for s in registry["home_station"]}
+    zone_by_bank_id = {}
+    for assignment in registry["assignment"]:
+        zone_by_bank_id[assignment["bank_id"]] = zone_by_station[assignment["home_station_id"]]
+    assert zone_by_bank_id == {"trailer-mb-01": "LZ_AEN"}

@@ -86,7 +86,10 @@ def unit_rating_kw(units: int | None, *, inverter_cap_kw: float = DEFAULT_INVERT
 def continuous_power_kw(params: HubParams, *, inverter_cap_kw: float = DEFAULT_INVERTER_CAP_KW) -> float:
     """The home's continuous rated power P_cont: min(`params.p_kw`, `unit_rating_kw(params.units)`) --
     11 kW for a single-unit home, 20 kW for a dual-unit one. The seeded `p_kw` alone never sets the cap:
-    a single-unit home mis-seeded at 20 kW is still held to 11 kW."""
+    a single-unit home mis-seeded at 20 kW is still held to 11 kW. The home unit rules apply to homes only: a
+    utility-scale asset (`params.utility_scale`, og.asset SUBSTATION) is rated at its nameplate `p_kw`."""
+    if params.utility_scale:
+        return params.p_kw
     return min(params.p_kw, unit_rating_kw(params.units, inverter_cap_kw=inverter_cap_kw))
 
 

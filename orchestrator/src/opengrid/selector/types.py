@@ -16,6 +16,8 @@ from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D, DEFAULT_SELF_DIS
 from opengrid.core.products import VariableKind
 
 ScenarioName = Literal["P10", "P50", "P90"]
+#: Service type of mobile-storage (truck) contracts (owner decision D-31).
+MOBILE_STORAGE = "MOBILE_STORAGE"
 GateKind = Literal["SCHEDULED_15MIN", "ADMISSION", "RENOMINATION"]
 
 
@@ -68,19 +70,28 @@ class BankSnapshot:
     solar_cost_usd_per_kwh: float | None = None
     """Cost of a solar-charged kWh: the utility's contract solar price in a regulated territory; None =
     behind-the-meter PV surplus valued at its forgone export credit (the zone price), never paying M1."""
-    solar_share_floor: float = 0.0
-    """09 D4 / D-22: at least this share of the bank's territory's charged energy is solar (soft floor,
-    priced slack). 0.30 in a regulated territory; 0 elsewhere."""
     solar_share: dict[int, float] = field(default_factory=dict)
     """D-28 measured solar share of charging per interval (`solar_charge_kw` = share x charge envelope)."""
     solar_share_source: dict[int, str] = field(default_factory=dict)
     """Which D-28 source each interval's share came from: TELEMETRY, ERCOT_SOLAR or ASSUMPTION."""
     grid_charge_intervals: frozenset[int] | None = None
-    """Intervals in which grid charging is allowed; None = any. Owner decision 2026-09-26 (D-22): a
-    regulated bank charges from the grid only at its utility's night / off-peak rate."""
+    """Intervals in which grid charging is allowed; None = any. Owner decision D-29(c): a utility-toll
+    bank charges from the grid on the owner's schedule (config windows), not at the utility's direction."""
+
+    is_mobile: bool = False
+    """D-31: a mobile storage unit (truck). It is never charged from the fleet, and charges only while at
+    its home station (depot), costed at the station's zone/tariff (its `zone` is the station's)."""
+    home_station_intervals: frozenset[int] | None = None
+    """For a mobile unit: the intervals it is at its home station. None = unknown: no charging at all."""
 
     def grid_charge_allowed(self, t: int) -> bool:
         return self.grid_charge_intervals is None or t in self.grid_charge_intervals
+
+    def charging_allowed(self, t: int) -> bool:
+        """D-31: a mobile unit charges (grid or solar) only at its home station; others always may."""
+        return not self.is_mobile or (
+            self.home_station_intervals is not None and t in self.home_station_intervals
+        )
 
     @property
     def models_soc(self) -> bool:
@@ -143,6 +154,8 @@ class CommittedObligation:
     expected_deployment_share: float = 0.0
     """09 S1.3 psi: expected fraction of a held award actually deployed (discharged). Wear (D8) is
     charged on that expected discharge; the hold itself pays none."""
+    service_type: str = ""
+    """The contract's service type (D-31: a MOBILE_STORAGE obligation is served by mobile units only)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +255,19 @@ class ModelInputs:
             }
         )
         return shares
+
+    def mobile_service_ids(self) -> set[str]:
+        """ybar keys of MOBILE_STORAGE obligations (committed and candidate), D-31."""
+        ids = {co.obligation_id for co in self.committed if co.service_type == MOBILE_STORAGE}
+        ids.update(c.opportunity_id for c in self.candidates if c.service_type == MOBILE_STORAGE)
+        return ids
+
+    def may_serve(self, obligation_id: str, bank_id: str) -> bool:
+        """D-31: fleet energy never feeds a mobile unit -- a MOBILE_STORAGE obligation is served only by
+        mobile units. The one rule the model, the rule fallback and the validator all apply."""
+        if obligation_id not in self.mobile_service_ids():
+            return True
+        return any(b.bank_id == bank_id and b.is_mobile for b in self.banks)
 
     def regulated_obligation_ids(self) -> set[str]:
         """ybar keys of REGULATED obligations (committed and candidate): their delivery windows bar

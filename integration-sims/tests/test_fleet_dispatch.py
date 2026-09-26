@@ -126,6 +126,42 @@ async def test_rejected_verdict_still_publishes_an_ack(
     assert ack["applied_p_kw"] is None
 
 
+async def test_tampered_unsigned_command_anomaly_publishes_a_rejected_ack(
+    engine: FleetEngine, guardian_key: Ed25519PrivateKey
+) -> None:
+    """Demo gap #14, 2026-09-26: starting this anomaly must actually reach the ack topic with a
+    REJECTED verdict -- previously `handle_scenario_cmd` never invoked the self-test at all, so
+    nothing was ever published here."""
+    hub_id = engine.state.hub_ids[0]
+    client = _FakePublishingClient()
+    scenario_cmd = {
+        "id": str(uuid.uuid4()),
+        "target": {"kind": "hub", "ref": hub_id},
+        "type": "FLEET_TAMPERED_UNSIGNED_COMMAND",
+        "params": {},
+        "start": datetime.now(UTC).isoformat(),
+        "duration_s": 0,
+    }
+
+    await _dispatch_message(
+        engine,
+        client,  # type: ignore[arg-type]
+        "og/v1/scenario/cmd",
+        json.dumps(scenario_cmd).encode("utf-8"),
+        guardian_key.public_key(),
+        Ed25519PrivateKey.generate().public_key(),
+    )
+
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["schema_name"] == "ack"
+    assert call["qos"] == 1
+    ack = call["message"]
+    assert ack["accepted"] is False
+    assert ack["reject_reason"] == "BAD_SIGNATURE"
+    assert ack["applied_p_kw"] is None
+
+
 async def test_unparseable_payload_is_dropped_without_publishing(engine: FleetEngine) -> None:
     client = _FakePublishingClient()
     await _dispatch_message(

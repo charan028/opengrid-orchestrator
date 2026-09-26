@@ -95,6 +95,11 @@ def _wired(monkeypatch):
         return 0
 
     monkeypatch.setattr(gate, "load_solar_shares", _no_solar)
+
+    async def _no_windows():
+        return {}
+
+    monkeypatch.setattr(gate, "load_owner_charge_windows", _no_windows)
     monkeypatch.setattr(gate.db, "prune_plan_energy_value", _prune)
 
     async def _fake_persist_plan(plan_mode, gate_kind, horizon_start, horizon_end, scenarios, result):

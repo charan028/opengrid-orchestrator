@@ -4,6 +4,7 @@ and the real Postgres/MQTT implementations (`pg_backend.py`, `mqtt_publish.py`) 
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -38,6 +39,41 @@ class StopEventBackend(Protocol):
         """Most recent `action` for this scope, or None if never stopped. Used only for observability
         (e.g. `main.py` refuses a redundant ENGAGE) -- never for release, which `safestop` can't do."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxEntry:
+    """One queued stop publication (`og.stop_outbox`, migration 0035)."""
+
+    seq: int
+    stop_id: UUID
+    action: Literal["ENGAGE", "RELEASE"]
+    topic_suffix: str
+    payload: dict[str, Any]
+
+
+class StopOutboxBackend(Protocol):
+    """K8 durable publish outbox: every accepted ENGAGE/RELEASE is queued in acceptance order and
+    (re)published until the broker acknowledges it."""
+
+    async def enqueue_publication(
+        self,
+        *,
+        stop_id: UUID,
+        action: Literal["ENGAGE", "RELEASE"],
+        topic_suffix: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Queue once per (stop_id, action); a second enqueue of the same event is a no-op."""
+        ...
+
+    async def pending_publications(self, *, limit: int) -> list[OutboxEntry]:
+        """Unacknowledged entries, oldest first (acceptance order)."""
+        ...
+
+    async def mark_published(self, seq: int) -> None: ...
+
+    async def record_publish_failure(self, seq: int, error: str) -> None: ...
 
 
 class StopPublisher(Protocol):

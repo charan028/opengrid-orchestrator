@@ -38,6 +38,7 @@ from opengrid.allocator.energy_sufficiency import (
     evaluate_with_substitution,
 )
 from opengrid.allocator.models import (
+    HOLD_SERVICE_TYPES,
     BankSnapshot,
     FleetState,
     HubSnapshot,
@@ -54,8 +55,14 @@ from opengrid.allocator.models import (
 from opengrid.core.economics import wear_cost
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
-from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, COMMIT_LOCK_OVERRIDE_REASONS, R_SUBSTITUTION
-from opengrid.core.timeutil import floor_to_interval
+from opengrid.core.reasons import (
+    ALR_ENERGY_SHORTFALL_RISK,
+    COMMIT_LOCK_OVERRIDE_REASONS,
+    LOCK_REASON_BY_SHORTFALL,
+    R_SHORTFALL_RESTORED,
+    R_SUBSTITUTION,
+)
+from opengrid.core.timeutil import floor_to_interval, to_utc
 from opengrid.engine.alerts import clear_open_alerts, open_alert_details
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
@@ -118,8 +125,15 @@ SELECT r.obligation_id, r.bank_id,
        EXISTS (
            SELECT 1 FROM og.as_deployment d
            WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
-             AND (d.obligation_id IS NULL OR d.obligation_id = r.obligation_id)
-       ) AS as_deployed
+             -- A NULL obligation_id means every ERCOT_AS award, never a utility toll (D-29).
+             AND (d.obligation_id = r.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
+       ) AS as_deployed,
+       -- The active deployment's end: while deployed the energy need is the rest of THIS call.
+       (
+           SELECT MAX(d.end_at) FROM og.as_deployment d
+           WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+             AND (d.obligation_id = r.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
+       ) AS deploy_end
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.contract c ON c.contract_id = o.contract_id
@@ -139,11 +153,18 @@ DEFAULT_AS_DEPLOYMENT_MINUTES = int(DEFAULT_AS_DEPLOYMENT_H * 60)
 AS_HOLD_FLOOR_FRACTION = HOLD_MARGIN_FRACTION
 
 
-def as_energy_hold(now: datetime, hold_kw: object, duration_minutes: object) -> tuple[float, datetime]:
-    """`(kW, draw end)` of an ERCOT_AS award's energy hold: its committed kW sustained for the product's
-    full deployment duration from now. `evaluate_energy_sufficiency` then requires `kW x duration` of
-    deliverable energy, i.e. `kW x duration / eta_d` stored above the reserve floor."""
+def as_energy_hold(
+    now: datetime, hold_kw: object, duration_minutes: object, deploy_end: datetime | None = None
+) -> tuple[float, datetime]:
+    """`(kW, draw end)` of a capacity hold's energy need (ERCOT_AS, D-29 toll): its committed kW sustained
+    for the product's full deployment duration from now while HELD; while DEPLOYED only for the rest of the
+    active call (`deploy_end - now`, capped by the product duration) -- sizing a call already under way
+    at the full duration escalated a correctly delivering award to SHORTFALL (review R3).
+    `evaluate_energy_sufficiency` then requires `kW x duration` of deliverable energy."""
     minutes = float(str(duration_minutes)) if duration_minutes else float(DEFAULT_AS_DEPLOYMENT_MINUTES)
+    if deploy_end is not None:
+        remaining_min = max((to_utc(deploy_end) - to_utc(now)).total_seconds(), 0.0) / 60.0
+        minutes = min(minutes, remaining_min)
     return float(str(hold_kw)) if hold_kw else 0.0, now + timedelta(minutes=minutes)
 
 
@@ -197,6 +218,9 @@ DEFAULT_WEAR_USD_PER_KWH = 0.03
 #: included; `opengrid.selector.energy_value.discharge_threshold_usd_per_mwh`). A bank it has no value for
 #: uses the replacement-cost fallback.
 StoredEnergyValueReader = Callable[[Sequence[str], datetime], Awaitable[Mapping[str, float]]]
+#: The selector's DB read of its published hard floors (`selector.db.load_hold_floors_kwh`).
+HoldFloorReader = Callable[[list[str], datetime], Awaitable[Mapping[str, float]]]
+HOLD_FLOOR_DB_REFRESH_S = 60.0
 
 
 def wear_usd_per_mwh(wear_usd_per_kwh: float) -> float:
@@ -278,11 +302,17 @@ SELECT r.obligation_id, r.bank_id, r.amount, o.service_type, o.tier, op.value_pe
        EXISTS (
            SELECT 1 FROM og.as_deployment d
            WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
-             AND (d.obligation_id IS NULL OR d.obligation_id = o.obligation_id)
+             -- A NULL obligation_id means every ERCOT_AS award, never a utility toll (D-29).
+             AND (d.obligation_id = o.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
        ) AS as_deployed,
        -- The AS product's full-deployment duration (Non-Spin 240 min, ECRS 60 min) for its energy hold.
        (SELECT MAX(pr.duration_minutes) FROM og.product_rule pr WHERE pr.contract_id = o.contract_id)
-           AS duration_minutes
+           AS duration_minutes,
+       (
+           SELECT MAX(d.end_at) FROM og.as_deployment d
+           WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+             AND (d.obligation_id = o.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
+       ) AS deploy_end
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
@@ -293,6 +323,29 @@ WHERE r.bank_id = ANY(%(bank_ids)s)
   -- maximum feasible kW of its unchanged commitment until its window ends (K13: nothing reallocated).
   AND o.state IN ('COMMITTED', 'DELIVERING', 'SHORTFALL')
 """
+
+#: 02a S2.2 commitment-lock event: a revision of the obligation's latest commitment row for the interval
+#: covering now, with the lock reason and a `supersedes` link; plan, interval and kW copied unchanged.
+_LOCK_EVENT_SQL = """
+INSERT INTO og.commitment
+    (commitment_id, obligation_id, plan_id, interval_start, interval_end, committed_kw, variable_kind,
+     supersedes, reason_code)
+SELECT gen_random_uuid(), c.obligation_id, c.plan_id, c.interval_start, c.interval_end, c.committed_kw,
+       c.variable_kind, c.commitment_id, %(reason_code)s
+FROM og.commitment c
+WHERE c.obligation_id = %(obligation_id)s::uuid
+  AND c.interval_start <= %(now)s AND c.interval_end > %(now)s
+  AND NOT EXISTS (SELECT 1 FROM og.commitment n WHERE n.supersedes = c.commitment_id)
+ORDER BY c.created_at DESC
+LIMIT 1
+"""
+
+
+def lock_reason_of(shortfall_reason: str) -> str:
+    """The K13 lock reason an allocator shortfall reason stands for (`R-SHORTFALL-*` detail codes map
+    onto their override), for the commitment-lock event row."""
+    return LOCK_REASON_BY_SHORTFALL.get(shortfall_reason, shortfall_reason)
+
 
 _CONTRACT_MARKETS_SQL = """
 SELECT o.obligation_id, c.market, c.utility_id, c.service_type
@@ -329,6 +382,36 @@ class FleetCapabilityProvider:
         return Decimal(str(cap.max_discharge_kw))
 
 
+#: Banks carrying a utility-scale asset (og.asset SUBSTATION), refreshed with the market model: their
+#: hubs are rated at nameplate, never at the home unit cap (`HubParams.utility_scale`).
+_UTILITY_SCALE_BANKS: set[str] = set()
+
+_SUBSTATION_BANKS_SQL = """
+SELECT DISTINCT bank_id FROM og.asset WHERE asset_class = 'SUBSTATION' AND bank_id IS NOT NULL
+"""
+
+
+def set_utility_scale_banks(bank_ids: set[str]) -> None:
+    _UTILITY_SCALE_BANKS.clear()
+    _UTILITY_SCALE_BANKS.update(bank_ids)
+
+
+def is_utility_scale_bank(bank_id: str) -> bool:
+    return bank_id in _UTILITY_SCALE_BANKS
+
+
+async def load_utility_scale_banks(pool: AsyncConnectionPool) -> set[str] | None:
+    """Banks with an og.asset SUBSTATION row; `None` (logged) when unreadable (keep the last set)."""
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_SUBSTATION_BANKS_SQL)
+            rows = await cur.fetchall()
+    except Exception:
+        logger.warning("og.asset unreadable; utility-scale banks unchanged", exc_info=True)
+        return None
+    return {str(r[0]) for r in rows}
+
+
 class EngineFleetGateway:
     """`opengrid.allocator.gateways.FleetGateway` backed by the in-process fleet twin
     (`opengrid.fleet`, already loaded/kept warm by `og-engine`'s own `load_topology()`/MQTT ingest --
@@ -340,6 +423,11 @@ class EngineFleetGateway:
 
     def __init__(self, market_model: MarketModel | None = None) -> None:
         self._market = market_model
+
+    def set_market_model(self, market_model: MarketModel | None) -> None:
+        """Swap in a rebuilt market model (periodic refresh); `None` keeps the current one."""
+        if market_model is not None:
+            self._market = market_model
 
     async def bank_ids(self) -> Sequence[str]:
         return fleet.known_bank_ids()
@@ -353,8 +441,8 @@ class EngineFleetGateway:
             except LookupError:
                 logger.warning("fleet_state: unknown bank_id, skipping", extra={"bank_id": bank_id})
                 continue
-            scada = fleet.bank_scada_signal(bank_id)
-            load_kva = scada.value if scada is not None and scada.signal == "APPARENT_POWER_KVA" else 0.0
+            scada = fleet.bank_scada_signal(bank_id, "APPARENT_POWER_KVA")
+            load_kva = scada.value if scada is not None else 0.0
             territory = self._market.territory_of_bank(bank_id) if self._market is not None else None
             banks.append(
                 BankSnapshot(
@@ -392,6 +480,8 @@ class EngineFleetGateway:
                         p_dis_max_kw=getattr(snap, "p_dis_max_kw", None),
                         meter_kw=getattr(snap, "meter_kw", None),
                         units=getattr(snap, "units", None),
+                        utility_scale=bool(getattr(snap, "utility_scale", False))
+                        or is_utility_scale_bank(snap.bank_id),
                     )
                 )
         return FleetState(hubs=tuple(hubs), banks=tuple(banks))
@@ -404,8 +494,8 @@ class EngineScadaGateway:
     async def samples(self, bank_ids: Sequence[str]) -> dict[str, ScadaSample]:
         samples: dict[str, ScadaSample] = {}
         for bank_id in bank_ids:
-            signal = fleet.bank_scada_signal(bank_id)
-            if signal is None or signal.signal != "APPARENT_POWER_KVA":
+            signal = fleet.bank_scada_signal(bank_id, "APPARENT_POWER_KVA")
+            if signal is None:
                 continue
             samples[bank_id] = ScadaSample(bank_id=bank_id, apparent_power_kva=signal.value)
         return samples
@@ -423,6 +513,8 @@ class EngineScheduleGateway:
         stored_energy_value: StoredEnergyValueReader | None = None,
         wear_usd_per_kwh: float = DEFAULT_WEAR_USD_PER_KWH,
         m1_by_zone: Mapping[str, float] | None = None,
+        hold_floor_in_process: Callable[[str, datetime], float | None] = lambda bank_id, at: None,
+        hold_floor_db: HoldFloorReader | None = None,
     ) -> None:
         self._pool = pool
         self._posture_warned = False
@@ -430,6 +522,10 @@ class EngineScheduleGateway:
         self._wear_usd_per_mwh = wear_usd_per_mwh(wear_usd_per_kwh)
         self._m1_by_zone = m1_by_zone
         self._value_warned = False
+        self._hold_floor_in_process = hold_floor_in_process
+        self._hold_floor_db = hold_floor_db
+        self._db_floors: dict[str, float] = {}
+        self._db_floors_at: datetime | None = None
 
     async def schedule(self, bank_ids: Sequence[str]) -> Schedule:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -474,7 +570,39 @@ class EngineScheduleGateway:
                 conservative_banks.add(bank_id)
         if not price_by_zone:
             logger.warning("no live price observed yet; allocator sees price=0.0 this cycle")
-        return Schedule(prices=tuple(prices), conservative_bank_ids=frozenset(conservative_banks))
+        return Schedule(
+            prices=tuple(prices),
+            conservative_bank_ids=frozenset(conservative_banks),
+            hold_floor_kwh=await self._hold_floors(bank_ids),
+        )
+
+    async def _hold_floors(self, bank_ids: Sequence[str]) -> dict[str, float]:
+        """09 S1.8 e^hold per bank: the selector's in-process value from the latest plan, else (after a
+        restart, before this process has solved a plan) `selector.db.load_hold_floors_kwh`, read at most
+        every `HOLD_FLOOR_DB_REFRESH_S`. Unreadable -> none (the AS energy hold still applies)."""
+        now = datetime.now(UTC)
+        floors: dict[str, float] = {}
+        missing: list[str] = []
+        for bank_id in bank_ids:
+            value = self._hold_floor_in_process(bank_id, now)
+            if value is not None:
+                floors[bank_id] = value
+            else:
+                missing.append(bank_id)
+        if missing and self._hold_floor_db is not None:
+            due = (
+                self._db_floors_at is None
+                or (now - self._db_floors_at).total_seconds() >= HOLD_FLOOR_DB_REFRESH_S
+            )
+            if due:
+                self._db_floors_at = now
+                try:
+                    self._db_floors = dict(await self._hold_floor_db(missing, now))
+                except Exception:
+                    logger.warning("stored hold floors unreadable; AS energy hold only", exc_info=True)
+                    self._db_floors = {}
+            floors.update({b: self._db_floors[b] for b in missing if b in self._db_floors})
+        return floors
 
     async def _published_values(self, bank_ids: Sequence[str]) -> Mapping[str, float]:
         """The optimizer's stored-energy values; unreadable -> none (every bank falls back)."""
@@ -516,15 +644,23 @@ class EngineScheduleGateway:
         return {(str(kind), str(ref)) for kind, ref in rows}
 
     async def instructions(self, bank_ids: Sequence[str]) -> Sequence[Instruction]:
+        now = datetime.now(UTC)
         instructions: list[Instruction] = []
         for bank_id in bank_ids:
             instr: ScadaUtilityInstruction | None = fleet.utility_instruction(bank_id)
-            if instr is None:
+            if instr is None or not instruction_active(instr, now):
                 continue
             instructions.append(
                 Instruction(scope="BANK", scope_ref=bank_id, kind=instr.kind, limit_kw=instr.limit_kw)
             )
         return tuple(instructions)
+
+
+def instruction_active(instr: ScadaUtilityInstruction, now: datetime) -> bool:
+    """K5: an L2 instruction binds until its `expires_at`. Once the utility's constraint has expired the
+    bank's full capability is back, so a best-effort obligation is restored to its full commitment on the
+    next cycle (owner decision 2026-09-26) -- the latest stored instruction is not a standing cap."""
+    return instr.expires_at is None or to_utc(instr.expires_at) > to_utc(now)
 
 
 class EngineLedgerGateway:
@@ -542,6 +678,16 @@ class EngineLedgerGateway:
         #: (obligation_id, reason, interval) K13 shortfalls already traced in the current episode.
         self._traced_shortfalls: set[tuple[str, str, str]] = set()
         self._market_warned = False
+        #: This cycle's committed kW and SHORTFALL state per obligation (from `ledger_view`), and granted
+        #: kW (from `persist_grants`), for the restore check.
+        self._committed_kw: dict[str, float] = {}
+        self._in_shortfall: set[str] = set()
+        self._granted_kw: dict[str, float] = {}
+        #: Obligations short (K13 exception) in the previous cycle, and those already traced restored.
+        self._short_prev: set[str] = set()
+        self._restored: set[str] = set()
+        #: (obligation_id, reason) -> the 15-min interval its commitment-lock event was last written for.
+        self._lock_events: dict[tuple[str, str], str] = {}
 
     async def ledger_view(self, bank_ids: Sequence[str], interval_start: datetime) -> LedgerView:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -552,11 +698,19 @@ class EngineLedgerGateway:
         markets = await self._markets([str(row[0]) for row in call_rows])
 
         prior_by_obligation = {str(obligation_id): float(kw) for obligation_id, kw in prior_rows}
+        self._committed_kw = {}
+        self._in_shortfall = set()
+        for row in call_rows:
+            oid = str(row[0])
+            self._committed_kw[oid] = self._committed_kw.get(oid, 0.0) + float(row[2])
+            if row[6] == "SHORTFALL":
+                self._in_shortfall.add(oid)
 
         calls: list[ObligationCall] = []
         for row in call_rows:
             obligation_id, bank_id, amount, service_type, tier, value_per_mwh, state, as_deployed = row[:8]
             duration_minutes = row[8] if len(row) > 8 else None
+            deploy_end = row[9] if len(row) > 9 else None
             try:
                 eligible_hub_ids = tuple(
                     s.hub_id for s in fleet.hub_capabilities(bank_id) if s.health == "online"
@@ -578,6 +732,11 @@ class EngineLedgerGateway:
                     in_shortfall=state == "SHORTFALL",
                     as_deployed=bool(as_deployed),
                     hold_duration_h=float(str(duration_minutes)) / 60.0 if duration_minutes else None,
+                    deployment_remaining_h=(
+                        max((to_utc(deploy_end) - to_utc(interval_start)).total_seconds(), 0.0) / 3600.0
+                        if deploy_end is not None and as_deployed
+                        else None
+                    ),
                     market_ref=markets.get(str(obligation_id), FREE),
                 )
             )
@@ -613,6 +772,10 @@ class EngineLedgerGateway:
         return await ledger.ledger_version()
 
     async def persist_grants(self, cycle_id: str, grants: Sequence[ProposedGrant]) -> None:
+        self._granted_kw = {}
+        for g in grants:
+            if g.obligation_id is not None and not g.is_headroom:
+                self._granted_kw[g.obligation_id] = self._granted_kw.get(g.obligation_id, 0.0) + g.granted_kw
         if not grants:
             return
         version = await ledger.ledger_version()
@@ -673,6 +836,72 @@ class EngineLedgerGateway:
                 reason_codes=[s.reason_code],
             )
         self._traced_shortfalls = current
+        # K13 audit: each lock exception is a commitment-lock event row (once per episode and interval).
+        for obligation_id, reason, _interval in sorted(current):
+            await self._record_lock_event(obligation_id, lock_reason_of(reason), at)
+        short_now = {s.obligation_id for s in shortfalls if s.reason_code in _K13_SHORTFALL_REASONS}
+        await self._restore(cycle_id, short_now, at)
+        self._short_prev = short_now
+
+    async def _restore(self, cycle_id: str, short_now: set[str], at: datetime) -> None:
+        """Owner decision 2026-09-26 (K13 best effort): once the constraint clears, a short obligation is
+        granted its full committed kW again (the allocator re-derives it every cycle). The first cycle it is
+        served in full is recorded: trace R-SHORTFALL-RESTORED, a commitment-lock event row, and AT_RISK
+        cleared. Obligations already in SHORTFALL (e.g. escalated before a restart) count too, once."""
+        self._restored -= short_now
+        candidates = (self._short_prev | self._in_shortfall) - short_now - self._restored
+        for obligation_id in sorted(candidates):
+            committed = self._committed_kw.get(obligation_id)
+            granted = self._granted_kw.get(obligation_id, 0.0)
+            if committed is None or committed <= 0 or granted < committed - 1e-6:
+                continue
+            self._restored.add(obligation_id)
+            if self._trace is not None:
+                try:
+                    await self._trace.append(
+                        f"shortfall-{obligation_id}",
+                        "SHORTFALL",
+                        "SHORTFALL_RESTORED",
+                        {"cycle_id": cycle_id, "obligation_id": obligation_id, "granted_kw": granted},
+                        reason_codes=[R_SHORTFALL_RESTORED],
+                    )
+                except Exception:
+                    logger.exception(
+                        "could not trace a restored commitment", extra={"obligation_id": obligation_id}
+                    )
+            await self._record_lock_event(obligation_id, R_SHORTFALL_RESTORED, at)
+            try:
+                await contracts.set_obligation_at_risk(
+                    UUID(obligation_id),
+                    False,
+                    reason_code=R_SHORTFALL_RESTORED,
+                    payload={"cause": "restored"},
+                )
+            except Exception:
+                logger.exception("could not clear AT_RISK on restore", extra={"obligation_id": obligation_id})
+
+    async def _record_lock_event(self, obligation_id: str, reason_code: str, at: datetime) -> None:
+        """02a S2.2 / K13: write the commitment-lock event as an `og.commitment` row carrying the reason and
+        superseding the obligation's latest row for the current interval. The committed kW is copied
+        unchanged (K13: the lock never reduces the commitment; delivery is metered and settled). Once per
+        (obligation, reason, 15-min interval). Best effort: the trace is the safety record."""
+        interval = floor_to_interval(at, 15).isoformat()
+        if self._lock_events.get((obligation_id, reason_code)) == interval:
+            return
+        self._lock_events[(obligation_id, reason_code)] = interval
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    _LOCK_EVENT_SQL, {"obligation_id": obligation_id, "reason_code": reason_code, "now": at}
+                )
+                commit = getattr(conn, "commit", None)
+                if commit is not None:
+                    await commit()
+        except Exception:
+            logger.exception(
+                "could not write commitment-lock event",
+                extra={"obligation_id": obligation_id, "reason": reason_code},
+            )
 
     async def record_substitution_events(self, cycle_id: str, events: Sequence[SubstitutionEvent]) -> None:
         """S5.3: the automatic swaps one 2 s cycle made, one `SUBSTITUTION` trace event each."""
@@ -687,6 +916,7 @@ class EngineLedgerGateway:
                 },
                 R_SUBSTITUTION,
             )
+            await self._record_lock_event(event.obligation_id, R_SUBSTITUTION, datetime.now(UTC))
 
     async def _trace_substitution(self, payload: dict[str, object], reason_code: str) -> None:
         if self._trace is None:
@@ -748,12 +978,21 @@ class EnergySufficiencyGateway:
         as_all: set[str] = set()
         for row in rows:
             obligation_id, bank_id, required_kwh, draw_end, customer_id = row[:5]
-            service_type, hold_kw, duration_minutes, as_deployed = (*row[5:9], None, None, None, False)[:4]
-            if service_type == "ERCOT_AS":
-                # Energy hold (Frank #6, NPRR1282): an AS award must keep enough energy above the reserve
+            service_type, hold_kw, duration_minutes, as_deployed, deploy_end = (
+                *row[5:10],
+                None,
+                None,
+                None,
+                False,
+                None,
+            )[:5]
+            if service_type in HOLD_SERVICE_TYPES:
+                # Energy hold (ERCOT_AS; D-29 utility toll, 90 min product rule) (Frank #6, NPRR1282): an AS award must keep enough energy above the reserve
                 # floor for a FULL deployment of its committed kW -- held or deployed -- not just the kWh
                 # of its remaining window.
-                kw, draw_end = as_energy_hold(now, hold_kw, duration_minutes)
+                kw, draw_end = as_energy_hold(
+                    now, hold_kw, duration_minutes, deploy_end if as_deployed else None
+                )
                 as_all.add(str(obligation_id))
                 if not as_deployed:
                     as_holds.add(str(obligation_id))
@@ -952,6 +1191,8 @@ def build_gateways(
     stored_energy_value: StoredEnergyValueReader | None = None,
     wear_usd_per_kwh: float = DEFAULT_WEAR_USD_PER_KWH,
     m1_by_zone: Mapping[str, float] | None = None,
+    hold_floor_in_process: Callable[[str, datetime], float | None] | None = None,
+    hold_floor_db: HoldFloorReader | None = None,
 ) -> tuple[EngineFleetGateway, EngineLedgerGateway, EngineScadaGateway, EngineScheduleGateway]:
     """Convenience constructor for `opengrid.engine.main`: one of each gateway, built once per process
     (the fleet/scada gateways hold no state of their own; the ledger/schedule gateways hold the shared
@@ -965,5 +1206,7 @@ def build_gateways(
             stored_energy_value=stored_energy_value,
             wear_usd_per_kwh=wear_usd_per_kwh,
             m1_by_zone=m1_by_zone,
+            hold_floor_in_process=hold_floor_in_process or (lambda bank_id, at: None),
+            hold_floor_db=hold_floor_db,
         ),
     )

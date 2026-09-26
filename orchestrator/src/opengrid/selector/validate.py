@@ -25,7 +25,30 @@ def validate_plan(inputs: ModelInputs, plan: ExtractedPlan) -> tuple[bool, tuple
     violations.extend(_check_bank_bounds(inputs, plan))
     violations.extend(_check_product_rules(inputs, plan))
     violations.extend(_check_soc_dynamics(inputs, plan))
+    violations.extend(check_mobile_storage(inputs, plan))
     return not violations, tuple(violations)
+
+
+def check_mobile_storage(inputs: ModelInputs, plan: ExtractedPlan) -> list[str]:
+    """Owner decision D-31: no plan row feeds a mobile unit from the fleet (a MOBILE_STORAGE obligation
+    allocated to a non-mobile bank), and no plan row charges a mobile unit away from its home station."""
+    violations = []
+    mobile_ids = inputs.mobile_service_ids()
+    mobile_banks = {b.bank_id: b for b in inputs.banks if b.is_mobile}
+    for (oid, bank_id, t), kw in plan.bank_interval_allocation.items():
+        if kw > _TOL_KW and oid in mobile_ids and bank_id not in mobile_banks:
+            violations.append(
+                f"D-31: mobile obligation {oid} fed {kw:.3f}kW from fleet bank {bank_id} at {t}"
+            )
+    for charges in (plan.charge_by_bank_interval_scenario, plan.solar_charge_by_bank_interval_scenario):
+        for (bank_id, t, scenario), kw in charges.items():
+            bank = mobile_banks.get(bank_id)
+            if bank is not None and kw > _TOL_KW and not bank.charging_allowed(t):
+                violations.append(
+                    f"D-31: mobile unit {bank_id} charges {kw:.3f}kW away from its home station "
+                    f"(interval {t}, scenario {scenario})"
+                )
+    return violations
 
 
 def _caps(inputs: ModelInputs) -> dict[str, dict[int, float]]:

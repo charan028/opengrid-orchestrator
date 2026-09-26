@@ -138,6 +138,14 @@ Then deploy (the guardian and og-api read the config at start) and `apache2ctl c
 reload apache2`. Two different people are always required: the guardian refuses a release approved by its
 requester.
 
+**The shared `operator` account cannot complete a release.** It can engage a safe stop and request a
+release, but it is not in `stop_release_authorised_operators`, so the guardian refuses any release it
+requests or approves. One shared login is also one identity, which can never be both people. Releases
+need two named accounts (today `og-op-a` and `og-op-b`).
+
+The engage proposal lives for `[safestop].confirm_window_s` (30 s); a confirm after that returns 409
+"proposal expired, propose again". Release requests keep their 60 s window.
+
 ## ERCOT AS deployment (demo trigger)
 
 An ERCOT_AS award is a 0 kW capacity hold until deployed. To deploy one award (operator):

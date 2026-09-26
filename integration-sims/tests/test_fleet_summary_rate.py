@@ -27,8 +27,11 @@ def _engine() -> FleetEngine:
 
 def test_each_hub_publishes_one_summary_per_interval_not_per_tick() -> None:
     engine = _engine()
+    # Not a hardcoded 8: the shipped fleet.yaml's substation asset (D-29(b)) adds one more hub on top
+    # of this fixture's own hub_count=8 override (substation_assets isn't itself overridden above).
+    expected_hub_count = len(engine.state.hub_ids)
 
     first = engine.wave_summary_messages(1000.0)
-    assert len(first) == 8
+    assert len(first) == expected_hub_count
     assert engine.wave_summary_messages(1002.0) == []  # next 2 s tick: nothing due
-    assert len(engine.wave_summary_messages(1010.0)) == 8
+    assert len(engine.wave_summary_messages(1010.0)) == expected_hub_count

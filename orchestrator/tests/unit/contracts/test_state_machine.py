@@ -44,6 +44,7 @@ ALL_REASON_CODES = (
     "R-SHORTFALL-THRESHOLD",
     "R-AS-RELEASE",
     "R-SUBSTITUTION",
+    "R-SHORTFALL-RESTORED",
     "bogus-code",
 )
 
@@ -127,6 +128,25 @@ def test_terminal_states_have_no_outgoing_edges() -> None:
             except IllegalTransitionError:
                 continue
             raise AssertionError(f"terminal state {state} accepted a transition to {target}")
+
+
+def test_a_restored_shortfall_returns_to_delivering_only_with_the_restore_code() -> None:
+    """Owner decision 2026-09-26: SHORTFALL -> DELIVERING needs R-SHORTFALL-RESTORED, and the obligation
+    is locked again afterwards (K13)."""
+    validate_transition("SHORTFALL", "DELIVERING", "R-SHORTFALL-RESTORED")
+    assert is_locked("DELIVERING")
+    for code in (None, "R-RENOM-GATE", "R-FULFILLED", "bogus-code"):
+        try:
+            validate_transition("SHORTFALL", "DELIVERING", code)
+        except IllegalTransitionError:
+            continue
+        raise AssertionError(f"SHORTFALL -> DELIVERING accepted {code!r}")
+    for target in ("COMMITTED", "FULFILLED", "REJECTED", "EXPIRED"):
+        try:
+            validate_transition("SHORTFALL", target, "R-SHORTFALL-RESTORED")  # type: ignore[arg-type]
+        except IllegalTransitionError:
+            continue
+        raise AssertionError(f"SHORTFALL -> {target} should stay illegal")
 
 
 def test_r_as_release_alone_never_authorizes_a_shortfall_transition() -> None:

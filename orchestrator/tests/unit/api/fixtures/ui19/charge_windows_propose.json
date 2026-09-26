@@ -1,0 +1,9 @@
+{
+  "proposal_id": "<uuid>",
+  "summary": "Charge windows ZONE LZ_NORTH: none -> 21:30-05:30 (tou)",
+  "scope_kind": "ZONE",
+  "scope_ref": "LZ_NORTH",
+  "old_windows": null,
+  "new_windows": ["21:30-05:30"],
+  "expires_in_s": 60.0
+}

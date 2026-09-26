@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-import aiomqtt
 from prometheus_client import start_http_server
 from psycopg_pool import AsyncConnectionPool
 
@@ -37,14 +37,15 @@ from opengrid.guardian.keys import resolve_signing_seed
 from opengrid.guardian.mqtt_io import (
     MqttHubStatePort,
     MqttL2InstructionPort,
+    build_input_session,
     publish_calibration_command,
     publish_command_batch,
     publish_lease,
-    run_telemetry_listener,
 )
 from opengrid.guardian.ports import AlertPort, ProposedBatch, ScopePosturePort
 from opengrid.guardian.pq_ports import FirmwareCalibrationBoundsPort, ProposedCalibrationCommand
 from opengrid.guardian.repo import (
+    ConfigMobileUnitPort,
     PendingCalibration,
     PgAlertPort,
     PgCalibrationQueuePort,
@@ -62,11 +63,37 @@ from opengrid.platform.db import POOL_OPEN_TIMEOUT_S, build_dsn
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.log import configure_logging
 from opengrid.platform.mqtt import build_client
+from opengrid.platform.mqtt_session import MqttPublisher, MqttSession
 from opengrid.platform.process import run_forever
+from opengrid.selector.gate import load_mobile_units
 from opengrid.trace import TraceStore
 from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
 
 logger = logging.getLogger("guardian")
+
+#: Fail closed on MQTT: after this long with a connection down, the process exits so systemd restarts it.
+DEFAULT_MQTT_DOWN_EXIT_S = 60.0
+
+
+def mqtt_inputs_ready(*sessions: MqttSession, exit_after_s: float) -> bool:
+    """True when every MQTT connection is up. While one is down the guardian holds: the tick writes no
+    heartbeat (health sees the guardian stale) and evaluates and signs nothing -- it never signs on a
+    telemetry/L2 view it can no longer refresh, nor signs what it cannot publish. Once a connection has been
+    down longer than `exit_after_s` this raises `SystemExit` so systemd restarts the process."""
+    down = [s for s in sessions if not s.connected]
+    if not down:
+        return True
+    longest_s = max(s.down_for_s() for s in down)
+    names = ",".join(s.name for s in down)
+    logger.error(
+        "MQTT connection down: signing held", extra={"clients": names, "down_s": round(longest_s, 1)}
+    )
+    if longest_s > exit_after_s:
+        raise SystemExit(
+            f"guardian MQTT connection(s) {names} down for {longest_s:.0f}s: exiting for restart"
+        )
+    return False
+
 
 _PENDING_BATCHES_SQL = """
 SELECT cb.command_batch_id, cb.cycle_id, cb.ledger_version, cb.submission_id, cb.command_count, cb.merkle_root,
@@ -108,7 +135,7 @@ def build_signed_batch(service: GuardianService, *, key_id: str, proposal: Propo
 
 async def _publish_signed_batch(
     *,
-    mqtt_client: aiomqtt.Client,
+    mqtt_client: MqttPublisher,
     cfg: Config,
     service: GuardianService,
     key_id: str,
@@ -257,8 +284,7 @@ async def apply_escalation(
             await posture.set_posture(
                 kind, ref, posture="NORMAL", veto_ratio=t.veto_ratio, consecutive=0, stop_requested=False
             )
-            await alerts.clear_alert(CONSERVATIVE_ALERT_RULE, key)
-            await alerts.clear_alert(STOP_REQUEST_ALERT_RULE, key)
+            await _clear_scope_alerts(alerts, key)
             continue
         await posture.set_posture(
             kind,
@@ -283,7 +309,40 @@ async def apply_escalation(
             )
             await alerts.raise_alert(STOP_REQUEST_ALERT_RULE, "critical", f"{key}: {reason}", key, detail)
             await posture.propose_safe_stop(kind, ref, reason)
+    touched = {f"{kind}:{ref}" for kind, ref in (t.scope for t in transitions)}
+    await _reconcile_scope_alerts(tracker, posture, alerts, touched=touched)
     return transitions
+
+
+async def _clear_scope_alerts(alerts: AlertPort, key: str) -> None:
+    """Clear both escalation alerts of a scope; one failing never leaves the other open."""
+    for rule in (CONSERVATIVE_ALERT_RULE, STOP_REQUEST_ALERT_RULE):
+        try:
+            await alerts.clear_alert(rule, key)
+        except Exception:
+            logger.exception("failed to clear escalation alert", extra={"rule": rule, "condition_key": key})
+
+
+async def _reconcile_scope_alerts(
+    tracker: EscalationTracker, posture: ScopePosturePort, alerts: AlertPort, *, touched: set[str]
+) -> None:
+    """Review fix (base, 2026-09-26: ALR-SCOPE-CONSERVATIVE alerts stayed open after their scopes returned
+    to NORMAL). Every open escalation alert whose scope this guardian's tracker holds NORMAL -- a missed
+    clear, or state lost across a guardian restart -- is cleared, and its posture row set back to NORMAL, so
+    the alerts, `og.scope_posture` and the tracker always agree. A scope that is still bad re-enters
+    CONSERVATIVE on its next bad tick. Scopes with a transition this tick were handled above."""
+    for rule in (CONSERVATIVE_ALERT_RULE, STOP_REQUEST_ALERT_RULE):
+        for key in await alerts.open_condition_keys(rule):
+            kind, _, ref = key.partition(":")
+            if key in touched or kind not in ("BANK", "ZONE") or not ref:
+                continue
+            if tracker.posture((kind, ref)) != "NORMAL":  # type: ignore[arg-type]
+                continue
+            if rule == CONSERVATIVE_ALERT_RULE:
+                await posture.set_posture(
+                    kind, ref, posture="NORMAL", veto_ratio=0.0, consecutive=0, stop_requested=False
+                )
+            await _clear_scope_alerts(alerts, key)
 
 
 async def process_pending_stop_releases(
@@ -346,96 +405,99 @@ async def main() -> None:
         alerts=alert_port,
         zones_by_bank=zones_by_bank,
         # 09 S2.6 flow limits (G-26..G-32) and K15 territory (G-33): always wired in production.
-        topology=PgGridTopologyPort(pool, guardian_cfg, zone_territory),
+        topology=PgGridTopologyPort(pool, guardian_cfg, zone_territory, members=telemetry_cache),
         territory=PgTerritoryPort(pool, zone_territory),
     )
+    # G-35 (D-31): the mobile-unit registry, read once at start (a malformed file fails the start loudly).
+    ports = dataclasses.replace(ports, mobile_units=ConfigMobileUnitPort(load_mobile_units()))
     calibration_queue = PgCalibrationQueuePort(pool)
 
     service = GuardianService(ports=ports, config=guardian_cfg, signing_seed=signing_seed)
     guardian_module.configure(service)
 
     mqtt_password = resolve_secret("OG_MQTT_GUARDIAN_PASSWORD")
-    telemetry_task = asyncio.create_task(
-        run_telemetry_listener(
-            cfg,
-            telemetry_cache,
-            username="og_guardian",
-            password=mqtt_password,
-            l2_instructions=l2_instructions,
-        )
+    # Both MQTT connections survive broker disconnects (reconnect with backoff, same client id, never two
+    # clients at once): the input subscription (telemetry + L2) and the signed-publish connection.
+    input_session = build_input_session(
+        cfg, telemetry_cache, username="og_guardian", password=mqtt_password, l2_instructions=l2_instructions
     )
+    mqtt_client = MqttSession(
+        lambda: build_client(cfg, username="og_guardian", password=mqtt_password, process="guardian"),
+        name="guardian",
+    )
+    mqtt_tasks = [asyncio.create_task(input_session.run()), asyncio.create_task(mqtt_client.run())]
+    mqtt_down_exit_s = float(cfg.get("guardian.mqtt_down_exit_s", DEFAULT_MQTT_DOWN_EXIT_S))
     start_http_server(
         int(cfg.get("metrics.guardian_port", 9103)), addr=str(cfg.get("metrics.bind_host", "127.0.0.1"))
     )
 
-    async with build_client(
-        cfg, username="og_guardian", password=mqtt_password, process="guardian"
-    ) as mqtt_client:
+    async def publish_calibration(command: CalibrationCommand) -> None:
+        await publish_calibration_command(mqtt_client, cfg, command)
 
-        async def publish_calibration(command: CalibrationCommand) -> None:
-            await publish_calibration_command(mqtt_client, cfg, command)
-
-        async def tick() -> None:
-            await write_heartbeat(pool, "guardian")
-            outcomes: list[BatchOutcome] = []
-            for batch in await _fetch_pending_batches(pool):
-                verdict = await service.evaluate_and_sign(batch)
-                await _insert_verdict(pool, verdict)
-                outcome = service.batch_outcome(verdict)
-                if outcome is not None:
-                    outcomes.append(outcome)
-                if verdict.outcome != "PASS":
-                    continue
-                # Publish exactly what was evaluated -- never a second read of the pre-image.
-                proposal = service.evaluated_proposal(batch.command_batch_id)
-                if proposal is None:
-                    continue
-                await leases.record_accepted(proposal.bank_id, proposal.epoch, proposal.seq)
-                await _publish_signed_batch(
-                    mqtt_client=mqtt_client,
-                    cfg=cfg,
+    async def tick() -> None:
+        if not mqtt_inputs_ready(input_session, mqtt_client, exit_after_s=mqtt_down_exit_s):
+            return  # fail closed: no heartbeat, nothing evaluated or signed while MQTT is down
+        await write_heartbeat(pool, "guardian")
+        outcomes: list[BatchOutcome] = []
+        for batch in await _fetch_pending_batches(pool):
+            verdict = await service.evaluate_and_sign(batch)
+            await _insert_verdict(pool, verdict)
+            outcome = service.batch_outcome(verdict)
+            if outcome is not None:
+                outcomes.append(outcome)
+            if verdict.outcome != "PASS":
+                continue
+            # Publish exactly what was evaluated -- never a second read of the pre-image.
+            proposal = service.evaluated_proposal(batch.command_batch_id)
+            if proposal is None:
+                continue
+            await leases.record_accepted(proposal.bank_id, proposal.epoch, proposal.seq)
+            await _publish_signed_batch(
+                mqtt_client=mqtt_client,
+                cfg=cfg,
+                service=service,
+                key_id=guardian_cfg.key_id,
+                proposal=proposal,
+            )
+        if ports.pq is not None:
+            # Isolated from batch signing: a calibration-path failure (e.g. og.calibration_attempt
+            # not yet migrated) must never stop the guardian signing or holding dispatch (K7).
+            try:
+                await process_pending_calibrations(
+                    queue=calibration_queue,
+                    firmware_bounds=ports.pq.firmware_bounds,
                     service=service,
-                    key_id=guardian_cfg.key_id,
-                    proposal=proposal,
-                )
-            if ports.pq is not None:
-                # Isolated from batch signing: a calibration-path failure (e.g. og.calibration_attempt
-                # not yet migrated) must never stop the guardian signing or holding dispatch (K7).
-                try:
-                    await process_pending_calibrations(
-                        queue=calibration_queue,
-                        firmware_bounds=ports.pq.firmware_bounds,
-                        service=service,
-                        publish=publish_calibration,
-                        config=guardian_cfg,
-                    )
-                except Exception:
-                    logger.exception("calibration hand-off pass failed; batch signing unaffected")
-            # ES06-S04 escalation, isolated: publishing posture/alerts never touches the signing decisions.
-            try:
-                await apply_escalation(
-                    tracker=escalation,
-                    posture=posture_port,
-                    alerts=alert_port,
-                    outcomes=outcomes,
-                    zone_by_bank=zones_by_bank,
+                    publish=publish_calibration,
+                    config=guardian_cfg,
                 )
             except Exception:
-                logger.exception("veto escalation pass failed; signing unaffected")
-            # Isolated like the calibration pass: a release-path failure never touches batch signing, and a
-            # stop simply stays engaged (K8 fails closed).
-            try:
-                await process_pending_stop_releases(port=release_port, service=service, config=guardian_cfg)
-            except Exception:
-                logger.exception("stop-release hand-off pass failed; stops stay engaged")
-
+                logger.exception("calibration hand-off pass failed; batch signing unaffected")
+        # ES06-S04 escalation, isolated: publishing posture/alerts never touches the signing decisions.
         try:
-            await run_forever(tick, interval_s=guardian_cfg.cycle_interval_s, process_name="guardian")
-        finally:
-            telemetry_task.cancel()
+            await apply_escalation(
+                tracker=escalation,
+                posture=posture_port,
+                alerts=alert_port,
+                outcomes=outcomes,
+                zone_by_bank=zones_by_bank,
+            )
+        except Exception:
+            logger.exception("veto escalation pass failed; signing unaffected")
+        # Isolated like the calibration pass: a release-path failure never touches batch signing, and a
+        # stop simply stays engaged (K8 fails closed).
+        try:
+            await process_pending_stop_releases(port=release_port, service=service, config=guardian_cfg)
+        except Exception:
+            logger.exception("stop-release hand-off pass failed; stops stay engaged")
+
+    try:
+        await run_forever(tick, interval_s=guardian_cfg.cycle_interval_s, process_name="guardian")
+    finally:
+        for task in mqtt_tasks:
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await telemetry_task
-            await pool.close()
+                await task
+        await pool.close()
 
 
 if __name__ == "__main__":

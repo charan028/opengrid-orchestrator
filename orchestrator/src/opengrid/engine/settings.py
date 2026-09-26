@@ -19,8 +19,11 @@ from typing import Any
 
 from opengrid.allocator.models import FlowLimits
 from opengrid.engine.gateways import DEFAULT_WEAR_USD_PER_KWH
+from opengrid.engine.veto import DEFAULT_EXCLUDE_CYCLES, DEFAULT_VERDICT_WAIT_S
 from opengrid.platform.config import Config
 
+#: `[guardian.flow].default_export_limit_kw`'s default (guardian/config.py), shared with the allocator's F2.
+GUARDIAN_DEFAULT_EXPORT_LIMIT_KW = 20.0
 #: DATA_CENTER site meters are 480Y/277 V services (06 S4.b); `[allocator.closed_loop].site_nominal_v`.
 DEFAULT_SITE_NOMINAL_V = 277.0
 
@@ -54,12 +57,21 @@ class DispatchSettings:
     #: DATA_CENTER site-meter import to hold, per site id (`None` for a site: feed-forward only).
     dc_target_import_kw: dict[str, float] = field(default_factory=dict)
     pipeline_ac: PipelineAcDefaults = field(default_factory=PipelineAcDefaults)
+    #: K4 veto fail-safe (`engine.veto`): on/off, cycles a vetoed hub stays out, wait for verdicts (s).
+    veto_retry_enabled: bool = True
+    veto_exclude_cycles: int = DEFAULT_EXCLUDE_CYCLES
+    verdict_wait_s: float = DEFAULT_VERDICT_WAIT_S
+    #: How often the K15 market model is rebuilt (re-zoning, market changes).
+    market_refresh_s: float = 60.0
 
 
 def dispatch_settings(cfg: Config) -> DispatchSettings:
     flow: Any = cfg.get("allocator.flow_limits", {}) or {}
     pac: Any = cfg.get("allocator.closed_loop.pipeline_ac", {}) or {}
-    default_export = flow.get("default_export_limit_kw") if isinstance(flow, dict) else None
+    # G-26's premise default, read from the guardian's own key so allocator and guardian agree (review R3):
+    # a hub with no og.hub.export_limit_kw is capped at it on both sides. "unknown" = no default.
+    raw_export = cfg.get("guardian.flow.default_export_limit_kw", GUARDIAN_DEFAULT_EXPORT_LIMIT_KW)
+    default_export = None if raw_export in (None, "unknown") else float(str(raw_export))
     shift = pac.get("shift_factor") if isinstance(pac, dict) else None
     return DispatchSettings(
         data_center_activation=bool(cfg.get("contracts.activation.data_center", False)),
@@ -78,6 +90,10 @@ def dispatch_settings(cfg: Config) -> DispatchSettings:
         ),
         site_nominal_v=float(cfg.get("allocator.closed_loop.site_nominal_v", DEFAULT_SITE_NOMINAL_V)),
         dc_target_import_kw=_float_table(cfg.get("allocator.closed_loop.data_center.target_import_kw")),
+        veto_retry_enabled=bool(cfg.get("allocator.veto_retry.enabled", True)),
+        veto_exclude_cycles=int(cfg.get("allocator.veto_retry.exclude_cycles", DEFAULT_EXCLUDE_CYCLES)),
+        verdict_wait_s=float(cfg.get("allocator.veto_retry.wait_s", DEFAULT_VERDICT_WAIT_S)),
+        market_refresh_s=float(cfg.get("allocator.market_refresh_s", 60.0)),
         pipeline_ac=PipelineAcDefaults(
             line_kv=float(pac.get("line_kv", 138.0)) if isinstance(pac, dict) else 138.0,
             power_factor=float(pac.get("power_factor", 0.95)) if isinstance(pac, dict) else 0.95,

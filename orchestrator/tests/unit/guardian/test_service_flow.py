@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import uuid4
 
+from opengrid.core.models.mqtt import Telemetry
 from opengrid.guardian.config import GuardianConfig
 from opengrid.guardian.ports import (
     AggregateFlow,
@@ -41,9 +43,13 @@ class FakeTopology:
         self.substations: dict[str, AggregateFlow] = {}
         self.territories: dict[str, AggregateFlow] = {}
         self.pois: dict[str, PoiLimit] = {}
+        self.hub_banks: dict[str, str | None] = {}  # og.hub bank per hub; unlisted hubs sit on BANK_ID
 
     async def hub_site(self, hub_id):
         return self.sites.get(hub_id, SITE)
+
+    async def hub_bank(self, hub_id):
+        return self.hub_banks.get(hub_id, BANK_ID)
 
     async def transformer(self, transformer_id):
         return self.transformers.get(transformer_id)
@@ -235,6 +241,7 @@ def _feeder_world(fakes, topology, bank_id, delta_kw, *, cycle="cycle-1"):
     )
     fakes.banks.banks[bank_id] = make_bank_snapshot(kva_rating=10_000.0, feeder_id="f1", bank_load_kva=5.0)
     xfmr = f"x-{bank_id}"
+    topology.hub_banks[f"{bank_id}-hub"] = bank_id
     topology.sites[f"{bank_id}-hub"] = replace(SITE, transformer_id=xfmr)
     topology.transformers[xfmr] = ServiceTransformer(xfmr, 1_000.0, (f"{bank_id}-hub",))
     return proposal
@@ -355,18 +362,29 @@ async def test_free_headroom_inside_a_territory_needs_wholesale_access(fakes, gu
 # --- the guardian's own telemetry cache carries the flow fields as they land ------------------------------------
 
 
-async def test_mqtt_cache_ages_flow_fields_and_keeps_never_reported_ones_absent():
-    from types import SimpleNamespace
+def _wire_telemetry(**flow: float) -> Telemetry:
+    """A real `core.models.mqtt.Telemetry` (the wire model), never a stand-in with guessed field names."""
+    return Telemetry(
+        hub_id="hub-1",
+        bank_id=BANK_ID,
+        zone="LZ_NORTH",
+        ts=datetime(2026, 9, 26, 18, 0, tzinfo=UTC),
+        soc_kwh=20.0,
+        p_kw=-3.0,
+        health="online",
+        seq=1,
+        epoch=1,
+        **flow,
+    )
 
+
+async def test_mqtt_cache_ages_flow_fields_and_keeps_never_reported_ones_absent():
     from opengrid.guardian.mqtt_io import MqttHubStatePort
 
     clock = [100.0]
     seed = replace(make_hub_snapshot(), health="stale")
     cache = MqttHubStatePort({"hub-1": seed}, max_age_s=60.0, monotonic_fn=lambda: clock[0])
-    message = SimpleNamespace(
-        hub_id="hub-1", soc_kwh=20.0, p_kw=-3.0, health="online", meter_kw=-1.5, cell_temp_c=31.0
-    )
-    cache.ingest(message)  # type: ignore[arg-type]
+    cache.ingest(_wire_telemetry(meter_kw=-1.5, cell_temp_c=31.0))
     clock[0] = 105.0
 
     snap = await cache.snapshot("hub-1")
@@ -374,4 +392,73 @@ async def test_mqtt_cache_ages_flow_fields_and_keeps_never_reported_ones_absent(
     assert snap is not None
     assert snap.flow.meter_kw == Reading(-1.5, 5.0)
     assert snap.flow.cell_temp_c == Reading(31.0, 5.0)
-    assert snap.flow.pv_kw is None and snap.flow.peak_budget_kws is None
+    assert snap.flow.pv_kw is None and snap.flow.peak_budget_kws is None  # never reported by this hub
+
+
+async def test_the_wire_peak_power_budget_reaches_g31(fakes, guardian_config, signing_seed):
+    """R2 review fix: the wire field is `peak_power_budget_kws`; the cache read `peak_budget_kws`, which the
+    Telemetry model never has, so G-31's budget was always None and every above-continuous setpoint was
+    vetoed. With the budget on the wire, a short peak within it is signed."""
+    from opengrid.guardian import flow_checks
+    from opengrid.guardian.mqtt_io import MqttHubStatePort
+
+    cache = MqttHubStatePort(
+        {"hub-1": make_hub_snapshot(p_kw=11.0)}, max_age_s=60.0, monotonic_fn=lambda: 0.0
+    )
+    cache.ingest(_wire_telemetry(peak_power_budget_kws=500.0))
+
+    snap = await cache.snapshot("hub-1")
+
+    assert snap is not None and snap.flow.peak_budget_kws == Reading(500.0, 0.0)
+    site = replace(SITE, peak_kw=15.0, tau_peak_s=60.0)
+    policy = service_with(fakes, guardian_config, signing_seed)._flow_policy()
+    ok = flow_checks.check_g31_peak(ProposedItem("hub-1", -14.0, "R"), snap, site, 10.0, policy)
+    assert ok.ok  # 3 kW over continuous x 10 s = 30 kW*s, inside the 500 kW*s budget
+    over = flow_checks.check_g31_peak(ProposedItem("hub-1", -14.0, "R"), snap, site, 60.0, policy)
+    assert over.ok  # 180 kW*s still inside
+    none = replace(snap, flow=replace(snap.flow, peak_budget_kws=None))
+    assert not flow_checks.check_g31_peak(ProposedItem("hub-1", -14.0, "R"), none, site, 10.0, policy).ok
+
+
+# --- D-29c: manual ramps in a regulated/toll territory ------------------------------------------------------
+
+
+async def _manual_in_aen(fakes, config, seed, p_kw: float, *, reason: str = "R-MANUAL-RAMP"):
+    territory = FakeTerritory()
+    territory.zones = {"hub-0001": "LZ_AEN"}  # Austin Energy territory, no wholesale access
+    proposal = _batch(fakes, [ProposedItem("hub-0001", p_kw, reason)])
+    return await _service(fakes, config, seed, territory=territory).evaluate_and_sign(
+        make_batch_row(proposal)
+    )
+
+
+async def test_a_manual_charge_or_hold_in_a_regulated_territory_is_allowed(fakes, signing_seed):
+    """The utility makes the discharge calls there (D-29c); an operator's charge (owner schedule) or 0 kW hold
+    (maintenance) is not a market service and passes G-33."""
+    config = GuardianConfig(key_path="", cycle_interval_s=2.0, default_feeder_ramp_ceiling_kw_per_min=1e9)
+    assert "G-33" not in (await _manual_in_aen(fakes, config, signing_seed, 2.0)).vetoed_rule_ids
+    assert "G-33" not in (await _manual_in_aen(fakes, config, signing_seed, 0.0)).vetoed_rule_ids
+
+
+async def test_a_manual_discharge_in_a_regulated_territory_stays_vetoed(fakes, signing_seed):
+    config = GuardianConfig(key_path="", cycle_interval_s=2.0, default_feeder_ramp_ceiling_kw_per_min=1e9)
+    assert "G-33" in (await _manual_in_aen(fakes, config, signing_seed, -2.0)).vetoed_rule_ids
+
+
+async def test_headroom_charging_in_a_regulated_territory_is_not_exempted(fakes, signing_seed):
+    """Only R-MANUAL-RAMP is exempt: a market (headroom) item there is still judged by G-33."""
+    config = GuardianConfig(key_path="", cycle_interval_s=2.0, default_feeder_ramp_ceiling_kw_per_min=1e9)
+    verdict = await _manual_in_aen(fakes, config, signing_seed, 2.0, reason="R-GRANT-HEADROOM")
+    assert "G-33" in verdict.vetoed_rule_ids
+
+
+def test_a_hub_with_a_manual_charge_and_a_discharging_headroom_item_is_not_exempt():
+    from opengrid.guardian.checks import CheckOutcome
+    from opengrid.guardian.service import manual_charge_territory_exempt
+
+    proposal = replace(
+        make_proposal(),
+        items=[ProposedItem("hub-1", 2.0, "R-MANUAL-RAMP"), ProposedItem("hub-1", -3.0, "R-GRANT-HEADROOM")],
+    )
+    g33 = CheckOutcome("G-33", False, "R-TERRITORY-NO-FREE-ACCESS", "hub-1")
+    assert manual_charge_territory_exempt(proposal, [g33]) == [g33]

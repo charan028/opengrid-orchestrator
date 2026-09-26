@@ -23,6 +23,10 @@ from opengrid.market.territory import FREE, MarketRef
 if TYPE_CHECKING:
     from opengrid.allocator.pq_eligibility import EligibilityResult
 
+#: Services held at 0 kW until called (`og.as_deployment` active for the obligation), then delivered up to
+#: `committed_kw`: ERCOT_AS (NPRR1282) and the utility toll (D-29: REGULATED_CAPACITY, variant TOLLING).
+HOLD_SERVICE_TYPES: frozenset[str] = frozenset({"ERCOT_AS", "REGULATED_CAPACITY"})
+
 Tier = Literal["T1", "T2", "T3", "T4"]
 TIER_ORDER: tuple[Tier, ...] = ("T1", "T2", "T3", "T4")
 
@@ -62,6 +66,9 @@ class HubSnapshot:
     export_limit_kw: float | None = None  # interconnection export limit at the meter
     xfmr_id: str | None = None  # service transformer the home hangs off
     units: int | None = None  # battery/inverter units in the home (og.hub.units, migration 0032)
+    #: A utility-scale asset (og.asset SUBSTATION on this bank, e.g. the D-29 20 MW set): rated at its
+    #: nameplate, never the home per-unit cap (`core.limits.continuous_power_kw`).
+    utility_scale: bool = False
 
     @property
     def is_healthy(self) -> bool:
@@ -125,14 +132,23 @@ class ObligationCall:
     #: ERCOT_AS only: the product's full-deployment duration (NSPIN 4 h, ECRS 1 h; `product_rule.
     #: duration_minutes`). `None`: `energy_hold.DEFAULT_AS_DEPLOYMENT_H`.
     hold_duration_h: float | None = None
+    #: While called: hours left of the active deployment (`og.as_deployment.end_at - now`). The energy hold
+    #: then covers only the rest of this call, not a fresh full duration (review R3).
+    deployment_remaining_h: float | None = None
     #: K15: the obligation's market (its contract's `market`/`utility_id`). `None` = unknown or
     #: inconsistent market data: never served while territory is enforced (fail closed).
     market_ref: MarketRef | None = FREE
 
     @property
+    def is_capacity_hold(self) -> bool:
+        """A capacity-hold service (`HOLD_SERVICE_TYPES`): its capacity and a full call's energy stay held."""
+        return self.service_type in HOLD_SERVICE_TYPES
+
+    @property
     def is_as_hold(self) -> bool:
-        """An ERCOT_AS capacity hold not currently deployed: 0 kW, capacity and energy stay locked."""
-        return self.service_type == "ERCOT_AS" and not self.as_deployed
+        """A capacity hold not currently called (ERCOT_AS undeployed; D-29: a utility toll not called):
+        0 kW, capacity and energy stay locked."""
+        return self.is_capacity_hold and not self.as_deployed
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +229,9 @@ class Schedule:
     #: K7 escalation (og.scope_posture CONSERVATIVE, written by the guardian): banks that get NO new
     #: uncommitted/market dispatch (headroom export); committed obligations continue under K13 best effort.
     conservative_bank_ids: frozenset[str] = frozenset()
+    #: 09 S1.8 e^hold: the selector plan's hard SoC floor per bank (kWh), where published. Headroom never
+    #: discharges below it (nor below the AS energy hold).
+    hold_floor_kwh: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,3 +362,7 @@ class CycleExtras:
     pq: PqDispatchContext | None = None
     enforce_territory: bool = False
     flow_limits: FlowLimits = field(default_factory=FlowLimits)
+    #: K4 fail-safe: hubs kept out after a guardian item veto (R-HUB-VETO-EXCLUDED); unavailable this cycle.
+    excluded_hub_ids: frozenset[str] = frozenset()
+    #: The subset held by a live operator target (R-OPERATOR-OVERRIDE on shortfalls there).
+    operator_hub_ids: frozenset[str] = frozenset()

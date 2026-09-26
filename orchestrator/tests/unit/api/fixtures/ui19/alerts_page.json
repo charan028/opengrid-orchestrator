@@ -1,0 +1,27 @@
+{
+  "total": 4,
+  "limit": 2,
+  "offset": 1,
+  "alerts": [
+    {
+      "id": 2,
+      "rule": "ALR-FEED-STALE",
+      "severity": "warning",
+      "summary": "ALR-FEED-STALE ERCOT:np6-905-cd",
+      "opened_at": "2026-09-26T16:58:00+00:00",
+      "acked_by": null,
+      "scope_kind": "FEED",
+      "scope_ref": "ERCOT:np6-905-cd"
+    },
+    {
+      "id": 3,
+      "rule": "ALR-PROCESS-DOWN",
+      "severity": "critical",
+      "summary": "ALR-PROCESS-DOWN engine",
+      "opened_at": "2026-09-26T16:57:00+00:00",
+      "acked_by": null,
+      "scope_kind": "PROCESS",
+      "scope_ref": "engine"
+    }
+  ]
+}

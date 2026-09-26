@@ -23,6 +23,14 @@ SolarShareSource = Literal["TELEMETRY", "ERCOT_SOLAR", "ASSUMPTION"]
 #: D-22 / 08 S3c planning assumption, the LAST fallback under D-28.
 PLANNING_SOLAR_SHARE = Decimal("0.30")
 
+#: D-28 source 2 feeds (`og.feed_obs`, source 'ERCOT'): ERCOT solar production (actual for past hours,
+#: forecast for future ones) over ERCOT system load. The one definition for the selector and settle.
+ERCOT_SOLAR_PRODUCT = "np4-737-cd"
+ERCOT_SOLAR_ACTUAL_SERIES = "solar_actual"
+ERCOT_SOLAR_FORECAST_SERIES = "solar_forecast"
+ERCOT_SYSTEM_LOAD_PRODUCT = "np6-345-cd"
+ERCOT_SYSTEM_LOAD_SERIES = "total"
+
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
@@ -78,6 +86,16 @@ def solar_share(
     if ercot_solar_share is not None:
         return SolarShare(_clamp(ercot_solar_share), "ERCOT_SOLAR")
     return SolarShare(PLANNING_SOLAR_SHARE, "ASSUMPTION")
+
+
+def ercot_solar_share_of_load(solar_mw: Decimal, load_mw: Decimal) -> Decimal | None:
+    """D-28 source 2's number: ERCOT's published solar production over ERCOT load for the same hour and
+    area, clamped to [0, 1] (night-time solar is posted slightly negative for auxiliary draw). None when
+    load is not positive -- there is no share of zero load. `opengrid.feeds.ercot_solar` reads the two
+    feed values; this is the one formula."""
+    if load_mw <= _ZERO:
+        return None
+    return _clamp(solar_mw / load_mw)
 
 
 def _clamp(value: Decimal) -> Decimal:

@@ -57,6 +57,7 @@ def derated_discharge_kw(hub: HubSnapshot) -> float | None:
         p_kw=hub.rated_kw,
         eta_d=hub.eta_d,
         units=hub_units(hub.rated_kw, hub.units),
+        utility_scale=hub.utility_scale,
     )
     bounds = derated_power_bounds_kw(
         params,

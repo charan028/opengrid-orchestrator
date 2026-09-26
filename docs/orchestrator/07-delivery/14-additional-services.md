@@ -40,8 +40,8 @@ value), and `DEGRADED` inverters remain eligible provided they still meet the gr
 `DATA_CENTER`/`PIPELINE_AC` for the fleet's highest-quality units).
 
 **Tier and priority.** `T3`, non-firm by default (03 §2.6) — it sits below the firm services in the F2
-priority bucket. Wiring line for the optimizer owner: `opengrid.selector.gate._CATEGORY_BY_SERVICE_TYPE`
-needs `"PJM_CAPACITY": "MARKET"`.
+priority bucket. Wired: `opengrid.selector.gate._CATEGORY_BY_SERVICE_TYPE["PJM_CAPACITY"] = "MARKET"`
+(optimizer owner, confirmed in place 2026-09-26).
 
 **M&V and settlement.** `mv_method = DIRECT_HUB_METER`; `settlement_metric = capacity_payment_x_pf` (the
 routine, non-emergency-hour line, computed exactly like every other capacity profile's generic
@@ -82,9 +82,49 @@ delivery schedule); `target_scope = SITE_METER`, `mv_method = AMI_INTERVAL` — 
 CATEGORY_II` (looser than `DATA_CENTER`'s Category III — a relocatable trailer's own inverter
 characterization, not a fixed hub bank, is what is being screened here) and `pq_aware_selection = false`.
 
-**Tier and priority.** `T2` — committed for the deployment window, not the top firm tier. Wiring line for
-the optimizer owner: `_CATEGORY_BY_SERVICE_TYPE["MOBILE_STORAGE"] = "FIRM"` (a deployment window is a
-committed obligation for its duration, same as `DATA_CENTER`/`PARTNER_CAPACITY`).
+**Home-station model and charging (OWNER DECISION D-31, 2026-09-26,
+`docs/orchestrator/07-delivery/11-decision-log.md`).** A mobile unit is **never charged from the fleet** —
+not from home batteries, not from any other fleet asset, not from a customer deployment site's hubs. It
+charges only while parked at its registered **home station**: a depot near a distribution or power
+substation, from that station's own grid connection, priced at that station's own zone/tariff (never the
+deployment site's). While charging, the unit is at its home station and unavailable for service; it
+becomes available again only after it leaves for a deployment with whatever state of charge it left with.
+
+There is no `og.mobile_home_station` DB table yet, so this is modeled config-first (per the lead's
+2026-09-26 R3.1 instruction) in `config/service_profiles/mobile_storage_home_stations.toml`:
+- `[[home_station]]`: one row per depot — `home_station_id`, `zone` (the ERCOT load zone or regulated
+  utility zone billing that depot), `utility_id` (empty = free-market), `lat`, `lon`, `charger_kw`.
+- `[[assignment]]`: binds a mobile unit's `bank_id` (`og.bank.bank_id`/`og.hub.hub_id` — a mobile unit is a
+  single-hub bank) to its `home_station_id`. A unit's home station changes only by an explicit
+  re-assignment; a deployment relocates the unit's *customer site*, never its home station.
+- `mobile_storage.toml` itself carries the profile-level statement: `[home_station].
+  chargeable_from_fleet = false`, `[home_station].registry` pointing at the file above, `[home_station].
+  charging_priced_at = "HOME_STATION_TARIFF"`, and `[control].charge_source = "HOME_STATION_ONLY"`.
+
+**Migration requested (lead to assign a number):** `og.mobile_home_station` (home_station_id PK, zone,
+utility_id nullable, lat, lon, charger_kw) + `og.hub.is_mobile boolean NOT NULL DEFAULT false` +
+`og.hub.home_station_id text NULL REFERENCES og.mobile_home_station` (mirrors the two config tables above
+1:1, additive only) + a new `og.mobile_deployment` (deployment_id PK, bank_id, home_station_id, site_id
+NULL, starts_at, ends_at NULL) recording each charge-at-station/deploy-to-site leg — the real source for
+"which intervals is this unit at its home station" once it exists.
+
+**Simulator (`integration-sims/scenarios/svc-mobile-storage.yaml`, updated for D-31).** The timeline is
+deliberately HOME STATION CHARGE → DEPLOY → RELOCATE BACK TO HOME STATION → HOME STATION CHARGE → DEPLOY:
+never site-to-site relocation, never a charge step anywhere but at the home station. `mobile_home_station_
+charge` is the only step type that may raise SoC; `mobile_deployment_start`/`mobile_deployment_relocate`
+never carry a `target_soc_pct`. `tests/unit/profiles/test_svc_scenarios.py` enforces this shape.
+
+**Tier and priority.** `T2` — committed for the deployment window, not the top firm tier. Wired:
+`opengrid.selector.gate._CATEGORY_BY_SERVICE_TYPE["MOBILE_STORAGE"] = "FIRM"` (optimizer owner, confirmed
+in place 2026-09-26).
+
+**Wiring needed for D-31 enforcement (OPTIMIZER/DISPATCH/SAFETY):**
+
+| Owner | Status | Detail |
+|---|---|---|
+| OPTIMIZER | **Done** (confirmed 2026-09-26). | `opengrid.selector.types.BankSnapshot.is_mobile`/`.home_station_intervals`/`.charging_allowed(t)` gate `max_charge_kw` to 0 outside home-station intervals (`model.py`'s `charge_cap_kw = ... if bank.charging_allowed(t) else 0.0`); `model.py` also refuses to let a non-`is_mobile` bank serve a MOBILE_STORAGE obligation. The exact source/join for `is_mobile`/`zone`/`home_station_intervals` (this file's config, above) was sent to OPTIMIZER directly 2026-09-26 R3.1: `is_mobile`/`zone` from the config now; `home_station_intervals = None` (fail closed — never charge) until the `og.mobile_deployment` migration above lands. |
+| DISPATCH | **Wiring line, not applied here** (`allocator/`, `engine/` are DISPATCH-owned). | Any real-time water-fill/substitution/rebalance path in `allocator/`/`engine/` that can independently propose a CHARGE setpoint (i.e. not just replaying the optimizer's plan) must consult the same predicate before ever proposing to charge a hub: `is_mobile` and (if mobile) "is this hub's bank inside its `home_station_intervals` this cycle" — mirroring `BankSnapshot.charging_allowed(t)` exactly, not re-derived. Since `Hub`/`HubState` (`opengrid.core.models.platform`, platform/LIVE-PATH owned) carry no `is_mobile` field today, DISPATCH's real-time path has no live signal to check against until the `og.hub.is_mobile`/`home_station_id` migration above lands — flagging this as a gap alongside the migration ask, not a silent risk. |
+| SAFETY | **Wiring line, not applied here** (`guardian/` is SAFETY-owned). | Add guardian check **G-35** (next free number after G-34, `opengrid.guardian.flow_checks`/`service.py`'s numbering): item-level, added to `service.py`'s `_ITEM_LEVEL_RULES`, VETOing any batch item where the hub is mobile and the proposed setpoint is a charge (negative real power, matching this codebase's sign convention) unless the hub's home-station-arrival status (from telemetry once wired, or the same config source in the interim) says it is currently at its assigned home station. Missing/unknown status fails closed (VETO), the same stance every other guardian check in this family takes (K1/G-01's stale-data pattern, G-33's territory block). Reason code suggestion: `R-MOBILE-CHARGE-AWAY-FROM-HOME-STATION`. This is the independent, production-side enforcement of the same rule DISPATCH enforces primarily and OPTIMIZER enforces at planning time (the K2 primary-check/independent-check pattern already used throughout `guardian/`). |
 
 **M&V and settlement.** `settlement_metric = deployment_capacity_payment`, plus a second line
 `deployment_availability_pct` — the MOBILE_STORAGE analogue of `DATA_CENTER`'s `pq_compliance_pct`, but
@@ -122,8 +162,9 @@ waive the requirement that the load's own battery support must not trip during t
 triggered the curtailment/ride-through call in the first place (the same logic `DATA_CENTER` uses for its
 own Category III requirement, §4.b).
 
-**Tier and priority.** `T2`. Wiring line for the optimizer owner: `_CATEGORY_BY_SERVICE_TYPE["LARGE_LOAD"]
-= "FIRM"` (a committed firming/ride-through capacity contract, same bucket as `DATA_CENTER`).
+**Tier and priority.** `T2`. Wired: `_CATEGORY_BY_SERVICE_TYPE["LARGE_LOAD"] = "FIRM"` (optimizer owner,
+confirmed in place 2026-09-26; a committed firming/ride-through capacity contract, same bucket as
+`DATA_CENTER`).
 
 **M&V and settlement.** `settlement_metric = capacity_payment_x_performance`, a single line — no PQ
 compliance line (§4.b's contrast means there is nothing PQ-specific to bill beyond the grid-code-minimum
@@ -154,21 +195,27 @@ owned path (BUILD.md ownership map) — the SERVICES agent cannot edit those pat
   `EXTRA_METER_SOURCE_BY_SERVICE` for the settle owner to merge in (`tests/unit/settle/
   test_services_extra.py`).
 - `integration-sims/scenarios/svc-{pjm-capacity,mobile-storage,large-load}.yaml` (structural tests:
-  `tests/unit/profiles/test_svc_scenarios.py`).
+  `tests/unit/profiles/test_svc_scenarios.py`; `svc-mobile-storage.yaml` updated 2026-09-26 for D-31's
+  home-station-only charging).
+- `config/service_profiles/mobile_storage_home_stations.toml` (new, D-31): the config-first home-station
+  registry and unit assignments (tests: `tests/unit/profiles/test_mobile_storage_profile.py`'s `test_d31_*`).
 - `dev/seed/services_seed.sql`: one demo customer/contract per new service type, same shape as
   `dev/seed/customer_services_seed.sql`. Not run by CI; apply by hand after migration 0025.
 
 **Wiring lines for other owners (not applied by this agent):**
 
-| Owner | Path | Change needed |
+| Owner | Path | Status / change needed |
 |---|---|---|
-| SETTLE | `opengrid/settle/baselines.py` | `METER_SOURCE_BY_SERVICE` is missing `PJM_CAPACITY`/`MOBILE_STORAGE`/`LARGE_LOAD` — merge in `services_extra.EXTRA_METER_SOURCE_BY_SERVICE` (or add the three keys directly). Without this, `settle()` raises `KeyError` for any obligation on these service types. `tests/unit/profiles/test_data_center_registered.py`'s `set(METER_SOURCE_BY_SERVICE) == set(get_args(ServiceType))` assertion already fails until this lands. |
-| SETTLE | `opengrid/settle` orchestration (`settle()`) | Call `services_extra.pjm_non_performance_charge(...)` when `ctx.service_type == "PJM_CAPACITY"` and the interval falls inside a declared emergency performance hour, and append the result as an extra `LD_PENALTY`-shaped draft (a new `SettleBackend` accessor for the emergency-hour window/flag is settle's to add). |
-| OPTIMIZER | `opengrid/selector/gate.py` | `_CATEGORY_BY_SERVICE_TYPE` needs `"PJM_CAPACITY": "MARKET"`, `"MOBILE_STORAGE": "FIRM"`, `"LARGE_LOAD": "FIRM"`. Until added, the `.get(row["service_type"], "MARKET")` fallback silently treats all three as `MARKET` priority, correct only for `PJM_CAPACITY`. |
-| DISPATCH | `allocator/`, `engine/` | No special-casing expected to be required: `CAPACITY_HOLD` (`ERCOT_AS`) and `EVENT_SCHEDULE_TRACKING` (`PARTNER_CAPACITY` EVENT, `ERCOT_AS` NCLR) are both already-exercised control primitives: the three new profiles reuse them rather than introducing a new one, so no new control-loop shape is dispatched. Please confirm on review. |
-| FLEET-SIM | `integration-sims/src/ogsim/control/catalogue.py` | New anomaly-type catalogue entries so `Injector`/`run_scenario` can execute the three `svc-*.yaml` scenarios: `pjm_emergency_performance_event` (owner `market`), `mobile_deployment_start` / `mobile_deployment_relocate` (owner `fleet`), and optionally a dedicated `large_load_curtailment_request` (owner `customer`) to replace the current stand-in reuse of `load_step_datacenter` in `svc-large-load.yaml`. |
+| SETTLE | `opengrid/settle/baselines.py` | **Done** (confirmed 2026-09-26): `METER_SOURCE_BY_SERVICE` now spreads in `services_extra.EXTRA_METER_SOURCE_BY_SERVICE`. |
+| SETTLE | `opengrid/settle` orchestration (`settle()`) | Still open: call `services_extra.pjm_non_performance_charge(...)` when `ctx.service_type == "PJM_CAPACITY"` and the interval falls inside a declared emergency performance hour, and append the result as an extra `LD_PENALTY`-shaped draft (a new `SettleBackend` accessor for the emergency-hour window/flag is settle's to add). |
+| OPTIMIZER | `opengrid/selector/gate.py`, `opengrid/selector/types.py`, `opengrid/selector/model.py` | **Done** (confirmed 2026-09-26): `_CATEGORY_BY_SERVICE_TYPE` has all three entries; D-31's `BankSnapshot.is_mobile`/`.home_station_intervals`/`.charging_allowed(t)` are wired into `model.py`'s charge-cap and mobile-obligation-eligibility logic. The exact `is_mobile`/`zone`/`home_station_intervals` source (`mobile_storage_home_stations.toml`, §2 above) was sent to OPTIMIZER directly 2026-09-26 R3.1. |
+| DISPATCH | `allocator/`, `engine/` | Still open (D-31, §2 above): any real-time water-fill/substitution/rebalance path that can independently propose a CHARGE setpoint must consult the same `is_mobile` + "at home station this cycle" predicate before proposing to charge a hub — never re-derived, mirroring `BankSnapshot.charging_allowed(t)`. Blocked on the same `og.hub.is_mobile`/`home_station_id` migration requested in §2 (no live per-hub signal exists yet outside the optimizer's own config read). For PJM_CAPACITY/LARGE_LOAD: no special-casing expected — `CAPACITY_HOLD` (`ERCOT_AS`) and `EVENT_SCHEDULE_TRACKING` (`PARTNER_CAPACITY` EVENT, `ERCOT_AS` NCLR) are both already-exercised control primitives reused here, not a new control-loop shape. Please confirm on review. |
+| SAFETY | `guardian/` | Still open (D-31, §2 above): new item-level check **G-35** (next free number after G-34) VETOing any batch item that charges a mobile hub away from its home station — added to `service.py`'s `_ITEM_LEVEL_RULES`, fail-closed on missing/unknown home-station status (mirrors G-01/G-33's stale-data stance). Suggested reason code `R-MOBILE-CHARGE-AWAY-FROM-HOME-STATION`. |
+| FLEET-SIM | `integration-sims/src/ogsim/control/catalogue.py` | New anomaly-type catalogue entries so `Injector`/`run_scenario` can execute the three `svc-*.yaml` scenarios: `pjm_emergency_performance_event` (owner `market`), `mobile_deployment_start` / `mobile_deployment_relocate` / `mobile_home_station_charge` (owner `fleet`; the D-31 charging step — the fleet/hub charge model must never route power into an `is_mobile` hub at any other step), and optionally a dedicated `large_load_curtailment_request` (owner `customer`) to replace the current stand-in reuse of `load_step_datacenter` in `svc-large-load.yaml`. |
 | FLEET-SIM | `integration-sims/tests/test_scenarios.py` | `test_all_six_shipped_scenarios_load_without_error`'s hardcoded `len(scenarios) == 6` now undercounts — the `scenarios/` directory holds 9 files after this work package. |
-| CUSTOMER | `ogsim/customer/` (directory does not exist yet) | Three new simulated customer operators, matching the pattern already used for `DATA_CENTER`/`PIPELINE_AC`: a simulated PJM RPM capacity customer (drives `svc-pjm-capacity.yaml`'s emergency declarations against `og-cust-pjm`), a mobile-deployment site customer (`og-cust-mobile`, tracks arrival/relocation against `dev/seed/services_seed.sql`'s seeded contract), and a large-load customer (`og-cust-largeld`) issuing `CUSTOMER_API` curtailment/ride-through signals. |
+| CUSTOMER | `ogsim/customer/` (directory does not exist yet) | Three new simulated customer operators, matching the pattern already used for `DATA_CENTER`/`PIPELINE_AC`: a simulated PJM RPM capacity customer (drives `svc-pjm-capacity.yaml`'s emergency declarations against `og-cust-pjm`), a mobile-deployment site customer (`og-cust-mobile`, tracks arrival/relocation/home-station-charging against `dev/seed/services_seed.sql`'s seeded contract), and a large-load customer (`og-cust-largeld`) issuing `CUSTOMER_API` curtailment/ride-through signals. |
+| LEAD | migration number | Requested (§2 above): `og.mobile_home_station` + `og.hub.is_mobile`/`home_station_id` + `og.mobile_deployment`, additive only, to replace the config-first D-31 model with a real one DISPATCH/SAFETY can read live. |
 
 No migration, `ServiceType` enum value, or DDL CHECK was touched by this document or its accompanying
-files — all three service types and the DB CHECK widening are migration 0025, owned by MARKET-MODEL.
+files — all three service types and the DB CHECK widening are migration 0025, owned by MARKET-MODEL. The
+D-31 home-station tables above are a SEPARATE, not-yet-numbered migration request.

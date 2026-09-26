@@ -26,7 +26,8 @@ or a failed validation. F2 also serves as the KPI-22 rule-baseline.
 | `validate` | Independent re-derivation of K1/K2/K13/product-rule constraints from raw numbers (`validate_plan`). |
 | `rule_fallback` | F2: firm-then-AS-then-market greedy selector; also the KPI-22 baseline, run on every gate (`rule_fallback_f2`). |
 | `value` | One net-value evaluator for the LP and rule plans (wear via `core.economics.wear_cost`, M1), and the ES05-S07 shadow comparison. |
-| `energy_value` | 09 D7 stored-energy value per bank/interval and the DISPATCH read API (`discharge_threshold_usd_per_mwh`). |
+| `energy_value` | 09 D7 stored-energy value and the hard hold floor per bank/interval; the DISPATCH read API (`discharge_threshold_usd_per_mwh`, `hold_floor_kwh`). |
+| `solar_history` | D-28 measured solar share of charging: trailing 7-day same-hour share per zone from fleet telemetry, via `core.solar_share`. |
 | `db` | Selector's read-only queries against `og.commitment` et al., and its own analytics tables (migration 0030). |
 | `gate` | Orchestration: `run_gate`/`solve_gate`, the horizon/loader plumbing, market terms and K15 territory via `opengrid.market.MarketModel`, `persist_plan`. |
 
@@ -38,12 +39,16 @@ or a failed validation. F2 also serves as the KPI-22 rule-baseline.
 - Charging: zone price + the TDSP's M1 in the ERCOT competitive area; the utility's own charging terms
   (TOU, solar floor) in a regulated territory, no M1. Exports never recover M1.
 - Regulated candidates are selected first (stage R), then the full net value on the remainder (stage F).
+- Charging is split solar / grid (C27): solar availability = the D-28 measured share x the charge
+  envelope; a regulated bank has a 30% soft solar floor and charges from the grid only at night/off-peak.
+- No wash trade: no charging while delivering a regulated obligation (C7(b)'); grid charging and headroom
+  sale share one envelope per interval.
+- Held AS awards pay wear on their expected deployment (psi, an assumption: 2%).
 
 ## Known gaps (see the build's final report for detail)
 
-- Charge-side constraints C7-C9/C14/C18, the PV/grid charging split (C27), home load (F2) and the flow
-  families F1-F7 are not modelled yet; all charging is treated as grid-drawn.
-- The AS expected-deployment wear (`psi * r`) is 0: no deployment share is modelled.
+- Charge-side constraints C8/C9/C14/C18, home load (F2) and the flow families F1-F7 (DISPATCH and the
+  guardian enforce F1-F7) are not modelled in the selector.
 
 ## How to test
 

@@ -13,16 +13,17 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from opengrid.api.auth import Identity, require_loopback_health_probe, require_operator, require_viewer
 from opengrid.api.deps import get_config, get_store
 from opengrid.api.sse import sse_response
-from opengrid.api.store import HealthSnapshot, StoreProtocol
+from opengrid.api.store import AlertQuery, HealthSnapshot, StoreProtocol
 from opengrid.core.models.platform import Alert
 from opengrid.health.queries import fetch_degraded_modes
 from opengrid.invariants import InvariantsSummary, read_summary
@@ -223,6 +224,13 @@ def _alert_payload(alert: Alert) -> dict[str, Any]:
     }
 
 
+async def _ack_one(store: StoreProtocol, alert_id: int, operator: str) -> Alert | None:
+    """The ONE alert acknowledgement path (single and bulk routes): records the acking operator on the
+    alert (`og.alert.acked_by`, its audit field); never clears it (clearing is `health`'s job when the
+    underlying condition resolves)."""
+    return await store.ack_alert(alert_id, operator=operator)
+
+
 @router.post("/og/api/alerts/{alert_id}/ack")
 async def ack_alert(
     alert_id: int,
@@ -231,7 +239,82 @@ async def ack_alert(
 ) -> dict[str, Any]:
     """Screens 1/5's "Ack an alert" action (02b S8) -- acknowledgement only, does not clear the alert
     (clearing is `health`'s job when the underlying condition resolves)."""
-    alert = await store.ack_alert(alert_id, operator=identity.user)
+    alert = await _ack_one(store, alert_id, identity.user)
     if alert is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
     return _alert_payload(alert)
+
+
+#: Largest bulk acknowledgement / alert page, matching the store's historical 500-row alert cap.
+MAX_ALERTS_PER_REQUEST = 500
+
+AckOutcome = Literal["acked", "already_acked", "not_found"]
+
+
+class AlertBulkAck(BaseModel):
+    alert_ids: list[int] = Field(min_length=1, max_length=MAX_ALERTS_PER_REQUEST)
+
+
+@router.post("/og/api/alerts/ack-bulk")
+async def ack_alerts_bulk(
+    body: AlertBulkAck,
+    store: Annotated[StoreProtocol, Depends(get_store)],
+    identity: Annotated[Identity, Depends(require_operator)],
+) -> dict[str, Any]:
+    """Acknowledge up to 500 alerts in one call, each through the same path as the single-alert ack
+    (`_ack_one`). Per-id outcome: `acked`, `already_acked` (left as acked by whoever did it first, never
+    re-attributed) or `not_found`. Duplicate ids are answered once."""
+    alert_ids = list(dict.fromkeys(body.alert_ids))
+    states = await store.alert_ack_states(alert_ids)
+    results: list[dict[str, Any]] = []
+    for alert_id in alert_ids:
+        outcome: AckOutcome
+        if alert_id not in states:
+            outcome = "not_found"
+        elif states[alert_id] is not None:
+            outcome = "already_acked"
+        else:
+            outcome = "acked" if await _ack_one(store, alert_id, identity.user) is not None else "not_found"
+        results.append({"alert_id": alert_id, "outcome": outcome})
+    counts = {
+        k: sum(1 for r in results if r["outcome"] == k) for k in ("acked", "already_acked", "not_found")
+    }
+    return {"results": results, "counts": counts}
+
+
+@router.get("/og/api/alerts")
+async def list_alerts(
+    store: Annotated[StoreProtocol, Depends(get_store)],
+    _identity: Annotated[Identity, Depends(require_viewer)],
+    open_only: bool = True,
+    severity: Literal["warning", "critical"] | None = None,
+    rule: str | None = None,
+    scope_kind: str | None = None,
+    scope_ref: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_ALERTS_PER_REQUEST)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    group: bool = False,
+) -> dict[str, Any]:
+    """Paged alert list (newest first) with filters, and -- with `group=true` -- a count per
+    rule + scope over the SAME filters (for the grouped alert view)."""
+    query = AlertQuery(
+        open_only=open_only, severity=severity, rule=rule, scope_kind=scope_kind, scope_ref=scope_ref
+    )
+    alerts, total = await store.query_alerts(query, limit=limit, offset=offset)
+    payload: dict[str, Any] = {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "alerts": [_alert_payload(a) for a in alerts],
+    }
+    if group:
+        payload["groups"] = [
+            {
+                "rule": g["rule"],
+                "scope_kind": g["scope_kind"],
+                "scope_ref": g["scope_ref"],
+                "count": int(g["count"]),
+            }
+            for g in await store.alert_group_counts(query)
+        ]
+    return payload
