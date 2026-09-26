@@ -112,18 +112,27 @@ def _identity_headers(remote_user: str | None) -> dict[str, str] | None:
     return {"X-Remote-User": remote_user, "X-OG-Proxy-Auth": os.environ.get(PROXY_SECRET_ENV, "")}
 
 
-async def post_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
+async def post_json(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    remote_user: str | None = None,
+    timeout_s: float | None = None,
+) -> Any:
     """POST `path` (e.g. `/og/api/safestop`) with a JSON `payload` and return the parsed JSON body.
     `remote_user` forwards the Apache-authenticated identity (`X-Remote-User`) to the API, which needs it
     to tell two operators apart (the two-person stop release).
 
     Shares `get_json`'s `ApiUnavailable` contract (BUILD.md code-review round: this used to be a private
     `_post_json` copy in `opengrid.ui.routes.billing_audit`, plus a second bare `httpx.AsyncClient` for
-    the CSV relay in the same module -- both now go through this one shared client)."""
+    the CSV relay in the same module -- both now go through this one shared client).
+
+    `timeout_s` overrides the default for a call the API itself holds open (e.g. the safe-stop release
+    approval, which waits up to 10 s for the guardian's signed release)."""
     url = f"{api_base_url()}{path}"
     headers = _identity_headers(remote_user)
     try:
-        async with httpx.AsyncClient(timeout=_POST_TIMEOUT_S) as client:
+        async with httpx.AsyncClient(timeout=timeout_s or _POST_TIMEOUT_S) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             return response.json()

@@ -27,13 +27,14 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import HTMLResponse
 
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.api_client import get_bytes as api_get_bytes
-from opengrid.ui.role import is_operator, role_of
+from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.settlement import SETTLEMENT_VIEW_PATH, filter_options, invoice_view, last_updated
 from opengrid.ui.templating import templates
 
@@ -44,6 +45,7 @@ _INVOICE_LINES_PATH = "/og/api/billing/invoice-lines"
 _TRACE_EVENTS_PATH = "/og/api/trace/events"
 _TRACE_VERIFY_PATH = "/og/api/trace/verify"
 _DEFAULT_PERIOD_DAYS = 30
+_MARKET_TZ = ZoneInfo("America/Chicago")
 
 
 def api_date(value: str | None, default: datetime) -> str:
@@ -51,6 +53,16 @@ def api_date(value: str | None, default: datetime) -> str:
     first live run): default a blank filter to `default`, and cut a `datetime-local` form value
     (`2026-09-25T10:00`) down to its date part."""
     return (value or default.isoformat())[:10]
+
+
+def export_period(from_: str | None, to: str | None, *, now: datetime | None = None) -> tuple[str, str]:
+    """The CSV export's `from`/`to` as plain ISO dates, which `GET .../invoice-lines` requires (a blank
+    field or a `datetime-local` value is a 422): blank defaults to the first of the current month and
+    today, in ERCOT local time; a datetime is cut to its date."""
+    today = (now or datetime.now(UTC)).astimezone(_MARKET_TZ).date()
+    start = (from_ or "").strip()[:10] or today.replace(day=1).isoformat()
+    end = (to or "").strip()[:10] or today.isoformat()
+    return start, end
 
 
 def invoice_table_view(lines: list[dict[str, Any]]) -> dict[str, Any]:
@@ -223,12 +235,21 @@ async def export_invoice_lines_csv(
 ) -> Response:
     """Stream the CSV export by relaying `GET .../invoice-lines?format=csv` from `opengrid.api`
     unchanged (the API owns CSV formatting; the UI only adds the download headers)."""
-    params = {k: v for k, v in {"from": from_, "to": to, "format": "csv"}.items() if v}
-    content = await api_get_bytes(_INVOICE_LINES_PATH, params=params)
+    start, end = export_period(from_, to)
+    params = {"from": start, "to": end, "format": "csv"}
+    try:
+        content = await api_get_bytes(_INVOICE_LINES_PATH, params=params)
+    except ApiUnavailable as exc:
+        logger.warning("billing: CSV export failed: %s", exc)
+        return Response(
+            content=f"The invoice-line export for {start} to {end} could not be produced: {exc.detail or exc}\n",
+            media_type="text/plain; charset=utf-8",
+            status_code=exc.status_code if exc.status_code in (400, 401, 403, 404, 422) else 502,
+        )
     return Response(
         content=content,
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=invoice_lines.csv"},
+        headers={"Content-Disposition": f"attachment; filename=invoice_lines_{start}_{end}.csv"},
     )
 
 
@@ -241,7 +262,9 @@ async def run_chain_verify(
 ) -> HTMLResponse:
     """HTMX partial: runs the chain-verify button, returns the pass/fail fragment (02b S7.1/S8)."""
     try:
-        result = await post_json(_TRACE_VERIFY_PATH, {"class": class_, "from": from_, "to": to})
+        result = await post_json(
+            _TRACE_VERIFY_PATH, {"class": class_, "from": from_, "to": to}, remote_user=remote_user(request)
+        )
     except ApiUnavailable as exc:
         result = {"passed": False, "checked": 0, "first_broken": {"error": str(exc)}}
     return templates.TemplateResponse(

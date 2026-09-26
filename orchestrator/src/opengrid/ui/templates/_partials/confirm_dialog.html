@@ -26,7 +26,7 @@
         open: {{ 'true' if open_default|default(false) else 'false' }},
         busy: false,
         acked: {{ 'false' if acknowledge else 'true' }},
-        remaining: {{ expires_in_s|default('null') }},
+        remaining: {{ expires_in_s if expires_in_s is number else 'null' }},
         returnTo: null,
         show() {
           this.returnTo = document.activeElement;

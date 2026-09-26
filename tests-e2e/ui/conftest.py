@@ -144,7 +144,9 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
 
     post_calls: dict[str, int] = {}
 
-    async def fake_post_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
+    async def fake_post_json(
+        path: str, payload: dict[str, Any], *, remote_user: str | None = None, timeout_s: float | None = None
+    ) -> Any:
         if path not in posts:
             raise ApiUnavailable(f"no fixture registered for POST {path}")
         body = posts[path]

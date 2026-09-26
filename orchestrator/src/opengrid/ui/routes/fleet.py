@@ -33,6 +33,8 @@ _COMMAND_PROPOSE_PATH = "/og/api/fleet/command"
 _BULK_COMMAND_PATH = "/og/api/fleet/commands/bulk"
 _MAP_PATH = "/og/api/fleet/map"
 _HUB_STALE_AFTER_S = 10.0
+#: The API holds the approval open up to 10 s waiting for the guardian (api `routers.safestop`).
+_RELEASE_APPROVE_TIMEOUT_S = 15.0
 _SAFESTOP_SCOPES = ("fleet", "zone", "bank")
 
 
@@ -158,6 +160,16 @@ def api_double_confirm_reasons(body: dict[str, Any] | None) -> list[str]:
         detail = f" ({', '.join(sorted(services[code]))})" if code in services else ""
         out.append(f"{n} hub{'' if n == 1 else 's'} {_BULK_REASON_TEXT.get(code, code)}{detail}")
     return out
+
+
+def api_error_result(exc: ApiUnavailable) -> dict[str, Any] | None:
+    """The result carried by an API error body. FastAPI wraps `HTTPException(409, detail=result)` as
+    `{"detail": result}`, so a guardian veto arrives nested; unwrap it so the fragment renders the veto
+    (VETOED / PARTLY_VETOED and its rule ids) instead of a generic failure."""
+    detail = exc.detail
+    if isinstance(detail, dict) and isinstance(detail.get("detail"), dict):
+        return dict(detail["detail"])
+    return detail if isinstance(detail, dict) and ("outcome" in detail or "status" in detail) else None
 
 
 def parse_hub_ids(raw: str | None) -> list[str]:
@@ -389,8 +401,13 @@ async def approve_release(request: Request, proposal_id: str) -> HTMLResponse:
     assumes the stop was released."""
     _require_operator(request)
     try:
+        # 200 released / 202 pending (both parsed; the fragment renders RELEASED or PENDING). The API polls
+        # up to 10 s for the guardian's signed release, so this call waits longer than the default.
         result = await post_json(
-            f"{_SAFESTOP_PROPOSE_PATH}/release/{proposal_id}/approve", {}, remote_user=remote_user(request)
+            f"{_SAFESTOP_PROPOSE_PATH}/release/{proposal_id}/approve",
+            {},
+            remote_user=remote_user(request),
+            timeout_s=_RELEASE_APPROVE_TIMEOUT_S,
         )
     except ApiUnavailable as exc:
         logger.warning("safestop release approve failed: %s", exc)
@@ -509,7 +526,7 @@ async def confirm_bulk_command(request: Request, proposal_id: str) -> HTMLRespon
         )
     except ApiUnavailable as exc:
         logger.warning("fleet bulk command confirm failed: %s", exc)
-        result = exc.detail if isinstance(exc.detail, dict) else None
+        result = api_error_result(exc)
         return templates.TemplateResponse(
             request,
             "_partials/fleet_bulk_confirm_result.html",
@@ -541,7 +558,7 @@ async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
         )
     except ApiUnavailable as exc:
         logger.warning("fleet command confirm failed: %s", exc)
-        result = exc.detail if isinstance(exc.detail, dict) else None
+        result = api_error_result(exc)
         return templates.TemplateResponse(
             request,
             "_partials/fleet_command_confirm_result.html",

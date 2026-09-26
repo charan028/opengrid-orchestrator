@@ -518,8 +518,26 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
     return events
 
 
+#: NPRR1282 stored-energy duration per AS product (hours of full deployment the award must be able to hold).
+_AS_HOLD_HOURS: dict[str, int] = {"ECRS": 1, "NSPIN": 4, "NON_SPIN": 4, "NONSPIN": 4}
+
+
+def contract_products(contracts: Any) -> dict[str, str]:
+    """`contract_id -> variant` from `GET /og/api/contracts` (the AS product lives on the contract)."""
+    rows = contracts if isinstance(contracts, list) else []
+    return {
+        str(c["contract_id"]): str(c["variant"])
+        for c in rows
+        if isinstance(c, dict) and c.get("contract_id") and c.get("variant")
+    }
+
+
 def as_awards_view(
-    opportunities: list[dict[str, Any]], deployments: list[dict[str, Any]], *, now: datetime
+    opportunities: list[dict[str, Any]],
+    deployments: list[dict[str, Any]],
+    *,
+    now: datetime,
+    product_by_contract: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Join ERCOT_AS awards with the active deployment records for the operator panel.
 
@@ -538,13 +556,20 @@ def as_awards_view(
         obligation_id = str(award.get("obligation_id") or "")
         deployment = active_by_obligation.get(obligation_id) or all_deployment
         state = "deployed" if deployment else "held"
-        product = str(award.get("product") or award.get("variant") or "").upper()
-        required_hours = 1 if "ECRS" in product else 4
+        # Obligation rows carry no product: it is the contract's variant (ECRS, NSPIN, ...), looked up from
+        # GET /og/api/contracts. An unknown product shows as such rather than defaulting to Non-Spin's 4 h.
+        product = str(
+            award.get("product")
+            or award.get("variant")
+            or (product_by_contract or {}).get(str(award.get("contract_id") or ""))
+            or ""
+        ).upper()
+        required_hours: int | None = _AS_HOLD_HOURS.get(product)
         energy_held = _f(award.get("energy_held_kwh"))
         required_energy = _f(award.get("required_energy_kwh"))
         if required_energy is None:
             committed_kw = _f(award.get("committed_qty_kw")) or _f(award.get("requested_kw")) or 0.0
-            required_energy = committed_kw * required_hours
+            required_energy = committed_kw * required_hours if required_hours is not None else None
         at_risk = bool(award.get("at_risk", False))
         if energy_held is not None and required_energy is not None:
             at_risk = at_risk or energy_held < required_energy
@@ -748,6 +773,12 @@ async def dispatch_page(
         logger.warning("dispatch: /og/api/ledger/%s/timeline unavailable: %s", bank_id, exc)
         degraded = degraded or str(exc)
 
+    products: dict[str, str] = {}
+    try:
+        products = contract_products(await get_json("/og/api/contracts"))
+    except ApiUnavailable as exc:
+        logger.info("dispatch: contracts unavailable for AS product names: %s", exc)
+
     return templates.TemplateResponse(
         request,
         "dispatch.html",
@@ -769,7 +800,10 @@ async def dispatch_page(
             "grants": grants_and_substitutions_view(grants),
             "lock_events": commitment_lock_events_view(commitments),
             "as_awards": as_awards_view(
-                obligations if isinstance(obligations, list) else [], deployments, now=now
+                obligations if isinstance(obligations, list) else [],
+                deployments,
+                now=now,
+                product_by_contract=products,
             ),
             "as_deployments": deployments,
             "degraded": degraded,

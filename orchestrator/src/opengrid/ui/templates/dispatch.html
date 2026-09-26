@@ -69,7 +69,7 @@
       {% for award in as_awards %}
         <tr>
           <td><code>{{ award.obligation_id[:8] }}</code></td>
-          <td>{{ award.product }} · {{ award.required_hours }}h</td>
+          <td>{{ award.product }}{% if award.required_hours %} · {{ award.required_hours }} h hold{% endif %}</td>
           <td>{{ award.committed_kw or '--' }} kW</td>
           <td>{{ '%.1f'|format(award.energy_held_kwh) if award.energy_held_kwh is not none else '--' }} / {{ '%.1f'|format(award.required_energy_kwh) if award.required_energy_kwh is not none else '--' }} kWh</td>
           <td><span class="status-badge {{ 'status-dispatching' if award.state == 'deployed' else 'status-info' }}">{{ award.state }}</span></td>
