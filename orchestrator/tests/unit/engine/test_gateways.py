@@ -5,7 +5,7 @@ pool/cursor, mirroring `tests/unit/guardian/test_repo.py`'s pattern."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -306,3 +306,53 @@ async def test_ledger_gateway_records_substitutions_as_trace_events() -> None:
         ("substitution-o2", "SUBSTITUTION", ["R-SUBSTITUTION"]),
     ]
     assert appended[1][2]["bank_id"] == "b1"
+
+
+async def test_ledger_gateway_traces_a_k13_shortfall_once_per_episode_and_interval() -> None:
+    """K13 invariant finding (live 2026-09-26): two dips below a committed 150 kW (88 kW at 00:49, 11 kW
+    at 01:09, right after engine restarts while the twin's hubs were not yet fresh) carried no traced
+    exception -- the allocator reported R-COMMIT-LOCK-INFEASIBLE, but only in memory. A K13-exception
+    shortfall is now traced when it starts, and again in each new 15-min interval it spans."""
+    from opengrid.allocator.models import ShortfallReport
+
+    appended: list[tuple] = []
+
+    class _Trace:
+        async def append(self, stream_id, decision_type, event_class, payload, reason_codes=None):
+            appended.append((stream_id, decision_type, event_class, payload, reason_codes))
+
+    gateway = gw.EngineLedgerGateway(pool=None, trace=_Trace())  # type: ignore[arg-type]
+    infeasible = ShortfallReport(
+        obligation_id="o1", bank_id="b1", shortfall_kw=62.0, reason_code="R-COMMIT-LOCK-INFEASIBLE"
+    )
+    t0 = datetime(2026, 9, 26, 5, 49, 0, tzinfo=UTC)
+
+    await gateway.record_shortfalls("c1", [infeasible], now=t0)
+    await gateway.record_shortfalls("c2", [infeasible], now=t0 + timedelta(seconds=2))  # same episode
+    await gateway.record_shortfalls("c3", [], now=t0 + timedelta(seconds=4))  # cleared
+    await gateway.record_shortfalls("c4", [infeasible], now=t0 + timedelta(seconds=6))  # new episode
+    await gateway.record_shortfalls("c5", [infeasible], now=datetime(2026, 9, 26, 6, 0, 1, tzinfo=UTC))
+
+    assert [(a[0], a[1], a[2], a[4]) for a in appended] == [
+        ("shortfall-o1", "SHORTFALL", "ALLOCATOR_SHORTFALL", ["R-COMMIT-LOCK-INFEASIBLE"]),
+    ] * 3
+    assert appended[0][3]["obligation_id"] == "o1"
+    assert appended[0][3]["shortfall_kw"] == 62.0
+    assert gateway.last_shortfalls == [("o1", "R-COMMIT-LOCK-INFEASIBLE")]
+
+
+async def test_a_shortfall_without_a_k13_reason_is_not_traced() -> None:
+    from opengrid.allocator.models import ShortfallReport
+
+    appended: list[tuple] = []
+
+    class _Trace:
+        async def append(self, *args, **kwargs):
+            appended.append(args)
+
+    gateway = gw.EngineLedgerGateway(pool=None, trace=_Trace())  # type: ignore[arg-type]
+    report = ShortfallReport(
+        obligation_id="o1", bank_id="b1", shortfall_kw=1.0, reason_code="R-GRANT-HEADROOM"
+    )
+    await gateway.record_shortfalls("c1", [report], now=datetime(2026, 9, 26, 5, 0, tzinfo=UTC))
+    assert appended == []

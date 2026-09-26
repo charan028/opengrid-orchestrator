@@ -46,7 +46,8 @@ from opengrid.allocator.models import (
     SubstitutionEvent,
 )
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
-from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, R_SUBSTITUTION
+from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK, COMMIT_LOCK_OVERRIDE_REASONS, R_SUBSTITUTION
+from opengrid.core.timeutil import floor_to_interval
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.health.rules import evaluate_energy_shortfall_risk_alert
@@ -54,6 +55,9 @@ from opengrid.ledger import GrantRecord
 from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
+
+#: A shortfall with one of these reasons is a K13 exception and must be traced (K13's own exception list).
+_K13_SHORTFALL_REASONS = COMMIT_LOCK_OVERRIDE_REASONS
 
 # item 3's continuous energy-sufficiency check: every COMMITTED/DELIVERING obligation's remaining
 # committed draw against its bank(s), joined to the contract for customer_id and the obligation for
@@ -256,6 +260,8 @@ class EngineLedgerGateway:
         self._trace = trace
         #: `(obligation_id, shortfall reason)` from the latest cycle, read by the engine's escalation.
         self.last_shortfalls: list[tuple[str, str]] = []
+        #: (obligation_id, reason, interval) K13 shortfalls already traced in the current episode.
+        self._traced_shortfalls: set[tuple[str, str, str]] = set()
 
     async def ledger_view(self, bank_ids: Sequence[str], interval_start: datetime) -> LedgerView:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -320,9 +326,38 @@ class EngineLedgerGateway:
             reason_code,
         )
 
-    async def record_shortfalls(self, cycle_id: str, shortfalls: Sequence[ShortfallReport]) -> None:
-        _ = cycle_id
+    async def record_shortfalls(
+        self, cycle_id: str, shortfalls: Sequence[ShortfallReport], *, now: datetime | None = None
+    ) -> None:
+        """Keep this cycle's shortfalls for the escalation step, and trace each K13-exception shortfall
+        (`R-COMMIT-LOCK-OVERRIDE-L0/L1/L2`, `R-COMMIT-LOCK-INFEASIBLE`) when it starts and again in every
+        new 15-min interval it spans: a delivery dip below the committed kW must carry its exception in
+        the trace (K13), not only in memory. Not once per 2 s cycle."""
         self.last_shortfalls = [(s.obligation_id, s.reason_code) for s in shortfalls]
+        at = now or datetime.now(UTC)
+        interval = floor_to_interval(at, 15).isoformat()
+        current: set[tuple[str, str, str]] = set()
+        for s in shortfalls:
+            if s.reason_code not in _K13_SHORTFALL_REASONS:
+                continue
+            key = (s.obligation_id, s.reason_code, interval)
+            current.add(key)
+            if key in self._traced_shortfalls or self._trace is None:
+                continue
+            await self._trace.append(
+                f"shortfall-{s.obligation_id}",
+                "SHORTFALL",
+                "ALLOCATOR_SHORTFALL",
+                {
+                    "cycle_id": cycle_id,
+                    "obligation_id": s.obligation_id,
+                    "bank_id": s.bank_id,
+                    "shortfall_kw": s.shortfall_kw,
+                    "interval_start": interval,
+                },
+                reason_codes=[s.reason_code],
+            )
+        self._traced_shortfalls = current
 
     async def record_substitution_events(self, cycle_id: str, events: Sequence[SubstitutionEvent]) -> None:
         """S5.3: the automatic swaps one 2 s cycle made, one `SUBSTITUTION` trace event each."""
