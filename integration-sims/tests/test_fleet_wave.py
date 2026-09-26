@@ -3,6 +3,8 @@ publication, 06-service-profiles-and-power-quality.md S6.4/S7.4)."""
 
 from __future__ import annotations
 
+import cmath
+import math
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -27,7 +29,6 @@ from ogsim.fleet.wave import (
     channels_for_phase_connection,
     current_rms_a,
     hub_phase_connection,
-    set_current_rms,
     synthesize_raw_capture,
 )
 
@@ -106,58 +107,147 @@ def test_hub_phase_connection_canonical(legs: list[str], expected: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_summary_message_validates_against_schema_without_harmonics() -> None:
-    snapshot = _snapshot()
+def _summary(
+    snapshots: list[InverterSnapshot], currents_a: list[float], *, include_harmonics: bool = True
+) -> dict[str, object]:
     msg = build_summary_message(
-        "hub-00000",
+        snapshots[0].hub_id,
         "bank-000",
         "LZ_NORTH",
-        [snapshot],
+        snapshots,
         "2026-09-26T00:00:00.000Z",
-        include_harmonics=False,
+        unit_currents_a=currents_a,
+        include_harmonics=include_harmonics,
         config=CONFIG,
     )
-    set_current_rms(msg, snapshot.phase_connection, current_rms_a(5.0))
     validate("pq_waveform_summary", msg)
-    assert msg["harmonics_v"] is None if "harmonics_v" in msg else True
-    assert msg["v_rms_a"] > 0
+    return msg
+
+
+def _spectrum(mags: dict[int, float], angles: dict[int, float]) -> dict[int, dict[str, float]]:
+    return {order: {"mag_pct": mags[order], "angle_deg": angles[order]} for order in mags}
+
+
+def _phasor(msg: dict[str, object], block: str, order: int, fundamental: float) -> complex:
+    component = msg[block][str(order)]  # type: ignore[index]
+    return cmath.rect(fundamental * component["mag_pct"] / 100.0, math.radians(component["angle_deg"]))
+
+
+def test_summary_message_validates_against_schema_without_harmonics() -> None:
+    msg = _summary([_snapshot()], [current_rms_a(5.0)], include_harmonics=False)
+    assert "harmonics_v" not in msg
+    assert "harmonics_i" not in msg
+    assert msg["v_rms_a"] > 0  # type: ignore[operator]
     assert msg["i_rms_a"] == pytest.approx(current_rms_a(5.0))
 
 
 def test_summary_message_includes_harmonics_when_due() -> None:
-    snapshot = _snapshot()
-    msg = build_summary_message(
-        "hub-00000",
-        "bank-000",
-        "LZ_NORTH",
-        [snapshot],
-        "2026-09-26T00:00:00.000Z",
-        include_harmonics=True,
-        config=CONFIG,
-    )
-    set_current_rms(msg, snapshot.phase_connection, current_rms_a(5.0))
-    validate("pq_waveform_summary", msg)
-    assert msg["harmonics_i"]["3"]["mag_pct"] == pytest.approx(1.2)
+    msg = _summary([_snapshot()], [current_rms_a(5.0)])
+    assert msg["harmonics_i"]["3"]["mag_pct"] == pytest.approx(1.2)  # type: ignore[index]
+    assert msg["harmonics_i"]["3"]["angle_deg"] == pytest.approx(30.0)  # type: ignore[index]
 
 
 def test_summary_message_merges_dual_unit_legs() -> None:
     unit_a = _snapshot(unit_id="hub-00004-inv0", hub_id="hub-00004", phase_connection="A")
     unit_b = _snapshot(unit_id="hub-00004-inv1", hub_id="hub-00004", phase_connection="B")
-    msg = build_summary_message(
-        "hub-00004",
-        "bank-000",
-        "LZ_NORTH",
-        [unit_a, unit_b],
-        "2026-09-26T00:00:00.000Z",
-        include_harmonics=False,
-        config=CONFIG,
-    )
-    set_current_rms(msg, unit_a.phase_connection, current_rms_a(3.0))
-    set_current_rms(msg, unit_b.phase_connection, current_rms_a(4.0))
-    validate("pq_waveform_summary", msg)
-    assert msg["v_rms_a"] > 0
-    assert msg["v_rms_b"] > 0
+    msg = _summary([unit_a, unit_b], [current_rms_a(3.0), current_rms_a(4.0)], include_harmonics=False)
+    assert msg["i_rms_a"] == pytest.approx(current_rms_a(3.0))
+    assert msg["i_rms_b"] == pytest.approx(current_rms_a(4.0))
     assert msg.get("v_rms_c") is None
+
+
+def test_wp_k_dual_unit_same_leg_reports_phasor_sum_current_not_one_unit() -> None:
+    """#16 follow-up: the second unit on a leg used to overwrite `i_rms`, halving the leg."""
+    unit_0 = _snapshot(unit_id="hub-00004-inv0", hub_id="hub-00004", phase_angle_error_deg=4.0)
+    unit_1 = _snapshot(unit_id="hub-00004-inv1", hub_id="hub-00004", phase_angle_error_deg=-2.0)
+    msg = _summary([unit_0, unit_1], [20.0, 30.0], include_harmonics=False)
+    expected = cmath.rect(20.0, math.radians(4.0)) + cmath.rect(30.0, math.radians(-2.0))
+    assert msg["i_rms_a"] == pytest.approx(abs(expected))
+    assert msg["phase_angle_deg_a"] == pytest.approx(math.degrees(cmath.phase(expected)))
+    assert msg["pf_a"] == pytest.approx(math.cos(cmath.phase(expected)))
+    assert msg.get("i_rms_b") is None
+
+
+def test_wp_k_dual_unit_harmonics_are_the_vector_sum_of_both_units() -> None:
+    """#16 follow-up: the hub's harmonic block carries both units (vector sum), not only the first."""
+    mags = {3: 2.0, 5: 1.0}
+    unit_0 = _snapshot(
+        unit_id="hub-00004-inv0",
+        hub_id="hub-00004",
+        phase_connection="A",
+        dominant_harmonics=_spectrum(mags, {3: 0.0, 5: 90.0}),
+    )
+    unit_1 = _snapshot(
+        unit_id="hub-00004-inv1",
+        hub_id="hub-00004",
+        phase_connection="B",
+        dominant_harmonics=_spectrum(mags, {3: 120.0, 5: 90.0}),
+    )
+    currents = [10.0, 30.0]
+    msg = _summary([unit_0, unit_1], currents)
+    fundamental = float(msg["i_rms_a"]) + float(msg["i_rms_b"])  # type: ignore[arg-type]
+    for order in mags:
+        expected = sum(
+            current
+            * u.dominant_harmonics[order]["mag_pct"]
+            / 100.0
+            * cmath.exp(1j * math.radians(u.dominant_harmonics[order]["angle_deg"]))
+            for u, current in zip((unit_0, unit_1), currents, strict=True)
+        )
+        assert _phasor(msg, "harmonics_i", order, fundamental) == pytest.approx(expected)
+
+
+def test_wp_k_thd_i_is_rss_of_leg_harmonic_phasors() -> None:
+    mags = {3: 3.0, 5: 4.0}
+    unit_0 = _snapshot(dominant_harmonics=_spectrum(mags, {3: 0.0, 5: 0.0}))
+    single = _summary([unit_0], [25.0])
+    assert single["thd_i_pct_a"] == pytest.approx(5.0)  # sqrt(3^2 + 4^2)
+    # Two identical units, 3rd in phase, 5th in anti-phase: 3rd stacks, 5th cancels.
+    unit_1 = _snapshot(unit_id="hub-00000-inv1", dominant_harmonics=_spectrum(mags, {3: 0.0, 5: 180.0}))
+    paired = _summary([unit_0, unit_1], [25.0, 25.0])
+    assert paired["i_rms_a"] == pytest.approx(50.0)
+    assert paired["thd_i_pct_a"] == pytest.approx(3.0)
+
+
+def test_wp_k_thd_v_follows_source_impedance_not_a_fixed_fraction_of_thd_i() -> None:
+    """THD_V = RSS_k(k X_source I_k) / V_rms and each voltage harmonic leads its current by 90 deg."""
+    mags = {3: 2.0, 5: 1.0}
+    unit = _snapshot(dominant_harmonics=_spectrum(mags, {3: 10.0, 5: 200.0}))
+    light = _summary([unit], [5.0])
+    heavy = _summary([unit], [40.0])
+    x_ohm = CONFIG.source_reactance_ohm
+    expected_v = {order: order * x_ohm * 40.0 * mags[order] / 100.0 for order in mags}
+    v_rms = float(heavy["v_rms_a"])  # type: ignore[arg-type]
+    assert heavy["thd_v_pct_a"] == pytest.approx(100.0 * math.hypot(*expected_v.values()) / v_rms)
+    assert heavy["thd_i_pct_a"] == pytest.approx(light["thd_i_pct_a"])
+    assert heavy["thd_v_pct_a"] == pytest.approx(8.0 * float(light["thd_v_pct_a"]))  # type: ignore[arg-type]
+    for order, v_h in expected_v.items():
+        component = heavy["harmonics_v"][str(order)]  # type: ignore[index]
+        assert component["mag_pct"] == pytest.approx(100.0 * v_h / v_rms)
+        assert component["angle_deg"] == pytest.approx(
+            (unit.dominant_harmonics[order]["angle_deg"] + 90.0) % 360.0
+        )
+    assert heavy["harmonics_v"] != heavy["harmonics_i"]
+
+
+def test_wp_k_source_reactance_from_short_circuit_ratio() -> None:
+    rated_current_a = CONFIG.unit_rated_kw * 1000.0 / 240.0
+    assert CONFIG.source_reactance_ohm * CONFIG.source_short_circuit_ratio * rated_current_a == pytest.approx(
+        240.0
+    )
+
+
+def test_wp_k_engine_dual_unit_summary_carries_full_hub_current() -> None:
+    config = replace(load_fleet_config(), mqtt=MQTT, hub_count=10, bank_count=2, zones=("LZ_NORTH",))
+    engine = FleetEngine(config, seed=7)
+    dual_hubs = [h for h in engine.state.hub_ids if len(engine.inverter_state(h)) == 2]
+    assert dual_hubs, "fleet.yaml's dual_unit_share must yield at least one dual-unit hub"
+    engine.state.p_kw_applied[:] = 16.0
+    messages = {msg["hub_id"]: msg for _topic, msg in engine.wave_summary_messages(now=0.0)}
+    for hub_id in dual_hubs:
+        msg = messages[hub_id]
+        total = sum(float(msg.get(f"i_rms_{leg}") or 0.0) for leg in "abc")
+        assert total == pytest.approx(current_rms_a(16.0), rel=1e-3)
 
 
 def test_current_rms_a_floors_near_zero_dispatch() -> None:
