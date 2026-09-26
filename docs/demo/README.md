@@ -75,7 +75,7 @@ simulator, as `dev/config/dev.toml` does. That switch is configuration plus `sys
 | SCADA overload | [ogsim] `bank_overload` on the demo bank | `$BANK` | System Health, Dispatch |
 | Comms loss, best effort | [ogsim] `demo-03-zone-comms-loss` | `hub-00001`, then zone `LZ_SOUTH` | Fleet, System Health, Dispatch |
 | Guardian escalation (K7) | operator API burst | `$HUB`, a hub on the demo bank | Control room, System Health, Fleet |
-| Degraded mode | [ogsim] [feeds→sim] `feed_outage_and_stale` | `np6-905-cd` | System Health, Control room |
+| Degraded mode | [ogsim] [feeds→sim] `stale_posting`, 60 min, started during setup | `np6-905-cd` | System Health, Control room |
 | Scoped safe stop and release | operator actions, two operators | `bank-022` | Fleet |
 | Energy runs low | [ogsim] `reserve_floor_pressure` on the demo bank's zone | `$ZONE` | Dispatch, System Health |
 
@@ -113,6 +113,9 @@ the id you `DELETE` to end a moment early.
    release), and `viewer` on the Fleet screen.
 6. **The control plane.** Use the `curl` lines below. Its web page calls `/api/...` by absolute path, which the
    server's Apache does not proxy under `/ogsim/`, so its buttons may not work there.
+7. **Only when feeds read the simulator: start step 18's stale price now**, at least 50 minutes before step 18
+   (the `curl` is in step 18). Everything already committed keeps delivering, but nothing new is committed once
+   the price is 45 minutes old, so run the demo seed (item 3) first.
 
 ## The steps
 
@@ -309,21 +312,21 @@ skip to step 13.
 
 ### Topic 10: degraded mode [feeds→sim]
 
-**Step 18: A feed goes down** [ogsim] (30 s, started about 10 minutes earlier)
-- **Where:** the dev stack, whose price freshness window is 600 s. On the server the window is 2,700 s since R2.
-  That is longer than this scenario's 17 minutes without new data, so there the banner appears only if the
-  breaker opens. Skip the step on the server unless the lead shortens the window for the run [root].
-- **Action:** Start it during step 3:
-  `curl -u tester:... -X POST $SIM/api/scenarios/feed_outage_and_stale/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
-  (np6-905-cd returns 503 for 120 s, then stops posting new data for 900 s). Now open System Health.
-- **Show:** The banner at the top; "Feed freshness"; "Alerts"; then Dispatch.
-- **Expect:** "Degraded mode: **Feed stale**" once the price feed is older than its window (`ALR-FEED-STALE`,
-  warning), or at once if its breaker opened (`ALR-FEED-LGV-EXHAUSTED`, critical). Markets shows the row's
-  failures and breaker. The banner is live on System Health; the Control room shows it on reload.
-- **Say:** Feed stale is enforced. While it lasts, og-engine skips intake and every selector gate commits
-  nothing new; the committed deliveries continue. The other modes (Engine down, Guardian down, SCADA silent)
-  are shown and recorded only. "Engine down" and "Guardian down" need `systemctl stop` [root] and interrupt
+**Step 18: A feed goes stale** [ogsim] (30 s, started at least 50 minutes earlier)
+- **Why the long lead time:** since R2 the price freshness window is 2,700 s on the server and on the dev stack
+  (the simulator stamps prices like ERCOT, at the 15-min interval start). The `feed_outage_and_stale` scenario
+  (120 s of 503, then 900 s without new data) no longer reaches it.
+- **Action:** during "Before you start", stop the price feed posting for an hour:
+  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "stale_posting", "target": "np6-905-cd", "params": {}, "duration": 3600}'`
+  (the response carries the anomaly's `id`). At step 18, open System Health, then Dispatch.
+- **Show:** The banner at the top; "Feed freshness"; "Alerts"; then the Dispatch pipeline.
+- **Expect:** "Degraded mode: **Feed stale**" once the price is older than 2,700 s (`ALR-FEED-STALE` "... stale
+  for over 2700s", warning). The banner is live on System Health; the Control room shows it on reload.
+- **Say:** Feed stale is enforced. While it lasts, og-engine skips intake and every selector gate commits nothing
+  new, and the committed deliveries continue. The other modes (Engine down, Guardian down, SCADA silent) are
+  shown and recorded only. "Engine down" and "Guardian down" need `systemctl stop` [root] and interrupt
   delivery, so they are not part of this run.
+- **End:** `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`. The banner clears once a fresh price posts.
 
 ### Topic 11: a scoped safe stop, released by two operators
 

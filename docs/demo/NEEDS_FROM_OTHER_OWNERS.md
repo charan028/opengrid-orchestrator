@@ -27,8 +27,8 @@ earlier are listed at the end for the record. Items 12-16 concern the simulators
 6. **Market anomalies need `og-feeds` on the simulator** (owner: lead; steps 7-8, 18).
    - The server polls live ERCOT/EIA/NWS, so `/ogsim/` market anomalies do not reach it until `[feeds.*]` points
      at `ogsim.market`.
-   - Since R2 the server's price freshness window is 2,700 s, longer than the `feed_outage_and_stale` scenario.
-     Step 18 therefore runs on the dev stack (600 s) unless the lead shortens the window for the run.
+   - Since R2 the price freshness window is 2,700 s (server and dev stack), longer than the
+     `feed_outage_and_stale` scenario. Step 18 therefore injects a 60-minute `stale_posting` during setup.
 7. **"LP value added (latest selector gate)" is never available** (owner: MERGE, API; step 21).
    `orchestrator/src/opengrid/api/routers/lp_value.py` exists but og-api does not mount it
    (`api/app.py:130-171`).
