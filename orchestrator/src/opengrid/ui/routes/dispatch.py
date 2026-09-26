@@ -230,6 +230,87 @@ def ledger_timeline_view(
     }
 
 
+def ledger_api_view(payload: dict[str, Any], title: str, *, now: datetime) -> dict[str, Any] | None:
+    """`GET /og/api/dispatch/ledger` (`{level, id, now, timeline[{t, capacity_kw, committed_kw,
+    uncommitted_capacity_kw, over_committed_kw, committed_by_service, unallocated_committed_kw}], ...}`)
+    as the same stacked chart: committed kW per service, the capacity nobody has bought yet, and any
+    over-commitment in its own red series. `None` when the body has no timeline."""
+    timeline = payload.get("timeline")
+    if not isinstance(timeline, list):
+        return None
+    xs = [_minutes(b.get("t")) for b in timeline]
+    services = sorted({s for b in timeline for s in (b.get("committed_by_service") or {})})
+
+    def col(key: str) -> list[float]:
+        return [round(float(b.get(key) or 0.0), 3) for b in timeline]
+
+    series: list[dict[str, Any]] = [
+        {
+            "name": service,
+            "type": "line",
+            "stack": "ledger",
+            "areaStyle": {},
+            "showSymbol": False,
+            "data": [
+                round(float((b.get("committed_by_service") or {}).get(service) or 0.0), 3) for b in timeline
+            ],
+        }
+        for service in services
+    ]
+    if any(col("unallocated_committed_kw")):
+        series.append(
+            {
+                "name": "Committed, not yet on a segment",
+                "type": "line",
+                "stack": "ledger",
+                "areaStyle": {},
+                "showSymbol": False,
+                "data": col("unallocated_committed_kw"),
+            }
+        )
+    series.append(
+        {
+            "name": UNCOMMITTED_SERIES,
+            "type": "line",
+            "stack": "ledger",
+            "areaStyle": {"opacity": 0.35},
+            "lineStyle": {"type": "dashed"},
+            "itemStyle": {"color": "token:--muted@0.55"},
+            "showSymbol": False,
+            "data": col("uncommitted_capacity_kw"),
+        }
+    )
+    if any(col("over_committed_kw")):
+        series.append(
+            {
+                "name": "Over-committed",
+                "type": "line",
+                "showSymbol": False,
+                "itemStyle": {"color": "token:--status-critical"},
+                "data": col("over_committed_kw"),
+            }
+        )
+    current = payload.get("now") or (timeline[-1] if timeline else {})
+    return {
+        "bank_id": title,
+        "chart_option": {
+            "xAxis": {"type": "category", "data": xs},
+            "yAxis": {"type": "value", "name": "kW"},
+            "series": series,
+            "legend": {"data": [s["name"] for s in series], "top": 0},
+            "tooltip": {"trigger": "axis", "valueFormatter": "token:kw"},
+            "grid": {"containLabel": True, "left": 8, "right": 12, "top": 44, "bottom": 8},
+        },
+        "obligation_count": len(services),
+        "series_noun": "service",
+        "capacity_kw": round(float(current.get("capacity_kw") or 0.0), 3),
+        "hub_count": payload.get("hub_count"),
+        "available_hub_count": payload.get("available_hub_count"),
+        "notes": payload.get("notes") or [],
+        "generated_at": now.isoformat(),
+    }
+
+
 def obligation_labels(obligations: list[dict[str, Any]]) -> dict[str, str]:
     """`obligation_id -> "ERCOT_AS 8937a346"` for the ledger legend, from the pipeline rows."""
     out: dict[str, str] = {}
@@ -630,9 +711,14 @@ async def dispatch_page(
 
     # Aggregate ledger: the CR #19 endpoint when it exists, else the per-bank timelines summed.
     aggregate_loaded = False
+    ledger_payload: dict[str, Any] | None = None
     try:
-        agg = await get_json("/og/api/dispatch/ledger", params={"level": scope["level"], "id": scope["id"]})
-        if isinstance(agg, dict) and "reservations" in agg:
+        ledger_params = {"level": scope["level"], **({"id": scope["id"]} if scope["id"] else {})}
+        agg = await get_json("/og/api/dispatch/ledger", params=ledger_params)
+        if isinstance(agg, dict) and isinstance(agg.get("timeline"), list):
+            ledger_payload = agg
+            aggregate_loaded = True
+        elif isinstance(agg, dict) and "reservations" in agg:
             reservations = agg.get("reservations", [])
             bank_capacity_kw = float(agg.get("capacity_kw") or agg.get("bank_capacity_kw") or 0.0)
             aggregate_loaded = True
@@ -672,7 +758,8 @@ async def dispatch_page(
             "scope": scope,
             "pipeline": pipeline_view(obligations if isinstance(obligations, list) else [], now=now),
             "plan": plan_view(plan if isinstance(plan, dict) else None),
-            "ledger": ledger_timeline_view(
+            "ledger": (ledger_api_view(ledger_payload, scope["title"], now=now) if ledger_payload else None)
+            or ledger_timeline_view(
                 scope["title"],
                 reservations,
                 bank_capacity_kw,

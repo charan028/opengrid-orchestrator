@@ -70,7 +70,7 @@
   <div id="fleet-map" class="og-map og-map-tall"
        data-hubs='{{ map_hubs|tojson }}'
        data-customers='{{ customers|tojson }}'
-       data-grid-url="{{ base_path }}/static/grid-layers.json"></div>
+       data-grid-urls='{{ [base_path ~ "/api/grid/layers?min_kv=200", base_path ~ "/static/grid-layers.json"]|tojson }}'></div>
   <p class="og-map-caption">
     <span class="og-swatch" style="background: var(--series-ercot-energy)"></span> zone load &middot;
     <span class="og-swatch" style="background: var(--series-pipeline-ac)"></span> utility batteries &middot;
@@ -120,7 +120,7 @@
     og.map.addHubLayer(handle, hubs, { colorBy: "activity" });
     og.map.addCustomerLayer(handle, customers);
 
-    og.map.loadGrid(mapEl.dataset.gridUrl).then(function (grid) {
+    og.map.loadGrid(JSON.parse(mapEl.dataset.gridUrls || "[]")).then(function (grid) {
       og.map.addGridLayers(handle, grid);
       og.map.addBestDestination(handle, grid);
 
@@ -133,7 +133,9 @@
         z.hubs += 1;
         if (String(h.health).toLowerCase() === "online") { z.online += 1; }
       });
-      var cells = (grid.zones || []).filter(function (z) { return z.load_mw != null; }).map(function (z) {
+      // The API's own heat cells (served = the fleet's granted delivery, SCADA/ERCOT demand) when present;
+      // the nameplate estimate below only for the static reference file.
+      var cells = grid.heat_cells ? og.map.apiHeatCells(grid.heat_cells) : (grid.zones || []).filter(function (z) { return z.load_mw != null; }).map(function (z) {
         var here = byZone["LZ_" + z.name.toUpperCase()] || byZone[z.key] || { hubs: 0, online: 0 };
         var demandKw = z.load_mw * 1000;
         var servedKw = Math.min(demandKw, here.online * perHubKw);

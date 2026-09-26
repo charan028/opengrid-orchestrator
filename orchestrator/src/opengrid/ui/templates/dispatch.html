@@ -118,7 +118,7 @@
   <h2 id="ledger-heading">Ledger timeline &mdash; {{ ledger.bank_id }}</h2>
   <p>Committed kW per obligation, stacked, against the scope's {{ '%.0f'|format(ledger.capacity_kw) }} kW of sellable capacity; the dashed remainder is capacity nobody has bought yet.
     {% if scope.level == 'fleet' %}Aggregate of every feeder segment; pick a zone or a segment to drill down.{% elif scope.level == 'zone' %}Aggregate of the zone's feeder segments.{% elif scope.level == 'bank' %}A bank is a feeder segment aggregating its homes ({{ scope.hubs_in_scope or 50 }} hubs, one 600 kVA rating), not a single hub.{% else %}Hubs share their segment's ledger; this is {{ scope.banks[0] }}'s.{% endif %}
-    {{ ledger.obligation_count }} obligation{{ '' if ledger.obligation_count == 1 else 's' }} plotted.
+    {{ ledger.obligation_count }} {{ ledger.series_noun|default('obligation') }}{{ '' if ledger.obligation_count == 1 else 's' }} plotted{% if ledger.available_hub_count is not none and ledger.hub_count %} ({{ ledger.available_hub_count }} of {{ ledger.hub_count }} homes available){% endif %}.
     {% if scope.banks_unavailable %}<span class="stale-badge" data-stale="true">{{ scope.banks_unavailable|length }} of {{ scope.banks|length }} segments unavailable</span>{% endif %}
     {% with since_iso=ledger.generated_at, stale_after_s=15 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
   {% if scope.level == 'fleet' and scope.zones %}

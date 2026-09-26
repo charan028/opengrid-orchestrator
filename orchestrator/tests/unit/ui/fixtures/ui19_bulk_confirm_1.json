@@ -1,0 +1,30 @@
+{
+  "proposal_id": "fc038bc1-ac6d-4c90-b30e-845fbb777d63",
+  "status": "AWAITING_SECOND_CONFIRM",
+  "confirmations_required": 2,
+  "confirmations_received": 1,
+  "double_confirm_reasons": [
+    {
+      "hub_id": "hub-00000",
+      "reasons": [
+        "SERVES_COMMITTED_OBLIGATION"
+      ],
+      "obligations": [
+        {
+          "obligation_id": "00000000-0000-7000-8000-00000000a001",
+          "service_type": "ERCOT_ENERGY",
+          "state": "DELIVERING",
+          "tier": "T2"
+        }
+      ]
+    },
+    {
+      "hub_id": "hub-00003",
+      "reasons": [
+        "HUB_FAULT"
+      ],
+      "obligations": []
+    }
+  ],
+  "trace_id": "3aa81d40-371c-4844-a003-760f5657809e"
+}

@@ -48,7 +48,7 @@ _SERVER_READY_TIMEOUT_S = 15.0
 _SERVER_STOP_TIMEOUT_S = 5.0
 _MAP_TILE_URL_GLOB = "**/tile.openstreetmap.org/**"
 
-BULK_PROPOSAL_ID = "55555555-5555-5555-5555-555555555555"
+BULK_PROPOSAL_ID = "fc038bc1-ac6d-4c90-b30e-845fbb777d63"  # the API ui19 fixture's
 SAFESTOP_PROPOSAL_ID = "11111111-1111-1111-1111-111111111111"
 COMMAND_PROPOSAL_ID = "33333333-3333-3333-3333-333333333333"
 AS_DEPLOYMENT_ID = "44444444-4444-4444-4444-444444444444"
@@ -102,8 +102,12 @@ def _post_responses() -> dict[str, Any]:
         "/og/api/safestop": _load("fleet_safestop_propose.json"),
         f"/og/api/safestop/{SAFESTOP_PROPOSAL_ID}/confirm": _load("fleet_safestop_confirm.json"),
         "/og/api/fleet/command": _load("fleet_command_propose.json"),
-        "/og/api/fleet/commands/bulk": _load("fleet_bulk_command_propose.json"),
-        f"/og/api/fleet/commands/bulk/{BULK_PROPOSAL_ID}/confirm": _load("fleet_bulk_command_confirm.json"),
+        "/og/api/fleet/commands/bulk": _load("ui19_bulk_propose.json"),
+        # the API flags the selection: the first confirm answers AWAITING_SECOND_CONFIRM, the second executes
+        f"/og/api/fleet/commands/bulk/{BULK_PROPOSAL_ID}/confirm": [
+            _load("ui19_bulk_confirm_1.json"),
+            _load("ui19_bulk_confirm_2.json"),
+        ],
         f"/og/api/fleet/command/{COMMAND_PROPOSAL_ID}/confirm": _load("fleet_command_confirm_pass.json"),
         "/og/api/alerts/7/ack": _load("alert_ack.json"),
         "/og/api/trace/verify": {"passed": True, "checked": 12, "first_broken": None},
@@ -137,10 +141,17 @@ def _install_fake_api(monkeypatch: pytest.MonkeyPatch) -> None:
             raise ApiUnavailable(f"no fixture registered for GET {path}")
         return gets[path]
 
+    post_calls: dict[str, int] = {}
+
     async def fake_post_json(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
         if path not in posts:
             raise ApiUnavailable(f"no fixture registered for POST {path}")
-        return posts[path]
+        body = posts[path]
+        if isinstance(body, list):  # a sequence: one response per call, the last one repeats
+            served = post_calls.setdefault(path, 0)
+            post_calls[path] = served + 1
+            return body[min(served, len(body) - 1)]
+        return body
 
     async def fake_delete_json(path: str, *, remote_user: str | None = None) -> Any:
         if path != f"/og/api/dispatch/as-deployments/{AS_DEPLOYMENT_ID}":

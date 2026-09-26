@@ -56,12 +56,21 @@ def test_bulk_command_needs_a_second_acknowledgement_then_passes(operator_page: 
     expect(acknowledge).to_be_visible()
     expect(confirm).to_be_disabled()
 
+    # the acknowledgement names the API's own reasons, not only the console's reading
+    expect(dialog.locator(".confirm-dialog-ack")).to_contain_text(
+        "serving a committed obligation (ERCOT_ENERGY)"
+    )
     acknowledge.check()
     expect(confirm).to_be_enabled()
     confirm.click()
 
+    # the API recorded the first confirm and asks for a second, separate one; nothing is sent automatically
     result = operator_page.locator("#bulk-confirm-result")
-    expect(result.locator(".status-badge .status-text")).to_have_text("PASS")
+    expect(result.locator(".status-badge .status-text")).to_have_text("SECOND CONFIRM")
+    expect(result).to_contain_text("1 hub in a fault state")
+    result.locator("#bulk-second-confirm").click()
+    expect(operator_page.locator("#bulk-confirm-result .status-badge .status-text")).to_have_text("PASS")
+    expect(operator_page.locator("#bulk-confirm-result")).to_contain_text("3 of 3 hubs passed the guardian")
 
 
 def test_viewer_gets_no_selection_or_bulk_command(viewer_page: Page) -> None:

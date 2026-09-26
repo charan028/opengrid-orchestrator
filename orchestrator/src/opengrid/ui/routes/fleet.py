@@ -124,6 +124,42 @@ def bulk_risk_reasons(hubs: list[dict[str, Any]], hub_ids: list[str]) -> list[st
     return reasons
 
 
+def map_hubs_from(payload: Any) -> list[dict[str, Any]]:
+    """Hubs of a `GET /og/api/fleet/map` body (`{"hubs": [...], "activity_counts", ...}`), in the compact
+    shape the map draws; `[]` for anything else (the caller then draws from the hub list)."""
+    items = payload.get("hubs", payload.get("items")) if isinstance(payload, dict) else payload
+    return [map_hub(h) for h in items if isinstance(h, dict)] if isinstance(items, list) else []
+
+
+#: `POST /og/api/fleet/commands/bulk` double-confirm reason codes (api `routers.fleet_bulk`), in words.
+_BULK_REASON_TEXT: dict[str, str] = {
+    "SERVES_COMMITTED_OBLIGATION": "serving a committed obligation",
+    "HUB_FAULT": "in a fault state",
+    "CRITICAL_ALERT": "under a critical alert",
+    "AT_OR_BELOW_RESERVE": "at or below its backup reserve",
+}
+
+
+def api_double_confirm_reasons(body: dict[str, Any] | None) -> list[str]:
+    """The API's own double-confirm reasons (`double_confirm_reasons`, per hub) as plain sentences, e.g.
+    `1 hub serving a committed obligation (ERCOT_ENERGY)`. These are authoritative; the console's
+    `bulk_risk_reasons` is only OR-ed on top, never used in their place."""
+    counts: dict[str, int] = {}
+    services: dict[str, set[str]] = {}
+    for entry in (body or {}).get("double_confirm_reasons") or []:
+        for code in entry.get("reasons") or []:
+            counts[code] = counts.get(code, 0) + 1
+            if code == "SERVES_COMMITTED_OBLIGATION":
+                for obligation in entry.get("obligations") or []:
+                    if obligation.get("service_type"):
+                        services.setdefault(code, set()).add(str(obligation["service_type"]))
+    out = []
+    for code, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        detail = f" ({', '.join(sorted(services[code]))})" if code in services else ""
+        out.append(f"{n} hub{'' if n == 1 else 's'} {_BULK_REASON_TEXT.get(code, code)}{detail}")
+    return out
+
+
 def parse_hub_ids(raw: str | None) -> list[str]:
     """The selection posted by the Fleet map/table: comma-separated hub ids, de-duplicated, order kept."""
     seen: dict[str, None] = {}
@@ -201,10 +237,9 @@ async def fleet_screen(
     # Its absence is not a degraded screen -- the map draws from the hub list either way (CR #19).
     map_hubs = [map_hub(h) for h in hubs]
     try:
-        raw_map = await get_json(_MAP_PATH, params=params)
-        items = raw_map.get("items", raw_map) if isinstance(raw_map, dict) else raw_map
-        if isinstance(items, list) and items:
-            map_hubs = [map_hub(h) for h in items]
+        from_map = map_hubs_from(await get_json(_MAP_PATH, params=params))
+        if from_map:
+            map_hubs = from_map
     except ApiUnavailable as exc:
         logger.info(
             "fleet screen: %s not serving yet (%s); drawing the map from the hub list", _MAP_PATH, exc
@@ -442,6 +477,7 @@ async def propose_bulk_command(
     except ApiUnavailable as exc:
         logger.warning("fleet bulk command propose failed: %s", exc)
         return templates.TemplateResponse(request, "_partials/propose_error.html", {"message": str(exc)})
+    api_reasons = api_double_confirm_reasons(proposal)
     double = bool(proposal.get("requires_double_confirm")) or bool(reasons)
     context = _confirm_dialog_context(
         dialog_id=f"bulk-confirm-{proposal['proposal_id']}",
@@ -453,16 +489,19 @@ async def propose_bulk_command(
         target="#bulk-confirm-result",
     )
     if double:
+        combined = api_reasons + [r for r in reasons if r not in api_reasons]
         context["acknowledge"] = "I understand this overrides what these hubs are doing now: " + "; ".join(
-            reasons or ["the API flagged this selection as high risk"]
+            combined or ["the API flagged this selection as high risk"]
         )
     return templates.TemplateResponse(request, "_partials/confirm_dialog.html", context)
 
 
 @router.post("/command/bulk/{proposal_id}/confirm", response_class=HTMLResponse)
 async def confirm_bulk_command(request: Request, proposal_id: str) -> HTMLResponse:
-    """Step 2 of 2 for a selection: relays the confirmation and renders the same pass/veto/timeout/
-    expired fragment the single-hub flow uses."""
+    """Step 2 (and 3) for a selection: relays the confirmation. When the API flagged the selection it
+    records the first confirm and answers `AWAITING_SECOND_CONFIRM`; the fragment then offers a second,
+    separate confirm naming the API's reasons -- never sent automatically. The executing confirm returns
+    per-hub guardian outcomes (`status=EXECUTED`, `outcome_counts`, `results`)."""
     _require_operator(request)
     try:
         result = await post_json(
@@ -479,7 +518,13 @@ async def confirm_bulk_command(request: Request, proposal_id: str) -> HTMLRespon
     return templates.TemplateResponse(
         request,
         "_partials/fleet_bulk_confirm_result.html",
-        {"result": result, "status_code": status.HTTP_200_OK, "message": None},
+        {
+            "result": result,
+            "status_code": status.HTTP_200_OK,
+            "message": None,
+            "api_reasons": api_double_confirm_reasons(result if isinstance(result, dict) else None),
+            "second_confirm_url": f"{BASE_PATH}/fleet/command/bulk/{proposal_id}/confirm",
+        },
     )
 
 

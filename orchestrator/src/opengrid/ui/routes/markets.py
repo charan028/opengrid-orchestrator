@@ -244,13 +244,17 @@ def bid_funnel_view(payload: dict[str, Any] | None, *, now: datetime) -> dict[st
     ponytail: `by_hour` is deliberately not rendered. The totals answer "how leaky is the funnel"; add an
     hourly chart when someone needs to know *when* it leaks.
     """
-    raw_products = payload.get("products") or [] if isinstance(payload, dict) else []
+    # API shape (`routers.markets_funnel`): `by_product[]` and top-level `rejection_reasons[]`
+    # (`reason_code`, `count`); the provisional shape (`products[]` with per-product reasons) still parses.
+    raw_products: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        raw_products = payload.get("by_product") or payload.get("products") or []
     rows: list[dict[str, Any]] = []
     for product in raw_products:
         counts = {key: int(product.get(key) or 0) for key, _ in _BID_FUNNEL_STAGES}
         rows.append(
             {
-                "product": str(product.get("product") or "unknown"),
+                "product": str(product.get("product") or product.get("service_type") or "unknown"),
                 **counts,
                 # Win rate is of what we *bid*, not of what ERCOT offered: the opportunities we skipped
                 # were a bidding decision, not a loss, and folding them in would hide how well we price.
@@ -259,10 +263,15 @@ def bid_funnel_view(payload: dict[str, Any] | None, *, now: datetime) -> dict[st
         )
 
     reason_counts: dict[str, int] = {}
-    for product in raw_products:
-        for entry in product.get("rejection_reasons") or []:
-            code = str(entry.get("reason") or "UNKNOWN")
-            reason_counts[code] = reason_counts.get(code, 0) + int(entry.get("count") or 0)
+    top_reasons = payload.get("rejection_reasons") if isinstance(payload, dict) else None
+    reason_entries = (
+        top_reasons
+        if isinstance(top_reasons, list)
+        else [entry for product in raw_products for entry in product.get("rejection_reasons") or []]
+    )
+    for entry in reason_entries:
+        code = str(entry.get("reason_code") or entry.get("reason") or "UNKNOWN")
+        reason_counts[code] = reason_counts.get(code, 0) + int(entry.get("count") or 0)
 
     totals = {key: sum(row[key] for row in rows) for key, _ in _BID_FUNNEL_STAGES}
     return {

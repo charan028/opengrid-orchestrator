@@ -200,13 +200,70 @@
   };
 
   /** Fetch the static reference layers (real ERCOT/HIFLD export shipped next to this file). */
-  map.loadGrid = function loadGrid(url) {
-    return fetch(url, { credentials: "same-origin" }).then(function (r) {
-      if (!r.ok) {
-        throw new Error("grid layers " + r.status);
-      }
-      return r.json();
+  /**
+   * `GET /og/api/grid/layers` (`{zones, weather_zones, utility_batteries, transmission_lines_by_kv,
+   * grid_connection_points, heat_cells}`) in the shape the layer functions draw (the static export's:
+   * `{zones: weather zones, transmission: [{kv, path}], grid_entry_point, utility_batteries}`). The
+   * static file already has that shape and passes through unchanged.
+   */
+  map.normalizeGrid = function normalizeGrid(raw) {
+    if (!raw || raw.transmission) {
+      return raw;
+    }
+    const transmission = [];
+    const byKv = raw.transmission_lines_by_kv || {};
+    Object.keys(byKv).forEach(function (kv) {
+      (byKv[kv] || []).forEach(function (line) {
+        if (line && line.path) {
+          transmission.push({ kv: Number(kv), path: line.path });
+        }
+      });
     });
+    const entry = (raw.grid_connection_points || []).filter(function (p) {
+      return p.kind === "grid_entry_point";
+    })[0] || null;
+    return {
+      zones: (raw.weather_zones || []).map(function (z) {
+        return { key: z.zone_key, name: z.name, lat: z.lat, lon: z.lon, load_mw: z.load_mw,
+                 nearest_storage: z.nearest_storage, live: z.live };
+      }),
+      load_zones: raw.zones || [],
+      utility_batteries: raw.utility_batteries || [],
+      transmission: transmission,
+      grid_entry_point: entry,
+      heat_cells: raw.heat_cells || null,
+      source: raw.source || null,
+    };
+  };
+
+  /** The API's heat cells as demand-layer cells (served/unserved kW come from the API, not the browser). */
+  map.apiHeatCells = function apiHeatCells(cells) {
+    const list = (cells || []).filter(function (c) { return c.lat != null && c.lon != null; });
+    const scale = Math.max.apply(null, list.map(function (c) { return Number(c.demand_kw || 0); }).concat([1]));
+    return list.map(function (c) {
+      return {
+        name: (c.level === "bank" ? "Feeder segment " : "Zone ") + c.id + " demand",
+        lat: c.lat, lon: c.lon,
+        served_kw: Number(c.served_kw || 0), unserved_kw: Number(c.unserved_kw || 0), scale_kw: scale,
+      };
+    });
+  };
+
+  /** Load the grid layers from the first URL that answers (the API, then the static reference file). */
+  map.loadGrid = function loadGrid(urls) {
+    const list = [].concat(urls || []);
+    function attempt(i) {
+      if (i >= list.length) {
+        return Promise.reject(new Error("grid layers unavailable"));
+      }
+      return fetch(list[i], { credentials: "same-origin" }).then(function (r) {
+        if (!r.ok) {
+          throw new Error("grid layers " + r.status);
+        }
+        return r.json();
+      }).then(map.normalizeGrid).catch(function () { return attempt(i + 1); });
+    }
+    return attempt(0);
   };
 
   /**
