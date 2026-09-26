@@ -8,9 +8,12 @@ reading; `tick()` reverts anomalies whose duration has elapsed.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SCADA_ANOMALY_TYPES = frozenset(
     {
@@ -120,6 +123,15 @@ class ScadaAnomalyManager:
             self._active.pop(anomaly_id, None)
             self._revert(anomaly)
             return anomaly
+        if not banks:
+            # Not an error (behaviour unchanged), but an unknown target silently does nothing.
+            logger.warning(
+                "anomaly %s (%s) target kind=%s ref=%r matched 0 banks; it has no effect",
+                anomaly_id,
+                anomaly_type,
+                target_kind,
+                target_ref,
+            )
         self._active[anomaly_id] = anomaly
         self._apply(anomaly, start)
         return anomaly
