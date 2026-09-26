@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from psycopg import sql
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.platform import Alert, FeedStatus, Heartbeat
@@ -14,11 +15,16 @@ from opengrid.health.model import AlertFinding
 _FETCH_HEARTBEATS_SQL = "SELECT process, pid, ts, status FROM og.heartbeat"
 
 _FETCH_HUB_STATES_SQL = """
-SELECT h.zone, hs.hub_id, hs.last_seen_at, hs.fault_code
+SELECT h.zone, hs.hub_id, hs.last_seen_at, hs.fault_code, hs.health
 FROM og.hub_state hs JOIN og.hub h ON h.hub_id = hs.hub_id
 """
 
-_UPDATE_HUB_HEALTH_SQL = "UPDATE og.hub_state SET health = %(health)s WHERE hub_id = %(hub_id)s"
+# Hub health is soft state re-derived from scratch every cycle (like fleet's telemetry/hub_state
+# flush, opengrid.fleet.pg_backend): its transaction commits asynchronously (WAL still written, just
+# not fsync-waited), so `write_hub_health_batch`'s single statement per chunk does not queue behind the
+# engine's own writes waiting on the ~0.5s WAL fsync observed on the base server.
+_ASYNC_COMMIT_SQL = "SET LOCAL synchronous_commit TO OFF"
+_WRITE_HUB_HEALTH_CHUNK_SIZE = 500
 
 _FETCH_FEED_STATUSES_SQL = """
 SELECT source, product, last_value_at, last_success_at, consecutive_failures, breaker_open, active_key
@@ -54,17 +60,46 @@ async def fetch_heartbeats(pool: AsyncConnectionPool) -> list[Heartbeat]:
     return [Heartbeat(process=r[0], pid=r[1], ts=r[2], status=r[3]) for r in rows]
 
 
-async def fetch_hub_states(pool: AsyncConnectionPool) -> list[tuple[str, str, datetime | None, str | None]]:
-    """Returns `(zone, hub_id, last_seen_at, fault_code)` tuples."""
+async def fetch_hub_states(
+    pool: AsyncConnectionPool,
+) -> list[tuple[str, str, datetime | None, str | None, str]]:
+    """Returns `(zone, hub_id, last_seen_at, fault_code, current_health)` tuples; `current_health` is the
+    classification already stored on `hub_state.health` from the previous cycle, so callers can skip
+    writing rows whose classification hasn't changed (dispatch-live pass: ~2,000 hubs/cycle, most of
+    which don't flip state cycle-to-cycle)."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(_FETCH_HUB_STATES_SQL)
         rows = await cur.fetchall()
-    return [(r[0], r[1], r[2], r[3]) for r in rows]
+    return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
 
-async def write_hub_health(pool: AsyncConnectionPool, hub_id: str, health: str) -> None:
+async def write_hub_health_batch(pool: AsyncConnectionPool, changes: list[tuple[str, str]]) -> None:
+    """Write `(hub_id, health)` classification changes in one batched `UPDATE ... FROM (VALUES ...)`
+    statement per chunk, under asynchronous commit (see `_ASYNC_COMMIT_SQL`) -- not one single-row
+    `UPDATE`+commit per hub (merge task, dispatch-live pass: `og-settle`'s health evaluator did ~2,000
+    single-row commits/cycle to this soft-state column, contending with the engine's own writes for the
+    ~0.5s WAL fsync observed on the base server). Chunked at `_WRITE_HUB_HEALTH_CHUNK_SIZE` rows/statement
+    for the same reason `fleet.pg_backend.upsert_hub_states` chunks: staying under Postgres's
+    parameter-count ceiling as `hub_count` grows past MVP-S's ~2,000.
+
+    Callers pass only hubs whose classification actually changed; an empty list is a no-op (no round trip
+    for a cycle where nothing flipped state).
+    """
+    if not changes:
+        return
+    row_placeholder = sql.SQL("(%s, %s)")
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_UPDATE_HUB_HEALTH_SQL, {"hub_id": hub_id, "health": health})
+        await cur.execute(_ASYNC_COMMIT_SQL)
+        for start in range(0, len(changes), _WRITE_HUB_HEALTH_CHUNK_SIZE):
+            chunk = changes[start : start + _WRITE_HUB_HEALTH_CHUNK_SIZE]
+            values_sql = sql.SQL(", ").join([row_placeholder] * len(chunk))
+            statement = sql.SQL(
+                "UPDATE og.hub_state AS hs SET health = v.health "
+                "FROM (VALUES {values}) AS v(hub_id, health) "
+                "WHERE hs.hub_id = v.hub_id"
+            ).format(values=values_sql)
+            params: list[str] = [value for hub_id, health in chunk for value in (hub_id, health)]
+            await cur.execute(statement, params)
         await conn.commit()
 
 

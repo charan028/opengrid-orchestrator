@@ -97,14 +97,22 @@ async def evaluate_heartbeats() -> dict[str, ProcessStatus]:
 
 async def evaluate_hub_health() -> None:
     """Classify each hub online/stale/offline from `hub_state.last_seen_at` (02b S6.4 thresholds) and
-    write the classification back onto `hub_state.health` so `fleet.capability()` excludes it."""
+    write the classification back onto `hub_state.health` so `fleet.capability()` excludes it.
+
+    Only hubs whose classification actually changed since the last cycle are written, in one batched
+    statement (`queries.write_hub_health_batch`) under asynchronous commit -- not one single-row
+    `UPDATE`+commit per hub (dispatch-live pass: ~2,000 hubs/cycle, most unchanged cycle-to-cycle, were
+    contending with the engine's own writes for the base server's ~0.5s WAL fsync)."""
     pool = _require_pool()
     now = _now()
-    for _zone, hub_id, last_seen_at, fault_code in await queries.fetch_hub_states(pool):
+    changes: list[tuple[str, str]] = []
+    for _zone, hub_id, last_seen_at, fault_code, current_health in await queries.fetch_hub_states(pool):
         state = classify_hub_health(
             last_seen_at=last_seen_at, fault_code=fault_code, now=now, thresholds=_thresholds
         )
-        await queries.write_hub_health(pool, hub_id, state)
+        if state != current_health:
+            changes.append((hub_id, state))
+    await queries.write_hub_health_batch(pool, changes)
 
 
 async def _fetch_cycle_latency(now: datetime) -> CycleLatencySample:
@@ -172,7 +180,7 @@ async def evaluate_alerts() -> None:
     hub_rows = await queries.fetch_hub_states(pool)
     classified_hubs = [
         (zone, classify_hub_health(last_seen_at=seen, fault_code=fault, now=now, thresholds=_thresholds))
-        for zone, _hub_id, seen, fault in hub_rows
+        for zone, _hub_id, seen, fault, _current_health in hub_rows
     ]
     hub_counts_by_zone = aggregate_hub_counts(classified_hubs)
 
@@ -245,7 +253,7 @@ async def evaluate_once() -> HealthSnapshot:
     hub_rows = await queries.fetch_hub_states(pool)
     classified_hubs = [
         (zone, classify_hub_health(last_seen_at=seen, fault_code=fault, now=now, thresholds=_thresholds))
-        for zone, _hub_id, seen, fault in hub_rows
+        for zone, _hub_id, seen, fault, _current_health in hub_rows
     ]
     hub_counts_by_zone = aggregate_hub_counts(classified_hubs)
 

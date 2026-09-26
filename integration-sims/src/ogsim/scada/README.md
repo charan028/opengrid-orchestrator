@@ -12,6 +12,12 @@ SCADA_* anomaly catalogue.
 - `background.py` -- feeder background load, seeded from
   `mariadb_history_signals.tsv`'s `substation_load_kw` when present on the
   server, else a synthetic diurnal curve (never crashes if absent).
+  `substation_load_kw` is the whole feeder's (all `bank_count` banks')
+  aggregate reading, so it is divided by `bank_count` to get one bank's
+  share -- skipping that division was a defect that replayed the whole
+  substation's ~3,000 kW history mean onto every bank independently
+  (~3,000 kVA reported against a 600 kVA rating, 40 false
+  `ALR-SCADA-OVERLOAD` alerts on the live server).
 - `instructions.py` -- consecutive-overload counter -> auto LIMIT rule.
 - `anomalies.py` -- SCADA_* anomaly apply/revert.
 - `runtime.py` -- `ScadaEngine` (pure per-tick logic) + `run_scada` (async

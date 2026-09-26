@@ -34,11 +34,15 @@ def _reset_health_module(monkeypatch: pytest.MonkeyPatch) -> None:
 class _FakeQueries:
     def __init__(self) -> None:
         self.heartbeats: list[Heartbeat] = []
-        self.hub_rows: list[tuple[str, str, datetime | None, str | None]] = []
+        # (zone, hub_id, last_seen_at, fault_code, current_health) -- current_health defaults to
+        # "online" (the schema default, `og.hub_state.health`) so tests that only care about other
+        # fields don't need to spell it out every time.
+        self.hub_rows: list[tuple[str, str, datetime | None, str | None, str]] = []
         self.feed_statuses: list[FeedStatus] = []
         self.bank_loads: list[tuple[str, float, float | None]] = []
         self.open_alerts: list[Alert] = []
         self.written_hub_health: dict[str, str] = {}
+        self.write_hub_health_batch_calls: list[list[tuple[str, str]]] = []
         self.raised: list[str] = []
         self.cleared: list[int] = []
         self._next_alert_id = 1
@@ -49,8 +53,10 @@ class _FakeQueries:
     async def fetch_hub_states(self, pool):
         return self.hub_rows
 
-    async def write_hub_health(self, pool, hub_id, state):
-        self.written_hub_health[hub_id] = state
+    async def write_hub_health_batch(self, pool, changes):
+        self.write_hub_health_batch_calls.append(list(changes))
+        for hub_id, state in changes:
+            self.written_hub_health[hub_id] = state
 
     async def fetch_feed_statuses(self, pool):
         return self.feed_statuses
@@ -101,11 +107,47 @@ async def test_evaluate_heartbeats_reports_down_for_missing_process(fake_queries
 
 async def test_evaluate_hub_health_writes_classification_back(fake_queries: _FakeQueries) -> None:
     fake_queries.hub_rows = [
-        ("LZ_NORTH", "hub-1", NOW, None),
-        ("LZ_NORTH", "hub-2", NOW - timedelta(seconds=60), None),
+        ("LZ_NORTH", "hub-1", NOW, None, "online"),
+        ("LZ_NORTH", "hub-2", NOW - timedelta(seconds=60), None, "online"),
     ]
     await health.evaluate_hub_health()
-    assert fake_queries.written_hub_health == {"hub-1": "online", "hub-2": "offline"}
+    assert fake_queries.written_hub_health == {"hub-2": "offline"}  # hub-1 stays "online" -- unchanged
+
+
+async def test_evaluate_hub_health_skips_unchanged_rows(fake_queries: _FakeQueries) -> None:
+    """Defect fix: a hub whose classification matches `hub_state.health` already is not written at all --
+    proves the evaluator no longer does a write-storm of ~2,000 unconditional single-row commits/cycle."""
+    fake_queries.hub_rows = [
+        ("LZ_NORTH", "hub-1", NOW, None, "online"),  # still online: no write
+        ("LZ_NORTH", "hub-2", NOW - timedelta(seconds=60), None, "offline"),  # still offline: no write
+        ("LZ_NORTH", "hub-3", None, "INV-01", "fault"),  # still fault: no write
+    ]
+    await health.evaluate_hub_health()
+    assert fake_queries.write_hub_health_batch_calls == [[]]
+    assert fake_queries.written_hub_health == {}
+
+
+async def test_evaluate_hub_health_writes_one_batch_for_many_changed_hubs(
+    fake_queries: _FakeQueries,
+) -> None:
+    """Benchmark-style shape check (dispatch-live pass: ~2,000 hubs/cycle): every changed hub is written
+    through exactly one `write_hub_health_batch` call, not one call per hub."""
+    hub_count = 2_000
+    fake_queries.hub_rows = [
+        (
+            "LZ_NORTH",
+            f"hub-{i}",
+            NOW - timedelta(seconds=60),  # offline threshold: everyone flips from "online"
+            None,
+            "online",
+        )
+        for i in range(hub_count)
+    ]
+    await health.evaluate_hub_health()
+    assert len(fake_queries.write_hub_health_batch_calls) == 1
+    batch = fake_queries.write_hub_health_batch_calls[0]
+    assert len(batch) == hub_count
+    assert all(state == "offline" for _hub_id, state in batch)
 
 
 async def test_evaluate_alerts_raises_once_and_clears_on_resolve(fake_queries: _FakeQueries) -> None:
@@ -156,7 +198,7 @@ async def test_evaluate_once_returns_snapshot_with_degraded_mode(fake_queries: _
         Heartbeat(process=p, pid=1, ts=NOW, status="ok")
         for p in ("feeds", "guardian", "safestop", "sim", "settle", "api")
     ]  # engine missing -> HOLD_LOCAL_AUTONOMY
-    fake_queries.hub_rows = [("LZ_NORTH", "hub-1", NOW, None)]
+    fake_queries.hub_rows = [("LZ_NORTH", "hub-1", NOW, None, "online")]
 
     snapshot = await health.evaluate_once()
 
