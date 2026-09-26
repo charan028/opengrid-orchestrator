@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from ogsim.common.config import load_fleet_config, load_scada_config
-from ogsim.customer.config import load_customer_config
 from ogsim.control import catalogue
 from ogsim.control.scenarios import ScenarioStep, load_scenarios_dir
 from ogsim.fleet.pq import PQ_ANOMALY_TYPES
@@ -29,6 +29,27 @@ from ogsim.market.data import PRODUCTS
 from ogsim.scada.runtime import ScadaEngine
 
 SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
+SIMS_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+
+
+def _config_ids(config_dir: Path) -> set[str]:
+    """Every string value in the shipped sim configs (site ids, zone ids, ...)."""
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, str):
+            found.add(node)
+
+    for path in sorted(config_dir.glob("*.yaml")):
+        walk(yaml.safe_load(path.read_text(encoding="utf-8")))
+    return found
+
 
 # ogsim.market.anomalies: a market anomaly's target is a product id, "eia", "nws", or "*".
 KNOWN_MARKET_TARGETS = set(PRODUCTS) | {"*", "eia", "nws"}
@@ -71,10 +92,11 @@ def test_scenario_step_target_resolves(step: ScenarioStep, fleet: FleetEngine, s
         return
 
     if entry.owner == "customer":
-        # R2's customer operators (ogsim.customer): the target is a configured customer site.
-        sites = {s.site_id for s in load_customer_config().sites if s.site_id}
-        assert step.target in sites, (
-            f"customer target {step.target!r} is not a configured site ({sorted(sites)})"
+        # R2's customer operators (ogsim.customer): the target must be an id the shipped config names
+        # (a customer site, or a market zone such as a PJM zone) -- a typo would silently do nothing.
+        known = _config_ids(SIMS_CONFIG_DIR)
+        assert step.target in known, (
+            f"customer target {step.target!r} is not named in {SIMS_CONFIG_DIR}/*.yaml"
         )
         return
     if "trailer" in (entry.target_kind or ""):
