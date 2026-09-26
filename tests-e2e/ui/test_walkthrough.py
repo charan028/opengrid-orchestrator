@@ -46,3 +46,10 @@ def test_fleet_hub_drilldown_shows_its_age(viewer_page: Page) -> None:
     expect(drilldown).to_be_visible()
     expect(drilldown.locator("h2")).to_contain_text("Hub ")
     expect(drilldown.locator(_DATED_BADGE)).to_have_text(_AGE_TEXT)
+
+
+def test_operator_dispatch_shows_as_deployment_control(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/dispatch")
+
+    expect(operator_page.get_by_role("heading", name="AS awards & deployment")).to_be_visible()
+    expect(operator_page.locator("#as-deployment-form")).to_be_visible()

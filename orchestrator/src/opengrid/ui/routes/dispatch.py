@@ -21,12 +21,12 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from opengrid.ui.api_client import ApiUnavailable, get_json
-from opengrid.ui.role import is_operator, role_of
-from opengrid.ui.templating import templates
+from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json
+from opengrid.ui.role import is_operator, remote_user, role_of
+from opengrid.ui.templating import BASE_PATH, templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dispatch")
@@ -318,6 +318,154 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
     return events
 
 
+def as_awards_view(
+    opportunities: list[dict[str, Any]], deployments: list[dict[str, Any]], *, now: datetime
+) -> list[dict[str, Any]]:
+    """Join ERCOT_AS awards with the active deployment records for the operator panel.
+
+    Awards are held until a deployment exists.  The API owns the authoritative award and deployment
+    state; this view only joins the two read models and preserves optional energy-risk fields when the
+    allocator supplies them.
+    """
+    active_by_obligation = {
+        str(row.get("obligation_id")): row
+        for row in deployments
+        if row.get("obligation_id") is not None
+    }
+    all_deployment = next((row for row in deployments if row.get("obligation_id") is None), None)
+    rows: list[dict[str, Any]] = []
+    for award in opportunities:
+        if award.get("service_type") != "ERCOT_AS":
+            continue
+        obligation_id = str(award.get("obligation_id") or "")
+        deployment = active_by_obligation.get(obligation_id) or all_deployment
+        state = "deployed" if deployment else "held"
+        product = str(award.get("product") or award.get("variant") or "").upper()
+        required_hours = 1 if "ECRS" in product else 4
+        energy_held = _f(award.get("energy_held_kwh"))
+        required_energy = _f(award.get("required_energy_kwh"))
+        if required_energy is None:
+            committed_kw = _f(award.get("committed_qty_kw")) or _f(award.get("requested_kw")) or 0.0
+            required_energy = committed_kw * required_hours
+        at_risk = bool(award.get("at_risk", False))
+        if energy_held is not None and required_energy is not None:
+            at_risk = at_risk or energy_held < required_energy
+        rows.append(
+            {
+                "obligation_id": obligation_id,
+                "customer_id": award.get("customer_id") or award.get("contract_id"),
+                "product": product or "ERCOT_AS",
+                "committed_kw": award.get("committed_qty_kw", award.get("requested_kw")),
+                "energy_held_kwh": energy_held,
+                "required_energy_kwh": required_energy,
+                "required_hours": required_hours,
+                "at_risk": at_risk,
+                "state": state,
+                "deployment_id": str(deployment["deployment_id"]) if deployment else None,
+                "deployment_end": deployment.get("end_at") if deployment else None,
+            }
+        )
+    return rows
+
+
+def _require_operator(request: Request) -> None:
+    if not is_operator(request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="operator role required")
+
+
+def _action_result(request: Request, *, message: str, ok: bool = False) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "_partials/as_deployment_result.html",
+        {"message": message, "ok": ok},
+    )
+
+
+@router.post("/as-deployments/propose", response_class=HTMLResponse)
+async def propose_as_deployment(
+    request: Request,
+    obligation_id: str = Form(default=""),
+    duration_minutes: int = Form(default=15),
+    reason: str = Form(...),
+) -> HTMLResponse:
+    """Step 1: render the exact AS deployment summary without changing system state."""
+    _require_operator(request)
+    if not 1 <= duration_minutes <= 240:
+        return _action_result(request, message="Duration must be between 1 and 240 minutes.")
+    return templates.TemplateResponse(
+        request,
+        "_partials/as_deployment_confirm.html",
+        {
+            "obligation_id": obligation_id,
+            "duration_minutes": duration_minutes,
+            "reason": reason,
+            "confirm_url": f"{BASE_PATH}/dispatch/as-deployments/confirm",
+            "summary": (
+                f"Deploy {obligation_id or 'all held ERCOT_AS awards'} for {duration_minutes} minutes "
+                f"({reason})"
+            ),
+        },
+    )
+
+
+@router.post("/as-deployments/confirm", response_class=HTMLResponse)
+async def confirm_as_deployment(
+    request: Request,
+    obligation_id: str = Form(default=""),
+    duration_minutes: int = Form(...),
+    reason: str = Form(...),
+) -> HTMLResponse:
+    """Step 2: create the deployment through the existing operator API."""
+    _require_operator(request)
+    try:
+        result = await post_json(
+            "/og/api/dispatch/as-deployments",
+            {
+                "obligation_id": obligation_id or None,
+                "duration_minutes": duration_minutes,
+                "reason": reason,
+            },
+            remote_user=remote_user(request),
+        )
+    except ApiUnavailable as exc:
+        return _action_result(request, message=str(exc))
+    return _action_result(
+        request,
+        message=f"Deployment {result.get('deployment_id', 'accepted')} is active.",
+        ok=True,
+    )
+
+
+@router.post("/as-deployments/{deployment_id}/stop-propose", response_class=HTMLResponse)
+async def propose_stop_as_deployment(request: Request, deployment_id: str) -> HTMLResponse:
+    _require_operator(request)
+    return templates.TemplateResponse(
+        request,
+        "_partials/as_deployment_confirm.html",
+        {
+            "obligation_id": "",
+            "duration_minutes": "",
+            "reason": "",
+            "deployment_id": deployment_id,
+            "confirm_url": f"{BASE_PATH}/dispatch/as-deployments/{deployment_id}/stop-confirm",
+            "summary": f"Stop active ERCOT_AS deployment {deployment_id} early",
+            "stop": True,
+        },
+    )
+
+
+@router.post("/as-deployments/{deployment_id}/stop-confirm", response_class=HTMLResponse)
+async def confirm_stop_as_deployment(request: Request, deployment_id: str) -> HTMLResponse:
+    _require_operator(request)
+    try:
+        await delete_json(
+            f"/og/api/dispatch/as-deployments/{deployment_id}", remote_user=remote_user(request)
+        )
+    except ApiUnavailable as exc:
+        return _action_result(request, message=str(exc))
+    return _action_result(request, message=f"Deployment {deployment_id} stopped.", ok=True)
+
+
 @router.get("", response_class=HTMLResponse)
 async def dispatch_page(request: Request, bank_id: str | None = Query(default=None)) -> HTMLResponse:
     """Dispatch & commitments screen (`/og/dispatch`, viewer role read-only in MVP-S)."""
@@ -330,6 +478,7 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
     grants: list[dict[str, Any]] = []
     bank_capacity_kw = 0.0
     commitments: list[dict[str, Any]] = []
+    deployments: list[dict[str, Any]] = []
 
     try:
         raw = await get_json("/og/api/dispatch/opportunities")
@@ -342,6 +491,13 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
         plan = await get_json("/og/api/dispatch/plan/latest")
     except ApiUnavailable as exc:
         logger.warning("dispatch: /og/api/dispatch/plan/latest unavailable: %s", exc)
+        degraded = degraded or str(exc)
+
+    try:
+        raw_deployments = await get_json("/og/api/dispatch/as-deployments")
+        deployments = raw_deployments if isinstance(raw_deployments, list) else []
+    except ApiUnavailable as exc:
+        logger.warning("dispatch: AS deployment API unavailable: %s", exc)
         degraded = degraded or str(exc)
 
     try:
@@ -367,6 +523,10 @@ async def dispatch_page(request: Request, bank_id: str | None = Query(default=No
             "ledger": ledger_timeline_view(bank_id, reservations, bank_capacity_kw, now=now),
             "grants": grants_and_substitutions_view(grants),
             "lock_events": commitment_lock_events_view(commitments),
+            "as_awards": as_awards_view(
+                obligations if isinstance(obligations, list) else [], deployments, now=now
+            ),
+            "as_deployments": deployments,
             "degraded": degraded,
         },
     )
