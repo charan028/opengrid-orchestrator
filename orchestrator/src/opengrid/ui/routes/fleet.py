@@ -31,6 +31,20 @@ router = APIRouter(prefix="/fleet")
 _SAFESTOP_PROPOSE_PATH = "/og/api/safestop"
 _COMMAND_PROPOSE_PATH = "/og/api/fleet/command"
 _HUB_STALE_AFTER_S = 10.0
+_SAFESTOP_SCOPES = ("fleet", "zone", "bank")
+
+
+def safestop_prefill(scope: str | None, scope_id: str | None) -> dict[str, str] | None:
+    """Values for the safe-stop form when an operator follows a guardian safe-stop request
+    (`opengrid.ui.routes.health.guardian_attention`). Only fills the step-1 form: the operator still
+    proposes and then confirms the API's summary (K8); an unknown scope prefills nothing."""
+    if scope not in _SAFESTOP_SCOPES:
+        return None
+    return {
+        "scope": scope,
+        "scope_id": (scope_id or "") if scope != "fleet" else "",
+        "reason": "Guardian escalation: safe stop requested",
+    }
 
 
 def _require_operator(request: Request) -> None:
@@ -97,6 +111,8 @@ async def fleet_screen(
     zone: str | None = Query(default=None),
     bank: str | None = Query(default=None),
     health: str | None = Query(default=None),
+    safestop_scope: str | None = Query(default=None),
+    safestop_scope_id: str | None = Query(default=None),
 ) -> HTMLResponse:
     params = {k: v for k, v in {"zone": zone, "bank": bank, "health": health}.items() if v}
     degraded: str | None = None
@@ -117,6 +133,7 @@ async def fleet_screen(
             "is_operator": is_operator(request),
             "table_rows": [_to_table_row(h) for h in hubs],
             "filters": {"zone": zone, "bank": bank, "health": health},
+            "safestop_prefill": safestop_prefill(safestop_scope, safestop_scope_id),
             "degraded": degraded,
             "rendered_at": datetime.now(UTC).isoformat(),
         },

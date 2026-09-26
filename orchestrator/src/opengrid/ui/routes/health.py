@@ -16,8 +16,11 @@ calls it server-side via `opengrid.ui.api_client.post_json` (BUILD.md code-revie
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
@@ -26,7 +29,7 @@ from opengrid.core.timeutil import to_utc
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.render import render_status_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
-from opengrid.ui.templating import templates
+from opengrid.ui.templating import BASE_PATH, templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/health")
@@ -72,6 +75,84 @@ def ack_message(exc: ApiUnavailable, alert_id: int) -> str:
     if exc.status_code is not None:
         return f"Alert {alert_id} could not be acknowledged (API returned {exc.status_code})."
     return f"Alert {alert_id} could not be acknowledged: the API is unreachable."
+
+
+#: `GET /og/api/health` `degraded_modes` (02b S6.5, health/rules.py `derive_degraded_modes`) in operator words.
+DEGRADED_MODE_LABELS: dict[str, str] = {
+    "NO_NEW_COMMITMENTS": "Feed stale",
+    "HOLD_LOCAL_AUTONOMY": "Engine down",
+    "HOLD": "Guardian down",
+    "DIST_DEFERRAL_OPEN_LOOP": "SCADA silent",
+}
+
+SAFE_STOP_REQUESTED_RULE = "ALR-SAFE-STOP-REQUESTED"
+SCOPE_CONSERVATIVE_RULE = "ALR-SCOPE-CONSERVATIVE"
+#: The guardian's escalation alerts open their summary with the scope key: "BANK:bank-007: ... safe stop
+#: requested" (ALR-SAFE-STOP-REQUESTED), "ZONE:LZ_NORTH CONSERVATIVE: ..." (ALR-SCOPE-CONSERVATIVE).
+_GUARDIAN_SCOPE = re.compile(r"^(BANK|ZONE):([^:\s]+)[:\s]")
+
+
+def degraded_modes_of(health: dict[str, Any]) -> list[str]:
+    """The payload's `degraded_modes`, de-duplicated in order; `[]` when absent (an older API)."""
+    raw = health.get("degraded_modes")
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(str(mode) for mode in raw if mode))
+
+
+def degraded_mode_banner_text(modes: Iterable[str]) -> str | None:
+    """ "Feed stale + Guardian down", or None when nothing is degraded. An unknown mode is shown by its code,
+    never dropped: a degraded system must not look healthy because the console is behind the API."""
+    labels = [DEGRADED_MODE_LABELS.get(mode, mode) for mode in modes]
+    return " + ".join(labels) if labels else None
+
+
+def guardian_attention(alerts: Iterable[Any]) -> list[dict[str, Any]]:
+    """The guardian's escalation alerts (ES06-S04), safe-stop requests first. A request links to the Fleet
+    screen's two-step safe-stop form prefilled with the requested scope; the operator still proposes and
+    confirms there. Nothing on this path engages or confirms a stop (K8)."""
+    items: list[dict[str, Any]] = []
+    for alert in alerts:
+        if not isinstance(alert, dict):
+            continue
+        rule = alert.get("rule")
+        if rule not in (SAFE_STOP_REQUESTED_RULE, SCOPE_CONSERVATIVE_RULE):
+            continue
+        summary = str(alert.get("summary") or "")
+        match = _GUARDIAN_SCOPE.match(summary)
+        scope, scope_id = (match.group(1).lower(), match.group(2)) if match else (None, None)
+        stop_requested = rule == SAFE_STOP_REQUESTED_RULE
+        review_url = None
+        if stop_requested:
+            query = f"?{urlencode({'safestop_scope': scope, 'safestop_scope_id': scope_id})}" if scope else ""
+            review_url = f"{BASE_PATH}/fleet{query}#safestop-propose-form"
+        items.append(
+            {
+                "id": alert.get("id", "-"),
+                "rule": rule,
+                "stop_requested": stop_requested,
+                "title": "Guardian requests a safe stop" if stop_requested else "Scope held conservative",
+                "scope_label": f"{scope} {scope_id}" if scope else None,
+                "summary": summary,
+                "opened_at": alert.get("opened_at", "-"),
+                "review_url": review_url,
+            }
+        )
+    items.sort(key=lambda item: not item["stop_requested"])
+    return items
+
+
+def degraded_context(health: dict[str, Any]) -> dict[str, Any]:
+    """Template context shared by the Health and Control room screens: the degraded-mode banner, the
+    guardian escalations, and the label table the live-stream handler uses (`og.renderDegradedBanner`)."""
+    modes = degraded_modes_of(health)
+    alerts = health.get("alerts") if isinstance(health.get("alerts"), list) else []
+    return {
+        "degraded_modes": modes,
+        "degraded_mode_banner": degraded_mode_banner_text(modes),
+        "degraded_mode_labels": DEGRADED_MODE_LABELS,
+        "guardian_items": guardian_attention(alerts or []),
+    }
 
 
 def _feed_row(entry: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +202,7 @@ async def health_screen(request: Request) -> HTMLResponse:
             "hub_counts": health.get("hub_health_counts") or {},
             "degraded": degraded,
             "rendered_at": datetime.now(UTC).isoformat(),
+            **degraded_context(health),
         },
     )
 

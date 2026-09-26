@@ -1,0 +1,25 @@
+{# guardian_attention.html -- the guardian's escalation alerts (ES06-S04), shown above the fold on Health and
+   Control room. Params: guardian_items (opengrid.ui.routes.health.guardian_attention), is_operator, id_prefix.
+   A safe-stop request only LINKS to the Fleet screen's two-step safe-stop form; nothing here engages or
+   confirms a stop (K8). #}
+{% if guardian_items %}
+<section class="og-guardian-attention" id="{{ id_prefix }}-guardian-attention" aria-label="Guardian escalations">
+  <h2>Guardian escalations</h2>
+  <ul>
+    {% for item in guardian_items %}
+    <li class="og-guardian-item {{ 'is-stop' if item.stop_requested else 'is-conservative' }}"{% if item.stop_requested %} role="alert"{% endif %}>
+      <strong>{{ item.title }}{% if item.scope_label %}: {{ item.scope_label }}{% endif %}</strong>
+      <span class="og-guardian-rule">{{ item.rule }} &middot; alert {{ item.id }} &middot; {{ item.opened_at }}</span>
+      <span class="og-guardian-summary">{{ item.summary }}</span>
+      {% if item.stop_requested %}
+        {% if is_operator %}
+        <a class="btn btn-safestop" href="{{ item.review_url }}">Review safe stop (two-step)</a>
+        {% else %}
+        <span class="og-card-meta">An operator reviews this on Fleet: propose, then confirm.</span>
+        {% endif %}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}

@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.render import render_status_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
-from opengrid.ui.routes.health import ack_message
+from opengrid.ui.routes.health import ack_message, degraded_context
 from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
 from opengrid.ui.templating import templates
 
@@ -76,6 +76,7 @@ async def control_room(request: Request) -> HTMLResponse:
             "hubs": hubs,
             "ticker": series_chart_view(ticker_rows, series_key="price"),
             "degraded": degraded,
+            **degraded_context(health),
         },
     )
 

@@ -437,6 +437,52 @@ html:not(.og-settled) .og-content > * {
   flex: none;
 }
 
+.og-degraded-banner[hidden] {
+  display: none;
+}
+
+/* guardian escalations: a requested safe stop is critical, a conservative scope is a caution */
+.og-guardian-attention {
+  border: 1px solid color-mix(in srgb, var(--status-critical) 45%, var(--border));
+  background: color-mix(in srgb, var(--status-critical) 8%, var(--panel));
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+
+.og-guardian-attention h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.og-guardian-attention ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.og-guardian-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.og-guardian-item.is-stop strong { color: var(--status-critical); }
+.og-guardian-item.is-conservative strong { color: var(--status-caution); }
+
+.og-guardian-rule {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.og-guardian-summary {
+  flex-basis: 100%;
+  font-size: 13px;
+}
+
 /* --- panels / grids -------------------------------------------------------------------------- */
 
 .og-grid {

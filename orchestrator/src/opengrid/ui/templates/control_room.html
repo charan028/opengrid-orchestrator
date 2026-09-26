@@ -6,6 +6,9 @@
 {% endblock %}
 
 {% block content %}
+<div class="og-degraded-banner" id="control-room-degraded-banner" role="alert"
+     data-labels='{{ degraded_mode_labels|tojson }}'{% if not degraded_mode_banner %} hidden{% endif %}>{% if degraded_mode_banner %}Degraded mode: {{ degraded_mode_banner }}{% endif %}</div>
+{% with id_prefix="control-room" %}{% include "_partials/guardian_attention.html" %}{% endwith %}
 {% if story %}
 <section class="og-story" aria-label="Fleet status in one line">
   <p>
@@ -191,6 +194,7 @@
       document.getElementById("control-room-updated").textContent = "live";
       document.getElementById("control-room-updated").dataset.stale = "false";
       if (!data) { return; }
+      og.renderDegradedBanner(document.getElementById("control-room-degraded-banner"), data.degraded_modes);
       if (typeof data.fleet_mw === "number") { setKpiValue("kpi-fleet-mw", data.fleet_mw.toFixed(2)); }
       if (typeof data.active_commitment_count === "number") {
         setKpiValue("kpi-active-commitments", data.active_commitment_count);

@@ -31,17 +31,20 @@
   <h2>Scoped safe stop</h2>
   <p>Stops new dispatch for the chosen scope. Never force-discharges below reserve.
     Requires a two-step confirmation: propose, then confirm the exact summary the API returns.</p>
+  {% if safestop_prefill %}
+  <p class="og-card-meta" id="safestop-prefill-note">Prefilled from the guardian's safe-stop request. Check the scope, then propose (step 1) and confirm (step 2); nothing is engaged until you confirm.</p>
+  {% endif %}
   <form id="safestop-propose-form" class="og-form"
         hx-post="{{ base_path }}/fleet/safestop/propose" hx-target="#safestop-propose-result" hx-swap="innerHTML">
     <label>Scope
       <select name="scope">
-        <option value="fleet">Fleet</option>
-        <option value="zone">Zone</option>
-        <option value="bank">Bank</option>
+        {% for value, label in [("fleet", "Fleet"), ("zone", "Zone"), ("bank", "Bank")] %}
+        <option value="{{ value }}"{% if safestop_prefill and safestop_prefill.scope == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
       </select>
     </label>
-    <label>Scope id (zone or bank) <input type="text" name="scope_id"></label>
-    <label>Reason <input type="text" name="reason" required></label>
+    <label>Scope id (zone or bank) <input type="text" name="scope_id" value="{{ safestop_prefill.scope_id if safestop_prefill else '' }}"></label>
+    <label>Reason <input type="text" name="reason" required value="{{ safestop_prefill.reason if safestop_prefill else '' }}"></label>
     <button class="btn btn-safestop" type="submit">Propose safe stop (step 1 of 2)</button>
   </form>
   <div id="safestop-propose-result" role="status"></div>

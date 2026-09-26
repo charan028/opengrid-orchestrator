@@ -176,6 +176,21 @@
     return instance;
   };
 
+  /**
+   * Degraded-mode banner (Health, Control room) from a stream frame's `degraded_modes`. The labels come from
+   * the server (`opengrid.ui.routes.health.DEGRADED_MODE_LABELS`, the element's data-labels); an unknown
+   * mode shows its code. A frame without the field leaves the banner as it is.
+   */
+  og.renderDegradedBanner = function renderDegradedBanner(el, modes) {
+    if (!el || !Array.isArray(modes)) {
+      return;
+    }
+    var labels = JSON.parse(el.dataset.labels || "{}");
+    var text = modes.map(function (m) { return labels[m] || m; }).join(" + ");
+    el.hidden = !text;
+    el.textContent = text ? "Degraded mode: " + text : "";
+  };
+
   /** True when the viewer asked the OS for reduced motion. */
   og.reducedMotion = function reducedMotion() {
     return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
