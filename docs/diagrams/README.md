@@ -18,6 +18,31 @@ and "Still open" below. (Earlier rounds' deltas are kept further down as history
 WP-H mistake — this diagram set once wrongly marked waveform sample generation absent — was corrected in
 the `f3b3365` round and is not repeated here.)
 
+## R2 update (`main @ 6470cfa`)
+
+Four diagrams were updated for release R2; everything else in this set is still the `434d230` snapshot.
+
+- **05 data model:** migrations `0024`–`0032` were read in full. It now shows 60 tables in 15 groups, 13 of them new:
+  - `utility` and `asset` (two markets, 0025);
+  - four customer-services tables (0026);
+  - `trace_anchor` (0028);
+  - `service_transformer`, `feeder_limit` and `substation_limit` (0029);
+  - `plan_energy_value`, `plan_value` and `plan_shadow_obligation` (0030).
+
+  It also shows the new columns on `contract` (0025), `hub_state`/`telemetry` (0027), `hub` (0029, 0032) and
+  `alert` (0031), and the `invoice_line` insert-only trigger (0024). Each new table names its writer, and says
+  when that writer ships switched off.
+- **02 dispatch cycle:** the guardian check grid adds G-26…G-33 (`guardian/flow_checks.py`; G-32 in
+  `core/limits.py`) and the changed G-02/G-05/G-19. The other stages are still `434d230`.
+- **01 system architecture:** the guardian box lists G-26…G-33, and the Postgres box names the R2 tables.
+- **06 power quality:** stages 3–4 are updated. Continuous monitoring (`allocator/pq_monitor.py`) and the S5.4
+  corrective ladder (`engine/pq_ladder.py`) are wired at R2 (`engine/wiring.py:84-106`), but they are built only
+  when `[site_ingest].enabled` or `[allocator.closed_loop].enabled` is true, and both ship false. Statements
+  below that `pq_monitor` "has 0 callers" are true at `434d230` only.
+
+The R2 build status per invariant and story is in `docs/orchestrator/07-delivery/00-invariants.md` and
+`10-traceability-matrix.md`.
+
 ## Resolved since `f3b3365` (verified at `434d230`)
 
 - **The obligation lifecycle is now fully driven — 0 remaining gaps.** `allocator/cycle.py:260`'s
@@ -300,7 +325,7 @@ the `f3b3365` round and is not repeated here.)
 | [`02-dispatch-cycle.svg`](02-dispatch-cycle.svg) | The full dispatch stack as implemented: selector gate (HiGHS solver process + F2 rule fallback) → real-time allocator 2 s cycle (tiers, PI loop, water-filling/substitution, price response, K13 L0/L1/L2/INFEASIBLE attribution, ERCOT_AS capacity hold) → ledger → engine→guardian handoff (bounded-concurrent bank proposals, off-tick heartbeat/persistence, per-phase latency) → guardian verdict (every G-check it actually runs, K7 posture escalation, two-person safe-stop RELEASE) → signed MQTT command batch → hub → ack/telemetry → settle. | `orchestrator/src/opengrid/{selector,allocator,ledger,engine,guardian,settle}/*.py`, `interfaces/mqtt/*.schema.json`, `interfaces/crypto.md`, `00-invariants.md` |
 | [`03-commitment-lifecycle.svg`](03-commitment-lifecycle.svg) | The obligation state machine exactly as coded in `state_machine.py`'s `_TRANSITIONS` table, the K13 commitment lock (all of `L0`/`L1`/`L2`/`INFEASIBLE` now driven), substitution (hub-level vs. bank-level), the `at_risk` flag, and the ERCOT_AS capacity hold — **each edge marked LIVE or NOT DRIVEN based on a full-repo grep for its reason code / trigger function; 12 of 12 edges are LIVE at `434d230`.** | `orchestrator/src/opengrid/contracts/*.py`, `orchestrator/src/opengrid/ledger/__init__.py`, `orchestrator/src/opengrid/allocator/cycle.py`, `orchestrator/src/opengrid/engine/gateways.py`, `api/routers/dispatch.py` |
 | [`04-deployment.svg`](04-deployment.svg) | The base-server layout (D-16, the confirmed permanent host — no decommission wording): every `systemd` unit with its venv/working directory/memory budget/ports/env-vars, the Apache reverse-proxy rules, Postgres (`/srv/pgdata`)/Mosquitto, the deploy/rollback/backup (`/srv/ogbackup`) flow per `deploy/RUNBOOK.md`; plus the local `docker compose` dev stack. | `deploy/README.md`, `deploy/RUNBOOK.md`, `deploy/systemd/*`, `deploy/apache/opengrid.conf`, `deploy/{cron,logrotate}/opengrid`, `deploy/mosquitto/provision_ws_users.{py,sh}`, `dev/README.md`, `dev/docker-compose.yml`, `dev/.env.example` |
-| [`05-data-model.html`](05-data-model.html) | Every one of the 47 tables created or altered by migrations `0001`…`0023` (`0015` skipped, allocated elsewhere), grouped into 11 areas including a new invariants/posture/AS-hold group, with primary keys, foreign keys, one-line purpose, and which migration touched each. | `orchestrator/migrations/0001_init.sql` … `0023_pnl_delivery_charge.sql` (read in full) |
+| [`05-data-model.html`](05-data-model.html) | Every one of the 60 tables created or altered by migrations `0001`…`0032` (`0015` skipped; customer services landed as `0026`), grouped into 15 areas, with primary keys, foreign keys, one-line purpose, which migration touched each, and (for the R2 tables) the writer and whether it ships switched off. Verified at `6470cfa` (R2). | `orchestrator/migrations/0001_init.sql` … `0032_hub_units.sql` (0024–0032 read in full for R2) |
 | [`06-power-quality-flow.svg`](06-power-quality-flow.svg) | The PQ pipeline the spec describes — waveform → transport → ingestion/storage → envelope checks (K14) → corrective ladder (calibration loop now fully wired, gated off by config) → asset health → work order → physical swap, plus the allocator PQ-eligibility/monitoring split — **with every stage marked LIVE, WIRED-BUT-CONFIG-DISABLED, BUILT-BUT-0-CALLERS, or PLANNED**, cross-checked against `docs/team/NOTICES.md`'s own wave 1/2/3 status. | `orchestrator/src/opengrid/pq_ingest/*.py`, `guardian/{pq_checks,pq_repo,mqtt_io}.py`, `assets/*.py`, `allocator/{pq_eligibility,pq_monitor}.py`, `engine/pq_eligibility.py`, `settle/main.py`, `core/models/pq.py`, `integration-sims/src/ogsim/fleet/{pq,calibration,wave,runtime}.py`, `orchestrator/migrations/0010_service_profile.sql`, `0011_asset_health.sql`, `0016_calibration_command.sql`, `interfaces/mqtt/{pq_waveform_*,calibration_*,waveform_capture_request}.schema.json` |
 
 ## How these were verified
