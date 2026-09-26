@@ -47,6 +47,14 @@ class HubSnapshot:
     # Nameplate discharge kW regardless of health/SoC, so a shortfall can be attributed to the K13
     # exception that caused it (device fault = L0, reserve floor = L1). `None`: unknown, attributes nothing.
     rated_kw: float | None = None
+    # Measured power now (+charge/-discharge), for the PQ phase-balance weighting (S5.2 step 2).
+    p_kw: float | None = None
+    # 09 S1.9 flow-limit inputs (F1/F2/F3). `None` = not reported: the static limits apply, never a guess.
+    cell_temp_c: float | None = None
+    p_dis_max_kw: float | None = None  # the hub BMS's own discharge limit
+    meter_kw: float | None = None  # net import at the home meter (+ import, - export)
+    export_limit_kw: float | None = None  # interconnection export limit at the meter
+    xfmr_id: str | None = None  # service transformer the home hangs off
 
     @property
     def is_healthy(self) -> bool:
@@ -64,6 +72,13 @@ class BankSnapshot:
     reserve_kva: float = 0.0
     tau_eff: float = 60.0  # effective time constant for the PI's Ki gain (02a S5.4)
     zone: str = ""  # ERCOT-load-zone-equivalent grouping, for ZONE-scoped L2 instructions / safe-stop
+    feeder_id: str | None = None  # 09 F3 per-cycle feeder budget
+    substation_id: str | None = None  # 09 F3 per-cycle substation budget
+    #: K15 territory (`opengrid.market.territory_of_zone`): a regulated utility id, `ERCOT_COMPETITIVE`, or
+    #: `None` = unknown (fail closed when territory is enforced).
+    territory: str | None = None
+    #: K15(b): the territory's utility grants wholesale (FREE) access. Ignored for competitive-area banks.
+    free_access: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +140,10 @@ class Instruction:
 class PriceSignal:
     bank_id: str
     price_usd_per_mwh: float
+    #: The bank's own headroom-discharge threshold: the replacement cost of the energy it would spend
+    #: (cheapest recharge price ahead + the M1 delivery charge, over round-trip efficiency; 09 S1.8 G9).
+    #: None: the cycle's fixed default threshold.
+    threshold_usd_per_mwh: float | None = None
 
 
 @dataclass

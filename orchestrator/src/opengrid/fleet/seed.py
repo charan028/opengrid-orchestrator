@@ -8,7 +8,9 @@ nothing downstream (selector commitments, allocator grants, guardian verdicts, s
 capacity to work with (A2/A4/A5/A6/A8, `qa/merge-notes.md` section 9).
 
 **Single source of truth.** The id scheme (`hub-00000`.."hub-01999"`, `bank-000`.."bank-039"`, hubs
-distributed round-robin across banks and zones) must match exactly what `integration-sims/src/ogsim/
+distributed round-robin across banks and zones -- banks are feeder segments and must stay single-zone,
+so the dual-unit rule is offset per-bank instead, see `_is_dual_unit`) must match exactly what
+`integration-sims/src/ogsim/
 fleet/state.py::build_fleet_state` generates, or telemetry still won't line up. `opengrid` must never
 import `ogsim` (BUILD.md S1's "share no code" rule, enforced by `tools/dupcheck.py`), so this module
 reads `integration-sims/config/fleet.yaml` itself, read-only, as plain YAML data -- never the sim's
@@ -50,6 +52,22 @@ _BANK_KVA_RATING_DEFAULT: float = 600.0
 BANKS_PER_FEEDER_DEFAULT: int = 5
 
 
+@dataclass(frozen=True, slots=True)
+class ZoneBlockConfig:
+    """Mirrors `ogsim.common.config.ZoneBlockConfig` field-for-field (BUILD.md S1: the two packages
+    share no code, so this is a second, independent definition of the same shape, not an import). One
+    optional extra load-zone block (build phase 2026-09-26: Austin Energy `LZ_AEN`/CPS Energy
+    `LZ_CPS`), appended after `hub-{hub_count-1}`/`bank-{bank_count-1}` (or after the previous enabled
+    block) in `zone_blocks` list order; disabled (`enabled=False`) by default, and a disabled block
+    reserves no ids at all, so the base fleet's ids never move regardless of how many blocks are
+    defined-but-off."""
+
+    zone: str
+    banks: int
+    homes_per_bank: int
+    enabled: bool = False
+
+
 def feeder_id_for(zone: str, rank_in_zone: int, banks_per_feeder: int) -> str:
     """`feeder-<zone>-<NN>`: the `rank_in_zone`-th bank of `zone` (0-based, by bank index) belongs to
     feeder `rank_in_zone // banks_per_feeder`. The live backfill SQL in the guardian safety report
@@ -84,6 +102,9 @@ class SimFleetTopologyConfig:
     eta_d: float = 0.9487
     # Feeder segment (~50 homes), not a single distribution transformer.
     bank_kva_rating_default: float = _BANK_KVA_RATING_DEFAULT
+    # Optional extra load-zone blocks (Austin Energy/CPS Energy, build phase 2026-09-26); empty/all-
+    # disabled by default, so the base fleet is unchanged (see `ZoneBlockConfig`'s docstring).
+    zone_blocks: tuple[ZoneBlockConfig, ...] = ()
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -118,6 +139,26 @@ def resolve_sim_fleet_config_path(cfg: Config | None = None) -> Path:
     return Path("integration-sims/config/fleet.yaml")
 
 
+def _zone_blocks_from_raw(raw_blocks: Any) -> tuple[ZoneBlockConfig, ...]:
+    """Mirrors `ogsim.common.config._zone_blocks_from_raw` (BUILD.md S1: independently re-implemented,
+    not imported). A missing key, non-list value, or non-mapping entry parses to "no extra blocks"."""
+    if not isinstance(raw_blocks, list):
+        return ()
+    blocks = []
+    for block in raw_blocks:
+        if not isinstance(block, dict):
+            continue
+        blocks.append(
+            ZoneBlockConfig(
+                zone=str(block["zone"]),
+                banks=int(block["banks"]),
+                homes_per_bank=int(block["homes_per_bank"]),
+                enabled=bool(block.get("enabled", False)),
+            )
+        )
+    return tuple(blocks)
+
+
 def load_sim_fleet_topology_config(cfg: Config | None = None) -> SimFleetTopologyConfig:
     """Reads `integration-sims/config/fleet.yaml` (read-only) and falls back field-by-field to
     `SimFleetTopologyConfig`'s defaults (which match `ogsim.common.config.FleetConfig`'s own defaults) --
@@ -137,6 +178,7 @@ def load_sim_fleet_topology_config(cfg: Config | None = None) -> SimFleetTopolog
         eta_c=float(raw.get("eta_c", defaults.eta_c)),
         eta_d=float(raw.get("eta_d", defaults.eta_d)),
         bank_kva_rating_default=float(raw.get("bank_kva_rating_default", defaults.bank_kva_rating_default)),
+        zone_blocks=_zone_blocks_from_raw(raw.get("zone_blocks", [])),
     )
 
 
@@ -146,22 +188,38 @@ class Topology:
     banks: tuple[Bank, ...]
 
 
-def _is_dual_unit(index: int, dual_unit_share: float) -> bool:
-    """Dual-unit rule (must match ogsim.fleet.state exactly): hub index i (hub-{i:05d}) is dual-unit
-    iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share), which selects exactly
-    floor(hub_count * dual_unit_share) hubs, deterministically and evenly spread across i in
-    range(hub_count)."""
-    return math.floor((index + 1) * dual_unit_share) > math.floor(index * dual_unit_share)
+def _is_dual_unit(index: int, bank_count: int, dual_unit_share: float) -> bool:
+    """Dual-unit rule (must match `ogsim.fleet.state` exactly, and the bank-assignment rule below):
+    hub index `i` belongs to bank `i % bank_count` (round-robin, single-zone banks -- see
+    `build_topology`'s docstring), and within a bank the hubs are `i = b, b + bank_count, b +
+    2*bank_count, ...` for `k = i // bank_count = 0, 1, 2, ...`. Hub `i` is dual-unit iff
+    `floor((k + 1) * dual_unit_share) > floor(k * dual_unit_share)` -- the same deterministic,
+    evenly-spread selection rule as before, applied to `k` (the hub's *rank within its own bank*)
+    instead of to `i` (its rank in the whole fleet), so every bank's `k` ranges over the identical
+    `0..49` and gets the identical `floor(50 * dual_unit_share)` = 10 dual-unit hubs.
+
+    This replaces indexing directly by `i`: at the default `dual_unit_share=0.2` (period 5), `i %
+    bank_count == i`'s bank, and `k % 5 == 4` selects one hub in every run of 5 *within* that bank
+    (`k=4,9,14,...,49`) -- 10 per bank, every bank -- instead of selecting hubs whose *fleet-wide*
+    index was congruent to 4 mod 5, which (since `bank_count=40` is a multiple of 5) always landed on
+    the same 8 of 40 banks (1,000 kW of dual-unit inverter capacity on one 600 kVA bank) and never on
+    the other 32."""
+    k = index // bank_count
+    return math.floor((k + 1) * dual_unit_share) > math.floor(k * dual_unit_share)
 
 
 def build_topology(
     config: SimFleetTopologyConfig, *, banks_per_feeder: int = BANKS_PER_FEEDER_DEFAULT
 ) -> Topology:
     """Pure (no I/O): reproduces `ogsim.fleet.state.build_fleet_state`'s id/grouping scheme exactly --
-    `hub-{i:05d}` for `i` in `range(hub_count)`, `bank-{i % bank_count:03d}`, zone `zones[i % len(zones)]`
-    -- so every id this generates is one the simulator will actually publish telemetry for. Dual-unit
-    hub selection uses `_is_dual_unit`, identical to `ogsim.fleet.state`'s vectorized rule. Each bank's
-    `feeder_id` groups `banks_per_feeder` banks of the same zone (`feeder_id_for`), so G-06 evaluates.
+    `hub-{i:05d}` for `i` in `range(hub_count)`, `bank-{i % bank_count:03d}` (round-robin -- banks are
+    feeder segments, so every hub on a bank must share that bank's one zone; `zones[i % len(zones)]`
+    cycles with a period that divides `bank_count` at the confirmed defaults, so this keeps every bank
+    single-zone) -- so every id this generates is one the simulator will actually publish telemetry
+    for. Dual-unit hub selection uses `_is_dual_unit`, identical to `ogsim.fleet.state`'s vectorized
+    rule: it selects 10 of each bank's 50 hubs (at the confirmed defaults), spread across *all* 40
+    banks instead of clustering in 1-in-5 of them. Each bank's `feeder_id` groups `banks_per_feeder`
+    banks of the same zone (`feeder_id_for`), so G-06 evaluates.
     """
     n_zones = len(config.zones)
 
@@ -171,7 +229,7 @@ def build_topology(
         hub_id = f"hub-{i:05d}"
         bank_id = f"bank-{i % config.bank_count:03d}"
         zone = config.zones[i % n_zones]
-        dual_unit = _is_dual_unit(i, config.dual_unit_share)
+        dual_unit = _is_dual_unit(i, config.bank_count, config.dual_unit_share)
         e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default
         p_kw = config.p_kw_dual_unit if dual_unit else config.p_kw_default
         r_kwh = e_kwh * config.reserve_frac_default
@@ -210,7 +268,66 @@ def build_topology(
                 feeder_id=feeder_id_for(zone, rank_in_zone, banks_per_feeder),
             )
         )
+
+    hub_offset, bank_offset = config.hub_count, config.bank_count
+    for block in config.zone_blocks:
+        if not block.enabled:
+            continue
+        hubs_added, banks_added = _build_zone_block(
+            block, config, hub_offset=hub_offset, bank_offset=bank_offset, banks_per_feeder=banks_per_feeder
+        )
+        hubs.extend(hubs_added)
+        banks.extend(banks_added)
+        hub_offset += block.banks * block.homes_per_bank
+        bank_offset += block.banks
+
     return Topology(hubs=tuple(hubs), banks=tuple(banks))
+
+
+def _build_zone_block(
+    block: ZoneBlockConfig,
+    config: SimFleetTopologyConfig,
+    *,
+    hub_offset: int,
+    bank_offset: int,
+    banks_per_feeder: int,
+) -> tuple[list[Hub], list[Bank]]:
+    """One enabled `ZoneBlockConfig`'s hubs/banks: `block.banks` banks, all in `block.zone` (a block is
+    single-zone by construction, so -- unlike the base fleet's majority-vote zone -- there's no
+    ambiguity), each with `block.homes_per_bank` hubs round-robin-assigned and the same per-bank-offset
+    dual-unit rule as the base fleet (`_is_dual_unit`). Ids continue from `hub_offset`/`bank_offset`,
+    so an enabled block never renumbers the base fleet or an earlier block (`build_topology`'s
+    docstring). Mirrors `ogsim.fleet.state.build_fleet_state`'s block-handling loop exactly."""
+    n_block = block.banks * block.homes_per_bank
+    hubs: list[Hub] = []
+    for j in range(n_block):
+        dual_unit = _is_dual_unit(j, block.banks, config.dual_unit_share)
+        e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default
+        p_kw = config.p_kw_dual_unit if dual_unit else config.p_kw_default
+        hubs.append(
+            Hub(
+                hub_id=f"hub-{hub_offset + j:05d}",
+                bank_id=f"bank-{bank_offset + (j % block.banks):03d}",
+                zone=block.zone,
+                e_kwh=e_kwh,
+                r_kwh=e_kwh * config.reserve_frac_default,
+                p_kw=p_kw,
+                eta_c=config.eta_c,
+                eta_d=config.eta_d,
+            )
+        )
+
+    banks = [
+        Bank(
+            bank_id=f"bank-{bank_offset + b:03d}",
+            zone=block.zone,
+            kva_rating=config.bank_kva_rating_default,
+            reserve_kva=0.0,
+            feeder_id=feeder_id_for(block.zone, b, banks_per_feeder),
+        )
+        for b in range(block.banks)
+    ]
+    return hubs, banks
 
 
 _UPSERT_BANK_SQL = """

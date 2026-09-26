@@ -81,3 +81,23 @@ LZ_WEST = "AEP_NORTH"
 [zone_territory]
 LZ_AEN = { utility = "AUSTIN_ENERGY", market = "REGULATED", delivery_charge = "NONE" }
 LZ_CPS = { utility = "CPS_ENERGY", market = "REGULATED", delivery_charge = "NONE" }
+
+# LZ_LCRA and LZ_RAYBN (build phase, 2026-09-26: FLEET-SIM reassignment) are FREE-market ERCOT zones --
+# confirmed present in live ERCOT NP6-905-CD results (2026-09-26 probe, FLEET-SIM build report) -- so
+# they belong here for `delivery_charge` documentation only, NOT in `[zone_default_tdsp]` above (that
+# table is only ever a competitively-filed TDSP tariff to charge against). Assumptions, to confirm:
+#   - LZ_LCRA (Lower Colorado River Authority): LCRA is itself a transmission AND distribution utility
+#     in its service area, not a retail customer of one of the four TDSPs above, so there is no separate
+#     competitive TDSP delivery tariff to apply -- $0 M1, same mechanism as a regulated zone even though
+#     LCRA is not vertically-integrated-retail like Austin/CPS (`market = "FREE"`, not "REGULATED": LCRA
+#     wholesale customers still transact in the ERCOT free market, unlike Austin/CPS's utility-as-
+#     customer regulated contracts).
+#   - LZ_RAYBN (Rayburn Country Electric Cooperative): a member-owned distribution cooperative, exempt
+#     from PUCT's competitive retail TDSP tariff filing requirement -- there is no filed
+#     `volumetric_usd_per_kwh` for it to add as a `[[tariff]]` block, so $0 M1 here too, documented as
+#     "non-competitive" rather than "regulated territory."
+# Both assumptions need confirmation from the owner/Base before they inform real settlement; until then
+# `[zone_default_tdsp]` has no entry for either (so `m1_delivery_charge` already prices $0, no code
+# change needed), and this table records WHY, distinctly from the Austin/CPS regulated-market reason.
+LZ_LCRA = { utility = "LCRA", market = "FREE", delivery_charge = "NONE" }  # LCRA is itself the TDSP
+LZ_RAYBN = { utility = "RAYBURN_COUNTRY_EC", market = "FREE", delivery_charge = "NONE" }  # co-op, non-competitive

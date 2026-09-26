@@ -166,16 +166,29 @@ def test_default_yaml_resolves_next_to_the_package_not_the_cwd(
 
 def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPatch) -> None:
     """Loading the shipped YAML instead of the built-in defaults changes nothing about the simulated
-    fleet (39.2 kWh / 11 kW units, 20% dual-unit homes at 78.4 kWh / 20 kW, 600 kVA banks)."""
+    fleet (39.2 kWh / 11 kW units, 20% dual-unit homes at 78.4 kWh / 20 kW, 600 kVA banks).
+
+    `zone_blocks` is the one documented exception (build phase, 2026-09-26): `fleet.yaml` ships the
+    Austin Energy/CPS Energy blocks pre-declared but `enabled: false`, which is asserted separately
+    below to have zero effect on the simulated base fleet (`ZoneBlockConfig`'s docstring: a disabled
+    block reserves no ids and changes nothing) -- it is excluded from the raw dict-equality check
+    because it is the one field this shipped YAML deliberately does NOT match the bare
+    "does-not-exist.yaml" built-in default (`()`, no blocks at all) on."""
     for loader, path in (
         (load_fleet_config, DEFAULT_FLEET_CONFIG_PATH),
         (load_scada_config, DEFAULT_SCADA_CONFIG_PATH),
     ):
-        assert asdict(loader(str(path))) == asdict(loader("does-not-exist.yaml"))
+        shipped = asdict(loader(str(path)))
+        builtin = asdict(loader("does-not-exist.yaml"))
+        shipped.pop("zone_blocks", None)
+        builtin.pop("zone_blocks", None)
+        assert shipped == builtin
     fleet = load_fleet_config()
     assert (fleet.e_kwh_default, fleet.p_kw_default, fleet.dual_unit_share) == (39.2, 11.0, 0.2)
     assert (fleet.e_kwh_dual_unit, fleet.p_kw_dual_unit, fleet.bank_kva_rating_default) == (78.4, 20.0, 600.0)
     assert (fleet.hub_count, fleet.bank_count) == (2000, 40)
+    assert all(not block.enabled for block in fleet.zone_blocks)
+    assert {block.zone for block in fleet.zone_blocks} == {"LZ_AEN", "LZ_CPS"}
 
 
 # --- broker credentials ----------------------------------------------------------------------

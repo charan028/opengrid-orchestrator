@@ -42,6 +42,55 @@ P_KW_DUAL_UNIT_DEFAULT: float = 20.0
 BANK_KVA_RATING_DEFAULT: float = 600.0
 
 
+@dataclass(frozen=True)
+class ZoneBlockConfig:
+    """One optional extra load-zone block, appended after the base `hub_count`/`bank_count`/`zones`
+    fleet (build phase, 2026-09-26: Austin Energy `LZ_AEN`/CPS Energy `LZ_CPS`, both municipal,
+    vertically-integrated regulated utilities outside ERCOT retail choice -- see
+    `docs/orchestrator/07-delivery/08-market-model-two-markets.md`).
+
+    Disabled by default (`enabled=False`): a disabled block reserves no hub/bank ids at all, so the
+    base fleet's ids (`hub-00000..`, `bank-000..`) never move when a block is defined-but-off, and new
+    ids only ever start at `hub_count`/`bank_count` (or after the previous enabled block) once a block
+    is turned on. Every bank in a block shares the block's single `zone` (feeder segments can't span
+    zones, same rule as the base fleet); `homes_per_bank` hubs are assigned round-robin across the
+    block's `banks`, and the same per-bank-offset dual-unit rule as the base fleet (`_dual_unit_mask`)
+    selects `floor(homes_per_bank * dual_unit_share) dual-unit hubs per bank. Must be parsed
+    identically (field names/defaults) in `opengrid.fleet.seed`'s mirror of this dataclass -- that
+    module can't import this one (BUILD.md S1 "share no code")."""
+
+    zone: str
+    banks: int
+    homes_per_bank: int
+    enabled: bool = False
+
+
+def bank_topology(
+    bank_count: int, zones: tuple[str, ...], zone_blocks: tuple[ZoneBlockConfig, ...]
+) -> tuple[list[str], list[str]]:
+    """`(bank_ids, zone_per_bank)` for the base fleet's `bank_count` banks (round-robin across
+    `zones`, `bank-000..`) plus every ENABLED entry in `zone_blocks`, in the SAME
+    id-numbering/offset scheme `ogsim.fleet.state.build_fleet_state` uses for hubs (a block's
+    banks start right after the base fleet's `bank_count`, then after each already-enabled
+    block in order, so enabling/disabling one block never renumbers another).
+
+    Lives in `ogsim.common` (not duplicated separately in `ogsim.fleet.state` and
+    `ogsim.scada.runtime`) because both need the identical bank roster for a shared config --
+    unlike the opengrid/ogsim boundary (BUILD.md S1: "share no code"), `ogsim.fleet`/
+    `ogsim.scada`/`ogsim.common` are one sims package with one owner, and `ogsim.common` is
+    already the shared config module both import."""
+    bank_ids = [f"bank-{i:03d}" for i in range(bank_count)]
+    zone_per_bank = [zones[i % len(zones)] for i in range(bank_count)]
+    offset = bank_count
+    for block in zone_blocks:
+        if not block.enabled:
+            continue
+        bank_ids += [f"bank-{offset + i:03d}" for i in range(block.banks)]
+        zone_per_bank += [block.zone] * block.banks
+        offset += block.banks
+    return bank_ids, zone_per_bank
+
+
 def load_yaml_file(path: str) -> dict[str, Any]:
     """Loads a YAML mapping from `path`; returns {} if absent or empty."""
     try:
@@ -167,6 +216,10 @@ class FleetConfig:
     self_discharge_kwh_per_h: float = 0.0005
     # Feeder segment (~50 homes), not a single distribution transformer.
     bank_kva_rating_default: float = BANK_KVA_RATING_DEFAULT
+    # Optional extra load-zone blocks (Austin Energy/CPS Energy, build phase 2026-09-26), appended
+    # after hub-{hub_count-1}/bank-{bank_count-1} in config order; empty/all-disabled by default, so
+    # the base fleet is unchanged (see `ZoneBlockConfig`'s docstring).
+    zone_blocks: tuple[ZoneBlockConfig, ...] = ()
     guardian_public_key_path: str = "/etc/opengrid/guardian_ed25519.pub"
     guardian_public_key_path_dev: str = ""
     safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
@@ -247,6 +300,7 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
             raw.get("self_discharge_kwh_per_h", defaults.self_discharge_kwh_per_h)
         ),
         bank_kva_rating_default=float(raw.get("bank_kva_rating_default", defaults.bank_kva_rating_default)),
+        zone_blocks=_zone_blocks_from_raw(raw.get("zone_blocks", [])),
         guardian_public_key_path=str(raw.get("guardian_public_key_path", defaults.guardian_public_key_path)),
         guardian_public_key_path_dev=str(
             os.environ.get("OGSIM_GUARDIAN_PUBLIC_KEY_PATH") or raw.get("guardian_public_key_path_dev", "")
@@ -258,6 +312,28 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         **_inverter_pq_fields(raw, defaults),
         **_wave_fields(raw, defaults),
     )
+
+
+def _zone_blocks_from_raw(raw_blocks: Any) -> tuple[ZoneBlockConfig, ...]:
+    """Reads the optional `zone_blocks:` YAML list (`ZoneBlockConfig`'s docstring); a missing key, a
+    non-list value, or a non-mapping entry is treated as "no extra blocks" rather than raising, so a
+    fleet.yaml without this key (every deployment before 2026-09-26) still loads (BUILD.md S5a "no
+    silent fallbacks" is about masking real data, not about a key that was never required)."""
+    if not isinstance(raw_blocks, list):
+        return ()
+    blocks = []
+    for block in raw_blocks:
+        if not isinstance(block, dict):
+            continue
+        blocks.append(
+            ZoneBlockConfig(
+                zone=str(block["zone"]),
+                banks=int(block["banks"]),
+                homes_per_bank=int(block["homes_per_bank"]),
+                enabled=bool(block.get("enabled", False)),
+            )
+        )
+    return tuple(blocks)
 
 
 def _inverter_pq_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:
@@ -319,6 +395,12 @@ class ScadaConfig:
     overload_consecutive_samples: int = 3
     history_tsv_path: str = "/var/lib/opengrid/import/mariadb_history_signals.tsv"
     base_load_kw_default: float = 200.0
+    # Optional extra load-zone blocks (see `ZoneBlockConfig`'s docstring) -- mirrors
+    # `FleetConfig.zone_blocks` (kept in the same order/values in scada.yaml as in fleet.yaml,
+    # the same manual-duplication pattern `bank_count`/`zones` already use across the two
+    # config files) so `ScadaEngine`'s bank roster covers exactly the banks `ogsim.fleet`
+    # actually seeds -- empty/all-disabled by default, so the base fleet is unchanged.
+    zone_blocks: tuple[ZoneBlockConfig, ...] = ()
 
 
 def load_scada_config(path: str | None = None) -> ScadaConfig:
@@ -336,6 +418,7 @@ def load_scada_config(path: str | None = None) -> ScadaConfig:
         ),
         history_tsv_path=str(raw.get("history_tsv_path", defaults.history_tsv_path)),
         base_load_kw_default=float(raw.get("base_load_kw_default", defaults.base_load_kw_default)),
+        zone_blocks=_zone_blocks_from_raw(raw.get("zone_blocks", [])),
     )
 
 
@@ -348,6 +431,8 @@ __all__ = [
     "MqttSettings",
     "ScadaConfig",
     "WorkspaceConfigError",
+    "ZoneBlockConfig",
+    "bank_topology",
     "is_production",
     "load_fleet_config",
     "load_scada_config",

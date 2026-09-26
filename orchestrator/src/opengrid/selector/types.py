@@ -51,12 +51,22 @@ class BankSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ScenarioPrice:
-    """One P10/P50/P90 price path (from `forecast.scenarios`, 02b S3). Bank-independent for MVP-S
-    (one ERCOT load-zone price feeds every bank's energy value, 02a S3.2 v^E_{b,t,omega})."""
+    """One P10/P50/P90 price path (from `forecast.scenarios`, 02b S3). `price_usd_per_mwh` is the fleet
+    path (mean of the load zones); `price_by_bank` holds each bank's OWN load-zone path (02a S3.2's
+    v^E_{b,t,omega} is per bank). Architect finding (a): every bank was priced at whichever zone's row
+    came last (LZ_WEST), and load-forecast rows were folded into the price path."""
 
     scenario: ScenarioName
     probability: float
     price_usd_per_mwh: dict[int, float]
+    price_by_bank: dict[str, dict[int, float]] = field(default_factory=dict)
+
+    def price_at(self, bank_id: str, t: int) -> float:
+        """Bank `bank_id`'s $/MWh at interval `t`: its zone's path, else the fleet path, else 0."""
+        by_t = self.price_by_bank.get(bank_id)
+        if by_t is not None and t in by_t:
+            return by_t[t]
+        return self.price_usd_per_mwh.get(t, 0.0)
 
 
 @dataclass(frozen=True, slots=True)

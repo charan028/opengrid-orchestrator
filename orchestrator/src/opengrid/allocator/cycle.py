@@ -87,6 +87,9 @@ def cycle(
         calls_by_bank.setdefault(call.bank_id, []).append(call)
 
     prices_by_bank = {p.bank_id: p.price_usd_per_mwh for p in schedule.prices}
+    thresholds_by_bank = {
+        p.bank_id: p.threshold_usd_per_mwh for p in schedule.prices if p.threshold_usd_per_mwh is not None
+    }
 
     grants: list[ProposedGrant] = []
     shortfalls: list[ShortfallReport] = []
@@ -147,6 +150,18 @@ def cycle(
                 # exported), and no shortfall is reported -- holding IS delivering the service.
                 held.append(call.obligation_id)
                 bank_has_as_hold = True
+                # An explicit 0 kW grant carrying R-GRANT-AS-HOLD: omitting the award from the batch would
+                # read to the guardian's G-19 as an unexplained reduction to 0 (it enumerates every active
+                # obligation itself); the guardian signs the hold on its own reads.
+                grants.append(
+                    ProposedGrant(
+                        bank_id=bank_id,
+                        granted_kw=0.0,
+                        obligation_id=call.obligation_id,
+                        is_headroom=False,
+                        reason_code=reasons.R_GRANT_AS_HOLD,
+                    )
+                )
                 continue
 
             if call.service_type == "DIST_DEFERRAL" and not pi_extra_applied and pi_extra_kw > _EPS:
@@ -201,7 +216,7 @@ def cycle(
         spot_kw, new_dwell = price_responsive_schedule(
             remaining_headroom,
             prices_by_bank.get(bank_id, 0.0),
-            price_threshold_usd_per_mwh,
+            thresholds_by_bank.get(bank_id, price_threshold_usd_per_mwh),
             dwell_states.get(bank_id, DwellState()),
             t,
         )

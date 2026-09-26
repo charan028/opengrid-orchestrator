@@ -27,8 +27,8 @@
         <div class="og-card-meta">customer {{ item.customer_id }}</div>
         {% if item.raw_state in ("COMMITTED", "DELIVERING") %}
         <div class="og-card-meta">
-          energy margin: {{ "%.2f"|format(item.energy_margin_kwh) if item.energy_margin_kwh is not none else "--" }} kWh
-          &middot; depletes in: {{ "%.2f"|format(item.time_to_depletion_h) + "h" if item.time_to_depletion_h is not none else "--" }}
+          energy margin: {{ "%.2f"|format(item.energy_margin_kwh|float) if item.energy_margin_kwh is not none else "--" }} kWh
+          &middot; depletes in: {{ "%.2f"|format(item.time_to_depletion_h|float) + "h" if item.time_to_depletion_h is not none else "--" }}
         </div>
         {% endif %}
         {% if item.reason_code %}<div class="og-card-meta">{{ item.reason_code }}</div>{% endif %}
@@ -59,7 +59,7 @@
       <dt>Gate</dt><dd>{{ plan.gate_kind }}</dd>
       <dt>Horizon</dt><dd>{{ plan.horizon_display }}</dd>
       <dt>Solver status</dt><dd>{{ plan.solver_status }}</dd>
-      {% if plan.solver_gap_pct is not none %}<dt>Solver gap</dt><dd>{{ "%.2f"|format(plan.solver_gap_pct) }}%</dd>{% endif %}
+      {% if plan.solver_gap_pct is not none %}<dt>Solver gap</dt><dd>{{ "%.2f"|format(plan.solver_gap_pct|float) }}%</dd>{% endif %}
       {% if plan.solver_time_ms is not none %}<dt>Solve time</dt><dd>{{ plan.solver_time_ms }} ms</dd>{% endif %}
       {% if plan.objective_value is not none %}<dt>Objective value</dt><dd>{{ plan.objective_value }}</dd>{% endif %}
     </dl>

@@ -38,7 +38,7 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.core.crypto import sha256_hex_of_json
 from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import apply_ramp_limit
-from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS
+from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS, R_GRANT_AS_HOLD
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.engine import metrics as engine_metrics
 from opengrid.engine import pq_eligibility
@@ -192,6 +192,39 @@ def _ramped_setpoint_kw(hub: Any, target_kw: float, cycle_interval_s: float | No
     return apply_ramp_limit(prev_kw, target_kw, cycle_interval_s, ramp_kw_per_s * RAMP_SAFETY_FACTOR)
 
 
+def _as_hold_items(
+    bank_id: str, grants: list[Grant], *, fleet_module: Any, cycle_interval_s: float | None
+) -> list[dict[str, object]]:
+    """ERCOT_AS capacity holds (R-GRANT-AS-HOLD, 0 kW): items that carry each held award into the
+    batch, so the guardian's G-19 sees the hold's reason instead of an unexplained 0 kW. The hold ramps
+    the bank's online hubs toward 0 (renewing their leases, K7), and goes FIRST: a hub also serving
+    another grant gets that grant's item later in the batch, and a hub applies the last item it gets.
+    Hubs no other grant uses carry the hold item; when every online hub is in use, the first hub carries
+    it (its later item then sets that hub), so the reason is always in the batch."""
+    held = [g for g in grants if g.obligation_id and g.reason_code == R_GRANT_AS_HOLD]
+    if not held:
+        return []
+    hubs = [h for h in fleet_module.hub_capabilities(bank_id) if h.health == "online"]
+    if not hubs:
+        return []
+    active = any(float(g.granted_kw) > 0 for g in grants)
+    # `_distribute_hub_items` gives an item to every online hub with free discharge for each active grant.
+    uncovered = [h for h in hubs if not active or h.free_discharge_kw <= 0]
+    items: list[dict[str, object]] = []
+    for grant in held:
+        for hub in uncovered or hubs[:1]:
+            items.append(
+                {
+                    "hub_id": hub.hub_id,
+                    "p_kw_setpoint": _ramped_setpoint_kw(hub, 0.0, cycle_interval_s),
+                    "reason_code": R_GRANT_AS_HOLD,
+                    "obligation_id": str(grant.obligation_id),
+                    "obligation_granted_kw": "0",
+                }
+            )
+    return items
+
+
 def _distribute_hub_items(
     bank_id: str, grants: list[Grant], *, fleet_module: Any, cycle_interval_s: float | None = None
 ) -> list[dict[str, object]]:
@@ -211,6 +244,9 @@ def _distribute_hub_items(
     items: list[dict[str, object]] = []
     if not hubs or total_free_kw <= 0:
         return items
+    items.extend(
+        _as_hold_items(bank_id, grants, fleet_module=fleet_module, cycle_interval_s=cycle_interval_s)
+    )
     for grant in grants:
         granted_kw = float(grant.granted_kw)
         if granted_kw <= 0:

@@ -116,7 +116,7 @@ def _headroom_schedule(
     headroom: dict[tuple[str, int, str], float] = {}
     for scenario in inputs.scenarios:
         for (bank_id, t), left in remaining.items():
-            price = scenario.price_usd_per_mwh.get(t, 0.0)
+            price = scenario.price_at(bank_id, t)
             headroom[bank_id, t, scenario.scenario] = left if price >= 0 else 0.0
     return headroom
 
@@ -135,9 +135,9 @@ def _objective_value(
     for (oid, _bank_id, _t), kw in allocation.items():
         total += (value_per_mwh.get(oid, 0.0) / 1000.0 - degradation.get(oid, 0.0)) * dt_h * kw
     for scenario in inputs.scenarios:
-        for (_bank_id, t, scenario_name), kw in headroom.items():
+        for (bank_id, t, scenario_name), kw in headroom.items():
             if scenario_name != scenario.scenario:
                 continue
-            price = scenario.price_usd_per_mwh.get(t, 0.0)
+            price = scenario.price_at(bank_id, t)
             total += scenario.probability * dt_h * (price / 1000.0) * kw
     return total

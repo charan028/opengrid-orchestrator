@@ -137,6 +137,7 @@ ercot_load_fresh_s = 1800
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800
+as_price_fresh_s = 93600     # NP4-188-CD posts once/day for the next day; last_value_at lags by design
 
 [mqtt]
 host = "<broker host>"
