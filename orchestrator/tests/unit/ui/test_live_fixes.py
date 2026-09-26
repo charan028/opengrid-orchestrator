@@ -73,3 +73,35 @@ def test_ack_message_is_operator_readable() -> None:
     assert "https://" not in ack_message(
         ApiUnavailable("Client error ... https://developer.mozilla.org", status_code=500), 7
     )
+
+
+def test_pipeline_cards_carry_energy_fields_or_dash() -> None:
+    rows = [
+        {"obligation_id": "a", "state": "COMMITTED", "energy_margin_kwh": 12.5, "time_to_depletion_min": 40},
+        {"obligation_id": "b", "state": "COMMITTED"},
+    ]
+    cards = pipeline_view(rows, now=_NOW)["columns"][2]["items"]
+    assert cards[0]["energy_margin_kwh"] == 12.5 and cards[0]["time_to_depletion_min"] == 40
+    assert cards[1]["energy_margin_kwh"] is None and cards[1]["time_to_depletion_min"] is None
+
+
+def test_dispatch_page_renders_energy_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
+        if "opportunities" in path:
+            return [
+                {
+                    "obligation_id": "a",
+                    "state": "COMMITTED",
+                    "energy_margin_kwh": 12.5,
+                    "time_to_depletion_min": 40,
+                }
+            ]
+        if path.startswith("/og/api/ledger/"):
+            return {"reservations": [], "grants": [], "commitments": [], "bank_capacity_kw": 0}
+        return {"items": [{"hub_id": "h", "bank_id": "bank-000"}]} if path.endswith("/hubs") else None
+
+    monkeypatch.setattr(dispatch, "get_json", fake_get_json)
+    app = FastAPI()
+    app.include_router(ui.build_router(), prefix="/og")
+    body = TestClient(app).get("/og/dispatch").text
+    assert "energy margin 12.5 kWh" in body and "depletion in 40 min" in body

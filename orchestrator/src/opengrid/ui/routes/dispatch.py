@@ -65,6 +65,10 @@ def pipeline_view(obligations: list[dict[str, Any]], *, now: datetime) -> dict[s
                 "window_end": row.get("window_end"),
                 "at_risk": bool(row.get("at_risk", False)),
                 "reason_code": row.get("last_reason_code") or row.get("reason_code"),
+                # Energy columns (NOTICES 2026-09-25: energy is checked every cycle). Field contract with the
+                # api owner in tests-e2e/ui/NEEDS_FROM_OTHER_OWNERS.md; absent fields render as "-".
+                "energy_margin_kwh": row.get("energy_margin_kwh"),
+                "time_to_depletion_min": row.get("time_to_depletion_min"),
                 "raw_state": state,
             }
         )
