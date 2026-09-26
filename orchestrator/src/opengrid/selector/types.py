@@ -104,6 +104,10 @@ class CandidateOpportunity:
     service_type: str = ""
     """The contract's service type (e.g. DATA_CENTER): PQ-sensitive profiles are capped at their
     PQ-eligible capacity at commit time (WP-D)."""
+    sustained_hours: float = 0.0
+    """ERCOT stored-energy duration for an AS award (NPRR1282: Non-Spin 4 h, ECRS 1 h), from the
+    product rule's `duration_minutes`; 0 means no requirement. While the award is held, each bank must
+    keep `sustained_hours / eta_d` kWh per awarded kW above its reserve (`selector.model`)."""
 
 
 @dataclass(frozen=True, slots=True)

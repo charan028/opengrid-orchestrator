@@ -154,11 +154,21 @@ def _is_dual_unit(index: int, dual_unit_share: float) -> bool:
     return math.floor((index + 1) * dual_unit_share) > math.floor(index * dual_unit_share)
 
 
+def bank_index_for(index: int, bank_count: int, zone_count: int) -> int:
+    """Bank rule (must match ogsim.fleet.state exactly): hub i goes to bank
+    (i + zone_count * (i // bank_count)) % bank_count. Each full round of `bank_count` hubs is rotated by
+    `zone_count` banks, so every bank still gets one hub per round (even sizes) and, when `zone_count`
+    divides `bank_count`, every hub in a bank still shares the bank's zone (i % zone_count). Without the
+    rotation (plain i % bank_count) the every-5th-hub dual-unit rule lined up with 40 banks: all 400
+    dual-unit homes landed in 8 banks (1,000 kW on a 600 kVA bank) and the other 32 had none."""
+    return (index + zone_count * (index // bank_count)) % bank_count
+
+
 def build_topology(
     config: SimFleetTopologyConfig, *, banks_per_feeder: int = BANKS_PER_FEEDER_DEFAULT
 ) -> Topology:
     """Pure (no I/O): reproduces `ogsim.fleet.state.build_fleet_state`'s id/grouping scheme exactly --
-    `hub-{i:05d}` for `i` in `range(hub_count)`, `bank-{i % bank_count:03d}`, zone `zones[i % len(zones)]`
+    `hub-{i:05d}` for `i` in `range(hub_count)`, `bank-{bank_index_for(i, ...):03d}`, zone `zones[i % len(zones)]`
     -- so every id this generates is one the simulator will actually publish telemetry for. Dual-unit
     hub selection uses `_is_dual_unit`, identical to `ogsim.fleet.state`'s vectorized rule. Each bank's
     `feeder_id` groups `banks_per_feeder` banks of the same zone (`feeder_id_for`), so G-06 evaluates.
@@ -169,7 +179,7 @@ def build_topology(
     hubs = []
     for i in range(config.hub_count):
         hub_id = f"hub-{i:05d}"
-        bank_id = f"bank-{i % config.bank_count:03d}"
+        bank_id = f"bank-{bank_index_for(i, config.bank_count, n_zones):03d}"
         zone = config.zones[i % n_zones]
         dual_unit = _is_dual_unit(i, config.dual_unit_share)
         e_kwh = config.e_kwh_dual_unit if dual_unit else config.e_kwh_default

@@ -616,3 +616,33 @@ async def test_seed_writes_the_feeder_id():
 
     bank_params = [params for sql, params in cursor.executed if sql.strip().startswith("INSERT INTO og.bank")]
     assert [p["feeder_id"] for p in bank_params] == ["feeder-LZ_NORTH-00", "feeder-LZ_NORTH-00"]
+
+
+# Expected bank of a few hubs at the default scale (2,000 hubs, 40 banks, 4 zones). Literal, not derived
+# from `bank_index_for`, and duplicated in integration-sims/tests/test_fleet_dual_unit.py.
+EXPECTED_BANK_OF_HUB = {
+    "hub-00000": "bank-000",
+    "hub-00004": "bank-004",
+    "hub-00040": "bank-004",
+    "hub-00044": "bank-008",
+}
+
+
+def test_dual_unit_homes_spread_evenly_across_banks():
+    """Bug list #4: with bank = i % 40, all 400 dual-unit homes landed in 8 of 40 banks (1,000 kW on a
+    600 kVA bank). Every bank must now get 10 dual-unit homes out of 50, and keep a single zone."""
+    config = SimFleetTopologyConfig(hub_count=2000, bank_count=40)
+    topology = build_topology(config)
+    size: dict[str, int] = {}
+    dual: dict[str, int] = {}
+    zones: dict[str, set[str]] = {}
+    for hub in topology.hubs:
+        size[hub.bank_id] = size.get(hub.bank_id, 0) + 1
+        dual[hub.bank_id] = dual.get(hub.bank_id, 0) + int(hub.e_kwh == config.e_kwh_dual_unit)
+        zones.setdefault(hub.bank_id, set()).add(hub.zone)
+    assert set(size.values()) == {50}
+    assert set(dual.values()) == {10}
+    assert all(len(z) == 1 for z in zones.values())
+    hub_bank = {h.hub_id: h.bank_id for h in topology.hubs}
+    for hub_id, bank_id in EXPECTED_BANK_OF_HUB.items():
+        assert hub_bank[hub_id] == bank_id

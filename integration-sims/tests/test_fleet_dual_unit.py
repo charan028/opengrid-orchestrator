@@ -453,3 +453,42 @@ def test_dual_unit_hub_power_and_reserve_match_config() -> None:
     assert single_index is not None
     assert state.e_kwh[single_index] == config.e_kwh_default
     assert state.p_kw_limit[single_index] == config.p_kw_default
+
+
+# Expected per-bank dual-unit spread at the default scale (2,000 hubs, 40 banks, 4 zones, 20%). Literal,
+# not derived from the bank formula, and duplicated in orchestrator/tests/unit/fleet/test_seed.py.
+EXPECTED_BANK_OF_HUB = {
+    "hub-00000": "bank-000",
+    "hub-00004": "bank-004",
+    "hub-00040": "bank-004",
+    "hub-00044": "bank-008",
+}
+
+
+def test_dual_unit_homes_spread_evenly_across_banks() -> None:
+    """Bug list #4: with bank = i % 40, the every-5th-hub dual rule put all 400 dual homes in 8 banks
+    (50 x 20 kW = 1,000 kW on a 600 kVA bank). Every bank must now get 10 of its 50 homes dual-unit."""
+    config, state = _build_default_scale_state()
+    dual_by_bank: dict[str, int] = {}
+    size_by_bank: dict[str, int] = {}
+    for bank_id, e_kwh in zip(state.bank_ids, state.e_kwh, strict=True):
+        size_by_bank[bank_id] = size_by_bank.get(bank_id, 0) + 1
+        dual_by_bank[bank_id] = dual_by_bank.get(bank_id, 0) + int(e_kwh == config.e_kwh_dual_unit)
+    assert set(size_by_bank.values()) == {50}
+    assert set(dual_by_bank.values()) == {10}
+
+
+def test_every_bank_has_a_single_zone() -> None:
+    _config, state = _build_default_scale_state()
+    zones_by_bank: dict[str, set[str]] = {}
+    for bank_id, zone in zip(state.bank_ids, state.zones, strict=True):
+        zones_by_bank.setdefault(bank_id, set()).add(zone)
+    assert all(len(z) == 1 for z in zones_by_bank.values())
+
+
+def test_bank_assignment_matches_expected_fixture() -> None:
+    _config, state = _build_default_scale_state()
+    for hub_id, bank_id in EXPECTED_BANK_OF_HUB.items():
+        index = state.index_of(hub_id)
+        assert index is not None
+        assert state.bank_ids[index] == bank_id

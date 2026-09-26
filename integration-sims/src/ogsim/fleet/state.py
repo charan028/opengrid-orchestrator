@@ -73,7 +73,13 @@ def build_fleet_state(config: FleetConfig, rng: np.random.Generator) -> FleetSta
     evenly across `config.bank_count` banks and `config.zones` (02b §4.1)."""
     n = config.hub_count
     hub_ids = [f"hub-{i:05d}" for i in range(n)]
-    bank_ids = [f"bank-{(i % config.bank_count):03d}" for i in range(n)]
+    # Bank rule (must match opengrid.fleet.seed.bank_index_for exactly): each round of bank_count hubs
+    # is rotated by len(zones) banks, so the every-5th-hub dual-unit rule spreads across all banks
+    # instead of filling 8 of 40, while each bank keeps a single zone and an equal hub count.
+    n_zones = len(config.zones)
+    bank_ids = [
+        f"bank-{((i + n_zones * (i // config.bank_count)) % config.bank_count):03d}" for i in range(n)
+    ]
     zones = [config.zones[i % len(config.zones)] for i in range(n)]
 
     soc_frac = rng.uniform(0.4, 0.9, size=n)

@@ -236,6 +236,27 @@ def build_mode_o_model(inputs: ModelInputs) -> BuiltModel:
                 >= bank.initial_soc_kwh - inputs.terminal_soc_slack_kwh
             )
 
+    # --- AS stored-energy hold (NPRR1282: Non-Spin 4 h, ECRS 1 h) ---------------------------------------
+    # An AS award must be backed by `sustained_hours` of energy per awarded kW for as long as it is held,
+    # on top of the bank's reserve (the member backup floor). The SoC balance above only charges the hold
+    # for its own window (as if deployed), so without this row a 1-hour Non-Spin window needed 1 kWh per
+    # kW instead of ERCOT's 4. Conservative by construction: SoC already reflects earlier hours' holds.
+    for c in inputs.candidates:
+        if c.category != "AS" or c.sustained_hours <= 0:
+            continue
+        for t in c.window_intervals:
+            for b in c.eligible_bank_ids:
+                ybar = ybar_vars.get((c.opportunity_id, b, t))
+                held_bank = bank_by_id.get(b)
+                if ybar is None or held_bank is None or not held_bank.models_soc:
+                    continue
+                for scenario in inputs.scenarios:
+                    soc = soc_vars.get((b, t, scenario.scenario))
+                    if soc is not None:
+                        highs.addConstr(
+                            soc - (c.sustained_hours / held_bank.eta_d) * ybar >= held_bank.reserve_kwh
+                        )
+
     # --- objective (02a S3.4, MVP-S subset) ---------------------------------------------------------
     vars_by_obligation: dict[str, list[highspy.highs_var]] = {}
     for (obligation_id, _bank_id, _t), var in ybar_vars.items():

@@ -34,7 +34,7 @@ _BANK_IDS_SQL = "SELECT bank_id FROM og.bank ORDER BY bank_id"
 _OFFERED_OPPORTUNITIES_SQL = """
     SELECT o.opportunity_id, ob.obligation_id, o.contract_id, o.window_start, o.window_end,
            o.requested_kw, o.value_per_mwh, c.service_type, c.tier, c.degradation_cost,
-           pr.variable_kind, pr.min_qty_kw, pr.increment_kw
+           pr.variable_kind, pr.min_qty_kw, pr.increment_kw, pr.duration_minutes
     FROM og.opportunity o
     JOIN og.contract c ON c.contract_id = o.contract_id
     JOIN og.obligation ob ON ob.opportunity_id = o.opportunity_id

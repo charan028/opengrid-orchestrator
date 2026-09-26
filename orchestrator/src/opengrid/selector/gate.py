@@ -345,9 +345,19 @@ async def load_candidates(
                 tier=row["tier"] or "T4",
                 category=_CATEGORY_BY_SERVICE_TYPE.get(row["service_type"], "MARKET"),
                 service_type=str(row["service_type"] or ""),
+                sustained_hours=_sustained_hours(row),
             )
         )
     return tuple(candidates)
+
+
+def _sustained_hours(row: dict[str, Any]) -> float:
+    """ERCOT's stored-energy duration applies to AS awards only (NPRR1282); every other category's
+    `duration_minutes` describes its delivery window, which the window intervals already carry."""
+    if _CATEGORY_BY_SERVICE_TYPE.get(row["service_type"], "MARKET") != "AS":
+        return 0.0
+    minutes = row.get("duration_minutes")
+    return float(minutes) / 60.0 if minutes else 0.0
 
 
 def _plan_mode_for(gate_kind: GateKind, horizon_start: datetime) -> str:
