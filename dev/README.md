@@ -243,7 +243,9 @@ docker compose -f docker-compose.yml --profile orchestrator up -d
 ```
 
 This is a laptop-scale approximation of the plan (one host, Docker Desktop), not the server run
-the plan describes; report it as such.
+the plan describes; report it as such. First results (2026-09-26, 24 threads / 32 GB): 2k runs with headroom (cycle
+p99 under 100 ms while delivering); at 10k the single-process fleet simulator saturates one core and falls far behind
+the 5,000 msg/s it would need, so 10k belongs on the server.
 
 ## Resetting
 
