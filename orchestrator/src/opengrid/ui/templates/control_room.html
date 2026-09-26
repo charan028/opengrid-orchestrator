@@ -157,13 +157,17 @@
       ], "cr-layer");
       og.map.addLegend(
         handle,
-        og.map.hubLegendItems("activity"),
+        [{ heading: "Our homes" }].concat(og.map.hubLegendItems("activity"), og.map.gridLegendItems()),
         og.map.derivedPositions(hubs)
           ? "Homes are placed inside their real load zone; exact coordinates arrive with /og/api/fleet/map."
           : null
       );
     }).catch(function () {
-      og.map.addLegend(handle, og.map.hubLegendItems("activity"), "Reference grid layers unavailable.");
+      og.map.addLegend(
+        handle,
+        [{ heading: "Our homes" }].concat(og.map.hubLegendItems("activity")),
+        "Reference grid layers unavailable."
+      );
     });
 
     og.chart("#market-ticker-chart", {{ ticker.chart_option | tojson }});

@@ -16,6 +16,9 @@
   const og = window.og || (window.og = {});
   const map = {};
 
+  /** Live map handles by container element id (see `create`). */
+  map.instances = {};
+
   // ---- vocabulary ------------------------------------------------------------------------------
 
   /** Hub activity (CR #19's `activity` enum). Colour + label + shape: never colour alone. */
@@ -51,6 +54,8 @@
     [230, "#5598e7"],
     [0, "#9ec5f4"],
   ];
+
+  map.VOLTAGE_STEPS = VOLTAGE_STEPS;
 
   function voltageColor(kv) {
     for (const [threshold, color] of VOLTAGE_STEPS) {
@@ -174,7 +179,7 @@
     // Our own homes ride in their own pane above the reference layers: the zone-load and utility-battery
     // bubbles are far larger, and whichever order the callers add them in, the fleet must stay on top.
     leaflet.createPane("ogHubs").style.zIndex = 450;
-    return {
+    const handle = {
       map: leaflet,
       layers: {},
       canvas: L.canvas({ padding: 0.5, pane: "ogHubs" }),
@@ -186,6 +191,12 @@
         return layer;
       },
     };
+    // Registered by element id so the browser console -- and the end-to-end tests -- can reach a live
+    // map to ask where a hub actually is on screen. Read-only introspection, no behaviour depends on it.
+    if (node.id) {
+      map.instances[node.id] = handle;
+    }
+    return handle;
   };
 
   /** Fetch the static reference layers (real ERCOT/HIFLD export shipped next to this file). */
@@ -487,6 +498,13 @@
     control.onAdd = function () {
       const box = L.DomUtil.create("div", "og-map-legend");
       items.forEach(function (item) {
+        if (item.heading) {
+          const head = document.createElement("span");
+          head.className = "og-legend-heading";
+          head.textContent = item.heading;
+          box.appendChild(head);
+          return;
+        }
         const row = document.createElement("span");
         const dot = document.createElement("i");
         dot.className = "og-legend-" + (item.shape || "dot");
@@ -512,6 +530,25 @@
     return handle;
   };
 
+  /**
+   * Legend rows for everything on the map that is not a hub: the reference layers, in the reference
+   * map's own order and wording. Without these the legend explained the dots and nothing else.
+   */
+  map.gridLegendItems = function gridLegendItems() {
+    return [
+      { heading: "Grid" },
+      { label: "zone load (radius = MW)", color: og.token("--series-ercot-energy") },
+      { label: "utility batteries (radius = MW)", color: og.token("--series-pipeline-ac") },
+      { label: "500 kV", color: VOLTAGE_STEPS[0][1], shape: "line" },
+      { label: "345 kV", color: VOLTAGE_STEPS[1][1], shape: "line" },
+      { label: "230 kV", color: VOLTAGE_STEPS[2][1], shape: "line" },
+      { label: "our grid connection", color: og.token("--text"), hollow: true },
+      { label: "best sell destination this hour", color: og.token("--status-caution") },
+      { label: "demand we serve", color: og.token("--status-good") },
+      { label: "demand we do not", color: og.token("--status-critical") },
+    ];
+  };
+
   /** Legend rows for the hub colouring in use. */
   map.hubLegendItems = function hubLegendItems(colorBy) {
     const source = colorBy === "health" ? map.HEALTH : map.ACTIVITY;
@@ -527,7 +564,25 @@
    * pans normally until the operator turns selection on, so the usual gesture is never hijacked.
    * `onChange(idsInRectangle, additive)` is called once per completed drag.
    */
-  map.enableAreaSelect = function enableAreaSelect(handle, onChange) {
+  const _CLICK_SLOP_PX = 6; // a drag shorter than this is a click, not a rectangle
+  const _PICK_RADIUS_PX = 14;
+
+  /** The hub nearest `point` within `_PICK_RADIUS_PX`, or null. */
+  map.hubAt = function hubAt(handle, point, leaflet) {
+    let best = null;
+    let bestDistance = _PICK_RADIUS_PX;
+    Object.keys(handle.hubMarkers || {}).forEach(function (id) {
+      const at = leaflet.latLngToContainerPoint(handle.hubMarkers[id].getLatLng());
+      const distance = Math.sqrt((at.x - point.x) ** 2 + (at.y - point.y) ** 2);
+      if (distance <= bestDistance) {
+        bestDistance = distance;
+        best = id;
+      }
+    });
+    return best;
+  };
+
+  map.enableAreaSelect = function enableAreaSelect(handle, onChange, onPick) {
     const leaflet = handle.map;
     const pane = leaflet.getContainer();
     let active = false;
@@ -568,9 +623,23 @@
       if (!origin) {
         return;
       }
+      const to = pointFor(event);
+      const dragged = Math.abs(origin.x - to.x) + Math.abs(origin.y - to.y);
+      const additive = event.shiftKey;
+      if (dragged < _CLICK_SLOP_PX) {
+        // A click, not a rectangle: pick the hub under the cursor. Without this a stray click in
+        // selection mode swept a zero-area box and silently cleared the whole selection (seen live),
+        // and the CR's "select hubs, one or in bulk" had no one-at-a-time path on the map at all.
+        const picked = map.hubAt(handle, to, leaflet);
+        cleanup();
+        if (picked && onPick) {
+          onPick(picked);
+        }
+        return;
+      }
       const bounds = L.latLngBounds(
         leaflet.containerPointToLatLng(origin),
-        leaflet.containerPointToLatLng(pointFor(event))
+        leaflet.containerPointToLatLng(to)
       );
       const ids = [];
       Object.keys(handle.hubMarkers || {}).forEach(function (id) {
@@ -578,7 +647,6 @@
           ids.push(id);
         }
       });
-      const additive = event.shiftKey;
       cleanup();
       onChange(ids, additive);
     }
