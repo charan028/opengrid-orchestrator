@@ -118,15 +118,13 @@ async def load_banks(
     n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
     snapshots = []
     for bank_id in bank_ids:
-        by_interval: dict[int, float] = {}
-        charge_by_interval: dict[int, float] = {}
-        for t in range(n_intervals):
-            interval_start = horizon_start + timedelta(minutes=INTERVAL_MINUTES * t)
-            cap = await fleet_capability(bank_id, interval_start)
-            by_interval[t] = cap.max_discharge_kw
-            # The charge envelope was never passed, so the model could never recharge a bank
-            # (live 2026-09-26: every plan RULE_FALLBACK).
-            charge_by_interval[t] = cap.max_charge_kw
+        # `fleet.capability` is a live-now reading (it ignores `interval_start`), so it is read once per
+        # bank and applied to every horizon interval -- 96 identical reads per bank took seconds of the
+        # event loop per gate (A11). The charge envelope was never passed before, so the model could
+        # never recharge a bank (live 2026-09-26: every plan RULE_FALLBACK).
+        cap = await fleet_capability(bank_id, horizon_start)
+        by_interval = dict.fromkeys(range(n_intervals), cap.max_discharge_kw)
+        charge_by_interval = dict.fromkeys(range(n_intervals), cap.max_charge_kw)
         capacity_kwh, reserve_kwh, initial_soc_kwh, eta_c, eta_d = _bank_energy_envelope(bank_id)
         snapshots.append(
             BankSnapshot(

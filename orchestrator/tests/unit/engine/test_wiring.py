@@ -363,3 +363,34 @@ async def test_pq_summaries_flush_on_their_own_cadence_and_a_failure_never_break
     await engine._flush_pq_summaries(state)  # due again
 
     assert len(calls) == 2
+
+
+async def test_gates_run_in_one_background_task_with_a_deduplicated_backlog() -> None:
+    """A11 (live 2026-09-26): a 24 h gate held the 2 s dispatch tick for 10-20 s. Gates now run in one
+    background task; triggers arriving meanwhile wait (once each) and start with the next task."""
+    import asyncio
+    import types
+
+    release = asyncio.Event()
+    batches: list[list] = []
+
+    async def _run(batch):
+        batches.append(batch)
+        await release.wait()
+        return 0
+
+    state = types.SimpleNamespace(gate_task=None, gate_backlog=[])
+    scheduled = engine.GateTrigger("SCHEDULED_15MIN")
+    renom = engine.GateTrigger("RENOMINATION", uuid4())
+
+    assert engine.start_gates_in_background(state, [scheduled], _run) is True
+    await asyncio.sleep(0)
+    assert engine.start_gates_in_background(state, [renom], _run) is False  # one gate task at a time
+    assert engine.start_gates_in_background(state, [renom], _run) is False
+    assert state.gate_backlog == [renom]  # de-duplicated
+
+    release.set()
+    await state.gate_task
+    assert engine.start_gates_in_background(state, [], _run) is True
+    await state.gate_task
+    assert batches == [[scheduled], [renom]]

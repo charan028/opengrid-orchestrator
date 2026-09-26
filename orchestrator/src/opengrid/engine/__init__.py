@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -325,7 +326,11 @@ class _EngineState:
     epoch: int = 1
     latency: CycleLatencyWindow = field(default_factory=CycleLatencyWindow)
     escalator: ShortfallEscalator = field(default_factory=ShortfallEscalator)
-    pq_flush: Cadence | None = None  # `[pq_ingest].flush_interval_s`; None when waveform ingest is off
+    pq_flush: Cadence | None = None
+    gate_task: asyncio.Task[int] | None = None
+    gate_backlog: list[GateTrigger] = field(
+        default_factory=list
+    )  # `[pq_ingest].flush_interval_s`; None when waveform ingest is off
 
 
 async def timed_tick(state: _EngineState) -> None:
@@ -396,6 +401,23 @@ async def exercise_due_renomination_points(
     return outcomes
 
 
+def start_gates_in_background(
+    state: Any, triggers: list[GateTrigger], run: Callable[[list[GateTrigger]], Coroutine[Any, Any, int]]
+) -> bool:
+    """Gates run as ONE background task, never awaited by the 2 s tick: a 24 h gate (capability load,
+    intake, LP) took 10-20 s and held dispatch for committed obligations that long (A11 p99, live
+    2026-09-26). Triggers arriving while a gate task runs wait in a de-duplicated backlog. Returns True
+    if a gate task was started now."""
+    for trigger in triggers:
+        if trigger not in state.gate_backlog:
+            state.gate_backlog.append(trigger)
+    if not state.gate_backlog or (state.gate_task is not None and not state.gate_task.done()):
+        return False
+    batch, state.gate_backlog = state.gate_backlog, []
+    state.gate_task = asyncio.create_task(run(batch))
+    return True
+
+
 async def _flush_pq_summaries(state: _EngineState) -> None:
     """Write buffered waveform summaries on `[pq_ingest].flush_interval_s` (one batched insert). A failed
     flush is logged and retried next time; it never costs the dispatch tick (K7)."""
@@ -432,16 +454,20 @@ async def _engine_tick(state: _EngineState) -> None:
         pending_admission_contract_ids=await state.backend.pending_admission_contract_ids(),
         due_renomination_contract_ids=await state.backend.due_renomination_contract_ids(now),
     )
-    # A failed gate is traced + alerted and never skips this tick's allocator cycle (K7/K13).
-    await run_due_gates(
+    # A failed gate is traced + alerted inside run_due_gates (K7/K13).
+    start_gates_in_background(
+        state,
         triggers,
-        now=now,
-        run_intake=intake.run_intake_gate,
-        run_gate=selector.run_gate,
-        trace=state.trace,
-        raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
-        on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
-            contract_id, plan_id, now
+        lambda batch: run_due_gates(
+            batch,
+            now=now,
+            run_intake=intake.run_intake_gate,
+            run_gate=selector.run_gate,
+            trace=state.trace,
+            raise_alert=lambda finding: raise_alert(state.heartbeat_pool, finding, opened_at=now),
+            on_renomination=lambda contract_id, plan_id: exercise_due_renomination_points(
+                contract_id, plan_id, now
+            ),
         ),
     )
 
