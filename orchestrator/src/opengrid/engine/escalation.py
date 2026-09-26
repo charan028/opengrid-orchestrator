@@ -41,7 +41,11 @@ _PRECEDENCE = (R_COMMIT_LOCK_OVERRIDE_L2, R_COMMIT_LOCK_INFEASIBLE)
 
 
 def lock_reason_for_shortfall(shortfall_reason: str) -> str | None:
-    """The K13 reason for an allocator shortfall reason, or `None` if it is not an escalation cause."""
+    """The K13 reason for an allocator shortfall reason, or `None` if it is not an escalation cause. The
+    allocator's `ShortfallReport.reason_code` is usually already the K13 reason (`allocate_tiers` /
+    `realize_obligation`); the `R-SHORTFALL-*` detail codes map onto them."""
+    if shortfall_reason in _PRECEDENCE:
+        return shortfall_reason
     return _LOCK_REASON_BY_SHORTFALL.get(shortfall_reason)
 
 
