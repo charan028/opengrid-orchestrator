@@ -15,7 +15,9 @@ beyond `bind_host`).
 
 Roles: `operator`, `viewer` and `customer`. A customer identity (`[api.roles.customer]`, a table of
 `user = "<customer_id>"`) may only use the customer API (`opengrid.customer_api`); `require_viewer` and
-`require_operator` refuse it, so a customer can never read the operator console's fleet-wide data.
+`require_operator` refuse it, so a customer can never read the operator console's fleet-wide data. A
+utility identity (`[api.roles.utility]`, `user = "<utility_id>"`, D-33) likewise reaches only its own
+tolling obligations and calls through the utility routes of the customer API.
 """
 
 from __future__ import annotations
@@ -41,11 +43,12 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 class Role(StrEnum):
-    """Operator/viewer (Apache's `AuthUserFile` accounts, deploy/README.md) and customer."""
+    """Operator/viewer (Apache's `AuthUserFile` accounts, deploy/README.md), customer and utility (D-33)."""
 
     OPERATOR = "operator"
     VIEWER = "viewer"
     CUSTOMER = "customer"
+    UTILITY = "utility"
 
 
 class Identity:
@@ -76,6 +79,8 @@ def role_for_identity(user: str, cfg: Config) -> Role | None:
         return Role.VIEWER
     if user in _configured_members(cfg, Role.CUSTOMER):
         return Role.CUSTOMER
+    if user in _configured_members(cfg, Role.UTILITY):
+        return Role.UTILITY
     return None
 
 

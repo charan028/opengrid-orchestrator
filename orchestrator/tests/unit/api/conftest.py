@@ -11,12 +11,13 @@ from fastapi.testclient import TestClient
 
 import opengrid.contracts as contracts_module
 from opengrid.api.app import create_app
-from opengrid.api.deps import get_config, get_proposals, get_store, get_trace_store
+from opengrid.api.deps import get_call_store, get_config, get_proposals, get_store, get_trace_store
 from opengrid.api.proposals import ProposalStore
 from opengrid.core.models.engine import Contract
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
+from ..calls.fakes import FakeCallStore
 from .contracts_fake import FakeContractsRepo
 from .fakes import SAMPLE_CONTRACT_ID, SAMPLE_CUSTOMER_ID, FakeStore, FakeTraceBackend
 
@@ -56,8 +57,13 @@ def _echo_csrf_cookie_as_header(request: object) -> None:
 
 
 @pytest.fixture
-def fake_store() -> FakeStore:
-    return FakeStore()
+def fake_call_store() -> FakeCallStore:
+    return FakeCallStore()
+
+
+@pytest.fixture
+def fake_store(fake_call_store: FakeCallStore) -> FakeStore:
+    return FakeStore(call_store=fake_call_store)
 
 
 @pytest.fixture
@@ -100,6 +106,7 @@ def _configured_contracts(fake_trace_store):
 def client(fake_store, fake_trace_store, fake_proposals, fake_config) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_store] = lambda: fake_store
+    app.dependency_overrides[get_call_store] = lambda: fake_store.call_store
     app.dependency_overrides[get_trace_store] = lambda: fake_trace_store
     app.dependency_overrides[get_proposals] = lambda: fake_proposals
     app.dependency_overrides[get_config] = lambda: fake_config
