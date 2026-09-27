@@ -238,6 +238,28 @@ def home_stations() -> list[dict[str, Any]]:
     ]
 
 
+_SUBSTATION_KEYS = "SELECT asset_id, bank_id FROM og.asset WHERE asset_class = 'SUBSTATION'"
+
+
+async def substation_keys(store: Any) -> set[str]:
+    """Ids (asset_id and bank_id) of every substation BESS in `og.asset`; empty on a store without the
+    fleet read helper or a schema without `og.asset` (a guarded read)."""
+    if not isinstance(store, FleetRowsStore):
+        return set()
+    rows = await _optional_rows(store, _SUBSTATION_KEYS, ())
+    return {str(v) for r in rows for v in (r.get("asset_id"), r.get("bank_id")) if v}
+
+
+def classify_asset(hub_id: str, bank_id: str | None, *, mobile: set[str], substations: set[str]) -> str:
+    """The in-process form of `asset_sql` (same rule): a D-31 unit is MOBILE, a hub or bank that is an
+    `og.asset` SUBSTATION is UTILITY_SCALE, anything else is a HOME battery."""
+    if hub_id in mobile or (bank_id or "") in mobile:
+        return "MOBILE"
+    if hub_id in substations or (bank_id or "") in substations:
+        return "UTILITY_SCALE"
+    return "HOME"
+
+
 def health_sql(th: Thresholds) -> Sql:
     return Sql(_HEALTH_SQL, [th.offline_s, th.online_s])
 

@@ -381,6 +381,9 @@ def responses() -> dict[str, Any]:
         "/og/api/fleet/summary": SUMMARY,
         "/og/api/fleet/manual-targets": TARGETS,
         "/og/api/fleet/home-stations": HOME_STATIONS,
+        # the map payload (Fleet and Control room): a slice of homes plus the truck, the substation BESS
+        # and the depot, each with its asset_class
+        "/og/api/fleet/map": {"hubs": [*HUBS[:30], TRUCK, SUBSTATION], "depots": HOME_STATIONS["items"]},
         CHARGE_PATH: CHARGE_WINDOWS,
         f"{CHARGE_PATH}/effective": effective,
     }

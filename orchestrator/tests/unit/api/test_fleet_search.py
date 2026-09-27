@@ -397,3 +397,12 @@ def test_substation_detail_from_og_asset(search_client: TestClient, rows_store: 
     body = search_client.get("/og/api/fleet/hubs/sub-LZ_AEN-00/detail", headers=VIEWER_HEADERS).json()
     assert body["asset_class"] == "UTILITY_SCALE"
     assert body["utility_scale"]["mw"] == 4.0 and body["utility_scale"]["poi_export_kva"] == 3500.0
+
+
+def test_classify_asset_matches_the_sql_rule() -> None:
+    from opengrid.api.routers.fleet_search import classify_asset
+
+    kw: dict[str, Any] = {"mobile": {"trailer-1"}, "substations": {"bank-sub"}}
+    assert classify_asset("trailer-1", "trailer-1", **kw) == "MOBILE"
+    assert classify_asset("sub-00", "bank-sub", **kw) == "UTILITY_SCALE"
+    assert classify_asset("hub-1", "bank-1", **kw) == "HOME"
