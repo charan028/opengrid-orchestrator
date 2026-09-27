@@ -35,12 +35,23 @@ def seed():
     return ts.build_seed(ts.load_fleet_config(), TERRITORY)
 
 
-def test_default_blocks_are_scada_covered_and_match_add_austin_fleet(seed) -> None:
-    banks = {b.bank_id: b.zone for b in seed.topology.banks}
-    assert len(seed.topology.hubs) == 3000 and len(banks) == 60
+def test_default_blocks_are_scada_covered_and_match_add_austin_fleet() -> None:
+    """Test-data fix, 2026-09-26 (post-D-29(b)/V-32 follow-up): fleet.yaml/scada.yaml now also declare
+    LZ_LCRA/LZ_RAYBN zone blocks (disabled by default, unrelated to this test's own "Austin fleet"
+    concern -- confirmed present ERCOT LZs, added for future market-model coverage). `load_fleet_config`'s
+    default `--blocks` set is "every zone scada.yaml declares" (this module's own docstring), so the
+    shared `seed` fixture's default scope grew from 2 zones to 4 once scada.yaml's own zone_blocks list
+    picked up LCRA/RAYBN too. This test is specifically about the Austin/CPS add-on (dev/seed/
+    add_austin_fleet.sql: bank-040..049 LZ_AEN, bank-050..059 LZ_CPS), so it now builds its own seed
+    scoped explicitly to just those two blocks, independent of the shared fixture (or whatever else
+    scada.yaml comes to declare covered)."""
+    austin_seed = ts.build_seed(ts.load_fleet_config(blocks=["LZ_AEN", "LZ_CPS"]), TERRITORY)
+    banks = {b.bank_id: b.zone for b in austin_seed.topology.banks}
+    assert len(austin_seed.topology.hubs) == 3000 and len(banks) == 60
     assert {banks[f"bank-{i:03d}"] for i in range(40, 50)} == {"LZ_AEN"}
     assert {banks[f"bank-{i:03d}"] for i in range(50, 60)} == {"LZ_CPS"}
-    assert "LZ_LCRA" not in banks.values()  # in fleet.yaml, not covered by scada.yaml
+    assert "LZ_LCRA" not in banks.values()
+    assert "LZ_RAYBN" not in banks.values()
 
 
 @pytest.mark.parametrize(
