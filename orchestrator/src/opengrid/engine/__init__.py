@@ -1383,7 +1383,7 @@ async def main(cfg: Config) -> None:
         cal_task = asyncio.create_task(cal_worker.run())
         summary_worker = BackgroundIngest("pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX)
         summary_task = asyncio.create_task(summary_worker.run())
-        device_info_worker = BackgroundIngest("device-info", make_device_info_handler(pool))
+        device_info_worker = build_device_info_worker(pool, cfg)
         firmware_status_worker = BackgroundIngest("firmware-status", make_firmware_status_handler(pool))
         firmware_status_task = asyncio.create_task(firmware_status_worker.run())
         device_info_task = asyncio.create_task(device_info_worker.run())
@@ -1542,6 +1542,18 @@ async def ingest_raw_capture_off_loop(payload: dict[str, Any]) -> None:
 
 #: FLEET-SIM's retained DEVICE-INFO topic under the MQTT root (to confirm); `[mqtt].device_info_topic`.
 DEFAULT_DEVICE_INFO_TOPIC = "hub/+/info"
+#: DEVICE-INFO queue: the whole retained burst of a 10,000-hub fleet fits (`[mqtt].device_info_queue_max`).
+DEVICE_INFO_QUEUE_MAX = 10_000
+
+
+def build_device_info_worker(pool: Any, cfg: Config) -> BackgroundIngest:
+    """The DEVICE-INFO worker. The sim's retained per-hub messages arrive as one burst on every
+    (re)connect, so the queue holds a whole fleet (live r3 19:03: 2,000 of 2,501 dropped at the default 500)."""
+    return BackgroundIngest(
+        "device-info",
+        make_device_info_handler(pool),
+        queue_max=int(cfg.get("mqtt.device_info_queue_max", DEVICE_INFO_QUEUE_MAX)),
+    )
 
 
 def make_device_info_handler(pool: Any) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
