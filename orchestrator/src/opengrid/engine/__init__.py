@@ -1620,12 +1620,14 @@ def build_device_info_worker(pool: Any, cfg: Config) -> BackgroundIngest:
 
 
 def make_device_info_handler(pool: Any, cfg: Config) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
-    """Background handler for a DEVICE-INFO message: `opengrid.fleet.device_info.upsert_device_info(pool,
-    msg)` (FOLLOWUPS). Until that module lands, messages are logged once and dropped."""
+    """Background handler for a DEVICE-INFO message: `opengrid.fleet.device_info.upsert_device_info`
+    (FOLLOWUPS) with the message's TOPIC (the hub is the topic's, never the payload's -- H4) and a trace
+    store of its own (every report is traced). Until that module lands, messages are logged once and
+    dropped."""
+    warned: list[bool] = []
     from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
     from opengrid.trace.store import TraceStore
 
-    warned: list[bool] = []
     trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
 
     async def _handle(item: dict[str, Any]) -> None:
