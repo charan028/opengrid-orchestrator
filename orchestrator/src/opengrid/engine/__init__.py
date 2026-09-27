@@ -82,8 +82,8 @@ from opengrid.engine.mqtt_supervisor import (
     IngestHealth,
     supervise_ingest,
 )
-from opengrid.engine.ramp_anchor import RampAnchors, stopped_banks
 from opengrid.engine.propose_guard import GuardianGate, propose_banks
+from opengrid.engine.ramp_anchor import RampAnchors, stopped_banks
 from opengrid.engine.settings import dispatch_settings
 from opengrid.engine.veto import (
     DEFAULT_VERDICT_WAIT_S,
