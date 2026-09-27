@@ -10,6 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.api.proposals import ProposalStore
 from opengrid.api.store import StoreProtocol
+from opengrid.calls.ports import CallStore
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
@@ -27,6 +28,12 @@ def get_pool(request: Request) -> AsyncConnectionPool:
 def get_store(request: Request) -> StoreProtocol:
     store: StoreProtocol = request.app.state.store
     return store
+
+
+def get_call_store(request: Request) -> CallStore:
+    """The dispatch-call ledger store (`opengrid.calls.PgCallStore`), shared by every call route."""
+    call_store: CallStore = request.app.state.call_store
+    return call_store
 
 
 def get_trace_store(request: Request) -> TraceStore:
