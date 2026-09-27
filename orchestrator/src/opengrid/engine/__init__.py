@@ -83,7 +83,12 @@ from opengrid.engine.mqtt_supervisor import (
     supervise_ingest,
 )
 from opengrid.engine.propose_guard import GuardianGate, propose_banks
-from opengrid.engine.ramp_anchor import RampAnchors, stopped_banks
+from opengrid.engine.ramp_anchor import (
+    AnchorVerdictReader,
+    PgAnchorVerdictReader,
+    RampAnchors,
+    stopped_banks,
+)
 from opengrid.engine.settings import dispatch_settings
 from opengrid.engine.veto import (
     DEFAULT_VERDICT_WAIT_S,
@@ -599,7 +604,7 @@ class _EngineState:
     verdict_wait_s: float = DEFAULT_VERDICT_WAIT_S
     pending_verdicts: dict[UUID, str] = field(default_factory=dict)
     #: Verdicts of the engine's utility-scale batches -> signed ramp anchors (`engine.ramp_anchor`).
-    anchor_verdicts: VerdictReader | None = None
+    anchor_verdicts: AnchorVerdictReader | None = None
     #: Bounded guardian hand-off (`engine.propose_guard`): propose/heartbeat-read timeouts, stall hold.
     guardian_gate: GuardianGate = field(default_factory=GuardianGate)
     #: Operator setpoints ramped by the engine (`engine.manual`); None = off.
@@ -1516,7 +1521,7 @@ async def main(cfg: Config) -> None:
             schedule_gateway=schedule_gateway,
             extras_gateway=extras_gateway,
             verdict_reader=PgVerdictReader(pool) if settings.veto_retry_enabled else None,
-            anchor_verdicts=PgVerdictReader(pool),
+            anchor_verdicts=PgAnchorVerdictReader(pool),
             veto_exclusions=veto_exclusions,
             verdict_wait_s=settings.verdict_wait_s,
             guardian_gate=GuardianGate(

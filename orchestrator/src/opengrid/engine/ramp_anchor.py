@@ -26,7 +26,9 @@ The contract with the guardian's G-04 (agreed with SAFETY):
   the release arrives, then at telemetry.
 
 The engine learns verdicts for its own utility-scale batches at the start of the next cycle
-(`refresh`), one bounded read and only while such batches are pending.
+(`refresh`), one bounded read and only while such batches are pending. A PASS counts as signed only once the
+guardian confirmed the publish (`og.verdict.published_at`, r3.4.3 LOW): a batch signed but never published
+leaves the anchor where the hub is.
 """
 
 from __future__ import annotations
@@ -36,8 +38,10 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
+
+from psycopg import errors as pg_errors
 
 from opengrid.core.manual_targets import stop_covers
 from opengrid.core.timeutil import to_utc
@@ -46,7 +50,50 @@ logger = logging.getLogger("opengrid.engine")
 
 SIGNED_OUTCOMES = frozenset({"PASS"})
 VETO_OUTCOMES = frozenset({"PARTLY_VETOED", "VETOED"})
+#: A PASS whose command batch the guardian has not (yet) confirmed published (`og.verdict.published_at`).
+PASS_UNPUBLISHED = "PASS_UNPUBLISHED"  # noqa: S105 -- a verdict outcome, not a secret
 DEFAULT_VERDICT_READ_TIMEOUT_S = 0.5
+
+#: Verdicts for the anchors: a PASS counts only once published (`og.verdict.published_at`, set by the
+#: guardian after `publish_command_batch` succeeds).
+_ANCHOR_VERDICTS_SQL = """
+SELECT command_batch_id,
+       CASE WHEN outcome = 'PASS' AND published_at IS NULL THEN 'PASS_UNPUBLISHED' ELSE outcome END
+FROM og.verdict WHERE command_batch_id = ANY(%(ids)s::uuid[])
+"""
+#: Until the published_at column exists (deploy order): PASS alone, the pre-r3.4.3 rule.
+_LEGACY_VERDICTS_SQL = """
+SELECT command_batch_id, outcome FROM og.verdict WHERE command_batch_id = ANY(%(ids)s::uuid[])
+"""
+
+
+class AnchorVerdictReader(Protocol):
+    async def outcomes(self, batch_ids: list[UUID]) -> dict[UUID, str]: ...
+
+
+class PgAnchorVerdictReader:
+    """Reads the engine's own batches' verdicts for the ramp anchors: PASS only once published."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+        self._published_column = True
+
+    async def outcomes(self, batch_ids: list[UUID]) -> dict[UUID, str]:
+        params = {"ids": [str(b) for b in batch_ids]}
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            if self._published_column:
+                try:
+                    await cur.execute(_ANCHOR_VERDICTS_SQL, params)
+                except pg_errors.UndefinedColumn:
+                    await conn.rollback()
+                    self._published_column = False
+                    logger.warning(
+                        "og.verdict.published_at missing: ramp anchors use PASS alone until it exists"
+                    )
+            if not self._published_column:
+                await cur.execute(_LEGACY_VERDICTS_SQL, params)
+            rows = await cur.fetchall()
+        return {UUID(str(b)): str(o) for b, o in rows}
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,16 +156,25 @@ class RampAnchors:
             self.pending[batch_id] = _PendingBatch(setpoints, expires_at)
 
     def apply_verdicts(self, outcomes: Mapping[UUID, str], now: datetime) -> None:
-        """PASS: each hub's setpoint in that batch is its signed anchor until the batch's lease ends. A veto
-        (VETO_OUTCOMES) leaves the anchor as it is: a live-lease signature is still where the hub is, so the
-        next proposal steps from it again. A batch whose lease ended with no verdict is dropped."""
+        """PASS (signed AND published): each hub's setpoint in that batch is its signed anchor until the batch's
+        lease ends. PASS_UNPUBLISHED (signed, publish not confirmed yet): still pending -- the hub has not got it,
+        so the anchor stays where the hub is (r3.4.3 LOW, same rule as the guardian's `confirm_published`). A
+        veto (VETO_OUTCOMES) leaves the anchor as it is: a live-lease signature is still where the hub is, so
+        the next proposal steps from it again. A batch whose lease ended undecided is dropped. An older batch
+        published late never replaces a newer anchor."""
         for batch_id, outcome in outcomes.items():
+            if outcome == PASS_UNPUBLISHED:
+                continue
             batch = self.pending.pop(batch_id, None)
             if batch is None or outcome not in SIGNED_OUTCOMES:
                 continue
             for hub_id, kw in batch.setpoints.items():
-                if hub_id not in self.stopped:
-                    self.signed[hub_id] = SignedSetpoint(kw, now, batch.expires_at)
+                current = self.signed.get(hub_id)
+                if hub_id in self.stopped or (
+                    current is not None and to_utc(current.expires_at) > to_utc(batch.expires_at)
+                ):
+                    continue
+                self.signed[hub_id] = SignedSetpoint(kw, now, batch.expires_at)
         for batch_id in [b for b, p in self.pending.items() if to_utc(p.expires_at) <= to_utc(now)]:
             del self.pending[batch_id]
 

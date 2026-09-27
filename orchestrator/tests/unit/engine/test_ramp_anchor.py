@@ -165,3 +165,92 @@ def test_refresh_reads_only_pending_batches_and_survives_a_slow_read(_fresh: Ram
 
     asyncio.run(_fresh.refresh(_slow, NOW, timeout_s=0.05))
     assert len(_fresh.pending) == 1  # kept for the next cycle
+
+
+def test_a_signed_but_unpublished_batch_is_not_an_anchor_until_published(_fresh: RampAnchors) -> None:
+    """r3.4.3 LOW (same rule as the guardian's confirm_published): a batch the guardian signed but did not
+    publish never reached the hub -- the anchor stays where the hub is."""
+    hub = _Hub(p_kw=0.0)
+    _, b1 = _propose(_fresh, hub, -20_000.0, NOW)
+    _fresh.apply_verdicts({b1: "PASS_UNPUBLISHED"}, NOW + timedelta(seconds=2))  # type: ignore[dict-item]
+    assert "sub-1" not in _fresh.signed and b1 in _fresh.pending  # still pending: the publish may land
+    _fresh.apply_verdicts({b1: "PASS"}, NOW + timedelta(seconds=4))  # type: ignore[dict-item]
+    assert _fresh.signed["sub-1"].kw < 0
+
+
+def test_a_batch_never_published_is_dropped_at_its_lease_end(_fresh: RampAnchors) -> None:
+    hub = _Hub(p_kw=0.0)
+    _, b1 = _propose(_fresh, hub, -20_000.0, NOW)
+    _fresh.apply_verdicts({b1: "PASS_UNPUBLISHED"}, NOW + timedelta(seconds=31))  # type: ignore[dict-item]
+    assert _fresh.pending == {} and "sub-1" not in _fresh.signed
+
+
+def test_an_older_batch_published_late_never_replaces_a_newer_anchor(_fresh: RampAnchors) -> None:
+    hub = _Hub(p_kw=0.0)
+    _, old = _propose(_fresh, hub, -20_000.0, NOW)
+    _fresh.signed["sub-1"] = SignedSetpoint(-500.0, NOW + timedelta(seconds=2), NOW + timedelta(seconds=32))
+    _fresh.apply_verdicts({old: "PASS"}, NOW + timedelta(seconds=3))  # type: ignore[dict-item]
+    assert _fresh.signed["sub-1"].kw == -500.0
+
+
+class _Cursor:
+    def __init__(self, conn: _Conn) -> None:
+        self.conn = conn
+        self.rows: list = []
+
+    async def __aenter__(self) -> _Cursor:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def execute(self, sql: str, params: dict) -> None:
+        from psycopg import errors
+
+        self.conn.sql.append(sql)
+        if "published_at" in sql and not self.conn.has_column:
+            raise errors.UndefinedColumn("column published_at does not exist")
+        self.rows = [(params["ids"][0], "PASS_UNPUBLISHED" if "published_at" in sql else "PASS")]
+
+    async def fetchall(self) -> list:
+        return self.rows
+
+
+class _Conn:
+    def __init__(self, has_column: bool) -> None:
+        self.has_column = has_column
+        self.sql: list[str] = []
+
+    async def __aenter__(self) -> _Conn:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def cursor(self) -> _Cursor:
+        return _Cursor(self)
+
+    async def rollback(self) -> None:
+        return None
+
+
+class _Pool:
+    def __init__(self, has_column: bool) -> None:
+        self.conn = _Conn(has_column)
+
+    def connection(self) -> _Conn:
+        return self.conn
+
+
+@pytest.mark.parametrize("has_column", [True, False])
+def test_the_anchor_reader_uses_published_at_and_falls_back_before_the_migration(has_column: bool) -> None:
+    from opengrid.engine.ramp_anchor import PgAnchorVerdictReader
+
+    pool = _Pool(has_column)
+    reader = PgAnchorVerdictReader(pool)
+    batch = uuid4()
+    got = asyncio.run(reader.outcomes([batch]))
+    assert got == {batch: "PASS_UNPUBLISHED" if has_column else "PASS"}
+    asyncio.run(reader.outcomes([batch]))
+    # Without the column the fallback is detected once, then only the legacy query runs.
+    assert sum("published_at" in s for s in pool.conn.sql) == (2 if has_column else 1)
