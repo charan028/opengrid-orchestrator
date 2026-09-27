@@ -43,6 +43,7 @@ from opengrid.core.manual_targets import (
     TargetStatus,
     active_targets,
     effective_targets,
+    latest_stop_by_scope,
     parse_targets,
 )
 from opengrid.core.reasons import R_MANUAL_RAMP
@@ -90,6 +91,12 @@ class ManualTargetSource:
         self._targets: dict[str, ManualTarget] = {}
         self._seen: set[str] | None = None  # trace ids seen; None until the first (baseline) read
         self._refused: set[str] = set()
+        #: Each stop scope's latest (action, at) at the last good read (`engine.ramp_anchor`).
+        self._stop_scopes: dict[tuple[str, str], tuple[str, datetime]] = {}
+
+    def stop_scopes(self) -> dict[tuple[str, str], tuple[str, datetime]]:
+        """Each safe-stop scope's latest `(action, at)` at the last good read (ENGAGE = engaged now)."""
+        return dict(self._stop_scopes)
 
     def active_hub_ids(self) -> frozenset[str]:
         """Hubs under a live target at the last read: operator-owned, unavailable to the allocator."""
@@ -105,6 +112,7 @@ class ManualTargetSource:
                     target_rows = await cur.fetchall()
                     await cur.execute(_STOPS_SQL)
                     stop_rows = await cur.fetchall()
+                self._stop_scopes = latest_stop_by_scope(stop_rows)
                 active = active_targets(
                     effective_targets(
                         target_rows,
