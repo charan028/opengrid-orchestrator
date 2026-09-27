@@ -16,7 +16,6 @@ from opengrid.engine.manual import (
     R_MANUAL_RAMP,
     ManualTarget,
     ManualTargetSource,
-    apply_stops,
     manual_items,
     parse_targets,
 )
@@ -49,22 +48,31 @@ def test_newest_target_wins_and_expired_or_malformed_are_ignored() -> None:
 
 
 def test_a_safe_stop_cancels_covering_targets() -> None:
+    """The stop rule lives in core.manual_targets.effective_targets (engine, API list and guardian)."""
+    from opengrid.core.manual_targets import TargetStatus, effective_targets
+
     issued = NOW - timedelta(minutes=5)
-    targets = {
-        "h1": ManualTarget("h1", -5.0, issued, NOW + timedelta(minutes=5), "t1"),
-        "h2": ManualTarget("h2", -5.0, issued, NOW + timedelta(minutes=5), "t1"),
-    }
+    rows = [_row(["h1", "h2"], -5.0, issued=issued)]
     bank_of = {"h1": "b1", "h2": "b2"}.get
     zone_of = {"b1": "LZ_NORTH", "b2": "LZ_WEST"}.get
-    stop_b1 = [("BANK", "b1", "ENGAGE", NOW - timedelta(minutes=1)), ("BANK", "b1", "RELEASE", NOW)]
-    assert set(apply_stops(targets, stop_b1, bank_of_hub=bank_of, zone_of_bank=zone_of)) == {"h2"}
-    old_released = [
-        ("ZONE", "LZ_WEST", "ENGAGE", NOW - timedelta(hours=1)),
-        ("ZONE", "LZ_WEST", "RELEASE", issued),
+
+    def states(stops):
+        return effective_targets(rows, stops, NOW, bank_of_hub=bank_of, zone_of_bank=zone_of)
+
+    stop_b1 = [
+        ("s1", "BANK", "b1", "ENGAGE", NOW - timedelta(minutes=1)),
+        ("s2", "BANK", "b1", "RELEASE", NOW),
     ]
-    assert set(apply_stops(targets, old_released, bank_of_hub=bank_of, zone_of_bank=zone_of)) == {"h1", "h2"}
-    fleet_engaged = [("FLEET", "FLEET", "ENGAGE", NOW - timedelta(hours=1))]
-    assert apply_stops(targets, fleet_engaged, bank_of_hub=bank_of, zone_of_bank=zone_of) == {}
+    got = states(stop_b1)
+    assert got["h1"].status is TargetStatus.CANCELLED_BY_SAFE_STOP and got["h1"].stop_event_id == "s1"
+    assert got["h2"].status is TargetStatus.ACTIVE
+    old_released = [
+        ("s3", "ZONE", "LZ_WEST", "ENGAGE", NOW - timedelta(hours=1)),
+        ("s4", "ZONE", "LZ_WEST", "RELEASE", issued),
+    ]
+    assert {s.status for s in states(old_released).values()} == {TargetStatus.ACTIVE}
+    fleet_engaged = [("s5", "FLEET", "FLEET", "ENGAGE", NOW - timedelta(hours=1))]
+    assert {s.stop_event_id for s in states(fleet_engaged).values()} == {"s5"}
 
 
 @dataclass
@@ -326,3 +334,34 @@ def test_a_cancel_ends_only_the_named_target_even_without_a_command_value() -> N
     ]
     targets = parse_targets(rows, later)
     assert set(targets) == {"h2"} and targets["h2"].p_kw_target == -2.0
+
+
+class _TraceSink:
+    def __init__(self):
+        self.rows: list[tuple] = []
+
+    async def __call__(self, stream, decision_type, event_class, payload):
+        self.rows.append((stream, decision_type, event_class, payload))
+
+
+@pytest.mark.asyncio
+async def test_a_target_first_seen_long_after_it_was_issued_is_refused_and_cancelled_for_everyone() -> None:
+    """Review R3.4: a MANUAL_TARGET the API reported as failed (journal) must not activate on replay."""
+    now = datetime.now(UTC)
+    live = _row(["h1"], -4.0, issued=now, expires=now + timedelta(minutes=10))
+    replayed = _row(["h2"], -6.0, issued=now - timedelta(minutes=5), expires=now + timedelta(minutes=10))
+    cursor = _Cursor([[live], [], [live, replayed], []])
+    sink = _TraceSink()
+    source = ManualTargetSource(
+        _Pool(cursor),
+        bank_of_hub=lambda h: "b1",
+        zone_of_bank=lambda b: "LZ_NORTH",
+        refresh_s=0.0,
+        trace=sink,
+    )
+    assert set(await source.targets(now)) == {"h1"}  # baseline read
+    assert set(await source.targets(now)) == {"h1"}  # the replayed target is refused
+    ((_, decision, event_class, payload),) = sink.rows
+    assert (decision, event_class) == ("OPERATOR_ACTION", "MANUAL_TARGET")
+    assert payload["cancels"] == str(replayed[0]) and payload["cancel_kind"] == "LATE_RECORD"
+    assert payload["hub_ids"] == ["h2"]

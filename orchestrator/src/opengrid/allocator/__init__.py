@@ -13,6 +13,7 @@ to a different obligation (K13) -- see `opengrid.allocator.cycle` for the full i
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Awaitable, Sequence
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ from opengrid.allocator.models import (
     PiState,
     ProposedGrant,
     Schedule,
+    ShortfallReport,
 )
 from opengrid.core.models.engine import Grant
 
@@ -63,6 +65,12 @@ _last_grants: list[Grant] = []
 #: The last cycle's per-hub realization of PQ-sensitive obligations, `(obligation_id, bank_id) ->
 #: {hub_id: kW}`: the engine builds those obligations' hub items from it (only PQ-eligible hubs deliver).
 _last_hub_allocations: dict[tuple[str, str], dict[str, float]] = {}
+#: The current cycle's extras, shortfalls and pre-cycle PI/dwell states, so a same-cycle re-proposal
+#: (`only_bank_ids`) neither re-steps controllers nor erases other banks' state.
+_last_extras: list[CycleExtras] = []
+_last_shortfalls: list[ShortfallReport] = []
+_pre_cycle_pi: dict[str, PiState] = {}
+_pre_cycle_dwell: dict[str, DwellState] = {}
 
 
 def hub_allocations() -> dict[tuple[str, str], dict[str, float]]:
@@ -90,6 +98,7 @@ async def run_cycle(
     now: datetime | None = None,
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
     only_bank_ids: Sequence[str] | None = None,
+    retry_excluded_hub_ids: frozenset[str] = frozenset(),
 ) -> list[Grant]:
     """One S1-S7 allocation cycle (02a S5.1-S5.2): builds this cycle's `grant` rows for every bank,
     honoring frozen commitments (K13), reserve/P/kVA/ramp limits (K1/K4), and the one-loop-per-quantity
@@ -99,6 +108,13 @@ async def run_cycle(
     wiring supplies real ones backed by `opengrid.fleet`/`opengrid.ledger`/`opengrid.feeds`; tests
     inject fakes, per BUILD.md S5's "use fakes for the ledger and fleet"), calls the pure
     `opengrid.allocator.cycle.cycle`, persists the resulting grants, and returns them as `Grant` rows.
+
+    `only_bank_ids` (the K4 veto re-proposal, one per cycle) re-solves just those banks and must not disturb
+    anything else: the cycle's cached extras are reused (closed-loop controllers and PQ are not stepped
+    twice) with `retry_excluded_hub_ids` added; the retried banks' PI/dwell states are restored to their
+    pre-cycle values first (K9: one integration step per cycle); the other banks' last grants, hub
+    allocations and shortfalls are kept (the shortfall report stays complete, so AT_RISK and escalation for
+    other banks are unaffected); and no extras `observe` runs.
     """
     if fleet is None or ledger is None:
         raise NotImplementedError(
@@ -144,13 +160,21 @@ async def run_cycle(
             if schedule_gateway is not None
             else ()
         )
-        extras = (
-            await _with_gateway_timeout(
-                extras_gateway.extras(fleet_state, ledger_view, t), gateway_name="extras.extras"
+        if only_bank_ids is not None:
+            extras = dataclasses.replace(
+                _last_extras[0] if _last_extras else CycleExtras(),
+                excluded_hub_ids=(_last_extras[0].excluded_hub_ids if _last_extras else frozenset())
+                | retry_excluded_hub_ids,
             )
-            if extras_gateway is not None
-            else CycleExtras()
-        )
+        else:
+            extras = (
+                await _with_gateway_timeout(
+                    extras_gateway.extras(fleet_state, ledger_view, t), gateway_name="extras.extras"
+                )
+                if extras_gateway is not None
+                else CycleExtras()
+            )
+            _last_extras[:] = [extras]
     except TimeoutError as exc:
         # K7 "degrade, don't trip": hold the last cycle's signed-off grants rather than propose a
         # fresh batch built from a stalled/partial read of this cycle's inputs.
@@ -160,6 +184,15 @@ async def run_cycle(
         )
         return list(_last_grants)
 
+    if only_bank_ids is None:
+        _pre_cycle_pi.clear()
+        _pre_cycle_pi.update(_pi_states)
+        _pre_cycle_dwell.clear()
+        _pre_cycle_dwell.update(_dwell_states)
+    else:
+        for bank_id in wanted:
+            _restore(_pi_states, _pre_cycle_pi, bank_id)
+            _restore(_dwell_states, _pre_cycle_dwell, bank_id)
     result: CycleResult = cycle(
         t,
         fleet_state,
@@ -178,11 +211,15 @@ async def run_cycle(
         operator_hub_ids=extras.operator_hub_ids,
         lease_ttl_s=lease_ttl_s,
     )
-    _last_hub_allocations.clear()
+    if only_bank_ids is None:
+        _last_hub_allocations.clear()
+    else:
+        for key in [k for k in _last_hub_allocations if k[1] in wanted]:
+            _last_hub_allocations.pop(key)
     _last_hub_allocations.update(
         {(a.obligation_id, a.bank_id): dict(a.per_hub_kw) for a in result.hub_allocations}
     )
-    if extras_gateway is not None:
+    if extras_gateway is not None and only_bank_ids is None:
         # Controller reconciliation, the PQ ladder and their traces; never costs the cycle (K7).
         try:
             await extras_gateway.observe(result, ledger_view, t)
@@ -190,8 +227,14 @@ async def run_cycle(
             logger.exception("cycle extras observe failed", extra={"cycle_id": cycle_id})
 
     await ledger.persist_grants(cycle_id, list(result.grants))
+    shortfalls = list(result.shortfalls)
+    if only_bank_ids is None:
+        _last_shortfalls[:] = shortfalls
+    else:
+        shortfalls = [s for s in _last_shortfalls if s.bank_id not in wanted] + shortfalls
+        _last_shortfalls[:] = shortfalls
     try:
-        await ledger.record_shortfalls(cycle_id, list(result.shortfalls))
+        await ledger.record_shortfalls(cycle_id, shortfalls)
     except Exception:
         logger.exception("failed to record shortfalls", extra={"cycle_id": cycle_id})
     if result.substitutions:
@@ -202,8 +245,18 @@ async def run_cycle(
             logger.exception("failed to record hub substitutions", extra={"cycle_id": cycle_id})
     ledger_version = await ledger.ledger_version()
     grants = [_to_grant_row(cycle_id, ledger_version, g) for g in result.grants]
-    _last_grants[:] = grants
+    if only_bank_ids is None:
+        _last_grants[:] = grants
+    else:
+        _last_grants[:] = [g for g in _last_grants if str(g.bank_id) not in wanted] + grants
     return grants
+
+
+def _restore[V](live: dict[str, V], snapshot: dict[str, V], bank_id: str) -> None:
+    if bank_id in snapshot:
+        live[bank_id] = snapshot[bank_id]
+    else:
+        live.pop(bank_id, None)
 
 
 _ledger_gateway: LedgerGateway | None = None

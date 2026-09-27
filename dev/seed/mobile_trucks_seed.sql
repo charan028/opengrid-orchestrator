@@ -17,8 +17,9 @@
 --
 -- og.bank.zone is the home station's zone for display; the selector prices a mobile unit at its home
 -- station's zone from the registry, never og.bank.zone. kva_rating 600 = the depot service/transformer
--- rating (above the 500 kW PCS / ~526 kVA at 0.95 pf). No og.asset row: og.asset's asset_class is
--- HOME_BANK | SUBSTATION only, and MOBILE is classified from the registry (api/routers/fleet_search.py).
+-- rating (above the 500 kW PCS / ~526 kVA at 0.95 pf). Each truck also gets an og.asset MOBILE_STORAGE row
+-- (needs migration 0044) so the guardian's G-02 rates it at its 500 kW nameplate; the UI still classifies
+-- MOBILE from the registry (api/routers/fleet_search.py).
 --
 -- units: migration 0032's insert trigger sets units = 2 for e_kwh >= 70 (a dual-unit HOME rule); a truck is
 -- one PCS/battery unit, so the insert is followed by an explicit UPDATE ... SET units = 1.
@@ -68,6 +69,26 @@ ON CONFLICT (hub_id) DO UPDATE SET
 
 -- 0032's trigger made these dual-unit (e_kwh >= 70); a truck is one unit.
 UPDATE og.hub SET units = 1 WHERE hub_id IN (SELECT hub_id FROM _og_trucks) AND units <> 1;
+
+-- One og.asset MOBILE_STORAGE row per truck (migration 0044): the guardian's G-02 then rates the hub at its
+-- 500 kW nameplate instead of the 11 kW home per-unit cap. utility_id = the home station's regulated utility
+-- (NULL = ERCOT competitive), matching the registry. No POI / substation_id: a truck is not substation-sited.
+-- eta_rt 0.9 = 0.9487^2; capex is a planning ASSUMPTION ($600/kWh installed, truck included).
+INSERT INTO og.asset (
+    asset_id, asset_class, bank_id, feeder_id, zone, utility_id, p_kw, e_kwh, eta_rt, floor_frac, capex_usd, status
+)
+SELECT
+    hub_id, 'MOBILE_STORAGE', 'bank-' || hub_id, 'feeder-' || hub_id, zone,
+    -- The territory's utility when og.utility has it (market_model_seed.sql), else NULL (never an FK error).
+    (SELECT u.utility_id FROM og.utility u
+     WHERE u.utility_id = CASE zone WHEN 'LZ_AEN' THEN 'AUSTIN_ENERGY' WHEN 'LZ_CPS' THEN 'CPS_ENERGY' END),
+    500, 1000, 0.9, 0.20, 600000, 'ACTIVE'
+FROM _og_trucks
+ON CONFLICT (asset_id) DO UPDATE SET
+    asset_class = EXCLUDED.asset_class, bank_id = EXCLUDED.bank_id, feeder_id = EXCLUDED.feeder_id,
+    zone = EXCLUDED.zone, utility_id = EXCLUDED.utility_id, p_kw = EXCLUDED.p_kw, e_kwh = EXCLUDED.e_kwh,
+    eta_rt = EXCLUDED.eta_rt, floor_frac = EXCLUDED.floor_frac, capex_usd = EXCLUDED.capex_usd,
+    status = EXCLUDED.status, updated_at = now();
 
 INSERT INTO og.hub_state (hub_id, soc_kwh, p_kw, health, lease_epoch, last_seen_at)
 SELECT hub_id, 200, 0, 'offline', 0, now() FROM _og_trucks

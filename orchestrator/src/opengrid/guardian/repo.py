@@ -33,7 +33,7 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.core import geo
+from opengrid.core import geo, manual_targets
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.core.pq import OffsetVector
 from opengrid.guardian.config import DEFAULT_CLOCK_CACHE_S, ClockSource
@@ -126,12 +126,18 @@ ORDER BY seq DESC LIMIT 1
 """
 
 
-#: `utility_scale`: the hub's bank is an og.asset SUBSTATION (migration 0025; the D-29 20 MW set is a one-hub
-#: bank) -- rated at its nameplate, never the home per-unit cap.
+#: Asset classes rated at their nameplate `og.hub.p_kw`, never the home per-unit cap (11 kW per unit): the D-29
+#: substation set, and the D-31 mobile trucks (e.g. 1000 kWh / 500 kW, units=1).
+NAMEPLATE_ASSET_CLASSES = ("SUBSTATION", "MOBILE_STORAGE")
+
+#: `utility_scale`: the hub belongs to a nameplate-rated og.asset -- linked by its (one-hub) bank or by its
+#: own id. Home hubs have no such asset row and keep the home unit rules.
 _ALL_HUB_PARAMS_SQL = """
 SELECT h.hub_id, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, h.units,
-       EXISTS (SELECT 1 FROM og.asset a WHERE a.bank_id = h.bank_id AND a.asset_class = 'SUBSTATION')
-           AS utility_scale
+       EXISTS (
+           SELECT 1 FROM og.asset a
+           WHERE (a.bank_id = h.bank_id OR a.asset_id = h.hub_id) AND a.asset_class = ANY(%(nameplate)s)
+       ) AS utility_scale
 FROM og.hub h
 """
 
@@ -142,7 +148,7 @@ async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
     otherwise keeps via MQTT). `soc_kwh`/`prev_p_kw` start at 0 and `health="stale"` until the first
     telemetry message for that hub arrives. `units` (migration 0032) feeds G-02's per-unit cap."""
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_ALL_HUB_PARAMS_SQL)
+        await cur.execute(_ALL_HUB_PARAMS_SQL, {"nameplate": list(NAMEPLATE_ASSET_CLASSES)})
         rows = await cur.fetchall()
     return {
         hub_id: HubSnapshot(
@@ -344,16 +350,11 @@ _ALERT_KEY_SQL = """coalesce(
     scope_kind || ':' || scope_ref,
     (detail ->> 'scope_kind') || ':' || (detail ->> 'scope_ref')
 )"""
-#: Live operator targets (the payload contract of `engine.manual`: `hub_ids`, `expires_at`), read by the
-#: guardian itself. Over the same 24 h horizon the engine reads; a malformed `expires_at` fails the read,
-#: which the caller treats as "no evidence" (VETO), never as a target.
-_MANUAL_TARGET_HUBS_SQL = """
-SELECT DISTINCT h.hub_id
-FROM og.trace t
-CROSS JOIN LATERAL jsonb_array_elements_text(t.payload -> 'hub_ids') AS h(hub_id)
-WHERE t.event_class = 'MANUAL_TARGET' AND t.created_at > now() - interval '24 hours'
-  AND (t.payload ->> 'expires_at')::timestamptz > now()
-  AND h.hub_id = ANY(%(hub_ids)s)
+#: Where each asked-about hub sits (bank, zone): `core.manual_targets.effective_targets` needs it to apply a
+#: covering safe stop (bank, zone or fleet) to a target.
+_HUB_PLACEMENT_SQL = """
+SELECT h.hub_id, h.bank_id, b.zone FROM og.hub h LEFT JOIN og.bank b ON b.bank_id = h.bank_id
+WHERE h.hub_id = ANY(%(hub_ids)s)
 """
 
 
@@ -405,18 +406,35 @@ class ConfigMobileUnitPort:
 
 
 class PgManualTargetPort:
-    """G-19 R-OPERATOR-OVERRIDE: the guardian's own read of live MANUAL_TARGET trace events."""
+    """G-19 R-OPERATOR-OVERRIDE: the guardian's own read of the operator targets, through the ONE status rule
+    (`core.manual_targets.effective_targets`, shared with the engine and the API): only an ACTIVE target counts
+    -- never one expired, cancelled by the operator, refused as a late record, or cancelled by a safe stop."""
 
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(
+        self, pool: AsyncConnectionPool, *, now_fn: Callable[[], datetime] = lambda: datetime.now(UTC)
+    ) -> None:
         self._pool = pool
+        self._now = now_fn
 
     async def manual_target_hubs(self, hub_ids: list[str]) -> set[str]:
         if not hub_ids:
             return set()
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_MANUAL_TARGET_HUBS_SQL, {"hub_ids": hub_ids})
+            await cur.execute(manual_targets.MANUAL_TARGET_ROWS_SQL)
             rows = await cur.fetchall()
-        return {str(row[0]) for row in rows}
+            await cur.execute(manual_targets.STOP_EVENT_ROWS_SQL)
+            stops = await cur.fetchall()
+            await cur.execute(_HUB_PLACEMENT_SQL, {"hub_ids": hub_ids})
+            placement = {str(r[0]): (r[1], r[2]) for r in await cur.fetchall()}
+        bank_zone = {bank: zone for bank, zone in placement.values() if bank is not None}
+        states = manual_targets.effective_targets(
+            [(r[0], dict(r[1]), r[2]) for r in rows],
+            stops,
+            self._now(),
+            bank_of_hub=lambda hub: placement.get(hub, (None, None))[0],
+            zone_of_bank=lambda bank: bank_zone.get(bank),
+        )
+        return set(manual_targets.active_targets(states)) & set(hub_ids)
 
 
 _OPEN_ALERTS_SQL = f"""

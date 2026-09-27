@@ -1170,3 +1170,203 @@ async def test_a_retained_device_info_burst_of_2501_hubs_is_ingested_without_dro
     for i in range(5):
         small.submit({"payload": {"hub_id": str(i)}})
     assert small.dropped == 2  # the size is configurable
+
+
+# --- r3.4: K4 retry safety, toll ramp, verdict hub filter, gates trace JSON --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_retry_keeps_other_banks_state_and_does_not_re_step_extras() -> None:
+    import opengrid.allocator as alloc
+    from opengrid.allocator.models import BankSnapshot, CycleExtras, PiState
+
+    class _FleetGw:
+        def __init__(self, fs):
+            self._fs = fs
+
+        async def bank_ids(self):
+            return ["b1", "b2"]
+
+        async def fleet_state(self, bank_ids, t):
+            return self._fs
+
+    class _LedgerGw:
+        def __init__(self, view):
+            self._view = view
+            self.shortfalls: list = []
+
+        async def ledger_view(self, bank_ids, t):
+            return LedgerView(tuple(c for c in self._view.calls if c.bank_id in bank_ids))
+
+        async def ledger_version(self):
+            return 1
+
+        async def persist_grants(self, cycle_id, grants):
+            return None
+
+        async def record_shortfalls(self, cycle_id, shortfalls):
+            self.shortfalls = list(shortfalls)
+
+        async def record_substitution_events(self, cycle_id, events):
+            return None
+
+    class _Extras:
+        def __init__(self):
+            self.calls = 0
+            self.observed = 0
+
+        async def extras(self, fs, lv, t):
+            self.calls += 1
+            return CycleExtras()
+
+        async def observe(self, result, lv, t):
+            self.observed += 1
+
+    hubs = tuple(
+        HubSnapshot(f"h-{b}", b, 10.0, soc_kwh=1e6, reserve_kwh=0.0, e_kwh=1e6) for b in ("b1", "b2")
+    )
+    banks = tuple(BankSnapshot(b, 10.0, kva_rating=10.0) for b in ("b1", "b2"))
+    calls = tuple(
+        ObligationCall(f"o-{b}", b, "PARTNER_CAPACITY", "T1", 20.0, (f"h-{b}",)) for b in ("b1", "b2")
+    )
+    ledger = _LedgerGw(LedgerView(calls))
+    extras = _Extras()
+    alloc._pi_states["b2"] = PiState(integral=5.0)
+    alloc._pi_states["b1"] = PiState(integral=1.0)
+    first = await alloc.run_cycle(
+        "c1", fleet=_FleetGw(FleetState(hubs, banks)), ledger=ledger, extras_gateway=extras, now=NOW
+    )
+    assert {str(g.bank_id) for g in first} == {"b1", "b2"}
+    assert {s.bank_id for s in ledger.shortfalls} == {"b1", "b2"}
+    alloc._pi_states["b1"] = PiState(integral=99.0)  # as if the first run stepped it
+    retry = await alloc.run_cycle(
+        "c1-r1",
+        fleet=_FleetGw(FleetState(hubs, banks)),
+        ledger=ledger,
+        extras_gateway=extras,
+        now=NOW,
+        only_bank_ids=["b1"],
+        retry_excluded_hub_ids=frozenset({"h-b1"}),
+    )
+    assert {str(g.bank_id) for g in retry} <= {"b1"}
+    assert extras.calls == 1 and extras.observed == 1  # extras reused, not re-stepped; no second observe
+    assert {s.bank_id for s in ledger.shortfalls} == {"b1", "b2"}  # b2's shortfall kept (AT_RISK unaffected)
+    assert {str(g.bank_id) for g in alloc._last_grants} == {"b1", "b2"} or not retry
+    assert alloc._pi_states["b1"].integral == 1.0  # restored to its pre-cycle state (K9)
+    assert alloc._pi_states["b2"].integral == 5.0
+
+
+def test_a_retried_batch_keeps_the_original_cycle_id_but_its_own_submission() -> None:
+    grants = [_g("5", obligation=uuid4())]
+    first = engine.build_command_batch_row(
+        command_batch_id=uuid4(),
+        trace_pre_image_id=uuid4(),
+        cycle_id="c1",
+        bank_id="b1",
+        grants=grants,
+        ledger_version=1,
+    )
+    retry = engine.build_command_batch_row(
+        command_batch_id=uuid4(),
+        trace_pre_image_id=uuid4(),
+        cycle_id="c1",
+        bank_id="b1",
+        grants=grants,
+        ledger_version=1,
+        attempt=1,
+    )
+    assert first.cycle_id == retry.cycle_id == "c1"
+    assert first.submission_id == "c1:b1" and retry.submission_id == "c1:b1:r1"
+
+
+def test_the_retry_stays_off_unless_the_owner_enables_it() -> None:
+    assert dispatch_settings(Config({})).veto_retry_enabled is False
+
+
+def test_utility_scale_hubs_step_from_the_last_commanded_setpoint() -> None:
+    @dataclass
+    class _Big:
+        hub_id: str = "sub-1"
+        bank_id: str = "b-sub"
+        p_kw: float = 0.0  # stale telemetry
+        ramp_kw_per_s: float = 100.0
+        utility_scale: bool = True
+
+    engine._last_commanded_kw.pop("sub-1", None)
+    hub = _Big()
+    step1 = engine._ramped_setpoint_kw(hub, -20000.0, 2.0)
+    step2 = engine._ramped_setpoint_kw(hub, -20000.0, 2.0)
+    assert step1 == pytest.approx(-180.0) and step2 == pytest.approx(-360.0)  # keeps climbing
+    home = _HubCap("h1", "b1", 10.0)
+    home_hub = SimpleNamespaceHub(p_kw=0.0, ramp_kw_per_s=0.1)
+    assert engine._ramped_setpoint_kw(home_hub, -5.0, 2.0) == engine._ramped_setpoint_kw(home_hub, -5.0, 2.0)
+    assert home.hub_id == "h1"
+
+
+@dataclass
+class SimpleNamespaceHub:
+    p_kw: float
+    ramp_kw_per_s: float
+    hub_id: str = "h-home"
+    bank_id: str = "b1"
+
+
+@pytest.mark.asyncio
+async def test_only_hub_ids_are_taken_from_a_verdict() -> None:
+    from opengrid.engine.veto import vetoed_banks
+
+    b1 = uuid4()
+    reader = _FakeVerdicts({b1: "VETOED"}, {b1: {"hub-1", "bank-1", "feeder-7"}})
+    got = await vetoed_banks(
+        reader, {b1: "VETOED"}, {b1: "bank-1"}, known_hub_ids=frozenset({"hub-1", "hub-2"})
+    )
+    assert got == {"bank-1": {"hub-1"}}
+    none_named = await vetoed_banks(
+        reader, {b1: "VETOED"}, {b1: "bank-1"}, known_hub_ids=frozenset({"hub-9"})
+    )
+    assert none_named == {}
+
+
+@pytest.mark.asyncio
+async def test_intake_skipped_trace_is_json_safe_with_a_uuid_scope() -> None:
+    import json
+
+    from opengrid.engine.gates import run_due_gates
+
+    scope = uuid4()
+
+    @dataclass
+    class _Trig:
+        gate_kind: str = "ADMISSION"
+        contract_scope: Any = scope
+
+    captured: list[dict] = []
+
+    class _T:
+        async def append(self, stream, dt, ec, payload, /):
+            captured.append(payload)
+
+    async def run_gate(kind, s):
+        return None
+
+    async def no_new():
+        return True
+
+    async def raise_alert(f):
+        return None
+
+    async def run_intake(*a, **k):
+        return None
+
+    await run_due_gates(
+        [_Trig()],
+        now=NOW,
+        run_intake=run_intake,
+        run_gate=run_gate,
+        trace=_T(),
+        raise_alert=raise_alert,
+        no_new_commitments=no_new,
+    )
+    (payload,) = captured
+    json.dumps(payload)  # no UUID objects left
+    assert payload["contract_scope"] == str(scope)

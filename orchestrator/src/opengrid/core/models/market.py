@@ -30,7 +30,7 @@ ERCOT_COMPETITIVE: Territory = "ERCOT_COMPETITIVE"
 NOIE: Territory = "NOIE"
 #: What `[zone_territory]` can assign a zone to: a regulated utility customer, or NOIE.
 ZoneOwner = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "NOIE"]
-AssetClass = Literal["HOME_BANK", "SUBSTATION"]
+AssetClass = Literal["HOME_BANK", "SUBSTATION", "MOBILE_STORAGE"]  # MOBILE_STORAGE: D-31 truck (0044)
 CapacityPaymentBasis = Literal["USD_PER_KW_MONTH", "USD_PER_KW_YEAR"]
 ChargingTariffKind = Literal["TOU_OFF_PEAK", "NIGHT_RATE"]
 

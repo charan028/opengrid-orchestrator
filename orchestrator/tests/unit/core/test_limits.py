@@ -80,6 +80,16 @@ def test_a_utility_scale_asset_is_rated_at_its_nameplate_not_the_home_unit_cap()
     assert continuous_power_kw(home_seeded_at_20_mw) == 20.0  # without the asset flag: the home rules
 
 
+def test_a_mobile_truck_is_rated_at_its_nameplate_and_a_home_hub_is_not():
+    """D-31 trucks (1000 kWh / 500 kW, units=1, og.asset MOBILE_STORAGE) are loaded as nameplate-rated; a home
+    hub with the same seeded numbers keeps the 11 kW single-unit cap."""
+    truck = HubParams(e_kwh=1000.0, r_kwh=200.0, p_kw=500.0, units=1, utility_scale=True)
+    assert continuous_power_kw(truck) == 500.0 and check_hub_power(-500.0, truck).ok
+    assert not check_hub_power(-500.5, truck).ok
+    home = HubParams(e_kwh=1000.0, r_kwh=200.0, p_kw=500.0, units=1)
+    assert continuous_power_kw(home) == 11.0 and not check_hub_power(-12.0, home).ok
+
+
 def test_out_of_range_unit_count_fails_closed_to_one_unit():
     assert unit_rating_kw(3) == 11.0
     assert unit_rating_kw(0) == 11.0

@@ -113,6 +113,7 @@ def test_seed_matches_the_registry() -> None:
     sql = SEED_SQL.read_text(encoding="utf-8")
     assert "SET units = 1" in sql  # 0032's trigger would make a 1 MWh hub dual-unit
     assert "ON CONFLICT" in sql
+    assert "'MOBILE_STORAGE'" in sql  # og.asset rows: G-02 nameplate (migration 0044)
 
 
 def test_load_mobile_units_sees_the_eight_trucks_at_their_home_zones(monkeypatch: pytest.MonkeyPatch) -> None:
