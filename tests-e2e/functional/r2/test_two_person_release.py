@@ -25,13 +25,21 @@ def _verdict(resp) -> dict:
     return body["detail"] if isinstance(body.get("detail"), dict) else body
 
 
-def _command_into_bank(stack: Stack):
+def _target_hub_in_bank(stack: Stack) -> tuple[str, str]:
+    """A manual target on one hub of the bank (R3: 202 RAMPING, the engine ramps it). Returns (hub, trace_id)."""
     hub = stack.rows(
         "SELECT h.hub_id, s.p_kw FROM og.hub h JOIN og.hub_state s USING (hub_id) "
         "WHERE h.bank_id = %(b)s AND s.health = 'online' LIMIT 1",
         {"b": BANK},
     )[0]
-    return stack.manual_command(hub["hub_id"], float(hub["p_kw"]), user=OPERATOR_A)
+    resp = stack.manual_command(hub["hub_id"], float(hub["p_kw"]), user=OPERATOR_A)
+    assert resp.status_code == 202 and resp.json().get("status") == "RAMPING", resp.text
+    return hub["hub_id"], resp.json()["trace_id"]
+
+
+def _live_target(stack: Stack, trace_id: str) -> bool:
+    items = stack.get("/fleet/manual-targets").json().get("items", [])
+    return any(item["trace_id"] == trace_id for item in items)
 
 
 def test_ts_06_24_a_second_operator_releases_the_stop_and_the_command_path_resumes(stack: Stack) -> None:
@@ -41,10 +49,17 @@ def test_ts_06_24_a_second_operator_releases_the_stop_and_the_command_path_resum
     if proposed.status_code == 403:
         pytest.skip(f"{OPERATOR_A} is not an operator on this stack ([api.roles.operator])")
     assert proposed.status_code == 202, proposed.text
+    _hub, target = _target_hub_in_bank(stack)
     engaged = stack.post(f"/safestop/{proposed.json()['proposal_id']}/confirm", user=OPERATOR_A)
     assert engaged.status_code == 200, engaged.text
-    blocked = _command_into_bank(stack)
-    assert "SAFE_STOP" in (_verdict(blocked).get("vetoed_rule_ids") or []), blocked.text
+    engaged_at = now_utc()
+
+    wait_until(
+        lambda: not _live_target(stack, target), timeout_s=30, what="the stop to cancel the manual target"
+    )
+    wait_until(lambda: (now_utc() - engaged_at).total_seconds() >= 12, timeout_s=20, what="12 s of cycles")
+    stopped = stack.bank_verdicts(BANK, engaged_at)
+    assert not [v for v in stopped if v["outcome"] == "PASS"], f"a signed command reached stopped {BANK}"
 
     released = False
     for _attempt in range(3):  # the guardian correctly refuses while its own clock check (G-20) fails
@@ -73,6 +88,5 @@ def test_ts_06_24_a_second_operator_releases_the_stop_and_the_command_path_resum
             continue
     assert released, "og-op-b's approval never produced a guardian-signed RELEASE"
 
-    resumed = _command_into_bank(stack)
-    assert resumed.status_code in {200, 409}, resumed.text
-    assert "SAFE_STOP" not in (_verdict(resumed).get("vetoed_rule_ids") or []), "the bank is still stopped"
+    _hub, resumed = _target_hub_in_bank(stack)
+    assert _live_target(stack, resumed), "a manual target into the released bank did not take"

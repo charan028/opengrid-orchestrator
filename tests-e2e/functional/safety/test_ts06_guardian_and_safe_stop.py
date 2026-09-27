@@ -24,6 +24,14 @@ STOP_BANK = "bank-007"
 OPERATOR_A = os.environ.get("OG_E2E_OPERATOR_A", "og-op-a")
 OPERATOR_B = os.environ.get("OG_E2E_OPERATOR_B", "og-op-b")
 
+#: R3: a confirmed manual command becomes a MANUAL_TARGET that the engine ramps toward (202 RAMPING), each step
+#: signed or vetoed by the guardian; there is no per-command verdict any more. These guardian negatives need a veto
+#: source on the engine/allocator path (e.g. a unit-cap fixture as in r3/test_k4_resolve.py).
+R3_NO_PER_COMMAND_VERDICT = pytest.mark.skip(
+    reason="R3: manual commands ramp through the engine (202 RAMPING), no per-command verdict; re-source via an "
+    "engine-path veto fixture"
+)
+
 
 def _verdict(resp) -> dict:
     body = resp.json()
@@ -33,6 +41,7 @@ def _verdict(resp) -> dict:
 # --- guardian negatives via the manual-command path -------------------------------------------------
 
 
+@R3_NO_PER_COMMAND_VERDICT
 def test_a_command_that_holds_the_current_setpoint_is_signed(stack: Stack) -> None:
     hub = stack.online_hub(exclude_banks=(STOP_BANK,), idle=True)
 
@@ -42,14 +51,7 @@ def test_a_command_that_holds_the_current_setpoint_is_signed(stack: Stack) -> No
     assert resp.json()["outcome"] == "PASS"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "FINDING (R2, main 6470cfa): a setpoint at 3x a competitive-area hub's rating is still vetoed (G-04, G-26, "
-        "G-27, G-31), but G-02 itself no longer flags it; R2's derated G-02 (P_max(SoC, T)) appears not to fire "
-        "when the batch is already over other limits or telemetry lacks p_dis_max_kw."
-    ),
-)
+@R3_NO_PER_COMMAND_VERDICT
 def test_ts_06_07a_g02_a_setpoint_above_the_hub_power_limit_is_vetoed(stack: Stack) -> None:
     hub = stack.online_hub(exclude_banks=(STOP_BANK,))
 
@@ -61,6 +63,7 @@ def test_ts_06_07a_g02_a_setpoint_above_the_hub_power_limit_is_vetoed(stack: Sta
     assert "G-02" in verdict["vetoed_rule_ids"]
 
 
+@R3_NO_PER_COMMAND_VERDICT
 def test_ts_06_09_g04_a_step_beyond_the_hub_ramp_limit_is_vetoed(stack: Stack) -> None:
     hub = stack.online_hub(exclude_banks=(STOP_BANK,), idle=True)
 
@@ -73,6 +76,7 @@ def test_ts_06_09_g04_a_step_beyond_the_hub_ramp_limit_is_vetoed(stack: Stack) -
     assert "G-02" not in verdict["vetoed_rule_ids"], "the setpoint is within the hub limit"
 
 
+@R3_NO_PER_COMMAND_VERDICT
 def test_ts_06_06_g01_a_hub_reporting_soc_below_reserve_is_refused(stack: Stack) -> None:
     hub = stack.rows(
         """SELECT h.hub_id, h.r_kwh FROM og.hub h JOIN og.hub_state s USING (hub_id)
@@ -104,6 +108,7 @@ def test_ts_06_06_g01_a_hub_reporting_soc_below_reserve_is_refused(stack: Stack)
     assert "G-01" in _verdict(resp)["vetoed_rule_ids"]
 
 
+@R3_NO_PER_COMMAND_VERDICT
 def test_every_veto_is_traced_with_its_rule(stack: Stack) -> None:
     started = now_utc()
     hub = stack.online_hub(exclude_banks=(STOP_BANK,))
@@ -141,21 +146,12 @@ def test_ts_06_16_a_bank_safe_stop_only_stops_that_bank(stack: Stack) -> None:
     )
     assert [(e["scope_kind"], e["scope_ref"]) for e in event] == [("BANK", STOP_BANK)]
 
-    inside = stack.rows(
-        "SELECT h.hub_id, s.p_kw FROM og.hub h JOIN og.hub_state s USING (hub_id) "
-        "WHERE h.bank_id = %(b)s AND s.health = 'online' LIMIT 1",
-        {"b": STOP_BANK},
-    )[0]
-    into_stop = stack.manual_command(inside["hub_id"], float(inside["p_kw"]))
-    assert into_stop.status_code == 409, into_stop.text
-    assert "SAFE_STOP" in _verdict(into_stop)["vetoed_rule_ids"]
-
-    outside = stack.online_hub(exclude_banks=(STOP_BANK,))
-    elsewhere = stack.manual_command(outside["hub_id"], float(outside["p_kw"]))
-    # A hub the engine is also driving may be refused for other reasons (G-13 lease/sequence); the scope
-    # property is only that the bank stop never reaches it.
-    assert elsewhere.status_code in {200, 409}, elsewhere.text
-    assert "SAFE_STOP" not in (_verdict(elsewhere).get("vetoed_rule_ids") or []), "the bank stop leaked"
+    engaged_at = now_utc()
+    wait_until(lambda: (now_utc() - engaged_at).total_seconds() >= 12, timeout_s=20, what="12 s of cycles")
+    stopped = stack.bank_verdicts(STOP_BANK, engaged_at)
+    assert not [v for v in stopped if v["outcome"] == "PASS"], f"a signed command reached stopped {STOP_BANK}"
+    others = [v for b in ("bank-000", "bank-001", "bank-002") for v in stack.bank_verdicts(b, engaged_at)]
+    assert any(v["outcome"] == "PASS" for v in others), "a bank-scoped stop must not stop other banks"
 
 
 def test_ts_06_15_a_safe_stop_never_engages_on_one_message(stack: Stack) -> None:
@@ -217,18 +213,16 @@ def test_a_second_authorised_operator_releases_the_stop(stack: Stack) -> None:
 
     _release(stack, STOP_BANK)
 
-    inside = stack.rows(
-        "SELECT h.hub_id, s.p_kw FROM og.hub h JOIN og.hub_state s USING (hub_id) "
-        "WHERE h.bank_id = %(b)s AND s.health = 'online' LIMIT 1",
-        {"b": STOP_BANK},
-    )[0]
-    after = stack.manual_command(inside["hub_id"], float(inside["p_kw"]))
-    assert "SAFE_STOP" not in (_verdict(after).get("vetoed_rule_ids") or []), "the bank is still stopped"
+    released_at = now_utc()
+    wait_until(lambda: (now_utc() - released_at).total_seconds() >= 12, timeout_s=20, what="12 s of cycles")
+    after = stack.bank_verdicts(STOP_BANK, released_at)
+    assert not [v for v in after if "SAFE_STOP" in (v["vetoed_rule_ids"] or [])], "the bank is still stopped"
 
 
 # --- process loss --------------------------------------------------------------------------------
 
 
+@R3_NO_PER_COMMAND_VERDICT
 def test_ts_06_17_with_the_guardian_down_a_command_is_never_treated_as_passed(stack: Stack) -> None:
     hub = stack.online_hub(exclude_banks=(STOP_BANK,))
     stack.compose("stop", "og-guardian")

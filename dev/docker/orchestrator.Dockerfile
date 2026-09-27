@@ -18,7 +18,7 @@ RUN apt-get update \
 
 COPY orchestrator/ orchestrator/
 
-RUN pip install --no-cache-dir -e ./orchestrator
+RUN pip install --no-cache-dir -e ./orchestrator python-multipart
 
 # dev/ itself is bind-mounted at runtime (docker-compose.yml), not copied, so editing
 # dev/config/*.toml or dev/config/*.yaml never requires an image rebuild.
