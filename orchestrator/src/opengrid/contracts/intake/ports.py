@@ -54,3 +54,12 @@ class MarketDataPort(Protocol):
         """latest_as_mcpc_usd_per_mwh with the observation's timestamp, so intake can refuse a stale
         clearing price ([contracts.intake].as_price_max_age_s)."""
         ...
+
+    async def as_mcpc_between(
+        self, product_code: str, start: datetime, end: datetime
+    ) -> list[PriceObservation]:
+        """Every `np4-188-cd` observation for `product_code` with `start <= ts < end`, oldest first.
+        NP4-188-CD posts one MCPC per product per operating-day HOUR (`og.feed_obs.ts` = that hour's
+        start, `feeds.normalize.ercot_as_price_to_feed_obs`), so intake prices each hour at its own
+        clearing price (issue #43 A1). `[]` when nothing is posted for the window yet."""
+        ...

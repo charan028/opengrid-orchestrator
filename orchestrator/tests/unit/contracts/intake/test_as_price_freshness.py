@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from opengrid.contracts import intake
+from opengrid.contracts.intake import ancillary
 from opengrid.trace import TraceStore
 
 from ..conftest import make_contract, make_product_rule
@@ -96,3 +97,30 @@ def test_default_bound_and_repo_config() -> None:
     config = Path(__file__).resolve().parents[4] / "config" / "orchestrator.toml"
     block = tomllib.loads(config.read_text(encoding="utf-8"))["contracts"]["intake"]
     assert block == {"as_price_max_age_s": 93600}
+
+
+async def test_intake_prices_each_hour_at_its_own_mcpc(repo: FakeContractsRepo, trace: TraceStore) -> None:
+    """Issue #43 A1: the posted hourly np4-188-cd MCPCs price their own hours (not the latest HE24
+    for all 24); an unposted hour takes the latest, which is still subject to the staleness bound."""
+    day_start = ancillary.next_operating_day_start(NOW)
+    hourly = {day_start + timedelta(hours=h): 5.0 + h for h in range(ancillary.OPERATING_DAY_HOURS - 1)}
+    market = _market(NOW - timedelta(hours=1))  # latest MCPC 20.0
+    market.as_mcpc_hourly = {"NONSPIN": hourly}
+    intake.configure(repo, trace, market)
+    await _seed_as(repo)
+    created = await intake.run_intake_gate("SCHEDULED_15MIN", now=NOW)
+    value_by_start = {o.window_start: o.value_per_mwh for o in created}
+    assert value_by_start[day_start] == Decimal("5.0")
+    assert value_by_start[day_start + timedelta(hours=22)] == Decimal("27.0")
+    assert value_by_start[day_start + timedelta(hours=23)] == Decimal("20.0")  # not posted: latest
+
+
+async def test_hourly_prices_do_not_bypass_the_staleness_bound(
+    repo: FakeContractsRepo, trace: TraceStore
+) -> None:
+    day_start = ancillary.next_operating_day_start(NOW)
+    market = _market(NOW - timedelta(days=3))
+    market.as_mcpc_hourly = {"NONSPIN": {day_start: 12.0}}
+    intake.configure(repo, trace, market)
+    await _seed_as(repo)
+    assert await intake.run_intake_gate("SCHEDULED_15MIN", now=NOW) == []

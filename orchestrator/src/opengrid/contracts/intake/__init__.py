@@ -434,8 +434,19 @@ async def _intake_as(
         )
         return []
     mcpc = observation.value_usd_per_mwh
+    # Issue #43 A1: each operating-day hour at its own posted MCPC; the latest (fresh, checked above)
+    # only for an hour NP4-188-CD has not posted.
+    day_start = ancillary.next_operating_day_start(now)
+    hourly = {
+        obs.ts: obs.value_usd_per_mwh
+        for obs in await state.market.as_mcpc_between(
+            rule.product_code, day_start, day_start + timedelta(hours=ancillary.OPERATING_DAY_HOURS)
+        )
+    }
     rounding_rule = rounding_rule_for(rule)
-    candidates = ancillary.compute_as_candidates(now=now, mcpc_usd_per_mwh=mcpc, rule=rounding_rule)
+    candidates = ancillary.compute_as_candidates(
+        now=now, mcpc_usd_per_mwh=mcpc, rule=rounding_rule, hourly_mcpc_usd_per_mwh=hourly
+    )
     created: list[Opportunity] = []
     for candidate in candidates:
         opportunity = await _admit_candidate(
@@ -445,7 +456,11 @@ async def _intake_as(
             window_end=candidate.window_end,
             requested_kw=candidate.requested_kw,
             value_per_mwh=candidate.value_per_mwh,
-            rationale={"product_code": rule.product_code, "mcpc_usd_per_mwh": mcpc},
+            rationale={
+                "product_code": rule.product_code,
+                "mcpc_usd_per_mwh": float(candidate.value_per_mwh),
+                "mcpc_basis": "HOURLY" if candidate.window_start in hourly else "LATEST_FALLBACK",
+            },
         )
         if opportunity is not None:
             created.append(opportunity)
