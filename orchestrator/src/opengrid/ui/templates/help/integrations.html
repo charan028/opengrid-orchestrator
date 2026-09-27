@@ -74,7 +74,7 @@
 </dl>
 </section>
 
-<section class="hp-sub" id="in-ercot-as-poll"><h3>ERCOT AS deployment instructions (r3.4.1, D-35)</h3>
+<section class="hp-sub" id="in-ercot-as-poll"><h3>ERCOT AS deployment instructions (r3.4.2, D-35)</h3>
 <p>og-feeds polls ERCOT's ancillary-service dispatch instructions (<code>DEPLOY_AS</code> and <code>RECALL_AS</code> for ECRS, RRS, Reg-Up/Down and Non-Spin) every 5 s, first in each tick and independent of the public-feed polls. The source is the <code>ercot_mms</code> adapter (EWS <code>get VDIs</code>, acknowledged with <code>change VDIs</code>), built from <code>[feeds.ercot_as_poll.mms]</code>. Until go-live the endpoint is the ogsim MMS simulator on the market sim (<code>http://127.0.0.1:8090/mms/ews/</code>); a real MMS endpoint replaces it by configuration only. Nothing is ever submitted to ERCOT.</p>
 <dl class="hp-dl">
 <dt>Which award</dt><dd>An instruction names an ERCOT resource and an AS type. <code>[feeds.ercot_as_poll.awards]</code> maps <code>"&lt;resource&gt;:&lt;AS type&gt;"</code> to the ERCOT_AS contract, and the obligation of that contract whose window covers the instruction's start is deployed. No match is 404; two matches are 409.</dd>
@@ -157,7 +157,7 @@ Every inbound command except a heartbeat is traced before it takes effect (<code
 
 <section class="hp-sub" id="in-mms"><h3>ERCOT MMS adapter (disabled)</h3>
 <p><code>opengrid.integrations.ercot_mms</code> is a QSE submission client for ERCOT MMS External Web Services: energy and three-part offers and AS offers (BidSet create/cancel), DAM/RTM awards (AwardSet get) and verbal dispatch instructions (VDIs get and acknowledge). A submission is POSTed exactly once; timeouts and 5xx are recorded as errors and never resent.</p>
-<p class="hp-warn">Submission is off twice over: the market backend defaults to <code>backend = "none"</code>, and the factory refuses to build <code>ercot_mms</code> unless <code>[integrations.market].enabled = true</code>. Neither key is set in <code>orchestrator.toml</code>. Nothing is ever submitted to ERCOT. Since r3.4.1 og-feeds builds the same client read-only for <a href="#in-ercot-as-poll">AS deployment instructions</a> when <code>[feeds.ercot_as_poll]</code> is enabled; it only reads instructions and answers them. The Markets bid funnel shows an <code>mms</code> count only if an MMS submissions table exists.</p>
+<p class="hp-warn">Submission is off twice over: the market backend defaults to <code>backend = "none"</code>, and the factory refuses to build <code>ercot_mms</code> unless <code>[integrations.market].enabled = true</code>. Neither key is set in <code>orchestrator.toml</code>. Nothing is ever submitted to ERCOT. Since r3.4.2 og-feeds builds the same client read-only for <a href="#in-ercot-as-poll">AS deployment instructions</a> when <code>[feeds.ercot_as_poll]</code> is enabled; it only reads instructions and answers them. The Markets bid funnel shows an <code>mms</code> count only if an MMS submissions table exists.</p>
 </section>
 
 <section class="hp-sub" id="in-customer-api"><h3>Customer API</h3>

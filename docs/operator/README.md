@@ -431,7 +431,7 @@ curl -s -u og-op-b:... -X POST https://base.tocy-net.net/og/api/safestop/release
   og-api accepts a second deployment of an award that is already deployed, so never chain deployments past the
   product's window: the energy hold covers one product duration.
 
-**Automatic deployments from ERCOT (r3.4.1, D-35).** When `[feeds.ercot_as_poll]` is enabled, og-feeds reads
+**Automatic deployments from ERCOT (r3.4.2, D-35).** When `[feeds.ercot_as_poll]` is enabled, og-feeds reads
 ERCOT's AS dispatch instructions every 5 s (today from the ogsim MMS simulator) and applies each one exactly
 as the Deploy button would: the same checks, the same deployment row (source `ERCOT`), the same hold rules. An
 ERCOT recall ends the deployment it names. You don't act on an accepted instruction; it appears in the
@@ -669,7 +669,7 @@ alert is raised or cleared and the degraded modes freeze.
 | `ALR-CALIBRATION-BUDGET` | warning | The guardian held a remote calibration (fleet budget, concurrency or suspected systemic drift, G-25). Dormant while `[assets] drift_enabled = false` | No automatic clear |
 | `ALR-CALIBRATION-PROTOCOL` | warning | A calibration acknowledgement did not match the issued command, or the hub rejected it. Dormant like the above | No automatic clear |
 | `ALR-XFMR-UNMAPPED` | warning | og-guardian checked a batch with a hub that has no service-transformer mapping, so G-27 checks it as a group of one. Every hub today: expect one open row per bank the guardian commands, all with the same summary | No automatic clear |
-| `ALR-ERCOT-AS-REFUSED` | warning | Since r3.4.1 (D-35): og-feeds refused an ERCOT AS dispatch instruction (404/409/422 and a reason code) and answered ERCOT REJECT. One row per instruction; a re-delivered duplicate adds none (6.5) | No automatic clear |
+| `ALR-ERCOT-AS-REFUSED` | warning | Since r3.4.2 (D-35): og-feeds refused an ERCOT AS dispatch instruction (404/409/422 and a reason code) and answered ERCOT REJECT. One row per instruction; a re-delivered duplicate adds none (6.5) | No automatic clear |
 | `ALR-ERCOT-AS-POLL-FAILED` | warning | Three ERCOT AS instruction polls in a row failed | og-feeds clears it on the next good poll |
 | `ALR-ERCOT-AS-POLL-STALE` | critical | No ERCOT AS instruction poll has succeeded for 60 s: a deployment may be missed | og-feeds clears it on the next good poll |
 | `ALR-TRACE-VERDICT-WRITE-FAILED` | warning | A verdict's `GUARDIAN_VERDICT` trace row could not be written (the verdict stands; the audit row is missing) | No automatic clear |
