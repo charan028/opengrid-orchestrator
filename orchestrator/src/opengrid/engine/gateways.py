@@ -54,6 +54,7 @@ from opengrid.allocator.models import (
 )
 from opengrid.core.economics import wear_cost
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
+from opengrid.core.nameplate import NAMEPLATE_BANKS_SQL
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.reasons import (
     ALR_ENERGY_SHORTFALL_RISK,
@@ -385,13 +386,12 @@ class FleetCapabilityProvider:
         return Decimal(str(cap.max_discharge_kw))
 
 
-#: Banks carrying a utility-scale asset (og.asset SUBSTATION), refreshed with the market model: their
-#: hubs are rated at nameplate, never at the home unit cap (`HubParams.utility_scale`).
+#: Banks carrying a nameplate-rated asset (`core.nameplate`: og.asset SUBSTATION or MOBILE_STORAGE, a D-31
+#: truck), refreshed with the market model: their hubs are rated at nameplate, never at the home unit cap
+#: (`HubParams.utility_scale`) -- the allocator plans a truck at its 500 kW, as the guardian's G-02 allows.
 _UTILITY_SCALE_BANKS: set[str] = set()
 
-_SUBSTATION_BANKS_SQL = """
-SELECT DISTINCT bank_id FROM og.asset WHERE asset_class = 'SUBSTATION' AND bank_id IS NOT NULL
-"""
+_SUBSTATION_BANKS_SQL = NAMEPLATE_BANKS_SQL
 
 
 def set_utility_scale_banks(bank_ids: set[str]) -> None:

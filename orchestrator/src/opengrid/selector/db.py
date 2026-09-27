@@ -10,7 +10,7 @@ exercised in tests only through `_get_pool`, which callers/tests may monkeypatch
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -18,6 +18,7 @@ from uuid import UUID
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core import geo
 from opengrid.core.solar_share import (
     ERCOT_SOLAR_ACTUAL_SERIES,
     ERCOT_SOLAR_FORECAST_SERIES,
@@ -142,25 +143,20 @@ async def load_bank_zones(bank_ids: list[str]) -> dict[str, str]:
         return {str(row[0]): str(row[1]) async for row in cur}
 
 
-#: A mobile unit is a single-hub bank; its hub's recorded position (device-reported, `og.hub.lat/lon`).
-_HUB_POSITIONS_SQL = """
-SELECT bank_id, hub_id, lat, lon FROM og.hub
-WHERE (bank_id = ANY(%(ids)s) OR hub_id = ANY(%(ids)s)) AND lat IS NOT NULL AND lon IS NOT NULL
-"""
-
-
-async def load_hub_positions(unit_ids: list[str]) -> dict[str, tuple[float, float]]:
-    """Read-only: `id -> (lat, lon)` for the hubs whose bank id or hub id is in `unit_ids`, keyed by both
-    (D-31 mobile units: the selector's at-home test). A hub without a recorded position is absent."""
+async def load_hub_positions(
+    unit_ids: list[str], now: datetime | None = None
+) -> dict[str, tuple[float, float]]:
+    """Read-only: `id -> (lat, lon)` of the FRESH device-reported position of the hubs whose bank id or hub
+    id is in `unit_ids`, keyed by both (D-31 mobile units: the selector's at-home test). The one query and
+    freshness rule G-35 uses (`core.geo.DEVICE_POSITIONS_SQL` / `fresh_positions`); a hub with no report,
+    or only a stale one, is absent (unknown: away)."""
     if not unit_ids:
         return {}
     pool = await get_pool()
-    out: dict[str, tuple[float, float]] = {}
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_HUB_POSITIONS_SQL, {"ids": unit_ids})
-        async for bank_id, hub_id, lat, lon in cur:
-            out[str(bank_id)] = out[str(hub_id)] = (float(lat), float(lon))
-    return out
+        await cur.execute(geo.DEVICE_POSITIONS_SQL, {"ids": unit_ids})
+        rows = await cur.fetchall()
+    return geo.fresh_positions(rows, now or datetime.now(UTC))
 
 
 async def load_degraded_modes() -> frozenset[str]:

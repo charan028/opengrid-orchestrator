@@ -63,6 +63,11 @@ from ogsim.fleet.wave import (
 
 logger = logging.getLogger(__name__)
 
+#: Scenario steps that move a simulated mobile unit (D-31 trucks): deploy to a site, relocate, return home.
+MOBILE_MOVE_TYPES = frozenset(
+    {"mobile_deployment_start", "mobile_deployment_relocate", "mobile_home_station_charge"}
+)
+
 
 def _mobile_masks(state: FleetState) -> tuple[np.ndarray, np.ndarray]:
     """`(is_mobile, charge_blocked)` sized to the fleet. A hand-built `FleetState` without the mobile
@@ -113,6 +118,45 @@ class FleetEngine:
             versions=initial_firmware_versions(self.state),
             hardware_revisions=initial_hardware_revisions(self.state),
         )
+        # D-31 mobile units (trucks): each simulated unit's home station position, and the units whose
+        # position changed since the runtime last republished their device_info.
+        self._mobile_home: dict[str, tuple[float, float]] = {
+            u.trailer_id: u.home_position for u in config.mobile_units if u.simulate
+        }
+        self._mobile_position_changes: set[str] = set()
+
+    def move_mobile_unit(self, hub_id: str, position: tuple[float, float]) -> bool:
+        """Drive a simulated truck to `position` (a deployment site, or back to its depot). Its telemetry and
+        device_info lat/lon follow; away from its home station it never charges (D-31, `charge_blocked`),
+        back at the depot it may again. False for an unknown or non-mobile hub (nothing changes)."""
+        home = self._mobile_home.get(hub_id)
+        idx = self.state.hub_index.get(hub_id)
+        if home is None or idx is None:
+            return False
+        self.state.lat_deg[idx], self.state.lon_deg[idx] = position
+        self.state.charge_blocked[idx] = position != home
+        self._mobile_position_changes.add(hub_id)
+        return True
+
+    def take_mobile_position_changes(self, *, all_units: bool = False) -> list[str]:
+        """The mobile units whose device_info must be republished: every one that moved since the last call,
+        or (`all_units`, the periodic position heartbeat) every simulated mobile unit."""
+        changed = set(self._mobile_home) if all_units else set(self._mobile_position_changes)
+        self._mobile_position_changes.clear()
+        return sorted(changed)
+
+    def _handle_mobile_move(self, catalogue_type: str, hub_id: str, params: dict[str, Any]) -> bool:
+        """The fleet side of the `mobile_*` scenario steps: `mobile_deployment_start` (params `site_lat`/
+        `site_lon`) and `mobile_deployment_relocate` (`to_site_lat`/`to_site_lon`) drive the truck to the
+        site; `mobile_home_station_charge` drives it back to its depot."""
+        if catalogue_type == "mobile_home_station_charge":
+            home = self._mobile_home.get(hub_id)
+            return home is not None and self.move_mobile_unit(hub_id, home)
+        prefix = "to_site_" if catalogue_type == "mobile_deployment_relocate" else "site_"
+        lat, lon = params.get(f"{prefix}lat"), params.get(f"{prefix}lon")
+        if lat is None or lon is None:
+            return False
+        return self.move_mobile_unit(hub_id, (float(lat), float(lon)))
 
     def handle_scenario_cmd(
         self, raw: dict[str, Any], guardian_public_key: Ed25519PublicKey | None = None
@@ -143,6 +187,9 @@ class FleetEngine:
                 self.rng,
             )
             return ActiveAnomalyStarted(cmd)
+        if cmd.catalogue_type in MOBILE_MOVE_TYPES:
+            moved = self._handle_mobile_move(cmd.catalogue_type, cmd.target_ref, dict(cmd.params))
+            return ActiveAnomalyStarted(cmd) if moved else None
         if cmd.catalogue_type in PQ_ANOMALY_TYPES:
             self.pq_anomalies.start(
                 cmd.id,
@@ -655,6 +702,7 @@ async def run_fleet(
     ):
         await client.publish_validated("device_info", suffix, message, qos=1, retain=True)
     last_telemetry_publish_at: float | None = None
+    last_mobile_publish_at = clock.now()  # every unit's device_info was just published above
     last_health_snapshot: tuple[str, ...] | None = None
     last_fault_snapshot: tuple[str | None, ...] | None = None
     while True:
@@ -692,7 +740,15 @@ async def run_fleet(
             # changes`'s docstring).
             for status in engine.firmware.tick(now):
                 await client.publish_validated("firmware_status", f"ack/fw/{status['hub_id']}", status, qos=1)
-            for hub_id in engine.firmware.take_device_info_changes():
+            republish = set(engine.firmware.take_device_info_changes())
+            # D-31 mobile units: a truck re-reports its position (device_info lat/lon) at once when it moves
+            # (a deployment or its return home) and at least every `mobile_position_interval_s` while parked,
+            # so the orchestrator's position age limit (G-35, selector) never sees a live truck as stale.
+            mobile_due = now - last_mobile_publish_at >= engine.config.mobile_position_interval_s
+            republish |= set(engine.take_mobile_position_changes(all_units=mobile_due))
+            if mobile_due:
+                last_mobile_publish_at = now
+            for hub_id in sorted(republish):
                 result = engine.device_info_message(hub_id, now)
                 if result is not None:
                     suffix, message = result
