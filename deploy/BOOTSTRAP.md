@@ -157,7 +157,7 @@ customer accounts and the proxy secret are done by `bootstrap_from_scratch.sh` p
 
 A seed is 32 random bytes:
 `/opt/opengrid/venv/bin/python -c "import os,sys; sys.stdout.buffer.write(os.urandom(32))" > <file>`, then
-`chown root:<key group> <file>; chmod 640 <file>`.
+`chown root:<key group> <file>; chmod 640 <file>`. Check a file only by counting (`grep -c`), never by printing it.
 
 **Key access.** Every og-* unit and every simulator runs as `opengrid`, so a key owned by `opengrid` is
 readable by og-api and the simulators too. Each private seed therefore belongs to its own group
@@ -172,8 +172,7 @@ any FIRM/AS delivery window (`deploy.sh`'s DELIVERING preflight query must retur
 --migrate-key-perms` from the release (it creates the groups, writes the three drop-ins, re-owns the keys and
 reloads systemd), then restart og-guardian, og-safestop and og-settle one at a time and check each is active.
 Without the flag, phase h leaves legacy-layout keys untouched. Folding `SupplementaryGroups=` into the three unit
-files would make the drop-ins unnecessary. Check a file only by counting (`grep -c`), never by
-printing it.
+files would make the drop-ins unnecessary.
 
 ## 6. First release
 
