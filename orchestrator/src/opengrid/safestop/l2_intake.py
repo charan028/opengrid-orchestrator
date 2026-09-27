@@ -43,6 +43,8 @@ DEFAULT_RECONNECT_DELAY_S = 5.0
 EngageFn = Callable[[str, str, str], Awaitable[object]]
 #: (instruction_id, bank_id) -> was an ENGAGE for this instruction already recorded?
 AlreadyActedFn = Callable[[UUID, str], Awaitable[bool]]
+#: (instruction_id, bank_id) -> queue the recorded ENGAGE's publication if it has none (H5 repair).
+EnsurePublishedFn = Callable[[UUID, str], Awaitable[object]]
 
 L2Outcome = Literal[
     "ENGAGED",
@@ -89,12 +91,16 @@ async def handle_instruction(
     engage_fn: EngageFn,
     already_acted_fn: AlreadyActedFn,
     topic_bank_id: str | None = None,
+    ensure_published_fn: EnsurePublishedFn | None = None,
 ) -> L2Outcome:
     """Act on one utility instruction. Never raises (except cancellation): a malformed message or a
     failed engage is logged and reported as an outcome, so one bad message never kills the listener.
 
     `topic_bank_id` is the `<bank_id>` topic level the message arrived on; a payload naming a different
-    bank is refused (a sender permitted on one bank's topic must not stop another bank)."""
+    bank is refused (a sender permitted on one bank's topic must not stop another bank).
+
+    `ensure_published_fn` (H5): on an instruction already acted on, make sure its recorded ENGAGE is also
+    queued to publish -- a stop recorded without a publication would otherwise never reach the hubs."""
     try:
         instruction = parse_instruction(message)
     except Exception as exc:
@@ -129,6 +135,8 @@ async def handle_instruction(
 
     try:
         if await already_acted_fn(instruction.instruction_id, bank_id):
+            if ensure_published_fn is not None:
+                await ensure_published_fn(instruction.instruction_id, bank_id)
             handled.add(instruction.instruction_id)
             logger.info(
                 "utility L2 instruction already acted on; not engaging again",
@@ -166,6 +174,7 @@ def build_l2_session(
     already_acted_fn: AlreadyActedFn,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     min_backoff_s: float = DEFAULT_RECONNECT_DELAY_S,
+    ensure_published_fn: EnsurePublishedFn | None = None,
 ) -> MqttSession:
     """The utility L2 instruction listener: `<root>/scada/instruction/+` (QoS 1) on its own connection
     (`L2_PROCESS_NAME`), kept up across broker disconnects by `MqttSession` (backoff from `min_backoff_s`,
@@ -190,6 +199,7 @@ def build_l2_session(
             engage_fn=engage_fn,
             already_acted_fn=already_acted_fn,
             topic_bank_id=topic_bank_id,
+            ensure_published_fn=ensure_published_fn,
         )
 
     return MqttSession(

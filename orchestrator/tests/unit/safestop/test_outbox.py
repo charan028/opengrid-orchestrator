@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import aiomqtt
 import pytest
@@ -46,18 +46,62 @@ class _Backend:
             }
         )
 
-    async def pending_publications(self, *, limit: int) -> list[OutboxEntry]:
+    #: set to make record_and_enqueue fail mid-transaction (the whole write must then be absent)
+    fail_enqueue: bool = False
+    alerts: list[tuple[UUID, str]] = field(default_factory=list)
+
+    async def record_and_enqueue(self, row, *, stop_id: UUID, topic_suffix: str, payload: dict) -> None:
+        """Both writes or neither, like the one Postgres transaction."""
+        if self.fail_enqueue:
+            raise RuntimeError("connection lost mid-transaction")
+        self.rows.append(
+            {"stop_event_id": row.stop_event_id, "action": row.action, "scope_ref": row.scope_ref,
+             "reason": row.reason, "initiator_ref": row.initiator_ref, "initiator_kind": row.initiator_kind,
+             "signature": row.signature}
+        )  # fmt: skip
+        await self.enqueue_publication(
+            stop_id=stop_id, action=row.action, topic_suffix=topic_suffix, payload=payload
+        )
+
+    async def pending_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        live = [e for e in self.outbox if not e["published"] and e["attempts"] < max_attempts]
+        live.sort(key=lambda e: (e["action"] != "ENGAGE", e["seq"]))
         return [
-            OutboxEntry(e["seq"], e["stop_id"], e["action"], e["topic_suffix"], e["payload"])
-            for e in self.outbox
-            if not e["published"]
+            OutboxEntry(e["seq"], e["stop_id"], e["action"], e["topic_suffix"], e["payload"]) for e in live
         ][:limit]
 
     async def mark_published(self, seq: int) -> None:
         self.outbox[seq - 1]["published"] = True
 
-    async def record_publish_failure(self, seq: int, error: str) -> None:
-        self.outbox[seq - 1]["attempts"] += 1
+    async def record_publish_failure(self, seq: int, error: str, *, permanent: bool) -> int:
+        if permanent:
+            self.outbox[seq - 1]["attempts"] += 1
+        return int(self.outbox[seq - 1]["attempts"])
+
+    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> None:
+        self.alerts.append((entry.stop_id, entry.action))
+
+    async def l2_engage_record(self, instruction_id: UUID, bank_id: str):
+        from opengrid.safestop.backend import RecordedL2Engage
+
+        for row in reversed(self.rows):
+            if (
+                row["action"] == "ENGAGE"
+                and row["scope_ref"] == bank_id
+                and str(instruction_id) in row["reason"]
+            ):
+                has = any(
+                    e["stop_id"] == row["stop_event_id"] and e["action"] == "ENGAGE" for e in self.outbox
+                )
+                return RecordedL2Engage(
+                    row["stop_event_id"], bank_id, row["reason"], row["initiator_ref"], has, self.released
+                )
+        return None
+
+    released: bool = False
+
+    async def has_signature(self, signature: str) -> bool:
+        return any(row.get("signature") == signature for row in self.rows)
 
 
 @dataclass
@@ -186,3 +230,143 @@ async def test_the_session_drains_the_outbox_on_every_reconnect(world):
 
     assert sent == [backend.outbox[0]["topic_suffix"]]
     assert backend.outbox[0]["published"] is True
+
+
+# --- H5: atomic record + enqueue, redelivery repair, dead-letter, ENGAGE priority ---------------------------------
+
+
+async def test_a_stop_is_never_recorded_without_its_publication(world):
+    """H5: the og.stop_event row and its outbox entry are ONE write. If it fails, neither exists -- so a
+    redelivered L2 instruction is not ALREADY_ACTED and engages again, instead of a recorded stop that is never
+    published."""
+    svc, backend, _publisher = world
+    backend.fail_enqueue = True
+    with pytest.raises(RuntimeError):
+        await svc.engage("BANK", "bank-07", "L2 instruction x", "utility:x")
+    assert backend.rows == [] and backend.outbox == []
+
+
+async def test_a_redelivered_instruction_repairs_a_recorded_engage_that_was_never_queued(world):
+    """A stop recorded before the fix (or by any path that left no outbox row): the redelivery re-signs it under
+    the SAME stop_id and queues it; hubs dedupe by stop_id."""
+    svc, backend, publisher = world
+    instruction, stop_id = uuid4(), uuid4()
+    backend.rows.append(
+        {"stop_event_id": stop_id, "action": "ENGAGE", "scope_ref": "bank-07",
+         "reason": f"utility L2 BLOCK {instruction}", "initiator_ref": "utility:aen", "initiator_kind": "UTILITY"}
+    )  # fmt: skip
+    publisher.up = True
+
+    assert await svc.ensure_l2_engage_published(instruction, "bank-07") is True
+    ((topic, action),) = publisher.published
+    assert action == "ENGAGE" and topic.endswith(str(stop_id))
+    assert await svc.ensure_l2_engage_published(instruction, "bank-07") is False  # now queued: a no-op
+
+
+async def test_the_repair_never_re_stops_a_released_bank(world):
+    svc, backend, publisher = world
+    instruction = uuid4()
+    backend.rows.append(
+        {"stop_event_id": uuid4(), "action": "ENGAGE", "scope_ref": "bank-07",
+         "reason": f"utility L2 BLOCK {instruction}", "initiator_ref": "utility:aen", "initiator_kind": "UTILITY"}
+    )  # fmt: skip
+    backend.released = True
+    publisher.up = True
+    assert await svc.ensure_l2_engage_published(instruction, "bank-07") is False
+    assert publisher.published == [] and backend.outbox == []
+
+
+async def test_the_l2_intake_calls_the_repair_on_an_already_acted_instruction():
+    from datetime import UTC, datetime, timedelta
+
+    from opengrid.core.models.mqtt import ScadaUtilityInstruction
+    from opengrid.safestop.l2_intake import handle_instruction
+
+    now = datetime.now(UTC)
+    instruction = ScadaUtilityInstruction.model_validate(
+        {"instruction_id": str(uuid4()), "bank_id": "bank-07", "kind": "BLOCK", "limit_kw": None,
+         "issued_at": now, "expires_at": now + timedelta(minutes=5), "issued_by": "utility"}
+    )  # fmt: skip
+    repaired: list[tuple[UUID, str]] = []
+
+    async def acted(_i: UUID, _b: str) -> bool:
+        return True
+
+    async def repair(i: UUID, b: str) -> None:
+        repaired.append((i, b))
+
+    async def engage(*_a: object) -> None:
+        raise AssertionError("must not engage twice")
+
+    outcome = await handle_instruction(
+        instruction,
+        now=now,
+        handled=set(),
+        engage_fn=engage,
+        already_acted_fn=acted,
+        ensure_published_fn=repair,
+    )
+    assert outcome == "ALREADY_ACTED" and repaired == [(instruction.instruction_id, "bank-07")]
+
+
+async def test_a_poison_entry_is_dead_lettered_and_never_blocks_later_stops(world):
+    svc, backend, publisher = world
+    svc.outbox_max_attempts = 2
+    poison = await svc.engage("BANK", "bank-01", "x", "op")
+    good = await svc.engage("BANK", "bank-02", "y", "op")
+    publisher.up = True
+    real = publisher.publish_retained
+
+    async def reject_poison(topic_suffix: str, payload: dict[str, Any]) -> None:
+        if topic_suffix.endswith(str(poison)):
+            raise StopPublishError("refusing to publish invalid stop payload", transient=False)
+        await real(topic_suffix, payload)
+
+    publisher.publish_retained = reject_poison  # type: ignore[method-assign]
+    assert await svc.drain_outbox() == 1  # the good stop goes out behind the poison one
+    assert [t.rsplit("/", 1)[-1] for t, _ in publisher.published] == [str(good)]
+    assert backend.alerts == []  # one permanent failure: not yet dead
+    await svc.drain_outbox()
+    assert backend.alerts == [(poison, "ENGAGE")]  # capped: dead-lettered and alerted
+    assert await svc.drain_outbox() == 0 and backend.outbox[0]["attempts"] == 2  # skipped now
+
+
+async def test_a_broker_outage_never_dead_letters_a_stop(world):
+    svc, backend, publisher = world
+    svc.outbox_max_attempts = 2
+    await svc.engage("BANK", "bank-01", "x", "op")
+    for _ in range(5):
+        await svc.drain_outbox()  # the broker is down: transient failures
+    assert backend.outbox[0]["attempts"] == 0 and backend.alerts == []
+    publisher.up = True
+    assert await svc.drain_outbox() == 1
+
+
+async def test_an_engage_goes_before_an_older_release(world):
+    from .test_release_relay import _guardian_release, _Keys
+
+    keys = _Keys()
+    svc, _backend, publisher = world
+    svc.guardian_public_key = keys.guardian_public
+    await svc.relay_guardian_release(_guardian_release(keys))  # queued while the broker is down
+    newer = await svc.engage("BANK", "bank-09", "z", "op")
+    publisher.up = True
+    await svc.drain_outbox()
+    assert [action for _t, action in publisher.published] == ["ENGAGE", "RELEASE"]
+    assert publisher.published[0][0].endswith(str(newer))
+
+
+async def test_a_recorded_release_without_a_queued_publication_is_queued_on_redelivery(world):
+    """H5 mirror for RELEASE: the guardian's re-hand-off of an event already recorded queues its publication."""
+    from .test_release_relay import _guardian_release, _Keys
+
+    keys = _Keys()
+    svc, backend, publisher = world
+    svc.guardian_public_key = keys.guardian_public
+    event = _guardian_release(keys)
+    backend.rows.append({"signature": event["signature"], "action": "RELEASE", "scope_ref": "bank-001"})
+    publisher.up = True
+    assert await svc.relay_guardian_release(event) is True
+    assert [action for _t, action in publisher.published] == ["RELEASE"]
+    await svc.relay_guardian_release(event)
+    assert len(backend.outbox) == 1  # queued once

@@ -329,3 +329,11 @@ async def test_manual_ramp_items_are_signed_under_the_ordinary_item_checks(
     wire_default_passing_scenario(fakes, over)
     verdict = await service_with(fakes, guardian_config, signing_seed).evaluate_and_sign(make_batch_row(over))
     assert "G-02" in verdict.vetoed_rule_ids and verdict.signature is None
+
+
+def test_an_operator_override_shortfall_is_a_traced_k13_exception():
+    """The engine traces and records R-OPERATOR-OVERRIDE shortfalls as K13 lock exceptions, like the others."""
+    from opengrid.core.reasons import R_OPERATOR_OVERRIDE
+    from opengrid.engine.gateways import _K13_SHORTFALL_REASONS
+
+    assert R_OPERATOR_OVERRIDE in _K13_SHORTFALL_REASONS

@@ -40,16 +40,92 @@ async def test_outbox_queues_once_drains_in_order_and_forgets_acknowledged_rows(
         await backend.enqueue_publication(  # the same event again: a no-op
             stop_id=first, action="ENGAGE", topic_suffix=f"stop/bank/b1/{first}", payload={"n": 1}
         )
-        mine = [e for e in await backend.pending_publications(limit=1000) if e.stop_id in (first, second)]
+        mine = [
+            e
+            for e in await backend.pending_publications(limit=1000, max_attempts=5)
+            if e.stop_id in (first, second)
+        ]
         assert [e.stop_id for e in mine] == [first, second]
         assert mine[0].payload == {"n": 1}
 
-        await backend.record_publish_failure(mine[0].seq, "broker down")
+        await backend.record_publish_failure(mine[0].seq, "broker down", permanent=False)
         await backend.mark_published(mine[0].seq)
         left = [
-            e.stop_id for e in await backend.pending_publications(limit=1000) if e.stop_id in (first, second)
+            e.stop_id
+            for e in await backend.pending_publications(limit=1000, max_attempts=5)
+            if e.stop_id in (first, second)
         ]
         assert left == [second]
     finally:
         async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("DELETE FROM og.stop_outbox WHERE stop_id = ANY(%s)", ([first, second],))
+
+
+async def test_h5_atomic_write_priority_dead_letter_and_l2_record(pool):
+    """H5 against the real schema: the stop_event row and its outbox entry are one transaction (a failing enqueue
+    leaves neither); ENGAGEs drain before older RELEASEs; a dead-lettered entry is skipped and alerted once; the
+    L2 record lookup reports whether the recorded ENGAGE has a publication."""
+    import psycopg
+
+    from opengrid.safestop.backend import StopEventRow
+    from opengrid.safestop.pg_backend import DEAD_LETTER_ALERT_RULE
+
+    backend = PgStopEventBackend(pool)
+    instruction, bank = uuid4(), f"bank-h5-{uuid4().hex[:6]}"
+    release_id, engage_id, orphan_id = uuid4(), uuid4(), uuid4()
+    ids = [release_id, engage_id, orphan_id]
+
+    def row(stop_id, action, reason="x"):
+        return StopEventRow(stop_id, "BANK", bank, action, "UTILITY", "utility:it", reason, None, uuid4().hex)
+
+    try:
+        await backend.record_and_enqueue(
+            row(release_id, "RELEASE"), stop_id=release_id, topic_suffix=f"stop/bank/{bank}/{release_id}",
+            payload={"n": "release"},
+        )  # fmt: skip
+        await backend.record_and_enqueue(
+            row(engage_id, "ENGAGE", f"utility L2 BLOCK {instruction}"), stop_id=engage_id,
+            topic_suffix=f"stop/bank/{bank}/{engage_id}", payload={"n": "engage"},
+        )  # fmt: skip
+        mine = [e for e in await backend.pending_publications(limit=1000, max_attempts=5) if e.stop_id in ids]
+        assert [e.action for e in mine] == ["ENGAGE", "RELEASE"]  # the newer ENGAGE goes first
+
+        record = await backend.l2_engage_record(instruction, bank)
+        assert record is not None and record.stop_id == engage_id and record.has_publication
+
+        # Atomic: a failing enqueue (a payload the column cannot take) leaves no stop_event row either.
+        class _Unjsonable:
+            pass
+
+        with pytest.raises((TypeError, psycopg.Error)):
+            await backend.record_and_enqueue(
+                row(orphan_id, "ENGAGE"),
+                stop_id=orphan_id,
+                topic_suffix="stop/x",
+                payload={"bad": _Unjsonable()},
+            )
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT count(*) FROM og.stop_event WHERE stop_event_id = %s", (orphan_id,))
+            assert (await cur.fetchone())[0] == 0
+
+        engage = mine[0]
+        assert await backend.record_publish_failure(engage.seq, "broker down", permanent=False) == 0
+        assert await backend.record_publish_failure(engage.seq, "bad payload", permanent=True) == 1
+        left = [e for e in await backend.pending_publications(limit=1000, max_attempts=1) if e.stop_id in ids]
+        assert [e.action for e in left] == ["RELEASE"]  # dead-lettered at the cap: skipped
+        await backend.raise_dead_letter_alert(engage, "bad payload")
+        await backend.raise_dead_letter_alert(engage, "bad payload")  # once while open
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM og.alert WHERE rule = %s AND cleared_at IS NULL AND detail ->> 'stop_id' = %s",
+                (DEAD_LETTER_ALERT_RULE, str(engage_id)),
+            )
+            assert (await cur.fetchone())[0] == 1
+    finally:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("DELETE FROM og.stop_outbox WHERE stop_id = ANY(%s)", (ids,))
+            await cur.execute("DELETE FROM og.stop_event WHERE stop_event_id = ANY(%s)", (ids,))
+            await cur.execute(
+                "DELETE FROM og.alert WHERE rule = %s AND detail ->> 'stop_id' = %s",
+                ("ALR-STOP-PUBLISH-DEAD-LETTER", str(engage_id)),
+            )

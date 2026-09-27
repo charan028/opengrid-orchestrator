@@ -52,9 +52,45 @@ class OutboxEntry:
     payload: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class StopEventRow:
+    """The `og.stop_event` row a stop decision records (the `insert_stop_event` keyword set)."""
+
+    stop_event_id: UUID
+    scope_kind: Literal["BANK", "ZONE", "FLEET"]
+    scope_ref: str
+    action: Literal["ENGAGE", "RELEASE"]
+    initiator_kind: InitiatorKind
+    initiator_ref: str
+    reason: str
+    approver_ref: str | None
+    signature: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedL2Engage:
+    """An UTILITY ENGAGE already recorded for an L2 instruction (for the redelivery repair)."""
+
+    stop_id: UUID
+    bank_id: str
+    reason: str
+    initiator_ref: str
+    has_publication: bool  # an og.stop_outbox row exists for (stop_id, ENGAGE)
+    released: bool  # a later RELEASE is recorded for the bank: never re-publish the ENGAGE
+
+
 class StopOutboxBackend(Protocol):
-    """K8 durable publish outbox: every accepted ENGAGE/RELEASE is queued in acceptance order and
-    (re)published until the broker acknowledges it."""
+    """K8 durable publish outbox: every accepted ENGAGE/RELEASE is queued and (re)published until the broker
+    acknowledges it. ENGAGEs go before RELEASEs (a stop is never delayed behind a release), each in acceptance
+    order; an entry that fails permanently `max_attempts` times is dead-lettered (skipped, alerted) so it
+    never blocks later stops."""
+
+    async def record_and_enqueue(
+        self, row: StopEventRow, *, stop_id: UUID, topic_suffix: str, payload: dict[str, Any]
+    ) -> None:
+        """H5: write the `og.stop_event` row AND its outbox entry in ONE transaction -- a stop can never be
+        recorded (which makes a redelivered L2 instruction ALREADY_ACTED) without being queued to publish."""
+        ...
 
     async def enqueue_publication(
         self,
@@ -67,13 +103,23 @@ class StopOutboxBackend(Protocol):
         """Queue once per (stop_id, action); a second enqueue of the same event is a no-op."""
         ...
 
-    async def pending_publications(self, *, limit: int) -> list[OutboxEntry]:
-        """Unacknowledged entries, oldest first (acceptance order)."""
+    async def pending_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        """Unacknowledged, not dead-lettered entries (fewer than `max_attempts` permanent failures): every
+        ENGAGE first, then the RELEASEs, each oldest first."""
         ...
 
     async def mark_published(self, seq: int) -> None: ...
 
-    async def record_publish_failure(self, seq: int, error: str) -> None: ...
+    async def record_publish_failure(self, seq: int, error: str, *, permanent: bool) -> int:
+        """Record a failed publish. Only a `permanent` failure counts toward the dead-letter cap (a broker
+        outage never dead-letters a stop). Returns the entry's permanent-failure count."""
+        ...
+
+    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> None:
+        """ALR-STOP-PUBLISH-DEAD-LETTER (critical), once per entry."""
+        ...
+
+    async def l2_engage_record(self, instruction_id: UUID, bank_id: str) -> RecordedL2Engage | None: ...
 
 
 class StopPublisher(Protocol):
