@@ -66,6 +66,8 @@ Rows (every one is an upsert; the output is deterministic, so re-running is a no
   the transformer G-27 must bind; `feeder-<truck id>` is the depot feeder mobile_trucks_seed.sql assigns.
   An exemption would need a guardian code path that skips G-27 for a class of hub, which 09 S2.6 does not
   allow, and a truck rated at the 25 kVA unmapped-home default could never discharge.
+  POI premise: their hubs' `service_kw` and `export_limit_kw` are filled with the nameplate `p_kw` where
+  NULL (never overwritten), so G-26 does not apply a home's 20 kW export / 48 kW service default to them.
 
 Every count in `opengrid.fleet.topology_audit.UNMAPPED_QUERIES` is 0 after this seed (bootstrap_check.py
 asserts it): no ALR-XFMR-UNMAPPED and no ALR-BANK-UNMAPPED-TOPOLOGY on a fresh install.
@@ -83,6 +85,8 @@ NOTHING and a hub is mapped only while its `transformer_id` is NULL, so no exist
 transformer or asset row is rewritten. With `--dsn` the statements run in ONE transaction that also verifies
 exactly that (fingerprints of the existing rows before and after); any difference rolls it back. `--dry-run`
 always rolls back and prints the plan: rows per statement and the unmapped counts before and after.
+`--only HUB_ID` restricts that to one dedicated-connection hub's bank (its transformer, mapping, POI premise
+and feeder limit): the toll hotfix for `sub-LZ_AEN-00`, shippable without the full backfill.
 """
 
 from __future__ import annotations
@@ -382,6 +386,84 @@ def _limit_statements(
     return out
 
 
+def _dedicated_statements(*, only_missing: bool, only_hub: str | None = None) -> list[Statement]:
+    """The dedicated-connection banks' rows (module docstring), derived in SQL from og.bank/og.hub/og.asset:
+    the transformer at the bank rating, the hubs mapped to it, the hubs' POI premise and the bank feeder's
+    limit. `only_hub`: just that hub's bank (the separable toll hotfix, `--only`).
+
+    POI premise: a utility-scale hub (the 20 MW substation set, a 500 kW truck at its depot) is not a home
+    behind a 200 A service, so the guardian's home defaults (export 20 kW, service 48 kW) would make G-26 veto
+    it. `service_kw` and `export_limit_kw` are set to the hub's nameplate `p_kw` -- ONLY where NULL, in every
+    mode: a value already in og.hub (an interconnection agreement's) is never overwritten."""
+    xfmr = "'xfmr-' || b.bank_id || '-00'"
+    upsert_xfmr = (
+        "ON CONFLICT (transformer_id) DO NOTHING"
+        if only_missing
+        else "ON CONFLICT (transformer_id) DO UPDATE SET bank_id = EXCLUDED.bank_id, rating_kva = EXCLUDED.rating_kva"
+    )
+    hub_still = "h.transformer_id IS NULL" if only_missing else f"h.transformer_id IS DISTINCT FROM {xfmr}"
+    banks = f"b.bank_id IN ({DEDICATED_BANKS_SQL})"
+    if only_hub is not None:
+        banks += f" AND b.bank_id = (SELECT o.bank_id FROM og.hub o WHERE o.hub_id = {_lit(only_hub)})"  # noqa: S608
+    return [
+        Statement(
+            "og.service_transformer (dedicated banks)",
+            "-- Dedicated-connection banks (the substation set, each truck at its depot): one transformer at the\n"
+            "-- bank's own kVA rating, from the rows market_model_seed.sql / mobile_trucks_seed.sql wrote.",
+            "\n".join(
+                [
+                    "INSERT INTO og.service_transformer (transformer_id, bank_id, rating_kva)",
+                    f"SELECT {xfmr}, b.bank_id, b.kva_rating",
+                    "FROM og.bank b",
+                    f"WHERE {banks}",
+                    upsert_xfmr,
+                ]
+            ),
+        ),
+        Statement(
+            "og.hub.transformer_id (dedicated banks)",
+            "-- Every hub of a dedicated bank -> that bank's transformer.",
+            "\n".join(
+                [
+                    f"UPDATE og.hub h SET transformer_id = {xfmr}",  # noqa: S608 -- fixed fragments
+                    "FROM og.bank b",
+                    f"WHERE b.bank_id = h.bank_id AND {banks}",
+                    f"  AND {hub_still}",
+                    "  AND EXISTS (SELECT 1 FROM og.service_transformer st",
+                    f"    WHERE st.transformer_id = {xfmr})",
+                ]
+            ),
+        ),
+        Statement(
+            "og.hub service_kw/export_limit_kw (dedicated banks, NULL only)",
+            "-- POI premise of a utility-scale hub: its nameplate, only where og.hub has none (never overwritten).",
+            "\n".join(
+                [
+                    "UPDATE og.hub h SET service_kw = coalesce(h.service_kw, h.p_kw),",
+                    "    export_limit_kw = coalesce(h.export_limit_kw, h.p_kw)",
+                    "FROM og.bank b",
+                    f"WHERE b.bank_id = h.bank_id AND {banks}",
+                    "  AND (h.service_kw IS NULL OR h.export_limit_kw IS NULL)",
+                ]
+            ),
+        ),
+        Statement(
+            "og.feeder_limit (dedicated banks)",
+            "-- A dedicated bank's feeder, when it has no row yet (market_model_seed.sql's substation feeder wins).",
+            "\n".join(
+                [
+                    "INSERT INTO og.feeder_limit (feeder_id, thermal_kw, reverse_kw)",
+                    f"SELECT b.feeder_id, {_lit(FEEDER_THERMAL_KW)}, sum(b.kva_rating)",
+                    "FROM og.bank b",
+                    f"WHERE b.feeder_id IS NOT NULL AND {banks}",
+                    "GROUP BY b.feeder_id",
+                    "ON CONFLICT DO NOTHING",
+                ]
+            ),
+        ),
+    ]
+
+
 def seed_statements(seed: TopologySeed, *, only_missing: bool = False) -> tuple[Statement, ...]:
     """The seed's statements in apply order. `only_missing`: insert-only, a hub mapped only while unmapped."""
     t = seed.topology
@@ -397,7 +479,6 @@ def seed_statements(seed: TopologySeed, *, only_missing: bool = False) -> tuple[
     hub_still = (
         "h.transformer_id IS NULL" if only_missing else "h.transformer_id IS DISTINCT FROM v.transformer_id"
     )
-    dedicated_xfmr = "'xfmr-' || b.bank_id || '-00'"
     statements = [
         Statement(
             "og.service_transformer (home banks)",
@@ -430,35 +511,8 @@ def seed_statements(seed: TopologySeed, *, only_missing: bool = False) -> tuple[
                 ]
             ),
         ),
-        Statement(
-            "og.service_transformer (dedicated banks)",
-            "-- Dedicated-connection banks (the substation set, each truck at its depot): one transformer at the\n"
-            "-- bank's own kVA rating, from the rows market_model_seed.sql / mobile_trucks_seed.sql wrote.",
-            "\n".join(
-                [
-                    "INSERT INTO og.service_transformer (transformer_id, bank_id, rating_kva)",
-                    f"SELECT {dedicated_xfmr}, b.bank_id, b.kva_rating",
-                    "FROM og.bank b",
-                    f"WHERE b.bank_id IN ({DEDICATED_BANKS_SQL})",
-                    upsert_xfmr,
-                ]
-            ),
-        ),
-        Statement(
-            "og.hub.transformer_id (dedicated banks)",
-            "-- Every hub of a dedicated bank -> that bank's transformer.",
-            "\n".join(
-                [
-                    f"UPDATE og.hub h SET transformer_id = {dedicated_xfmr}",  # noqa: S608 -- fixed fragments
-                    "FROM og.bank b",
-                    f"WHERE b.bank_id = h.bank_id AND b.bank_id IN ({DEDICATED_BANKS_SQL})",
-                    f"  AND {hub_still.replace('v.transformer_id', dedicated_xfmr)}",
-                    "  AND EXISTS (SELECT 1 FROM og.service_transformer st",
-                    f"    WHERE st.transformer_id = {dedicated_xfmr})",
-                ]
-            ),
-        ),
     ]
+    statements += _dedicated_statements(only_missing=only_missing)
     statements += _limit_statements(
         "feeder_limit",
         "feeder_id",
@@ -466,22 +520,6 @@ def seed_statements(seed: TopologySeed, *, only_missing: bool = False) -> tuple[
         [(f.feeder_id, f.thermal_kw, f.reverse_kw) for f in seed.feeders],
         comment="-- Feeder thermal and reverse limits (G-28).",
         only_missing=only_missing,
-    )
-    statements.append(
-        Statement(
-            "og.feeder_limit (dedicated banks)",
-            "-- A dedicated bank's feeder, when it has no row yet (market_model_seed.sql's substation feeder wins).",
-            "\n".join(
-                [
-                    "INSERT INTO og.feeder_limit (feeder_id, thermal_kw, reverse_kw)",
-                    f"SELECT b.feeder_id, {_lit(FEEDER_THERMAL_KW)}, sum(b.kva_rating)",
-                    "FROM og.bank b",
-                    f"WHERE b.feeder_id IS NOT NULL AND b.bank_id IN ({DEDICATED_BANKS_SQL})",
-                    "GROUP BY b.feeder_id",
-                    "ON CONFLICT DO NOTHING",
-                ]
-            ),
-        )
     )
     statements += _limit_statements(
         "substation_limit",
@@ -579,13 +617,18 @@ def render_sql(seed: TopologySeed, *, only_missing: bool = False) -> str:
 # --- apply -------------------------------------------------------------------------------------------------
 
 #: Existing rows `--only-missing` must leave untouched: table -> SELECT (key, row text). og.hub's text omits
-#: transformer_id (a NULL one may be set); a transformer_id already set is guarded on its own.
+#: the columns a backfill may fill while NULL (transformer_id, and a dedicated hub's service_kw /
+#: export_limit_kw); a value already set in any of them is guarded on its own.
+_HUB_FILLABLE = ("transformer_id", "service_kw", "export_limit_kw")
 _GUARDED_ROWS: dict[str, str] = {
     "og.bank": "SELECT bank_id, to_jsonb(b)::text FROM og.bank b",
-    "og.hub (all but transformer_id)": "SELECT hub_id, (to_jsonb(h) - 'transformer_id')::text FROM og.hub h",
-    "og.hub.transformer_id (already set)": (
-        "SELECT hub_id, transformer_id FROM og.hub WHERE transformer_id IS NOT NULL"
+    "og.hub (all but the NULL-fillable columns)": (
+        "SELECT hub_id, (to_jsonb(h) - 'transformer_id' - 'service_kw' - 'export_limit_kw')::text FROM og.hub h"
     ),
+    **{
+        f"og.hub.{col} (already set)": f"SELECT hub_id, {col}::text FROM og.hub WHERE {col} IS NOT NULL"  # noqa: S608
+        for col in _HUB_FILLABLE
+    },
     "og.service_transformer": "SELECT transformer_id, to_jsonb(t)::text FROM og.service_transformer t",
     "og.feeder_limit": "SELECT feeder_id, to_jsonb(f)::text FROM og.feeder_limit f",
     "og.substation_limit": "SELECT substation_id, to_jsonb(s)::text FROM og.substation_limit s",
@@ -620,6 +663,15 @@ class ApplyReport:
     unmapped_before: dict[str, int]
     unmapped_after: dict[str, int]
     committed: bool
+    hub_ready: bool | None = None  # `ready_hub`'s state inside the transaction (None: not asked)
+
+
+#: A hub the guardian can dispatch at its nameplate: on an existing transformer, POI premise set.
+_HUB_READY_SQL = """
+SELECT h.service_kw IS NOT NULL AND h.export_limit_kw IS NOT NULL AND st.transformer_id IS NOT NULL
+FROM og.hub h LEFT JOIN og.service_transformer st ON st.transformer_id = h.transformer_id
+WHERE h.hub_id = %s
+"""
 
 
 def _guarded_rows(conn: Any) -> dict[str, dict[str, str]]:
@@ -638,11 +690,18 @@ def _changed_existing(before: dict[str, dict[str, str]], after: dict[str, dict[s
 
 
 def apply_statements(
-    conn: Any, statements: Sequence[Statement], *, guard_existing: bool, dry_run: bool
+    conn: Any,
+    statements: Sequence[Statement],
+    *,
+    guard_existing: bool,
+    dry_run: bool,
+    ready_hub: str | None = None,
 ) -> ApplyReport:
     """Run `statements` in ONE transaction on `conn` (a psycopg connection, not autocommit), printing each
     one's row count. `guard_existing`: roll back and raise when any row that existed before changed.
-    `dry_run`: always roll back (the plan)."""
+    `dry_run`: always roll back (the plan). `ready_hub`: also report whether that hub ends up mapped with its
+    POI premise set."""
+    hub_ready: bool | None = None
     committed = False
     try:
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -675,6 +734,10 @@ def apply_statements(
         )
         for label, count in after_unmapped.items():
             print(f"  unmapped {label}: {before_unmapped[label]} -> {count}")
+        if ready_hub is not None:
+            ready = conn.execute(_HUB_READY_SQL, (ready_hub,)).fetchone()
+            hub_ready = bool(ready and ready[0])
+            print(f"  {ready_hub}: mapped with POI premise: {'OK' if hub_ready else 'NO'}")
         if guard_existing:
             print(f"  existing rows unchanged: OK ({', '.join(_GUARDED_ROWS)})")
         if dry_run:
@@ -685,7 +748,7 @@ def apply_statements(
     except BaseException:
         conn.rollback()
         raise
-    return ApplyReport(tuple(rows), before_unmapped, after_unmapped, committed)
+    return ApplyReport(tuple(rows), before_unmapped, after_unmapped, committed, hub_ready)
 
 
 # --- CLI ---------------------------------------------------------------------------------------------------
@@ -712,9 +775,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="insert-only backfill: never rewrite an existing row (verified in the transaction with --dsn)",
     )
     parser.add_argument("--dry-run", action="store_true", help="with --dsn: run, print the plan, roll back")
+    parser.add_argument(
+        "--only",
+        metavar="HUB_ID",
+        default=None,
+        help="with --dsn: only this dedicated-connection hub's bank (e.g. sub-LZ_AEN-00, the toll hotfix); "
+        "insert-only and guarded like --only-missing",
+    )
     args = parser.parse_args(argv)
     if args.dry_run and not args.dsn:
         parser.error("--dry-run needs --dsn")
+    if args.only and not args.dsn:
+        parser.error("--only needs --dsn")
+    if args.only:
+        import psycopg
+
+        with psycopg.connect(args.dsn) as conn:
+            report = apply_statements(
+                conn,
+                _dedicated_statements(only_missing=True, only_hub=args.only),
+                guard_existing=True,
+                dry_run=args.dry_run,
+                ready_hub=args.only,
+            )
+        print(f"{'applied' if report.committed else 'dry run'}: {args.only} ready: {report.hub_ready}")
+        return 0 if report.hub_ready else 1
 
     blocks = None if args.blocks is None else [z for z in args.blocks.split(",") if z]
     config = load_fleet_config(args.fleet_config, args.scada_config, blocks)

@@ -9,7 +9,8 @@ The guardian raises two warnings for incomplete grid topology (09 S2.6):
 
 `UNMAPPED_QUERIES` counts the rows behind both, plus the rows that silently fall back to static defaults: a
 bank feeder with no `og.feeder_limit` row (G-28 takes `[guardian.flow]`'s defaults) and a home bank with no
-HOME_BANK `og.asset` row under a `og.substation_limit` (no G-29 membership). A complete topology has every
+HOME_BANK `og.asset` row under a `og.substation_limit` (no G-29 membership), and a dedicated-connection hub
+with no POI premise (G-26 would apply a home's 20 kW export default to it). A complete topology has every
 count at 0. `dev/seed/topology_seed.py` (verification), `deploy/scripts/bootstrap_check.py` and the DB tests
 all read these queries, so the three can never disagree on what "unmapped" means.
 
@@ -47,6 +48,11 @@ UNMAPPED_QUERIES: dict[str, str] = {
     "bank feeders without og.feeder_limit": (
         "SELECT count(DISTINCT b.feeder_id) FROM og.bank b WHERE b.feeder_id IS NOT NULL"
         " AND NOT EXISTS (SELECT 1 FROM og.feeder_limit f WHERE f.feeder_id = b.feeder_id)"
+    ),
+    "dedicated-connection hubs without POI premise (service_kw/export_limit_kw; G-26)": (
+        "SELECT count(*) FROM og.hub h"  # noqa: S608 -- fixed fragments only
+        f" WHERE h.bank_id IN ({DEDICATED_BANKS_SQL})"
+        " AND (h.service_kw IS NULL OR h.export_limit_kw IS NULL)"
     ),
     "home banks without a HOME_BANK asset under a substation limit": (
         "SELECT count(*) FROM og.bank b"  # noqa: S608 -- fixed fragments only

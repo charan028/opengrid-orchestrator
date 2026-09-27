@@ -21,7 +21,7 @@ from opengrid.core.physics import HubParams
 from opengrid.fleet import topology_audit
 from opengrid.guardian import flow_checks
 from opengrid.guardian.config import GuardianConfig
-from opengrid.guardian.ports import HubSite, HubSnapshot, ServiceTransformer
+from opengrid.guardian.ports import HubSite, HubSnapshot, ProposedItem, ServiceTransformer
 
 REPO = Path(__file__).resolve().parents[4]
 _SCRIPT = REPO / "dev" / "seed" / "topology_seed.py"
@@ -237,7 +237,7 @@ def test_sql_is_deterministic_and_every_write_is_idempotent(seed) -> None:
     # transformers (home, dedicated), feeders (generated, dedicated), substations (+ protected), assets
     assert len(inserts) == 7
     assert all("ON CONFLICT" in s for s in inserts)
-    updates = [s for s in statements if s.startswith("UPDATE og.hub")]
+    updates = [s for s in statements if s.startswith("UPDATE og.hub h SET transformer_id")]
     assert len(updates) == 2 and all("IS DISTINCT FROM" in u for u in updates)  # a re-run rewrites nothing
     assert statements[0] == "BEGIN" and statements[-1] == "COMMIT"
 
@@ -265,7 +265,7 @@ def test_only_missing_is_insert_only(seed) -> None:
     assert len(inserts) == 7
     assert all(s.endswith("DO NOTHING") for s in inserts)
     assert "DO UPDATE" not in sql
-    updates = [s for s in statements if s.startswith("UPDATE og.hub")]
+    updates = [s for s in statements if s.startswith("UPDATE og.hub h SET transformer_id")]
     assert len(updates) == 2
     assert all("h.transformer_id IS NULL" in u and "IS DISTINCT FROM" not in u for u in updates)
     # Same rows as the full seed, only the conflict handling differs.
@@ -296,7 +296,10 @@ def test_the_backfill_guard_covers_every_topology_table() -> None:
         "og.asset",
     ):
         assert table in guarded
-    assert "- 'transformer_id'" in ts._GUARDED_ROWS["og.hub (all but transformer_id)"]
+    hub = ts._GUARDED_ROWS["og.hub (all but the NULL-fillable columns)"]
+    assert "- 'transformer_id' - 'service_kw' - 'export_limit_kw'" in hub
+    for col in ("transformer_id", "service_kw", "export_limit_kw"):
+        assert f"WHERE {col} IS NOT NULL" in ts._GUARDED_ROWS[f"og.hub.{col} (already set)"]
 
 
 def test_cli_writes_the_same_sql_to_a_file(tmp_path: Path) -> None:
@@ -371,3 +374,91 @@ def test_unmapped_queries_are_counts_covering_both_guardian_alerts() -> None:
     counts = topology_audit.count_unmapped(conn)  # type: ignore[arg-type]
     assert list(counts) == list(topology_audit.UNMAPPED_QUERIES)
     assert list(counts.values()) == list(range(len(counts)))
+
+
+def test_dedicated_hubs_get_poi_premise_only_where_null(seed) -> None:
+    """Toll hotfix: sub-LZ_AEN-00 (and each truck) gets service_kw = export_limit_kw = its nameplate, only
+    where og.hub has NULL -- never overwritten, in the full seed and the backfill alike."""
+    for only_missing in (False, True):
+        premise = next(
+            s.sql
+            for s in ts.seed_statements(seed, only_missing=only_missing)
+            if s.label.startswith("og.hub service_kw/export_limit_kw")
+        )
+        assert "service_kw = coalesce(h.service_kw, h.p_kw)" in premise
+        assert "export_limit_kw = coalesce(h.export_limit_kw, h.p_kw)" in premise
+        assert "(h.service_kw IS NULL OR h.export_limit_kw IS NULL)" in premise
+        assert topology_audit.DEDICATED_BANKS_SQL in premise
+    assert any("POI premise" in label for label in topology_audit.UNMAPPED_QUERIES)
+
+
+def test_only_one_hub_is_separable_and_insert_only() -> None:
+    statements = ts._dedicated_statements(only_missing=True, only_hub="sub-LZ_AEN-00")
+    assert [s.label for s in statements] == [
+        "og.service_transformer (dedicated banks)",
+        "og.hub.transformer_id (dedicated banks)",
+        "og.hub service_kw/export_limit_kw (dedicated banks, NULL only)",
+        "og.feeder_limit (dedicated banks)",
+    ]
+    for s in statements:
+        assert "o.hub_id = 'sub-LZ_AEN-00'" in s.sql
+        assert "DO UPDATE" not in s.sql and "IS DISTINCT FROM" not in s.sql
+    with pytest.raises(SystemExit):
+        ts.main(["--only", "sub-LZ_AEN-00"])  # needs --dsn
+
+
+def _substation_site(export_kw: float | None, service_kw: float | None) -> HubSite:
+    return HubSite(
+        export_limit_kw=export_kw,
+        service_kw=service_kw,
+        pv_rated_kw=GuardianConfig(key_path="unused").default_pv_rated_kw,  # og.hub.pv_rated_kw is NULL
+        peak_kw=None,
+        tau_peak_s=None,
+        transformer_id="xfmr-bank-sub-LZ_AEN-00-00",
+    )
+
+
+def _substation_hub() -> HubSnapshot:
+    return HubSnapshot(
+        params=HubParams(e_kwh=40000.0, r_kwh=8000.0, p_kw=20000.0),
+        soc_kwh=32000.0,
+        prev_p_kw=0.0,
+        health="online",
+    )
+
+
+def _step(kw: float) -> ProposedItem:
+    return ProposedItem(hub_id="sub-LZ_AEN-00", p_kw_setpoint=-kw, reason_code="SELECTOR")
+
+
+def test_g27_passes_a_20_mw_step_on_the_substation_sets_own_transformer() -> None:
+    transformer = ServiceTransformer("xfmr-bank-sub-LZ_AEN-00-00", 20408.0, ("sub-LZ_AEN-00",))
+    members = {
+        "sub-LZ_AEN-00": flow_checks.TransformerMember(_substation_hub(), _substation_site(20000.0, 20000.0))
+    }
+    assert flow_checks.check_g27_transformer(transformer, members, -20000.0, _policy()) == (True, None)
+
+
+def test_g26_with_the_poi_premise_passes_the_toll_step_the_null_premise_vetoes() -> None:
+    """The toll-hotfix blocker: with og.hub's premise NULL (r3.4 prod) the guardian uses a home's defaults
+    (export 20 kW) and G-26 vetoes any MW step; with service_kw = export_limit_kw = 20,000 kW it passes a step
+    up to the nameplate less G-26's `load_drop_kw` margin (static meter)."""
+    policy = _policy()
+    hub, fixed = _substation_hub(), _substation_site(20000.0, 20000.0)
+    step = 20000.0 - policy.load_drop_kw
+    assert flow_checks.check_g26_home_meter(_step(step), hub, fixed, policy).ok
+    assert not flow_checks.check_g26_home_meter(_step(step), hub, _substation_site(None, None), policy).ok
+    assert not flow_checks.check_g26_home_meter(_step(1000.0), hub, _substation_site(None, None), policy).ok
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="OPEN (lead decision): G-26 keeps a load_drop_kw (0.5 kW) margin below X_exp, so an export limit of"
+    " exactly the 20,000 kW nameplate vetoes the full 20,000 kW step; needs X_exp above nameplate (the POI"
+    " agreement's value) or a toll request <= 19,999.5 kW",
+)
+def test_g26_passes_the_exact_20_mw_step_with_export_limit_at_nameplate() -> None:
+    policy = _policy()
+    assert flow_checks.check_g26_home_meter(
+        _step(20000.0), _substation_hub(), _substation_site(20000.0, 20000.0), policy
+    ).ok
