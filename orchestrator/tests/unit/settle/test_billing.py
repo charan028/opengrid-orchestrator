@@ -26,6 +26,7 @@ def test_home_posts_no_invoice_lines():
         revenue=Decimal("1.00"),
         performance_factor=Decimal("1"),
         penalty_amount=Decimal("0"),
+        duration_hours=Decimal("1"),
     )
     assert lines == []
 
@@ -39,6 +40,7 @@ def test_ercot_energy_posts_one_energy_line():
         revenue=Decimal("10.00"),
         performance_factor=Decimal("1"),
         penalty_amount=Decimal("0"),
+        duration_hours=Decimal("1"),
     )
     assert len(lines) == 1
     assert lines[0].line_type == "ENERGY"
@@ -57,6 +59,7 @@ def test_dist_deferral_capacity_payment_scaled_by_performance_factor():
         revenue=Decimal("8.00"),
         performance_factor=Decimal("0.8"),
         penalty_amount=Decimal("0"),
+        duration_hours=Decimal("1"),
     )
     assert len(lines) == 1
     assert lines[0].line_type == "CAPACITY_PAYMENT"
@@ -80,6 +83,7 @@ def test_partner_capacity_80pct_delivery_bills_80pct_of_committed_payment():
         revenue=price_per_kwh * delivered_kwh,
         performance_factor=performance_factor,
         penalty_amount=Decimal("0"),
+        duration_hours=Decimal("1"),
     )
     assert len(lines) == 1
     assert lines[0].line_type == "CAPACITY_PAYMENT"
@@ -96,6 +100,7 @@ def test_ld_penalty_line_added_when_penalty_positive():
         revenue=Decimal("10.00"),
         performance_factor=Decimal("1"),
         penalty_amount=Decimal("2.50"),
+        duration_hours=Decimal("1"),
     )
     line_types = [line.line_type for line in lines]
     assert "CAPACITY_PAYMENT" in line_types
@@ -154,3 +159,36 @@ def test_next_version_changed_amount_is_an_insert_only_correction():
     assert version == 2
     assert supersedes == original_id
     assert status == "CORRECTED"
+
+
+def test_capacity_lines_are_kw_based():
+    """Issue #43 A8: a 500 kW AS award held for a 15-min interval at an MCPC of $8.50/MW-h bills
+    500 kW x ($0.0085/kWh x 0.25 h = $0.002125/kW) = $1.0625, not 125 "kWh" at a per-kWh rate."""
+    lines = draft_invoice_lines(
+        service_type="ERCOT_AS",
+        delivered_kwh=Decimal("0"),
+        committed_kwh=Decimal("125"),
+        price_per_kwh=Decimal("0.0085"),
+        revenue=Decimal("1.0625"),
+        performance_factor=Decimal("1"),
+        penalty_amount=Decimal("0"),
+        duration_hours=Decimal("0.25"),
+    )
+    [line] = lines
+    assert (line.quantity, line.unit, line.rate) == (Decimal("500"), "kW", Decimal("0.002125"))
+    assert line.quantity * line.rate == line.amount == Decimal("1.0625")
+    deferral = draft_invoice_lines(
+        service_type="DIST_DEFERRAL",
+        delivered_kwh=Decimal("100"),
+        committed_kwh=Decimal("100"),
+        price_per_kwh=Decimal("0.10"),
+        revenue=Decimal("10"),
+        performance_factor=Decimal("1"),
+        penalty_amount=Decimal("0"),
+        duration_hours=Decimal("0.25"),
+    )
+    assert (deferral[0].quantity, deferral[0].unit, deferral[0].rate) == (
+        Decimal("400"),
+        "kW",
+        Decimal("0.025"),
+    )

@@ -8,10 +8,13 @@ description: >
   and that delivered kW to the site meter is metered from the moment of arrival (SoC-on-arrival is the
   deployment's starting condition, not a control-law parameter -- see the toml file's header note).
 
-  Step types "mobile_deployment_start"/"mobile_deployment_relocate" are NOT YET in ogsim's anomaly
-  catalogue (integration-sims/src/ogsim/control/catalogue.py) -- see the SERVICES agent's 2026-09-26
-  report for the FLEET-SIM wiring line needed before `ogsim.control.injector.Injector` can execute
-  this step; `ogsim.control.scenarios.load_scenario` parses this file today regardless.
+  Step types "mobile_deployment_start"/"mobile_deployment_relocate" ARE now in ogsim's anomaly
+  catalogue (integration-sims/src/ogsim/control/catalogue.py, owner: fleet) -- `ogsim.control.
+  injector.Injector` can dispatch them onto the wire (`scenario/cmd`), but nothing on the fleet side
+  acts on them yet; see the SERVICES agent's 2026-09-26 reports for that remaining wiring line.
+  `ogsim.control.scenarios.load_scenario` parses this file regardless. `trailer-mb-01`'s existence is
+  validated against fleet.yaml's `mobile_units:` registry (`ogsim.common.config.MobileUnitConfig`,
+  #33 target-check, 2026-09-26) -- previously this file's target had no registry to resolve against.
 steps:
   - at_s: 0
     type: mobile_deployment_start

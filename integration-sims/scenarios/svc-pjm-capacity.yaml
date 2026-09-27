@@ -9,11 +9,18 @@ description: >
   the non-performance charge (opengrid.settle.services_extra.pjm_non_performance_charge) on top of
   the ordinary CAPACITY_PAYMENT line -- never doubled outside the declared window.
 
-  Step type "pjm_emergency_performance_event" is NOT YET in ogsim's anomaly catalogue
-  (integration-sims/src/ogsim/control/catalogue.py) -- see the SERVICES agent's 2026-09-26 report for
-  the FLEET-SIM/market wiring line needed before `ogsim.control.injector.Injector` can execute this
-  step; `ogsim.control.scenarios.load_scenario` parses this file today regardless (schema validation
-  is structural only: at_s/type/target).
+  Step type "pjm_emergency_performance_event" IS now in ogsim's anomaly catalogue
+  (integration-sims/src/ogsim/control/catalogue.py, owner: market) but has no handler yet in
+  `ogsim.market.anomalies.MARKET_ANOMALY_TYPES` -- injecting it is a no-op until that wiring lands;
+  see the SERVICES agent's 2026-09-26 report for the FLEET-SIM/market wiring line still needed.
+  `ogsim.control.scenarios.load_scenario` parses this file today regardless (schema validation is
+  structural only: at_s/type/target).
+
+  Target fix (#33 target-check, 2026-09-26): "pjm-zone-aep-01" is a market-owned target (catalogue.py's
+  `pjm_emergency_performance_event` entry, owner: market) -- it belongs in a market zone/product
+  registry, not a customer id. PJM has no real feed (fully simulated, per this file's own header), so
+  it's now a registered simulated zone id, `ogsim.market.data.SIMULATED_PJM_ZONES`, rather than an ERCOT
+  `PRODUCTS` entry (those are real NP report codes the market simulator actually serves over HTTP).
 steps:
   - at_s: 0
     type: pjm_emergency_performance_event

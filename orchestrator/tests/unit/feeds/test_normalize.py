@@ -13,6 +13,9 @@ import pytest
 
 from opengrid.feeds.normalize import (
     EIA_SYSTEM_LOAD_SERIES,
+    ERCOT_ENERGY_PRICE_PRODUCTS,
+    ERCOT_PRICE_CAP_USD_PER_MWH,
+    ERCOT_PRICE_FLOOR_USD_PER_MWH,
     FeedDataError,
     eia_demand_to_feed_obs,
     ercot_as_price_to_feed_obs,
@@ -21,6 +24,7 @@ from opengrid.feeds.normalize import (
     ercot_spp_to_feed_obs,
     ercot_wind_to_feed_obs,
     nws_forecast_to_feed_obs,
+    split_out_of_bounds_prices,
 )
 
 RECORDED_AT = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
@@ -342,3 +346,28 @@ def test_nws_forecast_without_sky_cover_still_returns_temperature_and_dewpoint()
     assert {r.series for r in rows} == {"temperature", "dewpoint"}
     temp = next(r for r in rows if r.series == "temperature")
     assert temp.value == pytest.approx((91 - 32) * 5 / 9)
+
+
+def test_price_bounds_are_the_ercot_offer_floor_and_system_wide_offer_cap() -> None:
+    """Issue #43 A12 (the pure split; `feeds.ercot` applies it to ERCOT_ENERGY_PRICE_PRODUCTS)."""
+    assert (ERCOT_PRICE_FLOOR_USD_PER_MWH, ERCOT_PRICE_CAP_USD_PER_MWH) == (-250.0, 5_000.0)
+    payload = {
+        "data": [
+            ["2026-09-26", 1, i + 1, "LZ_WEST", "LZ", v, False] for i, v in enumerate((9_999.0, 30.0, -251.0))
+        ],
+        "fields": [
+            {"name": "deliveryDate"},
+            {"name": "deliveryHour"},
+            {"name": "deliveryInterval"},
+            {"name": "settlementPoint"},
+            {"name": "settlementPointType"},
+            {"name": "settlementPointPrice"},
+            {"name": "DSTFlag"},
+        ],
+    }
+    kept, rejected = split_out_of_bounds_prices(
+        ercot_spp_to_feed_obs(payload, product="np6-905-cd", recorded_at=RECORDED_AT)
+    )
+    assert [o.value for o in kept] == [30.0]
+    assert [o.value for o in rejected] == [9_999.0, -251.0]
+    assert "np6-905-cd" in ERCOT_ENERGY_PRICE_PRODUCTS

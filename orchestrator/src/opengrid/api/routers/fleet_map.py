@@ -14,7 +14,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from opengrid.api.auth import Identity, require_viewer
-from opengrid.api.deps import get_config
+from opengrid.api.deps import get_config, get_store
+from opengrid.api.routers.fleet_search import classify_asset, home_stations, mobile_units, substation_keys
 from opengrid.api.views_ext import (
     ACTIVITIES,
     CUSTOMER_SITES_FILE,
@@ -38,6 +39,7 @@ _DEFAULT_SITE_READING_MAX_AGE_S = 900.0
 @router.get("/fleet/map", response_model=None)
 async def fleet_map(
     service: Annotated[FleetMapService, Depends(get_fleet_map_service)],
+    store: Annotated[Any, Depends(get_store)],
     _identity: Annotated[Identity, Depends(require_viewer)],
     zone: str | None = None,
     bank: str | None = None,
@@ -45,15 +47,23 @@ async def fleet_map(
 ) -> JSONResponse:
     """`{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,
     bank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,
-    home_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[]`.
-    `activity_counts` covers the filtered set."""
+    home_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[],
+    asset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`). `depots` are the D-31 home
+    stations with their assigned units. `activity_counts` covers the filtered set."""
     if activity is not None and activity not in ACTIVITIES:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"activity must be one of {', '.join(ACTIVITIES)}"
         )
     snapshot = await service.snapshot()
+    mobile = set(mobile_units())
+    substations = await substation_keys(store)
     hubs = [
-        h
+        {
+            **h,
+            "asset_class": classify_asset(
+                h["hub_id"], h.get("bank_id"), mobile=mobile, substations=substations
+            ),
+        }
         for h in snapshot.hubs
         if (zone is None or h["zone"] == zone)
         and (bank is None or h["bank_id"] == bank)
@@ -68,6 +78,7 @@ async def fleet_map(
         "coord_sources": dict(Counter(h["coord_source"] for h in hubs)),
         "warnings": list(service.warnings),
         "hubs": hubs,
+        "depots": home_stations(),
     }
     return JSONResponse(body)
 

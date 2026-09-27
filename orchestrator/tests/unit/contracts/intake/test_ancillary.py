@@ -3,10 +3,14 @@ brief: "value MCPC x MW", "min 0.1 MW, 0.1 increment")."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from opengrid.contracts.intake.ancillary import OPERATING_DAY_HOURS, compute_as_candidates
+from opengrid.contracts.intake.ancillary import (
+    OPERATING_DAY_HOURS,
+    compute_as_candidates,
+    next_operating_day_start,
+)
 from opengrid.core.products import ProductRule
 
 # ERCOT_AS product rule from the demo seed (0002_seed_demo.sql): min 0.1 MW / 0.1 MW increment.
@@ -44,3 +48,18 @@ def test_candidates_start_at_next_operating_day() -> None:
     first_start_local = candidates[0].window_start
     assert first_start_local > NOW
     assert (first_start_local - NOW).total_seconds() > 3600 * 8  # tomorrow, not later today
+
+
+def test_each_hour_is_valued_at_its_own_posted_mcpc() -> None:
+    """Issue #43 A1: NP4-188-CD posts one MCPC per operating-day hour. Hour h is priced at its own
+    posted value (here 10 + h); an hour with nothing posted (hour 5) falls back to the latest MCPC."""
+    day_start = next_operating_day_start(NOW)
+    hourly = {day_start + timedelta(hours=h): 10.0 + h for h in range(OPERATING_DAY_HOURS) if h != 5}
+    candidates = compute_as_candidates(
+        now=NOW, mcpc_usd_per_mwh=99.0, rule=AS_RULE, offer_kw=Decimal("500"), hourly_mcpc_usd_per_mwh=hourly
+    )
+    values = [c.value_per_mwh for c in candidates]
+    assert values[0] == Decimal("10.0")
+    assert values[23] == Decimal("33.0")
+    assert values[5] == Decimal("99.0")  # no posted value for that hour: the latest MCPC
+    assert len(set(values)) == OPERATING_DAY_HOURS  # not flat

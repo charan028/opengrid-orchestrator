@@ -162,3 +162,28 @@ def test_secret_repr_and_str_never_show_the_value() -> None:
     assert _PASSWORD not in repr(secret)
     assert _PASSWORD not in str(secret)
     assert secret.reveal() == _PASSWORD
+
+
+async def test_energy_prices_outside_the_offer_floor_and_cap_are_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #43 A12: an SPP outside -$250..$5,000/MWh is a feed error. Both bounds themselves are
+    real prices (kept); the rows beyond them are dropped at ingest and logged."""
+    prices = [42.17, 5_000.0, 5_000.01, -250.0, -250.5]
+    payload = {
+        "data": [["2026-09-26", 1, i + 1, "LZ_NORTH", "LZ", p, False] for i, p in enumerate(prices[:4])]
+        + [["2026-09-26", 2, 1, "LZ_NORTH", "LZ", prices[4], False]],
+        "fields": SPP_PAYLOAD["fields"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith("http://test/token"):
+            return httpx.Response(200, json={"id_token": "tok-1"})
+        return httpx.Response(200, json=payload)
+
+    client = _make_client(httpx.MockTransport(handler))
+    with caplog.at_level(logging.WARNING, logger="opengrid.feeds.ercot"):
+        obs, _events = await client.fetch_product("np6-905-cd", now=NOW)
+    assert sorted(o.value for o in obs) == [-250.0, 42.17, 5_000.0]
+    dropped = [r for r in caplog.records if "dropped at ingest" in r.getMessage()]
+    assert sorted(r.__dict__["value"] for r in dropped) == [-250.5, 5_000.01]

@@ -96,7 +96,9 @@ these IDs and meanings. Principles P1–P8 are defined in `../06-reviews/06-firs
       check, `core/limits.py:370-378`, `guardian/service.py:360-368`), G-06 and the new G-32 (non-firm feeder
       ramp, `core/limits.py:360`). The engine ramps each hub (`orchestrator/src/opengrid/engine/__init__.py:195-207`);
       there is no fleet or feeder ramp shaping and no signed start jitter.
-    - **Reverse flow is not measured.** The guardian's aggregate flow is the sum of each bank's latest SCADA
+    - **Reverse flow was not measured at R2; fixed in R3 (`451a2a2`, `02a` §6.8):** the guardian now takes the signed
+      `REAL_POWER_KW`, and an unsigned kVA reading becomes an interval with unknown direction treated as export.
+      At `6470cfa`: the guardian's aggregate flow is the sum of each bank's latest SCADA
       `APPARENT_POWER_KVA`, taken as import-positive (`orchestrator/src/opengrid/guardian/flow_repo.py:40-48`).
       Apparent power has no sign (the simulator publishes |kW|/pf,
       `integration-sims/src/ogsim/scada/aggregation.py:37-41`), so a bank that is already exporting reads as
@@ -177,13 +179,14 @@ matches `09-optimizer-dispatcher-update.md` §2.5/§2.6 as renumbered:
 | G-31 | Sustained vs peak | `flow_checks.py:88` `check_g31_peak` | `:427`, per item |
 | G-32 | Feeder ramp for non-firm steps | `orchestrator/src/opengrid/core/limits.py:360` `check_feeder_ramp` | `:383-390` |
 | G-33 | K15 market segregation | `flow_checks.py:317` `check_g33_territory`, on `market/territory.py:131` `check_territory` (the one predicate) | `:584`, per item |
+| G-34 | Hub on the proposal's bank (new in R3; refs at `451a2a2`) | `flow_checks.py:317` `check_hub_in_bank` | `:627`, batch |
 
 - **Status at main `6470cfa` (R2): built.** All eight run on the guardian's own reads (its topology, territory and
   telemetry ports; `guardian/main.py:349` wires `PgGridTopologyPort`), next to G-01…G-25. Item-level rules are
   listed at `guardian/service.py:66`. Tests: `orchestrator/tests/unit/guardian/test_flow_checks.py` (29) and
   `test_service_flow.py` (14). No feature flag gates them. Caveats, all under K4 above: G-31's peak path is
   dead (the field-name defect), G-29/G-30 are idle without substation or regulated-zone data, reverse flow is
-  seen only through the batch's own change, and `[guardian.flow].telemetry_required` is false, so a flow field
+  seen only through the batch's own change (fixed in R3, `02a` §6.8), and `[guardian.flow].telemetry_required` is false, so a flow field
   a hub has never reported falls back to the static premise limits (`guardian/config.py:101`).
 - **The ERCOT_AS energy hold is not a guardian check.** Two built pieces enforce it:
   - the selector's C3′ floor (`orchestrator/src/opengrid/selector/model.py:345`);

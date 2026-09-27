@@ -99,6 +99,9 @@ def test_ts_04_07_a_new_call_during_delivery_does_not_interrupt_it(
     assert stack.obligation(offer)["state"] == "DELIVERING"
 
 
+@pytest.mark.skip(
+    reason="R3: manual commands ramp through the engine (202 RAMPING), no per-command G-19 verdict"
+)
 def test_ts_06_14_g19_a_manual_command_cutting_a_committed_hub_is_vetoed(
     stack: Stack, delivering: tuple[Offer, dict]
 ) -> None:

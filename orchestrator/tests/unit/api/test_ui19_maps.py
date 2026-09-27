@@ -284,3 +284,25 @@ def test_reads_allow_viewer_and_operator(ui19_client, headers: dict[str, Any]) -
 
 def test_fleet_rows_fixture_is_2000_hubs() -> None:
     assert len(fleet_rows()) == 2000
+
+
+def test_fleet_map_carries_asset_class_and_depots(ui19_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner R3.1: the Control room map shapes trucks and substation BESS; one rule, fleet_search's."""
+    import opengrid.api.routers.fleet_map as fleet_map
+
+    first, second = (
+        h["hub_id"] for h in ui19_client.get("/og/api/fleet/map", headers=VIEWER_HEADERS).json()["hubs"][:2]
+    )
+    monkeypatch.setattr(fleet_map, "mobile_units", lambda: {first: "LZ_AEN"})
+
+    async def substations(_store: Any) -> set[str]:
+        return {second}
+
+    monkeypatch.setattr(fleet_map, "substation_keys", substations)
+    depot = {"home_station_id": "hs-1", "zone": "LZ_AEN", "lat": 30.4, "lon": -97.7, "units": [first]}
+    monkeypatch.setattr(fleet_map, "home_stations", lambda: [depot])
+    body = ui19_client.get("/og/api/fleet/map", headers=VIEWER_HEADERS).json()
+    classes = {h["hub_id"]: h["asset_class"] for h in body["hubs"]}
+    assert classes[first] == "MOBILE" and classes[second] == "UTILITY_SCALE"
+    assert set(classes.values()) == {"HOME", "MOBILE", "UTILITY_SCALE"}
+    assert body["depots"] == [depot]

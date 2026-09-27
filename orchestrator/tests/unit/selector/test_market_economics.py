@@ -313,7 +313,9 @@ def test_every_gate_runs_the_rule_shadow_and_reports_the_lp_value_added():
 
     plan = solve_gate(inputs, "SCHEDULED_15MIN", H0, {}, {})
 
-    assert plan.plan_mode == "L-ID" and plan.shadow is not None
+    # H0 is 00:00 America/Chicago, so this is the operating-day (L-DA) gate (#43 A11); the shadow runs at
+    # every LP gate.
+    assert plan.plan_mode == "L-DA" and plan.shadow is not None
     assert plan.shadow.rule_value.energy_revenue == pytest.approx(25.0 * 0.005)
     assert plan.shadow.lp_value.energy_revenue == pytest.approx(25.0 * 0.150)
     assert plan.shadow.value_added == pytest.approx(25.0 * (0.150 - 0.005))

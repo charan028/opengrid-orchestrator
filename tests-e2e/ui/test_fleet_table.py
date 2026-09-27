@@ -356,3 +356,23 @@ def test_asset_types_on_the_map_table_filter_and_drawer(operator_page: Page) -> 
     rows.filter(has_text="sub-LZ_AEN-00").click()
     expect(drawer.locator("#drawer-substation")).to_contain_text("4.0 MW / 16.0 MWh")
     expect(drawer.locator("#drawer-substation")).to_contain_text("F-AEN-7")
+
+
+def test_control_room_map_shapes_asset_classes(operator_page: Page) -> None:
+    operator_page.set_viewport_size({"width": 1400, "height": 1000})
+    goto_ok(operator_page, f"{BASE_PATH}/")
+    grid_map = operator_page.locator("#fleet-map")
+    expect(grid_map.locator(".og-asset-truck")).to_have_count(1)
+    expect(grid_map.locator(".og-asset-sub")).to_have_count(1)
+    expect(grid_map.locator(".og-asset-depot")).to_have_count(1)
+    legend = operator_page.locator(".og-map-legend")
+    for label in ("Trucks", "Substation BESS", "Home stations"):
+        expect(legend).to_contain_text(label)
+    toggle = operator_page.get_by_label("Show substation BESS layer")
+    toggle.uncheck()
+    expect(grid_map.locator(".og-asset-sub")).to_have_count(0)
+    toggle.check()
+    grid_map.scroll_into_view_if_needed()
+    shots = os.environ.get("OG_UI_SCREENSHOT_DIR")
+    if shots:
+        grid_map.screenshot(path=os.path.join(shots, "control_room_assets.png"))

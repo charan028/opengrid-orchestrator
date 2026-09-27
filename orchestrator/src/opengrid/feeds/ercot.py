@@ -18,12 +18,14 @@ import httpx
 from opengrid.core.models.platform import FeedObs
 from opengrid.feeds.http_client import DEFAULT_TIMEOUT_S, FeedHttpError, request_with_retry
 from opengrid.feeds.normalize import (
+    ERCOT_ENERGY_PRICE_PRODUCTS,
     ercot_as_price_to_feed_obs,
     ercot_load_to_feed_obs,
     ercot_solar_by_region_to_feed_obs,
     ercot_solar_to_feed_obs,
     ercot_spp_to_feed_obs,
     ercot_wind_to_feed_obs,
+    split_out_of_bounds_prices,
 )
 from opengrid.feeds.secrets import Secret, mask_secrets
 from opengrid.platform.config import resolve_secret
@@ -97,6 +99,18 @@ _NORMALIZERS = {
     "np4-188-cd": ercot_as_price_to_feed_obs,
     SOLAR_BY_REGION_PRODUCT: ercot_solar_by_region_to_feed_obs,
 }
+
+
+def _drop_impossible_prices(product: str, observations: list[FeedObs]) -> list[FeedObs]:
+    """Issue #43 A12: never store an energy price outside ERCOT's -$250..$5,000/MWh bounds
+    (`normalize.split_out_of_bounds_prices`); each dropped row is logged."""
+    kept, rejected = split_out_of_bounds_prices(observations)
+    for row in rejected:
+        logger.warning(
+            "ercot price outside the offer floor/system-wide offer cap; dropped at ingest",
+            extra={"product": product, "series": row.series, "ts": row.ts.isoformat(), "value": row.value},
+        )
+    return kept
 
 
 @dataclass
@@ -280,8 +294,11 @@ class ErcotClient:
                     raise FeedHttpError(exc.status_code, mask_secrets(str(exc), request_secrets)) from None
             payload = response.json()
             normalizer = _NORMALIZERS[product]
+            observations = normalizer(payload, product=product, recorded_at=now)
+            if product in ERCOT_ENERGY_PRICE_PRODUCTS:
+                observations = _drop_impossible_prices(product, observations)
             return ErcotPage(
-                observations=normalizer(payload, product=product, recorded_at=now),
+                observations=observations,
                 rotation_events=events,
                 total_pages=_total_pages(payload),
             )

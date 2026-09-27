@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.contracts.intake.ports import (
@@ -16,6 +18,13 @@ _LATEST_OBS_SQL = """
 SELECT value, ts FROM og.feed_obs
 WHERE source = %(source)s AND product = %(product)s AND series = %(series)s
 ORDER BY ts DESC LIMIT 1
+"""
+
+_WINDOW_OBS_SQL = """
+SELECT value, ts FROM og.feed_obs
+WHERE source = %(source)s AND product = %(product)s AND series = %(series)s
+  AND ts >= %(start)s AND ts < %(end)s
+ORDER BY ts
 """
 
 
@@ -45,3 +54,19 @@ class PgMarketDataPort:
             )
             row = await cur.fetchone()
             return PriceObservation(float(row[0]), row[1]) if row else None
+
+    async def as_mcpc_between(
+        self, product_code: str, start: datetime, end: datetime
+    ) -> list[PriceObservation]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _WINDOW_OBS_SQL,
+                {
+                    "source": FEED_SOURCE_ERCOT,
+                    "product": AS_PRICE_PRODUCT,
+                    "series": product_code,
+                    "start": start,
+                    "end": end,
+                },
+            )
+            return [PriceObservation(float(value), ts) for value, ts in await cur.fetchall()]

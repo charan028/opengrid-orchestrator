@@ -77,8 +77,16 @@ async def control_room(request: Request) -> HTMLResponse:
     # Hubs for the map: `GET /og/api/fleet/map` (real coordinates, activity, obligations) when it answers,
     # else the hub list (the map then places hubs inside their zone and derives activity).
     map_hubs = [map_hub(h) for h in hubs]
+    depots: list[Any] = []
     try:
-        map_hubs = map_hubs_from(await get_json("/og/api/fleet/map")) or map_hubs
+        raw_map = await get_json("/og/api/fleet/map")
+        map_hubs = map_hubs_from(raw_map) or map_hubs
+        # D-31 home stations (depots) drawn with a line to each assigned truck (og-map.js addDepotLayer)
+        depots = [
+            d
+            for d in (raw_map.get("depots") or [] if isinstance(raw_map, dict) else [])
+            if isinstance(d, dict)
+        ]
     except ApiUnavailable as exc:
         logger.info("control room: /og/api/fleet/map not serving (%s); map drawn from the hub list", exc)
 
@@ -100,6 +108,7 @@ async def control_room(request: Request) -> HTMLResponse:
             "alert_rows": [_alert_row(entry) for entry in health.get("alerts", []) or []],
             "hubs": hubs,
             "map_hubs": map_hubs,
+            "depots": depots,
             "customers": customers,
             "ticker": series_chart_view(ticker_rows, series_key="price"),
             "degraded": degraded,

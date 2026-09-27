@@ -34,15 +34,25 @@ products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"
 # product page; per-region field names (gen<Region>/STPPF<Region>) UNCONFIRMED against a live response.
 # System-wide solar (actual + STPPF forecast) is NP4-737-CD above. Set false to stop polling NP4-745-CD
 # without a deploy (it shares the ERCOT breaker with price/load). Freshness: wind_solar_fresh_s.
-# OFF until the per-region field names are confirmed against a live NP4-745-CD response (R2 review).
-solar_by_region_enabled = false
+# ON by owner decision (2026-09-26, r3.3): regional solar with Frank's weather-zone mapping (PR #42).
+solar_by_region_enabled = true
 
 # Solar share of load (opengrid.feeds.ercot_solar; rule in opengrid.core.solar_share): which ERCOT solar region(s) cover a load weather zone.
 # ERCOT's solar regions and load weather zones are different partitions, so only zones listed here get a
-# zonal share ("total" = system-wide always works). Empty for this release: region solar is OFF and the
-# NP4-745-CD field names are unconfirmed. The proposed mapping (WP-L #39) is in
-# docs/orchestrator/07-delivery/integrations/solar-region-mapping.md and tests/unit/feeds/test_solar_region_mapping.py.
+# zonal share ("total" = system-wide always works). Keys are NP6-345-CD weather-zone series (the load side
+# of the ratio); values are NP4-745-CD solar regions. Proposed by county overlap with ERCOT's "Wind and Solar
+# Regions to County Mapping" (2024-05-31); rationale and caveats in
+# docs/orchestrator/07-delivery/integrations/solar-region-mapping.md. PROPOSED, pending lead sign-off.
+# Load zones reach these via forecast.service.DEFAULT_WEATHER_ZONES_BY_LOAD_ZONE (LZ_AEN -> southC etc.).
 [feeds.ercot.solar_share_zones]
+coast = ["FarEast"]                     # Houston metro: Harris, Fort Bend, Brazoria, Galveston
+east = ["FarEast"]                      # Tyler, Longview, Lufkin
+farWest = ["FarWest"]                   # Midland, Odessa, Permian Basin
+north = ["NorthWest", "CenterWest"]     # Lubbock (NorthWest) and Wichita Falls (CenterWest)
+northC = ["CenterEast"]                 # DFW, Waco (Dallas, Tarrant, Collin, Denton, McLennan)
+southC = ["CenterEast", "SouthEast"]    # Austin (Travis, CenterEast) and San Antonio (Bexar, SouthEast)
+southern = ["SouthEast"]                # Corpus Christi, Laredo, Rio Grande Valley
+west = ["CenterWest"]                   # Abilene (Taylor), San Angelo (Tom Green)
 
 [feeds.eia]
 base_url = "https://api.eia.gov/v2"

@@ -49,6 +49,22 @@ def test_panel_renders_for_an_operator(client: TestClient, monkeypatch: pytest.M
     assert 'id="per-kw-table"' in html and "Free market (ERCOT competitive)" in html
 
 
+def test_panel_hides_capex_and_payback_and_labels_assumed_figures(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#43 B5: the planning capex ($7,000 / 11 kW), the 3-year payback target and the Payback column are
+    unsourced, so the panel does not render them; the illustrative unit and the O&M allowance say Assumed."""
+    _serve(monkeypatch, load_fixture("profitability_per_kw.json"))
+    html = client.get("/og/profitability", headers={"X-Remote-User": "alice"}).text
+    panel = html[html.index('id="per-kw"') : html.index('id="pnl-by-contract-heading"')]
+    for gone in ("Payback", "payback", "3-yr target", "Hardware view", "636", "meets", "misses"):
+        assert gone not in panel
+    for kept in ("In $/kW-yr", "Out $/kW-yr", "Net $/kW-yr"):
+        assert kept in panel
+    assert "Illustrative home unit (reference) (Assumed)" in panel
+    assert "O&amp;M allowance is (Assumed)" in panel
+
+
 @pytest.mark.parametrize(
     ("status", "text"), [(404, "not available on this deployment yet"), (403, "Operator role required")]
 )

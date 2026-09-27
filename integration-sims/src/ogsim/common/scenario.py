@@ -55,6 +55,7 @@ WIRE_TYPE_TO_CATALOGUE_ID: dict[str, str] = {
     "MARKET_AS_DEPLOYMENT": "as_deployment",
     "FLEET_MOBILE_DEPLOYMENT_START": "mobile_deployment_start",
     "FLEET_MOBILE_DEPLOYMENT_RELOCATE": "mobile_deployment_relocate",
+    "FLEET_MOBILE_HOME_STATION_CHARGE": "mobile_home_station_charge",
     # ogsim.customer (customer-operator simulators): shared here per coordination with the
     # lead so ogsim.customer can reuse parse_scenario_cmd unchanged.
     "CUSTOMER_LOAD_STEP": "load_step_datacenter",
