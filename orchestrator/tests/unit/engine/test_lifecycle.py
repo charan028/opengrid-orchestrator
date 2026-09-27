@@ -75,6 +75,31 @@ async def test_one_failed_transition_does_not_block_the_others() -> None:
     assert counts["DELIVERING"] == 1
 
 
+async def test_a_lost_optimistic_lock_race_is_logged_quietly_not_as_an_error(caplog) -> None:
+    """R3.4.1 follow-up (DISPATCH review): once the lifecycle step backgrounds `advance_obligations`
+    under a timeout, an abandoned pass's shielded write can still land after a fresh pass has already
+    retried the same obligation -- one of the two loses the CAS race. That's the ordinary, expected
+    outcome of the single-flight design, not a bug, so it must log at INFO, never ERROR/exception."""
+    from opengrid.contracts.errors import ConcurrentUpdateError
+
+    obligation_id = uuid4()
+
+    class _LosingTransitions:
+        async def __call__(self, obligation_id, to_state, *, reason_code):
+            raise ConcurrentUpdateError(obligation_id, 1)
+
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="opengrid.engine.lifecycle"):
+        counts = await advance_obligations(
+            _Backend([obligation_id], []), _LosingTransitions(), _expire_none, NOW
+        )
+
+    assert counts["DELIVERING"] == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("lost the optimistic-lock race" in r.message for r in caplog.records)
+
+
 async def test_unselected_offers_are_expired() -> None:
     expired = [uuid4(), uuid4()]
 

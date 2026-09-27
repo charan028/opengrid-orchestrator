@@ -71,7 +71,12 @@ from opengrid.engine.gateways import (
     set_utility_scale_banks,
 )
 from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
-from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations, resolve_stuck_selected
+from opengrid.engine.lifecycle import (
+    LifecycleBackend,
+    Transition,
+    advance_obligations,
+    resolve_stuck_selected,
+)
 from opengrid.engine.manual import ManualTarget, ManualTargetSource, manual_items
 from opengrid.engine.mqtt_supervisor import (
     DEFAULT_BACKOFF_INITIAL_S,
@@ -571,6 +576,9 @@ class _EngineState:
     gate_backlog: list[GateTrigger] = field(
         default_factory=list
     )  # `[pq_ingest].flush_interval_s`; None when waveform ingest is off
+    #: R3.4.1: the clock-triggered obligation lifecycle pass (`advance_obligations`), backgrounded off
+    #: the 2 s tick the same way gates are; single-flight via `start_lifecycle_in_background`.
+    lifecycle_task: asyncio.Task[None] | None = None
 
 
 async def timed_tick(state: _EngineState) -> None:
@@ -718,6 +726,57 @@ def start_gates_in_background(
         return False
     batch, state.gate_backlog = state.gate_backlog, []
     state.gate_task = asyncio.create_task(run(batch))
+    return True
+
+
+#: R3.4.1 PROD-IO: at 3,509+ hubs `advance_obligations`'s backend reads/CAS updates were occasionally
+#: slow enough (contended Postgres) to add to the 4-5 s event-loop freezes traced to `pq_ingest`; moved
+#: off the tick the same way, with a cap so one bad pass cannot wedge every pass after it.
+DEFAULT_LIFECYCLE_TIMEOUT_S = 30.0
+
+
+def start_lifecycle_in_background(
+    state: Any,
+    transition: Transition,
+    expire_unselected: Callable[..., Coroutine[Any, Any, list[UUID]]],
+    now: datetime,
+    *,
+    timeout_s: float = DEFAULT_LIFECYCLE_TIMEOUT_S,
+) -> bool:
+    """Run the clock-triggered obligation lifecycle edges (`advance_obligations`) as ONE background
+    task, never awaited by the 2 s tick (mirrors `start_gates_in_background`). Single-flight: if the
+    previous pass hasn't finished, this cycle is SKIPPED (never queued) and logged -- a stuck pass must
+    not pile up a backlog of concurrent scans over the same obligations. A pass that runs past
+    `timeout_s` is abandoned (logged, not raised): the next cycle gets a fresh attempt rather than the
+    tick waiting on a wedged DB call forever (K7 -- dispatch keeps ticking either way, since neither the
+    allocator nor escalation reads `state.lifecycle_task`).
+
+    Safe to run concurrently with `escalate_sustained_shortfalls`'s own `transition_obligation` calls in
+    the same tick: `contracts.transition_obligation` persists through
+    `ContractsRepo.update_obligation_state`'s `UPDATE ... WHERE obligation_id = %s AND version = %s`,
+    a single conditional statement Postgres applies atomically per row, so two writers racing the SAME
+    obligation never both succeed -- the loser's `RETURNING *` comes back empty and `transition_obligation`
+    raises `ConcurrentUpdateError`, which both call sites (`lifecycle._apply` and
+    `escalate_sustained_shortfalls`) already catch and log rather than propagate. No additional lock
+    between the two is needed as a result. Returns True if a pass was started now."""
+    if state.lifecycle_backend is None:
+        return False
+    if state.lifecycle_task is not None and not state.lifecycle_task.done():
+        logger.warning("obligation lifecycle pass still running; skipping this cycle's run")
+        return False
+
+    async def _run() -> None:
+        try:
+            await asyncio.wait_for(
+                advance_obligations(state.lifecycle_backend, transition, expire_unselected, now),
+                timeout=timeout_s,
+            )
+        except TimeoutError:
+            logger.error("obligation lifecycle pass timed out", extra={"timeout_s": timeout_s})
+        except Exception:
+            logger.exception("obligation lifecycle step failed")
+
+    state.lifecycle_task = asyncio.create_task(_run())
     return True
 
 
@@ -1123,12 +1182,12 @@ async def _engine_tick(state: _EngineState) -> None:
 
     if state.lifecycle_backend is not None:
         with phase("lifecycle"):
-            try:
-                await advance_obligations(
-                    state.lifecycle_backend, contracts.transition_obligation, contracts.expire_unselected, now
-                )
-            except Exception:
-                logger.exception("obligation lifecycle step failed", extra={"cycle_id": cycle_id})
+            # R3.4.1: backgrounded (single-flight, timed out) rather than awaited inline -- see
+            # `start_lifecycle_in_background`'s docstring for why this is safe to run alongside this
+            # same tick's `escalate_sustained_shortfalls` below.
+            start_lifecycle_in_background(
+                state, contracts.transition_obligation, contracts.expire_unselected, now
+            )
 
     state.veto_exclusions.next_cycle()
     if state.pending_verdicts:
