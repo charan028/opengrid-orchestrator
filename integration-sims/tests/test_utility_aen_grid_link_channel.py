@@ -47,11 +47,11 @@ class FakeMaster:
     async def integrity_poll(self) -> PointValues:
         return self.points
 
-    def report(self, call_id: int, state: int, reason: int = 0, granted: float | None = None) -> None:
+    def report(self, call_id: int, state: int, reason: int = 0, delivered: float | None = None) -> None:
         self.points.analogs.update({gp.AI["CALL_ID"]: float(call_id), gp.AI["CALL_STATE"]: float(state)})
         self.points.analogs[gp.AI["CALL_REASON"]] = float(reason)
-        if granted is not None:
-            self.points.analogs[gp.AI["CALL_DELIVERED_KW"]] = granted
+        if delivered is not None:
+            self.points.analogs[gp.AI["CALL_DELIVERED_KW"]] = delivered
             self.points.analog_flags[gp.AI["CALL_DELIVERED_KW"]] = gp.FLAG_ONLINE
         else:
             self.points.analog_flags[gp.AI["CALL_DELIVERED_KW"]] = 0x04
@@ -88,7 +88,7 @@ async def test_issue_stages_then_executes_with_sbo_and_reports_the_state() -> No
     channel, master = _channel()
     master.report(4242, 1)
     result = await channel.issue_call(_spec())
-    assert result.accepted and result.state == "ACCEPTED" and result.granted_kw is None
+    assert result.accepted and result.state == "ACCEPTED" and result.delivered_kw is None
     assert master.ops[0] == ("CROB", gp.BO["HEARTBEAT"], gp.CROB_PULSE_ON, False)  # heartbeat before a call
     assert master.ops[1:] == [
         ("AO", 0, 1500, False),
@@ -96,9 +96,9 @@ async def test_issue_stages_then_executes_with_sbo_and_reports_the_state() -> No
         ("AO", 2, 4242, False),
         ("CROB", 0, gp.CROB_LATCH_ON, True),
     ]
-    master.report(4242, 2, granted=1480.0)
+    master.report(4242, 2, delivered=1480.0)
     status = await channel.status("4242")
-    assert status.state == "ACTIVE" and status.granted_kw == -1480.0
+    assert status.state == "ACTIVE" and status.delivered_kw == -1480.0
     await channel.aclose()
 
 

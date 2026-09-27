@@ -20,7 +20,7 @@ Mapping onto the link:
   locally with R-GL-SHORTEN-UNSUPPORTED.
 - `status`: one integrity poll. The link reports only the utility's latest call; any other call reads
   UNKNOWN.
-- `granted_kw` (the base type's field name): CALL_DELIVERED_KW, the call's MEASURED delivery (D-38), when the
+- `delivered_kw`: CALL_DELIVERED_KW, the call's MEASURED delivery (D-38), when the
   outstation marks it good, signed (- discharge); None while unmeasured or stale (COMM_LOST).
 
 The EMS heartbeat (CROB 2) runs as a background task from the first use until `aclose()`: without it the
@@ -202,14 +202,14 @@ def _result(call_ref: str, call_id: int, values: PointValues) -> CallResult:
         return CallResult(call_ref, False, "UNKNOWN", detail="the link reports a different call")
     state = _STATE_NAMES.get(CALL_STATES.get(int(values.analogs.get(AI["CALL_STATE"], 0)), "IDLE"), "UNKNOWN")
     reason_number = int(values.analogs.get(AI["CALL_REASON"], 0))
-    granted_flags = values.analog_flags.get(AI["CALL_DELIVERED_KW"], 0)
-    granted = values.analogs.get(AI["CALL_DELIVERED_KW"]) if granted_flags & FLAG_ONLINE else None
+    delivered_flags = values.analog_flags.get(AI["CALL_DELIVERED_KW"], 0)
+    delivered = values.analogs.get(AI["CALL_DELIVERED_KW"]) if delivered_flags & FLAG_ONLINE else None
     return CallResult(
         call_ref,
         accepted=state in ("ACCEPTED", "ACTIVE", "COMPLETED"),
         state=state,
         reason_code=CALL_REASONS.get(reason_number) if reason_number else None,
-        granted_kw=-granted if granted is not None else None,
+        delivered_kw=-delivered if delivered is not None else None,
     )
 
 
