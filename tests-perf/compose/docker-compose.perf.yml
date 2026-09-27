@@ -1,0 +1,60 @@
+# tests-perf/compose/docker-compose.perf.yml -- perf override for the Docker dev stack (tests-perf/HANDOFF.md).
+#
+# Layered on dev/docker-compose.yml as its own compose project (`ogperf`), with the orchestrator profile:
+#
+#   docker compose -p ogperf -f dev/docker-compose.yml -f tests-perf/compose/docker-compose.perf.yml \
+#     --profile orchestrator up -d --build
+#
+# tests-perf/campaign.py runs exactly that for every fleet size, after tests-perf/perfenv.py --target compose
+# has written tests-perf/compose/generated/ (gitignored):
+#   generated/fleet.perf.yaml, scada.perf.yaml  sim configs sized for --homes (production shape);
+#   generated/config/orchestrator.toml          production tuning (orchestrator/config/orchestrator.toml) with
+#                                               the dev stack's hosts, keys and binds (dev/config/docker.toml);
+#   generated/opengrid.acl                      the dev ACL plus `$SYS` read for og_simctl (the harness monitor).
+# Paths below are relative to dev/ (the first file's directory); the repo is mounted read-only at /app.
+
+x-perf-env: &perf-env
+  OG_CONFIG: /app/tests-perf/compose/generated/config/orchestrator.toml
+  OG_FLEET_SIM_CONFIG: /app/tests-perf/compose/generated/fleet.perf.yaml
+  OG_TDSP_TARIFFS_PATH: /app/tests-perf/compose/generated/config/tdsp_tariffs.toml
+  OG_AUTHZ_POLICY: /app/orchestrator/config/authz.toml
+
+services:
+  mosquitto:
+    volumes:
+      - ../tests-perf/compose/generated/opengrid.acl:/mosquitto/config/opengrid.acl:ro
+
+  migrate:
+    environment:
+      <<: *perf-env
+    command:
+      - sh
+      - -c
+      - python -m opengrid.platform.db migrate && python -m opengrid.fleet.seed && python /app/tests-perf/compose/seed_extra.py
+
+  sim-fleet:
+    environment:
+      OGSIM_FLEET_CONFIG: /app/tests-perf/compose/generated/fleet.perf.yaml
+
+  sim-scada:
+    environment:
+      OGSIM_SCADA_CONFIG: /app/tests-perf/compose/generated/scada.perf.yaml
+
+  og-feeds:
+    environment:
+      <<: *perf-env
+  og-engine:
+    environment:
+      <<: *perf-env
+  og-guardian:
+    environment:
+      <<: *perf-env
+  og-safestop:
+    environment:
+      <<: *perf-env
+  og-settle:
+    environment:
+      <<: *perf-env
+  og-api:
+    environment:
+      <<: *perf-env

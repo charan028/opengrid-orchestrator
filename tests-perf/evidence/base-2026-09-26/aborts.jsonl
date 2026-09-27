@@ -1,0 +1,1 @@
+{"ts":"2026-09-26T22:08:13-05:00","stage":"setup","reasons":"pgdata_util_100.00%>50;","prod_p99_ms":146.7,"pgdata_util":100.00,"prod_fresh":3509}

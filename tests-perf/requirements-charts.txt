@@ -1,0 +1,5 @@
+# Chart generation only (tests-perf/analyze.py --charts). Install into the harness venv after
+# requirements-perf.txt. PyPI, maintained, permissive licence, pinned (package policy).
+#   matplotlib: Matplotlib License (PSF-based, BSD-compatible); its dependencies numpy, pillow, kiwisolver,
+#   pyparsing, cycler, fonttools, contourpy, packaging, python-dateutil and six are BSD/MIT/HPND/Apache-2.0.
+matplotlib==3.10.7
