@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from psycopg import sql
 
 from opengrid.fleet.seed import build_topology, load_sim_fleet_topology_config
 from opengrid.platform.config import load_config
