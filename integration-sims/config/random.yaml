@@ -19,6 +19,8 @@ sims:
   scada: { enabled: true }
   fleet: { enabled: true }
   customer: { enabled: true }
+  # The utility EMS calls the REAL orchestrator (production toll calls): never random, on demand only.
+  utility: { enabled: false }
 
 profiles:
   calm: { rate_multiplier: 0.25, duration_multiplier: 0.75 }
@@ -285,3 +287,30 @@ types:
     rate_per_hour: 0.02
     duration_s: [120, 600]
     params: { step_kw: [1000, 3000] }
+
+  # ---- utility EMS (ogsim.utility_aen): on demand only (sims.utility disabled; each type disabled) ----
+  utility_call_normal:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_overlap:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_over_cap:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_charge:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_cancel_mid:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
