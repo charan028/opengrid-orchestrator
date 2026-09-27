@@ -29,7 +29,7 @@ from typing import Any
 
 from opengrid.ai_agent import deterministic, fleet
 from opengrid.ai_agent.budgets import Budget, BudgetLimits, Pricing
-from opengrid.ai_agent.gateway import ModelGateway
+from opengrid.ai_agent.gateway import ModelGateway, ScreeningHealth
 from opengrid.ai_agent.grounding import ungrounded_numbers
 from opengrid.ai_agent.providers import ModelProvider, ModelRequest
 from opengrid.ai_agent.redaction import contains_personal_data, redact_text
@@ -91,6 +91,11 @@ class CopilotService:
     @property
     def budget(self) -> Budget:
         return self._gateway.budget
+
+    @property
+    def screening(self) -> ScreeningHealth:
+        """Screening outcomes in a row (drives ALR-COPILOT-SCREENING, raised by the API router)."""
+        return self._gateway.screening
 
     def status(self) -> dict[str, Any]:
         """What System Health renders (UI-DAT-05): what works, and how much budget is left."""

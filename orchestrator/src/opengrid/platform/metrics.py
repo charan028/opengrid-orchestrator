@@ -155,3 +155,21 @@ eventloop_lag_seconds = Histogram(
     "asyncio event-loop scheduling lag.",
     labelnames=("process",),
 )
+
+# --- og-api: the advisory copilot (issue #26) ------------------------------------------------------
+copilot_model_call_seconds = Histogram(
+    "og_copilot_model_call_seconds",
+    "Latency of each copilot model call attempt, by purpose (screen | explain) and outcome (ok or the "
+    "error class: timeout, connection_error, rate_limited, auth_error, bad_request, http_5xx, ...).",
+    labelnames=("purpose", "outcome"),
+    buckets=(0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0),
+)
+copilot_screening_failures_total = Counter(
+    "og_copilot_screening_failures_total",
+    "Copilot screenings that failed after their retries, by the last attempt's error class.",
+    labelnames=("error",),
+)
+copilot_screening_consecutive_failures = Gauge(
+    "og_copilot_screening_consecutive_failures",
+    "Failed copilot screenings in a row (0 after a success); ALR-COPILOT-SCREENING opens at the threshold.",
+)

@@ -92,6 +92,9 @@ class ModelCall(BaseModel):
     usd: float = 0.0
     ok: bool = True
     error: str | None = None
+    #: Wall time of this attempt, and which attempt it was (screening is retried once on a timeout).
+    latency_ms: int | None = None
+    attempt: int = 1
 
 
 class Citation(BaseModel):

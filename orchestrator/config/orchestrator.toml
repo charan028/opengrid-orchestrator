@@ -244,6 +244,12 @@ daily_tokens = 200000
 daily_usd = 5.0
 requests_per_minute = 20
 timeout_s = 20.0
+# Screening (every question): a short timeout and one retry on timeout / connection error / 5xx, so a
+# slow attempt costs seconds; after screen_alert_after failed screenings in a row og-api opens the
+# ALR-COPILOT-SCREENING warning (cleared by the next success).
+screen_timeout_s = 5.0
+screen_retries = 1
+screen_alert_after = 3
 
 # US$ per million tokens, used to charge each call's reported usage against daily_usd. A model with no
 # entry here is charged at a deliberately high rate (opengrid.ai_agent.budgets.UNPRICED).

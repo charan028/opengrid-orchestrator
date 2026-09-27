@@ -19,6 +19,7 @@ assistant is unavailable rather than shown an untraced answer.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
@@ -27,12 +28,15 @@ from pydantic import BaseModel, Field
 
 from opengrid import ai_agent
 from opengrid.ai_agent import fleet as ai_agent_fleet
+from opengrid.ai_agent.gateway import ScreeningHealth
 from opengrid.api.auth import Identity, Role, require_viewer
 from opengrid.api.deps import get_config, get_store, get_trace_store
 from opengrid.api.routers import dispatch as dispatch_routes
 from opengrid.api.routers import fleet_search
 from opengrid.api.routers import health as health_routes
 from opengrid.api.store import StoreProtocol
+from opengrid.health.model import AlertFinding
+from opengrid.health.queries import clear_alert, fetch_open_alerts, raise_alert
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
@@ -269,6 +273,52 @@ async def snapshot(store: StoreProtocol, pool: AsyncConnectionPool | None) -> di
     return view
 
 
+#: Warning while the copilot's screening fails `[ai_agent].screen_alert_after` (3) times in a row: every
+#: answer is then on the no-model tier. Raised and cleared here, through health's single og.alert writer;
+#: not health-owned, so health's evaluator never clears it.
+SCREENING_ALERT_RULE = "ALR-COPILOT-SCREENING"
+
+#: Whether this process last saw the alert open (None: not yet known since start). The DB is read only
+#: when the screening state and this disagree, so a healthy copilot costs no alert query per question.
+_screening_alert_open: bool | None = None
+
+
+async def sync_screening_alert(pool: AsyncConnectionPool | None, health: ScreeningHealth) -> None:
+    """Open ALR-COPILOT-SCREENING when screening is failing, clear it on the next success. Never raises:
+    the answer has already been given, and alerting must not turn into an error for the operator."""
+    global _screening_alert_open
+    if pool is None or health.screenings == 0 or _screening_alert_open is health.alerting:
+        return
+    try:
+        open_ids = [a.id for a in await fetch_open_alerts(pool) if a.rule == SCREENING_ALERT_RULE]
+        open_now = bool(open_ids)
+        if health.alerting and not open_now:
+            detail: dict[str, Any] = {
+                "consecutive_failures": health.consecutive_failures,
+                "last_error": health.last_error,
+                "since": health.last_ok_at.isoformat() if health.last_ok_at else None,
+            }
+            finding = AlertFinding(
+                rule=SCREENING_ALERT_RULE,
+                severity="warning",
+                summary=(
+                    f"Copilot screening failed {health.consecutive_failures} times in a row (last: "
+                    f"{health.last_error}); answers fall back to console data only"
+                ),
+                condition_key=SCREENING_ALERT_RULE,
+                detail=detail,
+            )
+            await raise_alert(pool, finding, opened_at=datetime.now(UTC))
+        elif not health.alerting and open_now:
+            cleared_at = datetime.now(UTC)
+            for alert_id in open_ids:
+                if alert_id is not None:
+                    await clear_alert(pool, alert_id, cleared_at=cleared_at)
+        _screening_alert_open = health.alerting
+    except Exception as exc:
+        logger.warning("copilot screening alert not synced (%s)", type(exc).__name__)
+
+
 @router.post("/ask", response_model=AskResponse)
 async def ask(
     body: AskRequest,
@@ -294,6 +344,7 @@ async def ask(
         user=identity.user,
         fleet_tool=fleet,
     )
+    await sync_screening_alert(pool, ai_agent.service().screening)
     return AskResponse(
         text=answer.text,
         tier=answer.tier,
