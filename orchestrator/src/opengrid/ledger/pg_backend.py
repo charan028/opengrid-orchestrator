@@ -197,25 +197,33 @@ class PgGrantBackend:
             # fsync (see opengrid.fleet.pg_backend._ASYNC_COMMIT_SQL). Reservations/commitments above
             # keep synchronous commit (K2/K13 durability).
             await conn.execute("SET LOCAL synchronous_commit TO OFF")
-            for record in records:
-                await conn.execute(
-                    """
-                    INSERT INTO og.grant
-                        (grant_id, cycle_id, obligation_id, bank_id, granted_kw, is_headroom,
-                         ledger_version, command_batch_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        record.grant_id,
-                        record.cycle_id,
-                        record.obligation_id,
-                        record.bank_id,
-                        record.granted_kw,
-                        record.is_headroom,
-                        record.ledger_version,
-                        record.command_batch_id,
-                    ),
+            # One batched statement per cycle (psycopg pipelines `executemany`: one round trip, not one per
+            # grant -- hundreds of grants per cycle at fleet scale); the same rows, in order, in one transaction.
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    _INSERT_GRANT_SQL,
+                    [
+                        (
+                            record.grant_id,
+                            record.cycle_id,
+                            record.obligation_id,
+                            record.bank_id,
+                            record.granted_kw,
+                            record.is_headroom,
+                            record.ledger_version,
+                            record.command_batch_id,
+                        )
+                        for record in records
+                    ],
                 )
+
+
+_INSERT_GRANT_SQL = """
+INSERT INTO og.grant
+    (grant_id, cycle_id, obligation_id, bank_id, granted_kw, is_headroom,
+     ledger_version, command_batch_id)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
 
 
 async def make_grant_backend(pool: AsyncConnectionPool) -> PgGrantBackend:
