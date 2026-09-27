@@ -422,6 +422,38 @@ def evaluate_scada_overload_alert(
     )
 
 
+def evaluate_command_bad_signature_alert(
+    bank_id: str, hub_ids: list[str], rejected_count: int, latest_at: datetime
+) -> AlertFinding | None:
+    """ALR-COMMAND-BAD-SIGNATURE (critical, #43 B3): hubs on `bank_id` rejected `rejected_count`
+    command batches as BAD_SIGNATURE within `command_bad_signature_window_s` (`queries.
+    fetch_bad_signature_acks_by_bank` applies the window). Every legitimate batch is guardian-signed, so a
+    signature rejection means a forged or tampered command reached a hub and was refused (A3) -- the
+    `demo-04-tampered-command` self-test's REJECTED ack lands here. Scoped per bank so the usual
+    raise-once/clear-on-resolve wiring applies; it clears once the window passes with no new rejection."""
+    if rejected_count <= 0:
+        return None
+    hubs = ", ".join(sorted(hub_ids))
+    return AlertFinding(
+        rule="ALR-COMMAND-BAD-SIGNATURE",
+        severity="critical",
+        summary=(
+            f"Bank {bank_id}: {rejected_count} command batch(es) rejected by hub(s) {hubs} "
+            "(BAD_SIGNATURE: forged or tampered, never applied)"
+        ),
+        condition_key=f"ALR-COMMAND-BAD-SIGNATURE:{bank_id}",
+        detail={
+            "bank_id": bank_id,
+            "hub_ids": sorted(hub_ids),
+            "rejected_count": rejected_count,
+            "latest_at": latest_at.isoformat(),
+            "reject_reason": "BAD_SIGNATURE",
+            "scope_kind": "BANK",
+            "scope_ref": bank_id,
+        },
+    )
+
+
 def evaluate_energy_shortfall_risk_alert(
     *,
     obligation_id: str,

@@ -51,6 +51,10 @@ class _FakeQueries:
         self.latest_fleet_seen_at: datetime | None = None
         self.latest_scada_seen_at: datetime | None = None
         self.latest_scada_seen_at_by_bank: list[tuple[str, datetime]] = []
+        # ALR-COMMAND-BAD-SIGNATURE (#43 B3): rows as `(bank_id, hub_ids, count, latest_received_at)`;
+        # the fake applies the `since` cutoff to `latest_received_at` like the real query's WHERE.
+        self.bad_signature_acks: list[tuple[str, list[str], int, datetime]] = []
+        self.bad_signature_since: datetime | None = None
         self.degraded_mode_state: dict[str, datetime] = {}
         self._next_alert_id = 1
 
@@ -79,6 +83,10 @@ class _FakeQueries:
 
     async def fetch_latest_scada_obs_by_bank(self, pool):
         return self.latest_scada_seen_at_by_bank
+
+    async def fetch_bad_signature_acks_by_bank(self, pool, *, since):
+        self.bad_signature_since = since
+        return [row for row in self.bad_signature_acks if row[3] >= since]
 
     async def fetch_degraded_modes(self, pool):
         return list(self.degraded_mode_state.items())
@@ -475,6 +483,36 @@ async def test_evaluate_alerts_clears_per_bank_scada_silent_once_bank_recovers(
     await health.evaluate_alerts()
 
     assert not any(a.rule == "ALR-SCADA-SILENT-BANK" for a in fake_queries.open_alerts)
+
+
+async def test_evaluate_alerts_raises_then_clears_a_bad_signature_ack_alert(
+    fake_queries: _FakeQueries,
+) -> None:
+    """#43 B3: demo-04's forged command is rejected by the hub (BAD_SIGNATURE) and stored in
+    og.command_ack, but no screen read it. It now opens a critical ALR-COMMAND-BAD-SIGNATURE (System Health
+    and Control room "Open alerts"), which clears once the lookback window passes with no new rejection."""
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.bad_signature_acks = [("bank-022", ["hub-00142"], 1, NOW - timedelta(seconds=5))]
+
+    await health.evaluate_alerts()
+
+    assert fake_queries.bad_signature_since == NOW - timedelta(
+        seconds=health._thresholds.command_bad_signature_window_s
+    )
+    assert "ALR-COMMAND-BAD-SIGNATURE:bank-022" in fake_queries.raised
+    alert = next(a for a in fake_queries.open_alerts if a.rule == "ALR-COMMAND-BAD-SIGNATURE")
+    assert alert.severity == "critical"
+    assert "hub-00142" in alert.summary
+
+    await health.evaluate_alerts()  # still inside the window: raised once, not a storm
+    assert fake_queries.raised.count("ALR-COMMAND-BAD-SIGNATURE:bank-022") == 1
+
+    fake_queries.bad_signature_acks = []  # the window passed with no new rejection
+    await health.evaluate_alerts()
+    assert not any(a.rule == "ALR-COMMAND-BAD-SIGNATURE" for a in fake_queries.open_alerts)
 
 
 async def test_evaluate_once_persists_dist_deferral_open_loop_when_scada_silent(

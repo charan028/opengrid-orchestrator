@@ -47,6 +47,15 @@ _FETCH_LATEST_SCADA_OBS_BY_BANK_SQL = """
 SELECT product AS bank_id, MAX(ts) AS latest_seen_at FROM og.feed_obs WHERE source = 'scada' GROUP BY product
 """
 
+# ALR-COMMAND-BAD-SIGNATURE (#43 B3): hub acks rejected as BAD_SIGNATURE since a cutoff, per bank. Uses
+# `received_at` (the orchestrator's own clock), not the hub-reported `ts`, so a hub clock skew can't hide one.
+_FETCH_BAD_SIGNATURE_ACKS_BY_BANK_SQL = """
+SELECT h.bank_id, array_agg(DISTINCT a.hub_id), count(*), MAX(a.received_at)
+FROM og.command_ack a JOIN og.hub h ON h.hub_id = a.hub_id
+WHERE NOT a.accepted AND a.reject_reason = 'BAD_SIGNATURE' AND a.received_at >= %(since)s
+GROUP BY h.bank_id
+"""
+
 _FETCH_DEGRADED_MODES_SQL = "SELECT mode, since FROM og.degraded_mode_state"
 _INSERT_DEGRADED_MODE_SQL = """
 INSERT INTO og.degraded_mode_state (mode, since) VALUES (%(mode)s, %(since)s)
@@ -181,6 +190,17 @@ async def fetch_latest_scada_obs_by_bank(pool: AsyncConnectionPool) -> list[tupl
         await cur.execute(_FETCH_LATEST_SCADA_OBS_BY_BANK_SQL)
         rows = await cur.fetchall()
     return [(r[0], r[1]) for r in rows]
+
+
+async def fetch_bad_signature_acks_by_bank(
+    pool: AsyncConnectionPool, *, since: datetime
+) -> list[tuple[str, list[str], int, datetime]]:
+    """`(bank_id, hub_ids, rejected_count, latest_received_at)` for every bank with a hub ack rejected as
+    BAD_SIGNATURE at or after `since` (ALR-COMMAND-BAD-SIGNATURE, #43 B3)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_FETCH_BAD_SIGNATURE_ACKS_BY_BANK_SQL, {"since": since})
+        rows = await cur.fetchall()
+    return [(r[0], list(r[1]), int(r[2]), r[3]) for r in rows]
 
 
 async def fetch_degraded_modes(pool: AsyncConnectionPool) -> list[tuple[str, datetime]]:

@@ -311,8 +311,12 @@ Timing is the budget per step; the total is about 15 minutes.
 - **Expect:** `PASS` "Command accepted. Trace ..." (the drill-down's last command id changes), or `VETOED` "Vetoed
   by guardian: <rule ids>. Trace ..."; the 409 in step 15 is the same veto seen from the API. Either way the
   setpoint reached the hub only in a guardian-signed batch.
-- **Forged command:** `demo-04-tampered-command` still only registers an active anomaly (the simulator's
-  self-test is not invoked), so there is nothing to show on screen; leave it out.
+- **Forged command** [ogsim]: run scenario `demo-04-tampered-command` (target `hub-00142`, bank `bank-022`). The
+  self-test hands the bank's first simulated hub a forged, unsigned batch, and the hub rejects it (og-sim-fleet
+  logs "fleet self-test: forged command correctly rejected (BAD_SIGNATURE)"). The REJECTED ack is stored in
+  `og.command_ack`, and within a few seconds System Health "Alerts" (and the Control room "Open alerts", on
+  reload) shows a critical `ALR-COMMAND-BAD-SIGNATURE` for `bank-022`. It clears on its own 300 s after the last
+  rejection.
 
 ### Topic 10: degraded mode [feeds→sim]
 

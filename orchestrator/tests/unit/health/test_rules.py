@@ -16,6 +16,7 @@ from opengrid.health.rules import (
     classify_all_processes,
     classify_hub_health,
     derive_degraded_modes,
+    evaluate_command_bad_signature_alert,
     evaluate_cycle_latency_alert,
     evaluate_cycle_latency_warning_alert,
     evaluate_energy_shortfall_risk_alert,
@@ -735,3 +736,28 @@ def test_scada_silent_clears_once_reading_resumes() -> None:
     assert evaluate_scada_silent_alert(old, now=NOW, thresholds=THRESHOLDS) is not None
     fresh = NOW
     assert evaluate_scada_silent_alert(fresh, now=NOW, thresholds=THRESHOLDS) is None
+
+
+# --- ALR-COMMAND-BAD-SIGNATURE (#43 B3) ------------------------------------------------------------
+
+
+def test_command_bad_signature_alert_is_critical_and_scoped_to_the_bank() -> None:
+    finding = evaluate_command_bad_signature_alert("bank-022", ["hub-00142"], 1, NOW)
+    assert finding is not None
+    assert finding.rule == "ALR-COMMAND-BAD-SIGNATURE"
+    assert finding.severity == "critical"
+    assert finding.condition_key == "ALR-COMMAND-BAD-SIGNATURE:bank-022"
+    assert finding.detail["scope_kind"] == "BANK"
+    assert finding.detail["scope_ref"] == "bank-022"
+    assert "hub-00142" in finding.summary
+    assert "BAD_SIGNATURE" in finding.summary
+
+
+def test_command_bad_signature_alert_none_without_rejections() -> None:
+    assert evaluate_command_bad_signature_alert("bank-022", [], 0, NOW) is None
+
+
+def test_command_bad_signature_window_is_configurable() -> None:
+    assert HealthThresholds().command_bad_signature_window_s == 300.0
+    cfg = Config({"health": {"command_bad_signature_window_s": 60}})
+    assert HealthThresholds.from_config(cfg).command_bad_signature_window_s == 60

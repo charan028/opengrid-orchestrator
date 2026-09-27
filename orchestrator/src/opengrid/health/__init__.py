@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from psycopg_pool import AsyncConnectionPool
@@ -40,6 +40,7 @@ from opengrid.health.rules import (
     classify_all_processes,
     classify_hub_health,
     derive_degraded_modes,
+    evaluate_command_bad_signature_alert,
     evaluate_cycle_latency_alert,
     evaluate_cycle_latency_warning_alert,
     evaluate_feed_alert,
@@ -239,7 +240,7 @@ async def _fetch_reserve_breach_count() -> float:
 
 async def evaluate_alerts() -> None:
     """Run the MVP-S `ALR-*` alert rule set (feed stale, process down, hub offline ratio, cycle p99,
-    guardian verdict timeout rate, reserve-breach counter, SCADA silence) and insert `og.alert` rows
+    guardian verdict timeout rate, reserve-breach counter, SCADA silence, forged-command rejections) and insert `og.alert` rows
     (02b S6.4).
 
     Raises a new alert only when its `condition_key` has no currently-open row (TS-07-06: no duplicate
@@ -270,6 +271,9 @@ async def evaluate_alerts() -> None:
     latest_fleet_seen_at = await queries.fetch_latest_hub_seen_at(pool)
     latest_scada_seen_at = await queries.fetch_latest_scada_obs_at(pool)
     latest_scada_seen_at_by_bank = await queries.fetch_latest_scada_obs_by_bank(pool)
+    bad_signature_acks = await queries.fetch_bad_signature_acks_by_bank(
+        pool, since=now - timedelta(seconds=_thresholds.command_bad_signature_window_s)
+    )
 
     findings = []
     for bank_id, kva_rating, load_kva in bank_loads:
@@ -321,6 +325,12 @@ async def evaluate_alerts() -> None:
         )
         if bank_silent_finding:
             findings.append(bank_silent_finding)
+    for bank_id, hub_ids, rejected_count, latest_at in bad_signature_acks:
+        bad_signature_finding = evaluate_command_bad_signature_alert(
+            bank_id, hub_ids, rejected_count, latest_at
+        )
+        if bad_signature_finding:
+            findings.append(bad_signature_finding)
 
     open_alerts = await queries.fetch_open_alerts(pool)
     open_by_key = {queries.condition_key_for(a): a for a in open_alerts}

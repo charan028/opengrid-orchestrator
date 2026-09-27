@@ -48,6 +48,7 @@ HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
         "ALR-RESERVE-BREACH",
         "ALR-SCADA-OVERLOAD",
         "ALR-SIM-OFFLINE",
+        "ALR-COMMAND-BAD-SIGNATURE",
         # Prepared, not yet raised anywhere (R2 item 3: FLEET-SIM hasn't landed the telemetry yet) --
         # listed now so wiring them into evaluate_alerts() later doesn't also require touching this set.
         "ALR-METER-EXPORT-LIMIT",
@@ -159,6 +160,10 @@ class HealthThresholds:
     # loops must HOLD/SCHEDULE until it recovers (07 S6.8). Distinct from (and independently configurable
     # from) `sim_offline_s`, which also folds in fleet telemetry to infer whether `ogsim` itself is alive.
     scada_silent_s: float = 60.0
+    # ALR-COMMAND-BAD-SIGNATURE (#43 B3): a hub rejected a command batch as BAD_SIGNATURE (a forged or
+    # tampered command; `og.command_ack.reject_reason`) within this lookback. The alert stays open while
+    # any such rejection is this recent and clears on its own once the window passes without another.
+    command_bad_signature_window_s: float = 300.0
     # R3 hotfix: `NO_NEW_COMMITMENTS` (02b S6.5 row 1) used to fire on ANY stale `feed_status` row,
     # including ERCOT system-load ACTUALS (np6-345-cd, a daily product), NWS and the EIA fallback --
     # none of those feed firm pricing, so their normal staleness (or, for EIA, being idle while its
@@ -223,6 +228,9 @@ class HealthThresholds:
                 "health.limit_proximity_sustained_cycles", defaults.limit_proximity_sustained_cycles
             ),
             scada_silent_s=cfg.get("health.scada_silent_s", defaults.scada_silent_s),
+            command_bad_signature_window_s=cfg.get(
+                "health.command_bad_signature_window_s", defaults.command_bad_signature_window_s
+            ),
             firm_blocking_feeds=_resolve_firm_blocking_feeds(cfg, defaults.firm_blocking_feeds),
         )
 
