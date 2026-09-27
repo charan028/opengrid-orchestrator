@@ -221,3 +221,46 @@ async def test_the_job_records_measured_delivery_meter_checks_and_vetoes(
 
     await job.run_once()  # final records are not re-verified or re-alerted
     assert len([r for r in trace.rows if r[1] == "DELIVERY_VERIFICATION"]) == 3
+
+
+async def test_restart_and_meter_queries_run_on_postgres(
+    pool: AsyncConnectionPool, seeded: dict[str, UUID], dsn: str
+) -> None:
+    settings = DeliverySettings(
+        bucket_s=30.0, telemetry_lag_s=0.0, meter_bank_ids=("dvit-ok-bank", "dvit-mm-bank")
+    )
+    await DeliveryJob(pool, _Trace(), settings).run_once()  # type: ignore[arg-type]
+    since = datetime.now(UTC) - timedelta(hours=1)
+    async with pool.connection() as conn:
+        latest = await store.latest_meter_status(conn, ["dvit-ok-bank", "dvit-mm-bank"], since=since)
+    assert latest["dvit-ok-bank"][0] == "CORROBORATED" and latest["dvit-mm-bank"][0] == "UNCORROBORATED"
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        (obligation_id,) = conn.execute(
+            "SELECT obligation_id FROM og.as_deployment WHERE deployment_id = %s", (seeded["vetoed"],)
+        ).fetchone()  # type: ignore[misc]
+        conn.execute("UPDATE og.obligation SET at_risk = true WHERE obligation_id = %s", (obligation_id,))
+        conn.execute(
+            """INSERT INTO og.trace (trace_id, decision_type, event_class, stream_id, seq, payload, hash)
+               VALUES (%s, 'ALERT', 'AT_RISK', %s, 0, %s, %s)""",
+            (
+                uuid4(),
+                f"obligation-{obligation_id}",
+                Jsonb({"cause": "measured_delivery", "call_id": "dvit-call"}),
+                f"dvit{uuid4()}",
+            ),
+        )
+    try:
+        async with pool.connection() as conn:
+            flags = await store.delivery_at_risk_flags(conn, since=since)
+        assert (obligation_id, "dvit-call") in flags
+        cleared: list[Any] = []
+
+        async def set_at_risk(oid: Any, at_risk: bool, **_kw: Any) -> None:
+            cleared.append((oid, at_risk))
+
+        await DeliveryJob(pool, _Trace(), settings, set_at_risk=set_at_risk).run_once()  # type: ignore[arg-type]
+        assert (obligation_id, False) in cleared  # the call is not running short: the stale flag is cleared
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM og.trace WHERE stream_id = %s", (f"obligation-{obligation_id}",))

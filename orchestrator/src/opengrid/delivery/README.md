@@ -30,7 +30,8 @@ og-settle runs `job.DeliveryJob.run_once` every `[delivery].interval_s`. For eac
 3. **Verifies the whole series** with `core.delivery.verify_delivery` (PASS/PARTIAL/FAIL, or IN_PROGRESS while running) and `corroborate_meter`.
 4. **Upserts `og.delivery_record`.** The final record is traced as `DELIVERY_VERIFICATION` on stream `delivery`.
 5. **Raises and clears the live alerts** `ALR-DELIVERY-RAMP-LATE`, `-SHORTFALL` and `-NONE` (`opengrid.health.delivery_rules`).
-   - `ALR-DELIVERY-METER-MISMATCH` is raised when a final record is UNCORROBORATED. It stays open for the operator.
+   - `ALR-DELIVERY-METER-MISMATCH` is raised when a final record is UNCORROBORATED. It clears once the same meter agrees again on a later call, or when an operator clears it with a reason (`POST /og/api/delivery/records/{call_id}/meter-mismatch/clear`).
+   - On startup, the job reconciles the AT_RISK flags it set, which are held in memory only. A call still running short keeps its flag; other flags are cleared. Live alerts of calls that are no longer open are cleared.
    - While a SHORTFALL or NONE alert is open, the obligation is flagged AT_RISK through `contracts.set_obligation_at_risk` (R-DELIVERY-MEASURED-SHORTFALL). The flag is cleared when delivery recovers.
 6. **Changes no dispatch** (K7, D-17). Mid-window SHORTFALL escalation remains the engine's.
 

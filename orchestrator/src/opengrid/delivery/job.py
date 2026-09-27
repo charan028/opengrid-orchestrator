@@ -27,6 +27,15 @@ from opengrid.core.delivery import (
     verify_delivery,
 )
 from opengrid.core.models.platform import Alert
+from opengrid.core.services import (
+    ECRS_PRODUCT,
+    NSPIN_PRODUCT,
+    REGDN_PRODUCT,
+    REGUP_PRODUCT,
+    RRS_PRODUCT,
+    TOLLING_PRODUCT,
+    canonical_product,
+)
 from opengrid.delivery import store
 from opengrid.delivery.models import CallSpec, DeliveryRecord, SeriesPoint
 from opengrid.delivery.series import assemble_buckets, bucket_starts, read_baselines, read_slice
@@ -49,14 +58,17 @@ DELIVERY_EVENT_CLASS = "DELIVERY_VERIFICATION"
 #: AT_RISK reason while a call's measured delivery is short (live SHORTFALL / NONE alert open).
 R_DELIVERY_MEASURED_SHORTFALL = "R-DELIVERY-MEASURED-SHORTFALL"
 R_DELIVERY_RECOVERED = "R-DELIVERY-RECOVERED"
+#: How far back a restarted og-settle looks for AT_RISK flags it set (calls are at most 4 h long).
+AT_RISK_RECONCILE_HOURS = 24
 
+#: Default ramp time per canonical product (`core.services`); `[delivery.ramp_time_s]` overrides.
 DEFAULT_RAMP_TIME_S: dict[str, float] = {
-    "ECRS": 600.0,
-    "RRS": 600.0,
-    "REGUP": 300.0,
-    "REGDN": 300.0,
-    "NSPIN": 1800.0,
-    "TOLLING": 600.0,
+    ECRS_PRODUCT: 600.0,
+    RRS_PRODUCT: 600.0,
+    REGUP_PRODUCT: 300.0,
+    REGDN_PRODUCT: 300.0,
+    NSPIN_PRODUCT: 1800.0,
+    TOLLING_PRODUCT: 600.0,
     "MANUAL": 120.0,
 }
 
@@ -80,7 +92,10 @@ class DeliverySettings:
     @classmethod
     def from_config(cls, cfg: Config) -> DeliverySettings:
         default = cls()
-        ramp = {str(k).upper(): float(v) for k, v in (cfg.get("delivery.ramp_time_s", {}) or {}).items()}
+        ramp = {
+            str(canonical_product(str(k))): float(v)
+            for k, v in (cfg.get("delivery.ramp_time_s", {}) or {}).items()
+        }
         base_policy = DeliveryPolicy()
         policy = DeliveryPolicy(
             **{
@@ -104,7 +119,9 @@ class DeliverySettings:
         )
 
     def ramp_for(self, product: str | None) -> float:
-        return float(self.ramp_time_s.get((product or "").upper(), self.default_ramp_time_s))
+        """The product's ramp time, keyed by its canonical name (`core.services.canonical_product`: NONSPIN
+        and NON_SPIN are NSPIN); unlisted products get `default_ramp_time_s`."""
+        return float(self.ramp_time_s.get(canonical_product(product) or "", self.default_ramp_time_s))
 
 
 def build_record(
@@ -184,6 +201,7 @@ class DeliveryJob:
         self._settings = settings
         self._set_at_risk = set_at_risk
         self._flagged: set[str] = set()
+        self._reconciled = False
 
     async def run_once(self, now: datetime | None = None) -> int:
         """Verify every open call; returns how many records were written. One call's failure is logged
@@ -193,6 +211,10 @@ class DeliveryJob:
             specs = await store.open_calls(conn, now=now, lookback_s=self._settings.lookback_s)
             existing = await store.fetch_open_records(conn, [s.call_id for s in specs])
         open_alerts = [a for a in await fetch_open_alerts(self._pool) if a.rule in DELIVERY_ALERT_RULES]
+        open_ids = {s.call_id for s in specs}
+        if not self._reconciled:
+            await self._reconcile_at_risk(open_alerts, open_ids, now)
+        await self._clear_ended(open_alerts, open_ids, now)
         written = 0
         for spec in specs:
             try:
@@ -267,7 +289,10 @@ class DeliveryJob:
         wanted = {f.rule: f for f in evaluate_delivery_alerts(facts)}
         if record.final and record.meter_status == MeterStatus.UNCORROBORATED.value:
             finding = evaluate_delivery_meter_mismatch_alert(
-                facts, mismatch_frac=record.meter_mismatch_frac, window_end=record.window_end
+                facts,
+                mismatch_frac=record.meter_mismatch_frac,
+                window_end=record.window_end,
+                meter_bank_ids=record.meter_bank_ids,
             )
             wanted[finding.rule] = finding
         mine = [a for a in open_alerts if (a.detail or {}).get("call_id") == record.call_id]
@@ -286,6 +311,71 @@ class DeliveryJob:
             ):
                 await clear_alert(self._pool, alert.id, cleared_at=now)
         await self._flag_at_risk(record, short=bool(set(wanted) & SHORT_RULES))
+
+    async def _reconcile_at_risk(self, open_alerts: list[Alert], open_ids: set[str], now: datetime) -> None:
+        """Startup: the AT_RISK flags this job set live only in memory. Adopt those whose call is still open
+        with a SHORTFALL/NONE alert (so they clear on recovery); clear the rest (call recovered or ended)."""
+        short_calls = {str((a.detail or {}).get("call_id")) for a in open_alerts if a.rule in SHORT_RULES}
+        async with self._pool.connection() as conn:
+            flags = await store.delivery_at_risk_flags(
+                conn, since=now - timedelta(hours=AT_RISK_RECONCILE_HOURS)
+            )
+        for obligation_id, call_id in flags:
+            if call_id is not None and call_id in open_ids and call_id in short_calls:
+                self._flagged.add(call_id)
+                continue
+            if self._set_at_risk is None:
+                continue
+            try:
+                await self._set_at_risk(
+                    obligation_id,
+                    False,
+                    reason_code=R_DELIVERY_RECOVERED,
+                    payload={"cause": "measured_delivery", "call_id": call_id, "reconciled": True},
+                )
+            except Exception:
+                logger.exception(
+                    "could not clear a stale measured-delivery AT_RISK", extra={"call_id": call_id}
+                )
+        self._reconciled = True
+
+    async def _clear_ended(self, open_alerts: list[Alert], open_ids: set[str], now: datetime) -> None:
+        """Live alerts of calls that are no longer open (ended while og-settle was down) are cleared; a meter
+        mismatch clears once the same meter agrees with battery telemetry on a later call."""
+        mismatches: list[Alert] = []
+        for alert in open_alerts:
+            call_id = str((alert.detail or {}).get("call_id"))
+            if alert.rule == ALR_DELIVERY_METER_MISMATCH:
+                mismatches.append(alert)
+            elif call_id not in open_ids and alert.id is not None:
+                await clear_alert(self._pool, alert.id, cleared_at=now)
+        for alert in mismatches:
+            if await self._meter_agrees_again(alert) and alert.id is not None:
+                await clear_alert(self._pool, alert.id, cleared_at=now)
+                await self._trace.append(
+                    DELIVERY_TRACE_STREAM,
+                    "ALERT",
+                    "DELIVERY_ALERT_CLEARED",
+                    {
+                        "rule": alert.rule,
+                        "call_id": (alert.detail or {}).get("call_id"),
+                        "cause": "meter_agrees",
+                    },
+                    [alert.rule],
+                )
+
+    async def _meter_agrees_again(self, alert: Alert) -> bool:
+        detail = alert.detail or {}
+        banks = [str(b) for b in detail.get("meter_bank_ids") or []]
+        window_end = detail.get("window_end")
+        if not banks or not window_end:
+            return False
+        since = datetime.fromisoformat(str(window_end))
+        async with self._pool.connection() as conn:
+            latest = await store.latest_meter_status(conn, banks, since=since)
+        return bool(latest) and all(
+            latest.get(bank, ("", since))[0] == MeterStatus.CORROBORATED.value for bank in banks
+        )
 
     async def _flag_at_risk(self, record: DeliveryRecord, *, short: bool) -> None:
         """AT_RISK while a live SHORTFALL/NONE alert stands; cleared once (by this job) when it recovers or

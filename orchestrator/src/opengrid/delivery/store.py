@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.manual_targets import SIGN_CONVENTION
+from opengrid.core.services import canonical_product
 from opengrid.delivery.models import CallKind, CallSpec, DeliveryRecord, LiveDeliveryPoint
 
 #: The service type of a utility toll (D-29), when the call ledger has no kind for an older deployment.
@@ -91,6 +92,31 @@ _SELECT = f"SELECT {_COLUMNS}, updated_at FROM og.delivery_record"  # noqa: S608
 _SUMMARY_COLUMNS = _COLUMNS.replace("series, ", "")
 _SELECT_SUMMARY = f"SELECT {_SUMMARY_COLUMNS}, updated_at FROM og.delivery_record"  # noqa: S608
 
+#: Obligations whose latest AT_RISK event is one this job set (cause measured_delivery) and still flagged:
+#: what a restarted og-settle must reconcile (its in-memory set is empty).
+_DELIVERY_AT_RISK_SQL = """
+WITH latest AS (
+    SELECT DISTINCT ON (t.stream_id) t.stream_id, t.event_class, t.payload
+    FROM og.trace t
+    WHERE t.event_class IN ('AT_RISK', 'AT_RISK_CLEARED') AND t.stream_id LIKE 'obligation-%%'
+      AND t.created_at > %(since)s
+    ORDER BY t.stream_id, t.created_at DESC
+)
+SELECT o.obligation_id, latest.payload->>'call_id' AS call_id
+FROM latest JOIN og.obligation o ON latest.stream_id = 'obligation-' || o.obligation_id::text
+WHERE latest.event_class = 'AT_RISK' AND latest.payload->>'cause' = 'measured_delivery' AND o.at_risk
+"""
+
+#: The newest final meter check per metered bank since `since` (to auto-clear a meter mismatch once the
+#: same meter agrees with battery telemetry again on a later call).
+_LATEST_METER_SQL = """
+SELECT DISTINCT ON (bank) bank, meter_status, window_end
+FROM og.delivery_record, unnest(meter_bank_ids) AS bank
+WHERE final AND meter_bank_ids && %(banks)s::text[] AND window_end > %(since)s
+  AND meter_status IN ('CORROBORATED', 'UNCORROBORATED')
+ORDER BY bank, window_end DESC
+"""
+
 _SUMMARY_SQL = """
 SELECT contract_id, service_type, (window_start AT TIME ZONE 'America/Chicago')::date AS day,
        count(*) AS calls,
@@ -133,7 +159,7 @@ def spec_from_deployment(row: Mapping[str, Any]) -> CallSpec:
         window_start=row["start_at"],
         window_end=row["end_at"],
         committed_kw=committed,
-        product=str(row["variant"]).upper() if row["variant"] else None,
+        product=canonical_product(row["variant"]),
         deployment_id=row["deployment_id"],
         dispatch_call_id=row.get("dispatch_call_id"),
         obligation_id=row["obligation_id"],
@@ -308,6 +334,22 @@ async def summary(pool: AsyncConnectionPool, *, since: datetime, until: datetime
         }
         for r in rows
     ]
+
+
+async def delivery_at_risk_flags(
+    conn: AsyncConnection[Any], *, since: datetime
+) -> list[tuple[UUID, str | None]]:
+    """(obligation_id, call_id) still AT_RISK from a measured-delivery flag this job set (restart reconcile)."""
+    rows = await _all(conn, _DELIVERY_AT_RISK_SQL, {"since": since})
+    return [(r["obligation_id"], r["call_id"]) for r in rows]
+
+
+async def latest_meter_status(
+    conn: AsyncConnection[Any], banks: Sequence[str], *, since: datetime
+) -> dict[str, tuple[str, datetime]]:
+    """Per metered bank, the newest final meter check (status, call window end) since `since`."""
+    rows = await _all(conn, _LATEST_METER_SQL, {"banks": list(banks), "since": since})
+    return {str(r["bank"]): (str(r["meter_status"]), r["window_end"]) for r in rows}
 
 
 def live_point(

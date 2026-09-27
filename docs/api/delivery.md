@@ -67,6 +67,15 @@ Returns, per contract and CT day, over final records:
 - `uncorroborated` (calls whose meter disagreed);
 - `discharged_kwh` and `committed_kwh`.
 
+### `POST /og/api/delivery/records/{call_id}/meter-mismatch/clear` (operator)
+
+Body: `{"reason": "..."}` (1-200 characters).
+
+- Clears the call's open `ALR-DELIVERY-METER-MISMATCH` after investigation. It is traced before it takes effect.
+- The record stays UNCORROBORATED; only the alert closes.
+- Returns 404 when no such alert is open for the call.
+- The job also clears the alert by itself once the same meter agrees with battery telemetry on a later call.
+
 ## Utility (role `utility`, action `utility.read`)
 
 - `GET /og/api/customer/v1/utility/delivery-records` lists the caller's own calls only. It takes the filters `since`, `until`, `result` and `limit`.

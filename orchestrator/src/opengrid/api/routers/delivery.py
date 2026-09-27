@@ -9,10 +9,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, Field
 
-from opengrid.api.auth import Identity, require_viewer
-from opengrid.api.deps import get_pool
+from opengrid.api.auth import Identity, require_operator, require_viewer
+from opengrid.api.deps import get_pool, get_trace_store
 from opengrid.delivery import store
+from opengrid.health.delivery_rules import ALR_DELIVERY_METER_MISMATCH
+from opengrid.health.queries import clear_alert, fetch_open_alerts
+from opengrid.trace.store import TraceStore
 
 router = APIRouter(prefix="/og/api/delivery", tags=["delivery"])
 
@@ -76,3 +80,41 @@ async def get_delivery_record(
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no delivery record for that call")
     return record.public(with_series=True)
+
+
+class MeterMismatchClear(BaseModel):
+    """Why the operator accepts the call's meter disagreement (checked the SCADA point, the hubs, ...)."""
+
+    reason: str = Field(min_length=1, max_length=200)
+
+
+@router.post("/records/{call_id}/meter-mismatch/clear")
+async def clear_meter_mismatch(
+    call_id: str,
+    body: MeterMismatchClear,
+    pool: Annotated[AsyncConnectionPool, Depends(get_pool)],
+    trace_store: Annotated[TraceStore, Depends(get_trace_store)],
+    identity: Annotated[Identity, Depends(require_operator)],
+) -> dict[str, Any]:
+    """Clear the call's open ALR-DELIVERY-METER-MISMATCH after investigation (traced before it takes effect,
+    K10). The record stays UNCORROBORATED; only the alert closes. 404 when none is open for the call."""
+    alerts = [
+        a
+        for a in await fetch_open_alerts(pool)
+        if a.rule == ALR_DELIVERY_METER_MISMATCH
+        and (a.detail or {}).get("call_id") == call_id
+        and a.id is not None
+    ]
+    if not alerts:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no open meter-mismatch alert for that call")
+    await trace_store.append(
+        f"operator_action:{identity.user}",
+        "OPERATOR_ACTION",
+        "DELIVERY_ALERT_CLEARED",
+        {"rule": ALR_DELIVERY_METER_MISMATCH, "call_id": call_id, "reason": body.reason, "cause": "operator"},
+        [ALR_DELIVERY_METER_MISMATCH],
+    )
+    now = datetime.now(UTC)
+    for alert in alerts:
+        await clear_alert(pool, alert.id, cleared_at=now)  # type: ignore[arg-type]
+    return {"call_id": call_id, "cleared": len(alerts)}
