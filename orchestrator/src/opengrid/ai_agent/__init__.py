@@ -145,8 +145,12 @@ class CopilotService:
         # Tier 1 is computed first: it is the answer whenever the models cannot be trusted or reached. A
         # fleet question the parser recognises is answered from the fleet tool, ahead of the snapshot's
         # generic hub counts.
-        parsed = fleet.parse(question)
-        early = deterministic.answer(question, context)
+        # A fleet question whose condition the parser could not read is never answered with a count
+        # that ignores the condition -- not the fleet tool's, and not the snapshot's hub totals.
+        reading = fleet.parse(question)
+        parsed = reading if isinstance(reading, FleetQuery) else None
+        unparsed = reading if isinstance(reading, fleet.UnparsedCondition) else None
+        early = fleet.not_understood(unparsed) if unparsed else deterministic.answer(question, context)
 
         if not self._gateway.available:
             fleet_answer = await _fleet_answer(parsed, fleet_tool)
@@ -180,6 +184,9 @@ class CopilotService:
         # The parser's reading wins; otherwise the routing model's validated extraction (only when it is
         # confident). Either way the query is typed values over a fixed vocabulary, run read-only.
         model_query = verdict.fleet if verdict.is_confident else None
+        if unparsed is not None and not fleet.covers(model_query, unparsed):
+            # The model's filters (if any) do not answer the condition either: say so, count nothing.
+            model_query = None
         query = parsed or model_query
         explaining = verdict.intent == "explain_decision"
 

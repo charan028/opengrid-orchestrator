@@ -20,6 +20,7 @@ Pure: no I/O. The tool itself is injected by the API router (`types.FleetTool`).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
@@ -35,9 +36,64 @@ _ZONE = re.compile(r"\bLZ[_ ]([A-Za-z]{2,12})\b", re.IGNORECASE)
 _ZONE_VALUE = re.compile(r"^LZ_[A-Z]{2,12}$")
 _ID_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _NUMBER = r"(\d+(?:\.\d+)?)"
-_BELOW = r"(below|under|less than|lower than|at most|no more than|<=?)"
-_ABOVE = r"(above|over|more than|greater than|higher than|at least|>=?)"
-_UNITS_OF = {"kwh": "capacity", "kw": "power"}
+_BELOW = r"(below|under|less than|lower than|fewer than|at most|no more than|<=?)"
+_ABOVE = r"(above|over|more than|greater than|higher than|at least|no less than|>=?)"
+#: Unit spellings: "kWh" / "kilowatt hours", "kW" / "kilowatts" (never followed by "hours"), "%" / "percent".
+_KWH = r"(?:kwh|kilowatt[- ]?hours?)\b"
+_KW = r"(?:kw|kilowatts?)\b(?![- ]?hours?)"
+_PCT = r"(?:%|\s*(?:percent|pct)\b)"
+#: FleetQuery field prefix -> the unit that marks it.
+_RATINGS: tuple[tuple[str, str, str], ...] = (("capacity", "kwh", _KWH), ("power", "kw", _KW))
+
+#: A condition word left over after every recognised phrase is taken out means the parser did NOT
+#: understand part of the question. Comparators, numbers and units are conditions on their own; a topic
+#: word ("capacity", "charge") only counts when no filter on that topic was parsed.
+_CONDITION_CUE = re.compile(
+    r"\d|%|\b(more|less|fewer|greater|higher|lower|above|below|over|under|at least|at most|between|exceed\w*"
+    r"|than|kwh|kw|mwh|mw|kilowatts?|megawatts?|watts?|percent|pct|full|empty|low|high|largest|smallest"
+    r"|biggest|top|bottom|most|least)\b",
+    re.IGNORECASE,
+)
+#: Topic word -> the FleetQuery fields that answer it (any one of them is enough).
+_TOPICS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (re.compile(r"\bcapacity\b", re.I), ("capacity_min_kwh", "capacity_max_kwh")),
+    (re.compile(r"\b(charge[d]?|soc|state of charge)\b", re.I), ("soc_min_pct", "soc_max_pct")),
+    (re.compile(r"\bpower\b", re.I), ("power_min_kw", "power_max_kw")),
+    (
+        re.compile(r"\brated\b", re.I),
+        ("capacity_min_kwh", "capacity_max_kwh", "power_min_kw", "power_max_kw"),
+    ),
+    (re.compile(r"\b(firmware|version)\b", re.I), ("fw",)),
+    (re.compile(r"\bhardware\b", re.I), ("hw",)),
+    (re.compile(r"\bzones?\b", re.I), ("zones", "group_by")),
+    (re.compile(r"\bbank\b", re.I), ("bank",)),
+)
+#: Which filters could answer a bare comparator/number/unit cue, by the unit it names.
+_CUE_FIELDS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (re.compile(r"kwh|kilowatt[- ]?hours?|mwh|capacity", re.I), ("capacity_min_kwh", "capacity_max_kwh")),
+    (re.compile(r"\b(kw|kilowatts?|mw|megawatts?|watts?|power)\b", re.I), ("power_min_kw", "power_max_kw")),
+    (re.compile(r"%|percent|pct|charge|soc|full|empty", re.I), ("soc_min_pct", "soc_max_pct")),
+)
+_RATING_FIELDS = (
+    "capacity_min_kwh",
+    "capacity_max_kwh",
+    "power_min_kw",
+    "power_max_kw",
+    "soc_min_pct",
+    "soc_max_pct",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class UnparsedCondition:
+    """A fleet question with a condition the parser could not read. It is never answered with a count
+    unless the routing model's validated filters cover it (`covers`); otherwise the operator is told
+    which words were not understood (`not_understood`)."""
+
+    text: str
+    #: FleetQuery fields any one of which would answer the condition (empty: none can be vouched for).
+    fields: tuple[str, ...]
+
 
 _FLEET_NOUN = re.compile(
     r"\b(units?|hubs?|batter(?:y|ies)|trucks?|substations?|homes?|fleet|banks?|trailers?)\b", re.IGNORECASE
@@ -101,16 +157,33 @@ _GROUPS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def _bounds(question: str, unit: str) -> tuple[float | None, float | None]:
-    """(min, max) for a `<number> kWh` / `<number> kW` mention, with its comparator. An exact value is
-    min == max; the API widens that by a rounding tolerance."""
+Spans = list[tuple[int, int]]
+
+
+def _search(pattern: re.Pattern[str], text: str, spans: Spans) -> re.Match[str] | None:
+    """`pattern.search`, recording the matched span as understood."""
+    match = pattern.search(text)
+    if match:
+        spans.append(match.span())
+    return match
+
+
+def _bounds(question: str, unit: str, spans: Spans, *, exact: bool) -> tuple[float | None, float | None]:
+    """(min, max) for `<comparator> <number> <unit>` mentions ("more than 40 kWh", "below 30%",
+    "between 20 and 40 kW"). With `exact`, a bare number and unit is an exact value (min == max; the API
+    widens it by a rounding tolerance); without it (SoC), a bare percentage is not a condition we read."""
     low: float | None = None
     high: float | None = None
-    between = re.search(rf"\bbetween\s+{_NUMBER}\s*(?:{unit})?\s+and\s+{_NUMBER}\s*{unit}\b", question, re.I)
+    between = re.search(
+        rf"\bbetween\s+{_NUMBER}\s*(?:{unit})?\s+and\s+{_NUMBER}\s*{unit}", question, re.IGNORECASE
+    )
     if between:
+        spans.append(between.span())
         a, b = sorted((float(between.group(1)), float(between.group(2))))
         return a, b
-    for match in re.finditer(rf"(?:{_BELOW}|{_ABOVE})?\s*{_NUMBER}\s*{unit}\b", question, re.IGNORECASE):
+    comparator = "?" if exact else ""
+    for match in re.finditer(rf"(?:{_BELOW}|{_ABOVE}){comparator}\s*{_NUMBER}\s*{unit}", question, re.I):
+        spans.append(match.span())
         value = float(match.group(3))
         if match.group(1):
             high = value
@@ -121,87 +194,132 @@ def _bounds(question: str, unit: str) -> tuple[float | None, float | None]:
     return low, high
 
 
-def _soc(question: str) -> tuple[float | None, float | None]:
-    between = re.search(rf"\bbetween\s+{_NUMBER}\s*%?\s+and\s+{_NUMBER}\s*%", question, re.IGNORECASE)
-    if between:
-        a, b = sorted((float(between.group(1)), float(between.group(2))))
-        return a, b
-    low: float | None = None
-    high: float | None = None
-    for match in re.finditer(rf"(?:{_BELOW}|{_ABOVE})\s*{_NUMBER}\s*%", question, re.IGNORECASE):
-        value = float(match.group(3))
-        if match.group(1):
-            high = value
-        else:
-            low = value
-    return low, high
+def _masked(text: str, spans: Spans) -> str:
+    """`text` with every understood span blanked out (positions kept)."""
+    chars = list(text)
+    for start, end in spans:
+        chars[start:end] = " " * (end - start)
+    return "".join(chars)
 
 
-def parse(question: str) -> FleetQuery | None:
-    """The fleet query a question asks for, or None when it is not (clearly) a fleet aggregate question.
+def _unparsed(text: str, spans: Spans, fields: dict[str, Any]) -> UnparsedCondition | None:
+    """The condition the parser did not understand, if any: a leftover comparator, number or unit, or a
+    topic word ("capacity", "charge") with no filter on that topic."""
+    rest = _masked(text, spans)
+    cue = _CONDITION_CUE.search(rest)
+    start: int | None = cue.start() if cue else None
+    answers: tuple[str, ...] = ()
+    if cue is not None:
+        tail = rest[cue.start() :]
+        answers = tuple(f for pattern, names in _CUE_FIELDS if pattern.search(tail) for f in names)
+        if not answers:
+            answers = _RATING_FIELDS if re.search(r"\d", tail) else ()
+    for pattern, names in _TOPICS:
+        topic = pattern.search(rest)
+        if topic and not any(fields.get(name) not in (None, (), "none") for name in names):
+            start = topic.start() if start is None else min(start, topic.start())
+            answers = tuple(dict.fromkeys((*answers, *names)))
+    if start is None:
+        return None
+    snippet = re.split(r"[?.!;]", text[start:], maxsplit=1)[0].strip()[:80]
+    return UnparsedCondition(text=snippet, fields=answers)
+
+
+def parse(question: str) -> FleetQuery | UnparsedCondition | None:
+    """The fleet query a question asks for; `UnparsedCondition` when it is a fleet question with a
+    condition the parser could not read (never answered as an unfiltered count); or None when it is not
+    (clearly) a fleet aggregate question.
 
     Conservative on purpose: a question that also names obligations, alerts or a reason ("why") is left
     to the handlers that own those, and a fleet noun with no filter, grouping, metric or counting cue
-    ("tell me about the fleet") is left to the health summary."""
+    ("tell me about the fleet") is left to the health summary. Every phrase that sets a filter is recorded
+    as understood; whatever condition word is left over makes the question unparsed."""
     text = question.strip()
     if not text or _NOT_FLEET.search(text):
         return None
+    spans: Spans = []
     fields: dict[str, Any] = {}
-    zones = tuple(dict.fromkeys(f"LZ_{m.group(1).upper()}" for m in _ZONE.finditer(text)))
+    zone_matches = list(_ZONE.finditer(text))
+    spans.extend(m.span() for m in zone_matches)
+    zones = tuple(dict.fromkeys(f"LZ_{m.group(1).upper()}" for m in zone_matches))
     if zones:
         fields["zones"] = zones
     at_home: bool | None = None
-    if _AWAY.search(text):
+    if _search(_AWAY, text, spans):
         at_home = False
-    elif _AT_HOME.search(text):
+    elif _search(_AT_HOME, text, spans):
         at_home = True
     # "trucks at home" is about location, not the home asset class: drop the phrase before matching.
-    classifiable = _AT_HOME.sub(" ", _AWAY.sub(" ", text))
-    asset = next((name for name, pattern in _ASSET_WORDS if pattern.search(classifiable)), None)
+    classifiable = _masked(text, spans)
+    asset = next((name for name, pattern in _ASSET_WORDS if _search(pattern, classifiable, spans)), None)
     if at_home is not None:
         asset = "truck"
         fields["at_home"] = at_home
     if asset:
         fields["asset_class"] = asset
-    if _UNHEALTHY.search(text):
+    if _search(_UNHEALTHY, text, spans):
         fields["health"] = _NOT_ONLINE
     else:
-        health = tuple(name for name, pattern in _HEALTH_WORDS if pattern.search(text))
+        health = tuple(name for name, pattern in _HEALTH_WORDS if _search(pattern, text, spans))
         if health:
             fields["health"] = health
-    if _UNAVAILABLE.search(text):
+    if _search(_UNAVAILABLE, text, spans):
         fields["availability"] = "UNAVAILABLE"
-    elif _AVAILABLE_NOUN.search(text):
+    elif _search(_AVAILABLE_NOUN, text, spans):
         fields["availability"] = "AVAILABLE"
-    for unit, name in _UNITS_OF.items():
-        low, high = _bounds(text, unit)
-        prefix = "capacity" if name == "capacity" else "power"
-        suffix = "kwh" if unit == "kwh" else "kw"
+    for prefix, suffix, unit in _RATINGS:
+        low, high = _bounds(text, unit, spans, exact=True)
         if low is not None:
             fields[f"{prefix}_min_{suffix}"] = low
         if high is not None:
             fields[f"{prefix}_max_{suffix}"] = high
-    soc_min, soc_max = _soc(text)
+    soc_min, soc_max = _bounds(text, _PCT, spans, exact=False)
     if soc_min is not None:
         fields["soc_min_pct"] = soc_min
     if soc_max is not None:
         fields["soc_max_pct"] = soc_max
     for key, pattern in (("bank", _BANK), ("fw", _FIRMWARE), ("hw", _HARDWARE)):
-        found = pattern.search(text)
+        found = _search(pattern, text, spans)
         if found:
             fields[key] = found.group(1)
-    metric = next((name for name, pattern in _METRICS if pattern.search(text)), None)
+    metric = next((name for name, pattern in _METRICS if _search(pattern, text, spans)), None)
     if metric:
         fields["metric"] = metric
-    group = next((name for name, pattern in _GROUPS if pattern.search(text)), None)
+    group = next((name for name, pattern in _GROUPS if _search(pattern, text, spans)), None)
     if group:
         fields["group_by"] = group
     if not (_FLEET_NOUN.search(text) or metric):
         return None  # "how many are below 30%?" of what? Not a fleet question we can vouch for.
+    unparsed = _unparsed(text, spans, fields)
+    if unparsed is not None:
+        return unparsed
     query = FleetQuery.model_validate(fields)
     if query.has_filter or metric or group or _AGGREGATE_CUE.search(text):
         return query
     return None
+
+
+def covers(query: FleetQuery | None, condition: UnparsedCondition) -> bool:
+    """True when the routing model's validated `query` sets a filter that answers `condition` (for
+    "more than forty kWh", a capacity bound). A query that does not is never run in its place."""
+    if query is None or not condition.fields:
+        return False
+    return any(getattr(query, name, None) not in (None, (), "none") for name in condition.fields)
+
+
+def not_understood(condition: UnparsedCondition) -> CopilotAnswer:
+    """The answer when a condition was not understood: what was not understood and how to phrase it,
+    and no count at all (an unfiltered count would answer a different question)."""
+    return CopilotAnswer(
+        text=(
+            f"I couldn't understand the condition '{condition.text}', so nothing was counted. Write it "
+            "with a number and a unit, for example 'more than N kWh', 'at least N kW', 'below N% charge' "
+            "or 'between N% and M% charge'."
+        ),
+        tier="deterministic",
+        intent="fleet_query",
+        refusal_reason="fleet_condition_unparsed",
+    )
 
 
 def from_model(raw: Any) -> FleetQuery | None:
