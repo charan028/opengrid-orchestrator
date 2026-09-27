@@ -41,7 +41,7 @@ make check                                            # lint, types, duplication
 | State | PostgreSQL 16 (`psycopg` async, 47 migrations); MQTT (Mosquitto, `aiomqtt`) for telemetry and commands |
 | Safety | Ed25519 command signing with RFC 8785 canonicalisation; per-stream SHA-256 hash chain |
 | Console | Server-rendered Jinja2 with htmx 1.9, Alpine 3.14, ECharts 5.5 and Leaflet 1.9; server-sent events for live values |
-| Copilot | Advisory only: deterministic answers first, Claude for open explanation, TypeSafe System One as the screening fallback |
+| Copilot | Advisory only: deterministic answers first; TypeSafe System One (Jev) screens intent and injection risk; Claude writes explanations |
 | Simulators | `integration-sims/`: hubs, SCADA, market and data APIs, a scenario control plane |
 
 Five independent processes, in the order a kilowatt travels. No single one can both decide and act.
@@ -68,6 +68,18 @@ Five independent processes, in the order a kilowatt travels. No single one can b
 
 The full diagram set is in `docs/diagrams/` (system, dispatch cycle, commitment lifecycle,
 deployment, data model, power quality), and the specs behind it in `docs/orchestrator/`.
+
+**Where the AI sits, and where it does not.** There is no model anywhere in the decision path. The
+selector, allocator, guardian and engine are deterministic and testable, which is what a power company
+would actually run. The AI is an advisory copilot docked on every screen. Every question is first
+screened by a typed judgement model, TypeSafe System One (`jev-latest`), which returns the intent, the
+probability that the text is an injection attempt, and whether the decision trace is needed, as
+calibrated probabilities that code branches on, in a few hundred milliseconds. Most questions end
+there, answered from the console's own data with citations and no further model call. Only a genuinely
+open "why" reaches Claude, and only over evidence the console already gathered. Which model screens is
+one config line, `[ai_agent].screening_provider`; the dev stack uses Jev, and either provider covers for
+the other. Personal data is stripped before anything leaves the process, budgets fail closed, and the
+copilot can read but never command.
 
 ## How to reproduce the demo
 

@@ -26,12 +26,14 @@ def _service(
     fallback: FakeProvider | None = None,
     *,
     fallback_enabled: bool = False,
+    screening_provider: str = "claude",
     budget: Budget | None = None,
 ) -> CopilotService:
     gateway = ModelGateway(
         primary=primary,
         fallback=fallback,
         fallback_enabled=fallback_enabled,
+        screening_provider="typesafe" if screening_provider == "typesafe" else "claude",
         budget=budget or Budget(BudgetLimits()),
     )
     return CopilotService(gateway=gateway)
@@ -221,6 +223,68 @@ async def test_no_provider_at_all_gives_the_no_model_tier_or_unavailable() -> No
     assert other.tier == "unavailable" and "assistant unavailable" in other.text
 
 
+async def test_typesafe_screens_first_when_it_is_the_screening_provider() -> None:
+    """`screening_provider = "typesafe"`: Jev screens, and Claude is not called at all for a question the
+    deterministic tier then answers -- the fallback switch is irrelevant to this path."""
+    claude = FakeProvider("claude")
+    typesafe = FakeProvider("typesafe", screen_model="jev-latest", explain_model=None)
+    trace = RecordingTrace()
+
+    answer = await _service(claude, typesafe, screening_provider="typesafe").ask(
+        "which obligations are at risk?", CONTEXT, trace=trace
+    )
+
+    assert answer.tier == "deterministic"
+    assert typesafe.calls == 1 and claude.calls == 0
+    record = trace.records[0]
+    assert [(c["provider"], c["purpose"], c["ok"]) for c in record["model_calls"]] == [
+        ("typesafe", "screen", True)
+    ]
+
+
+async def test_claude_covers_screening_when_typesafe_is_preferred_but_fails() -> None:
+    claude = FakeProvider("claude")
+    typesafe = FakeProvider("typesafe", screen_model="jev-latest", explain_model=None, fail=True)
+    trace = RecordingTrace()
+
+    await _service(claude, typesafe, screening_provider="typesafe").ask(
+        "which obligations are at risk?", CONTEXT, trace=trace
+    )
+
+    assert [(c["provider"], c["ok"]) for c in trace.records[0]["model_calls"]] == [
+        ("typesafe", False),
+        ("claude", True),
+    ]
+
+
+async def test_explanations_stay_with_claude_whichever_provider_screens() -> None:
+    claude = FakeProvider("claude")
+    typesafe = FakeProvider("typesafe", screen_model="jev-latest", explain_model=None)
+    trace = RecordingTrace()
+
+    answer = await _service(claude, typesafe, screening_provider="typesafe").ask(
+        "why did the guardian veto the last batch?", CONTEXT, trace=trace
+    )
+
+    assert answer.tier == "prose"
+    assert [(c["provider"], c["purpose"]) for c in trace.records[0]["model_calls"]] == [
+        ("typesafe", "screen"),
+        ("claude", "explain"),
+    ]
+
+
+def test_config_can_make_typesafe_the_screening_provider() -> None:
+    class _Cfg:
+        def get(self, path: str, default: object = None) -> object:
+            return {"ai_agent.screening_provider": "typesafe"}.get(path, default)
+
+    status = build_service(_Cfg()).status()
+
+    assert status["providers"]["screening_provider"] == "typesafe"
+    assert status["providers"]["fallback"]["provider"] == "typesafe"
+    assert status["providers"]["fallback"]["screen_model"] == "jev-latest"
+
+
 def test_config_wires_claude_primary_and_keeps_the_fallback_off_by_default() -> None:
     class _Cfg:
         def get(self, path: str, default: object = None) -> object:
@@ -232,6 +296,7 @@ def test_config_wires_claude_primary_and_keeps_the_fallback_off_by_default() -> 
     assert status["providers"]["primary"]["screen_model"] == "claude-haiku-4-5-20251001"
     assert status["providers"]["primary"]["explain_model"] == "claude-opus-5-5"
     assert status["providers"]["fallback_enabled"] is False
+    assert status["providers"]["screening_provider"] == "claude"
     assert status["available"] is False  # no ANTHROPIC_API_KEY in tests
 
 

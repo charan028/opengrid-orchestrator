@@ -149,3 +149,10 @@ bind_host = "127.0.0.1"
 [contracts.intake]
 # R3: AS intake ignores an AS clearing price older than this (base's value).
 as_price_max_age_s = 93600
+
+[ai_agent]
+# The demo stack screens every copilot question with TypeSafe's Jev first (typed intent and injection
+# judgements, sub-second) and lets Claude write explanations. Keys come from the environment
+# (TYPESAFE_API_KEY, ANTHROPIC_API_KEY); with neither set the copilot answers from its no-model tier.
+screening_provider = "typesafe"
+fallback_enabled = true

@@ -1,8 +1,14 @@
 """The one path every model call takes (issue #26 review items 1, 3, 5, 6). Owner: ui-a/ai.
 
-Provider order is fixed: Claude first; TypeSafe only if Claude is unavailable or fails, AND
+Provider order: Claude first; TypeSafe only if Claude is unavailable or fails, AND
 `[ai_agent].fallback_enabled` is true, AND `TYPESAFE_API_KEY` is set. With the switch off (the default)
 the fallback is never called, whatever keys exist.
+
+One deliberate exception, `[ai_agent].screening_provider = "typesafe"`: screening (intent, injection
+risk, needs-trace) goes to TypeSafe's System One first, because a typed judgement model answers that
+question in a few hundred milliseconds with calibrated probabilities, and Claude screens only if it
+fails. Explanations are never affected: TypeSafe writes no prose, so Claude stays the explanation
+provider whichever way screening is set. The default keeps Claude for both.
 
 For every call, whichever provider serves it, this module:
 
@@ -23,6 +29,9 @@ from dataclasses import dataclass, field
 from opengrid.ai_agent.budgets import Budget, Pricing
 from opengrid.ai_agent.providers import ModelProvider, ModelRequest, ProviderError, TokenUsage
 from opengrid.ai_agent.types import ModelCall, ProviderName, Purpose, RouterVerdict
+
+#: Who screens first. "claude" is the default order; "typesafe" puts System One in front for screening only.
+ScreeningProvider = ProviderName
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +55,14 @@ class ModelGateway:
         primary: ModelProvider | None,
         fallback: ModelProvider | None = None,
         fallback_enabled: bool = False,
+        screening_provider: ScreeningProvider = "claude",
         budget: Budget,
         pricing: Pricing | None = None,
     ) -> None:
         self._primary = primary
         self._fallback = fallback
         self._fallback_enabled = fallback_enabled
+        self._screening_provider: ScreeningProvider = screening_provider
         self._budget = budget
         self._pricing = pricing or Pricing()
 
@@ -59,13 +70,24 @@ class ModelGateway:
     def budget(self) -> Budget:
         return self._budget
 
-    def providers(self) -> list[ModelProvider]:
-        """The providers that may be called, in order. The fallback is included only when switched on."""
+    def providers(self, purpose: Purpose | None = None) -> list[ModelProvider]:
+        """The providers that may be called for `purpose`, in order. The fallback is included only when
+        switched on, or, for screening, when it is the configured screening provider (then it goes first
+        and the primary covers for it). With no purpose, the union: what can be called at all."""
+        primary = self._primary if self._primary is not None and self._primary.available else None
+        fallback = self._fallback if self._fallback is not None and self._fallback.available else None
+        screens_with_fallback = self._screening_provider == "typesafe" and purpose in (None, "screen")
         order: list[ModelProvider] = []
-        if self._primary is not None and self._primary.available:
-            order.append(self._primary)
-        if self._fallback_enabled and self._fallback is not None and self._fallback.available:
-            order.append(self._fallback)
+        if fallback is not None and purpose == "screen" and screens_with_fallback:
+            order.append(fallback)
+        if primary is not None:
+            order.append(primary)
+        if (
+            fallback is not None
+            and fallback not in order
+            and (self._fallback_enabled or screens_with_fallback)
+        ):
+            order.append(fallback)
         return order
 
     @property
@@ -87,6 +109,7 @@ class ModelGateway:
             "primary": describe(self._primary),
             "fallback": describe(self._fallback),
             "fallback_enabled": self._fallback_enabled,
+            "screening_provider": self._screening_provider,
         }
 
     async def screen(self, request: ModelRequest) -> Outcome[RouterVerdict]:
@@ -103,7 +126,7 @@ class ModelGateway:
     ) -> Outcome[T]:
         outcome: Outcome[T] = Outcome()
         timeout_s = self._budget.limits.timeout_s
-        for provider in self.providers():
+        for provider in self.providers(purpose):
             model = provider.model_for(purpose)
             if model is None:
                 continue

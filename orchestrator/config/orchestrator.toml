@@ -233,6 +233,11 @@ fallback_provider = "typesafe"
 fallback_enabled = false
 fallback_model = "jev-latest"
 fallback_timeout_s = 6.0
+# Who screens first. "claude" (default) keeps the order above. "typesafe" sends screening -- intent,
+# injection risk, needs-trace -- to System One first: a typed judgement model answers in a few hundred
+# milliseconds with calibrated probabilities, and Claude screens only if it fails. Explanations always
+# stay with Claude. Needs TYPESAFE_API_KEY; without it the order silently falls back to Claude.
+screening_provider = "claude"
 # Budgets: every model call (screening, explanation, fallback) counts against all three.
 daily_tokens = 200000
 daily_usd = 5.0

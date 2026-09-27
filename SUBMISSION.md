@@ -30,7 +30,8 @@ The impact is measured, not asserted. A rule-based allocator, a faithful port of
 replaces, runs at every gate and is scored by the same evaluator, so the console shows the value
 orchestration adds interval by interval, next to the money the fleet declined in order to keep its
 promises. Three invariants are live counters that must read zero: no home below its reserve, no
-kilowatt-hour sold twice, no commitment moved for a better price.
+kilowatt-hour sold twice, no commitment moved for a better price. An advisory copilot sits beside
+the console, screened by TypeSafe's Jev model and explained by Claude; it can read but never command.
 
 ## Demo video
 

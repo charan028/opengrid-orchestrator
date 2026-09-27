@@ -255,10 +255,12 @@ def build_service(cfg: ConfigReader) -> CopilotService:
                 timeout_s=float(cfg.get("ai_agent.fallback_timeout_s", 6.0)),
             )
         )
+    screening = str(cfg.get("ai_agent.screening_provider", "claude"))
     gateway = ModelGateway(
         primary=_claude_provider(cfg),
         fallback=fallback,
         fallback_enabled=bool(cfg.get("ai_agent.fallback_enabled", False)),
+        screening_provider="typesafe" if screening == "typesafe" else "claude",
         budget=budget,
         pricing=Pricing.from_config(cfg),
     )
