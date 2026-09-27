@@ -18,6 +18,7 @@ import aiomqtt
 import jsonschema
 
 from opengrid.platform.config import Config, ConfigError
+from opengrid.platform.fast_schema import Check, compile_schema
 
 INTERFACES_MQTT_DIR = Path(__file__).resolve().parents[4] / "interfaces" / "mqtt"
 
@@ -83,11 +84,30 @@ def validate_payload(kind: str, payload: dict[str, Any]) -> None:
     Raises SchemaValidationError with the jsonschema-reported reason; never silently accepts an
     invalid message (BUILD.md S5a security: "validate all inbound messages against interfaces/").
     """
+    fast = _fast_check_for(kind)
+    if fast is not None:
+        try:
+            if fast(payload):
+                return
+        except Exception:  # noqa: S110 -- never an accept: the reference validator below decides
+            pass
     validator = _validator_for(kind)
     try:
         validator.validate(instance=payload)
     except jsonschema.ValidationError as exc:
         raise SchemaValidationError(f"{kind}: {exc.message}") from exc
+
+
+#: Kinds validated with the precompiled accept-check first (`platform.fast_schema`): the per-hub ingest volume.
+#: Anything it does not accept -- and every rejection's error -- is still decided by `jsonschema` above.
+FAST_CHECK_KINDS: frozenset[str] = frozenset({"telemetry"})
+
+
+@cache
+def _fast_check_for(kind: str) -> Check | None:
+    if kind not in FAST_CHECK_KINDS:
+        return None
+    return compile_schema(_validator_for(kind))
 
 
 def topic(cfg: Config, suffix: str) -> str:

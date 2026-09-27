@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import cProfile
+import gc
 import io
 import os
 import pstats
@@ -43,6 +44,23 @@ from unit.engine.alloc_perf_fleet import (  # noqa: E402
     set_clock,
 )
 
+gc_pauses: list[float] = []
+#: Ticks between two reports of one hub (10 s telemetry / 2 s cycle = 5; 1 = every hub reports every tick).
+CHURN_PERIOD = [5]
+_gc_t0 = [0.0]
+
+
+def _gc_probe(phase: str, info: dict[str, int]) -> None:
+    if info.get("generation") != 2:
+        return
+    if phase == "start":
+        _gc_t0[0] = time.perf_counter()
+    else:
+        gc_pauses.append((time.perf_counter() - _gc_t0[0]) * 1000.0)
+
+
+gc.callbacks.append(_gc_probe)
+
 
 def _pct(samples: list[float], q: float) -> float:
     ordered = sorted(samples)
@@ -58,11 +76,15 @@ async def _bench(
     energy_ms: list[float] = []
     prof = cProfile.Profile() if profile else None
     async with engine_harness(sf) as h:
+        if os.environ.get("OG_BENCH_GC_FREEZE") == "1":
+            gc.collect()
+            gc.freeze()  # experiment: the long-lived twin/topology out of the cyclic GC's full passes
+        gc_pauses.clear()
         for n in range(cycles + 2):  # two warm-up ticks (first-run alert sweep, AT_RISK entries)
             now = NOW + timedelta(seconds=2 * n)
             set_clock(now, ticking=True)  # every read its own instant, as in production
             if churn and n > 0:
-                ingest_churn(seed, n)
+                ingest_churn(seed, n, period=CHURN_PERIOD[0])
             if prof is not None and profile == "allocator" and n >= 2:
                 prof.enable()
             t0 = time.perf_counter()
@@ -101,6 +123,7 @@ async def _bench(
         "energy_p50": statistics.median(energy_ms),
         "energy_p99": _pct(energy_ms, 0.99),
         "combined_p99": _pct(combined, 0.99),
+        "gc2": f"{len(gc_pauses)} x max {max(gc_pauses, default=0.0):.0f} ms",
     }
 
 
@@ -115,8 +138,10 @@ def main() -> int:
         "--load", type=int, default=1, help="obligation book multiplier (4 = heavy DELIVERING)"
     )
     parser.add_argument("--no-churn", dest="churn", action="store_false", help="no telemetry between ticks")
+    parser.add_argument("--churn-period", type=int, default=5, help="ticks between a hub's reports (1 = all)")
     parser.add_argument("--profile", choices=("allocator", "energy_check"), default=None)
     args = parser.parse_args()
+    CHURN_PERIOD[0] = args.churn_period
     print(
         f"{'hubs':>6} {'banks':>5} {'oblig':>5} {'rows':>5} | {'alloc p50':>9} {'alloc p99':>9} | "
         f"{'energy p50':>10} {'energy p99':>10} | {'comb p99':>8}  (ms)"
@@ -126,7 +151,7 @@ def main() -> int:
         print(
             f"{r['hubs']:>6} {r['banks']:>5} {r['obligations']:>5} {r['call_rows']:>5} | "
             f"{r['alloc_p50']:>9.1f} {r['alloc_p99']:>9.1f} | {r['energy_p50']:>10.1f} {r['energy_p99']:>10.1f} | "
-            f"{r['combined_p99']:>8.1f}"
+            f"{r['combined_p99']:>8.1f}  gen2 GC: {r['gc2']}"
         )
     return 0
 
