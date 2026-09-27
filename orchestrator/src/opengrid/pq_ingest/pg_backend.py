@@ -10,13 +10,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 
 from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.pq import PqWaveformRawIndex, PqWaveformSummaryRow
-from opengrid.pq_ingest.characterize import HubCharacterization
+from opengrid.pq_ingest.characterize import (
+    NOMINAL_FREQ_HZ,
+    NOMINAL_VOLTAGE_V,
+    HubCharacterization,
+    HubSummaryAggregate,
+    _phase_connection_from_presence,
+)
 
 # Waveform summaries are soft telemetry -- replayable from the hub's next publish and cross-checked by
 # the S6.5-step-2 audit job against raw captures -- never the ledger/commitment/trace tables that keep
@@ -118,6 +125,87 @@ _LATEST_SUMMARIES_SQL = sql.SQL(
     """
 ).format(columns=sql.SQL(", ").join(sql.Identifier(c) for c in _SUMMARY_COLUMNS))
 
+# R3.4.1 PROD-IO fix: computes exactly what `characterize.characterize_hub`'s Python loop used to
+# derive from ~101,761 raw sample rows (15 min window x ~3,509 hubs), but IN SQL, returning one row per
+# hub (~3,509) instead of one row per sample. Every CTE here mirrors one piece of
+# `characterize._aggregate_hub` (the Python reference this must match, proven by
+# `tests/unit/pq_ingest/test_characterize.py`'s before/after equality test):
+#   - freq_agg:        AVG/STDDEV_POP(freq_hz)                     <-> freq_offset_hz/freq_offset_std_hz
+#   - voltage_flat/agg: unpivot v_rms_a/b/c, AVG/STDDEV_POP         <-> voltage_offset_pct/_std_pct
+#     (the (v - %(nominal_voltage_v)s) / %(nominal_voltage_v)s * 100 transform is affine, so
+#     STDDEV_POP of the transformed value equals the Python side's pstdev of the same transform)
+#   - thd_flat/agg, angle_flat/agg: unpivot + AVG                   <-> thd_current_pct/phase_angle_error_deg
+#   - phase_presence:  bool_or(v_rms_<phase> IS NOT NULL)           <-> `_infer_phase_connection`'s
+#     "which v_rms_<phase> was EVER populated" set, via `characterize._phase_connection_from_presence`
+#   - latest_harmonics: DISTINCT ON (hub_id) ... ORDER BY ts DESC   <-> `_dominant_harmonics`'s "most
+#     recent non-null harmonics_i"
+# freq_agg/voltage_agg are INNER JOINed (both required -- matches `_aggregate_hub`'s
+# "if not freq_values or not voltage_devs: return None"); thd/angle/harmonics are LEFT JOINed with the
+# same defaults Python uses when that list is empty (0.0 / None).
+_LATEST_SUMMARY_AGGREGATES_SQL = """
+WITH window_rows AS (
+    SELECT hub_id, ts, freq_hz, v_rms_a, v_rms_b, v_rms_c,
+           thd_i_pct_a, thd_i_pct_b, thd_i_pct_c,
+           phase_angle_deg_a, phase_angle_deg_b, phase_angle_deg_c,
+           harmonics_i
+    FROM og.pq_waveform_summary
+    WHERE hub_id = ANY(%(hub_ids)s) AND ts >= %(since)s
+),
+freq_agg AS (
+    SELECT hub_id, AVG(freq_hz) AS freq_mean, STDDEV_POP(freq_hz) AS freq_std
+    FROM window_rows WHERE freq_hz IS NOT NULL GROUP BY hub_id
+),
+voltage_flat AS (
+    SELECT hub_id, (v - %(nominal_voltage_v)s) / %(nominal_voltage_v)s * 100.0 AS voltage_dev
+    FROM window_rows, LATERAL (VALUES (v_rms_a), (v_rms_b), (v_rms_c)) AS phase_v(v)
+    WHERE v IS NOT NULL
+),
+voltage_agg AS (
+    SELECT hub_id, AVG(voltage_dev) AS voltage_mean, STDDEV_POP(voltage_dev) AS voltage_std
+    FROM voltage_flat GROUP BY hub_id
+),
+thd_flat AS (
+    SELECT hub_id, v AS thd
+    FROM window_rows, LATERAL (VALUES (thd_i_pct_a), (thd_i_pct_b), (thd_i_pct_c)) AS phase_thd(v)
+    WHERE v IS NOT NULL
+),
+thd_agg AS (
+    SELECT hub_id, AVG(thd) AS thd_mean FROM thd_flat GROUP BY hub_id
+),
+angle_flat AS (
+    SELECT hub_id, v AS angle
+    FROM window_rows, LATERAL (VALUES (phase_angle_deg_a), (phase_angle_deg_b), (phase_angle_deg_c))
+        AS phase_angle(v)
+    WHERE v IS NOT NULL
+),
+angle_agg AS (
+    SELECT hub_id, AVG(angle) AS angle_mean FROM angle_flat GROUP BY hub_id
+),
+phase_presence AS (
+    SELECT hub_id,
+           bool_or(v_rms_a IS NOT NULL) AS has_a,
+           bool_or(v_rms_b IS NOT NULL) AS has_b,
+           bool_or(v_rms_c IS NOT NULL) AS has_c
+    FROM window_rows GROUP BY hub_id
+),
+latest_harmonics AS (
+    SELECT DISTINCT ON (hub_id) hub_id, harmonics_i
+    FROM window_rows
+    WHERE harmonics_i IS NOT NULL
+    ORDER BY hub_id, ts DESC
+)
+SELECT
+    f.hub_id, f.freq_mean, f.freq_std, v.voltage_mean, v.voltage_std,
+    COALESCE(t.thd_mean, 0.0) AS thd_mean, COALESCE(a.angle_mean, 0.0) AS angle_mean,
+    p.has_a, p.has_b, p.has_c, lh.harmonics_i
+FROM freq_agg f
+JOIN voltage_agg v USING (hub_id)
+JOIN phase_presence p USING (hub_id)
+LEFT JOIN thd_agg t USING (hub_id)
+LEFT JOIN angle_agg a USING (hub_id)
+LEFT JOIN latest_harmonics lh USING (hub_id)
+"""
+
 
 class PgPqIngestBackend:
     """`opengrid.pq_ingest.PqIngestBackend` over a `psycopg_pool.AsyncConnectionPool`."""
@@ -199,3 +287,51 @@ class PgPqIngestBackend:
             await cur.execute(_LATEST_SUMMARIES_SQL, {"hub_ids": list(hub_ids), "since": since})
             rows = await cur.fetchall()
         return [PqWaveformSummaryRow(**dict(zip(_SUMMARY_COLUMNS, row, strict=True))) for row in rows]
+
+    async def latest_summary_aggregates(
+        self, hub_ids: Sequence[str], *, since: datetime
+    ) -> list[HubSummaryAggregate]:
+        """R3.4.1 PROD-IO fix: `run_characterization_pass`'s production read -- the SAME aggregation
+        `latest_summaries` + `characterize.characterize_fleet` used to do in Python over ~101,761 raw
+        rows, computed in SQL instead (`_LATEST_SUMMARY_AGGREGATES_SQL`'s own comment maps each CTE to
+        the Python reference it must match), returning ~1 row/hub."""
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _LATEST_SUMMARY_AGGREGATES_SQL,
+                {"hub_ids": list(hub_ids), "since": since, "nominal_voltage_v": NOMINAL_VOLTAGE_V},
+            )
+            rows = await cur.fetchall()
+        return [self._aggregate_from_row(row) for row in rows]
+
+    @staticmethod
+    def _aggregate_from_row(row: Sequence[Any]) -> HubSummaryAggregate:
+        from opengrid.core.models.pq import HarmonicComponent
+
+        (
+            hub_id,
+            freq_mean,
+            freq_std,
+            voltage_mean,
+            voltage_std,
+            thd_mean,
+            angle_mean,
+            has_a,
+            has_b,
+            has_c,
+            harmonics_i,
+        ) = row
+        return HubSummaryAggregate(
+            hub_id=str(hub_id),
+            freq_offset_hz=float(freq_mean) - NOMINAL_FREQ_HZ,
+            freq_offset_std_hz=float(freq_std) if freq_std is not None else 0.0,
+            voltage_offset_pct=abs(float(voltage_mean)),
+            voltage_offset_std_pct=float(voltage_std) if voltage_std is not None else 0.0,
+            thd_current_pct=float(thd_mean),
+            phase_angle_error_deg=float(angle_mean),
+            phase_connection=_phase_connection_from_presence(bool(has_a), bool(has_b), bool(has_c)),
+            dominant_harmonics=(
+                {order: HarmonicComponent(**comp) for order, comp in harmonics_i.items()}
+                if harmonics_i is not None
+                else None
+            ),
+        )

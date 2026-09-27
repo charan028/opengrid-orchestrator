@@ -3,6 +3,7 @@ against fake backend/blob-store implementations (no DB, no filesystem)."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -22,6 +23,7 @@ class FakeBackend:
         self.characterization_batches: list[int] = []
         self.hub_inverter_pq: dict[str, object] = {}
         self.fail_characterization = False
+        self.aggregate_delay_s = 0.0
 
     async def insert_summary(self, row: PqWaveformSummaryRow) -> None:
         self.summaries.append(row)
@@ -37,6 +39,22 @@ class FakeBackend:
 
     async def latest_summaries(self, hub_ids, *, since):
         return [s for s in self.summaries if s.hub_id in hub_ids and s.ts >= since]
+
+    async def latest_summary_aggregates(self, hub_ids, *, since):
+        """R3.4.1 PROD-IO fix: the fake's counterpart to `pg_backend`'s SQL aggregation -- reuses the
+        same Python reference (`characterize._aggregate_hub`) the SQL is proven equivalent to
+        (`tests/unit/pq_ingest/test_characterize.py`), so this fake stays a faithful stand-in for the
+        real backend without re-deriving the aggregation math a second time here."""
+        from opengrid.pq_ingest.characterize import _aggregate_hub
+
+        if self.aggregate_delay_s:
+            await asyncio.sleep(self.aggregate_delay_s)
+        raw = await self.latest_summaries(hub_ids, since=since)
+        by_hub: dict[str, list[PqWaveformSummaryRow]] = {}
+        for row in raw:
+            by_hub.setdefault(row.hub_id, []).append(row)
+        aggregates = (_aggregate_hub(hub_id, rows) for hub_id, rows in by_hub.items())
+        return [a for a in aggregates if a is not None]
 
     async def upsert_hub_inverter_pq_batch(self, rows) -> None:
         if self.fail_characterization:
@@ -258,3 +276,66 @@ async def test_run_characterization_pass_propagates_and_counts_backend_failure(_
 
     with pytest.raises(RuntimeError, match="simulated characterization backend failure"):
         await pq_ingest.run_characterization_pass(["hub-00000"], now=now)
+
+
+async def test_run_characterization_pass_times_out_instead_of_hanging(_configure) -> None:
+    """R3.4.1 PROD-IO fix: a slow/hung fetch+characterize must raise `TimeoutError` (traced as the
+    "timeout" outcome, `metrics.characterization_passes_total`) rather than block indefinitely."""
+    backend, _ = _configure
+    backend.aggregate_delay_s = 0.2
+    now = datetime(2026, 9, 26, 0, 5, 0, tzinfo=UTC)
+    await pq_ingest.ingest_summary(_SUMMARY_PAYLOAD)
+    await pq_ingest.flush_summaries()
+
+    with pytest.raises(TimeoutError):
+        await pq_ingest.run_characterization_pass(["hub-00000"], now=now, timeout_s=0.02)
+
+
+async def test_characterization_pass_keeps_event_loop_lag_under_100ms_at_3500_hubs(_configure) -> None:
+    """R3.4.1 PROD-IO fix's own acceptance test: production saw 4-5s event-loop freezes every
+    characterization pass at ~3,509 hubs. Feeds a fixture at that same scale straight into the fake
+    backend's raw-row store (bypassing `ingest_summary`'s one-message-at-a-time buffering, which isn't
+    what's under test here) and runs a real `run_characterization_pass` concurrently with a lag probe
+    that samples how late its own `asyncio.sleep` wakes up -- the signal the offloaded
+    `characterize_fleet_from_aggregates` thread (`asyncio.to_thread`) must not block."""
+    backend, _ = _configure
+    hub_count = 3_500
+    now = datetime(2026, 9, 26, 0, 5, 0, tzinfo=UTC)
+    hub_ids = [f"hub-{i:05d}" for i in range(hub_count)]
+    for hub_id in hub_ids:
+        for sample in range(5):
+            backend.summaries.append(
+                PqWaveformSummaryRow(
+                    hub_id=hub_id,
+                    ts=datetime(2026, 9, 26, 0, sample, 0, tzinfo=UTC),
+                    v_rms_a=240.0 + sample * 0.1,
+                    i_rms_a=10.0,
+                    freq_hz=60.0 + sample * 0.001,
+                    sync_source="ptp",
+                    sync_quality_ns=50.0,
+                )
+            )
+
+    max_lag_s = 0.0
+    probe_interval_s = 0.005
+    stop = asyncio.Event()
+
+    async def _lag_probe() -> None:
+        nonlocal max_lag_s
+        loop = asyncio.get_running_loop()
+        last = loop.time()
+        while not stop.is_set():
+            await asyncio.sleep(probe_interval_s)
+            now_t = loop.time()
+            max_lag_s = max(max_lag_s, (now_t - last) - probe_interval_s)
+            last = now_t
+
+    probe_task = asyncio.create_task(_lag_probe())
+    try:
+        characterized = await pq_ingest.run_characterization_pass(hub_ids, now=now)
+    finally:
+        stop.set()
+        await probe_task
+
+    assert characterized == hub_count
+    assert max_lag_s < 0.1, f"event loop lag {max_lag_s * 1000:.1f}ms exceeded the 100ms budget"
