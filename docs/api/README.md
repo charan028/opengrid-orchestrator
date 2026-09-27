@@ -10,6 +10,7 @@ The REST and SSE API served by `og-api` (`opengrid.api`, port 8080 on loopback, 
 | [auth-and-actions.md](auth-and-actions.md) | Identity (proxy secret, named operators), roles, CSRF, the two-step and two-person flows, SSE streams, error codes |
 | [health.md](health.md) | The health payload, degraded modes, and the guardian's K7 escalation alerts |
 | [scenarios.md](scenarios.md) | The operator scenario route: request shape, anomaly types, and how it differs from the simulator control plane |
+| [console-endpoints.md](console-endpoints.md) | The console's map, search, bulk-command, ledger, AS-deployment and utility-toll, alerts, bid-funnel and profitability endpoints, with example requests and responses |
 | [integration-howto.md](integration-howto.md) | Switching between live ERCOT/EIA/NWS and the market simulator, the ERCOT token flow |
 
 ## Regenerating the reference
