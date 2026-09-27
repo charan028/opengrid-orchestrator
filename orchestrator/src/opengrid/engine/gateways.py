@@ -27,6 +27,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid import contracts, fleet, ledger
+from opengrid.allocator import grant_key
 from opengrid.allocator.energy_hold import (
     DEFAULT_AS_DEPLOYMENT_H,
     HOLD_MARGIN_FRACTION,
@@ -774,7 +775,7 @@ class EngineLedgerGateway:
     async def ledger_version(self) -> int:
         return await ledger.ledger_version()
 
-    async def persist_grants(self, cycle_id: str, grants: Sequence[ProposedGrant]) -> None:
+    async def persist_grants(self, cycle_id: str, grants: Sequence[ProposedGrant], attempt: int = 0) -> None:
         self._granted_kw = {}
         for g in grants:
             if g.obligation_id is not None and not g.is_headroom:
@@ -784,7 +785,7 @@ class EngineLedgerGateway:
         version = await ledger.ledger_version()
         records = [
             GrantRecord(
-                grant_id=uuid5(NAMESPACE_URL, f"{cycle_id}:{g.bank_id}:{g.obligation_id}:{g.is_headroom}"),
+                grant_id=uuid5(NAMESPACE_URL, grant_key(cycle_id, g, attempt)),
                 cycle_id=cycle_id,
                 bank_id=g.bank_id,
                 granted_kw=Decimal(str(round(g.granted_kw, 3))),

@@ -99,6 +99,7 @@ async def run_cycle(
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
     only_bank_ids: Sequence[str] | None = None,
     retry_excluded_hub_ids: frozenset[str] = frozenset(),
+    attempt: int = 0,
 ) -> list[Grant]:
     """One S1-S7 allocation cycle (02a S5.1-S5.2): builds this cycle's `grant` rows for every bank,
     honoring frozen commitments (K13), reserve/P/kVA/ramp limits (K1/K4), and the one-loop-per-quantity
@@ -209,6 +210,7 @@ async def run_cycle(
         flow_limits=extras.flow_limits,
         excluded_hub_ids=extras.excluded_hub_ids | extras.operator_hub_ids,
         operator_hub_ids=extras.operator_hub_ids,
+        device_excluded_hub_ids=extras.device_excluded_hub_ids,
         lease_ttl_s=lease_ttl_s,
     )
     if only_bank_ids is None:
@@ -226,7 +228,12 @@ async def run_cycle(
         except Exception:
             logger.exception("cycle extras observe failed", extra={"cycle_id": cycle_id})
 
-    await ledger.persist_grants(cycle_id, list(result.grants))
+    # A re-proposal (`attempt` > 0) keeps the ORIGINAL cycle id on its grant rows (K13 accounting sees one
+    # cycle); only the grant ids differ, so the rows never collide with the first attempt's.
+    if attempt:
+        await ledger.persist_grants(cycle_id, list(result.grants), attempt=attempt)  # type: ignore[call-arg]
+    else:
+        await ledger.persist_grants(cycle_id, list(result.grants))
     shortfalls = list(result.shortfalls)
     if only_bank_ids is None:
         _last_shortfalls[:] = shortfalls
@@ -244,7 +251,7 @@ async def run_cycle(
         except Exception:
             logger.exception("failed to record hub substitutions", extra={"cycle_id": cycle_id})
     ledger_version = await ledger.ledger_version()
-    grants = [_to_grant_row(cycle_id, ledger_version, g) for g in result.grants]
+    grants = [_to_grant_row(cycle_id, ledger_version, g, attempt=attempt) for g in result.grants]
     if only_bank_ids is None:
         _last_grants[:] = grants
     else:
@@ -312,14 +319,18 @@ def _obligation_uuid(obligation_id: str | None) -> UUID | None:
         return uuid5(NAMESPACE_URL, obligation_id)
 
 
-def _to_grant_row(cycle_id: str, ledger_version: int, grant: ProposedGrant) -> Grant:
+def grant_key(cycle_id: str, grant: ProposedGrant, attempt: int = 0) -> str:
+    """The stable key a grant id is derived from; a same-cycle re-proposal adds `:r<attempt>`."""
+    key = f"{cycle_id}:{grant.bank_id}:{grant.obligation_id}:{grant.is_headroom}"
+    return f"{key}:r{attempt}" if attempt else key
+
+
+def _to_grant_row(cycle_id: str, ledger_version: int, grant: ProposedGrant, *, attempt: int = 0) -> Grant:
     """Convert one pure-logic `ProposedGrant` into a `Grant` row. `bank_id` stays the topology's text id
     (`bank-000`, `og.bank`/`og.grant.bank_id` are text since migration 0004) -- the engine looks the bank
     up in the fleet twin by it."""
     return Grant(
-        grant_id=uuid5(
-            NAMESPACE_URL, f"{cycle_id}:{grant.bank_id}:{grant.obligation_id}:{grant.is_headroom}"
-        ),
+        grant_id=uuid5(NAMESPACE_URL, grant_key(cycle_id, grant, attempt)),
         cycle_id=cycle_id,
         obligation_id=_obligation_uuid(grant.obligation_id),
         bank_id=grant.bank_id,

@@ -666,3 +666,27 @@ def test_a_shortfall_caused_by_an_operator_target_carries_the_operator_override(
     # A veto exclusion alone is not an operator override.
     vetoed = cycle(T, fleet, ledger, Schedule(), {}, (), excluded_hub_ids=frozenset({"h0"}))
     assert vetoed.grants[0].reason_code != R_OPERATOR_OVERRIDE
+
+
+# --- M1: a firmware-updating hub is excluded without vetoing the bank --------------------------------------
+
+
+def test_a_firmware_updating_hub_is_substituted_and_a_covered_obligation_stays_whole() -> None:
+    hubs = tuple(_hub(f"h{i}", kw=10.0) for i in range(3))
+    fleet = FleetState(hubs=hubs, banks=(_bank(cap=30.0),))
+    ledger = LedgerView(calls=(_call("o1", 15.0, ("h0", "h1", "h2")),))
+    result = cycle(T, fleet, ledger, Schedule(), {}, (), device_excluded_hub_ids=frozenset({"h0"}))
+    (grant,) = result.grants
+    assert grant.granted_kw == pytest.approx(15.0) and grant.reason_code == reasons.R_GRANT_COMMITTED
+    assert result.shortfalls == ()  # nothing below the commitment: nothing for G-19 to veto
+
+
+def test_a_shortfall_caused_by_a_firmware_update_carries_the_l0_device_exclusion() -> None:
+    hubs = tuple(_hub(f"h{i}", kw=10.0) for i in range(3))
+    fleet = FleetState(hubs=hubs, banks=(_bank(cap=30.0),))
+    ledger = LedgerView(calls=(_call("o1", 30.0, ("h0", "h1", "h2")),))
+    result = cycle(T, fleet, ledger, Schedule(), {}, (), device_excluded_hub_ids=frozenset({"h0"}))
+    (grant,) = result.grants
+    assert grant.granted_kw == pytest.approx(20.0)
+    assert grant.reason_code == reasons.R_COMMIT_LOCK_OVERRIDE_L0
+    assert {s.reason_code for s in result.shortfalls} == {reasons.R_COMMIT_LOCK_OVERRIDE_L0}

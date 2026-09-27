@@ -101,11 +101,17 @@ def parse_targets(
 
 
 #: `og.stop_event` rows `effective_targets` expects, in order: `(stop_event_id, scope_kind, scope_ref, action,
-#: created_at)`, oldest first.
+#: created_at)`, oldest first: every stop event of the last 24 h (a target lives at most that long, so an
+#: ENGAGE at or after its issue is among them) PLUS the latest event of every scope whatever its age -- a
+#: stop engaged more than 24 h ago and never released is still in force and must still cancel targets.
 STOP_EVENT_ROWS_SQL = """
-SELECT stop_event_id, scope_kind, scope_ref, action, created_at FROM og.stop_event
-WHERE created_at > now() - interval '24 hours'
-ORDER BY created_at
+SELECT s.stop_event_id, s.scope_kind, s.scope_ref, s.action, s.created_at FROM og.stop_event s
+WHERE s.created_at > now() - interval '24 hours'
+   OR s.created_at = (
+       SELECT max(l.created_at) FROM og.stop_event l
+       WHERE l.scope_kind = s.scope_kind AND l.scope_ref = s.scope_ref
+   )
+ORDER BY s.created_at
 """
 #: A cancel row's `cancel_kind` when the engine refused a target recorded too late (not the operator).
 CANCEL_KIND_LATE_RECORD = "LATE_RECORD"
