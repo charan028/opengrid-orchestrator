@@ -300,14 +300,25 @@ def check_aggregate_flow(
 
 
 BANK_TOPOLOGY_UNMAPPED = "BANK_TOPOLOGY_UNMAPPED"
+SUBSTATION_TOPOLOGY_UNMAPPED = "SUBSTATION_TOPOLOGY_UNMAPPED"
 
 
-def check_unmapped_bank(bank_id: str, prev_net_kw: float, new_net_kw: float) -> CheckOutcome:
-    """09 S2.6 fail closed for a bank with no feeder mapping (G-06/G-28/G-32 cannot be evaluated): a batch
-    that raises the bank's net |setpoint| is vetoed; one that moves it toward zero is relief and passes."""
-    if abs(new_net_kw) > abs(prev_net_kw) + 1e-9:
-        return CheckOutcome(G28, False, BANK_TOPOLOGY_UNMAPPED, bank_id)
-    return CheckOutcome.passed(G28, hub_id=bank_id)
+def check_unmapped_bank(
+    bank_id: str,
+    prev_net_kw: float,
+    new_net_kw: float,
+    *,
+    rule_id: str = G28,
+    reason: str = BANK_TOPOLOGY_UNMAPPED,
+) -> CheckOutcome:
+    """09 S2.6 fail closed for a bank whose feeder (G-06/G-28/G-32) or substation (G-29) topology is missing:
+    only relief passes -- |new| <= |old| AND on the same side of zero (or zero). A sign flip (import to
+    export or back) is never relief, however small: the unknown limit may bind in the other direction."""
+    eps = 1e-9
+    same_side = abs(new_net_kw) <= eps or (abs(prev_net_kw) > eps and (new_net_kw > 0) == (prev_net_kw > 0))
+    if abs(new_net_kw) > abs(prev_net_kw) + eps or not same_side:
+        return CheckOutcome(rule_id, False, reason, bank_id)
+    return CheckOutcome.passed(rule_id, hub_id=bank_id)
 
 
 def check_g29_poi(poi: PoiLimit, batch_setpoint_kw: float) -> CheckOutcome:
