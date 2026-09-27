@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenGrid Orchestrator - data lifecycle run (partitions, rollups, exports, retention)
+Documentation=file:///opt/opengrid/current/docs/orchestrator/07-delivery/15-data-lifecycle.md
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=opengrid
+Group=opengrid
+WorkingDirectory=/opt/opengrid/current/orchestrator
+Environment=PYTHONPATH=/opt/opengrid/current/orchestrator/src
+Environment=OG_CONFIG=/opt/opengrid/current/orchestrator/config/orchestrator.toml
+EnvironmentFile=/etc/opengrid/secrets.env
+ExecStart=/opt/opengrid/venv/bin/python -m opengrid.lifecycle run --cycle auto
+# Background job: lowest CPU and I/O priority, so production commits win disk contention.
+Nice=10
+IOSchedulingClass=idle
+IOWeight=10
+TimeoutStartSec=50min
+MemoryMax=512M
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opengrid /var/log/opengrid /srv/ogbackup/cold
+PrivateTmp=true

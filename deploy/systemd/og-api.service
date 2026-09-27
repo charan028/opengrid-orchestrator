@@ -5,6 +5,8 @@ Requires=postgresql.service mosquitto.service
 PartOf=opengrid.target
 
 [Service]
+# Production wins disk contention over agent test runs and the lifecycle job.
+IOWeight=500
 Type=simple
 User=opengrid
 Group=opengrid
@@ -13,6 +15,8 @@ Environment=PYTHONPATH=/opt/opengrid/current/orchestrator/src
 Environment=OG_CONFIG=/opt/opengrid/current/orchestrator/config/orchestrator.toml
 EnvironmentFile=/etc/opengrid/secrets.env
 EnvironmentFile=/etc/opengrid/api_keys.env
+# AI copilot key (optional: without it the copilot runs its no-model tier).
+EnvironmentFile=-/etc/opengrid/ai_agent.env
 # og-api only (never secrets.env, which the sims load): the Apache proxy secret.
 EnvironmentFile=/etc/opengrid/api_proxy.env
 ExecStart=/opt/opengrid/venv/bin/python -m opengrid.api

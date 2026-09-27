@@ -649,3 +649,10 @@ def test_requeue_is_bounded_and_drops_the_oldest(monkeypatch) -> None:
     buffer = [4, 5]
     fleet._requeue(buffer, [1, 2, 3], "telemetry")
     assert buffer == [3, 4, 5]
+
+
+def test_configure_loads_hub_stale_s_from_config() -> None:
+    """R3 review: fleet.configure ignored [health].hub_stale_s, so hubs went stale at the 6 s default."""
+    fleet.configure(FakeFleetBackend(), Config({"health": {"hub_stale_s": 25.0, "hub_offline_s": 60.0}}))
+    assert fleet._thresholds.hub_stale_s == 25.0
+    assert fleet._thresholds.hub_offline_s == 60.0
