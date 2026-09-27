@@ -1514,6 +1514,11 @@ async def main(cfg: Config) -> None:
             if settings.site_ingest_enabled
             else asyncio.sleep(0)
         )
+        # D-34 grid-control link: og-engine owns SCADA ingest, so the utility EMS link lives here too.
+        # None unless [grid_link] enables a utility (default off); it never stops the engine.
+        from opengrid.integrations.grid_link.runner import start_grid_link
+
+        grid_link_task = start_grid_link(cfg, pool, trace_store) or asyncio.create_task(asyncio.sleep(0))
         try:
             await run_forever(
                 lambda: timed_tick(state), interval_s=state.cycle_interval_s, process_name=PROCESS_NAME
@@ -1532,6 +1537,7 @@ async def main(cfg: Config) -> None:
                 market_task,
                 device_info_task,
                 firmware_status_task,
+                grid_link_task,
             )
             for task in {ingest_task, *background}:
                 task.cancel()

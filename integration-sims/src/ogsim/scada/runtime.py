@@ -20,6 +20,7 @@ from ogsim.common.scenario import parse_scenario_cmd, utc_timestamp
 from ogsim.scada.aggregation import BankTelemetryBuffer, bank_load_kw, kw_to_kva
 from ogsim.scada.anomalies import SCADA_ANOMALY_TYPES, ScadaAnomalyManager
 from ogsim.scada.background import BackgroundLoadModel
+from ogsim.scada.grid_link import ScadaGridLinkBridge
 from ogsim.scada.instructions import OverloadRule, lift_instruction, limit_instruction
 
 logger = logging.getLogger(__name__)
@@ -202,15 +203,24 @@ class ScadaEngine:
         }
 
 
-async def run_scada(client: SimMqttClient, engine: ScadaEngine, clock: Clock) -> None:
+async def run_scada(
+    client: SimMqttClient,
+    engine: ScadaEngine,
+    clock: Clock,
+    grid_link: ScadaGridLinkBridge | None = None,
+) -> None:
     """Async shell: subscribes to fleet telemetry and scenario commands,
     ticks `engine` on `config.publish_interval_s`. Kept thin and not
-    unit-tested (the engine above is)."""
+    unit-tested (the engine above is). With `grid_link`, L2 instructions also
+    (or only, when `also_mqtt` is false) go to OpenGrid over the grid-control link."""
     await client.subscribe("tel/#", qos=0)
     await client.subscribe("scenario/cmd", qos=1)
     while True:
         now = clock.now()
         signals, instructions = engine.tick(now)
         await client.publish_batch("scada_bank_signal", signals, qos=0)
-        await client.publish_batch("scada_utility_instruction", instructions, qos=1)
+        if grid_link is not None:
+            grid_link.submit(instructions)
+        if grid_link is None or grid_link.settings.also_mqtt:
+            await client.publish_batch("scada_utility_instruction", instructions, qos=1)
         await clock.sleep(engine.config.publish_interval_s)

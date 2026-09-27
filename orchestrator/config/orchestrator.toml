@@ -382,3 +382,86 @@ release_note = "Demo image for the simulated fleet (RevD)"
 # granted fresh G-05/G-06/G-28..30 accumulator budgets, and it overwrote other banks' allocator state.
 # Off until the re-solve reuses the cycle id and touches only the vetoed bank.
 enabled = false
+
+[grid_link]
+# D-34 utility grid-control link (docs/orchestrator/07-delivery/integrations/grid-link.md): a utility EMS
+# sends D-29 toll calls and L2 LIMIT/BLOCK over DNP3 (IEEE 1815, mutual TLS) to og-engine. OFF by default:
+# nothing listens until BOTH this switch and a utility's own `enabled` are true. Addresses, CNs and
+# certificates below are placeholders (192.0.2.0/28 is a documentation range that matches no real peer);
+# replace them from the utility's signed point-list agreement before enabling.
+enabled = false
+mqtt_username = "og_gridlink"
+mqtt_password_env = "OG_MQTT_GRIDLINK_PASSWORD"
+
+[[grid_link.utilities]]
+utility_id = "AUSTIN_ENERGY"
+enabled = false
+listen_host = "0.0.0.0"
+listen_port = 20001
+allowed_peers = ["192.0.2.0/28"]
+allowed_peer_cns = ["aen-ems-primary", "aen-ems-backup"]
+banks = ["bank-040", "bank-041", "bank-042", "bank-043", "bank-044", "bank-045", "bank-046", "bank-047",
+         "bank-048", "bank-049", "bank-sub-LZ_AEN-00"]
+max_setpoint_kw = 26000   # D-29(b): Austin home block + 20 MW substation set
+heartbeat_timeout_s = 30
+[[grid_link.utilities.l2_targets]]
+name = "LZ_AEN"
+zone = "LZ_AEN"
+[[grid_link.utilities.l2_targets]]
+name = "SUB_LZ_AEN_00"
+bank_id = "bank-sub-LZ_AEN-00"
+[grid_link.utilities.tls]
+enabled = true
+cert_file = "/etc/opengrid/certs/og-gridlink.pem"
+key_file = "/etc/opengrid/certs/og-gridlink.key"
+client_ca_file = "/etc/opengrid/certs/aen-ems-ca.pem"
+[grid_link.utilities.dnp3]
+outstation_address = 10
+master_address = 1
+
+# D-37: LCRA and RAYBURN are regulated territory but have NO contract (banks UNAVAILABLE, sample toll
+# contracts SUSPENDED). Identities and point lists only; they stay disabled until a real contract exists,
+# and the core call function would refuse their calls anyway (no active tolling obligation).
+[[grid_link.utilities]]
+utility_id = "LCRA"
+enabled = false
+listen_host = "0.0.0.0"
+listen_port = 20002
+allowed_peers = ["192.0.2.0/28"]
+allowed_peer_cns = ["lcra-ems-primary"]
+banks = ["bank-050", "bank-051", "bank-052", "bank-053", "bank-054", "bank-055", "bank-056", "bank-057",
+         "bank-058", "bank-059"]
+max_setpoint_kw = 5000
+[[grid_link.utilities.l2_targets]]
+name = "LZ_LCRA"
+zone = "LZ_LCRA"
+[grid_link.utilities.tls]
+enabled = true
+cert_file = "/etc/opengrid/certs/og-gridlink.pem"
+key_file = "/etc/opengrid/certs/og-gridlink.key"
+client_ca_file = "/etc/opengrid/certs/lcra-ems-ca.pem"
+[grid_link.utilities.dnp3]
+outstation_address = 11
+master_address = 1
+
+[[grid_link.utilities]]
+utility_id = "RAYBURN"
+enabled = false
+listen_host = "0.0.0.0"
+listen_port = 20003
+allowed_peers = ["192.0.2.0/28"]
+allowed_peer_cns = ["rayburn-ems-primary"]
+banks = ["bank-060", "bank-061", "bank-062", "bank-063", "bank-064", "bank-065", "bank-066", "bank-067",
+         "bank-068", "bank-069"]
+max_setpoint_kw = 5000
+[[grid_link.utilities.l2_targets]]
+name = "LZ_RAYBN"
+zone = "LZ_RAYBN"
+[grid_link.utilities.tls]
+enabled = true
+cert_file = "/etc/opengrid/certs/og-gridlink.pem"
+key_file = "/etc/opengrid/certs/og-gridlink.key"
+client_ca_file = "/etc/opengrid/certs/rayburn-ems-ca.pem"
+[grid_link.utilities.dnp3]
+outstation_address = 12
+master_address = 1

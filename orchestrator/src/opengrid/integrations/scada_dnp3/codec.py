@@ -39,6 +39,8 @@ __all__ = [
     "build_link_frame",
     "build_read_classes",
     "crc16_dnp",
+    "decode_range",
+    "iter_items",
     "parse_response",
     "segment_fragment",
 ]
@@ -68,6 +70,10 @@ APP_CON = 0x20
 APP_UNS = 0x10
 FC_CONFIRM = 0x00
 FC_READ = 0x01
+FC_SELECT = 0x03
+FC_OPERATE = 0x04
+FC_DIRECT_OPERATE = 0x05
+FC_DIRECT_OPERATE_NR = 0x06
 FC_RESPONSE = 0x81
 FC_UNSOLICITED_RESPONSE = 0x82
 
@@ -294,8 +300,10 @@ _BINARY_SIZES: dict[tuple[int, int], int] = {(1, 2): 1, (2, 1): 1, (2, 2): 7, (2
 _TIME_SIZES: dict[tuple[int, int], int] = {(50, 1): 6, (51, 1): 6, (51, 2): 6}
 
 
-def _ranges(qualifier: int, data: bytes, pos: int) -> tuple[list[int] | None, int, int, int]:
-    """Decode the range field: (indices or None when index-prefixed, count, prefix size, new pos)."""
+def decode_range(qualifier: int, data: bytes, pos: int) -> tuple[list[int] | None, int, int, int]:
+    """Decode the range field of an object header at `pos`: (indices, or None when index-prefixed; count;
+    prefix size in bytes; position after the range field). Shared by the master response parser and the
+    grid-link outstation request parser."""
     code, prefix = qualifier & 0x0F, (qualifier >> 4) & 0x07
     if code in (0x00, 0x01):
         width = 1 if code == 0x00 else 2
@@ -318,9 +326,10 @@ def _ranges(qualifier: int, data: bytes, pos: int) -> tuple[list[int] | None, in
     raise Dnp3ParseError(f"unsupported qualifier 0x{qualifier:02X}")
 
 
-def _items(
+def iter_items(
     data: bytes, pos: int, indices: list[int] | None, count: int, prefix: int, size: int
 ) -> Iterator[tuple[int, bytes]]:
+    """Yield `(index, object bytes)` for `count` fixed-size objects starting at `pos`."""
     for n in range(count):
         if prefix:
             index = int.from_bytes(data[pos : pos + prefix], "little")
@@ -354,7 +363,7 @@ def parse_response(fragment: bytes) -> AppFragment:
         if pos + 3 > len(fragment):
             raise Dnp3ParseError("truncated object header")
         group, variation, qualifier = fragment[pos], fragment[pos + 1], fragment[pos + 2]
-        indices, count, prefix, pos = _ranges(qualifier, fragment, pos + 3)
+        indices, count, prefix, pos = decode_range(qualifier, fragment, pos + 3)
         key = (group, variation)
         if key == (1, 1):  # packed binary inputs, 1 bit each
             if indices is None:
@@ -369,13 +378,13 @@ def parse_response(fragment: bytes) -> AppFragment:
             pos += nbytes
         elif key in _BINARY_SIZES:
             size = _BINARY_SIZES[key]
-            for index, raw in _items(fragment, pos, indices, count, prefix, size):
+            for index, raw in iter_items(fragment, pos, indices, count, prefix, size):
                 out.binaries.append(BinaryReading(index, bool(raw[0] & BINARY_STATE), raw[0]))
             pos += count * (size + prefix)
         elif key in _ANALOG_LAYOUTS:
             size, fmt, has_flags = _ANALOG_LAYOUTS[key]
             width = struct.calcsize(fmt)
-            for index, raw in _items(fragment, pos, indices, count, prefix, size):
+            for index, raw in iter_items(fragment, pos, indices, count, prefix, size):
                 flags = raw[0] if has_flags else FLAG_ONLINE
                 (value,) = struct.unpack(fmt, raw[has_flags : has_flags + width])
                 out.analogs.append(AnalogReading(index, float(value), flags))
