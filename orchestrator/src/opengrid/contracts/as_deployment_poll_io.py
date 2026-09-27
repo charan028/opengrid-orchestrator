@@ -141,7 +141,12 @@ class CoreCallGateway:
             return CallOutcome(False, "R-ERCOT-AS-NOTHING-TO-RECALL", 404, "no call for that instruction")
         try:
             await cancel_call(
-                self._store, self._trace, record.call_id, origin=CallOrigin.ERCOT_POLL, principal=principal, now=now
+                self._store,
+                self._trace,
+                record.call_id,
+                origin=CallOrigin.ERCOT_POLL,
+                principal=principal,
+                now=now,
             )
         except CallRefused as exc:
             return CallOutcome(False, exc.reason_code, exc.http_status, exc.detail)
