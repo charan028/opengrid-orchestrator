@@ -460,8 +460,13 @@ async def status_of(store: CallStore, record: CallRecord, *, limits: CallLimits,
     effective_end = min(record.end_at, record.cancelled_at or record.end_at)
     if now < record.start_at:
         state = CallState.COMPLETED if record.cancelled_at is not None else CallState.ACCEPTED
-        return CallStatus(call=record, state=state, delivered_kw=None, delivered_kwh=0.0, as_of=now)
-    measured = await store.delivery(record.deployment_id) if record.deployment_id is not None else None
+        return CallStatus(
+            call=record, state=state, delivered_kw=None, delivered_kwh=0.0, as_of=now, granted_kwh=0.0
+        )
+    measured = (
+        await store.measured_delivery(record.deployment_id) if record.deployment_id is not None else None
+    )
+    granted = await store.granted(record.obligation_id, record.start_at, min(now, effective_end))
     delivered_kw = measured.delivered_kw if measured is not None else None
     if now >= effective_end:
         state = CallState.COMPLETED
@@ -474,6 +479,8 @@ async def status_of(store: CallStore, record: CallRecord, *, limits: CallLimits,
         delivered_kwh=measured.discharged_kwh if measured is not None else 0.0,
         as_of=now,
         delivery=measured,
+        granted_kw=-granted.last_kw if granted.last_kw is not None else None,
+        granted_kwh=granted.kwh,
     )
 
 

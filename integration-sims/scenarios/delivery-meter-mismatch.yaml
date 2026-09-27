@@ -1,0 +1,14 @@
+name: delivery-meter-mismatch
+description: >
+  D-38 delivery corroboration. The substation meter of the 20 MW toll set (bank-sub-LZ_AEN-00) reports
+  only half of the batteries' real power for 20 minutes, as a failed or mis-scaled independent meter
+  would, while hub telemetry is unchanged. A utility toll call on that bank during the window ends with
+  its og.delivery_record UNCORROBORATED and ALR-DELIVERY-METER-MISMATCH open (the meter delta disagrees
+  with the battery delta by about 50%, over the 10% tolerance). Without a call, nothing is raised. To end
+  early: DELETE /api/anomalies/delivery-meter-mismatch:meter_mismatch:0.
+steps:
+  - at_s: 0
+    type: meter_mismatch
+    target: bank-sub-LZ_AEN-00
+    params: {battery_scale: 0.5, offset_kw: 0}
+    duration: 1200

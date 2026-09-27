@@ -11,8 +11,9 @@ reads are reused from `opengrid.contracts` and `opengrid.api.store`; this packag
 
 from __future__ import annotations
 
+from opengrid.customer_api.delivery_routes import router as delivery_router
 from opengrid.customer_api.operator_routes import router as operator_router
 from opengrid.customer_api.routes import router
 from opengrid.customer_api.utility_routes import router as utility_router
 
-__all__ = ["operator_router", "router", "utility_router"]
+__all__ = ["delivery_router", "operator_router", "router", "utility_router"]

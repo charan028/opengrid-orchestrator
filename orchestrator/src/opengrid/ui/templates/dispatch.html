@@ -64,7 +64,7 @@
   {% if as_awards %}
   <div class="data-table-wrap">
     <table class="data-table" aria-label="ERCOT ancillary service awards">
-      <thead><tr><th>Obligation</th><th>Product</th><th>Committed</th><th>Energy held</th><th>State</th><th>Risk</th><th>Action</th></tr></thead>
+      <thead><tr><th>Obligation</th><th>Product</th><th>Committed</th><th>Energy held</th><th>State</th><th>Risk</th><th>Delivery</th><th>Action</th></tr></thead>
       <tbody>
       {% for award in as_awards %}
         <tr>
@@ -75,6 +75,7 @@
           <td><span class="status-badge {{ 'status-dispatching' if award.state == 'deployed' else 'status-info' }}">{{ award.state }}</span>{% if award.deployment_origin %}
             <span class="og-card-meta as-call-origin" data-origin="{{ award.deployment_origin }}">by {{ award.deployment_origin }}{% if award.deployment_by %} &middot; {{ award.deployment_by }}{% endif %}{% if award.deployment_kw is not none %} &middot; {{ '%.0f'|format(award.deployment_kw|float) }} kW{% endif %}</span>{% endif %}</td>
           <td>{% if award.at_risk %}<span class="status-badge status-caution">AT_RISK</span>{% else %}<span class="status-badge status-good">OK</span>{% endif %}</td>
+          <td{% if award.deployment_id %} data-delivery-call="{{ award.deployment_id }}"{% endif %}>{% if not award.deployment_id %}--{% endif %}</td>
           <td>
             {% if award.state == 'deployed' and is_operator %}
             <form hx-post="{{ base_path }}/dispatch/as-deployments/{{ award.deployment_id }}/stop-propose" hx-target="#as-action-result" hx-swap="innerHTML">
@@ -90,6 +91,7 @@
       </tbody>
     </table>
   </div>
+  {% include "_partials/delivery_drawer.html" %}
   {% else %}
   <p class="empty-state">No active ERCOT_AS awards are visible.</p>
   {% endif %}

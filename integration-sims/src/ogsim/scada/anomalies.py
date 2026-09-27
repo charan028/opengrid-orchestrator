@@ -58,6 +58,7 @@ SCADA_ANOMALY_TYPES = frozenset(
         "comms_loss",
         "utility_instruction",
         "time_skew",
+        "meter_mismatch",
     }
 )
 
@@ -107,6 +108,9 @@ class BankModifiers:
     breaker_open: bool = False
     comms_loss: bool = False
     time_skew_s: float = 0.0
+    #: meter_mismatch (D-38): the meter sees battery_scale x the batteries' net power plus offset_kw.
+    meter_battery_scale: float = 1.0
+    meter_offset_kw: float = 0.0
     pending_instruction: dict[str, Any] | None = None
 
 
@@ -221,6 +225,9 @@ class ScadaAnomalyManager:
                 m.quality_override = "comm_fail"
             elif anomaly.type == "time_skew":
                 m.time_skew_s = float(p.get("skew_s", 300.0))
+            elif anomaly.type == "meter_mismatch":
+                m.meter_battery_scale = float(p.get("battery_scale", 0.5))
+                m.meter_offset_kw = float(p.get("offset_kw", 0.0))
             elif anomaly.type == "utility_instruction":
                 m.pending_instruction = _utility_instruction_payload(bank_id, p)
 
@@ -253,6 +260,9 @@ class ScadaAnomalyManager:
                 m.quality_override = None
             elif anomaly.type == "time_skew":
                 m.time_skew_s = 0.0
+            elif anomaly.type == "meter_mismatch":
+                m.meter_battery_scale = 1.0
+                m.meter_offset_kw = 0.0
             elif anomaly.type == "utility_instruction":
                 # Blocker fix: ending a utility_instruction anomaly (natural duration elapse,
                 # via tick()'s expiry sweep, OR a manual cancel, via start()'s immediate-revert

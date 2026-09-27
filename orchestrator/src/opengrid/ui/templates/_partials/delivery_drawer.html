@@ -1,0 +1,15 @@
+{# D-38 measured delivery: fills every cell carrying data-delivery-call="<deployment_id>" from
+   GET /og/api/delivery/records and opens a detail drawer with the per-bucket chart on click.
+   Self-contained (static/og-delivery.js); the page only adds the cells and this include. #}
+<aside id="delivery-drawer" class="og-drawer delivery-drawer" hidden aria-labelledby="delivery-drawer-title" role="dialog">
+  <div class="og-section-heading">
+    <h2 id="delivery-drawer-title">Measured delivery</h2>
+    <button type="button" class="btn" id="delivery-drawer-close" aria-label="Close">Close</button>
+  </div>
+  <dl class="delivery-facts" id="delivery-drawer-facts"></dl>
+  <div id="delivery-drawer-chart" class="delivery-chart" style="height:260px" role="img"
+       aria-label="Committed, commanded and delivered kW over the call"></div>
+  <p class="og-card-meta">Delivered kW is measured from hub telemetry (discharge shown positive); commanded is what
+    the guardian signed. Meter = the independent substation/feeder meter's change against battery telemetry.</p>
+</aside>
+<script src="{{ base_path }}/static/og-delivery.js" data-base-path="{{ base_path }}" defer></script>

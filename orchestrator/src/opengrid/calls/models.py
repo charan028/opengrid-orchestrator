@@ -22,6 +22,8 @@ MAX_TEXT_LEN = 200
 #: `CallStatus.delivered_kw/_kwh` are MEASURED from telemetry by `opengrid.delivery` (D-38), never grants.
 #: Before the first evaluated bucket (or with no record yet) delivery is UNMEASURED and the state is ACTIVE.
 DELIVERY_STATE_UNMEASURED = "UNMEASURED"
+#: The deprecated `granted_*` status fields: the allocator's grants (planned), kept for compatibility.
+GRANTED_DESCRIPTION = "planned; removed in r3.5; use delivered_*"
 
 
 class CallOrigin(StrEnum):
@@ -182,9 +184,12 @@ class CallStatus(BaseModel):
     delivered_kwh: float | None
     as_of: datetime
     delivery: MeasuredDelivery | None = None
+    #: Deprecated (planned/granted, NOT measured; removed in r3.5): the allocator's grants over the call.
+    granted_kw: float | None = None
+    granted_kwh: float | None = None
 
     def public(self) -> dict[str, Any]:
-        measured = self.delivery is not None and self.delivery.evaluated_to is not None
+        measured = self.delivery is not None and self.delivery.is_measured
         return {
             **self.call.public(),
             "state": self.state.value,
@@ -201,6 +206,9 @@ class CallStatus(BaseModel):
                 if self.delivery and self.delivery.evaluated_to
                 else None
             ),
+            "granted_kw": self.granted_kw,
+            "granted_kwh": self.granted_kwh,
+            "granted_description": GRANTED_DESCRIPTION,
             "as_of": self.as_of.isoformat(),
         }
 
@@ -222,6 +230,15 @@ class AwardView:
 
 
 @dataclass(frozen=True, slots=True)
+class Granted:
+    """Deprecated (removed in r3.5): grants to a called obligation over the call so far, planned and NOT
+    metered: the latest cycle's granted discharge (kW magnitude, None when no cycle yet) and kWh."""
+
+    last_kw: float | None
+    kwh: float
+
+
+@dataclass(frozen=True, slots=True)
 class MeasuredDelivery:
     """A call's measured delivery, from its `og.delivery_record` (`opengrid.delivery.store.fetch_record`):
     the latest evaluated bucket's delivered kW (signed, < 0 = discharge; None = stale), discharged kWh so
@@ -233,6 +250,12 @@ class MeasuredDelivery:
     reasons: tuple[str, ...]
     meter_status: str
     evaluated_to: datetime | None
+
+    @property
+    def is_measured(self) -> bool:
+        """A measured value exists: a delivered kW in the latest bucket, or a final verdict. A running call
+        whose first buckets had no telemetry yet is NOT measured (delivery_state UNMEASURED)."""
+        return self.delivered_kw is not None or self.result != "IN_PROGRESS"
 
 
 CallStatus.model_rebuild()
