@@ -1,4 +1,4 @@
-.PHONY: test-unit test-int lint format typecheck dupcheck coverage migrate check
+.PHONY: test-unit test-int lint format typecheck dupcheck coverage migrate check bootstrap-check schema-check schema-snapshot
 
 PY ?= python
 
@@ -31,3 +31,26 @@ migrate:
 
 # Full pre-merge gate (BUILD.md S5a). Mirrors orchestrator/tools/check.sh.
 check: lint typecheck dupcheck test-unit coverage
+
+# From-scratch seed check (deploy/BOOTSTRAP.md): phases c-e into a FRESH database on the disposable test
+# cluster (5433; --fresh-db is refused on 5432), then deploy/scripts/bootstrap_check.py asserts the counts.
+# Run as root on the base server, from a clone; secrets for the test role go to BOOT_ETC, never /etc/opengrid.
+BOOT_DB ?= og_t_boot
+BOOT_PORT ?= 5433
+BOOT_ROLE ?= og_boot
+BOOT_ETC ?= /srv/ogwork/bootstrap/etc
+bootstrap-check:
+	bash deploy/scripts/bootstrap_from_scratch.sh --phase c-e --fresh-db \
+		--db-port $(BOOT_PORT) --db-name $(BOOT_DB) --db-role $(BOOT_ROLE) --etc $(BOOT_ETC)
+
+# Consolidated schema snapshot (orchestrator/schema/og_schema.sql): pg_dump --schema-only of a fresh database
+# after every migration. schema-check fails when the migrations no longer produce exactly the committed file;
+# schema-snapshot regenerates it (commit the result with the migration that changed it). Test cluster only.
+SCHEMA_DB ?= og_t_schema
+schema-check:
+	bash deploy/scripts/create_schema.sh --fresh-db --check-snapshot \
+		--db-port $(BOOT_PORT) --db-name $(SCHEMA_DB) --db-role $(BOOT_ROLE) --etc $(BOOT_ETC)
+
+schema-snapshot:
+	bash deploy/scripts/create_schema.sh --fresh-db --snapshot orchestrator/schema/og_schema.sql \
+		--db-port $(BOOT_PORT) --db-name $(SCHEMA_DB) --db-role $(BOOT_ROLE) --etc $(BOOT_ETC)
