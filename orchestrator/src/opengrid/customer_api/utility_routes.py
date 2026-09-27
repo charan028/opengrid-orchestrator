@@ -175,9 +175,9 @@ async def my_calls(
 
 @router.get("/calls/{call_id}")
 async def my_call(call_id: UUID, who: Reader, store: Store, trace: Trace, cfg: Cfg) -> dict[str, Any]:
-    """Status: ACCEPTED, ACTIVE (window running, commands issued; `delivery_state` UNMEASURED), COMPLETED or REFUSED (with its reason), plus granted kW
-    (signed, < 0 = discharge) and kWh -- planned/granted, not measured (`delivery_measured: false`); measured
-    delivery arrives in r3.4.2. RAMPING/DELIVERING return then."""
+    """Status: ACCEPTED, RAMPING / DELIVERING (window running; measured delivery below / at target), ACTIVE
+    (running, not measured yet: `delivery_state` UNMEASURED), COMPLETED or REFUSED (with its reason), plus
+    the MEASURED delivered kW (signed, < 0 = discharge) and kWh (`delivery_measured: true`, D-38)."""
     try:
         result = await call_status(
             store,
