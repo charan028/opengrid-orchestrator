@@ -262,9 +262,9 @@ Values are illustrative.
 | `state` | See the table below |
 | `delivered_kw` | Measured (D-38): the delivered kW of the latest evaluated 30 s bucket, signed (< 0 = discharge). `null` before the start, until a bucket with telemetry has been evaluated, when the latest bucket had no telemetry, and for a refused call |
 | `delivered_kwh` | Measured discharged energy so far, >= 0. `0.0` until something is measured; `null` for a refused call |
-| `delivery_measured` | `true` only once a measured value exists (a delivered kW in the latest bucket) or a final verdict (`calls/models.py:255-258` at `e28db35`). A running call whose buckets have no telemetry yet stays `false` |
-| `delivery_state` | `UNMEASURED` while `delivery_measured` is `false`. Otherwise the verdict: `IN_PROGRESS` while the call is verified, then `PASS`, `PARTIAL` or `FAIL` in the final record (`core/delivery.py:39-43`) |
-| `delivery_reasons` | Reasons for a verdict short of `PASS`, provisional while `IN_PROGRESS`: `RAMP_TOO_SLOW`, `SUSTAIN_BELOW_TARGET`, `NO_DELIVERY`, `VETOED`, `STOPPED`, `DATA_STALE`, `ENERGY_SHORT`. Empty without a record |
+| `delivery_measured` | `true` only once a measured value exists: a delivered kW in the latest evaluated bucket, or a final verdict (`calls/models.py`, `MeasuredDelivery.is_measured`). A record alone is not enough: a running call whose first buckets had no telemetry stays `false`, with `state` `ACTIVE` and `delivery_state` `UNMEASURED` |
+| `delivery_state` | `UNMEASURED` without a record or while `delivery_measured` is `false`. Otherwise the verification result: `IN_PROGRESS` while the call is verified, then `PASS`, `PARTIAL` or `FAIL` in the final record (`core/delivery.py:39-43`) |
+| `delivery_reasons` | Reasons for a result short of `PASS`, provisional while `IN_PROGRESS`: `RAMP_TOO_SLOW`, `SUSTAIN_BELOW_TARGET`, `NO_DELIVERY`, `VETOED`, `STOPPED`, `DATA_STALE`, `ENERGY_SHORT`. Empty without a record |
 | `meter_status` | The independent meter check on metered banks (a substation asset's bank, or `[delivery].meter_bank_ids`): `CORROBORATED`, `UNCORROBORATED`, `NO_METER` or `METER_STALE`. `null` without a record |
 | `delivery_as_of` | The end of the last evaluated bucket. `null` without a record |
 | `granted_kw`, `granted_kwh`, `granted_description` | **Deprecated; removed in r3.5.** The allocator's planned/granted kW and kWh, computed as in r3.4.2 (below) and never metered. `granted_description` reads "planned; removed in r3.5; use delivered_*" (`calls/models.py:26` at `e28db35`). **Move to `delivered_*`** |
@@ -354,7 +354,13 @@ present. Otherwise it falls back to `granted_*`, knowing those values are planne
   `GET /og/api/delivery/records/{deployment_id}` (with the per-bucket series) and `GET /og/api/delivery/summary`
   (`api/routers/delivery.py` at `e28db35`). The job also raises `ALR-DELIVERY-RAMP-LATE`, `ALR-DELIVERY-SHORTFALL`,
   `ALR-DELIVERY-NONE` and `ALR-DELIVERY-METER-MISMATCH`. A live shortfall flags the obligation `AT_RISK`
-  (`R-DELIVERY-MEASURED-SHORTFALL`) until it recovers (`delivery/job.py:265-311` at `e28db35`). The utility reads the same records through `GET /delivery-records`.
+  (`R-DELIVERY-MEASURED-SHORTFALL`) until it recovers (`delivery/job.py:265-311` at `2251392`).
+  On the Dispatch screen the toll's row shows the result in the **Delivery** column (result badge, a `METER` badge
+  when the meter disagrees, delivered / committed kW); clicking it opens the "Measured delivery" drawer with the
+  committed, commanded, delivered and meter-change chart. See [delivery.md](delivery.md).
+- **Delivery records for the utility.** `GET /og/api/customer/v1/utility/delivery-records[/{call_id}]`
+  (`utility.read`) returns the utility's own calls' delivery records; another utility's record is `404` like a
+  missing one (`customer_api/delivery_routes.py`, [delivery.md](delivery.md)).
 
 ## Code
 

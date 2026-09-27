@@ -34,6 +34,11 @@ whatever its policy row says.
 | `invoice_line`, `pnl` | **never deleted** (`protected`) | monthly write-once export | forever | monthly |
 | `meter_interval`, `performance` | **never deleted** (`protected`) | — | forever | — |
 | `trace`, `trace_checkpoint` | **not this job** | — | per `og.retention_policy`, pruned only behind a checkpoint (K11, 02a §8.3) | — |
+| `dispatch_call` (0047, D-33), `delivery_record` (0050, D-38) | **no policy row** (r3.4.3) | — | kept: not in `og.data_retention` or the whitelist, so never deleted | no |
+
+The r3.4.x tables are small: one `og.dispatch_call` row per call or refusal from any origin, and one
+`og.delivery_record` row per discharge call (utility toll call, ERCOT AS deployment or manual discharge target),
+whose `series` jsonb holds one entry per 30 s bucket of the call (r3.4.3: shown on the Dispatch screen's Delivery column and drawer for deployed AS/toll calls, and served to the utility and customer through their own delivery-record routes). See §8.
 
 - `protected` rows carry a CHECK constraint that makes a deletion policy impossible
   (`keep_days` must be NULL and `mode` must be `NONE`).
@@ -174,6 +179,11 @@ whatever its policy row says.
 
 ## 3. Operating it
 
+- **Deployment state (r3.4.3):** `deploy.sh` installs `deploy/systemd/og-lifecycle.service` and
+  `og-lifecycle.timer` but does **not enable** the timer; enable it only after an I/O check of the pgdata disk
+  (`systemctl enable --now og-lifecycle.timer`, `deploy/RUNBOOK.md` "Data lifecycle"). The Kubernetes chart
+  (`deploy/k8s`, r3.4.1) ships the same job as a CronJob (`*/10 * * * *`) with `lifecycle.suspend: true`, for the
+  same reason.
 - **Schedule:** a systemd timer, `og-lifecycle.timer`, runs every 10 minutes and starts
   `og-lifecycle.service` (Type=oneshot, User=opengrid), which runs
   `python -m opengrid.lifecycle run --cycle auto`.
@@ -262,8 +272,9 @@ policy table, the whitelist and the manifest format carry over.
 - Compressed cold CSV: ≈ 17 B/row of raw telemetry (C: about 100 B of CSV text at gzip ≈ 6×). The first
   archive runs will measure this.
 
-**Raw telemetry per day.** 06 §4.1's normal cadence is 10 s. The live simulator currently sends every 2 s
-(`[fleet].telemetry_interval_s = 2`).
+**Raw telemetry per day.** 06 §4.1's normal cadence is 10 s. When this section was written the live simulator
+sent every 2 s; at r3.4.3 the configured cadence is 10 s (`[fleet].telemetry_interval_s = 10`, owner R3 V-32), so
+the 10 s rows apply.
 
 | Load | Rows/day | PostgreSQL/day | Kept (7 d policy = up to 8 days on disk) | Cold/day |
 |---|---|---|---|---|
@@ -344,4 +355,45 @@ The findings below come from the index definitions and the query shapes (static 
 - The cold tier has no pruning of its own. At 2 s telemetry it grows by the compressed raw volume per day
   (§5), so watch `status` and size `/srv/ogbackup`.
 - Settle still meters from raw `og.telemetry`. Past 7 days, M&V must read `og.telemetry_1m`, which is a
-  request to the SETTLE owner.
+  request to the SETTLE owner. The same holds for delivery verification (D-38): it reads raw telemetry within
+  `[delivery].lookback_s` (1 h) of a call's end, and its result is then kept in `og.delivery_record`.
+- `og.dispatch_call` and `og.delivery_record` have no retention policy (§8.2). They grow by one row per call, so
+  this is not urgent, but a policy row plus a whitelist entry is needed before they are deleted from.
+- The trace quarantine file (§8.3) has no rotation or pruning.
+
+## 8. Changes at r3.4.1 to r3.4.3
+
+### 8.1 Two different "lifecycle" steps
+
+This document is about the **data** lifecycle (`opengrid.lifecycle`, the `og-lifecycle` unit). The engine also
+has an **obligation** lifecycle step (`advance_obligations`: COMMITTED to DELIVERING, window-end FULFILLED or
+SHORTFALL, expiry of unselected ones). Since **r3.4.3** og-engine runs that step **in the background**
+(`start_lifecycle_in_background`), single-flight (a pass still running means the next one is skipped, never
+queued) and bounded (30 s by default; a timeout is logged and abandoned, not raised), so it no longer eats the
+2 s dispatch tick. Each state write and its trace row are shielded together, so a timeout never leaves a state
+change without its trace (K10). Neither step touches the other's tables.
+
+### 8.2 Retention of the new tables and trace classes
+
+| Data | Written by | Retention at r3.4.3 |
+|---|---|---|
+| `og.dispatch_call` (migration 0047) | `opengrid.calls`, every origin, refusals included | kept (no `og.data_retention` row) |
+| `og.delivery_record` (migration 0050) | og-settle's delivery job (`opengrid.delivery`) | kept (no `og.data_retention` row) |
+| `og.as_deployment` (`source`, `requested_kw`, `call_id` added by 0047) | `opengrid.calls` | unchanged: not in the whitelist, kept |
+| `og.feed_obs` rows flagged `EXTREME_UNCORROBORATED` (migration 0045) | og-feeds | like every `feed_obs` row: 30 days, then exported and deleted |
+| Trace rows of class `DELIVERY_VERIFICATION` (stream `delivery`) and of the new streams (`manual_target:<user>`, `trace_quarantine`, `grid_link:<utility>`) | og-settle, og-api, og-engine | pruned only if their event class has an `og.retention_policy` row with `prune_after_checkpoint`; otherwise kept |
+
+### 8.3 Quarantine (r3.4.1)
+
+- **Trace journal quarantine.** A trace row that PostgreSQL refuses for its **content** (a data or integrity
+  error other than a unique violation, for example a NUL byte in jsonb) is no longer journaled for replay. It goes
+  to `<journal>.quarantine.jsonl` next to `[trace].journal_path`, is traced once (`TRACE_QUARANTINED` on stream
+  `trace_quarantine`, identifiers only) and raises `ALR-TRACE-QUARANTINED`. A journal replay that meets such an
+  entry quarantines it and continues, instead of stopping at it forever. The quarantine file is kept as evidence;
+  nothing rotates or deletes it.
+- **Price quarantine at ingest.** An ERCOT price that is not a number or lies outside the V-P1 hard bounds is
+  quarantined at ingest: logged, never stored. A price outside the normal band but inside the hard bounds is
+  stored and flagged `EXTREME_UNCORROBORATED` until a consecutive posting corroborates it (FR-ING-117, migration
+  0045); forecasts built on an uncorroborated latest value are marked NOT_FOR_FIRM.
+- **Manual targets** are written DB-or-nothing on their own stream and are never journaled, so a 503 "not
+  recorded" cannot be undone later by a replay.

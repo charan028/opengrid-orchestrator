@@ -102,7 +102,7 @@ def lp_vs_baseline_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "tooltip": {"trigger": "axis"},
             "series": [
                 {
-                    "name": "LP net value",
+                    "name": "MILP net value",
                     "type": "bar",
                     "data": [_num(row["net_value"]) for row in with_baseline],
                 },
@@ -178,9 +178,9 @@ async def profitability_page(
         lp_payload = await get_json(LP_VALUE_PATH)
     except ApiUnavailable as exc:
         lp_note = {
-            403: "Operator role required for the LP value-added view.",
-            404: "The LP value-added view is not available on this deployment yet.",
-        }.get(exc.status_code or 0, f"The LP value-added view is unavailable: {exc}")
+            403: "Operator role required for the MILP value-added view.",
+            404: "The MILP value-added view is not available on this deployment yet.",
+        }.get(exc.status_code or 0, f"The MILP value-added view is unavailable: {exc}")
 
     filters = {"service": service, "day": day, "customer": customer, "contract": contract}
     return templates.TemplateResponse(

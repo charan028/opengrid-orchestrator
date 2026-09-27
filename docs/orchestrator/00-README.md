@@ -31,7 +31,7 @@ This folder is the specification for review **before any code is written**.
 | 20 | 06-reviews/ | Independent adversarial and red-team reviews and the resolution log | after 19 |
 
 Related business-case document (outside the orchestrator scope):
-[../business-case/01-reviewer-claims-verification.md](../business-case/01-reviewer-claims-verification.md) — primary-source
+`business-case/01-reviewer-claims-verification.md` (kept outside this repository) — primary-source
 fact-check of the independent reviewers' claims about the business cases.
 
 ## Status

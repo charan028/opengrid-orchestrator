@@ -92,7 +92,7 @@ def test_plan_view_flags_lp_vs_rule_fallback() -> None:
 
     assert view["has_plan"] is True
     assert view["is_lp"] is True
-    assert view["mode_label"] == "LP optimizer"
+    assert view["mode_label"] == "MILP optimizer"
     assert view["solver_gap_pct"] == 0.4
 
     rule_plan = {**plan, "plan_mode": "RULE_FALLBACK"}
