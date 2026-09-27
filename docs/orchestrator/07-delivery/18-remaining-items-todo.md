@@ -58,9 +58,13 @@ Legend: **P1** blocks value or safety, **P2** needed for scale or completeness, 
 ### B3. Scale (see the performance report, doc 17)
 - [ ] **P1 Enable telemetry ingest decoupling** (`[ingest].telemetry_decoupled`) after the performance run and a
       dev-stack test. Owner: DISPATCH.
-- [ ] **P2 Update the fleet snapshot incrementally, and scan banks with arrays,** so that allocator plus energy_check p99
-      is at most 150 ms at 7,500 hubs. Owners: PERF-OPT with DISPATCH.
-- [ ] **P2 Find the og-engine RSS growth** (+275 MB/h in the 7,509-hub soak) and fix it if it is a leak. Owner: PERF-OPT.
+- [ ] **P2 Incremental fleet snapshot** (`integ/perf-r345` d841082): allocator plus energy_check p99 at 7,500 hubs is
+      186 ms on a laptop, about 105–125 ms estimated on the workstation. Needs DISPATCH review, then workstation soak
+      confirmation. Owners: PERF-OPT with DISPATCH.
+- [ ] **P2 og-engine RSS growth** (+275 MB/h in the 7,509-hub soak). Most likely the unbounded MQTT client queue backing
+      up under saturation; the per-hub caches were proven bounded. To do: enable decoupled ingest (bounded buffer); log
+      queue size and RSS every minute; trim the ledger reservation cache (a small real leak). Owners: PERF-OPT with
+      DISPATCH.
 - [ ] **P3 Separate og-ingest process** (design document first). Owner: DISPATCH.
 
 ### B4. Copilot
