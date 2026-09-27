@@ -59,10 +59,14 @@ class ModelRequest:
         )
 
     def user_content(self) -> str:
-        """The single user turn a text model is sent: delimited JSON, never an interpolated repr."""
-        question = _json_for_tags(canonicalize_json(self.question))
+        """The explanation turn: the question and the evidence, delimited JSON, never an interpolated repr."""
         evidence = _json_for_tags(canonicalize_json(self.evidence))
-        return f"<operator_question>{question}</operator_question>\n<evidence>{evidence}</evidence>"
+        return f"{self.question_content()}\n<evidence>{evidence}</evidence>"
+
+    def question_content(self) -> str:
+        """The screening turn: the operator's question ONLY. Screening classifies the operator's words;
+        it never needs, and is never sent, the console snapshot (r3.4.5: ~9.4k tokens per question)."""
+        return f"<operator_question>{_json_for_tags(canonicalize_json(self.question))}</operator_question>"
 
 
 @dataclass(frozen=True, slots=True)

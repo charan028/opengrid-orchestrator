@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from opengrid.ai_agent import CopilotService, build_service, confidence_label
+from opengrid.ai_agent import CopilotService, build_service, confidence_label, explain_evidence
 from opengrid.ai_agent.budgets import Budget, BudgetLimits
 from opengrid.ai_agent.gateway import ModelGateway
 from opengrid.ai_agent.providers import ModelRequest
@@ -285,18 +285,37 @@ async def test_the_trace_names_provider_models_usage_and_the_payload_hash() -> N
     answer = await _service(claude).ask("explain the guardian's reasoning for me", CONTEXT, trace=trace)
 
     record = trace.records[0]
-    sent = claude.requests[0][1]
+    (screen_purpose, screened), (explain_purpose, explained) = claude.requests
+    assert (screen_purpose, explain_purpose) == ("screen", "explain")
     assert answer.trace_id == "trace-1"
     assert record["provider"] == "claude" and record["model"] == "fake-explain-1"
     assert record["models_called"] == ["claude:fake-explain-1", "claude:fake-screen-1"]
     assert record["input_tokens"] == 200 and record["output_tokens"] == 40
     assert record["usd"] > 0
+    # screening was handed the question only; the explanation its trimmed evidence, which the hash names
+    assert screened.evidence == {}
     assert (
         record["payload_sha256"]
-        == sent.payload_sha256
-        == ModelRequest.build(sent.question, CONTEXT).payload_sha256
+        == explained.payload_sha256
+        == ModelRequest.build(explained.question, explain_evidence(CONTEXT, None)).payload_sha256
     )
     assert len(record["payload_sha256"]) == 64
+
+
+def test_explanation_evidence_is_trimmed_to_the_intents_sections() -> None:
+    big = {
+        **CONTEXT,
+        "obligations": [{"obligation_id": f"o{i}", "state": "COMMITTED"} for i in range(59)]
+        + [{"obligation_id": "risky", "state": "COMMITTED", "at_risk": True}],
+        "health": {**CONTEXT["health"], "alerts": [{"id": i} for i in range(20)]},
+    }
+
+    evidence = explain_evidence(big, None)
+    assert len(evidence["obligations"]) == 20 and evidence["obligations"][0]["obligation_id"] == "risky"
+    assert len(evidence["health"]["alerts"]) == 10 and "reserve_breaches" in evidence["health"]
+
+    fleet_evidence = explain_evidence(big, {"total": {"hubs": 504}})
+    assert set(fleet_evidence) == {"unavailable", "hubs", "fleet"}, "no obligations/alerts for a fleet why"
 
 
 async def test_the_trace_holds_only_the_redacted_question() -> None:
