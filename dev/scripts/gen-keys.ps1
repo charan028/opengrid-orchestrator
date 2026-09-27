@@ -3,6 +3,13 @@
 # keygen CLIs, so the dev stack's key format is guaranteed identical to production's.
 #
 # Idempotent-ish: skips a keypair that already exists. Pass -Force to regenerate both anyway.
+#
+# Python resolution (fix, 2026-09-26): a git worktree checkout has no `.venv` of its own next to
+# it, so the old repo-root/.venv-only check silently fell back to a bare `python` on PATH -- on a
+# machine where that's an unrelated interpreter with none of this project's dependencies
+# installed, the keygen CLI failed deep inside an unrelated import (`ModuleNotFoundError:
+# pydantic`) instead of a clear "no venv found" message. Set OPENGRID_VENV_PYTHON to point at a
+# venv shared across worktrees (e.g. the main checkout's `.venv`) when this worktree has none.
 param(
     [switch]$Force
 )
@@ -11,8 +18,13 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $KeysDir = Join-Path $RepoRoot "dev\keys"
-$Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $Python)) { $Python = "python" }
+if ($env:OPENGRID_VENV_PYTHON -and (Test-Path $env:OPENGRID_VENV_PYTHON)) {
+    $Python = $env:OPENGRID_VENV_PYTHON
+} else {
+    $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path $Python)) { $Python = "python" }
+}
+Write-Host "gen-keys.ps1: using python: $Python"
 
 $env:PYTHONPATH = Join-Path $RepoRoot "orchestrator\src"
 
