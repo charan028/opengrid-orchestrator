@@ -225,9 +225,14 @@ phase_d() {
 phase_f() {
   phase f "sim configs ($SIM_DIR, zone blocks $ZONES)"
   local dry=""; [ "$DRY" -eq 1 ] && dry="--dry-run"
-  [ "$DRY" -eq 1 ] || install -d -o root -g opengrid -m 750 "$SIM_DIR"
+  if [ "$DRY" -eq 0 ]; then  # non-root (deploy/k8s seed Job): a private dir, no ownership change
+    if [ "$(id -u)" -eq 0 ]; then install -d -o root -g opengrid -m 750 "$SIM_DIR"; else install -d -m 750 "$SIM_DIR"; fi
+  fi
   "$OG_PY" "$SCRIPT_DIR/gen_sim_overrides.py" --release "$RELEASE" --out "$SIM_DIR" --zones "$ZONES" $dry | sed 's/^/  /'
-  if [ "$DRY" -eq 0 ]; then chown root:opengrid "$SIM_DIR"/*.yaml; chmod 640 "$SIM_DIR"/*.yaml; fi
+  if [ "$DRY" -eq 0 ]; then
+    [ "$(id -u)" -ne 0 ] || chown root:opengrid "$SIM_DIR"/*.yaml
+    chmod 640 "$SIM_DIR"/*.yaml
+  fi
 }
 
 phase_e() {

@@ -2,7 +2,7 @@
 reach the broker as og_sim / og_simctl / og_sim_customer, never the database. */ -}}
 {{- $fn := include "og.fullname" . -}}
 {{- $host := .Values.ingress.host -}}
-{{- range $name := list "market" "fleet" "scada" "control" "customer" }}
+{{- range $name := list "market" "fleet" "scada" "control" "utility" "customer" }}
 {{- $sim := index $.Values.sims $name }}
 {{- if $sim.enabled }}
 {{- if $sim.port }}
@@ -101,6 +101,18 @@ spec:
               value: /ogsim
             - name: OGSIM_MARKET_ADMIN_URL
               value: "http://{{ $fn }}-sim-market:{{ $.Values.sims.market.port }}"
+            {{- end }}
+            {{- if eq $name "utility" }}
+            # production's /etc/opengrid/utility_sim.env (deploy/scripts/r341_utility_api_apache.sh)
+            - name: OGSIM_UTILITY_API_BASE
+              value: {{ $sim.apiBase | default (printf "https://%s" $host) | quote }}
+            - name: OGSIM_UTILITY_AEN_USER
+              value: og-util-aen
+            - name: OGSIM_UTILITY_AEN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.uiUsers }}
+                  key: og-util-aen
             {{- end }}
             {{- if eq $name "customer" }}
             - name: OGSIM_CUSTOMER_API_BASE

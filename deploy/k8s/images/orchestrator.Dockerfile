@@ -41,6 +41,7 @@ COPY dev/seed /opt/opengrid/current/dev/seed
 COPY dev/scripts /opt/opengrid/current/dev/scripts
 COPY dev/secrets.example /opt/opengrid/current/dev/secrets.example
 COPY deploy/scripts /opt/opengrid/current/deploy/scripts
+COPY deploy/mosquitto /opt/opengrid/current/deploy/mosquitto
 COPY integration-sims/config /opt/opengrid/current/integration-sims/config
 COPY deploy/k8s/images/k8s_support.py /opt/opengrid/k8s/k8s_support.py
 COPY --chmod=0755 deploy/k8s/images/og-entrypoint.sh /usr/local/bin/og-entrypoint

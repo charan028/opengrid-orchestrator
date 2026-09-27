@@ -21,15 +21,17 @@ thirdParty:
 # Secrets created by install.sh (phase "secrets"); never rendered by the chart, so helm never holds a value.
 secrets:
   db: og-db                 # OG_DB_PASSWORD (+ POSTGRES_PASSWORD for the bundled server)
-  mqtt: og-mqtt             # OG_MQTT_{ENGINE,GUARDIAN,API,SAFESTOP}_PASSWORD
-  mqttSim: og-mqtt-sim      # OG_MQTT_{SIM,SIMCTL,CUSTOMER}_PASSWORD
+  mqtt: og-mqtt             # OG_MQTT_{ENGINE,GUARDIAN,API,SAFESTOP,GRIDLINK}_PASSWORD
+  mqttSim: og-mqtt-sim      # OG_MQTT_{SIM,SIMCTL,CUSTOMER,UTILITY}_PASSWORD
   apiProxy: og-api-proxy    # OG_API_PROXY_SECRET
-  uiUsers: og-ui-users      # one key per Apache account (operator, viewer, tester, og-op-*, og-cust-*)
+  uiUsers: og-ui-users      # one key per Apache account (operator, viewer, tester, og-op-*, og-cust-*, og-util-*)
   signingKeys: og-signing-keys  # *_ed25519.key/.pub from the keygen CLIs
   ownerKeys: og-owner-keys  # the owner's api_keys.env (ERCOT/EIA)
   aiAgent: og-ai-agent      # the owner's ai_agent.env (ANTHROPIC_API_KEY), optional
+  gridLink: og-gridlink     # grid_link.toml + the TLS files of the D-34 grid link (only with gridLink.enabled)
 
 # Zone blocks enabled in the generated sim configs and the fleet seed (gen_sim_overrides.py --zones).
+# install.sh --noie-blocks adds LZ_LCRA,LZ_RAYBN (D-37: regulated NOIE, UNAVAILABLE, no contract).
 zones: LZ_AEN
 
 # Apache accounts that act for a customer ([api.roles.customer] of orchestrator.toml; install.sh fills this).
@@ -73,10 +75,29 @@ mosquitto:
     - {user: og_sim, secret: mqttSim, key: OG_MQTT_SIM_PASSWORD}
     - {user: og_simctl, secret: mqttSim, key: OG_MQTT_SIMCTL_PASSWORD}
     - {user: og_sim_customer, secret: mqttSim, key: OG_MQTT_CUSTOMER_PASSWORD}
+    - {user: og_sim_utility, secret: mqttSim, key: OG_MQTT_UTILITY_PASSWORD}
+  # og_gridlink (OG_MQTT_GRIDLINK_PASSWORD, mqtt Secret) is added, with its ACL block, only with gridLink.enabled.
 
 # Extra lines appended to the rendered orchestrator.toml overrides (TOML, [section] tables only).
 config:
   extraOverrides: ""
+
+# D-35 ERCOT AS instruction poller in og-feeds ([feeds.ercot_as_poll]); off, as in the release config.
+asPoll:
+  enabled: false
+
+# D-34 utility grid-control link: the DNP3/TLS outstation in og-engine. Off by default, as in production. To enable
+# it, pass install.sh --grid-link-config FILE (a [grid_link] override such as the one grid_link_enable_loopback.sh
+# writes) and --grid-link-certs DIR. Both go into the gridLink Secret, mounted as /etc/opengrid/grid_link.toml
+# (OG_GRID_LINK_CONFIG) and /etc/opengrid/certs in og-engine. Loopback option (the default): the override listens
+# on 127.0.0.1 inside the og-engine pod and nothing is exposed. service.enabled publishes the listen ports as a
+# ClusterIP Service, admitted only from service.allowedCidrs; exposure outside the cluster is not templated.
+gridLink:
+  enabled: false
+  service:
+    enabled: false
+    ports: [20001]
+    allowedCidrs: []
 
 # The og-* services (one singleton Deployment each, Recreate strategy: two engines or guardians must never run
 # at once). Memory limits follow the systemd MemoryMax of deploy/systemd; no CPU limits (no throttling).
@@ -96,6 +117,7 @@ services:
       limits: {memory: 512Mi}
   safestop:
     heartbeat: safestop
+    metricsPort: 9106      # r3.4.2 [metrics].safestop_port
     signingKey: safestop_ed25519.key
     resources:
       requests: {cpu: 50m, memory: 128Mi}
@@ -180,6 +202,13 @@ sims:
     resources:
       requests: {cpu: 50m, memory: 96Mi}
       limits: {memory: 256Mi}
+  # Austin Energy EMS simulator (r3.4.3, og-sim-utility; in ogsim.target). It calls the utility API as og-util-aen.
+  utility:
+    enabled: true
+    apiBase: ""             # "" = https://<ingress.host> (production: the Apache URL in utility_sim.env)
+    resources:
+      requests: {cpu: 20m, memory: 64Mi}
+      limits: {memory: 128Mi}
   customer:
     enabled: false
     apiBase: ""             # "" = https://<ingress.host> (the gateway, like production's Apache URL)
