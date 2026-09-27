@@ -72,6 +72,7 @@
 
   <section class="og-panel" aria-labelledby="per-kw-heading" id="per-kw">
     <h2 id="per-kw-heading">Economics per kW (annualised)</h2>
+{% with line_id='profitability-capacity-unavailable' %}{% include "_partials/availability_line.html" %}{% endwith %}
     {% if per_kw %}
     <p class="og-card-meta">Net = Out - In - wear - O&amp;M; the O&amp;M allowance is (Assumed)
       {% if per_kw.period_hours %}&middot; from {{ per_kw.period_hours }} h of this month{% endif %} &middot; <span title="method">{{ per_kw.method_version }}</span></p>

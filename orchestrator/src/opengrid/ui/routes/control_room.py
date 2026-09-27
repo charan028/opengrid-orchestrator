@@ -23,6 +23,7 @@ from opengrid.ui.routes.alerts import panel_context
 from opengrid.ui.routes.fleet import map_hub, map_hubs_from
 from opengrid.ui.routes.health import ack_message
 from opengrid.ui.routes.markets import _SERIES_QUERY, series_chart_view
+from opengrid.ui.routes.profitability import availability_view
 from opengrid.ui.templating import templates
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,8 @@ async def control_room(request: Request) -> HTMLResponse:
     except ApiUnavailable as exc:
         logger.info("control room: /og/api/fleet/map not serving (%s); map drawn from the hub list", exc)
 
+    availability = await availability_view()  # D-37 zone summary: "Regulated market - no contract"
+
     story = None
     try:
         raw_obl = await get_json("/og/api/dispatch/opportunities")
@@ -112,6 +115,7 @@ async def control_room(request: Request) -> HTMLResponse:
             "customers": customers,
             "ticker": series_chart_view(ticker_rows, series_key="price"),
             "degraded": degraded,
+            "availability": availability,
             **panel_context(
                 request,
                 list(health.get("alerts") or []) if isinstance(health, dict) else [],

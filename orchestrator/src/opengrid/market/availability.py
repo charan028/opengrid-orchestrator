@@ -173,6 +173,77 @@ WHERE b.availability = 'UNAVAILABLE'
   AND o.window_end > now()
 """
 
+#: Per-bank rated capacity and availability, for `capacity_summary` (the Profitability/Control room lines).
+#: to_jsonb keeps a database before 0046 working (every bank AVAILABLE).
+BANK_CAPACITY_SQL: Final = """
+SELECT b.bank_id, b.zone, b.kva_rating,
+       to_jsonb(b) ->> 'availability' AS availability,
+       to_jsonb(b) ->> 'availability_reason' AS availability_reason
+FROM og.bank b ORDER BY b.bank_id
+"""
+
+
+def capacity_summary(rows: Iterable[Mapping[str, object]]) -> dict[str, object]:
+    """Fleet capacity split (D-37): `available_kw` excludes UNAVAILABLE banks, which are reported on their
+    own line (`unavailable_kw`, `unavailable_badge`/`unavailable_text`), plus a per-zone summary for the
+    Control room (`zones`: zone, banks, rated/available/unavailable kW, and the zone's availability fields
+    when every bank in it is unavailable). Rated kW = the bank's kVA rating (its discharge ceiling)."""
+    zones: dict[str, dict[str, object]] = {}
+    available_total = unavailable_total = 0.0
+    reasons: set[str] = set()
+    for row in rows:
+        zone = str(row.get("zone") or "?")
+        raw_rating = row.get("kva_rating")
+        kw = float(raw_rating) if isinstance(raw_rating, int | float | str) and str(raw_rating) else 0.0
+        raw_a, raw_r = row.get("availability"), row.get("availability_reason")
+        bank = parse_availability(
+            str(row.get("bank_id")),
+            raw_a if isinstance(raw_a, str) else None,
+            raw_r if isinstance(raw_r, str) else None,
+            None,
+        )
+        z = zones.setdefault(
+            zone,
+            {
+                "zone": zone,
+                "banks": 0,
+                "unavailable_banks": 0,
+                "rated_kw": 0.0,
+                "available_kw": 0.0,
+                "unavailable_kw": 0.0,
+            },
+        )
+        z["banks"] = int(str(z["banks"])) + 1
+        z["rated_kw"] = float(str(z["rated_kw"])) + kw
+        if bank.available:
+            z["available_kw"] = float(str(z["available_kw"])) + kw
+            available_total += kw
+        else:
+            z["unavailable_banks"] = int(str(z["unavailable_banks"])) + 1
+            z["unavailable_kw"] = float(str(z["unavailable_kw"])) + kw
+            unavailable_total += kw
+            if bank.reason:
+                reasons.add(bank.reason)
+                z["reason"] = bank.reason
+    for z in zones.values():
+        all_out = z["banks"] == z["unavailable_banks"] and int(str(z["banks"])) > 0
+        reason = z.pop("reason", None)
+        z.update(
+            availability_fields(
+                "UNAVAILABLE" if all_out else "AVAILABLE", reason if isinstance(reason, str) else None
+            )
+        )
+    reason = next(iter(sorted(reasons)), None)
+    return {
+        "available_kw": round(available_total, 3),
+        "unavailable_kw": round(unavailable_total, 3),
+        "unavailable_reason": reason,
+        "unavailable_badge": availability_badge(reason) if unavailable_total > 0 else None,
+        "unavailable_text": availability_text(reason) if unavailable_total > 0 else None,
+        "zones": [zones[k] for k in sorted(zones)],
+    }
+
+
 #: `(bank_id, availability, availability_reason, availability_since)` for every bank.
 BANK_AVAILABILITY_SQL: Final = (
     "SELECT bank_id, availability, availability_reason, availability_since FROM og.bank ORDER BY bank_id"
@@ -180,6 +251,7 @@ BANK_AVAILABILITY_SQL: Final = (
 
 __all__ = [
     "BANK_AVAILABILITY_SQL",
+    "BANK_CAPACITY_SQL",
     "GRANDFATHERED_SQL",
     "R_BANK_UNAVAILABLE",
     "BankAvailability",
@@ -187,6 +259,7 @@ __all__ = [
     "availability_fields",
     "availability_text",
     "available_kw",
+    "capacity_summary",
     "contract_labels",
     "grandfathered_banks_by_obligation",
     "is_grandfathered",
