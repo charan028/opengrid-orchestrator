@@ -81,8 +81,7 @@ class RecordedL2Engage:
 
 class StopOutboxBackend(Protocol):
     """K8 durable publish outbox: every accepted ENGAGE/RELEASE is queued and (re)published until the broker
-    acknowledges it. ENGAGEs go before RELEASEs (a stop is never delayed behind a release), each in acceptance
-    order; an entry that fails permanently `max_attempts` times is dead-lettered (skipped, alerted) so it
+    acknowledges it, in acceptance order within a scope and ENGAGE first across scopes; an entry that fails permanently `max_attempts` times is dead-lettered (skipped, alerted) so it
     never blocks later stops."""
 
     async def record_and_enqueue(
@@ -105,7 +104,8 @@ class StopOutboxBackend(Protocol):
 
     async def pending_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
         """Unacknowledged, not dead-lettered entries (fewer than `max_attempts` permanent failures), in
-        acceptance order (the drain orders them: `SafestopService.drain_order`)."""
+        acceptance order (the drain orders them: `SafestopService.drain_order`): the oldest `limit` plus every entry
+        of each scope with a queued ENGAGE, wherever it sits in the queue (an ENGAGE never waits behind a backlog)."""
         ...
 
     async def dead_lettered_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
@@ -120,8 +120,8 @@ class StopOutboxBackend(Protocol):
         outage never dead-letters a stop). Returns the entry's permanent-failure count."""
         ...
 
-    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> None:
-        """ALR-STOP-PUBLISH-DEAD-LETTER (critical), once per entry."""
+    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> bool:
+        """ALR-STOP-PUBLISH-DEAD-LETTER (critical), once per entry while open. True when newly raised."""
         ...
 
     async def l2_engage_record(self, instruction_id: UUID, bank_id: str) -> RecordedL2Engage | None: ...

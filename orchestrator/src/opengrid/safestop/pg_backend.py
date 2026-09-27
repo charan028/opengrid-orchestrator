@@ -76,11 +76,20 @@ INSERT INTO og.stop_outbox (stop_id, action, topic_suffix, payload)
 VALUES (%(stop_id)s, %(action)s, %(topic_suffix)s, %(payload)s)
 ON CONFLICT ON CONSTRAINT stop_outbox_once DO NOTHING
 """
+#: The oldest `limit` live entries PLUS every live entry of each scope that has a queued ENGAGE (the oldest `limit`
+#: ENGAGEs, anywhere in the queue), so an ENGAGE is never stuck behind a long backlog (r3.4.2 review L-2) while its
+#: own scope's older entries still come with it, in order. A scope is the topic without its stop id
+#: (`service.outbox_scope`).
 _PENDING_SQL = """
-SELECT seq, stop_id, action, topic_suffix, payload FROM og.stop_outbox
-WHERE published_at IS NULL AND attempts < %(max_attempts)s
+WITH live AS (
+    SELECT seq, stop_id, action, topic_suffix, payload, regexp_replace(topic_suffix, '/[^/]*$', '') AS scope
+    FROM og.stop_outbox
+    WHERE published_at IS NULL AND attempts < %(max_attempts)s
+)
+SELECT seq, stop_id, action, topic_suffix, payload FROM live
+WHERE seq IN (SELECT seq FROM live ORDER BY seq LIMIT %(limit)s)
+   OR scope IN (SELECT scope FROM live WHERE action = 'ENGAGE' ORDER BY seq LIMIT %(limit)s)
 ORDER BY seq
-LIMIT %(limit)s
 """
 _DEAD_LETTERED_SQL = """
 SELECT seq, stop_id, action, topic_suffix, payload FROM og.stop_outbox
@@ -250,7 +259,7 @@ class PgStopEventBackend:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
 
-    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> None:
+    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> bool:
         condition_key = f"{DEAD_LETTER_ALERT_RULE}:{entry.stop_id}:{entry.action}"
         async with self.pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -271,6 +280,7 @@ class PgStopEventBackend:
                     "condition_key": condition_key,
                 },
             )
+            return cur.rowcount == 1  # False: already open
 
     async def l2_engage_record(self, instruction_id: UUID, bank_id: str) -> RecordedL2Engage | None:
         async with self.pool.connection() as conn, conn.cursor() as cur:

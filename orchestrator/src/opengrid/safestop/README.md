@@ -57,10 +57,13 @@ on restart simply requires the operator to re-arm.
 
 Every accepted ENGAGE and relayed RELEASE is written with its `og.stop_outbox` entry in one transaction and
 published (QoS 1, retained) until the broker acknowledges it, including after a reconnect. The drain keeps
-acceptance order within a scope and gives ENGAGE priority only across scopes. An entry that fails permanently
-`outbox_max_attempts` (5) times is dead-lettered and `ALR-STOP-PUBLISH-DEAD-LETTER` is raised (one open alert
-per entry, re-raised on every drain while missing). Known item (M6): dead-letter alerts are one per entry, not
-coalesced into a single summary alert.
+acceptance order within a scope and gives ENGAGE priority only across scopes. Each drain reads the oldest 100
+entries plus every entry of each scope with a queued ENGAGE, so a stop never waits behind a backlog. A
+permanently failing entry holds back its scope's later RELEASEs, never an ENGAGE. An entry that fails
+permanently `outbox_max_attempts` (5) times is dead-lettered and `ALR-STOP-PUBLISH-DEAD-LETTER` is raised (one
+open alert per entry, re-raised on every drain while missing, traced when newly raised). A dead-lettered ENGAGE
+is still retried on every drain after the live queue, and traced when it finally goes out. Known item (M6):
+dead-letter alerts are one per entry, not coalesced into a single summary alert.
 
 `/metrics` is served on `[metrics].safestop_port` (default **9106**, loopback `[metrics].bind_host`), e.g.
 `og_mqtt_reconnects_total{client="safestop"|"safestop-l2"}` and `og_mqtt_connected`. The guardian's is
