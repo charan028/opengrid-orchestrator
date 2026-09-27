@@ -435,6 +435,49 @@ curl -s -u viewer:... -X POST https://base.tocy-net.net/og/api/trace/verify -H '
 curl -s -u viewer:... "https://base.tocy-net.net/og/api/billing/invoice-lines?from=2026-09-26&to=2026-09-27&format=csv" -o invoice_lines.csv
 ```
 
+### 6.10 Utility grid-control link (r3.4.1, disabled by default)
+
+A utility's EMS (Austin Energy first) can control the fleet directly over DNP3 with mutual TLS. It sends
+toll calls (discharge only, at most 90 minutes) and L2 LIMIT/BLOCK, and it reads status back. The full spec
+is `docs/orchestrator/07-delivery/integrations/grid-link.md` (D-34). The link is off until the lead and the
+owner enable it for a utility.
+
+**What you see when the utility calls**
+
+- The call arrives exactly like a utility call raised from the Dispatch screen: the same obligation, the same
+  90-minute cap and the same checks. It raises **ALR-UTILITY-CALL**, and it is listed with origin
+  `GRID_LINK` and requester `grid_link:<utility>`.
+- A refused call raises **ALR-UTILITY-CALL-REFUSED** with its reason code, for example
+  `R-CALL-OUTSIDE-WINDOW`.
+- You can **end** an EMS call early from Dispatch the same way as any utility call.
+- The utility sees the call's state and reason on its own screen.
+- Every inbound command appears in the audit trail on stream `grid_link:<utility>` (`GRID_LINK_COMMAND`,
+  origin `GRID_LINK`). Refused connections and controls appear as `AUTHZ_DENY` (`GRID_LINK_DENY`).
+
+**L2 LIMIT/BLOCK from the link** appear as ordinary utility instructions, issued by `UTILITY_GRID_LINK`. They
+show on the Fleet page and are enforced by the guardian (G-15), like SCADA instructions.
+
+**Heartbeat lost** (trace `GRID_LINK_STATE` = `HEARTBEAT_LOST`, and an error in og-engine's log):
+
+- The link refuses new calls until heartbeats resume. A call already running continues to its own end.
+- L2 limits and blocks stay exactly as the utility last set them. Nothing is lifted automatically.
+- Contact the utility's control room.
+- If a call must stop, end it from Dispatch. Cancels from the EMS are also still accepted.
+
+**Checks from a shell** (read only):
+
+```bash
+journalctl -u og-engine --since -10min | grep -i 'grid link'   # listening, associations, refusals, state changes
+```
+
+**Enabling a utility** is a release-manager step, never an operator one. It needs:
+
+1. the signed point list;
+2. certificates in `/etc/opengrid/certs/`;
+3. MQTT user `og_gridlink` with publish on `og/v1/scada/instruction/#`;
+4. a firewall opening for the utility's EMS addresses only;
+5. both `enabled` switches in `[grid_link]`, then a restart of og-engine.
+
 ## 7. Degraded modes and guardian escalation
 
 ### 7.1 Degraded modes

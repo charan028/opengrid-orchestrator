@@ -18,6 +18,7 @@ Precedence and production safety (mirrors the orchestrator's platform/config.py)
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -617,6 +618,9 @@ class ScadaConfig:
     # duplication as `substation_assets`), so `ogsim.scada` measures each simulated truck's own
     # single-hub bank. Only `simulate: true` entries get a bank; empty by default.
     mobile_units: tuple[MobileUnitConfig, ...] = ()
+    # Utility grid-control link (D-34): the raw `grid_link` table, parsed by `ogsim.scada.grid_link`.
+    # Empty (disabled) by default: L2 instructions then travel on MQTT only, as before.
+    grid_link: Mapping[str, Any] = field(default_factory=dict)
 
 
 def load_scada_config(path: str | None = None) -> ScadaConfig:
@@ -641,6 +645,7 @@ def load_scada_config(path: str | None = None) -> ScadaConfig:
         zone_blocks=_zone_blocks_from_raw(raw.get("zone_blocks", [])),
         substation_assets=_substation_assets_from_raw(raw.get("substation_assets", [])),
         mobile_units=_mobile_units_from_raw(raw.get("mobile_units", [])),
+        grid_link=dict(raw.get("grid_link") or {}),
     )
 
 
