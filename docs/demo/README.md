@@ -1,4 +1,4 @@
-# OpenGrid Orchestrator: sign-off demo (DEMO-2, release R2)
+# OpenGrid Orchestrator: sign-off demo (DEMO-2, release R3.1)
 
 A presenter runs this start to finish in about 15 minutes against the server or the local dev stack. Every
 injected moment is a scenario or anomaly on the simulator control plane (`/ogsim/`), so the run is repeatable.
@@ -107,6 +107,17 @@ the id you `DELETE` to end a moment early.
    ```
    The steps below use `$BANK`, `$ZONE` and `$HUB`; the Dispatch pipeline must read at least `3 customers` with
    cards in COMMITTED (then DELIVERING) for the window.
+
+   **For steps 13-14 (demo-03),** the seed's last line names the zone to take dark. Substitution and SHORTFALL
+   show only where a committed obligation sits, and the selector, not the seed, picks the banks (it holds kW
+   where the zone's forecast price makes it cheapest), so LZ_SOUTH is not guaranteed:
+   ```bash
+   # e.g. "demo-03 zone: LZ_SOUTH (bank-005 carries DIST_DEFERRAL); a hub on it: hub-00005"
+   ZONE3=LZ_SOUTH; HUB3=hub-00005
+   ```
+   If it reads LZ_SOUTH, run the shipped scenario in step 13. If it names another zone ("no demo customer
+   landed in LZ_SOUTH"), either re-run the seed with `--start` on a later quarter hour and check again, or use
+   step 13's two `curl` lines on `$HUB3` and `$ZONE3` instead of the scenario (every base zone has 500 hubs).
 4. **The AS award.** Dispatch → "AS awards & deployment" lists the seeded ERCOT_AS award (contract
    `00000000-0000-7000-8000-000000000d03`, ECRS since migration `0022`) in state `held`. If the table reads "No
    active ERCOT_AS awards are visible", give that contract an opportunity for the demo window as in item 3.
@@ -243,16 +254,24 @@ Timing is the budget per step; the total is about 15 minutes.
 ### Topic 7: comms loss, substitution, then best effort
 
 **Step 13: One hub goes quiet, the bank covers for it** [ogsim] (45 s)
-- **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/run -H 'Content-Type: application/json' -d '{"speed": 1}'`,
-  then `/og/fleet?bank=bank-001`.
-- **Show:** bank-001's 50 hubs; `hub-00001`.
-- **Expect:** `hub-00001` goes `stale` after 6 s and `offline` after 30 s; the other 49 hubs pick up its share, so
-  the obligation on bank-001 keeps its granted kW (substitution: a grant change, never a commitment write).
+- **Action (the seed's demo-03 zone is LZ_SOUTH):** `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/run -H 'Content-Type: application/json' -d '{"speed": 1}'`,
+  then `/og/fleet?bank=bank-001`. The scenario's hub is `hub-00001` on bank-001, so its substitution shows only if
+  the seed's bank is bank-001; for another LZ_SOUTH bank, also run the `hub_offline` line below on `$HUB3` and
+  watch that bank. The zone step still gives the SHORTFALL.
+- **Action (another zone):** `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "hub_offline", "target": "'$HUB3'", "params": {}, "duration": 300}'`
+  now, and 90 s later (step 14)
+  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "zone_mass_disconnect", "target": "'$ZONE3'", "params": {}, "duration": 240}'`.
+  Each response carries the anomaly's `id` to `DELETE`. Read `$ZONE3` for LZ_SOUTH in step 14.
+- **Show:** the hub's bank on `/og/fleet?bank=<bank>`; the hub.
+- **Expect:** the hub goes `stale` after 25 s and `offline` after 60 s (`[health] hub_stale_s`, `hub_offline_s`;
+  hubs report every 10 s since R3); the other 49 hubs pick up its share, so the obligation on that bank keeps its
+  granted kW (substitution: a grant change, never a commitment write).
 
 **Step 14: The whole zone goes quiet; best effort** (60 s)
 - **Action:** At +90 s the scenario disconnects all of `LZ_SOUTH`. Open System Health, then `/og/dispatch`.
 - **Show:** "Hub health"; "Alerts"; the pipeline cards.
-- **Expect:** 500 LZ_SOUTH hubs `offline`; `ALR-HUB-OFFLINE-RATIO` for LZ_SOUTH, critical (over 20%). A
+- **Expect:** 500 LZ_SOUTH hubs `offline` about 60 s after the disconnect (so about 150 s after the run starts);
+  `ALR-HUB-OFFLINE-RATIO` for LZ_SOUTH, critical (over 20%). A
   delivering obligation on an LZ_SOUTH bank with no substitute left moves to **SHORTFALL** after 60 s
   sustained, with reason `R-COMMIT-LOCK-INFEASIBLE` (on the card at load, and in the trace: stream
   `shortfall-<obligation id>`, class `ALLOCATOR_SHORTFALL`), and its card turns amber (AT_RISK). Say (decision

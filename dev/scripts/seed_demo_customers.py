@@ -12,6 +12,12 @@ DIST_DEFERRAL `...0d04`, PARTNER_CAPACITY `...0d05`) for one demo window and let
 The selector decides which banks carry each obligation, so the script waits for the commit and prints them.
 Use the DIST_DEFERRAL obligation's bank as the demo bank (DEMO-2 steps 6 and 11-12 assume `bank-012`).
 
+`demo-03` (#43 B4) shows substitution and SHORTFALL only in a zone that carries a committed obligation, and the
+selector (not this script) picks the banks: it places each obligation where the zone's forecast price makes
+the held kW cheapest, so LZ_SOUTH is not guaranteed. The script therefore ends with a `demo-03 zone:` line:
+LZ_SOUTH when a committed demo customer has a bank there, otherwise the zone that carries the most of them,
+with a hub on that bank for the scenario's single-hub step (docs/demo/README.md, "Before you start").
+
 Idempotent: a contract that already has a live obligation (SELECTED, COMMITTED or DELIVERING) overlapping the
 window is left alone, and an OFFERED opportunity for the same window is reused instead of admitted twice.
 
@@ -40,6 +46,8 @@ from psycopg.rows import dict_row
 DEV_DIR = Path(__file__).resolve().parents[1]
 INTERVAL = timedelta(minutes=15)
 LIVE_STATES = ("SELECTED", "COMMITTED", "DELIVERING")
+#: The zone `integration-sims/scenarios/demo-03-zone-comms-loss.yaml` darkens.
+DEMO03_ZONE = "LZ_SOUTH"
 
 #: (label, contract id from 0002_seed_demo.sql, requested kW). PARTNER_CAPACITY is an all-or-nothing block
 #: with a 50 kW minimum (its product rule `...0e05`).
@@ -134,6 +142,29 @@ def _banks(conn: psycopg.Connection[Any], opportunity_id: Any) -> list[str]:
         {"o": opportunity_id},
     )
     return [row["bank_id"] for row in found]
+
+
+def demo03_zone(
+    zone_by_bank: dict[str, str], carried: dict[str, list[str]]
+) -> tuple[str, str] | None:
+    """`(zone, bank)` for demo-03's comms loss: LZ_SOUTH (the shipped scenario's zone) when a committed demo
+    customer has a bank there, otherwise the zone carrying the most demo customers; the bank is the one in
+    that zone carrying the most, then the lowest id. `None` when nothing is committed yet."""
+    if not carried:
+        return None
+    by_zone: dict[str, set[str]] = {}
+    for bank, labels in carried.items():
+        by_zone.setdefault(zone_by_bank.get(bank, "?"), set()).update(labels)
+    zone = (
+        DEMO03_ZONE
+        if DEMO03_ZONE in by_zone
+        else min(by_zone, key=lambda z: (-len(by_zone[z]), z))
+    )
+    bank = min(
+        (b for b in carried if zone_by_bank.get(b, "?") == zone),
+        key=lambda b: (-len(carried[b]), b),
+    )
+    return zone, bank
 
 
 def main() -> int:
@@ -262,6 +293,31 @@ def main() -> int:
                 f"demo bank: {bank} (zone {zone[0]['zone'] if zone else '?'}; carries "
                 f"{', '.join(carried[bank])}); a hub on it: {first_hub[0]['hub_id'] if first_hub else '?'}"
             )
+            zone_by_bank = {
+                row["bank_id"]: row["zone"]
+                for row in _rows(
+                    conn,
+                    "SELECT bank_id, zone FROM og.bank WHERE bank_id = ANY(%(b)s)",
+                    {"b": list(carried)},
+                )
+            }
+            picked = demo03_zone(zone_by_bank, carried)
+            if picked is not None:
+                zone3, bank3 = picked
+                hub3 = _rows(
+                    conn,
+                    "SELECT min(hub_id) AS hub_id FROM og.hub WHERE bank_id = %(b)s",
+                    {"b": bank3},
+                )
+                print(
+                    f"demo-03 zone: {zone3} ({bank3} carries {', '.join(carried[bank3])}); "
+                    f"a hub on it: {hub3[0]['hub_id'] if hub3 else '?'}"
+                    + (
+                        ""
+                        if zone3 == DEMO03_ZONE
+                        else f" (no demo customer landed in {DEMO03_ZONE})"
+                    )
+                )
         if not ok:
             print(
                 "not every demo customer is committed yet; the selector's next gate may still take them"

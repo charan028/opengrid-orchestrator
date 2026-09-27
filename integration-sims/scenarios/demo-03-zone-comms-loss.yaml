@@ -1,13 +1,15 @@
 name: demo-03-zone-comms-loss
 description: >
-  DEMO step 11-12 (docs/demo/README.md), two moments. At 0 s one hub on
-  bank-001 (hub-00001, LZ_SOUTH) stops reporting: after 30 s it is offline
+  DEMO step 13-14 (docs/demo/README.md), two moments. At 0 s one hub on
+  bank-001 (hub-00001, LZ_SOUTH) stops reporting: after 60 s it is offline
   and the allocator substitutes the other hubs on bank-001 so the
   obligation's granted kW does not move (R-SUBSTITUTION, never a
   commitment write). At 90 s every hub in LZ_SOUTH (500 hubs, banks
   bank-001, -005, ... -037) stops reporting: ALR-HUB-OFFLINE-RATIO:LZ_SOUTH
   goes critical (100% > 20%) and any LZ_SOUTH obligation with no substitute
-  left goes SHORTFALL with R-COMMIT-LOCK-INFEASIBLE. Both clear on their own
+  left goes SHORTFALL with R-COMMIT-LOCK-INFEASIBLE. Only a committed
+  obligation on an LZ_SOUTH bank shows either effect; the demo seed's
+  "demo-03 zone:" line says whether one landed there. Both clear on their own
   (300 s / 240 s). To end early:
   DELETE /api/anomalies/demo-03-zone-comms-loss:hub_offline:0 and
   DELETE /api/anomalies/demo-03-zone-comms-loss:zone_mass_disconnect:90.
