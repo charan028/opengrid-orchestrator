@@ -449,7 +449,7 @@ def _dedicated_statements(*, only_missing: bool, only_hub: str | None = None) ->
             "-- POI premise of a utility-scale hub: its nameplate, only where og.hub has none (never overwritten).",
             "\n".join(
                 [
-                    f"UPDATE og.hub h SET service_kw = coalesce(h.service_kw, {poi}),",
+                    f"UPDATE og.hub h SET service_kw = coalesce(h.service_kw, {poi}),",  # noqa: S608
                     f"    export_limit_kw = coalesce(h.export_limit_kw, {poi})",
                     "FROM og.bank b",
                     f"WHERE b.bank_id = h.bank_id AND {banks}",
