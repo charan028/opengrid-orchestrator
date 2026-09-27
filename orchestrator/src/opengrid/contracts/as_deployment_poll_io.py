@@ -19,6 +19,9 @@ from uuid import UUID
 import httpx
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.calls import CallLimits, CallOrigin, CallRefused, CallRequest, PgCallStore, cancel_call
+from opengrid.calls import CallOutcome as CallResult
+from opengrid.calls import find_call_by_key, issue_call
 from opengrid.contracts.as_deployment_poll import CallOutcome, ErcotAsPoller, settings_from
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import clear_alert, fetch_open_alerts, raise_alert
@@ -106,17 +109,45 @@ class CoreCallGateway:
     """`AsCallGateway` over the shared AS-deployment core (`opengrid.calls`)."""
 
     def __init__(self, pool: AsyncConnectionPool, trace: TraceStore, cfg: object) -> None:
-        self._pool = pool
+        self._store = PgCallStore(pool)
         self._trace = trace
-        self._cfg = cfg
+        self._limits = CallLimits.from_config(cfg)
 
     async def deploy(
         self, instruction: DispatchInstruction, *, obligation_id: UUID, principal: str, now: datetime
     ) -> CallOutcome:
-        raise NotImplementedError  # wired to opengrid.calls.issue_call (integ/utility-api)
+        if instruction.end_at is None:
+            return CallOutcome(False, "R-ERCOT-AS-NO-END", 422, "instruction has no end time")
+        mw = instruction.mw
+        request = CallRequest(
+            origin=CallOrigin.ERCOT_POLL,
+            principal=principal,
+            reason=f"ERCOT {instruction.service} deployment {instruction.instruction_id}"[:200],
+            obligation_id=obligation_id,
+            start_at=instruction.start_at,
+            end_at=instruction.end_at,
+            requested_kw=-float(mw * 1000) if mw is not None and mw > 0 else None,
+            idempotency_key=instruction.instruction_id,
+        )
+        try:
+            record = await issue_call(self._store, self._trace, request, limits=self._limits, now=now)
+        except CallRefused as exc:
+            return CallOutcome(False, exc.reason_code, exc.http_status, exc.detail)
+        return CallOutcome(True, call_id=str(record.call_id), duplicate=record.replayed)
 
     async def recall(self, deployment_instruction_id: str, *, principal: str, now: datetime) -> CallOutcome:
-        raise NotImplementedError  # wired to opengrid.calls.cancel_call
+        record = await find_call_by_key(self._store, principal, deployment_instruction_id)
+        if record is None:
+            return CallOutcome(False, "R-ERCOT-AS-NOTHING-TO-RECALL", 404, "no call for that instruction")
+        try:
+            await cancel_call(
+                self._store, self._trace, record.call_id, origin=CallOrigin.ERCOT_POLL, principal=principal, now=now
+            )
+        except CallRefused as exc:
+            return CallOutcome(False, exc.reason_code, exc.http_status, exc.detail)
+        return CallOutcome(True, call_id=str(record.call_id))
 
     async def has_call(self, instruction_id: str, *, principal: str) -> bool:
-        raise NotImplementedError  # wired to opengrid.calls.find_call_by_key
+        """True only for an ACCEPTED call: a refused one is answered from the poller's own memory."""
+        record = await find_call_by_key(self._store, principal, instruction_id)
+        return record is not None and record.outcome == CallResult.ACCEPTED
