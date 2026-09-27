@@ -11,7 +11,7 @@
 #      extensions, schema og                                                          BOOTSTRAP.md 3
 #   d  create_schema.sh: migrations 0001 -> latest (opengrid.platform.db migrate)     BOOTSTRAP.md 6
 #   e  seeds, in order: fleet (base + enabled zone blocks) -> market model (utilities, $102 toll, substation
-#      asset) -> customer services -> services -> topology -> trucks (when the release has them); the
+#      asset) -> customer services -> services -> trucks (when the release has them) -> topology; the
 #      charge-window default and the firmware catalogue come with 0038 and [firmware.catalogue]; then
 #      deploy/scripts/bootstrap_check.py asserts the counts                          BOOTSTRAP.md 7, 8
 #   f  sim configs: <etc>/sim/{fleet,scada}.yaml with the approved zone blocks on     BOOTSTRAP.md 8
@@ -227,7 +227,7 @@ phase_e() {
   local seed="$RELEASE/dev/seed" trucks=""
   if [ "$DRY" -eq 1 ]; then
     echo "  DRY: fleet seed (OG_FLEET_SIM_CONFIG=$SIM_DIR/fleet.yaml), then market_model_seed.sql,"
-    echo "       customer_services_seed.sql, services_seed.sql, topology_seed.py, mobile_trucks_seed.sql (if present)"
+    echo "       customer_services_seed.sql, services_seed.sql, mobile_trucks_seed.sql (if present), topology_seed.py"
     return 0
   fi
   log "  1/6 fleet: base 2,000 hubs + enabled zone blocks ($ZONES)"
@@ -238,14 +238,15 @@ phase_e() {
   psql_file "$seed/customer_services_seed.sql"
   log "  4/6 services (PJM_CAPACITY, MOBILE_STORAGE, LARGE_LOAD)"
   psql_file "$seed/services_seed.sql"
-  log "  5/6 topology (transformers, feeder/substation limits, home-bank assets)"
+  if [ -f "$seed/mobile_trucks_seed.sql" ]; then
+    log "  5/6 mobile trucks"; psql_file "$seed/mobile_trucks_seed.sql"; trucks="--expect-trucks"
+  else
+    log "  5/6 mobile trucks: SKIPPED (dev/seed/mobile_trucks_seed.sql not in this release)"
+  fi
+  # Last: it maps every hub already in og.hub, the substation set's and the trucks' included.
+  log "  6/6 topology (transformers for every hub, feeder/substation limits, home-bank assets)"
   with_db bash -c '"$0" "$1/dev/seed/topology_seed.py" --fleet-config "$2/fleet.yaml" --scada-config "$2/scada.yaml" \
     --dsn "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER"' "$OG_PY" "$RELEASE" "$SIM_DIR" | sed 's/^/      /'
-  if [ -f "$seed/mobile_trucks_seed.sql" ]; then
-    log "  6/6 mobile trucks"; psql_file "$seed/mobile_trucks_seed.sql"; trucks="--expect-trucks"
-  else
-    log "  6/6 mobile trucks: SKIPPED (dev/seed/mobile_trucks_seed.sql not in this release)"
-  fi
   echo "  charge-window default: migration 0038; firmware catalogue: [firmware.catalogue] in orchestrator.toml"
   phase_check "$trucks"
 }
