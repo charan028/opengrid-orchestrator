@@ -39,7 +39,9 @@ def _target_hub_in_bank(stack: Stack) -> tuple[str, str]:
 
 def _live_target(stack: Stack, trace_id: str) -> bool:
     items = stack.get("/fleet/manual-targets").json().get("items", [])
-    return any(item["trace_id"] == trace_id for item in items)
+    # r3.4 lists cancelled/stopped targets too, with a status: only ACTIVE means live. Fix credited to
+    # rpagaria2000's suite (workstation r3.4 review).
+    return any(item["trace_id"] == trace_id and item.get("status", "ACTIVE") == "ACTIVE" for item in items)
 
 
 def test_ts_06_24_a_second_operator_releases_the_stop_and_the_command_path_resumes(stack: Stack) -> None:

@@ -219,6 +219,7 @@ async def confirm_bulk(
     proposal_id: UUID,
     proposals: Annotated[ProposalStore, Depends(get_proposals)],
     trace_store: Annotated[TraceStore, Depends(get_trace_store)],
+    target_trace_store: Annotated[TraceStore, Depends(fleet.get_manual_target_trace_store)],
     store: Annotated[StoreProtocol, Depends(get_store)],
     cfg: Annotated[Config, Depends(get_config)],
     identity: Annotated[Identity, Depends(require_bulk_command)],
@@ -256,8 +257,9 @@ async def confirm_bulk(
     confirm_ref = await _trace_step(trace_store, identity, step, {"proposal_id": str(proposal_id)})
     response.status_code = status.HTTP_202_ACCEPTED  # executed: the engine is now ramping (single-hub parity)
     first = state.confirmations[0]["operator"] if state.confirmations else identity.user
+    # The MANUAL_TARGET itself goes through the DB-or-nothing store (a 503 "not recorded" stays true).
     issued = await fleet.issue_manual_target(
-        trace_store,
+        target_trace_store,
         store,
         operator=first,
         hub_ids=state.hub_ids,
@@ -287,4 +289,5 @@ async def confirm_bulk(
         "manual_target_trace_id": issued["trace_id"],
         "expires_at": issued["expires_at"],
         "trace_id": str(result_ref.trace_id),
+        **({"warnings": issued["warnings"]} if issued.get("warnings") else {}),
     }

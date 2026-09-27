@@ -4,9 +4,10 @@ two-step confirmation (the engine ramps it, the guardian signs each step), and t
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sse_starlette.sse import EventSourceResponse
@@ -26,7 +27,14 @@ from opengrid.core.manual_targets import (
     effective_targets,
 )
 from opengrid.platform.config import Config
-from opengrid.trace.store import TraceStore
+from opengrid.trace.pg_backend import (
+    PgTraceBackend,
+    TraceJournalUnavailableError,
+    TraceNotRecordedError,
+)
+from opengrid.trace.store import TraceRecordRef, TraceStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/og/api/fleet", tags=["fleet"])
 
@@ -123,6 +131,31 @@ async def stream_fleet(
 DEFAULT_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 240
 _MAX_BANK_HUBS = 2000
+#: Manual targets are traced on their own stream (`manual_target:<user>`) through a DB-or-nothing backend
+#: (`journal_failed_writes=False`): a write that cannot reach og.trace raises instead of being journaled, so a
+#: target the API answered 503 "not recorded" can never appear later through a journal replay or an engine
+#: restart (workstation r3.4 review, LOW/R5). The engine and guardian read targets by event_class, not stream.
+MANUAL_TARGET_STREAM_PREFIX = "manual_target:"
+_NOT_RECORDED_DETAIL = "manual target not recorded (trace store unavailable); nothing will ramp -- retry"
+_UNKNOWN_DETAIL = (
+    "manual target outcome unknown (the trace store failed and could not be re-checked); it may be live -- "
+    "check GET /og/api/fleet/manual-targets before retrying"
+)
+
+
+def get_manual_target_trace_store(
+    request: Request, default: Annotated[TraceStore, Depends(get_trace_store)]
+) -> TraceStore:
+    """og-api's DB-or-nothing trace store for manual targets, built once on the app's pool. Without a pool
+    (unit tests that inject a fake trace store) it is the injected store."""
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return default
+    store: TraceStore | None = getattr(request.app.state, "manual_target_trace_store", None)
+    if store is None:
+        store = TraceStore(PgTraceBackend(pool, journal_failed_writes=False))
+        request.app.state.manual_target_trace_store = store
+    return store
 
 
 @router.post("/command", status_code=status.HTTP_202_ACCEPTED)
@@ -144,7 +177,7 @@ async def propose_command(
 async def confirm_command(
     proposal_id: UUID,
     proposals: Annotated[ProposalStore, Depends(get_proposals)],
-    trace_store: Annotated[TraceStore, Depends(get_trace_store)],
+    trace_store: Annotated[TraceStore, Depends(get_manual_target_trace_store)],
     store: Annotated[StoreProtocol, Depends(get_store)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
@@ -193,28 +226,26 @@ async def issue_manual_target(
         )
     now = datetime.now(UTC)
     expires_at = now + timedelta(minutes=minutes)
-    trace_ref = await trace_store.append(
-        stream_id=f"operator_action:{operator}",
-        decision_type="OPERATOR_ACTION",
-        event_class=MANUAL_TARGET_EVENT,
-        payload={
+    trace_ref = await _append_manual_target(
+        trace_store,
+        store,
+        operator,
+        {
             "hub_ids": hub_ids,
             "p_kw_command": float(p_kw_target),
             "sign_convention": SIGN_CONVENTION,
+            # issued_at is set HERE, at write time: the engine's late-record guard compares against it.
             "issued_at": now.isoformat(),
             "expires_at": expires_at.isoformat(),
             "proposer": operator,
             "reason": reason,
             **(extra or {}),
         },
-        reason_codes=["MANUAL_OPERATOR"],
     )
-    await _require_recorded(store, trace_ref.trace_id)
-    await store.insert_operator_action(
+    warnings = await _record_operator_action(
+        store,
         operator_ref=operator,
-        action_kind="MANUAL_COMMAND",
         target_ref=target_ref,
-        tier="TIER1",
         reason=reason,
         trace_id=trace_ref.trace_id,
         confirmed_at=now,
@@ -226,7 +257,71 @@ async def issue_manual_target(
         "expires_at": expires_at.isoformat(),
         "hub_ids": hub_ids,
         "p_kw_target": float(p_kw_target),
+        **({"warnings": warnings} if warnings else {}),
     }
+
+
+async def _append_manual_target(
+    trace_store: TraceStore, store: StoreProtocol, operator: str, payload: dict[str, Any]
+) -> TraceRecordRef:
+    """Append one MANUAL_TARGET row, DB-or-nothing, and return its ref -- or 503 "not recorded", which is
+    then TRUE: the backend journals nothing, so no replay or restart can bring the row back later. The one
+    ambiguous case (the insert committed but its acknowledgement was lost) is settled by looking the row up
+    by this request's `request_id`: found -> success; absent -> 503 "not recorded" (true); the lookup itself
+    failing -> 503 "outcome unknown" (never a false "not recorded")."""
+    request_id = str(uuid4())
+    try:
+        ref = await trace_store.append(
+            stream_id=f"{MANUAL_TARGET_STREAM_PREFIX}{operator}",
+            decision_type="OPERATOR_ACTION",
+            event_class=MANUAL_TARGET_EVENT,
+            payload={**payload, "request_id": request_id},
+            reason_codes=["MANUAL_OPERATOR"],
+        )
+    except (TraceNotRecordedError, TraceJournalUnavailableError) as exc:
+        try:
+            committed = await store.manual_target_trace_id(request_id)
+        except Exception as lookup_exc:
+            # Cannot tell whether the insert committed before its acknowledgement was lost: say so, never
+            # claim "not recorded" when the target might be live.
+            logger.error("manual target outcome unknown", extra={"operator": operator}, exc_info=True)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=_UNKNOWN_DETAIL) from lookup_exc
+        if committed is None:
+            logger.error("manual target not recorded", extra={"operator": operator}, exc_info=True)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=_NOT_RECORDED_DETAIL) from exc
+        return TraceRecordRef(committed, "", -1, "")
+    await _require_recorded(store, ref.trace_id)
+    return ref
+
+
+async def _record_operator_action(
+    store: StoreProtocol,
+    *,
+    operator_ref: str,
+    target_ref: str,
+    reason: str,
+    trace_id: UUID,
+    confirmed_at: datetime,
+    approver_ref: str | None = None,
+) -> list[str]:
+    """The `og.operator_action` audit row for a target that is ALREADY durably traced (and so live). A
+    failure here must not turn into a 500 while the engine ramps the target: the durable result is returned
+    with a warning (the K10 trace row remains the authoritative record)."""
+    try:
+        await store.insert_operator_action(
+            operator_ref=operator_ref,
+            action_kind="MANUAL_COMMAND",
+            target_ref=target_ref,
+            tier="TIER1",
+            reason=reason,
+            trace_id=trace_id,
+            confirmed_at=confirmed_at,
+            approver_ref=approver_ref,
+        )
+    except Exception:
+        logger.exception("operator_action row not written for a recorded manual target")
+        return ["operator_action audit row not written; the trace record stands"]
+    return []
 
 
 async def _require_recorded(store: StoreProtocol, trace_id: UUID) -> None:
@@ -292,7 +387,7 @@ async def list_manual_targets(
 @router.post("/manual-targets/{trace_id}/cancel")
 async def cancel_manual_target(
     trace_id: UUID,
-    trace_store: Annotated[TraceStore, Depends(get_trace_store)],
+    trace_store: Annotated[TraceStore, Depends(get_manual_target_trace_store)],
     store: Annotated[StoreProtocol, Depends(get_store)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
@@ -315,11 +410,11 @@ async def cancel_manual_target(
                 "status": sorted({s.status.value for s in mine.values()}),
             },
         )
-    trace_ref = await trace_store.append(
-        stream_id=f"operator_action:{identity.user}",
-        decision_type="OPERATOR_ACTION",
-        event_class=MANUAL_TARGET_EVENT,
-        payload={
+    trace_ref = await _append_manual_target(
+        trace_store,
+        store,
+        identity.user,
+        {
             "hub_ids": hub_ids,
             "p_kw_command": live[hub_ids[0]].p_kw_target,
             "sign_convention": SIGN_CONVENTION,
@@ -329,14 +424,11 @@ async def cancel_manual_target(
             "reason": "cancel",
             "cancels": str(trace_id),
         },
-        reason_codes=["MANUAL_OPERATOR"],
     )
-    await _require_recorded(store, trace_ref.trace_id)
-    await store.insert_operator_action(
+    warnings = await _record_operator_action(
+        store,
         operator_ref=identity.user,
-        action_kind="MANUAL_COMMAND",
         target_ref=f"cancel:{trace_id}",
-        tier="TIER1",
         reason="cancel manual target",
         trace_id=trace_ref.trace_id,
         confirmed_at=now,
@@ -346,6 +438,7 @@ async def cancel_manual_target(
         "trace_id": str(trace_ref.trace_id),
         "cancels": str(trace_id),
         "hub_ids": hub_ids,
+        **({"warnings": warnings} if warnings else {}),
     }
 
 

@@ -230,6 +230,12 @@ def test_hub_id_from_topic() -> None:
         {"asset_class": "EV"},
         {"install_date": "14/03/2025"},
         {"extra_field": 1},
+        # R4: control characters (a NUL poisons jsonb and the trace journal) and unbounded strings
+        {"manufacturer": "evil\x00corp"},
+        {"model": "line\nbreak"},
+        {"serial_number": "x" * 129},
+        {"firmware_version": "\x7f"},
+        {"hub_id": "hub/00012"},
     ],
 )
 async def test_invalid_messages_are_rejected(bad: dict[str, Any]) -> None:
