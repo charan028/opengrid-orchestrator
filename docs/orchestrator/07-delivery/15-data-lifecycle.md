@@ -34,7 +34,8 @@ whatever its policy row says.
 | `invoice_line`, `pnl` | **never deleted** (`protected`) | monthly write-once export | forever | monthly |
 | `meter_interval`, `performance` | **never deleted** (`protected`) | — | forever | — |
 | `trace`, `trace_checkpoint` | **not this job** | — | per `og.retention_policy`, pruned only behind a checkpoint (K11, 02a §8.3) | — |
-| `dispatch_call` (0047, D-33), `delivery_record` (0050, D-38) | **no policy row** (r3.4.3) | — | kept: not in `og.data_retention` or the whitelist, so never deleted | no |
+| `dispatch_call` (0047, D-33) | **no policy row** (r3.4.3) | — | kept: not in `og.data_retention` or the whitelist, so never deleted | no |
+| `delivery_record` (0050, D-38) | `NONE`, not `protected` (row added by 0051, r3.4.3) | — | summary kept: not in the whitelist, so never deleted; the per-bucket `series` of a final record is emptied by og-settle's delivery job after `[delivery].series_keep_days` (60 d, the `og.grant` / `og.command_batch` horizon), in batches of `series_prune_batch`, and `series_pruned_at` records when | no |
 
 The r3.4.x tables are small: one `og.dispatch_call` row per call or refusal from any origin, and one
 `og.delivery_record` row per discharge call (utility toll call, ERCOT AS deployment or manual discharge target),
@@ -357,8 +358,9 @@ The findings below come from the index definitions and the query shapes (static 
 - Settle still meters from raw `og.telemetry`. Past 7 days, M&V must read `og.telemetry_1m`, which is a
   request to the SETTLE owner. The same holds for delivery verification (D-38): it reads raw telemetry within
   `[delivery].lookback_s` (1 h) of a call's end, and its result is then kept in `og.delivery_record`.
-- `og.dispatch_call` and `og.delivery_record` have no retention policy (§8.2). They grow by one row per call, so
-  this is not urgent, but a policy row plus a whitelist entry is needed before they are deleted from.
+- `og.dispatch_call` has no retention policy and `og.delivery_record` has a `NONE` row (0051) (§8.2). Both grow by
+  one row per call, so this is not urgent, but a deleting policy plus a whitelist entry is needed before either is
+  deleted from. The bulk of a `delivery_record` row, its `series`, is already emptied after 60 days.
 - The trace quarantine file (§8.3) has no rotation or pruning.
 
 ## 8. Changes at r3.4.1 to r3.4.3
@@ -378,10 +380,10 @@ change without its trace (K10). Neither step touches the other's tables.
 | Data | Written by | Retention at r3.4.3 |
 |---|---|---|
 | `og.dispatch_call` (migration 0047) | `opengrid.calls`, every origin, refusals included | kept (no `og.data_retention` row) |
-| `og.delivery_record` (migration 0050) | og-settle's delivery job (`opengrid.delivery`) | kept (no `og.data_retention` row) |
+| `og.delivery_record` (migration 0050; retention row and `series_pruned_at` from 0051) | og-settle's delivery job (`opengrid.delivery`) | summary kept (`og.data_retention` mode `NONE`); `series` emptied after `[delivery].series_keep_days` (60 d) |
 | `og.as_deployment` (`source`, `requested_kw`, `call_id` added by 0047) | `opengrid.calls` | unchanged: not in the whitelist, kept |
 | `og.feed_obs` rows flagged `EXTREME_UNCORROBORATED` (migration 0045) | og-feeds | like every `feed_obs` row: 30 days, then exported and deleted |
-| Trace rows of class `DELIVERY_VERIFICATION` (stream `delivery`) and of the new streams (`manual_target:<user>`, `trace_quarantine`, `grid_link:<utility>`) | og-settle, og-api, og-engine | pruned only if their event class has an `og.retention_policy` row with `prune_after_checkpoint`; otherwise kept |
+| Trace rows of class `DELIVERY_VERIFICATION` (stream `delivery`) and of the new streams (`manual_target:<user>`, `trace_quarantine`, `grid_link:<utility>`) | og-settle, og-api, og-engine | pruned only if their event class has an `og.retention_policy` row with `prune_after_checkpoint`; otherwise kept. The final-record rows (decision type `DELIVERY_RECORD`) can be written only once migration 0054 adds that type to the `og.trace` CHECK; before it they were quarantined (`ALR-TRACE-QUARANTINED`) and replay unchanged after 0054. 0054 does not change retention (policies are per event class) |
 
 ### 8.3 Quarantine (r3.4.1)
 
@@ -397,3 +399,5 @@ change without its trace (K10). Neither step touches the other's tables.
   0045); forecasts built on an uncorroborated latest value are marked NOT_FOR_FIRM.
 - **Manual targets** are written DB-or-nothing on their own stream and are never journaled, so a 503 "not
   recorded" cannot be undone later by a replay.
+
+**r3.4.3, migration 0052:** `og.dispatch_call` (the call ledger, D-33) and `og.as_deployment` get `og.data_retention` rows, mode `NONE` and `protected` (the CHECK then forbids any keep window): the call audit trail and toll settlement are never deleted. Neither table is in the lifecycle job's `DELETABLE_TABLES`, so this makes the existing behaviour explicit and visible. Any statement above that these tables have no retention row predates 0052.

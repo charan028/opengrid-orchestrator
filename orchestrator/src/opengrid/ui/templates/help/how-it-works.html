@@ -143,7 +143,7 @@
 <li><b>Who.</b> Role <code>utility</code>, Apache account <code>og-util-aen</code> bound to <code>AUSTIN_ENERGY</code>; the utility must also be in <code>[api.utility_api].enabled_utilities</code>. Another utility's data answers <code>404</code>, exactly like a missing one, and is traced as <code>AUTHZ_DENY</code>.</li>
 <li><b>Checks (<code>opengrid.calls.rules</code>).</b> A utility (API or grid link) may call only a <code>REGULATED_CAPACITY</code> <code>TOLLING</code> obligation in <code>COMMITTED</code>, <code>DELIVERING</code> or <code>SHORTFALL</code>; discharge only (<code>R-CALL-CHARGE-REFUSED</code>); within the product duration (<code>R-CALL-DURATION-CAP</code>), the committed kW (<code>R-CALL-OVER-COMMITTED</code>) and the reservation window (<code>R-CALL-OUTSIDE-WINDOW</code>); no overlapping call (<code>R-CALL-OVERLAP</code>); at most <code>[dispatch.calls].max_calls_per_hour</code> 30 and <code>max_calls_per_day</code> 200 per principal (<code>R-CALL-RATE-LIMIT</code>, <code>429</code>). Refusals are stored too.</li>
 <li><b>States.</b> <code>ACCEPTED</code> before its start; while running, <code>RAMPING</code> or <code>DELIVERING</code> by <b>measured</b> delivery below or at/above <code>[dispatch.calls].ramping_fraction</code> (0.9) of the target, or <code>ACTIVE</code> while no measurement exists yet; <code>COMPLETED</code>; <code>REFUSED</code>. The status carries <code>delivered_kw</code>, <code>delivered_kwh</code>, <code>delivery_measured</code>, <code>delivery_state</code> (the D-38 result) and <code>meter_status</code>. Before r3.4.3 it reported granted kW, not measured.</li>
-<li><b>Engine side.</b> The engine caps a called obligation at the call's requested kW. From r3.4.3 (<code>engine/ramp_anchor.py</code>) the substation set steps from its last <b>signed</b> setpoint (<code>og.verdict</code> PASS for the engine's own batch, while that lease is live), else from telemetry, by at most 0.9 &times; its ramp for <b>one</b> cycle. The guardian's G-04 uses the same anchor with a one-cycle bound, so a 20 MW call ramps at the firm hub rate within the 20 MW/min feeder ceiling (7 MW/min on the Austin home feeders). A veto, a lapsed lease or a safe stop drops the anchor and both sides re-anchor on telemetry; unsigned proposals never move it (the r3.4.2 behaviour stepped from its own unsigned proposals and was vetoed for the rest of the call after a signing gap). The engine reads the verdicts of its pending utility-scale batches once per cycle, bounded to 0.5 s.</li>
+<li><b>Engine side.</b> The engine caps a called obligation at the call's requested kW. From r3.4.3 (<code>engine/ramp_anchor.py</code>) the substation set steps from its last <b>signed</b> setpoint (<code>og.verdict</code> PASS with <code>published_at</code> set, migration 0053, for the engine's own batch, while that lease is live), else from telemetry, by at most 0.9 &times; its ramp for <b>one</b> cycle. The guardian's G-04 uses the same anchor with a one-cycle bound, so a 20 MW call ramps at the firm hub rate within the 20 MW/min feeder ceiling (7 MW/min on the Austin home feeders). A lapsed lease or a safe stop drops the anchor and both sides re-anchor on telemetry; a veto does not (r3.4.3: the hub is still following its last signed setpoint, and re-anchoring on stale telemetry after a veto let an oversized step be signed); unsigned proposals never move it (the r3.4.2 behaviour stepped from its own unsigned proposals and was vetoed for the rest of the call after a signing gap). The engine reads the verdicts of its pending utility-scale batches once per cycle, bounded to 0.5 s.</li>
 <li><b>Simulator.</b> <code>ogsim.utility_aen</code> (unit <code>og-sim-utility</code>, Austin Energy) issues one call on hot days in the 16:30-18:00 window over the <code>customer_api</code> channel and logs the measured delivery; five <code>/ogsim/</code> scenarios (<code>utility_call_normal</code>, <code>_overlap</code>, <code>_over_cap</code>, <code>_charge</code>, <code>_cancel_mid</code>) check the refusals. It skips a day with no toll reservation.</li>
 </ul>
 <h4>The grid link (D-34)</h4>
@@ -152,6 +152,61 @@
 </section>
 
 <section class="hp-sub" id="hw-delivery">
+<h3>Measured delivery (D-38)</h3>
+<p>A grant is only what the allocator planned, and a guardian veto (for example G-04 on a ramp) means it never
+reaches a device. Every discharge call is therefore verified against what the batteries actually <b>delivered</b>,
+measured from telemetry. This covers utility toll calls, ERCOT AS deployments (each <code>og.as_deployment</code>)
+and operator manual discharge targets. og-settle's delivery job (<code>opengrid.delivery</code>, every
+<code>[delivery].interval_s</code> = 15 s) builds one <code>og.delivery_record</code> per call, in 30 s buckets
+aligned to the call start.</p>
+<ul>
+<li><b>Committed</b> is the call's requested kW, else the obligation's committed kW.</li>
+<li><b>Commanded</b> is the call's items in command batches the guardian signed. A vetoed batch commands 0 kW
+and is counted.</li>
+<li><b>Delivered</b> is the hubs' measured discharge. On a shared bank, only the obligation's share of the
+granted kW counts, the same rule settlement meters by.</li>
+<li><b>Meter</b>: where an independent meter exists (a substation asset's bank, such as
+<code>bank-sub-LZ_AEN-00</code>, or <code>[delivery].meter_bank_ids</code>), its <code>REAL_POWER_KW</code> change
+from a 120 s pre-call baseline is compared with the batteries' change.</li>
+</ul>
+<p>The result is <b>PASS</b>, <b>PARTIAL</b> or <b>FAIL</b> (<b>IN_PROGRESS</b> while the call runs), with reasons:</p>
+<ul>
+<li><code>RAMP_TOO_SLOW</code>: not at <code>target_frac</code> (95 %) of committed within the product's ramp
+time (<code>[delivery.ramp_time_s]</code>: TOLLING 600 s, ECRS 600 s, RRS 600 s, REGUP/REGDN 300 s, NSPIN 1800 s,
+manual 120 s);</li>
+<li><code>SUSTAIN_BELOW_TARGET</code>: under 95 % of the buckets after the ramp at target;</li>
+<li><code>NO_DELIVERY</code>, <code>ENERGY_SHORT</code> (under half the committed kWh) and all-stale data give
+FAIL;</li>
+<li><code>VETOED</code>: at least half the command cycles were vetoed;</li>
+<li><code>STOPPED</code>: the call ended early;</li>
+<li><code>DATA_STALE</code>: over 10 % of the buckets had no telemetry.</li>
+</ul>
+<p>The record also carries the time to target, the sustained compliance %, the lowest point and how long it
+lasted, and discharged against committed kWh.</p>
+<p>Live alerts while a call runs: <code>ALR-DELIVERY-RAMP-LATE</code> (not at target after the ramp time),
+<code>ALR-DELIVERY-SHORTFALL</code> (below target for over <code>shortfall_alert_s</code> = 60 s) and
+<code>ALR-DELIVERY-NONE</code> (commanded, nothing measurable, for over <code>none_alert_s</code> = 60 s).
+While a SHORTFALL or NONE alert is open, the obligation is flagged AT_RISK
+(<code>R-DELIVERY-MEASURED-SHORTFALL</code>) and dispatch continues at the maximum feasible kW (K7, D-17). At the end
+of a call, a meter that disagrees by more than 10 % raises <code>ALR-DELIVERY-METER-MISMATCH</code> and marks the
+record <b>UNCORROBORATED</b>. That alert clears when the same meter agrees again on a later call, or when an operator
+clears it with a reason. After an og-settle restart, the job reconciles the AT_RISK flags it had set: a call still
+running short keeps its flag; any other flag is cleared, and so are the live alerts of calls that ended meanwhile.
+Products are matched by one canonical name (<code>core.services.canonical_product</code>), so NSPIN, NONSPIN and
+NON_SPIN all get Non-Spin's ramp time. The summary row is kept like the call (<code>og.as_deployment</code>); its
+per-bucket series is emptied after <code>[delivery].series_keep_days</code> (60 d).</p>
+<p>Where it shows:</p>
+<ul>
+<li>the Dispatch page's <b>Delivery</b> column and its detail drawer;</li>
+<li><code>GET /og/api/delivery/records</code>, <code>/records/{call_id}</code> and <code>/summary</code>;</li>
+<li>a utility's own calls under <code>/og/api/customer/v1/utility/delivery-records</code>;</li>
+<li>the utility call status (<code>delivered_kw</code>, RAMPING/DELIVERING);</li>
+<li>the grid link's delivered-kW point.</li>
+</ul>
+<p class="hp-note">Measured values trail real time by about 30-60 s (a 30 s telemetry lag plus the bucket).</p>
+</section>
+
+<section class="hp-sub" id="hw-delivery-rules">
 <h3>Delivery verification (D-38)</h3>
 <p>From r3.4.3 delivery is verified from measurement, not from grants. og-settle's delivery job (<code>opengrid.delivery</code>, <code>[delivery]</code>) runs every 15 s and builds one <code>og.delivery_record</code> (migration 0050) per discharge call: a utility toll call or an ERCOT AS deployment (keyed by its deployment id) or a manual discharge target (keyed by its <code>MANUAL_TARGET</code> trace id). It is observation only (K7): it never changes dispatch.</p>
 <ol class="hp-steps">
@@ -166,7 +221,7 @@
 <tr><td><code>ALR-DELIVERY-RAMP-LATE</code></td><td>The call has not reached target within its ramp time.</td></tr>
 <tr><td><code>ALR-DELIVERY-SHORTFALL</code></td><td>Delivery has been below target for 60 s (<code>shortfall_alert_s</code>).</td></tr>
 <tr><td><code>ALR-DELIVERY-NONE</code></td><td>Commanded for 60 s (<code>none_alert_s</code>) with no measurable delivery.</td></tr>
-<tr><td><code>ALR-DELIVERY-METER-MISMATCH</code></td><td>A final record whose independent meter disagrees with the battery telemetry (<code>UNCORROBORATED</code>). The delivery job never clears it.</td></tr>
+<tr><td><code>ALR-DELIVERY-METER-MISMATCH</code></td><td>A final record whose independent meter disagrees with the battery telemetry (<code>UNCORROBORATED</code>). It clears once the same meter agrees with telemetry on a later call, or when an operator clears it with a reason (<code>POST /og/api/delivery/records/{call_id}/meter-mismatch/clear</code>, operator, traced).</td></tr>
 </tbody></table></div>
 <p>The first three clear themselves when the condition ends or the call ends. While a <code>SHORTFALL</code> or <code>NONE</code> alert is open the job flags the obligation AT_RISK (<code>R-DELIVERY-MEASURED-SHORTFALL</code>, through <code>contracts.set_obligation_at_risk</code>) and clears only its own flag on recovery (<code>R-DELIVERY-RECOVERED</code>). A measured shortfall never stops a firm obligation (D-17); mid-window SHORTFALL escalation stays the engine's.</p>
 <p>Read the records with <code>GET /og/api/delivery/records</code> (filters), <code>GET /og/api/delivery/records/{call_id}</code> (with the series) and <code>GET /og/api/delivery/summary</code>; the utility sees its own through the call status and <code>/og/api/customer/v1/utility/delivery-records[/{call_id}]</code>, a customer through <code>/og/api/customer/delivery-records[/{call_id}]</code> (another's record is 404). On the console, the Dispatch screen's AS awards table has a <b>Delivery</b> column for each deployed toll or AS call (result badge, a <code>METER</code> badge on a meter mismatch, delivered / committed kW, refreshed every 15 s); clicking it opens the <b>Measured delivery</b> drawer with the committed, commanded, delivered and meter-change chart. Manual discharge targets and the summary are API only. See <a href="#ev-delivery">Delivery alerts</a> and the playbook <a href="#pb-delivery-alert">Delivery alert</a>.</p>
@@ -218,10 +273,10 @@
 <li>On the Fleet page choose the scope and a reason and press <b>Propose safe stop (step 1 of 2)</b> (<code>POST /og/api/safestop</code>). og-api sends a <code>PROPOSE</code> to og-safestop over the Postgres channel <code>og_safestop_request</code>. Nothing stops yet.</li>
 <li>Confirm within 30 s (<code>[safestop].confirm_window_s</code>; <code>POST /og/api/safestop/{proposal_id}/confirm</code>). og-safestop traces the stop, writes the <code>og.stop_event</code> ENGAGE row, and publishes a signed, retained message on <code>&lt;root&gt;/stop/&lt;scope&gt;/&lt;id&gt;/&lt;stop_id&gt;</code>. The API waits up to 3 s for the ENGAGE row and answers <code>503</code> if none appears (og-safestop down or its window elapsed); a proposal older than the window gets <code>409</code>.</li>
 </ol>
-<p><b>The stop outbox.</b> At r3.4.3 the <code>og.stop_event</code> row and its <code>og.stop_outbox</code> entry are written in one transaction (ENGAGE and relayed RELEASE), so a stop can no longer be recorded without being queued. The outbox is re-published (QoS 1, retained) until the broker acknowledges it, including after a broker reconnect. Since r3.4.1 entries of one scope drain strictly in sequence order (so a RELEASE is never overtaken by an older ENGAGE of the same scope), and an ENGAGE goes first only across different scopes. A stop engaged while the broker is down is recorded and delivered as soon as the broker returns. og-safestop exports <code>/metrics</code> on loopback port 9106 (<code>[metrics].safestop_port</code>).</p>
+<p><b>The stop outbox.</b> At r3.4.3 the <code>og.stop_event</code> row and its <code>og.stop_outbox</code> entry are written in one transaction (ENGAGE and relayed RELEASE), so a stop can no longer be recorded without being queued. The outbox is re-published (QoS 1, retained) until the broker acknowledges it, including after a broker reconnect. Since r3.4.1 entries of one scope drain strictly in sequence order (so a RELEASE is never overtaken by an older ENGAGE of the same scope), and an ENGAGE goes first only across different scopes; since r3.4.3 a scope with a queued ENGAGE is read in full on every drain, so a stop never waits behind a backlog. A stop engaged while the broker is down is recorded and delivered as soon as the broker returns. og-safestop exports <code>/metrics</code> on loopback port 9106 (<code>[metrics].safestop_port</code>).</p>
 <ul>
 <li><b>Redelivery repair.</b> A redelivered utility L2 instruction that was already acted on but whose ENGAGE has no outbox row is re-signed under the same <code>stop_id</code> and queued (hubs de-duplicate by <code>stop_id</code>); never for a bank released since. A re-handed RELEASE that is already recorded is queued if missing.</li>
-<li><b>Dead letter.</b> Only permanent failures (a payload that can never be published) count as attempts; a broker outage never dead-letters a stop. At <code>outbox_max_attempts</code> (5) the entry is skipped, traced and the critical <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> is raised once, so one poison entry never blocks later stops. See the playbook <a href="#pb-safe-stop">Safe stop</a>.</li>
+<li><b>Dead letter.</b> Only permanent failures (a payload that can never be published) count as attempts; a broker outage never dead-letters a stop. At <code>outbox_max_attempts</code> (5) the entry is skipped, traced and the critical <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> is raised once, so one poison entry never blocks later stops; it holds back only its scope's later RELEASEs, never an ENGAGE. Since r3.4.3 a dead-lettered ENGAGE is still retried after the live queue on every drain (traced <code>DEAD_LETTER_PUBLISHED</code> when it goes out). See the playbook <a href="#pb-safe-stop">Safe stop</a>.</li>
 </ul>
 <p>The simulated hubs ramp to 0 kW over 4 s (<code>stop_ramp_s</code>). The <code>[safestop]</code> keys <code>ramp_bank_s</code>, <code>ramp_zone_s</code>, <code>ramp_fleet_s</code> are reserved and not read by any code at r3.4.3.</p>
 <h4>Other ways a stop is engaged</h4>
@@ -234,7 +289,7 @@
 <ol class="hp-steps">
 <li>Operator 1 presses <b>Request release (operator 1)</b> (<code>POST /og/api/safestop/{scope}/{scope_id}/release</code>). The request expires after 60 s.</li>
 <li>A different operator presses <b>Review and approve (operator 2)</b> (<code>POST /og/api/safestop/release/{proposal_id}/approve</code>). The requester is refused with <code>403</code>. The API writes one confirmed <code>SAFE_STOP_RELEASE</code> operator action (tier <code>TIER2</code>).</li>
-<li>The guardian verifies it on its own: both operators on <code>[guardian].stop_release_authorised_operators</code> and distinct, approval at most 300 s old, request traced, scope still engaged, not a utility stop and no active L2 instruction. It then signs the RELEASE; og-safestop verifies the guardian signature and relays it on the stop's own topic.</li>
+<li>The guardian verifies it on its own: both operators on <code>[guardian].stop_release_authorised_operators</code> and distinct, approval at most 300 s old, request traced, scope still engaged, not a utility stop and no active L2 instruction. It then signs the RELEASE; og-safestop verifies the guardian signature and relays it on the stop's own topic. Since r3.4.3 og-safestop refuses a RELEASE signed before the newest ENGAGE on its scope (a newer stop arrived in between): nothing is relayed or recorded, the scope stays stopped, and <code>ALR-STOP-RELEASE-SUPERSEDED</code> asks the operators to re-issue the two-person release (see <a href="#ev-outbox">outbox</a>).</li>
 <li>The API waits up to 10 s: <code>200</code> when the release landed, <code>202</code> while the guardian has not signed (it may refuse; this is never faked).</li>
 </ol>
 <p><b>The engine during a stop (r3.4.3).</b> og-engine honours <code>og.stop_event</code>: a bank under an engaged FLEET, ZONE or BANK stop gets no command batch, so no vetoed proposals pile up behind the stop. The stop also drops the signed ramp anchor of utility-scale hubs on both sides (engine and G-04). After the release a substation set is held at 0 kW until a telemetry sample newer than the release arrives, then it ramps again from telemetry at one cycle's G-04 step, so a toll call still running resumes without a burst of vetoes.</p>

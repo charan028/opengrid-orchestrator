@@ -418,7 +418,8 @@ Since R3 a confirmed command is an operator **target**, not a one-shot setpoint:
 | Result | Meaning |
 |---|---|
 | **RAMPING** | Accepted (HTTP 202). "Ramping N hub(s) to X kW ... Holds until <expiry>. Trace ...". A progress bar follows the hubs' reported power; **Cancel target** ends the target (API: `POST $OG/fleet/manual-targets/<trace_id>/cancel`) |
-| **NOT RECORDED** | og-api answered 503: the target could not be written to the trace. Read the sentence after the badge: "manual target not recorded ... nothing will ramp -- retry" means exactly that (since r3.4.1 it can never take effect later); "manual target outcome unknown ... it may be live" means the write failed and the re-check failed too, so check `GET $OG/fleet/manual-targets` (or `target X kW` in the Fleet table) before proposing again |
+| **NOT RECORDED** | og-api answered 503 "manual target not recorded ... nothing will ramp -- retry": exactly that (since r3.4.1 it can never take effect later). Propose again |
+| **OUTCOME UNKNOWN** | Since r3.4.3 (caution badge): og-api answered 503 "manual target outcome unknown ... it may be live": the write failed and the re-check failed too. The result reads "check the target list before retrying" and links to the operator-target markers in the Fleet table. Check `GET $OG/fleet/manual-targets` (or `target X kW` in the Fleet table) before proposing again. Command, bulk and cancel results all show it |
 | **EXPIRED** | The proposal expired (confirm within 60 s), or the hub id is unknown. Propose again |
 | **FAILED** | Anything else, with the error |
 | (409) | Since r3.4.2 a target other than 0 kW on a hub of a regulated zone with no contract is refused with that reason (6.12) |
@@ -442,9 +443,8 @@ and **Cancel target** all work this way; a cancel that reports NOT RECORDED leav
 **Retry cancel**. To cancel from a shell, take the `trace_id` from `GET $OG/fleet/manual-targets` and call
 `POST $OG/fleet/manual-targets/<trace_id>/cancel`.
 
-**Known gap (r3.4.3):** the confirm result shows the badge **NOT RECORDED** for both 503 answers, with the
-sentence "nothing is ramping"; only the API's detail after it says "outcome unknown ... it may be live". Read the
-detail, and check the target list before proposing again.
+**Fixed in r3.4.3:** the two 503 answers have their own badges. **NOT RECORDED** ("nothing is ramping") is shown
+only for "not recorded"; "outcome unknown" shows **OUTCOME UNKNOWN** ("check the target list before retrying").
 
 Trace rows the database refuses for their content (not for an outage) are never journaled: since r3.4.1 they go
 to a quarantine file next to the journal and raise `ALR-TRACE-QUARANTINED` (section 8), and the journal replay
@@ -961,7 +961,8 @@ delivery alert is raised or cleared and the degraded modes freeze.
 | `ALR-SUBSTATION-UNMAPPED-TOPOLOGY` | warning | Since r3.4.1: og-guardian skipped G-29 for a bank because it has no substation mapping or its substation has no limit row. One row per bank | No automatic clear |
 | `ALR-DEVICE-RATING-MISMATCH` | warning | A hub's own report (device info) gives a rating or location that differs from the seed (3.2) | When a later report matches the seed |
 | `ALR-TRACE-QUARANTINED` | critical | Since r3.4.1: the database refused a trace row for its content (not an outage); the row went to the journal's quarantine file and the replay continued. The file is the evidence: tell the lead | No automatic clear |
-| `ALR-STOP-PUBLISH-DEAD-LETTER` | critical | Since r3.4.1: og-safestop gave up publishing a stop or release message after its maximum attempts; other scopes carry on. Check the scope on Fleet and propose the stop again if it is still needed | No automatic clear |
+| `ALR-STOP-PUBLISH-DEAD-LETTER` | critical | Since r3.4.1: og-safestop gave up publishing a stop or release message after its maximum attempts; other scopes carry on. Since r3.4.3 a dead-lettered stop (ENGAGE) is still retried after the live queue on every drain and traced when it goes out; a dead-lettered release is only alerted. Check the scope on Fleet and propose the stop again if it is still needed | No automatic clear |
+| `ALR-STOP-RELEASE-SUPERSEDED` | warning | Since r3.4.3: og-safestop refused a guardian-signed release because a newer stop (ENGAGE) on the same scope was recorded after the release was signed; the hubs would have dropped it. Nothing was published or recorded, so the scope is still stopped. "release of {scope} superseded by a newer stop; re-issue the two-person release". If the scope should be released, run the two-person release again (6.3); the new one is signed after the stop and relayed normally | No automatic clear (raised once per superseded release); acknowledge it once the new release is through |
 | `ALR-ANCHOR-PUBLISH-FAILED` / `ALR-ANCHOR-SECONDARY-FAILED` | critical / warning | The periodic K11 trace anchor could not be published at all, or only its secondary copy failed | When the next anchor publishes |
 | `ALR-UTILITY-CALL` | info | A utility call was accepted, cancelled or shortened through the utility API or the grid link (6.10). `ALR-DISPATCH-CALL` is the same notice for other non-operator origins | No automatic clear |
 | `ALR-UTILITY-CALL-REFUSED` | warning | A utility call was refused, with its reason code (6.10), including a cancel or shorten of a call the utility did not issue (403 `R-CALL-NOT-ISSUER`). `ALR-DISPATCH-CALL-REFUSED` is the same for other non-operator origins | No automatic clear |
@@ -975,7 +976,7 @@ delivery alert is raised or cleared and the degraded modes freeze.
 | `ALR-DELIVERY-RAMP-LATE` | critical | Since r3.4.3 (D-38, 8.1): a running discharge call (toll call, AS deployment or manual discharge target) is past its product's ramp time and its measured power has never reached 95% of the called kW. "Call {id} not at target after N s (ramp R s): delivered X kW of Y kW" | og-settle's delivery job clears it once delivery reaches the target, or when the call ends |
 | `ALR-DELIVERY-SHORTFALL` | critical | Since r3.4.3: a running call's measured power has stayed under 95% of the called kW for 60 s (`[delivery] shortfall_alert_s`), counted from when it reached the target, or from the end of its ramp time if it never did. Its obligation is AT_RISK meanwhile. "Call {id} below target for N s: delivered X kW of Y kW" | The delivery job clears it when delivery is back at target, or when the call ends; AT_RISK clears with it |
 | `ALR-DELIVERY-NONE` | critical | Since r3.4.3: guardian-signed commands ask the call's hubs to discharge, but the measured delivery has stayed at or under 5% of the called kW for 60 s (`none_alert_s`). Its obligation is AT_RISK meanwhile. "Call {id} commanded for N s with no measurable delivery" | The delivery job clears it when delivery resumes, or when the call ends; AT_RISK clears with it |
-| `ALR-DELIVERY-METER-MISMATCH` | critical | Since r3.4.3: at the end of a call, the independent meter on its banks disagrees with the batteries' telemetry by more than 10% of the energy, floored at 25 kW (the record is UNCORROBORATED). "Call {id}: independent meter disagrees with battery telemetry by N%; delivery UNCORROBORATED" | No automatic clear: the delivery job leaves it open for an operator, and the console and API can only acknowledge it (6.8) |
+| `ALR-DELIVERY-METER-MISMATCH` | critical | Since r3.4.3: at the end of a call, the independent meter on its banks disagrees with the batteries' telemetry by more than 10% of the energy, floored at 25 kW (the record is UNCORROBORATED). "Call {id}: independent meter disagrees with battery telemetry by N%; delivery UNCORROBORATED" | Clears automatically once the same meter agrees with the battery telemetry on a later call, or when an operator clears it with a reason: `POST $OG/delivery/records/{call_id}/meter-mismatch/clear` (operator role, traced) |
 | `ALR-TRACE-VERDICT-WRITE-FAILED` | warning | A verdict's `GUARDIAN_VERDICT` trace row could not be written (the verdict stands; the audit row is missing) | No automatic clear |
 
 An open alert keeps the severity it opened with: a zone that goes from 6% to 25% offline stays a warning until
@@ -1046,7 +1047,6 @@ clears the four `ALR-DELIVERY-*` alerts above. r3.4.2 and older raise none of th
 | Gap | What to do meanwhile |
 |---|---|
 | A manual target on a bank with no obligation grant never moves the hub (G-09) and raises `ALR-SAFE-STOP-REQUESTED` for the bank and zone (6.2) | Command hubs on delivering banks; cancel a target that does not move; do not engage the offered stop |
-| A 503 on a manual or bulk confirm always shows the badge NOT RECORDED, even when the detail says "outcome unknown ... it may be live" (6.2) | Read the detail; check `GET $OG/fleet/manual-targets` or `target X kW` in the Fleet table before proposing again |
 | Fleet table refreshes only P and telemetry age (every 10 s); it pages through the whole fleet (Rows 25 or 50) | Reload for SoC, Activity and Health |
 | AS deploy form: for an award whose product has no known duration it still offers up to 240 min, which og-api refuses (409) | Deploy one award, within its product's window; og-api refuses an overlapping deployment |
 | The ERCOT AS poller and the grid link ship disabled | The release manager enables them (`deploy/RUNBOOK.md`); until then ERCOT deployments are entered with **Deploy** |
@@ -1056,5 +1056,3 @@ clears the four `ALR-DELIVERY-*` alerts above. r3.4.2 and older raise none of th
 | Best-effort shortfall is labelled "Delivered short" | Watch the grants, not the card |
 | Topology alerts (`ALR-XFMR-UNMAPPED`, `ALR-BANK-UNMAPPED-TOPOLOGY`, `ALR-SUBSTATION-UNMAPPED-TOPOLOGY`) do not clear by themselves | After the lead fixes the mapping (`deploy/scripts/topology_backfill.sh`), acknowledge; new rows mean a new gap |
 | The Dispatch Delivery column covers deployed AS and toll rows only; manual discharge targets and the per-contract summary have no console view (r3.4.3) | Use `GET $OG/delivery/records?call_kind=MANUAL_TARGET` and `GET $OG/delivery/summary` (6.13, 8.1) |
-| `ALR-DELIVERY-METER-MISMATCH` never clears: the delivery job leaves it for an operator, and the console and API can only acknowledge it | Acknowledge it once investigated (8.1) |
-| A Non-Spin contract whose variant is spelled `NONSPIN` or `NON_SPIN` gets the 600 s default ramp time, not `NSPIN`'s 1800 s (`[delivery.ramp_time_s]` is keyed by the variant) | Read a RAMP-LATE on such a call within its first 30 minutes as possibly early; tell the lead |

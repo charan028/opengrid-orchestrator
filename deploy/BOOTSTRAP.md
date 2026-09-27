@@ -94,8 +94,10 @@ first `deploy.sh` fails its post-restart check.
 **Check on the test cluster:** `make bootstrap-check` runs phases c-e with `--fresh-db` into `og_t_boot` on port
 5433 (role `og_boot`, secrets under `/srv/ogwork/bootstrap/etc`), never on 5432, with the default zone blocks
 (LZ_AEN only). The counts below are for production's blocks (`--noie-blocks`: LZ_AEN, LZ_LCRA, LZ_RAYBN), as last
-measured on r3.4.2; r3.4.3 adds only migration 0050 (a table, no seed rows). Every migration through 0050 applied
-(47 files; 0015, 0048 and 0049 do not exist); 3,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH,
+measured on r3.4.2; r3.4.3 adds migrations 0050 (a table, no seed rows), 0051 (one `og.data_retention` row,
+`delivery_record`, mode NONE, plus a column), 0053 (`og.verdict.published_at`) and 0054 (the `og.trace`
+decision-type CHECK accepts `DELIVERY_RECORD`). Every migration through 0054 applied (0015, 0048 and 0049 do not
+exist; 51 files with 0051 to 0054); 3,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH,
 LZ_HOUSTON, LZ_WEST, LZ_AEN, LZ_LCRA, LZ_RAYBN; 700 dual-unit) plus the substation hub and the 8 trucks (3,509
 `og.hub` rows); 70 home banks plus `bank-sub-LZ_AEN-00` and the 8 truck banks (79); substation asset
 `sub-LZ_AEN-00` ACTIVE; utilities AUSTIN_ENERGY ($102/kW-yr), CPS_ENERGY, and (D-37) LCRA and RAYBURN (placeholder
@@ -165,9 +167,10 @@ database is always built by the migrations, never from the snapshot.
   with the migration that changed it.
 - On a `--fresh-db` bootstrap, phase d runs the same comparison and prints a warning on drift.
 
-In r3.4.3 the committed snapshot is still at 0047 (its header: "after migrations 0001..0047_dispatch_calls.sql"),
-while the tree has 0050 (`og.delivery_record`, D-38). Until the snapshot is regenerated, `make schema-check` reports
-drift (the missing `og.delivery_record`), and a `--fresh-db` bootstrap prints the phase d warning and continues.
+In r3.4.3 the committed snapshot was regenerated through 0050 during the release assembly. The migrations merged
+after it (0051 `delivery_record.series_pruned_at` and its index, 0053 `og.verdict.published_at`, 0054 the widened
+`og.trace` CHECK) change the schema, so unless the snapshot was regenerated again, `make schema-check` reports
+drift and a `--fresh-db` bootstrap prints the phase d warning and continues.
 
 ## 1. Storage
 
@@ -347,7 +350,7 @@ FULFILLED/SHORTFALL), which runs inside og-engine in the background as of r3.4.3
 - `systemctl is-active` for the 11 og-* units of the two targets (6 orchestrator: og-feeds, og-engine, og-guardian,
   og-safestop, og-settle, og-api; 5 simulators: og-sim-market, og-sim-fleet, og-sim-scada, og-sim-control,
   og-sim-utility); `GET /og/api/health` returns 200. Phase l prints ten of them (not og-sim-utility).
-- `og.schema_migrations` holds every file in `orchestrator/migrations/` (47 files through `0050_delivery_record.sql`).
+- `og.schema_migrations` holds every file in `orchestrator/migrations/` (through `0054_trace_delivery_record.sql`).
 - Every hub is fresh within `health.hub_stale_s` (25 s at the 10 s telemetry cadence).
 - All 12 invariants read 0 (`og.invariant_check`); a signed anchor appears in `/var/lib/opengrid/anchors`.
 - `/og/` returns 401 without credentials and 200 for operator and viewer; `/ogsim/` returns 200 for tester.
