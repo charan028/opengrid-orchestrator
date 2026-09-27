@@ -488,7 +488,31 @@ async def test_ts_d33_45_only_the_issuer_or_an_operator_may_cancel(store, trace)
             await cancel_call(store, trace, record.call_id, origin=origin, principal=principal, now=NOW)
         assert (info.value.reason_code, info.value.http_status) == (r.R_NOT_ISSUER, 403)
     assert trace.classes().count("TRACE_AUTHZ_DENY") == 2
+    refused = [a for a in store.alerts if a["detail"].get("reason_code") == r.R_NOT_ISSUER]
+    assert [a["rule"] for a in refused] == ["ALR-UTILITY-CALL-REFUSED"] * 2
+    assert {a["severity"] for a in refused} == {"warning"}
+    assert {a["detail"]["scope_ref"] for a in refused} == {
+        f"og-util-other:{record.call_id}",
+        f"grid_link:AUSTIN_ENERGY:{record.call_id}",
+    }  # keyed per (principal, call): the store coalesces repeats of the same key
     ended = await cancel_call(
         store, trace, record.call_id, origin=CallOrigin.OPERATOR, principal="operator", now=NOW
     )
     assert ended.cancelled_at == NOW
+
+
+async def test_ts_d33_46_other_cancel_refusals_raise_no_alert(store, trace) -> None:
+    record = await issue_call(
+        store, trace, _utility(_toll(store), duration_minutes=10), limits=LIMITS, now=NOW
+    )
+    before = len(store.alerts)
+    with pytest.raises(CallRefused):
+        await cancel_call(
+            store,
+            trace,
+            record.call_id,
+            origin=CallOrigin.UTILITY,
+            principal="og-util-aen",
+            now=NOW + timedelta(minutes=30),
+        )
+    assert len(store.alerts) == before

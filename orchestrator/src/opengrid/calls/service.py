@@ -347,11 +347,12 @@ async def _own_call(
 
 
 async def _require_issuer(
-    trace: TraceStore, record: CallRecord, *, origin: CallOrigin, principal: str
+    store: CallStore, trace: TraceStore, record: CallRecord, *, origin: CallOrigin, principal: str
 ) -> None:
     """A utility (customer API or grid link) may READ every call on its own toll, but cancel or shorten only
     the calls it issued itself (same origin and principal); an operator may end any call. Anything else is
-    403 NOT-ISSUER, traced as AUTHZ_DENY."""
+    403 NOT-ISSUER, traced as AUTHZ_DENY and alerted (ALR-UTILITY-CALL-REFUSED, warning: someone tried to end
+    a call they do not own), one open alert per (principal, call) however often it is repeated."""
     if origin is CallOrigin.OPERATOR or (record.origin is origin and record.principal == principal):
         return
     await audit_deny(
@@ -360,6 +361,20 @@ async def _require_issuer(
         action=AUTHZ_ACTION_CANCEL,
         decision=Decision(False, f"call {record.call_id} was issued by {record.origin.value}", audited=True),
         resource=None,
+    )
+    await _safe_alert(
+        store,
+        ALERT_UTILITY_CALL_REFUSED,
+        "warning",
+        f"{origin.value} {principal} tried to end call {record.call_id} issued by {record.origin.value}",
+        {
+            "reason_code": rules.R_NOT_ISSUER,
+            "call_id": str(record.call_id),
+            "call_origin": record.origin.value,
+            "origin": origin.value,
+            "scope_kind": "principal_call",
+            "scope_ref": f"{principal}:{record.call_id}",
+        },
     )
     raise CallRefused(
         rules.R_NOT_ISSUER, "only the issuer of a call may cancel or shorten it", rules.HTTP_FORBIDDEN
@@ -382,7 +397,7 @@ async def cancel_call(
     Traced before it takes effect; the allocator returns the obligation to its 0 kW hold next cycle."""
     now = now or datetime.now(UTC)
     record = await _own_call(store, trace, call_id, principal, utility_id)
-    await _require_issuer(trace, record, origin=origin, principal=principal)
+    await _require_issuer(store, trace, record, origin=origin, principal=principal)
     if record.outcome is CallOutcome.REFUSED or record.deployment_id is None:
         raise CallRefused(
             rules.R_ALREADY_ENDED, "the call was refused; nothing to cancel", rules.HTTP_CONFLICT
