@@ -249,8 +249,31 @@
     var eta = el.querySelector(".fl-ramp-eta");
     var first = null;
     var last = null;
+    var trace = el.dataset.trace;
+    var ended = false;
+    // Only an ACTIVE target is being ramped (r3.4): stop the progress as soon as it is cancelled
+    // (operator, safe stop, late record) or expires, and say so.
+    function checkStatus() {
+      if (!trace || ended || !document.body.contains(el)) { return; }
+      fetch(basePath + "/fleet/manual-targets/" + encodeURIComponent(trace) + "/status", { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (body) {
+          if (body && body.status && body.status !== "ACTIVE") {
+            ended = true;
+            el.classList.add("is-ended");
+            now.textContent = "Target ended: " + body.status.replace(/_/g, " ").toLowerCase() +
+              (body.stop_event_id ? " (stop event " + body.stop_event_id + ")" : "") + ".";
+            var cancel = el.querySelector(".fl-cancel-target");
+            if (cancel) { cancel.remove(); }
+          } else {
+            setTimeout(checkStatus, 5000);
+          }
+        })
+        .catch(function () { setTimeout(checkStatus, 5000); });
+    }
+    checkStatus();
     function tick() {
-      if (!document.body.contains(el) || !ids.length || isNaN(target)) { return; }
+      if (ended || !document.body.contains(el) || !ids.length || isNaN(target)) { return; }
       if (!isNaN(expires) && Date.now() > expires) { now.textContent = "Target expired; the hubs are back on normal dispatch."; return; }
       Promise.all(ids.map(function (id) {
         return fetch(basePath + "/fleet/hubs/" + encodeURIComponent(id) + "/live", { credentials: "same-origin" })

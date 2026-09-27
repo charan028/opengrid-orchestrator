@@ -407,9 +407,21 @@ TARGETS = {
             "issued_at": "2026-09-26T23:00:00+00:00",
             "expires_at": "2026-09-26T23:15:00+00:00",
             "trace_id": TARGET_TRACE,
+            "status": "ACTIVE",
             "proposer": "alice",
             "reason": "test",
-        }
+        },
+        {  # cancelled by a safe stop: listed by the API, but never a marker (only ACTIVE ramps)
+            "hub_id": "hub-0004",
+            "p_kw_target": -3.0,
+            "issued_at": "2026-09-26T23:00:00+00:00",
+            "expires_at": "2026-09-26T23:15:00+00:00",
+            "trace_id": "56565656-5656-5656-5656-565656565656",
+            "status": "CANCELLED_BY_SAFE_STOP",
+            "stop_event_id": 42,
+            "proposer": "bob",
+            "reason": "test",
+        },
     ]
 }
 CHARGE_WINDOWS = {

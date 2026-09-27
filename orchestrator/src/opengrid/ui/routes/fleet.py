@@ -48,6 +48,8 @@ _LEGACY_HUBS_PATH = "/og/api/fleet/hubs"
 _TARGETS_PATH = "/og/api/fleet/manual-targets"
 _CHARGE_WINDOWS_PATH = "/og/api/fleet/charge-windows"
 _HOME_STATIONS_PATH = "/og/api/fleet/home-stations"
+#: `GET /og/api/fleet/manual-targets` status meaning the engine is ramping the hub (r3.4).
+TARGET_ACTIVE = "ACTIVE"
 #: Owner asset classes (R3.1): shape + colour on the map, a column, a filter and a drawer badge.
 ASSET_LABELS: dict[str, str] = {"HOME": "Home battery", "MOBILE": "Truck", "UTILITY_SCALE": "Substation BESS"}
 DEFAULT_TARGET_MINUTES = 15
@@ -947,11 +949,38 @@ async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
 
 
 async def active_targets() -> dict[str, dict[str, Any]]:
-    """hub_id -> the operator target currently controlling it (`GET /og/api/fleet/manual-targets`);
-    empty when the API does not serve it yet, so the table simply shows no markers."""
+    """hub_id -> the operator target currently controlling it (`GET /og/api/fleet/manual-targets`). Only
+    status ACTIVE means the engine is ramping the hub; cancelled ones (operator, safe stop, late record)
+    are not markers. An item without a status (older API) counts as active. Empty when the API does not
+    serve it, so the table simply shows no markers."""
     body = await _optional_json(_TARGETS_PATH)
     items = body.get("items", []) if isinstance(body, dict) else []
-    return {str(t["hub_id"]): t for t in items if isinstance(t, dict) and t.get("hub_id")}
+    return {
+        str(t["hub_id"]): t for t in items if isinstance(t, dict) and t.get("hub_id") and target_is_active(t)
+    }
+
+
+def target_is_active(target: dict[str, Any]) -> bool:
+    return str(target.get("status") or TARGET_ACTIVE) == TARGET_ACTIVE
+
+
+@router.get("/manual-targets/{trace_id}/status")
+async def target_status(trace_id: str) -> JSONResponse:
+    """`{trace_id, status, stop_event_id, cancelled_by}` for the ramp indicator: it stops showing progress
+    as soon as the target is no longer ACTIVE (cancelled, stopped by a safe stop, or expired)."""
+    body = await _optional_json(_TARGETS_PATH, params={"include_expired": "true"})
+    items = body.get("items", []) if isinstance(body, dict) else []
+    found = next((t for t in items if isinstance(t, dict) and str(t.get("trace_id")) == trace_id), None)
+    if found is None:
+        return JSONResponse({"trace_id": trace_id, "status": None})
+    return JSONResponse(
+        {
+            "trace_id": trace_id,
+            "status": str(found.get("status") or TARGET_ACTIVE),
+            "stop_event_id": found.get("stop_event_id"),
+            "cancelled_by": found.get("cancelled_by"),
+        }
+    )
 
 
 @router.get("/hubs/{hub_id}/live")
@@ -971,10 +1000,20 @@ async def cancel_target(request: Request, trace_id: str) -> HTMLResponse:
         result = await post_json(f"{_TARGETS_PATH}/{trace_id}/cancel", {}, remote_user=remote_user(request))
     except ApiUnavailable as exc:
         logger.warning("manual target cancel failed: %s", exc)
+        # 409: the target exists but is no longer active (`detail.status` lists why); 404: unknown trace;
+        # 503: not recorded (trace store down) -- nothing changed, the operator can retry.
+        detail = exc.detail.get("detail") if isinstance(exc.detail, dict) else None
+        statuses = detail.get("status") if isinstance(detail, dict) else None
         return templates.TemplateResponse(
             request,
             "_partials/fleet_target_cancel_result.html",
-            {"result": None, "status_code": exc.status_code, "message": str(exc)},
+            {
+                "result": None,
+                "status_code": exc.status_code,
+                "message": str(exc),
+                "statuses": statuses if isinstance(statuses, list) else [],
+                "trace_id": trace_id,
+            },
         )
     return templates.TemplateResponse(
         request,

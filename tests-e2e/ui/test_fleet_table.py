@@ -248,6 +248,7 @@ def test_operator_targets_are_marked_in_the_table_and_drawer(operator_page: Page
     row = operator_page.locator('tr[data-row-id="hub-0003"]')
     expect(row.locator(".fl-target")).to_contain_text("target 5.0 kW")
     expect(operator_page.locator("#fleet-page-info")).to_contain_text("1 under an operator target")
+    expect(operator_page.locator('tr[data-row-id="hub-0004"] .fl-target')).to_have_count(0)
     row.click()
     drawer = operator_page.locator("#hub-drawer")
     expect(drawer.locator("#drawer-target")).to_contain_text("5.0 kW")

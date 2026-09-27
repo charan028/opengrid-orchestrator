@@ -14,8 +14,8 @@
     Vetoed by guardian: {{ result.vetoed_rule_ids|join(', ')|default('no rule ids given', true) }}.
     Trace {{ result.trace_id|default('-') }}.</p>
   {% elif status_code == 503 %}
-  <p>{% with status='warning', label='TIMEOUT' %}{% include "_partials/status_badge.html" %}{% endwith %}
-    No guardian verdict within the poll window. {{ message }}</p>
+  <p>{% with status='critical', label='NOT RECORDED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The API did not record this command (503), so nothing is ramping. Propose it again to retry. {{ message }}</p>
   {% elif status_code in (410, 404) %}
   <p>{% with status='caution', label='EXPIRED' %}{% include "_partials/status_badge.html" %}{% endwith %}
     The proposal expired or is unknown -- propose again. {{ message }}</p>

@@ -4,7 +4,7 @@
    and estimates the time left from the observed ramp rate (the ramp limit lives in the engine). #}
 {% set trace = result.manual_target_trace_id or result.trace_id %}
 {% set hub_ids = result.hub_ids or ((result.results or [])|map(attribute='hub_id')|list) %}
-<div class="fl-ramp" data-hubs="{{ hub_ids[:10]|join(',') }}" data-target="{{ result.p_kw_target if result.p_kw_target is not none else '' }}" data-expires="{{ result.expires_at or '' }}">
+<div class="fl-ramp" data-hubs="{{ hub_ids[:10]|join(',') }}" data-target="{{ result.p_kw_target if result.p_kw_target is not none else '' }}" data-expires="{{ result.expires_at or '' }}" data-trace="{{ trace or '' }}">
   <p>{% with status='info', label='RAMPING' %}{% include "_partials/status_badge.html" %}{% endwith %}
     Ramping {{ hub_ids|length }} hub{{ '' if hub_ids|length == 1 else 's' }} to
     <strong>{{ result.p_kw_target if result.p_kw_target is not none else '?' }} kW</strong>

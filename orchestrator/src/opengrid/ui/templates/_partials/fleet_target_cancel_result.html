@@ -1,11 +1,21 @@
-{# fleet_target_cancel_result.html -- result of `POST /og/api/fleet/manual-targets/{trace}/cancel`. #}
+{# fleet_target_cancel_result.html -- result of `POST /og/api/fleet/manual-targets/{trace}/cancel`:
+   200 cancelled; 409 exists but no longer active (`statuses` says why); 404 unknown trace; 503 not
+   recorded (trace store down: nothing changed, retry). #}
 <div class="fl-ramp-done" role="{{ 'status' if result else 'alert' }}">
   {% if result %}
   <p>{% with status='ok', label='CANCELLED' %}{% include "_partials/status_badge.html" %}{% endwith %}
     Target cancelled for {{ (result.hub_ids or [])|length }} hub(s); they return to normal dispatch. Trace {{ result.trace_id|default('-') }}.</p>
-  {% elif status_code == 404 %}
+  {% elif status_code == 409 %}
   <p>{% with status='caution', label='ENDED' %}{% include "_partials/status_badge.html" %}{% endwith %}
-    This target no longer controls any hub (it expired or was replaced).</p>
+    This target is no longer active{% if statuses %} ({{ statuses|join(', ')|replace('_', ' ')|lower }}){% endif %}; there is nothing to cancel.</p>
+  {% elif status_code == 404 %}
+  <p>{% with status='caution', label='UNKNOWN' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    No such target: the API does not know this trace id.</p>
+  {% elif status_code == 503 %}
+  <p>{% with status='critical', label='NOT RECORDED' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    The cancel was not recorded (the trace store is unavailable); the target is still running. Try again.</p>
+  <button type="button" class="btn btn-danger btn-sm fl-cancel-target"
+          hx-post="{{ base_path }}/fleet/manual-targets/{{ trace_id }}/cancel" hx-target="closest .fl-ramp-done" hx-swap="outerHTML">Retry cancel</button>
   {% else %}
   <p>{% with status='critical', label='FAILED' %}{% include "_partials/status_badge.html" %}{% endwith %}
     {{ message|default('the target could not be cancelled') }}</p>
