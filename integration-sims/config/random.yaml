@@ -79,6 +79,43 @@ types:
     rate_per_hour: 0.0
     duration_s: [0, 0]
     params: {}
+  # D-35 ERCOT AS dispatch instructions: scenario/manual only, never random (a deployment on a committed
+  # award discharges it). Listed so the catalogue stays fully covered; enabled: false and rate 0.
+  ercot_as_deploy:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_recall:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_duplicate:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_out_of_order:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_malformed:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_unknown_award:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_exceed_award:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
 
   # ---- SCADA ----
   bank_overload:
