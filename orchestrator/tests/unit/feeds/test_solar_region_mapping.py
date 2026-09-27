@@ -1,7 +1,5 @@
-"""The PROPOSED `[feeds.ercot.solar_share_zones]` (D-28 solar share, WP-L part 3) parses with the real
-loader and covers every NP6-345-CD weather zone and every NP4-745-CD solar region. Not shipped in this
-release (region solar is OFF, NP4-745-CD field names unconfirmed): the mapping is appended to the shipped
-config here, and moves back into orchestrator.toml when the lead signs it off.
+"""The shipped `[feeds.ercot.solar_share_zones]` (D-28 solar share, WP-L part 3) parses with the real
+loader and covers every NP6-345-CD weather zone and every NP4-745-CD solar region.
 Rationale: docs/orchestrator/07-delivery/integrations/solar-region-mapping.md."""
 
 from __future__ import annotations
@@ -18,34 +16,11 @@ from opengrid.platform.config import load_config
 OG_CONFIG = Path(__file__).resolve().parents[3] / "config" / "orchestrator.toml"
 
 
-PROPOSED_MAPPING = """
-coast = ["FarEast"]                     # Houston metro: Harris, Fort Bend, Brazoria, Galveston
-east = ["FarEast"]                      # Tyler, Longview, Lufkin
-farWest = ["FarWest"]                   # Midland, Odessa, Permian Basin
-north = ["NorthWest", "CenterWest"]     # Lubbock (NorthWest) and Wichita Falls (CenterWest)
-northC = ["CenterEast"]                 # DFW, Waco (Dallas, Tarrant, Collin, Denton, McLennan)
-southC = ["CenterEast", "SouthEast"]    # Austin (Travis, CenterEast) and San Antonio (Bexar, SouthEast)
-southern = ["SouthEast"]                # Corpus Christi, Laredo, Rio Grande Valley
-west = ["CenterWest"]                   # Abilene (Taylor), San Angelo (Tom Green)
-"""
-
-
-def test_not_shipped_this_release() -> None:
-    text = OG_CONFIG.read_text()
-    assert "solar_by_region_enabled = false" in text
-    assert "coast = [" not in text
-
-
 @pytest.fixture
-def zone_regions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, tuple[str, ...]]:
+def zone_regions(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[str, ...]]:
     monkeypatch.delenv("OG_DB", raising=False)
     monkeypatch.delenv("OG_MQTT_ROOT", raising=False)
-    text = OG_CONFIG.read_text().replace(
-        "[feeds.ercot.solar_share_zones]\n", "[feeds.ercot.solar_share_zones]\n" + PROPOSED_MAPPING, 1
-    )
-    cfg = tmp_path / "orchestrator.toml"
-    cfg.write_text(text)
-    return zone_regions_from_config(load_config(cfg))
+    return zone_regions_from_config(load_config(OG_CONFIG))
 
 
 def test_every_weather_zone_is_mapped(zone_regions: dict[str, tuple[str, ...]]) -> None:
