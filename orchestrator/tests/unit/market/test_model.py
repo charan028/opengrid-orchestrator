@@ -50,6 +50,8 @@ def test_zone_territory_loads_from_the_repo_config() -> None:
     assert load_zone_territory(CONFIG_DIR / "tdsp_tariffs.toml") == {
         "LZ_AEN": "AUSTIN_ENERGY",
         "LZ_CPS": "CPS_ENERGY",
+        "LZ_LCRA": "LCRA",  # D-37
+        "LZ_RAYBN": "RAYBURN",
     }
 
 

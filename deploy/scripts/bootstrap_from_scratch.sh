@@ -31,7 +31,8 @@
 #   --db-port N --db-name NAME --db-role ROLE   (default 5432 / og / opengrid)
 #   --fresh-db          drop the database first (refused on port 5432)
 #   --zones LIST        zone blocks to enable (default LZ_AEN, the owner-approved production set)
-#   --d32               also enable LZ_LCRA and LZ_RAYBN (decision D-32)
+#   --noie-blocks       also enable LZ_LCRA and LZ_RAYBN: regulated (NOIE), UNAVAILABLE, no contract (D-37)
+#   --d32               deprecated alias of --noie-blocks (D-32 is superseded by D-37)
 #   --demo-customers    phase l: run dev/scripts/seed_demo_customers.py once the API is up
 #   --backfill-days N   phase k window (default 14)
 #   --public-url URL    Apache-fronted URL the customer simulator calls (default https://<fqdn>)
@@ -79,7 +80,7 @@ while [ $# -gt 0 ]; do
     --db-role) DB_ROLE="$2"; shift 2 ;;
     --fresh-db) FRESH_DB=1; shift ;;
     --zones) ZONES="$2"; shift 2 ;;
-    --d32) ZONES="$ZONES,LZ_LCRA,LZ_RAYBN"; shift ;;
+    --noie-blocks|--d32) ZONES="$ZONES,LZ_LCRA,LZ_RAYBN"; shift ;;
     --demo-customers) DEMO=1; shift ;;
     --backfill-days) BACKFILL_DAYS="$2"; shift 2 ;;
     --public-url) PUBLIC_URL="$2"; shift 2 ;;
@@ -226,6 +227,8 @@ phase_e() {
   with_db "$OG_PY" -m opengrid.fleet.seed 2>&1 | { grep -v '^{' || true; } | sed 's/^/      /'
   log "  2/6 market model: utilities, Austin toll contract (\$102/kW-yr), substation asset sub-LZ_AEN-00"
   psql_file "$seed/market_model_seed.sql"
+  log "  2b/6 D-37: LCRA/RAYBURN sample tolls (inactive), LZ_LCRA/LZ_RAYBN banks UNAVAILABLE (no contract)"
+  psql_file "$seed/noie_switch_seed.sql"
   log "  3/6 customer services (DATA_CENTER, PIPELINE_AC)"
   psql_file "$seed/customer_services_seed.sql"
   log "  4/6 services (PJM_CAPACITY, MOBILE_STORAGE, LARGE_LOAD)"

@@ -141,7 +141,15 @@ def manual_charge_territory_exempt(
         if all(i.reason_code == reasons.R_MANUAL_RAMP and i.p_kw_setpoint >= 0 for i in items)
     }
     return [
-        o for o in outcomes if not (o.rule_id == "G-33" and o.obligation_id is None and o.hub_id in exempt)
+        o
+        for o in outcomes
+        if not (
+            o.rule_id == "G-33"
+            and o.obligation_id is None
+            and o.hub_id in exempt
+            # D-37: an UNAVAILABLE bank (regulated, no contract) is an idle hold -- no manual charge either.
+            and o.reason != reasons.R_BANK_UNAVAILABLE
+        )
     ]
 
 
@@ -672,8 +680,19 @@ class GuardianService:
             return violations
         zone_territory = port.zone_territory()
         markets: dict[UUID, MarketRef | None] = {}
+        availability = await port.bank_availability(proposal.bank_id)
         for item in proposal.items:
             if flow_checks.is_idle(item):
+                continue
+            # D-37 / K13: an obligation grandfathered on this (now unavailable, regulated) bank completes
+            # untouched -- exempt from the availability veto and from K15 (the guardian's own read).
+            if item.obligation_id is not None and await port.grandfathered(
+                item.obligation_id, proposal.bank_id
+            ):
+                continue
+            unavailable = flow_checks.check_g33_available(item, availability)
+            if not unavailable.ok:
+                violations.append(unavailable)
                 continue
             if item.obligation_id is None:
                 ref: MarketRef | None = flow_checks.HEADROOM_MARKET
@@ -1227,6 +1246,11 @@ class GuardianService:
         port = self.ports.territory
         if port is None or not proposal.items:
             return None
+        if await port.grandfathered(obligation_id, proposal.bank_id):
+            return None  # D-37/K13: served here untouched, never a territory reduction
+        availability = await port.bank_availability(proposal.bank_id)
+        if availability is not None and not availability.available:
+            return reasons.R_BANK_UNAVAILABLE
         ref = flow_checks.obligation_market_ref(await port.obligation_market(obligation_id))
         zone = await port.hub_zone(proposal.items[0].hub_id)
         territory = territory_of_zone(zone, port.zone_territory())

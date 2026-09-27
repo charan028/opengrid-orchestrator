@@ -72,6 +72,8 @@ class FakeTerritory:
         self.zones: dict[str, str] = {}
         self.markets: dict = {}
         self.access: set[str] = set()
+        self.availability: dict = {}
+        self.grandfathered_pairs: set[tuple[str, str]] = set()
 
     def zone_territory(self):
         return {"LZ_AEN": "AUSTIN_ENERGY", "LZ_CPS": "CPS_ENERGY"}
@@ -84,6 +86,12 @@ class FakeTerritory:
 
     async def free_access(self, utility_id):
         return utility_id in self.access
+
+    async def bank_availability(self, bank_id):  # D-37: every bank AVAILABLE unless a test says so
+        return self.availability.get(bank_id)
+
+    async def grandfathered(self, obligation_id, bank_id):
+        return (str(obligation_id), bank_id) in self.grandfathered_pairs
 
 
 class FakeAlerts:

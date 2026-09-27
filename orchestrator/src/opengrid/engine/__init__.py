@@ -63,7 +63,13 @@ from opengrid.engine.gates import (
     gate_failure_matches,
     run_due_gates,
 )
-from opengrid.engine.gateways import is_utility_scale_bank, load_utility_scale_banks, set_utility_scale_banks
+from opengrid.engine.gateways import (
+    is_utility_scale_bank,
+    load_unavailable_banks,
+    load_utility_scale_banks,
+    set_unavailable_banks,
+    set_utility_scale_banks,
+)
 from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
 from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations, resolve_stuck_selected
 from opengrid.engine.manual import ManualTarget, ManualTargetSource, manual_items
@@ -953,6 +959,9 @@ async def refresh_market_model(fleet_gateway: Any, fleet_module: Any, pool: Any 
         banks = await load_utility_scale_banks(pool)
         if banks is not None:
             set_utility_scale_banks(banks)
+        unavailable = await load_unavailable_banks(pool)
+        if unavailable is not None:
+            set_unavailable_banks(unavailable)
 
 
 async def handle_vetoes(state: Any, proposed: dict[UUID, str], *, wait_s: float, cycle_id: str) -> list[str]:
@@ -1354,6 +1363,9 @@ async def main(cfg: Config) -> None:
         banks_at_start = await load_utility_scale_banks(pool)
         if banks_at_start is not None:
             set_utility_scale_banks(banks_at_start)
+        unavailable_at_start = await load_unavailable_banks(pool)
+        if unavailable_at_start is not None:
+            set_unavailable_banks(unavailable_at_start)
         veto_exclusions = HubVetoExclusions(exclude_cycles=settings.veto_exclude_cycles)
         from opengrid.firmware.catalogue import Catalogue
         from opengrid.firmware.config import load_firmware_config

@@ -28,6 +28,7 @@ from opengrid.guardian.pq_ports import (
     PqMeasurementPort,
     SensitiveGrantPort,
 )
+from opengrid.market.availability import BankAvailability
 
 SafeStopScope = Literal["FLEET", "ZONE", "BANK"]
 UtilityInstructionKind = Literal["LIMIT", "BLOCK", "ESTOP"]
@@ -203,6 +204,15 @@ class TerritoryPort(Protocol):
     async def obligation_market(self, obligation_id: UUID) -> ObligationMarket | None: ...
 
     async def free_access(self, utility_id: str) -> bool: ...
+
+    async def bank_availability(self, bank_id: str) -> BankAvailability | None:
+        """D-37: the bank's og.bank.availability (None = unknown bank)."""
+        ...
+
+    async def grandfathered(self, obligation_id: UUID, bank_id: str) -> bool:
+        """D-37/K13: the obligation is grandfathered on this unavailable bank
+        (`opengrid.market.availability.GRANDFATHERED_SQL`, the guardian's own read)."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

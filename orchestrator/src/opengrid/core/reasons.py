@@ -103,6 +103,11 @@ R_PEAK_POWER_LIMIT = "PEAK_POWER_LIMIT"  # G-31: above continuous without a vali
 R_FEEDER_RAMP_NON_FIRM = "FEEDER_RAMP_NON_FIRM"  # G-32: feeder ramp for non-firm steps
 R_SYNC_STEP_LIMIT = "SYNC_STEP_LIMIT"  # G-05: synchronized (unstaggered) step in one tick
 R_TERRITORY_INELIGIBLE = "R-TERRITORY-INELIGIBLE"  # G-33/K15: REG obligation served outside its territory
+#: D-37: a bank that is og.bank.availability = UNAVAILABLE (reason REGULATED_NO_CONTRACT): regulated (NOIE)
+#: territory with no utility contract. Nothing is offered, planned or dispatched on it (idle hold), except
+#: an obligation grandfathered under K13 (`opengrid.market.availability`). Allocator 0 kW grant/block, G-33
+#: veto and the engine's manual-target refusal all carry it.
+R_BANK_UNAVAILABLE = "R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT"
 
 # --- G-01-ENERGY: lease-duration energy projection (K1), independent of the instantaneous G-01 check
 R_RESERVE_FLOOR_LEASE = "RESERVE_FLOOR_LEASE"

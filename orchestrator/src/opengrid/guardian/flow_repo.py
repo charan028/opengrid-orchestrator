@@ -39,6 +39,12 @@ from opengrid.guardian.ports import (
     PoiLimit,
     ServiceTransformer,
 )
+from opengrid.market.availability import (
+    BANK_AVAILABILITY_SQL,
+    GRANDFATHERED_SQL,
+    BankAvailability,
+    parse_availability,
+)
 from opengrid.market.config import load_zone_territory
 from opengrid.settle.tariffs import resolve_tdsp_tariffs_path
 
@@ -353,6 +359,9 @@ class PgTerritoryPort:
         self._zone_of_hub: dict[str, str] = {}
         self._zones_loaded_at: float | None = None
         self._free_access: dict[str, tuple[bool, float]] = {}
+        self._availability: dict[str, BankAvailability] = {}
+        self._grandfathered: set[tuple[str, str]] = set()
+        self._availability_loaded_at: float | None = None
 
     def zone_territory(self) -> Mapping[str, UtilityId]:
         return self._zone_territory
@@ -387,6 +396,30 @@ class PgTerritoryPort:
         granted = bool(row and row[0])
         self._free_access[utility_id] = (granted, self._monotonic())
         return granted
+
+    async def _refresh_availability(self) -> None:
+        """D-37: og.bank.availability and the K13-grandfathered pairs, the guardian's own reads, re-read on
+        the topology's cadence (both change only at a territory/contract switch)."""
+        now = self._monotonic()
+        loaded = self._availability_loaded_at
+        if loaded is not None and now - loaded <= self._refresh_s:
+            return
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(BANK_AVAILABILITY_SQL)
+            rows = await cur.fetchall()
+            await cur.execute(GRANDFATHERED_SQL)
+            pairs = await cur.fetchall()
+        self._availability = {str(r[0]): parse_availability(str(r[0]), r[1], r[2], r[3]) for r in rows}
+        self._grandfathered = {(str(o), str(b)) for o, b in pairs}
+        self._availability_loaded_at = now
+
+    async def bank_availability(self, bank_id: str) -> BankAvailability | None:
+        await self._refresh_availability()
+        return self._availability.get(bank_id)
+
+    async def grandfathered(self, obligation_id: UUID, bank_id: str) -> bool:
+        await self._refresh_availability()
+        return (str(obligation_id), bank_id) in self._grandfathered
 
 
 def load_required_zone_territory() -> dict[str, UtilityId]:

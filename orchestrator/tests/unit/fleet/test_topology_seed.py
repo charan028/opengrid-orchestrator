@@ -31,7 +31,7 @@ ts = importlib.util.module_from_spec(_spec)
 sys.modules["topology_seed"] = ts
 _spec.loader.exec_module(ts)
 
-TERRITORY = {"LZ_AEN": "AUSTIN_ENERGY", "LZ_CPS": "CPS_ENERGY"}
+TERRITORY = {"LZ_AEN": "AUSTIN_ENERGY", "LZ_CPS": "CPS_ENERGY", "LZ_LCRA": "LCRA", "LZ_RAYBN": "RAYBURN"}  # D-37
 DEV_FLEET = REPO / "dev" / "config" / "fleet.dev.yaml"
 DEV_SCADA = REPO / "dev" / "config" / "scada.dev.yaml"
 
@@ -77,7 +77,7 @@ def test_default_blocks_are_exactly_the_fleet_seeds_enabled_blocks(
     assert {zone_of[f"bank-{i:03d}"] for i in range(50, 60)} == {"LZ_LCRA"}
     assert {zone_of[f"bank-{i:03d}"] for i in range(60, 70)} == {"LZ_RAYBN"}
     assert len(seed.topology.hubs) == 3500 and len(zone_of) == 70
-    assert {a.bank_id: a.utility_id for a in seed.assets}["bank-050"] is None  # LCRA is FREE, not CPS
+    assert {a.bank_id: a.utility_id for a in seed.assets}["bank-050"] == "LCRA"  # D-37: regulated, not CPS
 
     # Exactly the fleet seed's hubs and banks, id for id.
     fleet_seed = build_topology(
