@@ -10,6 +10,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -311,10 +312,14 @@ async def test_charge_windows_table_store_and_topology(dsn: str, pool: AsyncConn
             conn.execute("DELETE FROM og.bank WHERE bank_id = 'fups-bank3'")
 
 
-async def test_device_info_upsert_against_the_real_hub_table(dsn: str, pool: AsyncConnectionPool) -> None:
+async def test_device_info_upsert_against_the_real_hub_table(
+    dsn: str, pool: AsyncConnectionPool, tmp_path: Path
+) -> None:
     """opengrid.fleet.device_info on migration 0036's columns, and the hub detail read (store.get_hub)."""
     from opengrid.api.store import PgStore
     from opengrid.fleet.device_info import upsert_device_info
+    from opengrid.trace.pg_backend import PgTraceBackend
+    from opengrid.trace.store import TraceStore
 
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("INSERT INTO og.bank (bank_id, zone, kva_rating) VALUES ('fups-bank4', 'LZ_NORTH', 600)")
@@ -346,19 +351,47 @@ async def test_device_info_upsert_against_the_real_hub_table(dsn: str, pool: Asy
         "ts": "2026-09-26T18:00:00Z",
     }
     try:
-        result = await upsert_device_info(pool, msg)
-        assert result.found and set(result.rating_changes) == {"units", "p_kw", "e_kwh", "r_kwh"}
+        trace = TraceStore(PgTraceBackend(pool, journal_path=tmp_path / "journal.jsonl"))
+        topic = "og/v1/hub/fups-hub-4/info"
+        result = await upsert_device_info(pool, msg, topic=topic, trace=trace)
+        # H4: the report differs from the seed -- recorded in device_* only, the seed is untouched
+        assert result.accepted and set(result.mismatches) == {"units", "p_kw", "e_kwh", "r_kwh"}
         hub = await PgStore(pool).get_hub("fups-hub-4")
         assert hub is not None
-        assert (hub["units"], hub["rated_p_kw"], hub["e_kwh"]) == (2, 20.0, 78.4)
+        assert (hub["units"], hub["rated_p_kw"], hub["e_kwh"], hub["r_kwh"]) == (1, 11.0, 39.2, 7.84)
         assert hub["serial_number"] == "BP-LZ_NORTH-FUPS4" and hub["inverter_model"] == "INV-20"
         assert str(hub["installed_at"]) == "2025-03-14" and str(hub["commissioned_at"]) == "2025-03-21"
         assert hub["device_info_at"] is not None
-        again = await upsert_device_info(pool, msg)
-        assert again.rating_changes == {}  # the same report re-rates nothing
-        assert (await upsert_device_info(pool, {**msg, "hub_id": "fups-nope"})).found is False
+        again = await upsert_device_info(pool, msg, topic=topic, trace=trace)
+        assert again.accepted and set(again.mismatches) == set(
+            result.mismatches
+        )  # still differs; never applied
+        spoof = await upsert_device_info(pool, {**msg, "hub_id": "fups-nope"}, topic=topic, trace=trace)
+        assert spoof.accepted is False
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DELETE FROM og.hub_state WHERE hub_id = 'fups-hub-4'")
             conn.execute("DELETE FROM og.hub WHERE hub_id = 'fups-hub-4'")
             conn.execute("DELETE FROM og.bank WHERE bank_id = 'fups-bank4'")
+
+
+async def test_trace_accepts_authz_deny(dsn: str, pool: AsyncConnectionPool, tmp_path: Path) -> None:
+    """Migration 0041: an audited deny (opengrid.authz.enforce.audit_deny, decision_type AUTHZ_DENY) is a valid
+    og.trace row -- before, it raised a CheckViolation that the backend journaled as an outage, blocking replay."""
+    from opengrid.trace.pg_backend import PgTraceBackend
+    from opengrid.trace.store import TraceStore
+
+    journal = tmp_path / "journal.jsonl"
+    store = TraceStore(PgTraceBackend(pool, journal_path=journal))
+    stream = f"fups-authz-{uuid4()}"
+    try:
+        await store.append(stream, "AUTHZ_DENY", "TRACE_AUTHZ_DENY", {"actor": "fups", "action": "api.write"})
+        assert not journal.exists() or journal.stat().st_size == 0  # written to og.trace, not journaled
+        with psycopg.connect(dsn) as conn:
+            row = conn.execute(
+                "SELECT decision_type FROM og.trace WHERE stream_id = %s", (stream,)
+            ).fetchone()
+        assert row == ("AUTHZ_DENY",)
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM og.trace WHERE stream_id = %s", (stream,))
