@@ -8,17 +8,24 @@ running processes did.
 |---|---|---|
 | `dispatch/test_ts04_commitment_lock.py` | Q1 | TS-04-05, -06, -15, -16 (gate-level, ~1 min) |
 | `dispatch/test_ts04_delivery.py` | Q1 | TS-04-07, -11/-13, -12, TS-05-07 (`slow`: waits for a real delivery window) |
-| `safety/test_ts06_guardian_and_safe_stop.py` | Q2 | TS-06-07a, -09, -15, -16, -17, -23, two-person release, TS-07-04, A11 |
+| `safety/test_ts06_guardian_and_safe_stop.py` | Q2 | TS-06-07a, -09, -15, -16, -17, -23, two-person release, TS-07-04, A11; an R3 manual discharge target reached and held, measured (D-38, `slow`) |
 | `decisions/test_d12_k7_as.py` | Q4 | D-12 two-person release by og-op-a/og-op-b, K8 replay of an old RELEASE, K7 veto-rate escalation |
 | `decisions/test_d17_d18_delivery.py` | Q4 | D-17 best-effort SHORTFALL under an L2 BLOCK and its lift; D-18 need-basis G-19 (`slow`) |
-| `decisions/test_as_capacity_hold.py` | Q4 | ERCOT_AS capacity hold: 0 kW until an ERCOT deployment, then back to the hold (`slow`) |
+| `decisions/test_as_capacity_hold.py` | Q4 | ERCOT_AS capacity hold: 0 kW until an ERCOT deployment, then back to the hold; the deployment's delivered power, measured (D-38) (`slow`) |
+| `r3/test_utility_toll.py` | R3 | D-29 toll: daily window, 0 kW hold, a call discharges it and its delivered power is measured (D-38, `slow`, only inside 16:30-18:00 CT), 90-minute cap, ERCOT deployments never touch it, availability settlement |
+| `r3/test_ercot_as_poll.py` | R3 | D-35 ERCOT AS instructions: refusals, and an ECRS deployment, its duplicate and its recall, with its delivered power measured (D-38, `slow`); needs `OG_E2E_ERCOT_AS_POLL=1` |
+
+The delivered-power checks (D-38) share `delivery_check.py`: hub telemetry judged by `opengrid.core.delivery`,
+and on r3.4.3 stacks og-settle's own `og.delivery_record` for the same call. `conftest.py` puts this checkout's
+`orchestrator/src` first on `sys.path`, so the suites judge with the code under test, never with another
+checkout a venv may have installed.
 
 ## Run
 
 ```bash
 docker compose -f dev/docker-compose.yml --profile orchestrator up -d
 pytest tests-e2e/functional -v                 # everything
-pytest tests-e2e/functional -v -m "not slow"   # skip the delivery-window scenarios
+pytest tests-e2e/functional -v -m "not slow"   # skip the scenarios that wait minutes for a delivery
 ```
 
 Every test skips (not fails) when the stack is not reachable. Defaults read `dev/secrets` and `dev/.env`;

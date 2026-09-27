@@ -2,15 +2,19 @@
 
 A committed Non-Spin award reserves its kW and holds energy for a full deployment above the reserve floor, but
 discharges 0 kW until ERCOT deploys it; an operator-recorded deployment (`POST /og/api/dispatch/as-deployments`)
-starts delivery and ending it returns the hold to 0 kW. Needs a live window, so `slow`.
+starts delivery and ending it returns the hold to 0 kW. The deployment's discharge is checked as DELIVERED power
+(D-38, `delivery_check`): measured from telemetry, it reaches 95% of the award's kW within the product's ramp time
+(the delivery job's: 600 s for this `NONSPIN` variant) and holds it, and on r3.4.3 og-settle's own record of the
+deployment must agree. Needs a live window, so `slow`.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from delivery_check import CHECK_MINUTES, assert_system_record, check_delivered, obligation_buckets
 from e2e_stack import Stack, now_utc, wait_until
 
 pytestmark = pytest.mark.slow
@@ -18,6 +22,10 @@ pytestmark = pytest.mark.slow
 #: The Non-Spin minimum: the smallest hold the energy-hold feasibility check has to fit.
 AWARD_KW = 100.0
 NONSPIN_MINUTES = 240
+#: Long enough for the delivered-power check to see the policy's whole ramp window plus one sustain window
+#: (`delivery_check.CHECK_MINUTES`, 12 min; was 5). The deployment still starts inside the award's 15-minute
+#: window, and it is ended early below as before.
+DEPLOY_MINUTES = CHECK_MINUTES
 
 
 def _discharged_per_cycle(stack: Stack, obligation_id, since) -> list[Decimal]:
@@ -83,7 +91,11 @@ def test_an_as_award_holds_capacity_at_0_kw_until_ercot_deploys_it(stack: Stack)
 
     deployed = stack.post(
         "/dispatch/as-deployments",
-        {"obligation_id": str(award["obligation_id"]), "duration_minutes": 5, "reason": "e2e deployment"},
+        {
+            "obligation_id": str(award["obligation_id"]),
+            "duration_minutes": DEPLOY_MINUTES,
+            "reason": "e2e deployment",
+        },
     )
     assert deployed.status_code == 201, deployed.text
     deployment_id = deployed.json()["deployment_id"]
@@ -97,6 +109,22 @@ def test_an_as_award_holds_capacity_at_0_kw_until_ercot_deploys_it(stack: Stack)
             ),
             timeout_s=45,
             what="discharge once ERCOT deploys the award",
+        )
+
+        # Granted is not delivered (D-38): the award's measured discharge must reach its committed kW and hold it,
+        # judged by core.delivery's own policy (the deployment names no kW, so it deploys all of it).
+        start = datetime.fromisoformat(deployed.json()["start_at"])
+        delivered = check_delivered(
+            lambda until: obligation_buckets(
+                stack, award["obligation_id"], committed_discharge_kw=AWARD_KW, call_start=start, until=until
+            ),
+            call_start=start,
+            call_end=datetime.fromisoformat(deployed.json()["end_at"]),
+            product="NONSPIN",
+            what="the deployed Non-Spin award",
+        )
+        assert_system_record(
+            stack, deployment_id, call_start=start, metrics=delivered, what="the deployed Non-Spin award"
         )
     finally:
         stack.http.delete(
