@@ -19,13 +19,14 @@ from opengrid.core.models.platform import FeedObs
 from opengrid.feeds.http_client import DEFAULT_TIMEOUT_S, FeedHttpError, request_with_retry
 from opengrid.feeds.normalize import (
     ERCOT_ENERGY_PRICE_PRODUCTS,
+    EXTREME_UNCORROBORATED,
     ercot_as_price_to_feed_obs,
     ercot_load_to_feed_obs,
     ercot_solar_by_region_to_feed_obs,
     ercot_solar_to_feed_obs,
     ercot_spp_to_feed_obs,
     ercot_wind_to_feed_obs,
-    split_out_of_bounds_prices,
+    screen_prices,
 )
 from opengrid.feeds.secrets import Secret, mask_secrets
 from opengrid.platform.config import resolve_secret
@@ -101,15 +102,32 @@ _NORMALIZERS = {
 }
 
 
-def _drop_impossible_prices(product: str, observations: list[FeedObs]) -> list[FeedObs]:
-    """Issue #43 A12: never store an energy price outside ERCOT's -$250..$5,000/MWh bounds
-    (`normalize.split_out_of_bounds_prices`); each dropped row is logged."""
-    kept, rejected = split_out_of_bounds_prices(observations)
-    for row in rejected:
+def _screen_prices(product: str, observations: list[FeedObs]) -> list[FeedObs]:
+    """FR-ING-117 / V-P1 (`normalize.screen_prices`): extremes are kept and flagged
+    EXTREME_UNCORROBORATED (never clipped); only a non-number or a value outside the hard bounds is
+    quarantined, and each quarantined row is logged."""
+    kept, quarantined = screen_prices(observations)
+    for row in quarantined:
         logger.warning(
-            "ercot price outside the offer floor/system-wide offer cap; dropped at ingest",
-            extra={"product": product, "series": row.series, "ts": row.ts.isoformat(), "value": row.value},
+            "ercot price quarantined at ingest (not a number, or outside the V-P1 hard bounds)",
+            extra={
+                "product": product,
+                "series": row.series,
+                "ts": row.ts.isoformat(),
+                "value": str(row.value),
+            },
         )
+    for row in kept:
+        if row.quality == EXTREME_UNCORROBORATED:
+            logger.warning(
+                "ercot price outside the normal band; kept as EXTREME_UNCORROBORATED",
+                extra={
+                    "product": product,
+                    "series": row.series,
+                    "ts": row.ts.isoformat(),
+                    "value": row.value,
+                },
+            )
     return kept
 
 
@@ -296,7 +314,7 @@ class ErcotClient:
             normalizer = _NORMALIZERS[product]
             observations = normalizer(payload, product=product, recorded_at=now)
             if product in ERCOT_ENERGY_PRICE_PRODUCTS:
-                observations = _drop_impossible_prices(product, observations)
+                observations = _screen_prices(product, observations)
             return ErcotPage(
                 observations=observations,
                 rotation_events=events,

@@ -7,16 +7,22 @@ follow-up finding), not the originally-assumed shapes (`deliveryDateTime`, tall 
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 
 import pytest
 
+from opengrid.core.models.platform import FeedObs
 from opengrid.feeds.normalize import (
     EIA_SYSTEM_LOAD_SERIES,
     ERCOT_ENERGY_PRICE_PRODUCTS,
     ERCOT_PRICE_CAP_USD_PER_MWH,
     ERCOT_PRICE_FLOOR_USD_PER_MWH,
+    ERCOT_PRICE_HARD_MAX_USD_PER_MWH,
+    ERCOT_PRICE_HARD_MIN_USD_PER_MWH,
+    EXTREME_UNCORROBORATED,
     FeedDataError,
+    corroborates,
     eia_demand_to_feed_obs,
     ercot_as_price_to_feed_obs,
     ercot_load_to_feed_obs,
@@ -24,7 +30,7 @@ from opengrid.feeds.normalize import (
     ercot_spp_to_feed_obs,
     ercot_wind_to_feed_obs,
     nws_forecast_to_feed_obs,
-    split_out_of_bounds_prices,
+    screen_prices,
 )
 
 RECORDED_AT = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
@@ -348,26 +354,71 @@ def test_nws_forecast_without_sky_cover_still_returns_temperature_and_dewpoint()
     assert temp.value == pytest.approx((91 - 32) * 5 / 9)
 
 
-def test_price_bounds_are_the_ercot_offer_floor_and_system_wide_offer_cap() -> None:
-    """Issue #43 A12 (the pure split; `feeds.ercot` applies it to ERCOT_ENERGY_PRICE_PRODUCTS)."""
-    assert (ERCOT_PRICE_FLOOR_USD_PER_MWH, ERCOT_PRICE_CAP_USD_PER_MWH) == (-250.0, 5_000.0)
-    payload = {
-        "data": [
-            ["2026-09-26", 1, i + 1, "LZ_WEST", "LZ", v, False] for i, v in enumerate((9_999.0, 30.0, -251.0))
-        ],
-        "fields": [
-            {"name": "deliveryDate"},
-            {"name": "deliveryHour"},
-            {"name": "deliveryInterval"},
-            {"name": "settlementPoint"},
-            {"name": "settlementPointType"},
-            {"name": "settlementPointPrice"},
-            {"name": "DSTFlag"},
-        ],
-    }
-    kept, rejected = split_out_of_bounds_prices(
-        ercot_spp_to_feed_obs(payload, product="np6-905-cd", recorded_at=RECORDED_AT)
+_SPP_FIELDS = [
+    {"name": "deliveryDate"},
+    {"name": "deliveryHour"},
+    {"name": "deliveryInterval"},
+    {"name": "settlementPoint"},
+    {"name": "settlementPointType"},
+    {"name": "settlementPointPrice"},
+    {"name": "DSTFlag"},
+]
+
+
+def _spp_rows(values: tuple[object, ...], series: str = "LZ_WEST") -> list[FeedObs]:
+    """Consecutive 15-minute intervals (hour-ending 1, intervals 1..4, then hour-ending 2) of `series`."""
+    data = [["2026-09-26", 1 + i // 4, i % 4 + 1, series, "LZ", v, False] for i, v in enumerate(values)]
+    return ercot_spp_to_feed_obs(
+        {"data": data, "fields": _SPP_FIELDS}, product="np6-905-cd", recorded_at=RECORDED_AT
     )
-    assert [o.value for o in kept] == [30.0]
-    assert [o.value for o in rejected] == [9_999.0, -251.0]
+
+
+def test_v_p1_bands_are_the_offer_floor_swcap_and_the_hard_bounds() -> None:
+    assert (ERCOT_PRICE_FLOOR_USD_PER_MWH, ERCOT_PRICE_CAP_USD_PER_MWH) == (-250.0, 5_000.0)
+    assert (ERCOT_PRICE_HARD_MIN_USD_PER_MWH, ERCOT_PRICE_HARD_MAX_USD_PER_MWH) == (-10_000.0, 50_000.0)
     assert "np6-905-cd" in ERCOT_ENERGY_PRICE_PRODUCTS
+
+
+def test_9000_scarcity_interval_is_kept_and_flagged_not_dropped() -> None:
+    """FR-ING-117 / TC-INT-115: a $9,000 scarcity interval (above SWCAP: adders plus positive congestion)
+    is stored as EXTREME_UNCORROBORATED -- never dropped, clipped or smoothed."""
+    kept, quarantined = screen_prices(_spp_rows((42.0, 9_000.0, 38.0)))
+    assert quarantined == []
+    assert [(o.value, o.quality) for o in kept] == [
+        (42.0, "GOOD"),
+        (9_000.0, EXTREME_UNCORROBORATED),
+        (38.0, "GOOD"),
+    ]
+
+
+def test_extreme_low_price_is_flagged_too() -> None:
+    kept, _ = screen_prices(_spp_rows((-251.0,)))
+    assert [(o.value, o.quality) for o in kept] == [(-251.0, EXTREME_UNCORROBORATED)]
+
+
+def test_same_extreme_value_in_consecutive_postings_is_corroborated_good() -> None:
+    kept, _ = screen_prices(_spp_rows((9_000.0, 9_000.0, 9_500.0)))
+    assert [o.quality for o in kept] == ["GOOD", "GOOD", EXTREME_UNCORROBORATED]
+
+
+def test_consecutive_intervals_of_different_series_do_not_corroborate() -> None:
+    kept, _ = screen_prices(_spp_rows((9_000.0,), "LZ_WEST") + _spp_rows((42.0, 9_000.0), "LZ_NORTH"))
+    assert {(o.series, o.value): o.quality for o in kept}[("LZ_WEST", 9_000.0)] == EXTREME_UNCORROBORATED
+    assert {(o.series, o.value): o.quality for o in kept}[("LZ_NORTH", 9_000.0)] == EXTREME_UNCORROBORATED
+
+
+def test_malformed_and_out_of_hard_bound_values_are_rejected_not_the_batch() -> None:
+    """A non-numeric price, a null, a non-finite value and one past the hard bounds (a unit or sign
+    error) are quarantined; the good rows of the same posting still land."""
+    kept, quarantined = screen_prices(_spp_rows(("abc", None, "NaN", 60_000.0, -20_000.0, 30.0)))
+    assert [o.value for o in kept] == [30.0]
+    assert len(quarantined) == 5
+    assert not any(math.isfinite(o.value) for o in quarantined[:3])
+    assert [o.value for o in quarantined[3:]] == [60_000.0, -20_000.0]
+
+
+def test_corroborates_needs_the_immediately_preceding_interval() -> None:
+    first, _, third = _spp_rows((9_000.0, 1.0, 9_000.0))
+    assert not corroborates(first, third)  # 30 minutes apart
+    a, b = _spp_rows((9_000.0, 9_000.004))
+    assert corroborates(a, b)
