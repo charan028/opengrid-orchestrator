@@ -6,30 +6,68 @@
 - A broker outage over 60 s: og-guardian and og-safestop exit and are restarted (systemd in production, the
   container restart policy here). `slow`.
 
-Metrics endpoints are loopback-only inside each container; ports are overridable for a stack that differs.
+Metrics endpoints are loopback-only inside each container, so they are scraped with `docker compose exec`. Their
+ports come from `[metrics]` of the config the stack's og-* services load (`OG_CONFIG` in dev/docker-compose.yml,
+dev/config/docker.toml; set `OG_E2E_CONFIG` for a stack that loads another file), else from each service's own
+default: og-guardian 9103, og-safestop 9106, and no endpoint for og-engine without `engine_port`.
+`OG_E2E_ENGINE_METRICS_PORT`, `OG_E2E_GUARDIAN_METRICS_PORT` and `OG_E2E_SAFESTOP_METRICS_PORT` override a port.
 """
 
 from __future__ import annotations
 
 import os
 import time
+import tomllib
+from pathlib import Path
+from typing import Any
 
 import pytest
-from e2e_stack import Stack, now_utc, wait_until
+from e2e_stack import REPO_ROOT, Stack, now_utc, wait_until
 
 pytestmark = pytest.mark.usefixtures("stack")
 
 BANK = "bank-007"
 OPERATOR_A = os.environ.get("OG_E2E_OPERATOR_A", "og-op-a")
 OPERATOR_B = os.environ.get("OG_E2E_OPERATOR_B", "og-op-b")
-RECONNECT_METRICS = {
-    "og-engine": (
-        int(os.environ.get("OG_E2E_ENGINE_METRICS_PORT", "9101")),
-        "og_engine_mqtt_reconnects_total",
-    ),
-    "og-guardian": (int(os.environ.get("OG_E2E_GUARDIAN_METRICS_PORT", "9102")), "og_mqtt_reconnects_total"),
-    "og-safestop": (int(os.environ.get("OG_E2E_SAFESTOP_METRICS_PORT", "9103")), "og_mqtt_reconnects_total"),
-}
+#: The config file the dev stack's og-* services load (`OG_CONFIG` in dev/docker-compose.yml; the repo is mounted).
+STACK_CONFIG = Path(os.environ.get("OG_E2E_CONFIG") or REPO_ROOT / "dev" / "config" / "docker.toml")
+
+
+def _reconnect_metrics() -> dict[str, tuple[int | None, str]]:
+    """service -> (its /metrics port, its reconnect counter). The port is the OG_E2E_<SVC>_METRICS_PORT override,
+    else `[metrics]` of STACK_CONFIG, else the service's own default (guardian/main.py 9103, safestop/main.py
+    9106). None: og-engine serves no /metrics without `[metrics].engine_port` (engine/metrics.py)."""
+    section: dict[str, Any] = {}
+    if STACK_CONFIG.is_file():
+        with STACK_CONFIG.open("rb") as fh:
+            section = tomllib.load(fh).get("metrics", {})
+
+    def port(env: str, key: str, default: int | None) -> int | None:
+        value = os.environ.get(env) or section.get(key, default)
+        return None if value is None else int(value)
+
+    return {
+        "og-engine": (
+            port("OG_E2E_ENGINE_METRICS_PORT", "engine_port", None),
+            "og_engine_mqtt_reconnects_total",
+        ),
+        "og-guardian": (
+            port("OG_E2E_GUARDIAN_METRICS_PORT", "guardian_port", 9103),
+            "og_mqtt_reconnects_total",
+        ),
+        "og-safestop": (
+            port("OG_E2E_SAFESTOP_METRICS_PORT", "safestop_port", 9106),
+            "og_mqtt_reconnects_total",
+        ),
+    }
+
+
+RECONNECT_METRICS = _reconnect_metrics()
+
+
+def _reconnects(stack: Stack, svc: str) -> float | None:
+    port, name = RECONNECT_METRICS[svc]
+    return None if port is None else stack.metric(svc, port, name)
 
 
 def _broker_outage(stack: Stack, seconds: float) -> None:
@@ -55,9 +93,11 @@ def _verdicts_since(stack: Stack, since) -> bool:
 
 
 def test_services_reconnect_and_resume_after_a_20_s_broker_outage(stack: Stack) -> None:
-    before = {svc: stack.metric(svc, port, name) for svc, (port, name) in RECONNECT_METRICS.items()}
+    before = {svc: _reconnects(stack, svc) for svc in RECONNECT_METRICS}
     missing = [svc for svc, value in before.items() if value is None]
-    assert not missing, f"no reconnect counter exposed by {missing} (check [metrics] ports on this stack)"
+    assert not missing, (
+        f"no reconnect counter exposed by {missing} on {RECONNECT_METRICS} (check [metrics] in {STACK_CONFIG})"
+    )
 
     _broker_outage(stack, 20)
     back = now_utc()
@@ -70,11 +110,9 @@ def test_services_reconnect_and_resume_after_a_20_s_broker_outage(stack: Stack) 
         timeout_s=120,
         what="guardian verdicts after the broker returned",
     )
-    for svc, (port, name) in RECONNECT_METRICS.items():
+    for svc, (_, name) in RECONNECT_METRICS.items():
         after = wait_until(
-            lambda svc=svc, port=port, name=name: (
-                v if (v := stack.metric(svc, port, name)) and v > before[svc] else None
-            ),
+            lambda svc=svc: v if (v := _reconnects(stack, svc)) and v > before[svc] else None,
             timeout_s=90,
             what=f"{svc}'s {name} to increase",
         )
