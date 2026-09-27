@@ -95,6 +95,12 @@ from opengrid.engine.ramp_anchor import (
     stopped_banks,
 )
 from opengrid.engine.settings import dispatch_settings
+from opengrid.engine.telemetry_ingest import (
+    DEFAULT_APPLY_INTERVAL_S,
+    DEFAULT_MAX_HUBS,
+    DEFAULT_RAW_MAX,
+    TelemetryDecoupler,
+)
 from opengrid.engine.veto import (
     DEFAULT_VERDICT_WAIT_S,
     HubVetoExclusions,
@@ -1633,6 +1639,12 @@ async def main(cfg: Config) -> None:
         firmware_status_worker = BackgroundIngest("firmware-status", make_firmware_status_handler(pool))
         firmware_status_task = asyncio.create_task(firmware_status_worker.run())
         device_info_task = asyncio.create_task(device_info_worker.run())
+        telemetry_decoupler = build_telemetry_decoupler(cfg)
+        telemetry_apply_task = (
+            asyncio.create_task(telemetry_decoupler.run_applier())
+            if telemetry_decoupler is not None
+            else asyncio.create_task(asyncio.sleep(0))
+        )
         # One client at a time, rebuilt with the same client id after every disconnect (reconnect
         # with backoff; the loop resubscribes on each connection).
         ingest_task = asyncio.create_task(
@@ -1647,6 +1659,7 @@ async def main(cfg: Config) -> None:
                     site_ingest_on=settings.site_ingest_enabled,
                     device_info_worker=device_info_worker,
                     firmware_status_worker=firmware_status_worker,
+                    telemetry_decoupler=telemetry_decoupler,
                 ),
                 ingest_health,
                 on_give_up=_give_up,
@@ -1721,15 +1734,41 @@ async def main(cfg: Config) -> None:
                 device_info_task,
                 firmware_status_task,
                 grid_link_task,
+                telemetry_apply_task,
             )
             for task in {ingest_task, *background}:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            if telemetry_decoupler is not None:
+                telemetry_decoupler.stop()
         if fatal_exit:
             raise SystemExit(fatal_exit[0])
     finally:
         await pool.close()
+
+
+def build_telemetry_decoupler(cfg: Config) -> TelemetryDecoupler | None:
+    """Telemetry ingest decoupling step 1 (`engine.telemetry_ingest`), `[ingest].telemetry_decoupled`
+    (default true; false = the pre-r3.4.4 inline path). The parser thread is started here."""
+    from opengrid import fleet
+
+    if not bool(cfg.get("ingest.telemetry_decoupled", True)):
+        return None
+
+    async def _apply(telemetry: Any) -> None:
+        fleet.apply_telemetry(telemetry)
+
+    decoupler = TelemetryDecoupler(
+        fleet.parse_telemetry,
+        _apply,
+        observe=engine_metrics.observe_ingest,
+        raw_max=int(cfg.get("ingest.telemetry_raw_max", DEFAULT_RAW_MAX)),
+        max_hubs=int(cfg.get("ingest.telemetry_max_hubs", DEFAULT_MAX_HUBS)),
+        apply_interval_s=float(cfg.get("ingest.telemetry_apply_interval_s", DEFAULT_APPLY_INTERVAL_S)),
+    )
+    decoupler.start()
+    return decoupler
 
 
 #: ~100 s of waveform summaries at 2,000 hubs; beyond that the newest are dropped (counted) rather than
@@ -1854,6 +1893,7 @@ async def _mqtt_ingest_loop(
     site_ingest_on: bool = False,
     device_info_worker: BackgroundIngest | None = None,
     firmware_status_worker: BackgroundIngest | None = None,
+    telemetry_decoupler: TelemetryDecoupler | None = None,
 ) -> None:
     """Subscribe to `<root>/tel/#`, `<root>/scada/#`, `<root>/scada/instruction/#` (topics.md) and route
     validated payloads into the fleet twin. Split out of `main` so it runs concurrently with the 2 s
@@ -1894,6 +1934,11 @@ async def _mqtt_ingest_loop(
         await client.subscribe(firmware_status_topic)
 
     async for message in client.messages:
+        if telemetry_decoupler is not None and message.topic.matches(tel_topic):
+            # r3.4.4: decode/validate/parse on the parser thread; the twin gets each hub's newest sample
+            # every ~100 ms (`engine.telemetry_ingest`). Nothing else is under tel/.
+            telemetry_decoupler.submit(message.payload)
+            continue
         msg_topic = str(message.topic)
         try:
             payload = json.loads(message.payload)

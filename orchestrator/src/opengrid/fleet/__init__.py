@@ -317,7 +317,20 @@ async def ingest_telemetry(payload: dict[str, Any]) -> None:
     logged and skipped rather than raising, so one bad/unregistered publisher never stalls ingestion for
     the other 1,999 hubs (K7: degrade, don't trip).
     """
-    telemetry = Telemetry.model_validate(payload)
+    apply_telemetry(Telemetry.model_validate(payload))
+
+
+def parse_telemetry(payload: dict[str, Any]) -> Telemetry:
+    """Validate a raw telemetry payload against `telemetry.schema.json` and parse it (thread-safe, no twin
+    access): the off-loop half of ingest (`engine.telemetry_ingest`). Raises on an invalid payload."""
+    from opengrid.platform.mqtt import validate_payload
+
+    validate_payload("telemetry", payload)
+    return Telemetry.model_validate(payload)
+
+
+def apply_telemetry(telemetry: Telemetry) -> None:
+    """Apply one parsed sample to the twin (on the event loop; `ingest_telemetry`'s second half)."""
     runtime = _hubs.get(telemetry.hub_id)
     if runtime is None:
         logger.warning("telemetry for unknown hub_id", extra={"hub_id": telemetry.hub_id})
