@@ -143,7 +143,7 @@
       </label>
     </span>
   </div>
-  <p class="og-card-meta">Data {% with since_iso=rendered_at, stale_after_s=10 %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
+  <p class="og-card-meta">Data {% with since_iso=rendered_at, stale_after_s=hub_stale_s %}{% include "_partials/stale_badge.html" %}{% endwith %}</p>
 
   <div class="og-table-wrap">
     <table class="data-table fl-table" id="fleet-table">

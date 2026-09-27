@@ -22,9 +22,11 @@ from urllib.parse import quote, urlencode
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from opengrid.api.deps import get_config
 from opengrid.core.timeutil import to_utc
+from opengrid.health.model import HealthThresholds
 from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json, put_json
-from opengrid.ui.render import render_stale_badge, render_status_badge
+from opengrid.ui.render import render_stale_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.templating import BASE_PATH, templates
 
@@ -85,7 +87,6 @@ SORT_COLUMNS: dict[str, str] = {
     "hw": "HW rev",
     "fw": "FW version",
 }
-_HUB_STALE_AFTER_S = 10.0
 #: The API holds the approval open up to 10 s waiting for the guardian (api `routers.safestop`).
 _RELEASE_APPROVE_TIMEOUT_S = 15.0
 _SAFESTOP_SCOPES = ("fleet", "zone", "bank")
@@ -235,22 +236,6 @@ def parse_hub_ids(raw: str | None) -> list[str]:
         if hub_id:
             seen.setdefault(hub_id, None)
     return list(seen)
-
-
-def _to_table_row(hub: dict[str, Any]) -> dict[str, Any]:
-    health = hub.get("health", "unknown")
-    last_seen_at = hub.get("last_seen_at")
-    return {
-        "hub_id": hub.get("hub_id", "-"),
-        "bank_id": hub.get("bank_id", "-"),
-        "zone": hub.get("zone", "-"),
-        "health_badge": render_status_badge(health),
-        "soc_kwh": hub.get("soc_kwh", "-"),
-        "p_kw": hub.get("p_kw", "-"),
-        "age_badge": render_stale_badge(
-            _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=_HUB_STALE_AFTER_S
-        ),
-    }
 
 
 def _confirm_dialog_context(
@@ -444,7 +429,21 @@ def _approx(n: int | None) -> str:
     return f"~{n:,}"
 
 
-def _table_row(hub: dict[str, Any], targets: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def hub_age_thresholds(request: Request) -> tuple[float, float]:
+    """(stale_after_s, offline_after_s) for the telemetry-age badges: `[health].hub_stale_s` and
+    `hub_offline_s` through the health module's own reader (`HealthThresholds.from_config`), so a hub
+    reporting every 10 s never blinks stale between reports (r3.4). No config (a bare test app): the
+    reader's defaults."""
+    try:
+        thresholds = HealthThresholds.from_config(get_config(request))
+    except AttributeError:
+        thresholds = HealthThresholds()
+    return float(thresholds.hub_stale_s), float(thresholds.hub_offline_s)
+
+
+def _table_row(
+    hub: dict[str, Any], targets: dict[str, dict[str, Any]], *, stale_after_s: float
+) -> dict[str, Any]:
     last_seen_at = hub.get("last_seen_at")
     return {
         "asset_class": hub.get("asset_class") or "HOME",
@@ -462,7 +461,7 @@ def _table_row(hub: dict[str, Any], targets: dict[str, dict[str, Any]]) -> dict[
         "health_label": hub.get("health_label") or str(hub.get("health", "unknown")).upper(),
         "last_seen_at": last_seen_at,
         "age_badge": render_stale_badge(
-            _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=_HUB_STALE_AFTER_S
+            _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=stale_after_s
         ),
     }
 
@@ -482,6 +481,7 @@ async def fleet_screen(
     safestop_scope_id: str | None = Query(default=None),
 ) -> HTMLResponse:
     state = table_state(request)
+    stale_s, _offline_s = hub_age_thresholds(request)
     degraded: str | None = None
     page: dict[str, Any] = {}
     api_params: list[tuple[str, str]] = [
@@ -547,7 +547,8 @@ async def fleet_screen(
             "role": role_of(request),
             "is_operator": operator,
             "state": state,
-            "table_rows": [_table_row(h, targets) for h in hubs],
+            "table_rows": [_table_row(h, targets, stale_after_s=stale_s) for h in hubs],
+            "hub_stale_s": stale_s,
             "hw_options": hw_options,
             "asset_labels": ASSET_LABELS,
             "home_stations": (stations or {}).get("items", []) if isinstance(stations, dict) else [],
@@ -640,6 +641,7 @@ async def hub_drilldown(request: Request, hub_id: str) -> HTMLResponse:
             "hub": hub,
             "detail": detail,
             "target": (await active_targets()).get(hub_id),
+            "hub_stale_s": hub_age_thresholds(request)[0],
             "charge_window": await _optional_json(
                 f"{_CHARGE_WINDOWS_PATH}/effective", params={"hub_id": hub_id}
             ),

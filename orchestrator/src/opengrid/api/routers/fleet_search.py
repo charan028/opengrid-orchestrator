@@ -16,8 +16,9 @@ Query-plan note (for millions of hubs):
 * Paging is keyset, never OFFSET: `WHERE (sort_expr, h.hub_id) > (%s, %s) ORDER BY sort_expr, h.hub_id
   LIMIT n+1`. Sorting by hub is an index range scan on `og.hub`'s primary key; the other sort keys need
   a matching expression index to stay O(page) (`og.hub (bank_id, hub_id)`, `og.hub (zone, hub_id)`,
-  `og.hub_state (last_seen_at, hub_id)`, `og.hub_state (p_kw, hub_id)`); without one Postgres sorts the
-  filtered set once per page (top-N heapsort, bounded memory).
+  `og.hub_state` is deliberately NOT indexed for P or telemetry age (0042 dropped 0039's two: they
+  defeated HOT updates on the hottest table), so those two sorts scan and top-N sort the filtered set
+  once per page (bounded memory; ~2,500 rows today).
 * The total is an estimate: `pg_class.reltuples` with no filter, else the planner's row estimate from
   `EXPLAIN (FORMAT JSON)` -- never a `count(*)` over the fleet.
 * Search is a case-insensitive prefix match (`ILIKE 'q%'`). It is an index range scan once
@@ -160,7 +161,8 @@ class Thresholds:
     def from_config(cls, cfg: Config) -> Thresholds:
         t = HealthThresholds.from_config(cfg)
         return cls(
-            online_s=float(t.hub_online_s),
+            # `[health].hub_stale_s` (25 s): a hub reporting every 10 s is never WATCH between reports
+            online_s=float(t.hub_stale_s),
             offline_s=float(t.hub_offline_s),
             mobile=tuple(sorted(mobile_units())),
         )
