@@ -141,10 +141,14 @@ async def test_pg_commitment_port_active_obligations_for_bank():
     """GUARD-01: guardian's own enumeration reads og.reservation/og.commitment directly, independent of
     anything a proposed batch claims."""
     obligation_id = uuid4()
-    cursor = FakeCursor([[(obligation_id, Decimal("5.0"))]])
+    cursor = FakeCursor([[(obligation_id, Decimal("5.0"), Decimal("8.0"))]])
     port = repo.PgCommitmentPort(FakePool(cursor))
     obligations = await port.active_obligations_for_bank("bank-1", "cycle-1")
-    assert obligations == [repo.ActiveObligation(obligation_id=obligation_id, frozen_kw=Decimal("5.0"))]
+    assert obligations == [
+        repo.ActiveObligation(
+            obligation_id=obligation_id, frozen_kw=Decimal("5.0"), total_frozen_kw=Decimal("8.0")
+        )
+    ]
 
 
 async def test_pg_commitment_port_active_obligations_for_bank_none_active():

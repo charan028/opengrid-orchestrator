@@ -856,6 +856,9 @@ class _AsAwards:
     async def deployment_active(self, obligation_id):
         return obligation_id in self.deployed
 
+    async def deployment_requested_kw(self, obligation_id):
+        return getattr(self, "requested", {}).get(obligation_id)
+
 
 def _as_hold_batch(fakes, *, extra: tuple | None = None):
     """AS award A: 5 kW committed, held at 0 kW. `extra` adds obligation B as (id, committed_kw, granted_kw)."""

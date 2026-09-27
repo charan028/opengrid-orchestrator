@@ -130,6 +130,9 @@ class _ServiceTypes:
     async def deployment_active(self, obligation_id):
         return False
 
+    async def deployment_requested_kw(self, obligation_id):
+        return None
+
 
 def _pq_world(fakes, config, seed, service_type: str):
     """A PQ-sensitive bank: an 8 kW commitment granted 2 kW; members hub-a (OK) and hub-b (QUARANTINED, not

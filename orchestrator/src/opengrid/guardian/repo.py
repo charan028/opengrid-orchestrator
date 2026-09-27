@@ -103,7 +103,10 @@ ORDER BY interval_start DESC LIMIT 1
 # not part of it. Unscoped, every future commitment on the bank counted as "omitted, 0 kW" and G-19
 # vetoed every batch (live 2026-09-26).
 _ACTIVE_OBLIGATIONS_FOR_BANK_SQL = """
-SELECT r.obligation_id, SUM(r.amount) AS frozen_kw
+SELECT r.obligation_id, SUM(r.amount) AS frozen_kw,
+       (SELECT SUM(a.amount) FROM og.reservation a
+        WHERE a.obligation_id = r.obligation_id AND a.released_at IS NULL
+          AND a.interval_start <= now() AND a.interval_end > now()) AS total_frozen_kw
 FROM og.reservation r
 JOIN og.commitment c ON c.obligation_id = r.obligation_id AND c.supersedes IS NULL
     AND c.interval_start = r.interval_start
@@ -112,7 +115,15 @@ WHERE r.bank_id = %(bank_id)s AND r.released_at IS NULL
 GROUP BY r.obligation_id
 """
 
+
+#: The PRIOR cycle's grant for this obligation ON THIS BANK (the current cycle's rows are written before the
+#: verdict, so they are excluded). Obligation-wide it compared another bank's share (r3.4.4 live G-19 veto burst).
 _PRIOR_GRANT_SQL = """
+SELECT granted_kw FROM og.grant
+WHERE obligation_id = %(obligation_id)s AND bank_id::text = %(bank_id)s AND cycle_id <> %(cycle_id)s
+ORDER BY created_at DESC LIMIT 1
+"""
+_PRIOR_GRANT_ANY_BANK_SQL = """
 SELECT granted_kw FROM og.grant WHERE obligation_id = %(obligation_id)s
 ORDER BY created_at DESC LIMIT 1
 """
@@ -271,16 +282,31 @@ class PgCommitmentPort:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_ACTIVE_OBLIGATIONS_FOR_BANK_SQL, {"bank_id": bank_id})
             rows = await cur.fetchall()
-        return [ActiveObligation(obligation_id=row[0], frozen_kw=Decimal(str(row[1]))) for row in rows]
+        return [
+            ActiveObligation(
+                obligation_id=row[0],
+                frozen_kw=Decimal(str(row[1])),
+                total_frozen_kw=Decimal(str(row[2])) if row[2] is not None else None,
+            )
+            for row in rows
+        ]
 
 
 class PgPriorGrantPort:
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
 
-    async def prior_granted_kw(self, obligation_id: UUID) -> Decimal | None:
+    async def prior_granted_kw(
+        self, obligation_id: UUID, bank_id: str | None = None, cycle_id: str | None = None
+    ) -> Decimal | None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_PRIOR_GRANT_SQL, {"obligation_id": obligation_id})
+            if bank_id is None:  # no bank to scope to (legacy caller): the latest row, as before
+                await cur.execute(_PRIOR_GRANT_ANY_BANK_SQL, {"obligation_id": obligation_id})
+            else:
+                await cur.execute(
+                    _PRIOR_GRANT_SQL,
+                    {"obligation_id": obligation_id, "bank_id": bank_id, "cycle_id": cycle_id or ""},
+                )
             row = await cur.fetchone()
         return Decimal(str(row[0])) if row else None
 
@@ -371,6 +397,17 @@ SELECT EXISTS (
 """
 
 
+#: The active deployment's requested kW for this obligation (the largest when several; NULL when one deploys the
+#: full commitment or none is active):
+#: a partial deployment (0.3 MW of a 0.5 MW award) is what the bank shares must deliver, not the whole award.
+_AS_DEPLOYMENT_REQUESTED_SQL = """
+SELECT CASE WHEN bool_or(d.requested_kw IS NULL) THEN NULL ELSE max(abs(d.requested_kw)) END
+FROM og.as_deployment d JOIN og.obligation o ON o.obligation_id = %(obligation_id)s
+WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+  AND (d.obligation_id = o.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
+"""
+
+
 class PgAsAwardPort:
     """G-19 R-GRANT-AS-HOLD: the guardian's own reads of the award's service type and its deployment."""
 
@@ -388,6 +425,12 @@ class PgAsAwardPort:
             await cur.execute(_AS_DEPLOYMENT_ACTIVE_SQL, {"obligation_id": obligation_id})
             row = await cur.fetchone()
         return bool(row and row[0])
+
+    async def deployment_requested_kw(self, obligation_id: UUID) -> Decimal | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_AS_DEPLOYMENT_REQUESTED_SQL, {"obligation_id": obligation_id})
+            row = await cur.fetchone()
+        return Decimal(str(row[0])) if row and row[0] is not None else None
 
 
 #: An open alert's condition key: the one this port stores in `detail`, else rebuilt from its scope (the
