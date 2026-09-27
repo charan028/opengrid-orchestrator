@@ -127,6 +127,10 @@ def _mode(path: Path) -> int:
 # ---------------------------------------------------------------------------------------------------
 
 
+#: The settlement/audit tables 0033 seeds as protected (never deleted).
+PROTECTED_BY_0033 = frozenset({"invoice_line", "pnl", "meter_interval", "performance", "trace"})
+
+
 def test_0033_reapplies_cleanly(dsn: str) -> None:
     text = MIGRATION.read_text(encoding="utf-8")
     # Re-applied twice inside ONE transaction that the rollback below discards: this proves 0033 is re-runnable
@@ -140,8 +144,12 @@ def test_0033_reapplies_cleanly(dsn: str) -> None:
             "SELECT 1 FROM og.schema_migrations WHERE filename = '0033_data_lifecycle.sql'"
         ).fetchone()
         assert applied is not None
-        protected = conn.execute("SELECT count(*) FROM og.data_retention WHERE protected").fetchone()
-        assert protected is not None and protected[0] == 5
+        # By name, not by count: later migrations add their own protected rows (0052: the call audit trail).
+        protected = {
+            row[0] for row in conn.execute("SELECT table_name FROM og.data_retention WHERE protected")
+        }
+        assert PROTECTED_BY_0033 <= protected
+        assert {"dispatch_call", "as_deployment"} <= protected  # 0052, still protected after a 0033 re-run
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute("UPDATE og.data_retention SET keep_days = 30 WHERE table_name = 'invoice_line'")
         conn.rollback()
