@@ -216,7 +216,9 @@ phase_f() {
 
 phase_e() {
   phase e "seeds"
-  if [ ! -f "$SIM_DIR/fleet.yaml" ]; then echo "  sim configs missing: running phase f first"; phase_f; fi
+  # Always (re)generate the sim configs first: a stale copy from an earlier run with other zone blocks would
+  # seed the wrong fleet (e.g. --noie-blocks after an AEN-only run). Idempotent; no-op when unchanged.
+  want f || phase_f
   local seed="$RELEASE/dev/seed" trucks=""
   if [ "$DRY" -eq 1 ]; then
     echo "  DRY: fleet seed (OG_FLEET_SIM_CONFIG=$SIM_DIR/fleet.yaml), then market_model_seed.sql,"
