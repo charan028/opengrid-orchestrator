@@ -151,21 +151,26 @@ class HubFilter:
 
 @dataclass(frozen=True, slots=True)
 class Thresholds:
-    """Per-request context: health thresholds (02b S6.4) and the D-31 mobile unit ids."""
+    """Per-request context: the health module's own `HealthThresholds` (built by its one constructor,
+    `HealthThresholds.from_config`, so `[health].hub_stale_s`/`hub_offline_s` mean exactly what they mean
+    to `classify_hub_health`) and the D-31 mobile unit ids."""
 
-    online_s: float
-    offline_s: float
+    health: HealthThresholds
     mobile: tuple[str, ...] = ()
+
+    @property
+    def online_s(self) -> float:
+        """Telemetry age past which a hub is WATCH (stale): `[health].hub_stale_s`."""
+        return float(self.health.hub_stale_s)
+
+    @property
+    def offline_s(self) -> float:
+        """Telemetry age past which a hub is OFFLINE: `[health].hub_offline_s`."""
+        return float(self.health.hub_offline_s)
 
     @classmethod
     def from_config(cls, cfg: Config) -> Thresholds:
-        t = HealthThresholds.from_config(cfg)
-        return cls(
-            # `[health].hub_stale_s` (25 s): a hub reporting every 10 s is never WATCH between reports
-            online_s=float(t.hub_stale_s),
-            offline_s=float(t.hub_offline_s),
-            mobile=tuple(sorted(mobile_units())),
-        )
+        return cls(health=HealthThresholds.from_config(cfg), mobile=tuple(sorted(mobile_units())))
 
 
 @dataclass(slots=True)
@@ -486,7 +491,7 @@ def shape_hub(row: dict[str, Any], th: Thresholds, *, now: datetime) -> dict[str
         last_seen_at=last_seen,
         fault_code=row.get("fault_code") or None,
         now=now,
-        thresholds=HealthThresholds(telemetry_interval_s=th.online_s / 2, hub_offline_s=th.offline_s),
+        thresholds=th.health,
     )
     if health != "fault" and stored in ("degraded", "quarantined"):
         health = stored
