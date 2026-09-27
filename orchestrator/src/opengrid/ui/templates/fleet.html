@@ -8,20 +8,21 @@
 {% block content %}
 <link rel="stylesheet" href="{{ base_path }}/static/og-fleet.css">
 
-{# 1. header: the fleet at a glance #}
-<section class="og-panel fl-summary" aria-label="Fleet summary">
-  <div class="fl-summary-row">
-    <div class="fl-stat"><span class="kpi-label">Hubs</span><strong id="fleet-total">{{ '{:,}'.format(summary.total|int(0)) if summary else approx_text }}</strong></div>
-    {% if summary %}
-    <div class="fl-stat"><span class="kpi-label">Online</span><strong>{{ '{:,}'.format(summary.online|int(0)) }}</strong></div>
-    <div class="fl-stat"><span class="kpi-label">Stale</span><strong>{{ '{:,}'.format(summary.stale|int(0)) }}</strong></div>
-    <div class="fl-stat"><span class="kpi-label">Offline / fault</span><strong>{{ '{:,}'.format(summary.offline|int(0)) }}</strong></div>
+{# 1. the map, at the top (owner r3.4) #}
+<section class="og-panel og-map-panel" aria-label="Fleet map">
+  <h2>Fleet map</h2>
+  <p>The hubs on this page, coloured by health. Click a hub for its detail. Turn on <em>Select an area</em>,
+    then drag a rectangle or click hubs; Shift adds to the selection. The map and the table share one selection.</p>
+  <div class="og-map-toolbar">
+    {% if is_operator %}
+    <button type="button" class="btn" id="fleet-select-toggle" aria-pressed="false">Select an area</button>
+    <button type="button" class="btn" id="fleet-select-clear">Clear selection</button>
     {% endif %}
-    <div class="fl-stat"><span class="kpi-label">Matching this view</span><strong id="fleet-approx-total">{{ approx_text }} hubs</strong></div>
   </div>
+  <div id="fleet-map" class="og-map og-map-tall" data-hubs='{{ map_hubs|tojson }}' data-stations='{{ home_stations|tojson }}'></div>
 </section>
 
-{# 2. filters + table #}
+{# 2. filters + hubs table (25 rows by default, 50 on request, server-side keyset pages beyond) #}
 <section class="og-panel" aria-labelledby="hubs-heading">
   <h2 id="hubs-heading">Hubs</h2>
   <p>Filter, sort and page through every home battery. Click a row for its detail; tick rows to command them.</p>
@@ -191,20 +192,23 @@
   </div>
 </section>
 
-<section class="og-panel og-map-panel" aria-label="Fleet map">
-  <h2>Fleet map</h2>
-  <p>The hubs on this page, coloured by health. Click a hub for its detail. Turn on <em>Select an area</em>,
-    then drag a rectangle or click hubs; Shift adds to the selection. The map and the table share one selection.</p>
-  <div class="og-map-toolbar">
-    {% if is_operator %}
-    <button type="button" class="btn" id="fleet-select-toggle" aria-pressed="false">Select an area</button>
-    <button type="button" class="btn" id="fleet-select-clear">Clear selection</button>
+{# 3. grid-charging schedule (D-30) #}
+{% include "_partials/fleet_charge_card.html" %}
+
+{# 4. the rest, in its previous relative order: fleet summary, hub drawer, actions #}
+<section class="og-panel fl-summary" aria-label="Fleet summary">
+  <div class="fl-summary-row">
+    <div class="fl-stat"><span class="kpi-label">Hubs</span><strong id="fleet-total">{{ '{:,}'.format(summary.total|int(0)) if summary else approx_text }}</strong></div>
+    {% if summary %}
+    <div class="fl-stat"><span class="kpi-label">Online</span><strong>{{ '{:,}'.format(summary.online|int(0)) }}</strong></div>
+    <div class="fl-stat"><span class="kpi-label">Stale</span><strong>{{ '{:,}'.format(summary.stale|int(0)) }}</strong></div>
+    <div class="fl-stat"><span class="kpi-label">Offline / fault</span><strong>{{ '{:,}'.format(summary.offline|int(0)) }}</strong></div>
     {% endif %}
+    <div class="fl-stat"><span class="kpi-label">Matching this view</span><strong id="fleet-approx-total">{{ approx_text }} hubs</strong></div>
   </div>
-  <div id="fleet-map" class="og-map og-map-tall" data-hubs='{{ map_hubs|tojson }}' data-stations='{{ home_stations|tojson }}'></div>
 </section>
 
-{# 3. hub detail side drawer #}
+{# hub detail side drawer (fixed position, opens on row click) #}
 <aside class="fl-drawer" id="hub-drawer" aria-label="Hub detail" hidden>
   <div class="fl-drawer-head">
     <span class="kpi-label">Hub detail</span>
@@ -213,8 +217,7 @@
   <div id="hub-drilldown-container" aria-live="polite"></div>
 </aside>
 
-{# 4. actions #}
-{% include "_partials/fleet_charge_card.html" %}
+{# actions #}
 {% if is_operator %}
 <section class="og-panel fl-actions" aria-labelledby="actions-heading" id="fleet-actions">
   <h2 id="actions-heading">Actions</h2>

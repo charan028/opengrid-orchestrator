@@ -25,20 +25,21 @@ def test_pages_by_cursor_and_shows_the_approximate_total(operator_page: Page) ->
     operator_page.set_viewport_size({"width": 1400, "height": 1000})
     goto_ok(operator_page, f"{BASE_PATH}/fleet")
     rows = operator_page.locator("#fleet-table tbody tr.clickable-row")
-    expect(rows).to_have_count(50)
+    expect(rows).to_have_count(25)
     expect(operator_page.locator("#fleet-page-info")).to_contain_text("~132 hubs")
     expect(operator_page.locator("#fleet-prev")).to_have_count(0)
     _shot(operator_page, "fleet_operator_1400.png")
 
     operator_page.locator("#fleet-next").click()
-    expect(rows.first).to_have_attribute("data-row-id", "hub-0051")
+    expect(rows.first).to_have_attribute("data-row-id", "hub-0026")
     assert "cursor=" in operator_page.url
     operator_page.locator("#fleet-prev").click()
     expect(rows.first).to_have_attribute("data-row-id", "hub-0001")
 
-    operator_page.locator("#fleet-page-size").select_option(label="25")
-    expect(rows).to_have_count(25)
-    assert "size=25" in operator_page.url
+    operator_page.locator("#fleet-page-size").select_option(label="50")
+    expect(rows).to_have_count(50)
+    assert "size=50" in operator_page.url
+    expect(operator_page.locator("#fleet-page-size option")).to_have_count(2)
 
 
 def test_filters_become_chips_live_in_the_url_and_survive_refresh(operator_page: Page) -> None:
@@ -118,7 +119,7 @@ def test_select_page_and_all_matching_share_one_selection(operator_page: Page) -
     expect(bar).to_be_hidden()
 
     operator_page.locator("#fleet-select-all-page").check()
-    expect(count).to_have_text("50 hubs selected")
+    expect(count).to_have_text("25 hubs selected")
     expect(bar).to_be_visible()
     expect(operator_page.locator("#bulk-propose-button")).to_be_enabled()
 
@@ -199,7 +200,7 @@ def test_disabled_propose_says_why(operator_page: Page) -> None:
 
 def test_viewer_is_read_only(viewer_page: Page) -> None:
     goto_ok(viewer_page, f"{BASE_PATH}/fleet")
-    expect(viewer_page.locator("#fleet-table tbody tr.clickable-row")).to_have_count(50)
+    expect(viewer_page.locator("#fleet-table tbody tr.clickable-row")).to_have_count(25)
     for selector in (
         "input.og-row-select",
         "#fleet-select-all-page",
@@ -377,3 +378,30 @@ def test_control_room_map_shapes_asset_classes(operator_page: Page) -> None:
     shots = os.environ.get("OG_UI_SCREENSHOT_DIR")
     if shots:
         grid_map.screenshot(path=os.path.join(shots, "control_room_assets.png"))
+
+
+def test_layout_order_map_hubs_charging_then_the_rest(operator_page: Page) -> None:
+    """Owner r3.4: map first, then the hubs table, then the charging schedule, then everything else."""
+    for width in (1400, 390):
+        operator_page.set_viewport_size({"width": width, "height": 900})
+        goto_ok(operator_page, f"{BASE_PATH}/fleet")
+        tops = [
+            operator_page.locator(sel).first.bounding_box()
+            for sel in (
+                ".og-map-panel",
+                'section[aria-labelledby="hubs-heading"]',
+                "#charge-schedule",
+                ".fl-summary",
+                "#fleet-actions",
+            )
+        ]
+        assert all(tops), tops
+        ys = [b["y"] for b in tops if b]
+        assert ys == sorted(ys), ys
+        lefts = {round(b["x"]) for b in tops if b}
+        assert len(lefts) == 1, lefts  # one left edge: the panels line up
+        overflow = operator_page.evaluate(
+            "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+        )
+        assert overflow <= 0, (width, overflow)
+        _shot(operator_page, f"fleet_layout_{width}.png")

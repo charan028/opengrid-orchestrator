@@ -66,8 +66,9 @@ CHARGE_SCOPES: tuple[tuple[str, str], ...] = (
 )
 _WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 MAX_WINDOWS = 4
-PAGE_SIZES = (25, 50, 100)
-DEFAULT_PAGE_SIZE = 50
+#: Owner r3.4: 25 rows by default, 50 on request; keyset pages beyond (the API also allows 100).
+PAGE_SIZES = (25, 50)
+DEFAULT_PAGE_SIZE = 25
 #: "Select all N matching" cap; the API applies its own `[api].fleet_selection_max` on top.
 SELECTION_MAX = 5000
 HEALTH_CHOICES = ("OK", "WATCH", "DEGRADED", "QUARANTINED", "FAULT", "OFFLINE")
