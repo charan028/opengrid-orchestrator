@@ -17,14 +17,24 @@ channels:
   customer_api:
     # base_url comes from OGSIM_UTILITY_API_BASE (/etc/opengrid/utility_sim.env); never the loopback port.
     timeout_s: 10
-  # grid_link:                       # GRID-LINK lane (ogsim/utility_aen/channels/grid_link.py)
-  #   host: 127.0.0.1
-  #   port: 20000
-  #   master_address: 1
-  #   outstation_address: 10
-  #   heartbeat_s: 10
-  #   sbo: true
-  #   tls: {ca_file: ..., cert_file: ..., key_file: ..., server_hostname: ...}
+  # D-34 grid link (ogsim/utility_aen/channels/grid_link.py; grid-link.md S7). Used only with
+  # `channel: grid_link`. Values match deploy/scripts/grid_link_enable_loopback.sh: og-engine's outstation on
+  # LOOPBACK 127.0.0.1:20001 with the locally generated TEST PKI in /etc/opengrid/certs (client CN
+  # aen-ems-loopback). The link starts at receipt, carries discharge only, and cannot shorten a call.
+  grid_link:
+    host: 127.0.0.1
+    port: 20001
+    master_address: 1
+    outstation_address: 10
+    heartbeat_s: 5
+    sbo: true
+    timeout_s: 5
+    status_wait_s: 10
+    tls:
+      ca_file: /etc/opengrid/certs/gridlink-test-ca.pem
+      cert_file: /etc/opengrid/certs/aen-ems-loopback.pem
+      key_file: /etc/opengrid/certs/aen-ems-loopback.key
+      server_hostname: 127.0.0.1
 
 # The daily evening-peak call on hot days (America/Chicago), inside the toll's reservation window.
 schedule:

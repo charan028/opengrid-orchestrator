@@ -528,6 +528,8 @@ show on the Fleet page and are enforced by the guardian (G-15), like SCADA instr
 journalctl -u og-engine --since -10min | grep -i 'grid link'   # listening, associations, refusals, state changes
 ```
 
+**Loopback test enablement (r3.4.3):** the release manager runs `sudo deploy/scripts/grid_link_enable_loopback.sh --apply --test-call`. This turns on AUSTIN_ENERGY on 127.0.0.1 only, with test certificates, and places one test call. Switch it off with `--disable --apply`.
+
 **Enabling a utility** is a release-manager step, never an operator one. It needs:
 
 1. the signed point list;

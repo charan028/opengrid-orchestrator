@@ -4,7 +4,10 @@ Covers the toll-call path, L2 from the SCADA sim, the heartbeat fail-safe, and a
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -198,4 +201,35 @@ async def test_ts_gl_association_limit_refuses_a_third_master() -> None:
     finally:
         for master in masters:
             await master.close()
+        await server.stop()
+
+
+async def test_ts_gl_e2e_aen_sim_channel_issues_status_and_cancels_over_dnp3() -> None:
+    channel_mod = pytest.importorskip("ogsim.utility_aen.channels.grid_link")
+    base_mod = pytest.importorskip("ogsim.utility_aen.channels.base")
+    h = make_harness()
+    server, port = await _start(h)
+    worker = asyncio.create_task(h.service.run())
+    channel = channel_mod.build({"host": "127.0.0.1", "port": port, "status_wait_s": 3.0, "timeout_s": 3.0})
+    try:
+        spec = base_mod.CallSpec(call_ref="77001", kw=-1200.0, start=datetime.now(UTC), duration_min=60)
+        result = await channel.issue_call(spec)
+        assert result.accepted and result.state == "ACCEPTED", result
+        assert h.calls.issued == [("AUSTIN_ENERGY", 77001, 1200.0, 60)]
+        assert (await channel.status("77001")).state == "ACCEPTED"
+        refused = await channel.issue_call(
+            base_mod.CallSpec(call_ref="77002", kw=-9000.0, start=datetime.now(UTC), duration_min=30)
+        )
+        assert refused.state == "REFUSED" and refused.reason_code == "R-CALL-OVER-COMMITTED"
+        charge = await channel.issue_call(
+            base_mod.CallSpec(call_ref="77003", kw=500.0, start=datetime.now(UTC), duration_min=30)
+        )
+        assert charge.reason_code == "R-CALL-CHARGE-REFUSED" and len(h.calls.issued) == 2
+        ended = await channel.cancel("77001")
+        assert ended.state == "COMPLETED" and h.calls.cancelled == [("AUSTIN_ENERGY", 77001)]
+    finally:
+        await channel.aclose()
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
         await server.stop()

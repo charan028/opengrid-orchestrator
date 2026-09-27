@@ -108,10 +108,10 @@ class CoreTollCallPort:
 
     async def _status_of(self, record: CallRecord) -> CallOutcome:
         status = await status_of(self._store, record, limits=self._limits, now=datetime.now(UTC))
-        # The measured delivered kW (opengrid.delivery, D-38); the outcome field keeps its link name.
-        granted = status.delivered_kw
+        # the measured delivered kW (opengrid.delivery, D-38); None while unmeasured or stale
+        delivered = status.delivered_kw
         return CallOutcome(
             phase=_PHASE[status.state],
             reason_code=status.call.reason_code,
-            granted_kw=round(max(0.0, -granted), 3) if granted is not None else None,
+            delivered_kw=round(max(0.0, -delivered), 3) if delivered is not None else None,
         )
