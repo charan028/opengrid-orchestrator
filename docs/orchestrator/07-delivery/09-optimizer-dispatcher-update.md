@@ -636,6 +636,10 @@ engine/allocator (S6 discharges headroom only down to $e^{hold}$). The invariant
   - Without it, `APPARENT_POWER_KVA` gives only $|F|$, so the flow is the interval $[\text{export floor},\,m]$.
     The export floor comes from the guardian's own hub telemetry; with no hub read it is $-m$ (unknown
     direction = export, fail closed).
+  - **Known at `r3`:** the floor is $\sum_h p_h - \sum_h \bar P^{pv}_h$ (`guardian/flow_repo.py:223-228`). No
+    process writes `og.hub.pv_rated_kw`, so $\bar P^{pv}_h$ = `default_pv_rated_kw` = 0 (`guardian/config.py:108`).
+    With idle batteries the floor is then ≥ 0, so rooftop-PV export is not seen on a kVA-only bank. Only
+    `REAL_POWER_KW` shows it.
   - Rows stamped in the future are ignored (`guardian/flow_repo.py:8-17`, `:67`, `:73`).
 - **Two `[guardian.flow]` keys:**
   - `fail_closed_missing_topology` (default **false** in R3, `true` at go-live) applies "a missing $F_f$ vetoes
@@ -646,9 +650,17 @@ engine/allocator (S6 discharges headroom only down to $e^{hold}$). The invariant
 - **K4 fail-safe re-solve.** The hubs a VETOED or PARTLY_VETOED verdict names are excluded for 3 cycles
   (`R-HUB-VETO-EXCLUDED`, traced), and the bank is re-proposed once in the same cycle without them
   (`orchestrator/src/opengrid/engine/veto.py`, `engine/__init__.py:907-928`).
+  - **Known at `r3`:** the retry is proposed under cycle id `<cycle>-r1` (`engine/__init__.py:942`, `:965`).
+    The per-cycle accumulators of G-05, G-06/G-32 and G-28/G-29/G-30 are keyed on the cycle id
+    (`guardian/service.py:405`, `:416`, `:426`, `:529`), so a retried batch starts from fresh budgets within the
+    same physical cycle.
+  - `[allocator.veto_retry] enabled = false` turns the retry off (`engine/settings.py:61`, `:93`).
 - **Telemetry cadence 10 s** (`integration-sims/config/fleet.yaml:19`; `orchestrator.toml` `[fleet]`
-  `telemetry_interval_s = 10`, `[health]` `hub_stale_s = 25`, `hub_offline_s = 60`). "Stale" inputs above are
-  judged against these.
+  `telemetry_interval_s = 10`, `[health]` `hub_offline_s = 60`).
+  - The guardian judges its own hub telemetry stale after `[guardian] telemetry_max_age_s`, default 60 s
+    (`guardian/config.py:34`, `:166`). It sets no value in `orchestrator.toml`.
+  - The health classifier's stale is 2 × the interval, 20 s (`health/model.py:182-184`).
+  - `[health] hub_stale_s = 25` is loaded but not read at `r3`.
 
 **Hub telemetry additions** (interface schema change, additive): `meter_kw`, `pv_kw`, `cell_temp_c`, `p_dis_max_kw`,
 `p_ch_max_kw`, `peak_budget_kws`. The guardian consumes them through its own hub-state port. The sim publishes them from its

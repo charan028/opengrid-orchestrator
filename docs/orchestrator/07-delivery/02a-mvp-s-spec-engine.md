@@ -1374,6 +1374,10 @@ Each item below was checked in the `r3` code; line numbers are `451a2a2`'s.
   - Future-stamped rows are ignored (`guardian/flow_repo.py:8-17`, SQL `:67`, `:73`).
   - The simulator publishes `REAL_POWER_KW` (`integration-sims/src/ogsim/scada/runtime.py:129-148`).
   - Tests: `test_flow_review_r3.py:190-305`.
+  - **Known at `r3`:** the export floor is Σ hub p − Σ `pv_rated_kw` (`guardian/flow_repo.py:223-228`). Nothing
+    writes `og.hub.pv_rated_kw`, so `default_pv_rated_kw = 0.0` applies (`guardian/config.py:108`). With idle
+    batteries the floor is then ≥ 0, so rooftop-PV export on a kVA-only bank is not seen; only `REAL_POWER_KW`
+    shows it.
 - **New `[guardian.flow]` keys** (`orchestrator/config/orchestrator.toml:167`, `:170`;
   `guardian/config.py:120-123`, `:225-233`):
   - `fail_closed_missing_topology` (default **false** in R3; `true` at go-live) makes a feeder without an
@@ -1389,6 +1393,13 @@ Each item below was checked in the `r3` code; line numbers are `451a2a2`'s.
     `:1294`; settings `engine/settings.py:61-62`, `:93-95`).
   - A batch-level veto (no hub) excludes nothing.
   - Tests: `orchestrator/tests/unit/engine/test_dispatch_wiring.py:823-890`.
+  - **Known at `r3`:**
+    - The retry is proposed under cycle id `<cycle>-r1` (`engine/__init__.py:942`, `:965`). The guardian keys its
+      per-cycle G-05, G-06/G-32 and G-28/G-29/G-30 sums on the cycle id (`guardian/service.py:405`, `:416`,
+      `:426`, `:529`), so a retried batch is checked against fresh budgets in the same physical cycle.
+    - The retry also re-enters `allocator.run_cycle` for the retried banks only, which replaces the
+      hold-last-grants set with theirs (`allocator/__init__.py:161`, `:205`).
+    - `[allocator.veto_retry] enabled = false` turns the retry off (`engine/settings.py:61`, `:93`).
 - **Expired L2 instructions no longer bind.**
   - The engine passes an instruction to the allocator only until its `expires_at`
     (`engine/gateways.py:646-663` `instruction_active`), so a best-effort obligation returns to its full
@@ -1400,8 +1411,14 @@ Each item below was checked in the `r3` code; line numbers are `451a2a2`'s.
   - Hubs report every 10 s (`integration-sims/config/fleet.yaml:19`).
   - `orchestrator.toml` sets `[fleet] telemetry_interval_s = 10` (`:132`) and `[health] hub_stale_s = 25`,
     `hub_offline_s = 60` (`:205-206`).
-  - A hub counts as online while its last report is under 2 × the interval (`health/model.py:183-184`).
-  - `orchestrator/config/test.toml` and the dev configs still say 2 / 6 / 30 at `r3`; the dev side is in PR #44.
+  - The health classifier marks a hub stale once its last report is older than 2 × the interval (20 s), and
+    offline after `hub_offline_s` (`health/model.py:182-184`, `health/rules.py:74-78`).
+  - `hub_stale_s` is loaded (`health/model.py:195`) but not read, so its 25 s has no effect.
+  - The guardian's own K1 telemetry freshness stays at 60 s (`guardian/config.py:34`, `:166`).
+  - The console's per-hub age badges still turn stale at 10 s in the Fleet table (`ui/routes/fleet.py:88`) and
+    6 s in the hub drill-down (`ui/templates/_partials/hub_drilldown.html:43`, `:129`).
+  - At `r3`, `orchestrator/config/test.toml` and the dev configs still said 2 / 6 / 30. The dev configs moved
+    to 10 / 25 / 60 in PR #44, and `test.toml` in `r3.1` (`97fadf3`).
 - **Safe-stop outbox (migration `0035`).**
   - Every accepted ENGAGE and every relayed guardian-signed RELEASE is queued once per (stop, action) in
     `og.stop_outbox` (`orchestrator/migrations/0035_stop_outbox.sql`, `safestop/pg_backend.py:70-74`).
@@ -1409,6 +1426,22 @@ Each item below was checked in the `r3` code; line numbers are `451a2a2`'s.
     (`safestop/main.py:160-164`, `safestop/service.py:196` `drain_outbox`) and as a per-tick backstop
     (`safestop/main.py:192`).
   - Tests: `orchestrator/tests/integration/safestop/test_outbox_pg.py:30`, `orchestrator/tests/unit/safestop/test_outbox.py`.
+  - **Known at `r3`:**
+    - The `og.stop_event` row and the outbox entry are written in separate transactions
+      (`safestop/service.py:114-124`, `:191-194`; `safestop/pg_backend.py:107`).
+    - A failure between the two leaves a recorded stop that is never published. A redelivered L2 ESTOP then
+      reads as already acted on (`safestop/pg_backend.py:62-67`).
+    - The drain stops at the first failing entry and has no attempt cap or dead-letter
+      (`safestop/service.py:196-217`).
+- **After `r3` (tags `r3.1`–`r3.3`, `main` `fdb0cdd`):**
+  - `PgStore.fleet_rows` is restored (`c6fceb1`). The Fleet search, table, selection and hub-detail routes had
+    returned 501 at `r3`.
+  - The LP value-added view keeps numeric breakdown values only (`62eab91`). `/og/profitability` had returned 500
+    at `r3` once a gate was recorded.
+  - K2 rates utility-scale (`og.asset` SUBSTATION) banks at nameplate (`adeca8e`).
+  - Regional solar (`np4-745-cd`) is polled again, by owner decision (`55a17ff`). Its zonal share is not yet used
+    by the selector or by settle.
+  - The DEVICE-INFO queue is sized for the retained per-hub burst (`75b2281`).
 
 ---
 
