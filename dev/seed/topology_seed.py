@@ -66,8 +66,9 @@ Rows (every one is an upsert; the output is deterministic, so re-running is a no
   the transformer G-27 must bind; `feeder-<truck id>` is the depot feeder mobile_trucks_seed.sql assigns.
   An exemption would need a guardian code path that skips G-27 for a class of hub, which 09 S2.6 does not
   allow, and a truck rated at the 25 kVA unmapped-home default could never discharge.
-  POI premise: their hubs' `service_kw` and `export_limit_kw` are filled with the nameplate `p_kw` where
-  NULL (never overwritten), so G-26 does not apply a home's 20 kW export / 48 kW service default to them.
+  POI premise: their hubs' `service_kw` and `export_limit_kw` are filled where NULL (never overwritten) --
+  the substation set at its bank rating (20,408 kW; placeholder for the grid-connection agreement's figure),
+  a truck at its nameplate `p_kw` -- so G-26 does not apply a home's 20 kW export / 48 kW service default.
 
 Every count in `opengrid.fleet.topology_audit.UNMAPPED_QUERIES` is 0 after this seed (bootstrap_check.py
 asserts it): no ALR-XFMR-UNMAPPED and no ALR-BANK-UNMAPPED-TOPOLOGY on a fresh install.
@@ -393,9 +394,18 @@ def _dedicated_statements(*, only_missing: bool, only_hub: str | None = None) ->
 
     POI premise: a utility-scale hub (the 20 MW substation set, a 500 kW truck at its depot) is not a home
     behind a 200 A service, so the guardian's home defaults (export 20 kW, service 48 kW) would make G-26 veto
-    it. `service_kw` and `export_limit_kw` are set to the hub's nameplate `p_kw` -- ONLY where NULL, in every
-    mode: a value already in og.hub (an interconnection agreement's) is never overwritten."""
+    it. `service_kw` and `export_limit_kw` are set -- ONLY where NULL, in every mode: a value already in og.hub
+    (an interconnection agreement's) is never overwritten -- to the bank's kVA rating for a SUBSTATION set
+    (20,408 kW for sub-LZ_AEN-00; a placeholder until the grid-connection agreement's figure replaces it) and
+    to the nameplate `p_kw` for any other dedicated hub (a truck)."""
     xfmr = "'xfmr-' || b.bank_id || '-00'"
+    # POI premise (owner, 2026-09-26): a SUBSTATION set's hub at its bank/transformer rating (20,408 kVA for
+    # sub-LZ_AEN-00, so a full 20 MW step clears G-26's load-drop margin) -- PLACEHOLDER, to be replaced by the
+    # grid-connection agreement's figure; any other dedicated hub (a truck) at its nameplate p_kw.
+    poi = (
+        "CASE WHEN EXISTS (SELECT 1 FROM og.asset a WHERE a.bank_id = b.bank_id AND a.asset_class = 'SUBSTATION'"
+        " AND a.status <> 'RETIRED') THEN b.kva_rating ELSE h.p_kw END"
+    )
     upsert_xfmr = (
         "ON CONFLICT (transformer_id) DO NOTHING"
         if only_missing
@@ -439,8 +449,8 @@ def _dedicated_statements(*, only_missing: bool, only_hub: str | None = None) ->
             "-- POI premise of a utility-scale hub: its nameplate, only where og.hub has none (never overwritten).",
             "\n".join(
                 [
-                    "UPDATE og.hub h SET service_kw = coalesce(h.service_kw, h.p_kw),",
-                    "    export_limit_kw = coalesce(h.export_limit_kw, h.p_kw)",
+                    f"UPDATE og.hub h SET service_kw = coalesce(h.service_kw, {poi}),",
+                    f"    export_limit_kw = coalesce(h.export_limit_kw, {poi})",
                     "FROM og.bank b",
                     f"WHERE b.bank_id = h.bank_id AND {banks}",
                     "  AND (h.service_kw IS NULL OR h.export_limit_kw IS NULL)",

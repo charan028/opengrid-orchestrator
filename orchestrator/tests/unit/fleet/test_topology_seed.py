@@ -385,8 +385,11 @@ def test_dedicated_hubs_get_poi_premise_only_where_null(seed) -> None:
             for s in ts.seed_statements(seed, only_missing=only_missing)
             if s.label.startswith("og.hub service_kw/export_limit_kw")
         )
-        assert "service_kw = coalesce(h.service_kw, h.p_kw)" in premise
-        assert "export_limit_kw = coalesce(h.export_limit_kw, h.p_kw)" in premise
+        assert "service_kw = coalesce(h.service_kw, CASE WHEN EXISTS" in premise
+        assert (
+            "THEN b.kva_rating ELSE h.p_kw END" in premise
+            and "export_limit_kw = coalesce(h.export_limit_kw," in premise
+        )
         assert "(h.service_kw IS NULL OR h.export_limit_kw IS NULL)" in premise
         assert topology_audit.DEDICATED_BANKS_SQL in premise
     assert any("POI premise" in label for label in topology_audit.UNMAPPED_QUERIES)
@@ -451,14 +454,10 @@ def test_g26_with_the_poi_premise_passes_the_toll_step_the_null_premise_vetoes()
     assert not flow_checks.check_g26_home_meter(_step(1000.0), hub, _substation_site(None, None), policy).ok
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="OPEN (lead decision): G-26 keeps a load_drop_kw (0.5 kW) margin below X_exp, so an export limit of"
-    " exactly the 20,000 kW nameplate vetoes the full 20,000 kW step; needs X_exp above nameplate (the POI"
-    " agreement's value) or a toll request <= 19,999.5 kW",
-)
-def test_g26_passes_the_exact_20_mw_step_with_export_limit_at_nameplate() -> None:
+def test_g26_passes_the_full_20_mw_step_with_the_premise_at_the_transformer_rating() -> None:
+    """Owner decision: sub-LZ_AEN-00's export/service premise is its 20,408 kVA rating (placeholder for the
+    grid-connection agreement), so the full 20,000 kW step clears G-26's load-drop margin."""
     policy = _policy()
     assert flow_checks.check_g26_home_meter(
-        _step(20000.0), _substation_hub(), _substation_site(20000.0, 20000.0), policy
+        _step(20000.0), _substation_hub(), _substation_site(20408.0, 20408.0), policy
     ).ok
