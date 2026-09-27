@@ -579,13 +579,15 @@ can stand in for Austin Energy's system.
   - never overlapping another call on the same obligation.
 - Every call carries an idempotency key. Resending the same request with the same key returns the original call
   and deploys nothing new; the same key with a different request is refused (409).
-- It can read the state of its calls and cancel or shorten them. It can never extend a call.
+- It can read the state of every call on its toll, and cancel or shorten the calls it issued. It can never extend a
+  call. From r3.4.3 it also reads its calls' measured delivery (`/og/api/customer/v1/utility/delivery-records`).
 - It reaches nothing else:
   - another utility's obligations and calls answer 404 (never 403, so their existence is not revealed);
   - Apache admits the account only under `/og/api/customer/`;
   - og-api refuses it (403) on every operator and viewer endpoint.
-- The scope is the utility, not the account. A call you raise on the toll from Dispatch is recorded against
-  `AUSTIN_ENERGY`. It appears in the utility's call history, and the utility can cancel it.
+- Reads are scoped to the utility, not the account. A call you raise on the toll from Dispatch is recorded against
+  `AUSTIN_ENERGY` and appears in the utility's call history. From r3.4.3 only you can end it: the utility gets
+  403 `R-CALL-NOT-ISSUER`, traced as `AUTHZ_DENY` (in r3.4.2 it could cancel it too).
 
 **How a call appears to you**
 
@@ -617,16 +619,19 @@ can stand in for Austin Energy's system.
 | `REFUSED` | Never deployed; the reason code says why |
 
 og-settle's delivery job measures each call from telemetry in 30 s buckets. The first measurement comes about a
-minute into the call, so a call starts `ACTIVE`. The status carries the measured `delivered_kw`/`delivered_kwh`
-and the verification (`delivery_state` `IN_PROGRESS`, then `PASS`, `PARTIAL` or `FAIL`, with reasons). Its
-`granted_kw`/`granted_kwh` are planned/granted values, never metered: they are deprecated and removed in r3.5.
+minute into the call, so a call starts `ACTIVE`; `delivery_measured` turns true only once a measured value (or a
+final verdict) exists. The status carries the measured `delivered_kw`/`delivered_kwh` and the verification
+(`delivery_state` `IN_PROGRESS`, then `PASS`, `PARTIAL` or `FAIL`, with reasons). Its `granted_kw`/`granted_kwh`
+are planned/granted values, never metered: they are deprecated and removed in r3.5 (`granted_description`:
+"planned; removed in r3.5; use delivered_*").
 
 - **Operator view (r3.4.3):** the same measurement is at `GET /og/api/delivery/records/{deployment_id}`. A slow
   or short delivery raises `ALR-DELIVERY-RAMP-LATE`, `ALR-DELIVERY-SHORTFALL` or `ALR-DELIVERY-NONE`.
 - **In r3.4.2** nothing is measured. A running call is always `ACTIVE`, with `delivery_measured: false` and
-  `delivery_state: "UNMEASURED"`; only the granted fields exist; `ramping_fraction` is unused. If the utility
-  questions a delivery there, compare Dispatch's "Real-time grants & substitutions" with the trace; don't rely on
-  the call's state.
+  `delivery_state: "UNMEASURED"`; only the granted fields exist; `ramping_fraction` is unused. The utility may
+  also cancel calls it did not issue, and cancelling an ended call answers 409 `R-CALL-CANNOT-EXTEND` (r3.4.3:
+  `R-CALL-ALREADY-ENDED`). If the utility questions a delivery there, compare Dispatch's "Real-time grants &
+  substitutions" with the trace; don't rely on the call's state.
 
 **Limits** (`[dispatch.calls]`)
 
