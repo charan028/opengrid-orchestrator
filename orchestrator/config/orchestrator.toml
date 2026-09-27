@@ -142,6 +142,13 @@ zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"]
 telemetry_interval_s = 10
 lease_ttl_s = 30
 banks_per_feeder = 5
+# Production seeds from the generated simulator override (deploy/README.md "Austin (LZ_AEN) sim override"),
+# never the repo yaml: bank/hub ids follow the ENABLED zone blocks in order and the seed upserts, so the
+# repo yaml (a different enabled set) would re-key existing zone banks. Read by every seed caller:
+# deploy.sh, `python -m opengrid.fleet.seed` and POST /og/api/admin/seed-fleet-topology. The file must
+# exist before the first deploy (deploy/BOOTSTRAP.md); if it is missing, the seed fails and deploy.sh
+# rolls back.
+sim_config_path = "/etc/opengrid/sim/fleet.yaml"
 
 [allocator]
 cycle_interval_s = 2
