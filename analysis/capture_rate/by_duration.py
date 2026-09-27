@@ -3,6 +3,7 @@
 One command:  python by_duration.py          (after run.py and pre_rtcb.py; no download)
 Reads:        output/capture_by_battery_day.csv, output/summer2025_capture_by_battery_day.csv.gz
 Output:       output/capture_by_duration.csv
+              output/capture_by_reserve_use.csv   batteries holding reserves under vs over 4 hours a day on average
 
 Duration = MWh / MW for each battery-day (2026: ERCOT's own SOC range; 2025: assumed, see pre_rtcb.py).
 Fleet capture = total actual $ / total perfect-foresight $ within the band; median = the median of each battery's
@@ -41,6 +42,28 @@ def main():
     out = pd.DataFrame(rows)
     out.to_csv(os.path.join(OUT, "capture_by_duration.csv"), index=False)
     print(out.to_string(index=False))
+
+    rows = []
+    for season, f in FILES.items():
+        r = pd.read_csv(os.path.join(OUT, f))
+        b = r.groupby("battery").agg(as_mwh=("as_awarded_mwh", "sum"), mw=("mw", "max"), days=("date", "nunique"))
+        b["as_hours_per_day"] = b.as_mwh / b.mw / b.days  # MWh of reserve awards / MW = hours at full award
+        for label, keep in [
+            ("under 4 h a day", b.as_hours_per_day < 4),
+            ("4 h a day or more", b.as_hours_per_day >= 4),
+        ]:
+            s = r[r.battery.isin(b.index[keep])]
+            rows.append(
+                dict(
+                    season=season,
+                    reserve_use=label,
+                    batteries=int(keep.sum()),
+                    fleet_capture=round(s.actual_usd.sum() / s.perfect_usd.sum(), 3),
+                )
+            )
+    res = pd.DataFrame(rows)
+    res.to_csv(os.path.join(OUT, "capture_by_reserve_use.csv"), index=False)
+    print(res.to_string(index=False))
 
 
 if __name__ == "__main__":
