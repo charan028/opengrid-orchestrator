@@ -1,5 +1,7 @@
 # Local downloads and intermediate data: re-created by the scripts, never committed
 capture_rate/downloads/
+spike_soc/downloads/
+reserves/downloads/
 price_history/data/
 *.pkl
 *.zip
