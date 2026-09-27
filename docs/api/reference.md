@@ -495,17 +495,22 @@ Responses: `200`, `422`
 
 List Manual Targets. Role: **viewer**.
 
-Hubs under a live manual target (newest per hub, not expired): `{"items": [{hub_id, p_kw_target,
-issued_at, expires_at, trace_id, proposer, reason}]}`. The ramp rate is the engine's, not listed.
+Every hub's newest manual target with its status -- `ACTIVE` (the engine is ramping it),
+`CANCELLED_BY_OPERATOR`, `CANCELLED_BY_SAFE_STOP` (with `stop_event_id`), `CANCELLED_LATE_RECORD`, and
+with `include_expired=true` also `EXPIRED`. Only `ACTIVE` targets control a hub; a stop-cancelled target is
+never reported as active. `{"items": [{hub_id, status, p_kw_target, issued_at, expires_at, trace_id,
+proposer, reason, stop_event_id, cancelled_by}]}`. The ramp rate is the engine's, not listed.
 
-Responses: `200`
+Parameters: `include_expired` (query, boolean)
+
+Responses: `200`, `422`
 
 ### `POST /og/api/fleet/manual-targets/{trace_id}/cancel`
 
 Cancel Manual Target. Role: **operator**.
 
 End a manual target now: appends a MANUAL_TARGET for the hubs it still controls with
-`expires_at = now` (`core.manual_targets.parse_targets`, shared with the engine: they return to
+`expires_at = now` (`core.manual_targets.effective_targets`, shared with the engine: they return to
 the allocator next cycle). Hubs a NEWER target has since taken over are left alone. 404 when the
 target is unknown or no longer controls any hub.
 
@@ -519,8 +524,9 @@ Fleet Map. Role: **viewer**.
 
 `{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,
 bank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,
-home_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[]`.
-`activity_counts` covers the filtered set.
+home_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[],
+asset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`). `depots` are the D-31 home
+stations with their assigned units. `activity_counts` covers the filtered set.
 
 Parameters: `zone` (query, string | null); `bank` (query, string | null); `activity` (query, string | null)
 
@@ -811,7 +817,7 @@ Responses: `200`
 
 ### `GET /og/api/profitability/per-kw`
 
-Profitability Per Kw Route. Role: **operator**.
+Profitability Per Kw Route. Role: **viewer**.
 
 `PerKwSummary` (`method_version, period_hours, hardware_view_usd_per_kw, target_payback_years,
 contracts[], markets{REGULATED, FREE}, fleet, illustrative_home_unit`), decimals as strings. Default

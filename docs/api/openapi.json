@@ -4104,8 +4104,20 @@
     },
     "/og/api/fleet/manual-targets": {
       "get": {
-        "description": "Hubs under a live manual target (newest per hub, not expired): `{\"items\": [{hub_id, p_kw_target,\nissued_at, expires_at, trace_id, proposer, reason}]}`. The ramp rate is the engine's, not listed.",
+        "description": "Every hub's newest manual target with its status -- `ACTIVE` (the engine is ramping it),\n`CANCELLED_BY_OPERATOR`, `CANCELLED_BY_SAFE_STOP` (with `stop_event_id`), `CANCELLED_LATE_RECORD`, and\nwith `include_expired=true` also `EXPIRED`. Only `ACTIVE` targets control a hub; a stop-cancelled target is\nnever reported as active. `{\"items\": [{hub_id, status, p_kw_target, issued_at, expires_at, trace_id,\nproposer, reason, stop_event_id, cancelled_by}]}`. The ramp rate is the engine's, not listed.",
         "operationId": "list_manual_targets_og_api_fleet_manual_targets_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_expired",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Expired",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4118,6 +4130,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Manual Targets",
@@ -4128,7 +4150,7 @@
     },
     "/og/api/fleet/manual-targets/{trace_id}/cancel": {
       "post": {
-        "description": "End a manual target now: appends a MANUAL_TARGET for the hubs it still controls with\n`expires_at = now` (`core.manual_targets.parse_targets`, shared with the engine: they return to\nthe allocator next cycle). Hubs a NEWER target has since taken over are left alone. 404 when the\ntarget is unknown or no longer controls any hub.",
+        "description": "End a manual target now: appends a MANUAL_TARGET for the hubs it still controls with\n`expires_at = now` (`core.manual_targets.effective_targets`, shared with the engine: they return to\nthe allocator next cycle). Hubs a NEWER target has since taken over are left alone. 404 when the\ntarget is unknown or no longer controls any hub.",
         "operationId": "cancel_manual_target_og_api_fleet_manual_targets__trace_id__cancel_post",
         "parameters": [
           {
@@ -4174,7 +4196,7 @@
     },
     "/og/api/fleet/map": {
       "get": {
-        "description": "`{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,\nbank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,\nhome_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[]`.\n`activity_counts` covers the filtered set.",
+        "description": "`{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,\nbank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,\nhome_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[],\nasset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`). `depots` are the D-31 home\nstations with their assigned units. `activity_counts` covers the filtered set.",
         "operationId": "fleet_map_og_api_fleet_map_get",
         "parameters": [
           {
@@ -7827,6 +7849,46 @@
         "summary": "Hub Live"
       }
     },
+    "/og/fleet/live-power": {
+      "get": {
+        "description": "`{hubs: {hub_id: {p_kw, last_seen_at}}}` for the rows on screen, from the map snapshot (one cached\nread of every hub, `GET /og/api/fleet/map`), so the table's P and age refresh without a page load.",
+        "operationId": "live_power_og_fleet_live_power_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "ids",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 4000,
+              "title": "Ids",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Live Power"
+      }
+    },
     "/og/fleet/manual-targets/{trace_id}/cancel": {
       "post": {
         "description": "Ends an operator target early: relays `POST /og/api/fleet/manual-targets/{trace_id}/cancel`; the\nengine hands the hubs back to normal dispatch. 404 means the target no longer controls any hub.",
@@ -7865,6 +7927,44 @@
           }
         },
         "summary": "Cancel Target"
+      }
+    },
+    "/og/fleet/manual-targets/{trace_id}/status": {
+      "get": {
+        "description": "`{trace_id, status, stop_event_id, cancelled_by}` for the ramp indicator: it stops showing progress\nas soon as the target is no longer ACTIVE (cancelled, stopped by a safe stop, or expired).",
+        "operationId": "target_status_og_fleet_manual_targets__trace_id__status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "trace_id",
+            "required": true,
+            "schema": {
+              "title": "Trace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Target Status"
       }
     },
     "/og/fleet/release-requests": {
@@ -8212,6 +8312,25 @@
           }
         },
         "summary": "Ack Alert"
+      }
+    },
+    "/og/help": {
+      "get": {
+        "description": "The Help page: overview, architecture, data model, every screen, integrations, APIs, events and\nerrors, maintenance, playbooks and glossary.",
+        "operationId": "help_page_og_help_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Help Page"
       }
     },
     "/og/markets": {
