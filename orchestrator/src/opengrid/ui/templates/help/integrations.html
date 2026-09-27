@@ -13,12 +13,12 @@
 <text class="hp-t" x="415" y="140" font-size="12">og-engine: MQTT ingest, fleet twin</text>
 <text class="hp-t" x="415" y="162" font-size="12">og-guardian: signs cmd, lease, cmd/fw</text>
 <text class="hp-t" x="415" y="184" font-size="12">og-safestop: signs stop</text>
-<text class="hp-t" x="415" y="206" font-size="12">og-api: REST, customer API (off)</text>
+<text class="hp-t" x="415" y="206" font-size="12">og-api: REST, customer/utility API</text>
 <text class="hp-t" x="415" y="228" font-size="12">PostgreSQL og.* schema</text>
 <rect class="hp-box" x="770" y="45" width="250" height="40" rx="6"/><text class="hp-t" x="782" y="70" font-size="13">Hubs: cmd, lease, stop, cmd/fw, cmd/cal</text>
 <rect class="hp-box" x="770" y="105" width="250" height="40" rx="6"/><text class="hp-t" x="782" y="130" font-size="13">Simulators: scenario/cmd, wave request</text>
 <rect class="hp-box-muted hp-box" x="770" y="165" width="250" height="40" rx="6"/><text class="hp-tm" x="782" y="190" font-size="13">ERCOT MMS (disabled)</text>
-<rect class="hp-box-muted hp-box" x="770" y="225" width="250" height="40" rx="6"/><text class="hp-tm" x="782" y="250" font-size="13">Customer API (off by default)</text>
+<rect class="hp-box" x="770" y="225" width="250" height="40" rx="6"/><text class="hp-t" x="782" y="250" font-size="13">Customer and utility API</text>
 <line class="hp-edge" x1="270" y1="40" x2="395" y2="110" marker-end="url(#hp-arrow)"/>
 <line class="hp-edge" x1="270" y1="90" x2="395" y2="125" marker-end="url(#hp-arrow)"/>
 <line class="hp-edge" x1="270" y1="140" x2="395" y2="145" marker-end="url(#hp-arrow)"/>
@@ -27,7 +27,7 @@
 <line class="hp-edge-accent" x1="645" y1="130" x2="770" y2="65" marker-end="url(#hp-arrow)"/>
 <line class="hp-edge" x1="645" y1="150" x2="770" y2="125" marker-end="url(#hp-arrow)"/>
 <line class="hp-edge-dash" x1="645" y1="180" x2="770" y2="185" marker-end="url(#hp-arrow)"/>
-<line class="hp-edge-dash" x1="645" y1="220" x2="770" y2="245" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="645" y1="220" x2="770" y2="245" marker-end="url(#hp-arrow)"/>
 <text class="hp-tm" x="20" y="300" font-size="12">Solid: live at r3.4. Dashed / muted: built and tested but switched off by configuration.</text>
 <text class="hp-tm" x="20" y="322" font-size="12">Every outbound grid command is Ed25519-signed by og-guardian (commands) or og-safestop (stop ENGAGE).</text>
 </svg><figcaption>Inbound sources on the left, outbound sinks on the right.</figcaption></figure>
@@ -49,7 +49,8 @@
 <tr><td>Firmware commands</td><td>Out (MQTT)</td><td>Guardian-signed FIRMWARE_UPDATE</td><td>Per campaign job</td><td><code>og.firmware_command</code></td><td>Hubs</td></tr>
 <tr><td>ERCOT AS dispatch instructions (D-35)</td><td>In (HTTPS/SOAP pull), answered</td><td>DEPLOY_AS / RECALL_AS for ECRS, RRS, Reg, Non-Spin</td><td>Every 5 s when enabled (off in the repo)</td><td><code>og.as_deployment</code> (source <code>ERCOT</code>), <code>og.trace</code> stream <code>ercot_as_poll</code></td><td>Allocator (deploys the held award), alerts</td></tr>
 <tr><td>ERCOT MMS submission</td><td>Out (HTTPS/SOAP)</td><td>Offers, awards</td><td>n/a</td><td>n/a</td><td>Disabled</td></tr>
-<tr><td>Customer API</td><td>Out/in (HTTPS)</td><td>Contracts, obligations, invoices, disputes</td><td>On request</td><td><code>og.customer_obligation_request</code>, <code>og.invoice_dispute</code></td><td>Disabled by default</td></tr>
+<tr><td>Customer API</td><td>Out/in (HTTPS)</td><td>Contracts, obligations, invoices, disputes</td><td>On request</td><td><code>og.customer_obligation_request</code>, <code>og.invoice_dispute</code></td><td>Customers; mounted from r3.4.1 (D-33)</td></tr>
+<tr><td>Utility customer API (D-33)</td><td>In/out (HTTPS)</td><td>Toll calls and cancels in; tolling obligations, call state and delivered kW out (measured from r3.4.3)</td><td>On request</td><td><code>og.dispatch_call</code>, <code>og.as_deployment</code> (source <code>UTILITY</code>) via the core</td><td>Austin Energy (<code>og-util-aen</code>); allocator</td></tr>
 </tbody></table></div>
 </section>
 
@@ -162,6 +163,19 @@ Every inbound command except a heartbeat is traced before it takes effect (<code
 
 <section class="hp-sub" id="in-customer-api"><h3>Customer API</h3>
 <p><code>opengrid.customer_api</code> adds customer-scoped routes under <code>/og/api/customer/</code>: <code>me</code>, <code>contracts</code>, <code>opportunities</code> (priced admission; 409 with <code>reason_code</code> on rejection), <code>obligations</code>, <code>invoices</code> and disputes, <code>obligations/{id}/cancel</code> (direct only before selection, otherwise an operator-reviewed request) and <code>obligations/{id}/renominate</code>. A customer is an Apache account mapped in <code>[api.roles.customer]</code>; every read is scoped to its <code>customer_id</code> (another customer's object answers 404) and it gets 403 on operator and viewer endpoints. Operators see requests at <code>GET /og/api/customer-disputes</code> and <code>GET /og/api/customer-requests</code>.</p>
-<p class="hp-note">The routes are mounted only when <code>[api.customer_api].enabled = true</code>; the default and the shipped value is <code>false</code> (go-live step, after owner confirmation). See <a href="#pb-customer-onboarding">customer onboarding</a> and <a href="#apis">APIs</a>.</p>
+<p class="hp-note">The routes are mounted only when <code>[api.customer_api].enabled = true</code>. The code default is <code>false</code>; since r3.4.1 the shipped <code>orchestrator.toml</code> sets <code>true</code> (D-33), which also mounts the <a href="#in-utility-api">utility routes</a>. See <a href="#pb-customer-onboarding">customer onboarding</a> and <a href="#apis">APIs</a>.</p>
+</section>
+
+<section class="hp-sub" id="in-utility-api"><h3>Utility customer API (r3.4.1, D-33)</h3>
+<p>A utility issues and follows its own toll calls under <code>/og/api/customer/v1/utility/</code>: <code>GET me</code>, <code>GET obligations</code> (its tolling obligations from today, America/Chicago, and today's window), <code>POST calls</code>, <code>GET calls</code>, <code>GET calls/{id}</code> and <code>POST calls/{id}/cancel</code>. The Austin Energy EMS simulator (<code>ogsim.utility_aen</code>) calls it through Apache. Full reference: <code>docs/api/utility-api.md</code>.</p>
+<dl class="hp-dl">
+<dt>Who</dt><dd>An Apache account listed in <code>[api.roles.utility]</code> gets the role <code>utility</code> and acts for the <code>utility_id</code> it maps to (<code>og-util-aen</code> = <code>AUSTIN_ENERGY</code>). Only utilities in <code>[api.utility_api].enabled_utilities</code> may use it: <code>AUSTIN_ENERGY</code> today. <code>og-util-lcra</code> and <code>og-util-rayburn</code> are mapped but not enabled (D-37). Any other identity, and a utility that is not enabled, gets 403. Apache admits the account only under <code>/og/api/customer/</code>, and og-api refuses it (403) on the operator and viewer endpoints.</dd>
+<dt>Scope</dt><dd>Every read and call is limited to the caller's <code>utility_id</code>. Another utility's obligation or call answers 404 exactly like an unknown id, never 403. The attempt is traced as <code>AUTHZ_DENY</code>.</dd>
+<dt>Calls</dt><dd>The body has a signed <code>kw</code> (negative: discharge only), <code>duration_minutes</code>, a required <code>idempotency_key</code>, and optional <code>start_at</code> and <code>obligation_id</code> (default: the toll whose window covers the start). The call goes through the same core as the Dispatch screen's utility call and the grid link, with origin <code>UTILITY</code>. The same checks apply: the 90-minute cap, the window, the committed kW, no overlap and a deployable state. The answer is 201 (200 for a replayed key), or the refusal's status with its <code>reason_code</code>.</dd>
+<dt>State</dt><dd><code>ACCEPTED</code> before the start. While the call runs it is <code>ACTIVE</code> until its delivery is measured, then <code>RAMPING</code> or <code>DELIVERING</code>: measured discharge below, or at or above, <code>[dispatch.calls].ramping_fraction</code> (0.9) of the call's kW. <code>COMPLETED</code> after its end or a cancel, and <code>REFUSED</code>. From r3.4.3 (D-38), og-settle's delivery job measures each call in 30 s buckets, so the first measurement comes about a minute in. The status then carries <code>delivered_kw</code>/<code>delivered_kwh</code>, <code>delivery_measured</code>, <code>delivery_state</code> (<code>IN_PROGRESS</code>, then <code>PASS</code>, <code>PARTIAL</code> or <code>FAIL</code>), <code>delivery_reasons</code>, <code>meter_status</code> and <code>delivery_as_of</code>. <code>granted_kw</code>/<code>granted_kwh</code> are planned/granted values, never metered; they are deprecated and removed in r3.5. In r3.4.2 a running call is always <code>ACTIVE</code>, with <code>delivery_measured: false</code> and <code>delivery_state: "UNMEASURED"</code>, and only the granted fields exist.</dd>
+<dt>Limits</dt><dd><code>[dispatch.calls]</code> allows at most 30 calls per rolling hour and 200 per rolling day per account. Accepted and refused calls count; replays do not. Over the limit: 429 <code>R-CALL-RATE-LIMIT</code>.</dd>
+<dt>What operators see</dt><dd><code>ALR-UTILITY-CALL</code> (info) on each accepted call and each cancel, and <code>ALR-UTILITY-CALL-REFUSED</code> (warning) on a refusal. The toll's row in the Dispatch screen's AS table reads <code>deployed</code>, "by UTILITY &middot; og-util-aen"; <b>Stop deploy</b> ends the call. The trace stream is <code>dispatch_call:og-util-aen</code>.</dd>
+</dl>
+<p class="hp-note">The routes are mounted with the customer routes by <code>[api.customer_api].enabled</code>. When it is off, every utility path answers 404.</p>
 </section>
 </section>
