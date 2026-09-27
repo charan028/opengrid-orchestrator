@@ -13,7 +13,7 @@ the utility customer API call. This adapter only translates:
 
 from __future__ import annotations
 
-from uuid import UUID
+from datetime import UTC, datetime
 
 from opengrid.calls import (
     CallLimits,
@@ -21,12 +21,13 @@ from opengrid.calls import (
     CallRefused,
     CallRequest,
     CallState,
-    call_status,
+    CallRecord,
+    CallStore,
     cancel_call,
     find_call_by_key,
     issue_call,
+    status_of,
 )
-from opengrid.calls.ports import CallStore
 from opengrid.integrations.grid_link.model import CallOutcome, CallPhase
 from opengrid.trace.store import TraceStore
 
@@ -77,7 +78,7 @@ class CoreTollCallPort:
             record = await issue_call(self._store, self._trace, request, limits=self._limits)
         except CallRefused as exc:
             return _refused(exc)
-        return await self._status_of(record.call_id, utility_id)
+        return await self._status_of(record)
 
     async def cancel(self, utility_id: str, ems_call_id: int) -> CallOutcome:
         record = await find_call_by_key(self._store, principal_of(utility_id), idempotency_key(ems_call_id))
@@ -95,16 +96,16 @@ class CoreTollCallPort:
         except CallRefused as exc:
             if exc.reason_code != "R-CALL-STATE":
                 return _refused(exc)
-        return await self._status_of(record.call_id, utility_id)
+        return await self._status_of(record)
 
     async def status(self, utility_id: str, ems_call_id: int) -> CallOutcome:
         record = await find_call_by_key(self._store, principal_of(utility_id), idempotency_key(ems_call_id))
         if record is None:
             return CallOutcome(CallPhase.REJECTED, "R-CALL-NOT-FOUND")
-        return await self._status_of(record.call_id, utility_id)
+        return await self._status_of(record)
 
-    async def _status_of(self, call_id: UUID, utility_id: str) -> CallOutcome:
-        status = await call_status(self._store, call_id, utility_id=utility_id)
+    async def _status_of(self, record: CallRecord) -> CallOutcome:
+        status = await status_of(self._store, record, limits=self._limits, now=datetime.now(UTC))
         delivered = status.delivered_kw
         return CallOutcome(
             phase=_PHASE[status.state],
