@@ -277,16 +277,18 @@ skip to step 13.
 ### Topic 8: the guardian gets cautious (K7)
 
 **Step 15: A burst of vetoed commands** (45 s)
-- **Not runnable at R3 — skip steps 15 and 16.**
+- **Not runnable as written at R3 — skip steps 15 and 16.**
   - Since R3 a confirmed manual command is a ramped operator target (operator guide 6.2). The confirm returns
     `202` `RAMPING`, and the setpoint is not checked against the hub's rating when it is confirmed.
-  - So the loop below prints `202`s, not `409`s, and produces no burst of vetoes.
-  - Worse, each confirm leaves a 15-minute target of +60 kW (charging) on `$HUB`, which the engine starts ramping
-    toward.
+  - So the loop below prints `202`s, not `409`s, and each confirm leaves a 15-minute +60 kW (charging) target
+    on `$HUB`.
+  - If `$BANK` carries no obligation grant, the guardian refuses every step with G-09 (the gap in step 17). The
+    escalation then does appear, but for that reason, and it stays until the targets end. If `$BANK` is
+    delivering, the engine ramps `$HUB` toward 60 kW instead.
   - If it was run, cancel the targets: take each `trace_id` from `curl -s -u og-op-a:... "$OG/fleet/manual-targets"`
     and call `curl -u og-op-a:... -X POST "$OG/fleet/manual-targets/<trace_id>/cancel"`.
-  - A new way to trigger the K7 escalation is being routed with the matching e2e test. The text below describes
-    R2.
+  - A way to trigger the K7 escalation from genuine vetoes is being routed with the matching e2e test. The text
+    below describes R2.
 - **Action (R2):** From a shell, send over-limit commands to one hub (60 kW is above every hub's 11 or 20 kW
   inverter), about one per second for 30 s:
   ```bash
@@ -318,14 +320,21 @@ skip to step 13.
 ### Topic 9: a forged command, and the legitimate path
 
 **Step 17: The signed path, for contrast** (45 s)
-- **Action:** `/og/fleet`, "Manual command": hub `hub-00142` (idle, 0 kW), setpoint `0.1`, duration `5`, reason
-  `demo signed path`, **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown.
+- **Known gap (R3; seen on the dev stack):** a target moves a hub only while the hub's bank carries an
+  obligation's grant in that cycle.
+  - On an idle bank the engine proposes the step with ledger version 0, and the guardian refuses it every cycle
+    (G-09, stale ledger version). The hub stays where it is.
+  - Within seconds the bank and its zone raise `ALR-SAFE-STOP-REQUESTED`.
+  - So run this step on `$HUB` (on the demo bank) while one of `$BANK`'s obligations is delivering, or skip it.
+  - If the progress bar does not move, cancel the target; the alert clears about 60 s later.
+- **Action:** `/og/fleet`, "Manual command": hub `$HUB`, setpoint `0.1`, duration `5`, reason `demo signed path`,
+  **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown.
 - **Show:** The confirm dialog (focus starts on Cancel, Tab to the confirm button, Escape closes); the result.
 - **Expect:**
   - `RAMPING` "Ramping 1 hub to 0.1 kW ... Holds until <+5 min>. Trace ...", with a progress bar.
-  - The Fleet table shows `target 0.1 kW` on `hub-00142`.
+  - The Fleet table shows `target 0.1 kW` on `$HUB`.
   - Since R3 a manual command is an operator target: every engine cycle moves the hub toward it by at most
-    0.9 × its G-04 step, from the hub's last report. So `hub-00142` reaches 0.1 kW within about one 10 s report.
+    0.9 × its G-04 step, from the hub's last report, so about one step per 10 s report.
   - Each step reached the hub only in a guardian-signed batch.
 - **End:** **Cancel target**, or let it expire after 5 minutes.
 - **Forged command:** `demo-04-tampered-command` still only registers an active anomaly (the simulator's

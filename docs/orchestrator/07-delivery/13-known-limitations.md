@@ -25,8 +25,8 @@ finding depends on server-side state this checkout cannot see (for example wheth
 ## Open at R3 (`main` `451a2a2`, tag `r3`)
 
 Found by the R3 adversarial review. Each item was read at `451a2a2` and is still in the code at `main` `fdb0cdd`
-(tag `r3.3`), on the same rules as the rest of this document: static reads, nothing run. Line numbers are
-`451a2a2`'s.
+(tag `r3.3`). The rules are the same as for the rest of this document (static reads, nothing run), except R3-11,
+which was also observed on the local dev stack. Line numbers are `451a2a2`'s.
 
 | # | Limitation | Evidence |
 |---|---|---|
@@ -40,6 +40,7 @@ Found by the R3 adversarial review. Each item was read at `451a2a2` and is still
 | R3-8 (new) | **A contract-scoped intake skip under `NO_NEW_COMMITMENTS` is never traced.** The `INTAKE_SKIPPED` payload carries the trigger's `contract_scope` as a UUID. The canonical-JSON hash rejects it, and the error is logged and swallowed. | `orchestrator/src/opengrid/engine/gates.py:120`, `:128-132`; `engine/__init__.py:152`; `core/tracehash.py:26-27`; `core/crypto.py:148` |
 | R3-9 (new) | **The simulator CLI and the smoke test get 403.** Since R3 every POST/DELETE on the simulator control plane needs `X-OGSim-Request: 1`. The `ogsim` CLI, `tests-e2e/smoke.py` and the e2e harness's `control()` do not send it. | `integration-sims/src/ogsim/control/app.py:68-73`; `control/cli.py:122`, `:145`, `:179-185`; `tests-e2e/smoke.py:77`; `tests-e2e/functional/e2e_stack.py:139-140` |
 | R3-10 (new) | **The data-lifecycle job is not deployed.** Migration 0033 leaves telemetry partitions and index builds to `opengrid.lifecycle`, but `deploy/` has no unit, timer or cron entry that runs it. | `orchestrator/migrations/0033_data_lifecycle.sql:5-13`; `deploy/systemd/`, `deploy/cron/` |
+| R3-11 (new) | **A manual target on a bank with no grant is always vetoed, and escalates.**<br>• The engine adds a bank with a live manual target and no grant with an empty grant list, and proposes it with ledger version `max(..., default=0)` = 0.<br>• G-09 vetoes any version other than the guardian's current one (`STALE_LEDGER_VERSION`).<br>• **Observed on the local dev stack at `r3`** (not a static read): a 0.1 kW, 2-minute target on an idle hub was vetoed G-09 every cycle and the hub stayed at 0 kW. `ALR-SAFE-STOP-REQUESTED` opened for its bank and zone 6 s after the confirm, and cleared about 60 s after the target was cancelled. | `orchestrator/src/opengrid/engine/__init__.py:1052-1053`, `:1065` (the K4 retry, `:968`, has the same default); `guardian/checks.py:160-166` |
 | NB-9 | **Anchoring at R3.** Anchors use absolute paths (`/var/lib/opengrid/anchors`, secondary `/srv/ogbackup/anchors`). The repo's og-settle unit allows writes to `/var/lib/opengrid` and `/var/log/opengrid` only, so from the repo's unit the secondary copy cannot be written. The server's own unit is not checked here. | `orchestrator/config/orchestrator.toml:186-188`; `deploy/systemd/og-settle.service:22-23` |
 
 ---

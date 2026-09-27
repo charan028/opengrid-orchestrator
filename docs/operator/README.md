@@ -316,6 +316,15 @@ Since R3 a confirmed command is an operator **target**, not a one-shot setpoint:
 | **EXPIRED** | The proposal expired (confirm within 60 s), or the hub id is unknown. Propose again |
 | **FAILED** | Anything else, with the error |
 
+**Known gap (R3; seen on the dev stack):** a target moves a hub only while the hub's bank carries an obligation's
+grant in that cycle.
+- On a bank with no grant, the engine proposes the step with ledger version 0, and the guardian refuses it every
+  cycle (G-09, stale ledger version). The hub does not move.
+- After 3 ticks the bank and its zone raise `ALR-SAFE-STOP-REQUESTED` ("Review safe stop"). The alert stays
+  until the target ends; do not engage the stop it offers.
+- So command hubs on banks that are delivering, and cancel a target whose progress bar does not move. The
+  alert clears about 60 s after the last refused step.
+
 **Known gap (R3):** a confirm that reports **FAILED** while the database is unavailable can still take effect.
 The target's trace event is written first, and if the database refuses it, the event is kept in the local trace
 journal. The journal is replayed when the database returns, and the engine then ramps to the target until its
@@ -540,6 +549,7 @@ it clears and re-opens.
 
 | Gap | What to do meanwhile |
 |---|---|
+| A manual target on a bank with no obligation grant never moves the hub (G-09) and raises `ALR-SAFE-STOP-REQUESTED` for the bank and zone (6.2) | Command hubs on delivering banks; cancel a target that does not move; do not engage the offered stop |
 | A manual or bulk confirm that shows FAILED during a database problem can still take effect later (6.2) | Look for `target X kW` on those hubs in the Fleet table; cancel the target (6.2) |
 | Fleet table does not update live (since R3.1 it pages through the whole fleet: choose Rows per page) | Reload |
 | A hub's age badge turns "stale" 10 s after its last report in the Fleet table (6 s in the hub drill-down), although hubs report every 10 s | Read the Health column or System Health's hub counts instead: stale after 20 s, offline after 60 s |
