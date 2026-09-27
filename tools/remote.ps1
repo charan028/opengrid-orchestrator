@@ -56,7 +56,7 @@ if [ "$([int](-not $NoSync))" = "1" ]; then
 fi
 cat > /tmp/og_cmd_`$WS.sh <<'OGCMD'
 . /opt/opengrid/work/$Ws/tools/ws_env.sh
-og_ws_env $Ws
+og_ws_env $Ws || exit 1
 export PYTHONPATH=/opt/opengrid/work/$Ws/orchestrator/src
 export OG_CONFIG=/opt/opengrid/work/$Ws/orchestrator/config/test.toml
 export PATH=/opt/opengrid/venv/bin:`$PATH
