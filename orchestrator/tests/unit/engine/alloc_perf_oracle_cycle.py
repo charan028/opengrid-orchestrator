@@ -1,17 +1,8 @@
-"""The 2-second S1-S7 allocation cycle (02a S5), as a pure function of its inputs.
-
-`cycle()` never touches a database or the network -- the thin adapter in
-`opengrid.allocator.__init__.run_cycle` gathers `FleetState`/`LedgerView`/`Schedule`/SCADA/instruction
-inputs from `opengrid.fleet`/`opengrid.ledger`/`opengrid.feeds` and converts this function's
-`CycleResult` into `og.grant` rows for the guardian. Keeping the logic pure makes it possible to
-hypothesis-test K1/K4/K5/K9/K13 without a DB, and keeps the hot path numpy-friendly for 2,000-10,000
-hubs across ~40 banks within the 200 ms budget (BUILD.md S5's performance target).
-
-The allocator NEVER selects new opportunities and NEVER reallocates a committed obligation's capacity
-to a different obligation (K13) -- it only re-derives, every 2 s, how much of each already-committed
-obligation's frozen floor is physically deliverable right now, substitutes hubs within the same
-obligation on health loss (S5), and schedules any leftover headroom (S6).
-"""
+# ruff: noqa
+# mypy: ignore-errors
+"""ORACLE -- do not edit. A verbatim copy of `opengrid/allocator/cycle.py` as of main b3e01fe (before the
+r3.4.3 PERF-OPT work), the reference the perf-optimized cycle must match byte for byte
+(`test_alloc_perf_equivalence.py`). Only this docstring differs from the original file."""
 
 from __future__ import annotations
 
@@ -92,7 +83,6 @@ def cycle(
     excluded_hub_ids: frozenset[str] = frozenset(),
     operator_hub_ids: frozenset[str] = frozenset(),
     device_excluded_hub_ids: frozenset[str] = frozenset(),
-    prep_memo: MutableMapping[str, PrepMemoEntry] | None = None,
 ) -> CycleResult:
     """Run one S1-S7 cycle across every bank in `fleet_state`.
 
@@ -116,10 +106,6 @@ def cycle(
       comes off their bank's capability.
     - `operator_hub_ids`: the excluded hubs held by a live operator target (`engine.manual`); a shortfall on
       their bank carries R-OPERATOR-OVERRIDE.
-    - `prep_memo`: optional, carried by the caller across cycles (`run_cycle`): each hub's preparation
-      (`_prepare_hub`) is reused while its inputs are the very same objects (`is`) -- the engine's fleet
-      gateway hands back the same `HubSnapshot` while a hub's telemetry and health are unchanged. It only
-      saves work: the result is identical with or without it.
     """
     cycle_id = cycle_id or t.isoformat()
     pi_states = {} if pi_states is None else pi_states
@@ -135,26 +121,25 @@ def cycle(
     # its bank's capability, so the tiers never allocate kW the hubs cannot deliver.
     flow_cut_by_bank: dict[str, float] = {}
     for hub in fleet_state.hubs:
-        device_out = hub.hub_id in device_excluded_hub_ids
-        vetoed = hub.hub_id in excluded_hub_ids
-        memo = prep_memo.get(hub.hub_id) if prep_memo is not None else None
-        if (
-            memo is not None
-            and memo[0] is hub
-            and memo[1] is device_out
-            and memo[2] is vetoed
-            and memo[3] is flow_limits
-            and memo[4] == lease_ttl_s
-        ):
-            capped, cuts = memo[5], memo[6]
-        else:
-            capped, cuts = _prepare_hub(hub, device_out, vetoed, flow_limits, lease_ttl_s)
-            if prep_memo is not None:
-                prep_memo[hub.hub_id] = (hub, device_out, vetoed, flow_limits, lease_ttl_s, capped, cuts)
-        bank_id = hub.bank_id
-        for cut in cuts:
-            flow_cut_by_bank[bank_id] = flow_cut_by_bank.get(bank_id, 0.0) + cut
-        hubs_by_bank.setdefault(bank_id, []).append(capped)
+        if hub.hub_id in device_excluded_hub_ids and hub.is_healthy:
+            # Device work (firmware update): out like a FAULT hub -- L0 attribution (`classify_hub_loss`).
+            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + max(
+                hub.free_discharge_kw, 0.0
+            )
+            hub = hub.evolve(health="FAULT", free_discharge_kw=0.0)
+        if hub.hub_id in excluded_hub_ids and hub.is_healthy:
+            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + max(
+                hub.free_discharge_kw, 0.0
+            )
+            hub = hub.evolve(health="LAGGING", free_discharge_kw=0.0)
+        if flow_limits.enabled:
+            hub = with_topology(hub, flow_limits)
+        sustainable = _cap_sustainable_discharge(hub, lease_ttl_s)
+        capped = cap_hub(sustainable, flow_limits)
+        if capped is not sustainable and sustainable.is_healthy:
+            cut = sustainable.free_discharge_kw - capped.free_discharge_kw
+            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + cut
+        hubs_by_bank.setdefault(hub.bank_id, []).append(capped)
     for bank in fleet_state.banks:
         cut = flow_cut_by_bank.get(bank.bank_id, 0.0)
         if cut > _EPS:
@@ -411,34 +396,6 @@ def cycle(
         pq_reductions=tuple(pq_reductions),
         territory_blocks=tuple(territory_blocks),
     )
-
-
-#: `cycle`'s per-hub preparation memo entry: (input hub, device-excluded, veto-excluded, flow limits, lease TTL,
-#: the prepared hub, its bank-capability cuts in order).
-PrepMemoEntry = tuple[HubSnapshot, bool, bool, FlowLimits, float, HubSnapshot, tuple[float, ...]]
-
-
-def _prepare_hub(
-    hub: HubSnapshot, device_out: bool, vetoed: bool, flow_limits: FlowLimits, lease_ttl_s: float
-) -> tuple[HubSnapshot, tuple[float, ...]]:
-    """One hub as the cycle offers it: device work and a K4 veto exclusion, the registry topology, the
-    lease-horizon energy cap and the F1/F2 caps; plus the kW each step takes off its bank's capability, in
-    the order they are deducted. A pure function of its arguments (`cycle`'s `prep_memo` relies on it)."""
-    cuts: list[float] = []
-    if device_out and hub.is_healthy:
-        # Device work (firmware update): out like a FAULT hub -- L0 attribution (`classify_hub_loss`).
-        cuts.append(max(hub.free_discharge_kw, 0.0))
-        hub = hub.evolve(health="FAULT", free_discharge_kw=0.0)
-    if vetoed and hub.is_healthy:
-        cuts.append(max(hub.free_discharge_kw, 0.0))
-        hub = hub.evolve(health="LAGGING", free_discharge_kw=0.0)
-    if flow_limits.enabled:
-        hub = with_topology(hub, flow_limits)
-    sustainable = _cap_sustainable_discharge(hub, lease_ttl_s)
-    capped = cap_hub(sustainable, flow_limits)
-    if capped is not sustainable and sustainable.is_healthy:
-        cuts.append(sustainable.free_discharge_kw - capped.free_discharge_kw)
-    return capped, tuple(cuts)
 
 
 def _zero_grant(bank_id: str, obligation_id: str, reason_code: str) -> ProposedGrant:

@@ -21,7 +21,7 @@ from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from opengrid.allocator import reasons
-from opengrid.allocator.cycle import DEFAULT_LEASE_TTL_S, cycle
+from opengrid.allocator.cycle import DEFAULT_LEASE_TTL_S, PrepMemoEntry, cycle
 from opengrid.allocator.gateways import (
     CycleExtrasGateway,
     FleetGateway,
@@ -71,6 +71,9 @@ _last_extras: list[CycleExtras] = []
 _last_shortfalls: list[ShortfallReport] = []
 _pre_cycle_pi: dict[str, PiState] = {}
 _pre_cycle_dwell: dict[str, DwellState] = {}
+#: The cycle's per-hub preparation memo (`cycle.cycle`'s `prep_memo`): pure work reused while a hub's inputs
+#: are unchanged. Keyed by hub; rebuilt when hubs leave the fleet.
+_prep_memo: dict[str, PrepMemoEntry] = {}
 
 
 def hub_allocations() -> dict[tuple[str, str], dict[str, float]]:
@@ -212,7 +215,13 @@ async def run_cycle(
         operator_hub_ids=extras.operator_hub_ids,
         device_excluded_hub_ids=extras.device_excluded_hub_ids,
         lease_ttl_s=lease_ttl_s,
+        prep_memo=_prep_memo,
     )
+    if only_bank_ids is None and len(_prep_memo) > len(fleet_state.hubs):
+        # Hubs left the fleet: keep only the current ones' entries.
+        current = {h.hub_id for h in fleet_state.hubs}
+        for hub_id in [k for k in _prep_memo if k not in current]:
+            del _prep_memo[hub_id]
     if only_bank_ids is None:
         _last_hub_allocations.clear()
     else:

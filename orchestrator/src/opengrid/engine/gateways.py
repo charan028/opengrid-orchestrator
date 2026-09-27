@@ -37,7 +37,7 @@ from opengrid.allocator.energy_hold import (
 from opengrid.allocator.energy_sufficiency import (
     EnergySufficiencyResult,
     HubEnergyState,
-    evaluate_with_substitution,
+    evaluate_bank_obligations,
 )
 from opengrid.allocator.models import (
     HOLD_SERVICE_TYPES,
@@ -488,6 +488,10 @@ class EngineFleetGateway:
 
     def __init__(self, market_model: MarketModel | None = None) -> None:
         self._market = market_model
+        #: hub_id -> (fleet snapshot, utility-scale flag, the HubSnapshot built from them): the fleet twin
+        #: hands back the SAME snapshot object while a hub's inputs are unchanged (`fleet._snapshot_memo`),
+        #: so an identical (`is`) snapshot maps to the identical, immutable HubSnapshot of the last cycle.
+        self._hub_memo: dict[str, tuple[fleet.HubCapabilitySnapshot, bool, HubSnapshot]] = {}
 
     def set_market_model(self, market_model: MarketModel | None) -> None:
         """Swap in a rebuilt market model (periodic refresh); `None` keeps the current one."""
@@ -500,9 +504,14 @@ class EngineFleetGateway:
     async def fleet_state(self, bank_ids: Sequence[str], interval_start: datetime) -> FleetState:
         hubs: list[HubSnapshot] = []
         banks: list[BankSnapshot] = []
+        hub_memo = self._hub_memo
+        new_memo: dict[str, tuple[fleet.HubCapabilitySnapshot, bool, HubSnapshot]] = {}
+        # One read instant for the whole fleet state: a bank's capability and its hub snapshots judge hub
+        # health at the same `now` (so they always agree), and each hub is classified once.
+        now = datetime.now(UTC)
         for bank_id in bank_ids:
             try:
-                cap = await fleet.capability(bank_id, interval_start)
+                cap = await fleet.capability(bank_id, interval_start, now=now)
             except LookupError:
                 logger.warning("fleet_state: unknown bank_id, skipping", extra={"bank_id": bank_id})
                 continue
@@ -520,36 +529,44 @@ class EngineFleetGateway:
                     available=not is_unavailable_bank(bank_id),
                 )
             )
-            for snap in fleet.hub_capabilities(bank_id):
-                hubs.append(
-                    HubSnapshot(
-                        hub_id=snap.hub_id,
-                        bank_id=snap.bank_id,
-                        free_discharge_kw=snap.free_discharge_kw,
-                        health=_HEALTH_TO_ALLOCATOR.get(snap.health, "FAULT"),  # type: ignore[arg-type]
-                        # CORE-003/K1 (user requirement: energy above reserve checked continuously, not
-                        # just power headroom): live SoC/reserve/capacity/efficiency from the fleet
-                        # twin's own telemetry, so the allocator's `_cap_sustainable_discharge` can cap
-                        # `free_discharge_kw` by the ENERGY sustainable over the command's hold horizon.
-                        # `snap.soc_kwh` is already `None` for any hub the twin excluded this instant
-                        # (stale/offline/fault, `fleet._classify_health`) -- never a stale/missing
-                        # reading silently forwarded as "trust free_discharge_kw at face value".
-                        soc_kwh=snap.soc_kwh,
-                        reserve_kwh=snap.reserve_kwh,
-                        e_kwh=snap.e_kwh,
-                        eta_d=snap.eta_d,
-                        rated_kw=snap.rated_kw,
-                        p_kw=snap.p_kw,
-                        # 09 S1.9 telemetry (migration 0027), picked up as soon as the fleet twin carries it;
-                        # until then None: F1 takes the guardian's unknown-temperature factor.
-                        cell_temp_c=getattr(snap, "cell_temp_c", None),
-                        p_dis_max_kw=getattr(snap, "p_dis_max_kw", None),
-                        meter_kw=getattr(snap, "meter_kw", None),
-                        units=getattr(snap, "units", None),
-                        utility_scale=bool(getattr(snap, "utility_scale", False))
-                        or is_utility_scale_bank(snap.bank_id),
-                    )
+            for snap in fleet.hub_capabilities(bank_id, now=now):
+                utility_scale = bool(getattr(snap, "utility_scale", False)) or is_utility_scale_bank(
+                    snap.bank_id
                 )
+                memo = hub_memo.get(snap.hub_id)
+                if memo is not None and memo[0] is snap and memo[1] is utility_scale:
+                    new_memo[snap.hub_id] = memo
+                    hubs.append(memo[2])
+                    continue
+                hub = HubSnapshot(
+                    hub_id=snap.hub_id,
+                    bank_id=snap.bank_id,
+                    free_discharge_kw=snap.free_discharge_kw,
+                    health=_HEALTH_TO_ALLOCATOR.get(snap.health, "FAULT"),  # type: ignore[arg-type]
+                    # CORE-003/K1 (user requirement: energy above reserve checked continuously, not
+                    # just power headroom): live SoC/reserve/capacity/efficiency from the fleet
+                    # twin's own telemetry, so the allocator's `_cap_sustainable_discharge` can cap
+                    # `free_discharge_kw` by the ENERGY sustainable over the command's hold horizon.
+                    # `snap.soc_kwh` is already `None` for any hub the twin excluded this instant
+                    # (stale/offline/fault, `fleet._classify_health`) -- never a stale/missing
+                    # reading silently forwarded as "trust free_discharge_kw at face value".
+                    soc_kwh=snap.soc_kwh,
+                    reserve_kwh=snap.reserve_kwh,
+                    e_kwh=snap.e_kwh,
+                    eta_d=snap.eta_d,
+                    rated_kw=snap.rated_kw,
+                    p_kw=snap.p_kw,
+                    # 09 S1.9 telemetry (migration 0027), picked up as soon as the fleet twin carries it;
+                    # until then None: F1 takes the guardian's unknown-temperature factor.
+                    cell_temp_c=getattr(snap, "cell_temp_c", None),
+                    p_dis_max_kw=getattr(snap, "p_dis_max_kw", None),
+                    meter_kw=getattr(snap, "meter_kw", None),
+                    units=getattr(snap, "units", None),
+                    utility_scale=utility_scale,
+                )
+                new_memo[snap.hub_id] = (snap, utility_scale, hub)
+                hubs.append(hub)
+        self._hub_memo = new_memo
         return FleetState(hubs=tuple(hubs), banks=tuple(banks))
 
 
@@ -780,17 +797,23 @@ class EngineLedgerGateway:
                 self._in_shortfall.add(oid)
 
         calls: list[ObligationCall] = []
+        # One fleet read per bank, not per call row: every call on a bank shares its online hubs.
+        eligible_by_bank: dict[str, tuple[str, ...]] = {}
         for row in call_rows:
             obligation_id, bank_id, amount, service_type, tier, value_per_mwh, state, as_deployed = row[:8]
             duration_minutes = row[8] if len(row) > 8 else None
             deploy_end = row[9] if len(row) > 9 else None
             amount = float(amount) * call_scale.get(str(obligation_id), 1.0)
-            try:
-                eligible_hub_ids = tuple(
-                    s.hub_id for s in fleet.hub_capabilities(bank_id) if s.health == "online"
-                )
-            except LookupError:
-                eligible_hub_ids = ()
+            eligible = eligible_by_bank.get(bank_id)
+            if eligible is None:
+                try:
+                    eligible = tuple(
+                        s.hub_id for s in fleet.hub_capabilities(bank_id) if s.health == "online"
+                    )
+                except LookupError:
+                    eligible = ()
+                eligible_by_bank[bank_id] = eligible
+            eligible_hub_ids = eligible
             # WP-D: the S5.2 PQ filter for PQ-sensitive profiles (DATA_CENTER) runs inside the allocator
             # cycle (`allocator.pq_eligibility.apply_eligibility`, fed by the engine's cycle extras).
             calls.append(
@@ -1157,7 +1180,6 @@ class EnergySufficiencyGateway:
             except LookupError:
                 continue
             online_hubs = [h for h in hub_snaps if h.health == "online"]
-            total_free_kw = sum(h.free_discharge_kw for h in online_hubs)
             hub_states = [
                 HubEnergyState(
                     hub_id=h.hub_id,
@@ -1175,33 +1197,22 @@ class EnergySufficiencyGateway:
                 (getattr(h, "e_kwh", None), h.eta_d) for h in online_hubs if h.soc_kwh is not None
             )
 
-            for obligation_id, committed_kw, window_end, customer_id in obligations:
+            # K2: every OTHER obligation on this bank reserves its remaining required energy across the bank's
+            # online hubs, proportional to free_discharge_kw share -- energy this obligation may NOT count as
+            # available. All of the bank's obligations are evaluated together (`evaluate_bank_obligations`:
+            # the same verdicts as `evaluate_with_substitution` per obligation, without the per-pair rescans).
+            checks: list[tuple[str, float, float]] = []
+            reserving_kwh: list[float] = []
+            for obligation_id, committed_kw, window_end, _customer_id in obligations:
                 remaining_window_h = max((window_end - now).total_seconds(), 0.0) / 3600.0
+                reserving_kwh.append(committed_kw * remaining_window_h)
                 if obligation_id in self._as_ids and remaining_window_h > 0:
                     committed_kw += hold_margin_kwh / remaining_window_h
-
-                # K2: distribute every OTHER obligation on this bank's remaining required energy across
-                # the bank's online hubs, proportional to free_discharge_kw share -- the energy this
-                # obligation may NOT count as available.
-                reserved_kwh_by_hub: dict[str, float] = {}
-                if total_free_kw > 0:
-                    for other_id, other_kw, other_window_end, _other_customer in obligations:
-                        if other_id == obligation_id:
-                            continue
-                        other_remaining_h = max((other_window_end - now).total_seconds(), 0.0) / 3600.0
-                        other_required_kwh = other_kw * other_remaining_h
-                        for h in online_hubs:
-                            share = other_required_kwh * (h.free_discharge_kw / total_free_kw)
-                            reserved_kwh_by_hub[h.hub_id] = reserved_kwh_by_hub.get(h.hub_id, 0.0) + share
-
-                result = evaluate_with_substitution(
-                    obligation_id,
-                    committed_kw,
-                    remaining_window_h,
-                    hub_states,
-                    hub_states,
-                    reserved_kwh_by_hub,
-                )
+                checks.append((obligation_id, committed_kw, remaining_window_h))
+            bank_results = evaluate_bank_obligations(
+                checks, reserving_kwh, hub_states, [h.free_discharge_kw for h in online_hubs]
+            )
+            for (_oid, _kw, _end, customer_id), result in zip(obligations, bank_results, strict=True):
                 results.append(result)
                 if result.at_risk and result.obligation_id not in self._at_risk:
                     self._at_risk.add(result.obligation_id)
@@ -1214,16 +1225,17 @@ class EnergySufficiencyGateway:
         `GET /og/api/dispatch/opportunities`/the dispatch SSE stream can show a live
         `energy_margin_kwh`/`time_to_depletion_h` for an obligation that is currently fine (merge task
         item 5). Display state, recomputed every cycle: one transaction per cycle with an asynchronous
-        commit, never one synchronous commit per obligation inside the dispatch tick (A11). Best-effort: a
+        commit, never one synchronous commit per obligation inside the dispatch tick (A11); the rows go as one
+        batched `executemany` (psycopg pipelines it: one round trip, not one per obligation). Best-effort: a
         failure never blocks the AT_RISK trace/alert path, which is the safety-relevant one."""
         if not results:
             return
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(_ASYNC_COMMIT_SQL)
-                for result in results:
-                    await cur.execute(
-                        _UPSERT_ENERGY_STATUS_SQL,
+                await cur.executemany(
+                    _UPSERT_ENERGY_STATUS_SQL,
+                    [
                         {
                             "obligation_id": result.obligation_id,
                             "required_kwh": result.required_kwh,
@@ -1232,8 +1244,10 @@ class EnergySufficiencyGateway:
                             "time_to_depletion_h": result.time_to_depletion_h,
                             "at_risk": result.at_risk,
                             "used_substitution": result.used_substitution,
-                        },
-                    )
+                        }
+                        for result in results
+                    ],
+                )
                 await conn.commit()
         except Exception:
             logger.exception("failed to persist obligation_energy_status", extra={"count": len(results)})
