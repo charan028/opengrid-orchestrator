@@ -109,7 +109,9 @@ class ScadaEngine:
                 continue
             bg_kw = float(background_kw[i]) if i < self._home_bank_count else 0.0
             real_kw = bank_load_kw(self.buffers[bank_id].net_battery_kw(), bg_kw)
-            value_kw, quality = self.anomalies.apply_reading(bank_id, real_kw, "good", now)
+            value_kw, quality = self.anomalies.apply_reading(
+                bank_id, real_kw, "good", now, kva_rating=self.kva_rating[bank_id]
+            )
             kva = kw_to_kva(value_kw)
             ts = utc_timestamp(now + modifiers.time_skew_s)
             signals.append(

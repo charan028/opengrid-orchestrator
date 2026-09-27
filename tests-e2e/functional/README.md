@@ -58,5 +58,5 @@ check the rule under test rather than demanding PASS, and the one PASS scenario 
 
 ## Known failure (xfail, strict)
 
-- **`bank_overload` injection has no effect** on the SCADA simulator's readings, so `ALR-SCADA-OVERLOAD` cannot be
-  exercised on the dev stack.
+None. The former `bank_overload` xfail (A11: the injection never lifted a bank over its kVA rating) is fixed by
+#43 B1: the SCADA simulator now reports `rating x (1 + kva_over_rating_pct / 100)` while the anomaly is active.

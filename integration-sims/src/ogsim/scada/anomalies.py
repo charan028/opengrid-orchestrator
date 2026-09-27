@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ogsim.scada.aggregation import kva_to_kw
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,6 +96,7 @@ def _utility_instruction_payload(
 @dataclass
 class BankModifiers:
     overload_pct: float = 0.0
+    overload_active: bool = False
     load_multiplier: float = 1.0
     frozen: bool = False
     frozen_value: float | None = None
@@ -176,6 +179,7 @@ class ScadaAnomalyManager:
             p = anomaly.params
             if anomaly.type == "bank_overload":
                 m.overload_pct = float(p.get("kva_over_rating_pct", 20.0))
+                m.overload_active = True
             elif anomaly.type == "load_spike":
                 m.load_multiplier = float(p.get("multiplier", 2.0))
             elif anomaly.type == "frozen_value":
@@ -212,6 +216,7 @@ class ScadaAnomalyManager:
             m = self.modifiers[bank_id]
             if anomaly.type == "bank_overload":
                 m.overload_pct = 0.0
+                m.overload_active = False
             elif anomaly.type in ("load_spike", "phase_imbalance"):
                 m.load_multiplier = 1.0
             elif anomaly.type == "frozen_value":
@@ -251,12 +256,18 @@ class ScadaAnomalyManager:
                 m.pending_instruction = _utility_instruction_payload(bank_id, anomaly.params, lift=True)
 
     def apply_reading(
-        self, bank_id: str, real_power_kw: float, quality: str, now: float
+        self, bank_id: str, real_power_kw: float, quality: str, now: float, *, kva_rating: float
     ) -> tuple[float, str]:
         """Applies this bank's active modifiers to a computed reading,
         returning `(possibly overridden value, possibly overridden quality)`.
         Overrides operate on the real-power kW value before kVA conversion;
-        callers compute kVA from the returned kW."""
+        callers compute kVA from the returned kW.
+
+        Bug fix, 2026-09-26 (#43 B1): a `bank_overload` sets the reading to `kva_rating x (1 +
+        kva_over_rating_pct / 100)` kVA while active -- what the param's name, the catalogue entry and
+        `scenarios/demo-02-bank-overload.yaml` ("25% over rating, i.e. 750 kVA") all say. It used to
+        multiply the actual reading (~200 kW background load), so +25% landed near 250 kVA, far under
+        the 600 kVA rating, and no ALR-SCADA-OVERLOAD ever opened."""
         m = self.modifiers[bank_id]
         value = real_power_kw
         if m.out_of_range_value is not None:
@@ -266,7 +277,8 @@ class ScadaAnomalyManager:
                 m.frozen_value = value
             return m.frozen_value, quality
         value *= m.load_multiplier
-        value *= 1.0 + m.overload_pct / 100.0
+        if m.overload_active:
+            value = kva_to_kw(kva_rating * (1.0 + m.overload_pct / 100.0))
         if m.oscillation:
             amp = m.oscillation["amplitude_pct"] / 100.0
             period = max(m.oscillation["period_s"], 1e-6)

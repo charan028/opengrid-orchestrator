@@ -294,14 +294,9 @@ def test_ts_07_04_an_offline_hub_is_classified_and_recovers(stack: Stack) -> Non
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "FINDING (dev stack): an ogsim.control `bank_overload` injection never changes the SCADA sim's readings "
-        "(bank-005 stayed <= 382 kVA of 600 with +60% injected), while fleet anomalies from the same control "
-        "plane apply -- so ALR-SCADA-OVERLOAD cannot be exercised here yet."
-    ),
-)
+# The former strict xfail ("bank-005 stayed <= 382 kVA of 600 with +60% injected") is fixed by #43 B1: the
+# anomaly multiplied the actual ~240 kVA reading; it now reports rating x (1 + pct/100), here 960 kVA (160%,
+# critical), and reverts when cleared (integration-sims/tests/test_scada_anomalies.py).
 def test_a11_a_scada_bank_overload_raises_an_alert_that_clears(stack: Stack) -> None:
     started = now_utc()
     bank = "bank-005"

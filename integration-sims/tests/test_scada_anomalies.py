@@ -114,6 +114,27 @@ def test_bank_overload_via_a_placeholder_ref_raises_kva_above_rating_for_its_dur
     assert engine.anomalies.modifiers[bank_id].overload_pct == 0.0
 
 
+def test_bank_overload_sets_kva_relative_to_the_rating_not_the_reading(engine: ScadaEngine) -> None:
+    """#43 B1: demo-02's `kva_over_rating_pct: 25` on a 600 kVA bank must read 750 kVA (125% of
+    rating, over the orchestrator's 120% ALR-SCADA-OVERLOAD critical threshold) while active --
+    independent of the ~200 kW background load -- and fall back under the rating after it ends. Before
+    the fix it multiplied the actual reading, so +25% landed near 250 kVA and never alerted."""
+    bank_id = engine.bank_ids[0]
+    rating = engine.kva_rating[bank_id]
+    assert rating == 600.0  # shipped scada.yaml feeder-segment rating
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 25.0}, 0.0, 10.0)
+
+    for t in (1.0, 2.0, 3.0):
+        signals, _ = engine.tick(t)
+        assert _kva_message(signals, bank_id)["value"] == pytest.approx(750.0, abs=0.01)
+        assert _kva_message(signals, bank_id)["value"] / rating > 1.20
+
+    engine.tick(11.0)  # past the 10 s duration
+    signals_after, _ = engine.tick(12.0)
+    assert _kva_message(signals_after, bank_id)["value"] < rating
+    assert engine.anomalies.modifiers[bank_id].overload_active is False
+
+
 def test_load_spike_multiplies_and_reverts(engine: ScadaEngine) -> None:
     bank_id = engine.bank_ids[0]
     _inject(engine, "load_spike", bank_id, {"multiplier": 3.0}, 0.0, 10.0)

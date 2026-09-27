@@ -221,16 +221,14 @@ Timing is the budget per step; the total is about 15 minutes.
 
 ### Topic 6: a SCADA overload, DIST_DEFERRAL responds, an alert fires
 
-**Step 11: Overload the demo bank** [ogsim] (30 s). **Known gap:** on the dev stack this injection does not
-change the SCADA readings yet (tests-e2e finding), so no alert fires there; if none appears on the server,
-skip to step 13.
+**Step 11: Overload the demo bank** [ogsim] (30 s).
 - **Action:** the same anomaly as scenario `demo-02-bank-overload` (which targets `bank-012`), on `$BANK`:
   `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "bank_overload", "target": "'$BANK'", "params": {"kva_over_rating_pct": 25}, "duration": 300}'`
   (the response carries the anomaly's `id`).
 - **Show:** System Health, "Alerts".
 - **Expect:** Within a few SCADA cycles an `ALR-SCADA-OVERLOAD` row for `$BANK`: warning above 100% of the
-  600 kVA rating, critical above 120%. The simulator reports the bank's actual load × 1.25, so the percentage
-  depends on the load at that moment. The same alert appears in the Control room "Open alerts" (reload).
+  600 kVA rating, critical above 120%. The simulator reports 25% over the rating (750 kVA, 125%) whatever the
+  bank's actual load, so the row lands critical. The same alert appears in the Control room "Open alerts" (reload).
 
 **Step 12: The DIST_DEFERRAL loop responds** (45 s)
 - **Action:** `/og/dispatch`, ledger `$BANK`: "Real-time grants & substitutions" and the ledger.
@@ -239,8 +237,8 @@ skip to step 13.
   every committed kW is unchanged. The alert clears when the anomaly ends (300 s), or now:
   `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`.
 - **Note:** after 3 overloaded readings the SCADA simulator also issues a LIMIT at 90% of the rating (540 kW) on
-  `$BANK` with no expiry, and in this release og-engine keeps applying it. `$BANK` stays capped at 540 kW for the
-  rest of the run, which does not affect the demo's 40-60 kW obligations.
+  `$BANK`. It lifts 3 readings after the overload ends (or after 15 minutes at most), and it does not affect the
+  demo's 40-60 kW obligations.
 
 ### Topic 7: comms loss, substitution, then best effort
 

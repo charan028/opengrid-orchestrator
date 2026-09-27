@@ -39,3 +39,11 @@ def kw_to_kva(real_power_kw: float, power_factor: float = ASSUMED_POWER_FACTOR) 
     if power_factor <= 0:
         raise ValueError("power_factor must be > 0")
     return abs(real_power_kw) / power_factor
+
+
+def kva_to_kw(apparent_power_kva: float, power_factor: float = ASSUMED_POWER_FACTOR) -> float:
+    """Inverse of `kw_to_kva`: the (importing, positive) real power whose apparent power at a fixed pf
+    is `apparent_power_kva`."""
+    if power_factor <= 0:
+        raise ValueError("power_factor must be > 0")
+    return abs(apparent_power_kva) * power_factor
