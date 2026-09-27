@@ -1,0 +1,13 @@
+# Harness venv for tests-perf/ on the machine that drives the campaign (never the orchestrator/ogsim runtime).
+# PyPI, maintained, permissive licences, pinned (package policy). The runtime pins match base's r3.4 venv.
+httpx==0.28.1            # BSD-3-Clause
+psycopg==3.3.6           # LGPL-3.0 (dynamic use, same as the orchestrator)
+psycopg-binary==3.3.6    # LGPL-3.0
+paho-mqtt==2.1.0         # EPL-2.0 / EDL-1.0
+PyYAML==6.0.3            # MIT
+tomli_w==1.2.0           # MIT
+# gate
+ruff==0.16.9             # MIT
+mypy==2.3.1              # MIT
+pytest==9.1.1            # MIT
+types-PyYAML==6.0.12.20260906
