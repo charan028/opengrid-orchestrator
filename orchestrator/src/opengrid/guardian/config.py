@@ -32,6 +32,8 @@ DEFAULT_CLOCK_CACHE_S = 1.0
 DEFAULT_BANK_LOAD_MAX_AGE_S = 30.0
 #: K1/G-01: a hub whose telemetry the guardian has not received for this long is stale (zero discharge).
 DEFAULT_TELEMETRY_MAX_AGE_S = 60.0
+#: 09 S2.6 / H3: the PV rating assumed for a hub whose rating is unknown (og.hub.pv_rated_kw NULL).
+DEFAULT_PV_RATED_KW = 10.0
 #: S6.7/G-25: calibration command lease the guardian issues, the longest it will sign, the future-dated
 #: skew it tolerates, and how old a PENDING `og.calibration_attempt` row may be and still be signed.
 DEFAULT_CALIBRATION_LEASE_S = 60.0
@@ -105,7 +107,10 @@ class GuardianConfig:
     #: G-26 static premise defaults while og.hub carries none (migration 0029 columns NULL). None = unknown.
     default_export_limit_kw: float | None = 20.0
     default_service_kw: float = 48.0  # 200 A at 240 V
-    default_pv_rated_kw: float = 0.0
+    #: PV rating of a hub whose og.hub.pv_rated_kw is NULL (nothing writes it yet) or that has no og.hub row.
+    #: Conservative on purpose (H3): it bounds the export side of G-28/29/30 on unsigned kVA, and 0 would read
+    #: as "this bank cannot export" and pass real rooftop-PV export. An explicit 0 in og.hub means no PV.
+    default_pv_rated_kw: float = DEFAULT_PV_RATED_KW
     xfmr_forward_pct: float = 1.0  # G-27 rho_xf
     xfmr_reverse_pct: float = 1.0  # G-27 rho_rev
     xfmr_max_stale_fraction: float = 0.2  # G-27: above this, any increase of |F| is vetoed
@@ -209,7 +214,7 @@ def load_guardian_config(cfg: Config) -> GuardianConfig:
         load_drop_kw=float(cfg.get("guardian.flow.load_drop_kw", 0.5)),
         default_export_limit_kw=_optional_float(cfg.get("guardian.flow.default_export_limit_kw", 20.0)),
         default_service_kw=float(cfg.get("guardian.flow.default_service_kw", 48.0)),
-        default_pv_rated_kw=float(cfg.get("guardian.flow.default_pv_rated_kw", 0.0)),
+        default_pv_rated_kw=float(cfg.get("guardian.flow.default_pv_rated_kw", DEFAULT_PV_RATED_KW)),
         xfmr_forward_pct=float(cfg.get("guardian.flow.xfmr_forward_pct", 1.0)),
         xfmr_reverse_pct=float(cfg.get("guardian.flow.xfmr_reverse_pct", 1.0)),
         xfmr_max_stale_fraction=float(cfg.get("guardian.flow.xfmr_max_stale_fraction", 0.2)),

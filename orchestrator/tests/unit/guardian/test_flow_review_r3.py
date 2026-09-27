@@ -250,7 +250,7 @@ async def test_kva_only_export_side_is_bounded_by_the_guardians_own_hub_telemetr
     }
     pool = _topology_pool(
         {"b1": (None, None, 10.0, 1.0), "b2": (None, None, 20.0, 1.0)},
-        hubs=[_hub_row("h1", "b1", pv_kw=1.0), _hub_row("h2", "b2")],
+        hubs=[_hub_row("h1", "b1", pv_kw=1.0), _hub_row("h2", "b2", pv_kw=0.0)],
     )
 
     flow = await _port(pool, members=members).feeder_flow("f1")
@@ -263,11 +263,93 @@ async def test_a_charging_bank_with_a_power_factor_floor_is_known_to_import():
     members = FakeBankMembers()
     members.hub_ids = {"b1": ["h1"], "b2": ["h2"]}
     members.members = {"b1": [make_hub_snapshot(prev_p_kw=2.0)], "b2": [make_hub_snapshot(prev_p_kw=0.0)]}
-    pool = _topology_pool({"b1": (None, None, 10.0, 1.0), "b2": (None, None, 10.0, 1.0)})
+    pool = _topology_pool(
+        {"b1": (None, None, 10.0, 1.0), "b2": (None, None, 10.0, 1.0)},
+        hubs=[_hub_row("h1", "b1", pv_kw=0.0), _hub_row("h2", "b2", pv_kw=0.0)],  # known: no PV
+    )
 
     flow = await _port(pool, members=members, scada_min_power_factor=0.98).feeder_flow("f1")
 
     assert flow is not None and flow.flow_low_kw == pytest.approx(19.6)
+
+
+# --- H3: an unknown PV rating is never "no export possible" -------------------------------------------------------------
+
+
+def _idle_members() -> FakeBankMembers:
+    members = FakeBankMembers()
+    members.hub_ids = {"b1": ["h1"], "b2": ["h2"]}
+    members.members = {"b1": [make_hub_snapshot(prev_p_kw=0.0)], "b2": [make_hub_snapshot(prev_p_kw=0.0)]}
+    return members
+
+
+def test_the_unknown_pv_rating_defaults_to_a_conservative_value():
+    assert GuardianConfig(key_path="").default_pv_rated_kw == 10.0
+    assert load_guardian_config(Config({})).default_pv_rated_kw == 10.0
+    cfg = Config({"guardian": {"flow": {"default_pv_rated_kw": 7.5}}})
+    assert load_guardian_config(cfg).default_pv_rated_kw == 7.5
+
+
+async def test_idle_hubs_with_unknown_pv_may_still_be_exporting():
+    """H3 (lead, verified): nothing writes og.hub.pv_rated_kw, so NULL read as 0 made an idle bank look unable
+    to export, and G-28 reverse / G-30 passed real rooftop-PV export on kVA-only data."""
+    pool = _topology_pool({"b1": (None, None, 30.0, 1.0), "b2": (None, None, 4.0, 1.0)})  # pv_rated_kw NULL
+
+    flow = await _port(pool, members=_idle_members()).feeder_flow("f1")
+
+    assert flow is not None and flow.flow_low_kw == pytest.approx(-10.0 + -4.0)  # max(0 - 10, -m) per bank
+
+
+async def test_an_explicit_zero_pv_rating_is_still_honoured():
+    pool = _topology_pool(
+        {"b1": (None, None, 30.0, 1.0), "b2": (None, None, 4.0, 1.0)},
+        hubs=[_hub_row("h1", "b1", pv_kw=0.0), _hub_row("h2", "b2", pv_kw=0.0)],
+    )
+
+    flow = await _port(pool, members=_idle_members()).feeder_flow("f1")
+
+    assert flow is not None and flow.flow_low_kw == 0.0
+
+
+async def test_g30_vetoes_discharge_on_kva_only_data_with_unknown_pv_but_trusts_real_power():
+    def territory_port(readings: dict[str, tuple[Any, Any, Any, Any]]) -> flow_repo.PgGridTopologyPort:
+        return flow_repo.PgGridTopologyPort(
+            _topology_pool(readings),  # type: ignore[arg-type]
+            GuardianConfig(key_path=""),
+            {"LZ_NORTH": "AUSTIN_ENERGY"},
+            members=_idle_members(),
+        )
+
+    def g30(flow: AggregateFlow | None) -> flow_checks.CheckOutcome:
+        assert flow is not None
+        return flow_checks.check_aggregate_flow(
+            "G-30",
+            flow,
+            0.0,
+            -1.0,
+            max_age_s=30.0,
+            reverse_reason=reasons.R_TERRITORY_EXPORT,
+            forward_reason=reasons.R_TERRITORY_EXPORT,
+            ref="AUSTIN_ENERGY",
+        )
+
+    kva_only = await territory_port(
+        {"b1": (None, None, 30.0, 1.0), "b2": (None, None, 30.0, 1.0)}
+    ).territory_flow("b1")
+    vetoed = g30(kva_only)
+    assert not vetoed.ok and vetoed.reason == reasons.R_TERRITORY_EXPORT
+
+    # REAL_POWER_KW GOOD and fresh (production stores it for every bank) is preferred over kVA: 60 kW import.
+    signed = await territory_port(
+        {"b1": (30.0, 1.0, 30.6, 1.0), "b2": (30.0, 1.0, 30.6, 1.0)}
+    ).territory_flow("b1")
+    assert signed is not None and signed.flow_kw == signed.flow_low_kw == 60.0
+    assert g30(signed).ok
+    # ...and real power that shows export is seen as export.
+    exporting = await territory_port(
+        {"b1": (-5.0, 1.0, 5.1, 1.0), "b2": (2.0, 1.0, 2.1, 1.0)}
+    ).territory_flow("b1")
+    assert not g30(exporting).ok
 
 
 # --- 5. SCADA read hygiene ---------------------------------------------------------------------------------------------
@@ -501,3 +583,70 @@ def test_the_flow_flags_are_read_from_config():
     assert not defaults.flow_fail_closed_missing_topology and defaults.scada_min_power_factor == 0.0
     with pytest.raises(ValueError, match="scada_min_power_factor"):
         load_guardian_config(Config({"guardian": {"flow": {"scada_min_power_factor": 1.5}}}))
+
+
+# --- a bank with no feeder mapping ----------------------------------------------------------------------------------------
+
+
+def _unmapped_world(fakes, p_kw: float, prev_kw: float):
+    from .test_service_flow import FakeAlerts
+
+    proposal = _batch(fakes, [ProposedItem(HUB_ID, p_kw, "SELECTOR")], prev={HUB_ID: prev_kw})
+    fakes.hubs.hubs[HUB_ID] = replace(
+        fakes.hubs.hubs[HUB_ID], params=replace(fakes.hubs.hubs[HUB_ID].params, p_kw=11.0)
+    )
+    assert fakes.banks.banks[BANK_ID].feeder_id is None
+    return proposal, FakeAlerts()
+
+
+@pytest.mark.parametrize("fail_closed", [False, True])
+async def test_a_bank_without_a_feeder_raises_the_unmapped_alert(fakes, signing_seed, fail_closed):
+    proposal, alerts = _unmapped_world(fakes, 3.0, 3.0)  # no change: never vetoed
+    config = GuardianConfig(key_path="", cycle_interval_s=2.0, flow_fail_closed_missing_topology=fail_closed)
+
+    verdict = await _service(
+        fakes, config, signing_seed, topology=FakeTopology(), alerts=alerts
+    ).evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.outcome == "PASS"
+    assert ("ALR-BANK-UNMAPPED-TOPOLOGY", BANK_ID) in alerts.raised
+
+
+async def test_fail_closed_vetoes_increases_on_an_unmapped_bank_and_passes_relief(fakes, signing_seed):
+    config = GuardianConfig(key_path="", cycle_interval_s=2.0, flow_fail_closed_missing_topology=True)
+    proposal, alerts = _unmapped_world(fakes, -4.0, -2.0)
+
+    verdict = await _service(
+        fakes, config, signing_seed, topology=FakeTopology(), alerts=alerts
+    ).evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.outcome == "VETOED" and "G-28" in verdict.vetoed_rule_ids
+    violations = fakes.trace.appended[-1][1]["violations"]
+    assert (BANK_ID, flow_checks.BANK_TOPOLOGY_UNMAPPED) in {(v["hub_id"], v["reason"]) for v in violations}
+
+    relief, _ = _unmapped_world(fakes, -1.0, -2.0)
+    relief = replace(relief, seq=2)
+    fakes.proposals.add(relief)
+    relief_verdict = await _service(
+        fakes, config, signing_seed, topology=FakeTopology(), alerts=alerts
+    ).evaluate_and_sign(make_batch_row(relief))
+    assert "G-28" not in relief_verdict.vetoed_rule_ids, relief_verdict.vetoed_rule_ids
+
+
+async def test_without_fail_closed_an_unmapped_bank_is_only_alerted(fakes, signing_seed):
+    config = GuardianConfig(key_path="", cycle_interval_s=2.0)
+    proposal, alerts = _unmapped_world(fakes, -4.0, -2.0)
+
+    verdict = await _service(
+        fakes, config, signing_seed, topology=FakeTopology(), alerts=alerts
+    ).evaluate_and_sign(make_batch_row(proposal))
+
+    assert "G-28" not in verdict.vetoed_rule_ids
+    assert ("ALR-BANK-UNMAPPED-TOPOLOGY", BANK_ID) in alerts.raised
+
+
+def test_check_unmapped_bank_relief_semantics():
+    assert not flow_checks.check_unmapped_bank("b", 0.0, -1.0).ok
+    assert not flow_checks.check_unmapped_bank("b", 2.0, 3.0).ok
+    assert flow_checks.check_unmapped_bank("b", -5.0, -1.0).ok
+    assert flow_checks.check_unmapped_bank("b", -5.0, 5.0).ok  # same magnitude
