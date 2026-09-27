@@ -41,6 +41,8 @@ __all__ = ["BridgeHolder", "start_grid_link"]
 MQTT_PROCESS_NAME = "gridlink"
 RECONNECT_MIN_S = 1.0
 RECONNECT_MAX_S = 30.0
+#: Bound on reading the link's L2 history from og.trace at start-up.
+RESTORE_TIMEOUT_S = 10.0
 
 
 class BridgeHolder:
@@ -115,6 +117,7 @@ async def _run(cfg: Config, pool: AsyncConnectionPool, trace: TraceStore, settin
                 sink=holder,
                 banks_of_zone=banks_of_zone,
             )
+            await _restore_l2(pool, service)
             server = _server_for(utility, service)
             try:
                 await server.start()
@@ -131,6 +134,23 @@ async def _run(cfg: Config, pool: AsyncConnectionPool, trace: TraceStore, settin
         finally:
             for server in servers:
                 await server.stop()
+
+
+async def _restore_l2(pool: AsyncConnectionPool, service: GridLinkService) -> None:
+    """Re-apply the link's traced L2 levels before listening (pg_history). A failure is logged and the link
+    starts with no L2 levels of its own; the EMS re-asserts them on reconnect."""
+    from opengrid.integrations.grid_link.pg_history import load_l2_commands
+
+    try:
+        payloads = await asyncio.wait_for(
+            load_l2_commands(pool, f"grid_link:{service.utility_id}"), timeout=RESTORE_TIMEOUT_S
+        )
+        await service.restore_l2(payloads)
+    except Exception:
+        logger.exception(
+            "grid link L2 restore failed; starting without restored levels",
+            extra={"utility_id": service.utility_id},
+        )
 
 
 def _server_for(utility: UtilityLinkSettings, service: GridLinkService) -> Dnp3GridLinkServer:

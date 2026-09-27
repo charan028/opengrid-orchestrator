@@ -253,7 +253,7 @@ While it is not healthy:
 | Core call function slow (> `core_timeout_s`, 5 s) | CALL_STATE shows REJECTED with reason 51. The next status refresh re-reads the call by its idempotency key and corrects the state. The EMS may re-send the same id; it is idempotent. |
 | MQTT bridge down | An L2 instruction is kept and re-sent on each status tick until it is delivered. It is never lost, even though the tracker has moved on. |
 | Telemetry missing | The affected banks' points are served with COMM_LOST and ALARM_TELEMETRY_STALE is on. Nothing is invented. |
-| og-engine restart | The link's L2 levels and call view are held in memory. After a restart the EMS must re-assert its L2 levels when it reconnects (standard EMS behaviour on association restart). Call state is re-read from the core by the EMS's call id. See the open points. |
+| og-engine restart | **L2 levels are restored (r3.4.3).** Before it listens, the link replays its own traced L2 commands from `og.trace` in sequence order: stream `grid_link:<utility>`, `GRID_LINK_COMMAND`, kept 400 days as operator actions. It then re-delivers the resulting instructions, and traces `GRID_LINK_STATE` = `L2_RESTORED`. There is no extra table: the audit trail is the persisted state. Refused commands were never traced, so they are never replayed. If the read fails (10 s bound), the failure is logged and the link starts without restored levels. Call state is re-read from the core by the EMS's call id. |
 | TLS or bind error at start | That utility's link is logged and stays down. og-engine keeps running. |
 | Unknown `utility_id` (not in `UTILITY_IDS`) | That entry is skipped and logged. The other utilities start. |
 
@@ -355,7 +355,6 @@ Nothing in `service.py`, `l2.py`, `calls_port.py` or the core changes.
 
 ## 10. Open points
 
-- **L2 levels are not persisted across an og-engine restart.** They are re-asserted by the EMS on reconnect. Persisting them would need a small table; this is deferred until a real utility asks for it.
 - **Event classes and unsolicited responses are not implemented.** The EMS uses integrity polls.
 - **DNP3 Secure Authentication (SAv5) is not implemented.** Mutual TLS is required on every non-loopback listener instead.
 - **ICCP needs a licensed TASE.2 stack** (§8).
