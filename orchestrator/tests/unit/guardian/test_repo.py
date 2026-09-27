@@ -271,6 +271,9 @@ async def test_load_hub_params():
     assert params["hub-2"].params.units == 2  # G-02's per-unit cap is populated, not left None
     assert not params["hub-2"].params.utility_scale
     assert params["sub-LZ_AEN-00"].params.utility_scale  # og.asset SUBSTATION: rated at its nameplate
+    sql, sql_params = cursor.executed[0]
+    assert "a.asset_id = h.hub_id" in sql
+    assert sql_params == {"nameplate": ["SUBSTATION", "MOBILE_STORAGE"]}  # D-31 trucks at nameplate too
 
 
 # ---------------------------------------------------------------------------------------------------
