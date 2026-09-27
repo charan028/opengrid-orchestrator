@@ -58,6 +58,24 @@ After a deploy, verify: all units active; `https://base.tocy-net.net/og/` loads 
 guardian verdicts mostly PASS; `og.invariant_check` shows 0 new violations; engine cycle p99 on
 `http://127.0.0.1:9101/metrics` (`og_engine_cycle_latency_ms`).
 
+## Deploy from scratch
+
+A new host, or a rebuild of this one after a total loss, uses `deploy/scripts/bootstrap_from_scratch.sh`. The
+full procedure (storage and packages by hand, then phases a-l), the owner-supplied inputs and the expected counts
+are in `deploy/BOOTSTRAP.md`; what each seed does is in `dev/seed/README.md`. In short:
+
+1. Storage, `postgresql-17 mosquitto apache2`, and the two venvs (BOOTSTRAP.md 1-2).
+2. The owner places `/etc/opengrid/api_keys.env` (ERCOT/EIA) and, optionally, `/etc/opengrid/ai_agent.env`
+   (Anthropic). Nothing else is supplied by hand: every other secret is generated on the host and never printed.
+3. `git archive <tag> | tar -x -C /root/release-<tag>`, then from there:
+   `bash deploy/scripts/bootstrap_from_scratch.sh --dry-run`, and without `--dry-run`.
+4. Expect: 10 og-* units active, `/og/api/health` 200, `/og/` 401 without credentials, every hub fresh,
+   invariants 0, and only forecast degraded modes until the price history exists (phase k backfills it when the
+   ERCOT keys are present). Enable `og-lifecycle.timer` only after the I/O check (BOOTSTRAP.md 9).
+
+To prove a release seeds correctly without touching production: `make bootstrap-check` (fresh `og_t_boot` on the
+test cluster, port 5433).
+
 ## Rollback
 
 ```bash
