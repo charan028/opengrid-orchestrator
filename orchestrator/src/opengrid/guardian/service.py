@@ -15,6 +15,7 @@ import logging
 import math
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -48,6 +49,7 @@ from opengrid.guardian.ports import (
     ProposedBatch,
     ProposedItem,
     ReleaseRequest,
+    SafeStopScope,
     ServiceTransformer,
 )
 from opengrid.guardian.pq_ports import (
@@ -196,6 +198,47 @@ class GuardianService:
             return
         for item in checks.hub_setpoints(proposal.items):
             self._last_signed[item.hub_id] = (item.p_kw_setpoint, signed_at, proposal.expires_at)
+
+    def seed_signed_anchors(self, anchors: dict[str, tuple[float, datetime, datetime]]) -> None:
+        """r3.4.3 HIGH-A: after a restart, reload the last signed setpoint per hub whose lease is still live
+        (`repo.load_signed_anchors`, from og.verdict PASS + the batch's RT_ALLOCATION trace), so G-04 keeps the
+        same anchor as the engine instead of falling back to stale telemetry. Never overwrites a newer entry."""
+        for hub_id, entry in anchors.items():
+            current = self._last_signed.get(hub_id)
+            if current is None or current[1] < entry[1]:
+                self._last_signed[hub_id] = entry
+
+    def _drop_signed_anchors(self, hub_ids: Iterable[str]) -> None:
+        """Contract with DISPATCH (r3.4.3): a veto naming a hub, or a stop engaged over it since the signature,
+        ends that hub's signed anchor on both sides -- both then anchor on telemetry."""
+        for hub_id in hub_ids:
+            self._last_signed.pop(hub_id, None)
+
+    async def _drop_anchors_stopped_since_signing(self, bank_id: str, hub_ids: Iterable[str]) -> None:
+        """A FLEET/ZONE/BANK stop ENGAGE at or after a hub's signature means the hub ramped to 0 kW: its signed
+        setpoint is no longer where it is (a release inside the lease would otherwise let a step from the
+        pre-stop setpoint pass G-04 while the hub sits at 0)."""
+        signed = {h: self._last_signed[h][1] for h in hub_ids if h in self._last_signed}
+        if not signed:
+            return
+        port = self.ports.safe_stop
+        scopes: list[tuple[SafeStopScope, str]] = [("FLEET", "FLEET"), ("BANK", bank_id)]
+        zone = self.ports.zones_by_bank.get(bank_id)
+        if zone:
+            scopes.append(("ZONE", zone))
+        engaged: list[datetime] = []
+        for kind, ref in scopes:
+            try:
+                at = await port.last_engaged_at(kind, ref)
+            except Exception:
+                logger.exception("stop read failed: signed anchors dropped", extra={"bank_id": bank_id})
+                self._drop_signed_anchors(signed)
+                return
+            if at is not None:
+                engaged.append(at)
+        if engaged:
+            latest = max(engaged)
+            self._drop_signed_anchors([h for h, signed_at in signed.items() if latest >= signed_at])
 
     def _g04_anchor(self, hub_id: str, hub: HubSnapshot) -> checks.G04Anchor:
         signed = self._last_signed.get(hub_id)
@@ -391,6 +434,7 @@ class GuardianService:
         # A hub may carry several items (one per obligation) and executes their SUM: every hub-level limit
         # (reserve, energy over the lease, power, meter, ramp) is checked on that sum, never per item.
         hub_items = checks.hub_setpoints(proposal.items)
+        await self._drop_anchors_stopped_since_signing(proposal.bank_id, [i.hub_id for i in hub_items])
         for item in hub_items:
             hub = await self.ports.hubs.snapshot(item.hub_id)
             if hub is None:
@@ -428,9 +472,7 @@ class GuardianService:
                 violations.append(g04)
 
             fleet_delta_kw += item.p_kw_setpoint - hub.prev_p_kw
-            ramp_step_kw = checks.ramp_step_per_cycle_kw(
-                item.p_kw_setpoint, anchor, self.config.cycle_interval_s
-            )
+            ramp_step_kw = checks.ramp_step_kw(item.p_kw_setpoint, anchor)
             ramp_delta_kw += ramp_step_kw
             gross_step_kw += abs(ramp_step_kw)
             additional_charge_kw += max(item.p_kw_setpoint, 0.0) - max(hub.prev_p_kw, 0.0)
@@ -1547,6 +1589,9 @@ class GuardianService:
             }
             signature = sign_payload(self.signing_seed, payload)
             self._record_signed_setpoints(batch.command_batch_id, signed_at)
+        else:
+            # contract with DISPATCH: a hub a veto names re-anchors on telemetry on both sides
+            self._drop_signed_anchors(vetoed_hub_ids(violations or []))
 
         verdict = Verdict(
             verdict_id=verdict_id,

@@ -417,6 +417,11 @@ class SafeStopPort(Protocol):
         or for a containing scope (FLEET stops everything; ZONE stops its banks)."""
         ...
 
+    async def last_engaged_at(self, scope: SafeStopScope, scope_ref: str) -> datetime | None:
+        """When the latest ENGAGE on exactly this scope/scope_ref was recorded (None: never). G-04 drops a hub's
+        signed anchor when a stop engaged over it at or after the signature (r3.4.3, DISPATCH contract)."""
+        ...
+
 
 StopScopeKind = Literal["FLEET", "ZONE", "BANK"]
 

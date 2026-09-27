@@ -52,16 +52,18 @@ def test_no_signed_setpoint_uses_telemetry() -> None:
     assert _anchor(last_signed_kw=None, last_signed_at=None, lease_expires_at=None).source == "TELEMETRY"
 
 
-def test_older_signature_widens_dt() -> None:
-    a = _anchor(last_signed_at=NOW - timedelta(seconds=3 * CYCLE))
-    assert a.dt_s == 3 * CYCLE
+def test_an_older_signature_never_widens_dt() -> None:
+    """r3.4.3 HIGH-B: the signed anchor is only the starting point; the bound is always one cycle."""
+    for age_s in (3 * CYCLE, 20.0, 28.0):
+        a = _anchor(
+            last_signed_at=NOW - timedelta(seconds=age_s), lease_expires_at=NOW + timedelta(seconds=2)
+        )
+        assert (a.source, a.dt_s) == ("SIGNED", CYCLE)
 
 
-def test_ramp_step_per_cycle_scales_old_anchor_to_one_cycle() -> None:
-    a = checks.G04Anchor(-400.0, 2 * CYCLE, "SIGNED")
-    assert checks.ramp_step_per_cycle_kw(-800.0, a, CYCLE) == -200.0
-    t = checks.G04Anchor(0.0, CYCLE, "TELEMETRY")
-    assert checks.ramp_step_per_cycle_kw(-222.0, t, CYCLE) == -222.0
+def test_the_rate_checks_count_the_full_step_from_the_anchor() -> None:
+    assert checks.ramp_step_kw(-800.0, checks.G04Anchor(-400.0, CYCLE, "SIGNED")) == -400.0
+    assert checks.ramp_step_kw(-222.0, checks.G04Anchor(0.0, CYCLE, "TELEMETRY")) == -222.0
 
 
 def test_20mw_toll_ramp_passes_g04_every_cycle_and_overshoot_is_vetoed() -> None:
