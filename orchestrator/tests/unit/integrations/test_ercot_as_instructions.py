@@ -91,3 +91,49 @@ async def test_the_client_is_a_dispatch_instruction_source_that_acknowledges_acc
         assert (await client.fetch_instruction_batch(now - timedelta(minutes=15))).instructions == []
     finally:
         await client.close()
+
+
+def _mw_vdi(mrid: str, mw: str | None) -> str:
+    mw_el = f"<mw>{mw}</mw>" if mw is not None else ""
+    return _vdi(mrid, GOOD.replace("<mw>0.5</mw>", mw_el))
+
+
+def test_an_as_deployment_without_a_positive_mw_is_malformed_never_the_full_award() -> None:
+    """Review finding (r3.4.2): mw 0 parsed to Decimal 0 and reached the core as requested_kw None, which
+    deploys the FULL award. ERCOT always states the MW: 0, negative or missing is a 422 malformed instruction."""
+    payload = fromstring(
+        f'<VDIs xmlns="{PAY}">'
+        + _mw_vdi("ZERO", "0")
+        + _mw_vdi("NEG", "-0.2")
+        + _mw_vdi("MISSING", None)
+        + _mw_vdi("PARTIAL", "0.25")
+        + "</VDIs>"
+    )
+    batch = parse_vdi_batch(payload, type_map=TYPES)
+    assert [(i.instruction_id, i.mw) for i in batch.instructions] == [("PARTIAL", Decimal("0.25"))]
+    assert sorted(m.instruction_id or "" for m in batch.malformed) == ["MISSING", "NEG", "ZERO"]
+
+
+async def test_the_core_gateway_never_sends_a_deployment_without_a_positive_mw() -> None:
+    from uuid import uuid4
+
+    from opengrid.contracts.as_deployment_poll import R_MALFORMED
+    from opengrid.contracts.as_deployment_poll_io import CoreCallGateway
+    from opengrid.integrations.interfaces import DispatchInstruction
+
+    class _Cfg:
+        def get(self, key: str, default: object = None) -> object:
+            return default
+
+    gateway = CoreCallGateway(None, None, _Cfg())  # type: ignore[arg-type]  -- refused before any I/O
+    now = datetime.now(UTC)
+    for mw in (None, Decimal("0")):
+        instruction = DispatchInstruction.model_construct(
+            instruction_id="X", kind="AS_DEPLOYMENT", resource_id="OG_ESR_1", service="ECRS", mw=mw,
+            start_at=now, end_at=now + timedelta(minutes=30), issued_at=now, text=None, ramp_minutes=None,
+            recalls=None,
+        )  # fmt: skip
+        outcome = await gateway.deploy(
+            instruction, obligation_id=uuid4(), principal="ercot:ercot_mms", now=now
+        )
+        assert (outcome.accepted, outcome.http_status, outcome.reason_code) == (False, 422, R_MALFORMED)

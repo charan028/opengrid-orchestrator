@@ -30,7 +30,7 @@ from opengrid.calls import (
     issue_call,
 )
 from opengrid.calls import CallOutcome as CallResult
-from opengrid.contracts.as_deployment_poll import CallOutcome, ErcotAsPoller, settings_from
+from opengrid.contracts.as_deployment_poll import R_MALFORMED, CallOutcome, ErcotAsPoller, settings_from
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import clear_alert, raise_alert
 from opengrid.integrations.ercot_mms.client import ErcotMmsClient
@@ -134,6 +134,9 @@ class CoreCallGateway:
         if instruction.end_at is None:
             return CallOutcome(False, "R-ERCOT-AS-NO-END", 422, "instruction has no end time")
         mw = instruction.mw
+        if mw is None or mw <= 0:
+            # Defence in depth (the model already refuses it): requested_kw None would mean the full award.
+            return CallOutcome(False, R_MALFORMED, 422, "an AS deployment must carry a positive MW")
         request = CallRequest(
             origin=CallOrigin.ERCOT_POLL,
             principal=principal,
@@ -141,7 +144,7 @@ class CoreCallGateway:
             obligation_id=obligation_id,
             start_at=instruction.start_at,
             end_at=instruction.end_at,
-            requested_kw=-float(mw * 1000) if mw is not None and mw > 0 else None,
+            requested_kw=-float(mw * 1000),
             idempotency_key=instruction.instruction_id,
         )
         try:

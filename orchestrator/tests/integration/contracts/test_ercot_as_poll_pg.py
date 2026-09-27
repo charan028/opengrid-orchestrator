@@ -185,6 +185,7 @@ async def test_instructions_go_through_the_shared_core_and_are_answered(
     bad = deploy(RESOURCE, 0.3, malformed_fields={"mw": "fifty"})
     unknown = deploy("OG_ESR_UNKNOWN", 0.3)
     toll = deploy(TOLL_RESOURCE, 0.3)  # mapped to the TOLLING contract: never an ERCOT_AS award
+    zero = deploy(RESOURCE, 0.0)  # MW 0 must be malformed, never the full award (review, r3.4.2)
 
     poller = _poller(pool, trace, http, seed)
     try:
@@ -210,6 +211,7 @@ async def test_instructions_go_through_the_shared_core_and_are_answered(
         assert answers[bad][0] == "REJECTED" and answers[bad][1].startswith("422")
         assert answers[unknown][0] == "REJECTED" and answers[unknown][1].startswith("404")
         assert answers[toll][0] == "REJECTED" and answers[toll][1].startswith("404")
+        assert answers[zero][0] == "REJECTED" and answers[zero][1].startswith("422")
 
         refused = {
             r[0]
@@ -218,7 +220,7 @@ async def test_instructions_go_through_the_shared_core_and_are_answered(
                 "AND cleared_at IS NULL",
             )
         }  # fmt: skip
-        assert refused >= {over, bad, unknown, toll}
+        assert refused >= {over, bad, unknown, toll, zero}
         events = [
             (r[0], r[1])
             for r in _rows(
@@ -227,7 +229,7 @@ async def test_instructions_go_through_the_shared_core_and_are_answered(
             )
         ]  # fmt: skip
         assert ("AS_INSTRUCTION_ACCEPTED", "ERCOT_POLL") in events
-        assert sum(1 for e in events if e[0] == "AS_INSTRUCTION_REFUSED") == 4
+        assert sum(1 for e in events if e[0] == "AS_INSTRUCTION_REFUSED") == 5
 
         # A duplicate delivery, then the same after a restart (a fresh poller): never a second deployment.
         book.force_duplicate(good)

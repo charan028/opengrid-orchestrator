@@ -229,6 +229,9 @@ class DispatchInstruction(_Model):
             raise ValueError("instruction_id is required")
         if self.mw is not None and self.mw < 0:
             raise ValueError("mw must not be negative")
+        if self.kind == "AS_DEPLOYMENT" and (self.mw is None or self.mw <= 0):
+            # ERCOT always states the deployed MW; a missing or zero MW must never become "the full award".
+            raise ValueError("an AS deployment must carry a positive mw")
         if self.end_at is not None and self.end_at <= self.start_at:
             raise ValueError("end_at must be after start_at")
         return self
