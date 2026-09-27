@@ -1,0 +1,124 @@
+{{- $fn := include "og.fullname" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-mosquitto
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "mosquitto") | nindent 4 }}
+spec:
+  selector:
+    {{- include "og.selector" (dict "root" . "component" "mosquitto") | nindent 4 }}
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fn }}-mosquitto
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "mosquitto") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" . "component" "mosquitto") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "og.labels" (dict "root" . "component" "mosquitto") | nindent 8 }}
+      annotations:
+        checksum/config: {{ toYaml .Values.mosquitto | sha256sum | trunc 12 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "og.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1883
+        runAsGroup: 1883
+        fsGroup: 1883
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # production's ACL (deploy/scripts/render_mosquitto_acl.sh, from the orchestrator image; holds no secret)
+        - name: acl
+          image: {{ include "og.image" (dict "root" . "which" "orchestrator") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["mqtt-acl", "/mosquitto/gen/opengrid.acl"]
+          securityContext:
+            {{- include "og.containerSecurityContext" . | nindent 12 }}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - name: gen
+              mountPath: /mosquitto/gen
+            - name: tmp
+              mountPath: /tmp
+        - name: passwd
+          image: {{ .Values.thirdParty.mosquitto }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/mosquitto/config/build-passwd.sh"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.mqtt }}
+            - secretRef:
+                name: {{ .Values.secrets.mqttSim }}
+          securityContext:
+            {{- include "og.containerSecurityContext" . | nindent 12 }}
+          resources:
+            requests: {cpu: 20m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - name: gen
+              mountPath: /mosquitto/gen
+            - name: config
+              mountPath: /mosquitto/config
+              readOnly: true
+      containers:
+        - name: mosquitto
+          image: {{ .Values.thirdParty.mosquitto }}
+          imagePullPolicy: IfNotPresent
+          command: ["mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]
+          ports:
+            - name: mqtt
+              containerPort: 1883
+          readinessProbe:
+            tcpSocket:
+              port: mqtt
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: mqtt
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          securityContext:
+            {{- include "og.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.mosquitto.resources | nindent 12 }}
+          volumeMounts:
+            - name: gen
+              mountPath: /mosquitto/gen
+              readOnly: true
+            - name: config
+              mountPath: /mosquitto/config
+              readOnly: true
+            - name: data
+              mountPath: /mosquitto/data
+      volumes:
+        - name: gen
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: data
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: config
+          configMap:
+            name: {{ $fn }}-mosquitto

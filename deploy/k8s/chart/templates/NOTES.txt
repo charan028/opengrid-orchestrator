@@ -1,0 +1,10 @@
+OpenGrid {{ .Chart.AppVersion }} (chart {{ .Chart.Version }}, images {{ include "og.tag" . }}) in namespace {{ .Release.Namespace }}.
+
+UI and API:   https://{{ .Values.ingress.host }}/og/      (basic auth; accounts in Secret {{ .Values.secrets.uiUsers }})
+Simulators:   https://{{ .Values.ingress.host }}/ogsim/   (account "tester")
+Zone blocks:  {{ .Values.zones }}
+Lifecycle:    CronJob {{ include "og.fullname" . }}-lifecycle is {{ if .Values.lifecycle.suspend }}SUSPENDED (as production's timer){{ else }}ACTIVE{{ end }}
+
+Verify:       deploy/k8s/install.sh --phase verify --namespace {{ .Release.Namespace }} --release {{ .Release.Name }}
+A password, when needed (never printed by the installer):
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.uiUsers }} -o jsonpath='{.data.operator}' | base64 -d

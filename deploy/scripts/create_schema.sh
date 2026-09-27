@@ -9,6 +9,8 @@
 #   --release DIR       release/repo root (default: this script's repo)
 #   --etc DIR           where secrets.env holds OG_DB_PASSWORD (default /etc/opengrid; generated when absent)
 #   --db-port N --db-name NAME --db-role ROLE   (default 5432 / og / opengrid)
+#   --db-host HOST      server host (default 127.0.0.1)
+#   --config FILE       orchestrator.toml of the migrate step (default: the release's; [postgres].host = --db-host)
 #   --fresh-db          drop the database first (refused on port 5432)
 #   --no-migrate        role, database, extensions and schema only
 #   --snapshot FILE     after migrating, write the normalised `pg_dump --schema-only` of schema og to FILE
@@ -18,6 +20,8 @@
 # Extensions: none are required. gen_random_uuid() is core since PostgreSQL 13 (the server must be >= 13);
 # add any future extension to EXTENSIONS below, never inside a migration (it needs a superuser).
 # The role's password never appears in argv or output: it goes to psql over stdin.
+# Admin connection: `runuser -u postgres` on the local socket; when OG_PG_ADMIN_PASSWORD is set in the environment
+# (never argv), TCP to --db-host as OG_PG_ADMIN_USER (default postgres) instead (the deploy/k8s migrations Job).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -27,6 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ETC=/etc/opengrid
 DB_HOST=127.0.0.1
+CONFIG=""
 DB_PORT=5432
 DB_NAME=og
 DB_ROLE=opengrid
@@ -46,6 +51,8 @@ while [ $# -gt 0 ]; do
     --db-port) DB_PORT="$2"; shift 2 ;;
     --db-name) DB_NAME="$2"; shift 2 ;;
     --db-role) DB_ROLE="$2"; shift 2 ;;
+    --db-host) DB_HOST="$2"; shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
     --fresh-db) FRESH_DB=1; shift ;;
     --no-migrate) MIGRATE=0; shift ;;
     --snapshot) SNAPSHOT="$2"; shift 2 ;;
@@ -57,7 +64,14 @@ while [ $# -gt 0 ]; do
 done
 SNAPSHOT_REF="$RELEASE/orchestrator/schema/og_schema.sql"
 
-pg_admin() { runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -p "$DB_PORT" "$@"; }
+pg_admin() {
+  if [ -n "${OG_PG_ADMIN_PASSWORD:-}" ]; then
+    PGPASSWORD="$OG_PG_ADMIN_PASSWORD" psql -X -q -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" \
+      -U "${OG_PG_ADMIN_USER:-postgres}" -d postgres "$@"
+  else
+    runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -p "$DB_PORT" "$@"
+  fi
+}
 count() { pg_admin -Atc "$1"; }
 
 with_db() {  # the orchestrator's DB environment, password exported only inside the subshell
@@ -65,7 +79,7 @@ with_db() {  # the orchestrator's DB environment, password exported only inside 
     OG_DB_PASSWORD="$(env_get "$ETC/secrets.env" OG_DB_PASSWORD)"
     [ -n "$OG_DB_PASSWORD" ] || die "OG_DB_PASSWORD missing in $ETC/secrets.env"
     export OG_DB_PASSWORD PGPASSWORD="$OG_DB_PASSWORD"
-    export OG_CONFIG="$RELEASE/orchestrator/config/orchestrator.toml" PYTHONPATH="$RELEASE/orchestrator/src"
+    export OG_CONFIG="${CONFIG:-$RELEASE/orchestrator/config/orchestrator.toml}" PYTHONPATH="$RELEASE/orchestrator/src"
     export OG_DB="$DB_NAME" OG_DB_PORT="$DB_PORT" OG_DB_USER="$DB_ROLE"
     export PGHOST="$DB_HOST" PGPORT="$DB_PORT" PGUSER="$DB_ROLE" PGDATABASE="$DB_NAME"
     "$@"

@@ -1,0 +1,146 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /* Ingress rules only (egress stays open: og-feeds calls ERCOT/EIA/NWS). Production reaches these ports on
+loopback only; here each one admits just the pods that call it. */ -}}
+{{- $fn := include "og.fullname" . -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}-default-deny
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opengrid
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}-postgres
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" . "component" "postgres") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              opengrid.io/db-client: "true"
+      ports:
+        - port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}-mosquitto
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" . "component" "mosquitto") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              opengrid.io/mqtt-client: "true"
+      ports:
+        - port: 1883
+---
+# The gateway is the only door from outside (the ingress controller runs in its own namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}-gateway
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" . "component" "api") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: {{ .Values.gateway.port }}
+---
+# og-engine / og-guardian /metrics: read by og-settle's health evaluator (and kubelet probes, which policies
+# do not filter on most CNIs).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}-metrics
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["engine", "guardian"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              opengrid.io/db-client: "true"
+      ports:
+        - port: {{ .Values.services.engine.metricsPort }}
+        - port: {{ .Values.services.guardian.metricsPort }}
+---
+# og-sim-control has no authentication of its own: only the gateway (og-api pod) may reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}-sim-control
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" . "component" "sim-control") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              opengrid.io/gateway: "true"
+      ports:
+        - port: {{ .Values.sims.control.port }}
+---
+# og-sim-market: the orchestrator (market_sim poller) and the control simulator's admin client.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}-sim-market
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" . "component" "sim-market") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              opengrid.io/db-client: "true"
+        - podSelector:
+            matchLabels:
+              {{- include "og.selector" (dict "root" . "component" "sim-control") | nindent 14 }}
+      ports:
+        - port: {{ .Values.sims.market.port }}
+{{- end }}

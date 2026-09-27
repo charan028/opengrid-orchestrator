@@ -1,0 +1,198 @@
+# OpenGrid chart values. deploy/k8s/install.sh sets the image tag, registry, ingress host, zone blocks, customer
+# users and the gateway's Apache fragment; everything else has a working default. See deploy/k8s/README.md.
+
+image:
+  # Registry prefix for the two OpenGrid images, e.g. registry.example.com/opengrid ("" = no prefix).
+  registry: ""
+  # Immutable tag of both images (install.sh uses the git short sha). Required; "latest" is refused.
+  tag: ""
+  orchestrator: opengrid-orchestrator
+  sims: opengrid-sims
+  pullPolicy: IfNotPresent
+  # Names of existing kubernetes.io/dockerconfigjson Secrets (install.sh --pull-secret-file creates og-pull).
+  pullSecrets: []
+
+# Third-party images, pinned by tag and digest (multi-arch index digests, resolved 2026-09-26).
+thirdParty:
+  postgres: docker.io/library/postgres:17.11-trixie@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+  mosquitto: docker.io/library/eclipse-mosquitto:2.0.22@sha256:199ea8ef2e35ec2b1b37e59cfd1dbae538ed4dfa4a2251a121a52215a6248a21
+  httpd: docker.io/library/httpd:2.4.68-trixie@sha256:03f858efb82c25cb0f9962946615cdcdaf26927cb971722149b563197cfd0fdd
+
+# Secrets created by install.sh (phase "secrets"); never rendered by the chart, so helm never holds a value.
+secrets:
+  db: og-db                 # OG_DB_PASSWORD (+ POSTGRES_PASSWORD for the bundled server)
+  mqtt: og-mqtt             # OG_MQTT_{ENGINE,GUARDIAN,API,SAFESTOP}_PASSWORD
+  mqttSim: og-mqtt-sim      # OG_MQTT_{SIM,SIMCTL,CUSTOMER}_PASSWORD
+  apiProxy: og-api-proxy    # OG_API_PROXY_SECRET
+  uiUsers: og-ui-users      # one key per Apache account (operator, viewer, tester, og-op-*, og-cust-*)
+  signingKeys: og-signing-keys  # *_ed25519.key/.pub from the keygen CLIs
+  ownerKeys: og-owner-keys  # the owner's api_keys.env (ERCOT/EIA)
+  aiAgent: og-ai-agent      # the owner's ai_agent.env (ANTHROPIC_API_KEY), optional
+
+# Zone blocks enabled in the generated sim configs and the fleet seed (gen_sim_overrides.py --zones).
+zones: LZ_AEN
+
+# Apache accounts that act for a customer ([api.roles.customer] of orchestrator.toml; install.sh fills this).
+customerUsers: []
+
+postgres:
+  # Bundled single-instance Postgres 17. For a managed/external server set external.enabled and create the
+  # role and database first (README "External database").
+  external:
+    enabled: false
+    host: ""
+    port: 5432
+  database: og
+  role: opengrid
+  port: 5432
+  storage:
+    size: 20Gi
+    storageClass: ""        # "" = the cluster's default StorageClass
+  args:
+    - -c
+    - shared_buffers=512MB
+    - -c
+    - max_connections=200
+    - -c
+    - wal_compression=on
+  resources:
+    requests: {cpu: 500m, memory: 1Gi}
+    limits: {memory: 2Gi}
+
+mosquitto:
+  persistence: true         # retained messages on an emptyDir (survive container restarts, not pod deletion)
+  resources:
+    requests: {cpu: 50m, memory: 32Mi}
+    limits: {memory: 128Mi}
+  # MQTT account -> Secret key of its password (the account list of bootstrap phase g).
+  users:
+    - {user: og_engine, secret: mqtt, key: OG_MQTT_ENGINE_PASSWORD}
+    - {user: og_guardian, secret: mqtt, key: OG_MQTT_GUARDIAN_PASSWORD}
+    - {user: og_api, secret: mqtt, key: OG_MQTT_API_PASSWORD}
+    - {user: og_safestop, secret: mqtt, key: OG_MQTT_SAFESTOP_PASSWORD}
+    - {user: og_sim, secret: mqttSim, key: OG_MQTT_SIM_PASSWORD}
+    - {user: og_simctl, secret: mqttSim, key: OG_MQTT_SIMCTL_PASSWORD}
+    - {user: og_sim_customer, secret: mqttSim, key: OG_MQTT_CUSTOMER_PASSWORD}
+
+# Extra lines appended to the rendered orchestrator.toml overrides (TOML, [section] tables only).
+config:
+  extraOverrides: ""
+
+# The og-* services (one singleton Deployment each, Recreate strategy: two engines or guardians must never run
+# at once). Memory limits follow the systemd MemoryMax of deploy/systemd; no CPU limits (no throttling).
+services:
+  engine:
+    heartbeat: engine
+    metricsPort: 9101
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {memory: 2Gi}
+  guardian:
+    heartbeat: guardian
+    metricsPort: 9103
+    signingKey: guardian_ed25519.key
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {memory: 512Mi}
+  safestop:
+    heartbeat: safestop
+    signingKey: safestop_ed25519.key
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 256Mi}
+  feeds:
+    heartbeat: feeds
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 512Mi}
+  settle:
+    # og-settle also runs the health evaluator and the PQ ingest. Its PVC holds /var/lib/opengrid (trace journal,
+    # anchors, PQ waveform blobs), /srv/ogbackup/anchors and the lifecycle's cold store /srv/ogbackup/cold.
+    heartbeat: settle
+    signingKey: trace_anchor_ed25519.key
+    persistence:
+      size: 30Gi
+      storageClass: ""
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 512Mi}
+
+api:
+  resources:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {memory: 1Gi}
+  # The owner's ai_agent.env is optional (the copilot runs its no-model tier without it).
+  aiAgent: true
+
+# Apache basic-auth gateway, a sidecar of og-api (og-api stays bound to loopback and trusts X-Remote-User only
+# with the proxy secret, exactly as behind production's Apache). install.sh passes deploy/apache/opengrid.conf.
+gateway:
+  port: 8081
+  apacheConf: ""
+  resources:
+    requests: {cpu: 50m, memory: 32Mi}
+    limits: {memory: 128Mi}
+
+ingress:
+  enabled: true
+  className: ""             # "" = the cluster's default IngressClass
+  host: ""                  # required: the public FQDN (also the CSRF allowed host)
+  tlsSecret: ""             # existing kubernetes.io/tls Secret; "" = plain HTTP at the ingress
+  annotations: {}
+
+# og-lifecycle (data lifecycle every 10 minutes). Suspended by default, like production's og-lifecycle.timer:
+# enable it after the I/O check of deploy/BOOTSTRAP.md section 9.
+lifecycle:
+  suspend: true
+  schedule: "*/10 * * * *"
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 512Mi}
+
+jobs:
+  backoffLimit: 3
+  activeDeadlineSeconds: 3600
+  resources:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {memory: 1Gi}
+
+# ogsim integration simulators. Customer is off, as in production (ogsim.target does not start it).
+sims:
+  market:
+    enabled: true
+    port: 8090
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 384Mi}
+  fleet:
+    enabled: true
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {memory: 3Gi}
+  scada:
+    enabled: true
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 384Mi}
+  control:
+    enabled: true
+    port: 8091
+    resources:
+      requests: {cpu: 50m, memory: 96Mi}
+      limits: {memory: 256Mi}
+  customer:
+    enabled: false
+    apiBase: ""             # "" = https://<ingress.host> (the gateway, like production's Apache URL)
+    resources:
+      requests: {cpu: 50m, memory: 96Mi}
+      limits: {memory: 256Mi}
+
+networkPolicy:
+  # Needs a CNI that enforces NetworkPolicy. og-sim-control and og-sim-market have no authentication of their
+  # own (loopback-only in production); the policies keep them reachable only from the pods that call them.
+  enabled: true
+
+podSecurity:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
