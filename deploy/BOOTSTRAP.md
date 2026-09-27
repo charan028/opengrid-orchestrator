@@ -33,7 +33,7 @@ bash deploy/scripts/bootstrap_from_scratch.sh --phase c-e        # only the data
 | k | optional ERCOT backfill (`orchestrator/tools/ercot_backfill.py --days 14`), only when `api_keys.env` holds the ERCOT keys | 10 |
 | l | the first release through `deploy.sh` (or a start when `/opt/opengrid/current` exists), then the checks of step 10 (`bootstrap_check.py --live`) | 6, 10 |
 
-Options: `--zones LZ_AEN` (default, the production set), `--d32` (adds LZ_LCRA and LZ_RAYBN), `--demo-customers`
+Options: `--zones LZ_AEN` (default, the production set), `--noie-blocks` (alias `--d32`; adds LZ_LCRA and LZ_RAYBN, regulated and UNAVAILABLE per D-37), `--demo-customers`
 (phase l runs `dev/scripts/seed_demo_customers.py`), `--backfill-days N`, `--public-url URL` (the Apache-fronted URL
 the customer simulator calls), `--etc DIR`, `--db-port`/`--db-name`/`--db-role` and `--fresh-db` (refused on 5432).
 The script runs itself at idle I/O priority and nice 19.
@@ -50,12 +50,15 @@ printed; generated passwords go only to the env files (640 root:opengrid, `api_p
 | `/etc/opengrid/ai_agent.env` (`ANTHROPIC_API_KEY`) | the AI copilot's model tier | optional; the copilot runs its no-model tier |
 
 **Check on the test cluster:** `make bootstrap-check` runs phases c-e into a fresh `og_t_boot` on port 5433 (role
-`og_boot`, secrets under `/srv/ogwork/bootstrap/etc`), never on 5432. Expected on r3.4.1 with `--d32` (production's
-blocks: LZ_AEN, LZ_LCRA, LZ_RAYBN): 43/43 migrations; 3,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH,
+`og_boot`, secrets under `/srv/ogwork/bootstrap/etc`), never on 5432. Expected on r3.4.2 with `--noie-blocks` (production's
+blocks: LZ_AEN, LZ_LCRA, LZ_RAYBN): every migration through 0046 applied; 3,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH,
 LZ_HOUSTON, LZ_WEST, LZ_AEN, LZ_LCRA, LZ_RAYBN; 700 dual-unit) plus the substation hub and the 8 trucks (3,509
 `og.hub` rows); 70 home banks plus `bank-sub-LZ_AEN-00` and the 8 truck banks (79); substation asset
-`sub-LZ_AEN-00` ACTIVE; utilities AUSTIN_ENERGY ($102/kW-yr) and CPS_ENERGY; the toll contract
-(REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 849
+`sub-LZ_AEN-00` ACTIVE; utilities AUSTIN_ENERGY ($102/kW-yr), CPS_ENERGY, and (D-37) LCRA and RAYBURN (placeholder
+terms); the toll contract (REGULATED_CAPACITY/TOLLING); 13 contracts (the 8 customer contracts, the toll, the other
+migration demo rows, and the 2 inactive `Sample Contract: ...` tolls: `is_sample`, SUSPENDED, 6,000 kW / 90 min); D-37
+availability: the 20 LZ_LCRA/LZ_RAYBN banks `UNAVAILABLE` / `REGULATED_NO_CONTRACT` ("Regulated market – no
+contract"), every other bank `AVAILABLE`, and their 20 HOME_BANK assets carry utility LCRA/RAYBURN; 849
 service transformers (12 x 50 kVA per home bank, D-36; one each for the substation set and the 8 trucks), every hub mapped;
 23 feeder limits; 7 substation limits; 79 assets (70 HOME_BANK, 1 SUBSTATION, 8 MOBILE_STORAGE); every
 `opengrid.fleet.topology_audit` unmapped count 0 (no ALR-XFMR-UNMAPPED / ALR-BANK-UNMAPPED-TOPOLOGY source); the

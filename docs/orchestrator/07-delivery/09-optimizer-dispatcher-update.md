@@ -1097,9 +1097,18 @@ The planning defaults for a substation set are **20 MW / 2 h (40 MWh)**, RTE 0.8
 in both directions and $1,000/kW. The 4 h option is `e_kwh = 80000` at $1,500/kW.
 
 **Territory resolution.** An asset's territory is its explicit `utility_id` if set; otherwise its zone decides
-through `[zone_territory]` in `config/tdsp_tariffs.toml` (LZ_AEN is AUSTIN_ENERGY, LZ_CPS is CPS_ENERGY, any
-other `LZ_*` is ERCOT_COMPETITIVE). An explicit utility that contradicts a regulated zone, an unknown zone or an
+through `[zone_territory]` in `config/tdsp_tariffs.toml` (LZ_AEN is AUSTIN_ENERGY, LZ_CPS is CPS_ENERGY, and since D-37 LZ_LCRA is LCRA and LZ_RAYBN is
+RAYBURN; any other `LZ_*` is ERCOT_COMPETITIVE). An explicit utility that contradicts a regulated zone, an unknown zone or an
 unknown bank resolves to **unknown**, which is never eligible.
+
+**Availability (D-37, migration 0046).** Separately from territory, a bank can be `og.bank.availability =
+UNAVAILABLE` (reason `REGULATED_NO_CONTRACT`: regulated territory, so no ERCOT sales, and no utility contract).
+The selector gives an unavailable bank no candidate, no FREE headroom and no charging (0 kW charge envelope, idle
+hold); the allocator grants nothing there (`R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT`); the guardian vetoes any
+non-idle item there (G-33). **K13 grandfathering:** a COMMITTED/DELIVERING obligation created before the bank's
+`availability_since` that still holds a live reservation on it keeps that bank (and only that bank) and is exempt
+from the availability block and from K15 (`opengrid.market.availability.GRANDFATHERED_SQL`, one rule for the
+selector, the allocator and the guardian). The LZ_LCRA/LZ_RAYBN banks are unavailable until a real contract exists.
 
 ### 11.3 Read API (`opengrid.market`)
 
