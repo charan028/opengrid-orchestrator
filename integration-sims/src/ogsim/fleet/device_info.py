@@ -68,8 +68,15 @@ class DeviceIdentity:
     p_kw: float
     lat: float
     lon: float
-    asset_class: str  # "HOME_BESS" | "SUBSTATION_BESS"
-    units: int  # 1 or 2 (always 1 for a substation asset)
+    asset_class: str  # "HOME_BESS" | "SUBSTATION_BESS" | "MOBILE_STORAGE"
+    units: int  # 1 or 2 (always 1 for a substation asset or a truck)
+    reserve_frac: float | None = None  # the unit's own floor; None = the fleet's reserve_frac_default
+
+
+#: Device identity of a truck-mounted mobile battery (D-31 mobile units). Mirrored verbatim by
+#: dev/seed/mobile_trucks_seed.sql's og.hub model/inverter_model, so the intake records no change.
+MOBILE_MODEL = "Base Power Mobile BESS (Truck)"
+MOBILE_INVERTER_MODEL = "Base Power Mobile PCS"
 
 
 def initial_firmware_version(hub_id: str) -> str:
@@ -122,6 +129,9 @@ def build_device_info_message(
     if identity.asset_class == "SUBSTATION_BESS":
         model = "Base Power Substation BESS"
         inverter_model = "Base Power Substation PCS"
+    elif identity.asset_class == "MOBILE_STORAGE":
+        model = MOBILE_MODEL
+        inverter_model = MOBILE_INVERTER_MODEL
     elif identity.units == 2:
         model = "Base Power Home Battery (Dual Unit)"
         inverter_model = "Base Power Inverter Gen2 (Dual)"
@@ -145,7 +155,9 @@ def build_device_info_message(
         "units": identity.units,
         "rated_kw": round(identity.p_kw, 3),
         "rated_kwh": round(identity.e_kwh, 3),
-        "reserve_floor_pct": round(reserve_frac_default * 100.0, 3),
+        "reserve_floor_pct": round(
+            (identity.reserve_frac if identity.reserve_frac is not None else reserve_frac_default) * 100.0, 3
+        ),
         "lat": round(identity.lat, 6),
         "lon": round(identity.lon, 6),
         "inverter_model": inverter_model,
@@ -159,8 +171,25 @@ def fleet_device_identities(state: FleetState, config: FleetConfig) -> list[Devi
     <asset_id>` id scheme `ogsim.fleet.state._substation_segment` builds, but matched here by hub_id,
     which for a substation asset IS its `asset_id` verbatim)."""
     substation_ids = {a.asset_id for a in config.substation_assets if a.enabled}
+    mobile = {u.trailer_id: u for u in config.mobile_units if u.simulate}
     identities = []
     for i, hub_id in enumerate(state.hub_ids):
+        truck = mobile.get(hub_id)
+        if truck is not None:
+            identities.append(
+                DeviceIdentity(
+                    hub_id=hub_id,
+                    zone=state.zones[i],
+                    e_kwh=float(state.e_kwh[i]),
+                    p_kw=float(state.p_kw_limit[i]),
+                    lat=float(state.lat_deg[i]),
+                    lon=float(state.lon_deg[i]),
+                    asset_class="MOBILE_STORAGE",
+                    units=1,
+                    reserve_frac=truck.reserve_frac,
+                )
+            )
+            continue
         is_substation = hub_id in substation_ids
         units = 1 if is_substation else (2 if state.e_kwh[i] == config.e_kwh_dual_unit else 1)
         identities.append(

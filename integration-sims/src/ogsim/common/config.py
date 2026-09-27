@@ -75,6 +75,12 @@ SUBSTATION_RESERVE_FRAC_DEFAULT: float = 0.20
 #: eta_d, same split as homes' 0.9487 -- see 09 S1.2's table: "substation sqrt(0.88)=0.938").
 SUBSTATION_ETA_DEFAULT: float = 0.88**0.5
 
+#: Truck-mounted mobile battery default rating (owner request 2026-09-26: realistic truck-mounted BESS,
+#: ~1 MWh / 500 kW, 20% floor). ASSUMPTION, planning value, to be confirmed with Base.
+MOBILE_P_KW_DEFAULT: float = 500.0
+MOBILE_E_KWH_DEFAULT: float = 1000.0
+MOBILE_RESERVE_FRAC_DEFAULT: float = 0.20
+
 
 @dataclass(frozen=True)
 class SubstationAssetConfig:
@@ -108,14 +114,34 @@ class MobileUnitConfig:
     `home_station_id` id space (`trailer_id` IS the `og.bank.bank_id`/`og.hub.hub_id` once the D-31
     migration lands; today it's a plain string, no DB row).
 
-    This is a target-existence registry only, for the #33 scenario target-check (svc-mobile-storage.
-    yaml's `trailer-mb-01`) -- `ogsim.fleet` does not simulate a mobile unit's physics (charge/
-    discharge/SoC) as a `FleetState` hub yet; `mobile_deployment_start`/`mobile_home_station_charge`
-    aren't wired into `ogsim.control.injector.Injector` either (see svc-mobile-storage.yaml's own
-    docstring for the still-pending FLEET-SIM wiring)."""
+    With `simulate=False` (the default, e.g. svc-mobile-storage.yaml's `trailer-mb-01`) an entry is a
+    target-existence registry row only, for the #33 scenario target-check. With `simulate=True` (the
+    owner's truck fleet, 2026-09-26: `truck-aus-*`, `truck-sat-*`, `truck-dfw-*`) `ogsim.fleet` also
+    simulates it as its own one-hub bank (`ogsim.fleet.state._mobile_segment`): hub id `trailer_id`,
+    bank id `bank_id` (default `bank-<trailer_id>`), at `lat`/`lon` (its current position, the home
+    station's coordinates while parked there), rated `p_kw`/`e_kwh` with a `reserve_frac` floor, no
+    household load or PV. D-31 in the sim: a unit charges only while `at_home`; away from home any
+    charging request is held at 0 kW and `p_ch_max_kw` reports 0. The sim does not relocate a unit
+    yet (`mobile_deployment_start`/`mobile_home_station_charge` are not wired into
+    `ogsim.control.injector.Injector`), so a simulated truck stays parked at its home station."""
 
     trailer_id: str
     home_station_id: str
+    simulate: bool = False
+    bank_id: str = ""
+    zone: str = ""
+    lat: float = 0.0
+    lon: float = 0.0
+    p_kw: float = MOBILE_P_KW_DEFAULT
+    e_kwh: float = MOBILE_E_KWH_DEFAULT
+    reserve_frac: float = MOBILE_RESERVE_FRAC_DEFAULT
+    at_home: bool = True
+
+    @property
+    def sim_bank_id(self) -> str:
+        """The unit's single-hub bank id: `bank_id` if configured, else `bank-<trailer_id>` (the same
+        `bank-<id>` scheme `_substation_segment` uses)."""
+        return self.bank_id or f"bank-{self.trailer_id}"
 
 
 def bank_topology(
@@ -498,6 +524,15 @@ def _mobile_units_from_raw(raw_units: Any) -> tuple[MobileUnitConfig, ...]:
             MobileUnitConfig(
                 trailer_id=str(unit["trailer_id"]),
                 home_station_id=str(unit["home_station_id"]),
+                simulate=bool(unit.get("simulate", False)),
+                bank_id=str(unit.get("bank_id", "")),
+                zone=str(unit.get("zone", "")),
+                lat=float(unit.get("lat", 0.0)),
+                lon=float(unit.get("lon", 0.0)),
+                p_kw=float(unit.get("p_kw", MOBILE_P_KW_DEFAULT)),
+                e_kwh=float(unit.get("e_kwh", MOBILE_E_KWH_DEFAULT)),
+                reserve_frac=float(unit.get("reserve_frac", MOBILE_RESERVE_FRAC_DEFAULT)),
+                at_home=bool(unit.get("at_home", True)),
             )
         )
     return tuple(units)
@@ -578,6 +613,10 @@ class ScadaConfig:
     # `zone_blocks` above) -- OWNER DECISION D-29(b), 2026-09-26: `ogsim.scada` must also measure a
     # substation asset once it's enabled, not just `ogsim.fleet`. Empty by default.
     substation_assets: tuple[SubstationAssetConfig, ...] = ()
+    # Simulated mobile units (trucks, D-31): mirrors `FleetConfig.mobile_units` (same manual
+    # duplication as `substation_assets`), so `ogsim.scada` measures each simulated truck's own
+    # single-hub bank. Only `simulate: true` entries get a bank; empty by default.
+    mobile_units: tuple[MobileUnitConfig, ...] = ()
 
 
 def load_scada_config(path: str | None = None) -> ScadaConfig:
@@ -601,6 +640,7 @@ def load_scada_config(path: str | None = None) -> ScadaConfig:
         base_load_kw_default=float(raw.get("base_load_kw_default", defaults.base_load_kw_default)),
         zone_blocks=_zone_blocks_from_raw(raw.get("zone_blocks", [])),
         substation_assets=_substation_assets_from_raw(raw.get("substation_assets", [])),
+        mobile_units=_mobile_units_from_raw(raw.get("mobile_units", [])),
     )
 
 

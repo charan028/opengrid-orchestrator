@@ -42,6 +42,18 @@ substation_assets:
     rated_mw: 20.0
     enabled: true
 
+# Simulated mobile units (trucks, D-31): must mirror fleet.yaml's `simulate: true` mobile_units
+# (trailer_id/bank_id/zone/p_kw), so ogsim.scada measures each truck's own single-hub bank.
+mobile_units:
+  - {trailer_id: truck-aus-01, bank_id: bank-truck-aus-01, home_station_id: hs-aus-roundrock-01, simulate: true, zone: LZ_SOUTH, p_kw: 500.0}
+  - {trailer_id: truck-aus-02, bank_id: bank-truck-aus-02, home_station_id: hs-aus-sandhill-01, simulate: true, zone: LZ_AEN, p_kw: 500.0}
+  - {trailer_id: truck-sat-01, bank_id: bank-truck-sat-01, home_station_id: hs-sat-selma-01, simulate: true, zone: LZ_CPS, p_kw: 500.0}
+  - {trailer_id: truck-sat-02, bank_id: bank-truck-sat-02, home_station_id: hs-sat-leoncreek-01, simulate: true, zone: LZ_CPS, p_kw: 500.0}
+  - {trailer_id: truck-dfw-01, bank_id: bank-truck-dfw-01, home_station_id: hs-dfw-irving-01, simulate: true, zone: LZ_NORTH, p_kw: 500.0}
+  - {trailer_id: truck-dfw-02, bank_id: bank-truck-dfw-02, home_station_id: hs-dfw-garland-01, simulate: true, zone: LZ_NORTH, p_kw: 500.0}
+  - {trailer_id: truck-dfw-03, bank_id: bank-truck-dfw-03, home_station_id: hs-dfw-mesquite-01, simulate: true, zone: LZ_NORTH, p_kw: 500.0}
+  - {trailer_id: truck-dfw-04, bank_id: bank-truck-dfw-04, home_station_id: hs-dfw-grandprairie-01, simulate: true, zone: LZ_NORTH, p_kw: 500.0}
+
 publish_interval_s: 2.0
 # feeder segment (~50 homes), not a single distribution transformer.
 bank_kva_rating_default: 600.0

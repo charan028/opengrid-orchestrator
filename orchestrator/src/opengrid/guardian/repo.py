@@ -24,7 +24,7 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -356,21 +356,64 @@ WHERE t.event_class = 'MANUAL_TARGET' AND t.created_at > now() - interval '24 ho
 """
 
 
+#: G-35 at-home radius: a mobile unit whose device-reported position is within this distance of its home
+#: station's registry coordinates is parked there. ASSUMPTION: 250 m covers a depot yard and GPS error.
+HOME_STATION_RADIUS_KM = 0.25
+_EARTH_RADIUS_KM = 6371.0088
+_HUB_POSITION_SQL = "SELECT lat, lon FROM og.hub WHERE hub_id = %(hub_id)s"
+
+
+def _distance_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Great-circle (haversine) distance between two (lat, lon) points in degrees."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (*a, *b))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 2 * _EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(h)))
+
+
 class ConfigMobileUnitPort:
     """G-35 (D-31) from SERVICES' home-station registry (`config/service_profiles/mobile_storage_home_stations
-    .toml`, read by `selector.gate.load_mobile_units`, the one reader of that file). A mobile unit is a
-    single-hub bank; its id is listed under `[[assignment]]`. No location or deployment-schedule source exists
-    yet (the requested `og.mobile_deployment` table), so whether a unit is at its home station is UNKNOWN,
-    which G-35 treats as away: a mobile unit is never charged until that source lands (fail closed)."""
+    .toml`, read by `selector.gate`, the one reader of that file). A mobile unit is a single-hub bank; its
+    bank id (and, for a truck, its hub id) is listed under `[[assignment]]`.
 
-    def __init__(self, mobile_ids: Iterable[str]) -> None:
-        self._mobile = frozenset(mobile_ids)
+    Location: the guardian's own read of the unit's position in `og.hub` (lat/lon; the device-info intake,
+    `opengrid.fleet.device_info`, re-rates it whenever the device reports a new position, with a K10 trace).
+    The unit is at home when that position is within `radius_km` of its home station. No pool, no station
+    coordinates, or no recorded position is UNKNOWN, which G-35 treats as away (fail closed)."""
+
+    def __init__(
+        self,
+        mobile_ids: Iterable[str],
+        sites: Mapping[str, tuple[float, float]] | None = None,
+        pool: AsyncConnectionPool | None = None,
+        *,
+        radius_km: float = HOME_STATION_RADIUS_KM,
+    ) -> None:
+        self._sites = dict(sites or {})
+        self._mobile = frozenset(mobile_ids) | frozenset(self._sites)
+        self._pool = pool
+        self._radius_km = radius_km
 
     def is_mobile(self, hub_or_bank_id: str) -> bool:
         return hub_or_bank_id in self._mobile
 
+    async def _position(self, hub_id: str) -> tuple[float, float] | None:
+        if self._pool is None:
+            return None
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_HUB_POSITION_SQL, {"hub_id": hub_id})
+            row = await cur.fetchone()
+        if row is None or row[0] is None or row[1] is None:
+            return None
+        return float(row[0]), float(row[1])
+
     async def at_home_station(self, hub_id: str) -> bool | None:
-        return None
+        site = self._sites.get(hub_id)
+        if site is None:
+            return None
+        position = await self._position(hub_id)
+        if position is None:
+            return None
+        return _distance_km(position, site) <= self._radius_km
 
 
 class PgManualTargetPort:

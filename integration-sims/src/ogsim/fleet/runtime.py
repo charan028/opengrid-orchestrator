@@ -64,6 +64,15 @@ from ogsim.fleet.wave import (
 logger = logging.getLogger(__name__)
 
 
+def _mobile_masks(state: FleetState) -> tuple[np.ndarray, np.ndarray]:
+    """`(is_mobile, charge_blocked)` sized to the fleet. A hand-built `FleetState` without the mobile
+    arrays (older tests/tools) has no mobile units: both masks are all False."""
+    n = len(state.hub_ids)
+    if state.is_mobile.shape != (n,) or state.charge_blocked.shape != (n,):
+        return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+    return state.is_mobile, state.charge_blocked
+
+
 class FleetEngine:
     """Pure per-tick fleet logic: home load, stop ramping, lease/autonomy,
     physics step, and anomaly bookkeeping. No MQTT, no wall-clock sleeps."""
@@ -370,10 +379,17 @@ class FleetEngine:
         home_net = home_load_kw - pv_kw
         forced = self.anomalies.modifiers.forced_home_load_kw
         home_net = np.where(np.isnan(forced), home_net, forced)
+        is_mobile, charge_blocked = _mobile_masks(state)
+        # A truck has no household behind it: no home load, no PV (D-31 mobile units).
+        home_load_kw = np.where(is_mobile, 0.0, home_load_kw)
+        pv_kw = np.where(is_mobile, 0.0, pv_kw)
+        home_net = np.where(is_mobile, 0.0, home_net)
 
         effective_commanded = state.p_kw_commanded * self.anomalies.modifiers.follow_fraction
         effective_commanded = np.where(self.anomalies.modifiers.inverter_tripped, 0.0, effective_commanded)
         effective_commanded = effective_commanded + self._pq_dispatch_bias_by_hub()
+        # D-31: a mobile unit away from its home station never charges -- a charging request is held at 0.
+        effective_commanded = np.where(charge_blocked & (effective_commanded > 0.0), 0.0, effective_commanded)
 
         for i, (zone, bank_id) in enumerate(zip(state.zones, state.bank_ids, strict=True)):
             hub_id = state.hub_ids[i]
@@ -433,7 +449,9 @@ class FleetEngine:
         )
         soc_frac = np.where(state.e_kwh > 0, state.soc_kwh / state.e_kwh, 0.0)
         state.p_dis_max_kw = battery_limits.p_dis_max_kw(state.p_kw_limit, soc_frac, state.cell_temp_c)
-        state.p_ch_max_kw = battery_limits.p_ch_max_kw(state.p_kw_limit, soc_frac, state.cell_temp_c)
+        state.p_ch_max_kw = np.where(
+            charge_blocked, 0.0, battery_limits.p_ch_max_kw(state.p_kw_limit, soc_frac, state.cell_temp_c)
+        )
 
         # Charging-source split (owner decision D-28, 2026-09-26): PV surplus after home load charges
         # first, the rest comes from the grid. `total_p_kw` is the same figure `physics.tick` feeds its

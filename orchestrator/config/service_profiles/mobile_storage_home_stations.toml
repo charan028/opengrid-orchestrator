@@ -39,7 +39,8 @@
 
 [[home_station]]
 home_station_id = "hs-austin-north-01"
-zone = "LZ_AEN"                       # ERCOT load zone (or a regulated utility's zone) billing this depot
+name = "Austin North depot (Parmer Lane)"
+zone = "LZ_AEN"                      # ERCOT load zone (or a regulated utility's zone) billing this depot
 utility_id = ""                       # empty = free-market (ERCOT); set to a `UtilityId` for a regulated depot
 lat = 30.401
 lon = -97.719
@@ -48,6 +49,7 @@ notes = "Depot near the Parmer Lane distribution substation."
 
 [[home_station]]
 home_station_id = "hs-permian-basin-01"
+name = "Permian Basin depot (Midland-Odessa)"
 zone = "LZ_WEST"
 utility_id = ""
 lat = 31.987
@@ -55,6 +57,153 @@ lon = -102.078
 charger_kw = 150.0
 notes = "Depot near a distribution substation serving the Permian Basin drilling corridor."
 
+# --- Truck fleet depots (owner request 2026-09-26: 2 Austin, 2 San Antonio, 4 Dallas trucks) -----------
+# One depot per truck, each an industrial site beside a real distribution substation or power station.
+# `name`/`tdsp` are display/documentation fields; `zone`/`utility_id` are what pricing reads (D-31: the
+# truck charges at THIS station's tariff). Zone/utility choices are ASSUMPTIONS, to confirm per site:
+#   * Inside Austin Energy / CPS Energy territory -> the regulated zone (LZ_AEN / LZ_CPS) and that utility.
+#   * Otherwise the competitive ERCOT load zone of the site's TDSP (Oncor here), utility_id empty.
+#   * Round Rock (Williamson Co., Oncor) is priced in LZ_SOUTH (ERCOT's South load zone covers central
+#     Texas outside AEN/LCRA); confirm the settlement point on the ESI ID before go-live.
+#   * The Selma/Schertz site is placed on the Bexar County side of IH-35, inside CPS Energy territory
+#     (the Guadalupe/Comal side of Schertz is GVEC / New Braunfels Utilities, not modeled).
+#   * Garland is mostly Garland Power & Light (municipal, not opted in to retail choice). The Garland
+#     depot is ASSUMED on an Oncor-served parcel; if GP&L serves it, it needs a regulated utility_id
+#     that is not modeled yet.
+# charger_kw 500 = one truck's full PCS rating (1 MWh / 500 kW truck, ~2 h from floor to full).
+
+[[home_station]]
+home_station_id = "hs-aus-roundrock-01"
+name = "Round Rock depot (US-79 / Kenney Fort Blvd)"
+zone = "LZ_SOUTH"
+utility_id = ""
+tdsp = "ONCOR"
+lat = 30.5195
+lon = -97.6480
+charger_kw = 500.0
+notes = "Industrial site east of IH-35 beside Oncor's Round Rock distribution substation. Competitive ERCOT (Oncor TDSP)."
+
+[[home_station]]
+home_station_id = "hs-aus-sandhill-01"
+name = "Sand Hill depot (Del Valle, south-east Austin)"
+zone = "LZ_AEN"
+utility_id = "AUSTIN_ENERGY"
+tdsp = "AUSTIN_ENERGY"
+lat = 30.2090
+lon = -97.6125
+charger_kw = 500.0
+notes = "Beside Austin Energy's Sand Hill Energy Center (FM 973). Austin Energy territory: regulated, AE tariff."
+
+[[home_station]]
+home_station_id = "hs-sat-selma-01"
+name = "Selma / Schertz depot (IH-35 at Loop 1604)"
+zone = "LZ_CPS"
+utility_id = "CPS_ENERGY"
+tdsp = "CPS_ENERGY"
+lat = 29.5840
+lon = -98.3170
+charger_kw = 500.0
+notes = "North-east San Antonio industrial corridor, Bexar County side, beside a CPS Energy distribution substation."
+
+[[home_station]]
+home_station_id = "hs-sat-leoncreek-01"
+name = "Leon Creek depot (south-west San Antonio)"
+zone = "LZ_CPS"
+utility_id = "CPS_ENERGY"
+tdsp = "CPS_ENERGY"
+lat = 29.3570
+lon = -98.5680
+charger_kw = 500.0
+notes = "Beside CPS Energy's Leon Creek power plant (Quintana Rd). CPS Energy territory: regulated, CPS tariff."
+
+[[home_station]]
+home_station_id = "hs-dfw-irving-01"
+name = "Irving depot (SH-183 / Valley View Ln)"
+zone = "LZ_NORTH"
+utility_id = ""
+tdsp = "ONCOR"
+lat = 32.8385
+lon = -96.9730
+charger_kw = 500.0
+notes = "Industrial site beside an Oncor distribution substation. Competitive ERCOT (Oncor TDSP)."
+
+[[home_station]]
+home_station_id = "hs-dfw-garland-01"
+name = "Garland depot (IH-635 / Jupiter Rd)"
+zone = "LZ_NORTH"
+utility_id = ""
+tdsp = "ONCOR"
+lat = 32.8920
+lon = -96.6560
+charger_kw = 500.0
+notes = "North Garland industrial area. ASSUMED Oncor-served (most of Garland is Garland Power & Light)."
+
+[[home_station]]
+home_station_id = "hs-dfw-mesquite-01"
+name = "Mesquite depot (US-80 / IH-635)"
+zone = "LZ_NORTH"
+utility_id = ""
+tdsp = "ONCOR"
+lat = 32.7905
+lon = -96.6150
+charger_kw = 500.0
+notes = "Industrial site beside an Oncor distribution substation. Competitive ERCOT (Oncor TDSP)."
+
+[[home_station]]
+home_station_id = "hs-dfw-grandprairie-01"
+name = "Grand Prairie depot (Great Southwest industrial district, SH-360)"
+zone = "LZ_NORTH"
+utility_id = ""
+tdsp = "ONCOR"
+lat = 32.7630
+lon = -97.0560
+charger_kw = 500.0
+notes = "Industrial site beside an Oncor distribution substation. Competitive ERCOT (Oncor TDSP)."
+
 [[assignment]]
 bank_id = "trailer-mb-01"             # og.bank.bank_id / og.hub.hub_id -- a mobile unit is a single-hub bank
 home_station_id = "hs-austin-north-01"
+
+# Trucks: hub_id = the truck id, bank_id = its own single-hub bank `bank-<truck id>` (the sim's scheme,
+# as for a substation asset). `bank_id` is the key OPTIMIZER/guardian/UI read; `hub_id` names the hub.
+# Seeded by dev/seed/mobile_trucks_seed.sql; simulated by integration-sims/config/fleet.yaml mobile_units.
+
+[[assignment]]
+bank_id = "bank-truck-aus-01"
+hub_id = "truck-aus-01"
+home_station_id = "hs-aus-roundrock-01"
+
+[[assignment]]
+bank_id = "bank-truck-aus-02"
+hub_id = "truck-aus-02"
+home_station_id = "hs-aus-sandhill-01"
+
+[[assignment]]
+bank_id = "bank-truck-sat-01"
+hub_id = "truck-sat-01"
+home_station_id = "hs-sat-selma-01"
+
+[[assignment]]
+bank_id = "bank-truck-sat-02"
+hub_id = "truck-sat-02"
+home_station_id = "hs-sat-leoncreek-01"
+
+[[assignment]]
+bank_id = "bank-truck-dfw-01"
+hub_id = "truck-dfw-01"
+home_station_id = "hs-dfw-irving-01"
+
+[[assignment]]
+bank_id = "bank-truck-dfw-02"
+hub_id = "truck-dfw-02"
+home_station_id = "hs-dfw-garland-01"
+
+[[assignment]]
+bank_id = "bank-truck-dfw-03"
+hub_id = "truck-dfw-03"
+home_station_id = "hs-dfw-mesquite-01"
+
+[[assignment]]
+bank_id = "bank-truck-dfw-04"
+hub_id = "truck-dfw-04"
+home_station_id = "hs-dfw-grandprairie-01"

@@ -266,4 +266,15 @@ def test_d31_optimizer_can_join_bank_id_to_a_zone_via_home_station_id() -> None:
     zone_by_bank_id = {}
     for assignment in registry["assignment"]:
         zone_by_bank_id[assignment["bank_id"]] = zone_by_station[assignment["home_station_id"]]
-    assert zone_by_bank_id == {"trailer-mb-01": "LZ_AEN"}
+    assert zone_by_bank_id == {
+        "trailer-mb-01": "LZ_AEN",
+        # The owner's truck fleet (2026-09-26), keyed by each truck's single-hub bank id.
+        "bank-truck-aus-01": "LZ_SOUTH",
+        "bank-truck-aus-02": "LZ_AEN",
+        "bank-truck-sat-01": "LZ_CPS",
+        "bank-truck-sat-02": "LZ_CPS",
+        "bank-truck-dfw-01": "LZ_NORTH",
+        "bank-truck-dfw-02": "LZ_NORTH",
+        "bank-truck-dfw-03": "LZ_NORTH",
+        "bank-truck-dfw-04": "LZ_NORTH",
+    }

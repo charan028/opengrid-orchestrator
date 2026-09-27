@@ -21,10 +21,10 @@
     "commissioning_date": { "type": "string", "format": "date" },
     "asset_class": {
       "type": "string",
-      "enum": ["HOME_BESS", "SUBSTATION_BESS"],
-      "description": "D11 asset classes: a home hub (single- or dual-unit) vs. a substation-sited battery-set asset."
+      "enum": ["HOME_BESS", "SUBSTATION_BESS", "MOBILE_STORAGE"],
+      "description": "D11 asset classes: a home hub (single- or dual-unit), a substation-sited battery-set asset, or a truck-mounted mobile battery (D-31 MOBILE_STORAGE; lat/lon is its current position)."
     },
-    "units": { "type": "integer", "enum": [1, 2], "description": "1 for a single-unit home hub, 2 for a dual-unit home hub. Always 1 for a substation asset (one PCS/battery-set unit)." },
+    "units": { "type": "integer", "enum": [1, 2], "description": "1 for a single-unit home hub, 2 for a dual-unit home hub. Always 1 for a substation asset (one PCS/battery-set unit) or a mobile unit." },
     "rated_kw": { "type": "number", "exclusiveMinimum": 0 },
     "rated_kwh": { "type": "number", "exclusiveMinimum": 0 },
     "reserve_floor_pct": { "type": "number", "minimum": 0, "maximum": 100 },

@@ -203,9 +203,18 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     assert fleet.substation_assets[0].enabled is True
     assert (fleet.substation_assets[0].rated_mw, fleet.substation_assets[0].duration_h) == (20.0, 2.0)
     # #33 target-check / D-31, 2026-09-26: matches SERVICES' mobile_storage_home_stations.toml
-    # [[assignment]] 1:1 (trailer-mb-01 -> hs-austin-north-01).
-    assert [(u.trailer_id, u.home_station_id) for u in fleet.mobile_units] == [
-        ("trailer-mb-01", "hs-austin-north-01")
+    # [[assignment]] 1:1 (trailer-mb-01 -> hs-austin-north-01, registry-only; plus the owner's eight
+    # simulated trucks, 2026-09-26).
+    assert [(u.trailer_id, u.home_station_id, u.simulate) for u in fleet.mobile_units] == [
+        ("trailer-mb-01", "hs-austin-north-01", False),
+        ("truck-aus-01", "hs-aus-roundrock-01", True),
+        ("truck-aus-02", "hs-aus-sandhill-01", True),
+        ("truck-sat-01", "hs-sat-selma-01", True),
+        ("truck-sat-02", "hs-sat-leoncreek-01", True),
+        ("truck-dfw-01", "hs-dfw-irving-01", True),
+        ("truck-dfw-02", "hs-dfw-garland-01", True),
+        ("truck-dfw-03", "hs-dfw-mesquite-01", True),
+        ("truck-dfw-04", "hs-dfw-grandprairie-01", True),
     ]
 
 

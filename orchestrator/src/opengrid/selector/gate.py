@@ -482,14 +482,43 @@ def parse_mobile_home_stations(raw: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+def parse_mobile_home_station_sites(raw: Mapping[str, Any]) -> dict[str, tuple[float, float]]:
+    """`unit id -> (lat, lon)` of its home station, keyed by every `[[assignment]]`'s `bank_id` and, when
+    given, its `hub_id` (a truck's hub id differs from its `bank-<id>` bank id). Same join and same
+    unknown-station error as `parse_mobile_home_stations`."""
+    parse_mobile_home_stations(raw)  # validates every assignment's station
+    site_by_station = {
+        str(s["home_station_id"]): (float(s["lat"]), float(s["lon"])) for s in raw.get("home_station", [])
+    }
+    out: dict[str, tuple[float, float]] = {}
+    for assignment in raw.get("assignment", []):
+        site = site_by_station[str(assignment["home_station_id"])]
+        out[str(assignment["bank_id"])] = site
+        if assignment.get("hub_id"):
+            out[str(assignment["hub_id"])] = site
+    return out
+
+
+def _load_mobile_registry() -> dict[str, Any] | None:
+    path = resolve_mobile_home_stations_path()
+    if not path.exists():
+        return None
+    with path.open("rb") as fh:
+        return tomllib.load(fh)
+
+
 def load_mobile_units() -> dict[str, str]:
     """D-31 mobile units and their home-station zones. No file = no mobile units; a malformed file
     raises (a config error fails the gate loudly)."""
-    path = resolve_mobile_home_stations_path()
-    if not path.exists():
-        return {}
-    with path.open("rb") as fh:
-        return parse_mobile_home_stations(tomllib.load(fh))
+    raw = _load_mobile_registry()
+    return {} if raw is None else parse_mobile_home_stations(raw)
+
+
+def load_mobile_home_station_sites() -> dict[str, tuple[float, float]]:
+    """D-31 home-station coordinates per mobile unit (`parse_mobile_home_station_sites`), for G-35's
+    at-home check. No file = no mobile units; a malformed file raises."""
+    raw = _load_mobile_registry()
+    return {} if raw is None else parse_mobile_home_station_sites(raw)
 
 
 async def load_bank_zones(bank_ids: Sequence[str]) -> dict[str, str]:

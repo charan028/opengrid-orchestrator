@@ -33,6 +33,7 @@ def base_config():
         zones=("LZ_NORTH", "LZ_SOUTH"),
         history_tsv_path="/nonexistent/substation_history.tsv",
         substation_assets=(),
+        mobile_units=(),  # the shipped trucks: test_fleet_mobile_units.py
     )
 
 

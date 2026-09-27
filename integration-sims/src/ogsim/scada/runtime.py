@@ -64,6 +64,15 @@ class ScadaEngine:
             self.bank_ids.append(bank_id)
             self.zones.append(asset.zone)
             self.kva_rating[bank_id] = kw_to_kva(asset.rated_mw * 1000.0)
+        # Simulated mobile units (trucks, D-31): each is its own single-hub bank, measured at its rated
+        # power (a charger/PCS rating, not a feeder segment) and, like a substation asset, with no
+        # background residential load. Same `sim_bank_id` scheme as `ogsim.fleet.state._mobile_segment`.
+        for unit in config.mobile_units:
+            if not unit.simulate:
+                continue
+            self.bank_ids.append(unit.sim_bank_id)
+            self.zones.append(unit.zone)
+            self.kva_rating[unit.sim_bank_id] = kw_to_kva(unit.p_kw)
         self.buffers: dict[str, BankTelemetryBuffer] = {b: BankTelemetryBuffer() for b in self.bank_ids}
         self.anomalies = ScadaAnomalyManager(self.bank_ids, self.zones)
         self.overload_rule = OverloadRule(
