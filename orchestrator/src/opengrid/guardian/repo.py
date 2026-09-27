@@ -1099,6 +1099,13 @@ WHERE t.event_class = 'GUARDIAN_VERDICT'
   AND t.created_at > now() - make_interval(secs => %(max_age_s)s)
   AND t.payload ->> 'kind' = 'STOP_RELEASE' AND t.payload ->> 'outcome' = 'SIGNED'
   AND NOT EXISTS (SELECT 1 FROM og.stop_event s WHERE s.signature = ev ->> 'signature')
+  -- og-safestop refused it as superseded by a newer ENGAGE (r3.4.2 review L-1): re-handing it can never help;
+  -- the operators re-issue the two-person release (ALR-STOP-RELEASE-SUPERSEDED)
+  AND NOT EXISTS (
+      SELECT 1 FROM og.trace r
+      WHERE r.event_class = 'SAFE_STOP' AND r.created_at > now() - make_interval(secs => %(max_age_s)s)
+        AND r.payload ->> 'superseded_signature' = ev ->> 'signature'
+  )
 ORDER BY t.created_at
 """
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -209,15 +210,20 @@ class SafestopService:
                 )
                 await self._drain_after_accept()
             return True
+        scope_kind = _WIRE_TO_KIND[parsed.scope]
+        scope_ref = parsed.scope_id or "FLEET"
+        engage_at = await self.backend.latest_engage_at(scope_kind, scope_ref)
+        if engage_at is not None and parsed.issued_at < engage_at:
+            await self._refuse_superseded_release(parsed, scope_kind, scope_ref, engage_at)
+            return False
         if self.trace is not None:
             await self.trace.append(
                 "safestop", "SAFE_STOP", "SAFE_STOP", dict(event), reason_codes=["SAFE_STOP_RELEASE"]
             )
-        scope_kind = _WIRE_TO_KIND[parsed.scope]
         row = StopEventRow(
             stop_event_id=uuid4(),
             scope_kind=scope_kind,
-            scope_ref=parsed.scope_id or "FLEET",
+            scope_ref=scope_ref,
             action="RELEASE",
             initiator_kind="GUARDIAN",
             initiator_ref=parsed.issued_by,
@@ -231,6 +237,42 @@ class SafestopService:
             extra={"scope": scope_kind, "scope_ref": parsed.scope_id, "stop_id": str(parsed.stop_id)},
         )
         return True
+
+    async def _refuse_superseded_release(
+        self, parsed: StopEvent, scope_kind: str, scope_ref: str, engage_at: datetime
+    ) -> None:
+        """r3.4.2 review L-1 (lead-approved): a guardian RELEASE signed BEFORE the newest ENGAGE on its scope is
+        never relayed. The hubs would drop it as older than that ENGAGE, so relaying it would record the scope as
+        released in og.stop_event while the hubs stay stopped. It is traced as superseded (the guardian stops
+        re-handing it: `guardian.repo._UNPUBLISHED_RELEASES_SQL`), and ALR-STOP-RELEASE-SUPERSEDED asks the
+        operators to re-issue the two-person release, which the guardian then signs after the ENGAGE."""
+        logger.warning(
+            "refused a stop RELEASE superseded by a newer ENGAGE on its scope",
+            extra={"scope": scope_kind, "scope_ref": scope_ref, "stop_id": str(parsed.stop_id)},
+        )
+        if self.trace is not None:
+            await self.trace.append(
+                "safestop",
+                "SAFE_STOP",
+                "SAFE_STOP",
+                {
+                    "release": "SUPERSEDED",
+                    "superseded_signature": parsed.signature,
+                    "stop_id": str(parsed.stop_id),
+                    "scope_kind": scope_kind,
+                    "scope_ref": scope_ref,
+                    "release_issued_at": parsed.issued_at.isoformat(),
+                    "newer_engage_at": engage_at.isoformat(),
+                },
+                reason_codes=["SAFE_STOP_RELEASE_SUPERSEDED"],
+            )
+        await self.backend.raise_superseded_release_alert(
+            scope_kind=scope_kind,
+            scope_ref=scope_ref,
+            stop_id=parsed.stop_id,
+            signature=parsed.signature,
+            engage_at=engage_at,
+        )
 
     async def _record_and_publish(
         self, row: StopEventRow, stop_id: UUID, topic_suffix: str, payload: dict[str, Any]

@@ -5,6 +5,7 @@ and the real Postgres/MQTT implementations (`pg_backend.py`, `mqtt_publish.py`) 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -38,6 +39,18 @@ class StopEventBackend(Protocol):
     async def latest_action(self, scope_kind: str, scope_ref: str) -> str | None:
         """Most recent `action` for this scope, or None if never stopped. Used only for observability
         (e.g. `main.py` refuses a redundant ENGAGE) -- never for release, which `safestop` can't do."""
+        ...
+
+    async def latest_engage_at(self, scope_kind: str, scope_ref: str) -> datetime | None:
+        """When the newest ENGAGE on exactly this scope was recorded (None: never). A guardian RELEASE signed
+        before it is superseded (r3.4.2 review L-1): the hubs would drop it as older than that ENGAGE."""
+        ...
+
+    async def raise_superseded_release_alert(
+        self, *, scope_kind: str, scope_ref: str, stop_id: UUID, signature: str, engage_at: datetime
+    ) -> bool:
+        """ALR-STOP-RELEASE-SUPERSEDED: the operators must re-issue the two-person release. Once per release
+        while open; True when newly raised."""
         ...
 
 

@@ -114,6 +114,9 @@ class _Backend:
 
     released: bool = False
 
+    async def latest_engage_at(self, scope_kind: str, scope_ref: str) -> None:
+        return None  # L-1 is covered in test_release_relay
+
     async def has_signature(self, signature: str) -> bool:
         return any(row.get("signature") == signature for row in self.rows)
 

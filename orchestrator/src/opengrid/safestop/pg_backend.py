@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -51,6 +52,22 @@ LIMIT %(limit)s
 """
 
 _HAS_SIGNATURE_SQL = "SELECT 1 FROM og.stop_event WHERE signature = %(signature)s LIMIT 1"
+
+_LATEST_ENGAGE_AT_SQL = """
+SELECT max(created_at) FROM og.stop_event
+WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s AND action = 'ENGAGE'
+"""
+#: r3.4.2 review L-1: a guardian RELEASE signed before the newest ENGAGE on its scope is refused (the hubs would
+#: drop it); the operators must re-issue the two-person release. Written in `health.queries.raise_alert`'s shape.
+SUPERSEDED_RELEASE_ALERT_RULE = "ALR-STOP-RELEASE-SUPERSEDED"
+_SUPERSEDED_RELEASE_ALERT_SQL = """
+INSERT INTO og.alert (rule, severity, summary, detail, opened_at, scope_kind, scope_ref)
+SELECT %(rule)s, 'warning', %(summary)s, %(detail)s, now(), 'STOP', %(scope_ref)s
+WHERE NOT EXISTS (
+    SELECT 1 FROM og.alert
+    WHERE rule = %(rule)s AND cleared_at IS NULL AND detail ->> 'condition_key' = %(condition_key)s
+)
+"""
 
 _LATEST_ACTION_SQL = """
 SELECT action FROM og.stop_event
@@ -196,6 +213,40 @@ class PgStopEventBackend:
             await cur.execute(_LATEST_ACTION_SQL, {"scope_kind": scope_kind, "scope_ref": scope_ref})
             row = await cur.fetchone()
             return None if row is None else str(row[0])
+
+    async def latest_engage_at(self, scope_kind: str, scope_ref: str) -> datetime | None:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LATEST_ENGAGE_AT_SQL, {"scope_kind": scope_kind, "scope_ref": scope_ref})
+            row = await cur.fetchone()
+        return None if row is None else row[0]
+
+    async def raise_superseded_release_alert(
+        self, *, scope_kind: str, scope_ref: str, stop_id: UUID, signature: str, engage_at: datetime
+    ) -> bool:
+        condition_key = f"{SUPERSEDED_RELEASE_ALERT_RULE}:{signature[:32]}"
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _SUPERSEDED_RELEASE_ALERT_SQL,
+                {
+                    "rule": SUPERSEDED_RELEASE_ALERT_RULE,
+                    "summary": (
+                        f"release of {scope_kind} {scope_ref} superseded by a newer stop; "
+                        "re-issue the two-person release"
+                    ),
+                    "detail": Jsonb(
+                        {
+                            "condition_key": condition_key,
+                            "stop_id": str(stop_id),
+                            "scope_kind": scope_kind,
+                            "scope_ref": scope_ref,
+                            "newer_engage_at": engage_at.isoformat(),
+                        }
+                    ),
+                    "scope_ref": f"{scope_kind}:{scope_ref}",
+                    "condition_key": condition_key,
+                },
+            )
+            return cur.rowcount == 1
 
     async def enqueue_publication(
         self,
