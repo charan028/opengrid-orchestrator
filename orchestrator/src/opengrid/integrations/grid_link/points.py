@@ -110,14 +110,13 @@ class GridLinkPointMap:
     # -- outbound ------------------------------------------------------------------------------------
 
     def analog_inputs(self, status: LinkStatus) -> dict[int, float]:
-        """AI index -> engineering value for `status`."""
+        """AI index -> engineering value for `status`. CALL_DELIVERED_KW is deliberately absent (served with the`n        COMM_LOST flag): the core reports GRANTED kW, not measured delivery, until the delivery-verify`n        measurement lands (r3.4.2). Measured discharge is DELIVERED_KW (fleet twin)."""
         values: dict[int, float] = {
             AI_FIXED["AVAILABLE_KW"]: status.available_kw,
             AI_FIXED["DELIVERED_KW"]: status.delivered_kw,
             AI_FIXED["CALL_STATE"]: float(status.call_phase),
             AI_FIXED["CALL_ID"]: float(status.ems_call_id),
             AI_FIXED["CALL_REASON"]: float(status.call_reason),
-            AI_FIXED["CALL_DELIVERED_KW"]: status.call_delivered_kw,
             AI_FIXED["SOC_PCT"]: status.soc_pct if status.soc_pct is not None else NO_L2_CEILING,
             AI_FIXED["HEARTBEAT_COUNT"]: float(status.heartbeat_count),
         }

@@ -87,6 +87,7 @@ def test_status_encodes_onto_input_points() -> None:
     assert analogs[16] == p.NO_L2_CEILING and analogs[17] == 250.0
     assert [analogs[100 + k] for k in range(4)] == [60.0, 900.0, 300.0, 250.0]
     assert 104 not in analogs  # no telemetry for bank-041: served as COMM_LOST, never invented
+    assert 5 not in analogs  # CALL_DELIVERED_KW: granted, not measured, until r3.4.2 -> COMM_LOST
     binaries = points.binary_inputs(status)
     assert binaries[0] and binaries[1] and not binaries[2] and binaries[4] and binaries[5]
     assert binaries[16] is False and binaries[17] is True and binaries[18] is True and binaries[19] is False

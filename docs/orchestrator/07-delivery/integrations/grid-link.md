@@ -135,6 +135,7 @@ in its `banks` list.
 | BI | 16 + 2t, 17 + 2t | Echoes of target t's LIMIT and BLOCK. |
 
 - A bank with no telemetry is served with the COMM_LOST flag. Its value is never invented.
+- **CALL_DELIVERED_KW (AI 5) is served with the COMM_LOST flag in r3.4.1.** The core call status reports granted kW, not measured delivery, and a guardian-vetoed call still has grants. Measured discharge is DELIVERED_KW (AI 1, fleet twin). AI 5 becomes a measured value in r3.4.2 (delivery-verify).
 - An unknown SoC is served as −1.
 - Static data only. Class 1/2/3 polls return empty, so the EMS scans with integrity (Class 0) polls at its
   own rate, typically every 2–4 s.
