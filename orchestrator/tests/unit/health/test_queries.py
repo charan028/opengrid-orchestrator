@@ -241,3 +241,37 @@ async def test_fetch_open_alerts_round_trips_scope_columns() -> None:
     assert len(alerts) == 1
     assert alerts[0].scope_kind == "BANK"
     assert alerts[0].scope_ref == "bank-000"
+
+
+async def test_fetch_open_alerts_does_not_raise_on_an_open_info_alert() -> None:
+    """R3.4.3 fix: `og.alert.severity` is plain TEXT (no CHECK constraint, migration 0001) and firmware
+    writes "info"-severity campaign-progress alerts (`opengrid.health.model.AlertSeverity` already
+    allows it), but `core.models.platform.Alert.severity`'s Literal was never widened to match, so
+    `Alert(**row)`/`Alert(severity=...)` raised a pydantic ValidationError as soon as any info alert was
+    open -- breaking every caller of `fetch_open_alerts` (e.g. `engine.alerts.open_alert_details`/
+    `clear_open_alerts`, `health.evaluate_alerts`'s own auto-clear pass)."""
+    cursor = ReturningFakeCursor(fetchone_row=None)
+
+    async def fetchall():
+        return [
+            (
+                7,
+                "ALR-FIRMWARE-CAMPAIGN-PROGRESS",
+                "info",
+                "Campaign c1: 3/10 hubs updated",
+                {"campaign_id": "c1"},
+                NOW,
+                None,
+                None,
+                None,
+                None,
+            )
+        ]
+
+    cursor.fetchall = fetchall
+    pool = FakePool(cursor)
+
+    alerts = await queries.fetch_open_alerts(pool)
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == "info"
