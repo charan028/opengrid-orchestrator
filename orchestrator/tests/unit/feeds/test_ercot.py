@@ -164,11 +164,11 @@ def test_secret_repr_and_str_never_show_the_value() -> None:
     assert secret.reveal() == _PASSWORD
 
 
-async def test_energy_prices_outside_the_offer_floor_and_cap_are_dropped(
+async def test_energy_prices_outside_the_normal_band_are_kept_and_flagged(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Issue #43 A12: an SPP outside -$250..$5,000/MWh is a feed error. Both bounds themselves are
-    real prices (kept); the rows beyond them are dropped at ingest and logged."""
+    """FR-ING-117 / V-P1 (replaces issue #43 A12's drop): an SPP outside -$250..$5,000/MWh but inside the
+    hard bounds is kept and flagged EXTREME_UNCORROBORATED, never dropped; both band edges are GOOD."""
     prices = [42.17, 5_000.0, 5_000.01, -250.0, -250.5]
     payload = {
         "data": [["2026-09-26", 1, i + 1, "LZ_NORTH", "LZ", p, False] for i, p in enumerate(prices[:4])]
@@ -184,6 +184,12 @@ async def test_energy_prices_outside_the_offer_floor_and_cap_are_dropped(
     client = _make_client(httpx.MockTransport(handler))
     with caplog.at_level(logging.WARNING, logger="opengrid.feeds.ercot"):
         obs, _events = await client.fetch_product("np6-905-cd", now=NOW)
-    assert sorted(o.value for o in obs) == [-250.0, 42.17, 5_000.0]
-    dropped = [r for r in caplog.records if "dropped at ingest" in r.getMessage()]
-    assert sorted(r.__dict__["value"] for r in dropped) == [-250.5, 5_000.01]
+    assert sorted((o.value, o.quality) for o in obs) == [
+        (-250.5, "EXTREME_UNCORROBORATED"),
+        (-250.0, "GOOD"),
+        (42.17, "GOOD"),
+        (5_000.0, "GOOD"),
+        (5_000.01, "EXTREME_UNCORROBORATED"),
+    ]
+    flagged = [r for r in caplog.records if "EXTREME_UNCORROBORATED" in r.getMessage()]
+    assert sorted(r.__dict__["value"] for r in flagged) == [-250.5, 5_000.01]
