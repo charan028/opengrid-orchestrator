@@ -50,7 +50,7 @@ zone_blocks:
   - zone: LZ_AEN
     banks: 10
     homes_per_bank: 50
-    enabled: true
+    enabled: false
   - zone: LZ_CPS
     banks: 10
     homes_per_bank: 50
