@@ -428,3 +428,61 @@ async def test_an_instruction_with_no_readable_id_alerts_once_across_polls() -> 
     for n in range(3):
         await poller.poll_once(now=T0 + timedelta(seconds=5 * n))
     assert alerts.raised == 1 and source.acks == []
+
+
+# -- one poison instruction never blocks the rest (review, r3.4.2) ---------------------------------------
+
+
+@dataclass
+class PoisonCalls(FakeCalls):
+    """Raises (as a database or core bug would) for the instruction ids in `poison`."""
+
+    poison: set[str] = field(default_factory=set)
+
+    async def deploy(
+        self, instruction: DispatchInstruction, *, obligation_id: UUID, principal: str, now: datetime
+    ) -> CallOutcome:
+        if instruction.instruction_id in self.poison:
+            raise RuntimeError("boom")
+        return await super().deploy(instruction, obligation_id=obligation_id, principal=principal, now=now)
+
+
+async def test_a_poison_instruction_first_in_the_batch_does_not_block_the_later_ones() -> None:
+    from opengrid.contracts.as_deployment_poll import ALR_PROCESSING_FAILED
+
+    batch = _batch(_deploy("P1"), _deploy("D2", at=T0 + timedelta(seconds=1)))
+    source, calls, alerts, trace = FakeSource([batch]), PoisonCalls(poison={"P1"}), FakeAlerts(), FakeTrace()
+    poller = _poller(source, calls, alerts=alerts, trace=trace)
+
+    await poller.poll_if_due(now=T0 + timedelta(seconds=2))
+
+    assert calls.deployed == [("D2", AWARD)]
+    assert [a[0] for a in source.acks] == ["D2"]  # the poison one is NOT acknowledged: the source re-sends it
+    assert (ALR_PROCESSING_FAILED, f"{ALR_PROCESSING_FAILED}:P1") in alerts.open
+    assert "AS_INSTRUCTION_PROCESSING_FAILED" in trace.classes()
+    assert poller._failures == 1 and poller._last_success_at is None  # counted as a failed poll
+    assert poller._next_poll_at == T0 + timedelta(seconds=7)  # no backoff: the source itself was readable
+
+
+async def test_a_persistent_processing_failure_raises_poll_failed_and_stale_then_clears() -> None:
+    from opengrid.contracts.as_deployment_poll import ALR_PROCESSING_FAILED
+
+    calls, alerts = PoisonCalls(poison={"P1"}), FakeAlerts()
+    source = FakeSource([_batch(_deploy("P1", at=T0)) for _ in range(20)])
+    poller = _poller(
+        source, calls, alerts=alerts, stale_after_s=60.0, failure_alert_after=3, max_instruction_age_s=900.0
+    )
+    now = T0
+    while (now - T0).total_seconds() <= 65:
+        await poller.poll_if_due(now=now)
+        now += timedelta(seconds=5)
+    assert (ALR_POLL_FAILED, ALR_POLL_FAILED) in alerts.open
+    assert (ALR_POLL_STALE, ALR_POLL_STALE) in alerts.open
+    assert len(source.batches) < 20 - 12  # still polled every 5 s, never backed off
+
+    calls.poison.clear()  # the cause is fixed: the re-sent instruction now deploys and everything clears
+    await poller.poll_if_due(now=now + timedelta(seconds=5))
+    assert calls.deployed == [("P1", AWARD)]
+    assert not any(
+        rule in (ALR_POLL_FAILED, ALR_POLL_STALE, ALR_PROCESSING_FAILED) for rule, _ in alerts.open
+    )

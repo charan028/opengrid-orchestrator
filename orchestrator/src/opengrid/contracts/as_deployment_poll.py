@@ -27,8 +27,13 @@ Guarantees:
 - **Traced** (`origin = ERCOT_POLL`) on stream `ercot_as_poll` before each acknowledgement (K10).
 - **Alerts**: `ALR-ERCOT-AS-REFUSED` per refused instruction; `ALR-ERCOT-AS-POLL-FAILED` after
   `failure_alert_after` consecutive failed polls and `ALR-ERCOT-AS-POLL-STALE` once no poll has succeeded
-  for `stale_after_s` (both cleared by the next good poll). A failed poll is retried with the feeds'
-  capped doubling backoff, scaled to this cadence: `interval_s`, 2x, 4x ... up to `retry_cap_s`.
+  for `stale_after_s` (both cleared by the next good poll). A poll whose source cannot be read is retried
+  with the feeds' capped doubling backoff, scaled to this cadence: `interval_s`, 2x, 4x ... up to
+  `retry_cap_s`.
+- **One instruction never blocks the rest**: each runs in its own guard. One that raises is traced
+  (`AS_INSTRUCTION_PROCESSING_FAILED`), alerted (`ALR-ERCOT-AS-PROCESSING-FAILED`, critical, per instruction,
+  cleared when it later succeeds) and left unacknowledged so the source re-sends it; the poll then counts
+  as failed (POLL-FAILED, and STALE if it persists) without slowing the cadence.
 
 Off by default (`[feeds.ercot_as_poll].enabled = false`): `build_as_deployment_poller` then returns None and
 nothing is polled, traced or written. With it on and no instruction received, nothing is written either:
@@ -39,6 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -58,6 +64,9 @@ TRACE_DECISION_TYPE = "FEED_CHANGE"
 ALR_REFUSED = "ALR-ERCOT-AS-REFUSED"
 ALR_POLL_FAILED = "ALR-ERCOT-AS-POLL-FAILED"
 ALR_POLL_STALE = "ALR-ERCOT-AS-POLL-STALE"
+ALR_PROCESSING_FAILED = "ALR-ERCOT-AS-PROCESSING-FAILED"
+#: Critical rules (the others are warnings): a deployment may be missed while either is open.
+CRITICAL_ALERT_RULES = frozenset({ALR_POLL_STALE, ALR_PROCESSING_FAILED})
 #: Local refusal codes (before the core is reached). Everything else is the core's own reason code.
 R_MALFORMED = "R-ERCOT-AS-MALFORMED"
 R_NO_AWARD = "R-ERCOT-AS-NO-AWARD"
@@ -178,23 +187,38 @@ class ErcotAsPoller:
     _held_recalls: dict[str, DispatchInstruction] = field(default_factory=dict, init=False)
     _superseded: set[str] = field(default_factory=set, init=False)
     _last_error: str = field(default="", init=False)
+    _fetch_failures: int = field(default=0, init=False)
+    _processing_failed_ids: set[str] = field(default_factory=set, init=False)
 
     @property
     def principal(self) -> str:
         return f"ercot:{self.source.backend}"
 
     async def poll_if_due(self, *, now: datetime | None = None) -> None:
-        """For og-feeds' 5 s tick: poll when due, never raise (a poll error is counted and alerted)."""
+        """For og-feeds' 5 s tick: poll when due, never raise. A poll counts as failed when the source could
+        not be read OR any instruction could not be processed (POLL-FAILED, then STALE); only an unreadable
+        source backs the cadence off -- a poison instruction must not slow every other instruction down."""
         now = now or datetime.now(UTC)
         if self._next_poll_at is not None and now < self._next_poll_at:
             return
-        ok = await self.poll_once(now=now)
+        fetched = False
+        try:
+            fetched, processed = await self.poll_once(now=now)
+        except Exception as exc:  # last resort: poll_once guards itself; never lose the failure accounting
+            logger.exception("ERCOT AS instruction poll raised")
+            self._last_error, processed = str(exc)[:300], False
+        ok = fetched and processed
         self._failures = 0 if ok else self._failures + 1
-        self._next_poll_at = now + timedelta(seconds=retry_delay_s(self.settings, self._failures))
-        await self._health_alerts(ok, now)
+        self._fetch_failures = 0 if fetched else self._fetch_failures + 1
+        self._next_poll_at = now + timedelta(seconds=retry_delay_s(self.settings, self._fetch_failures))
+        try:
+            await self._health_alerts(ok, now)
+        except Exception:
+            logger.exception("ERCOT AS poll health alert failed")
 
-    async def poll_once(self, *, now: datetime) -> bool:
-        """One poll and every instruction in it. False when the source could not be read."""
+    async def poll_once(self, *, now: datetime) -> tuple[bool, bool]:
+        """One poll and every instruction in it: (source read, every instruction processed). The poll counts as
+        a success -- and `_last_success_at` moves -- only when both hold."""
         try:
             batch = await self.source.fetch_instruction_batch(
                 now - timedelta(seconds=self.settings.lookback_s)
@@ -202,29 +226,82 @@ class ErcotAsPoller:
         except Exception as exc:  # any adapter/transport failure: counted, alerted, retried with backoff
             logger.warning("ERCOT AS instruction poll failed", extra={"error": str(exc)[:300]})
             self._last_error = str(exc)[:300]
-            return False
+            return False, False
+        failed = await self.process(batch, now=now)
+        if failed:
+            self._last_error = f"{failed} instruction(s) could not be processed"
+            return True, False
         self._last_success_at = now
-        await self.process(batch, now=now)
-        return True
+        return True, True
 
-    async def process(self, batch: InstructionBatch, *, now: datetime) -> None:
+    async def process(self, batch: InstructionBatch, *, now: datetime) -> int:
+        """Every instruction in its own guard: one that raises is traced, alerted and left unacknowledged
+        (the source re-sends it), and the rest of the batch still runs. Returns how many failed."""
+        failed = 0
         for bad in batch.malformed:
-            await self._answer_malformed(bad.instruction_id, bad.error, now)
+            key = bad.instruction_id or "unreadable"
+            failed += await self._guarded(
+                key, now, self._answer_malformed(bad.instruction_id, bad.error, now)
+            )
         ordered = sorted(batch.instructions, key=lambda i: (i.issued_at, i.instruction_id))
         recalled_in_batch = {i.recalls for i in ordered if i.kind == "AS_RECALL" and i.recalls}
         for instruction in ordered:
-            if instruction.instruction_id in self._answered:
-                await self._reanswer(instruction)
-            elif instruction.kind == "AS_DEPLOYMENT":
-                await self._deployment(
-                    instruction, now, superseded=instruction.instruction_id in recalled_in_batch
-                )
-            elif instruction.kind == "AS_RECALL":
-                await self._recall(instruction, now)
-            else:
-                await self._finish(
-                    instruction, "AS_INSTRUCTION_NOTED", True, None, now, {"text": instruction.text}
-                )
+            step = self._one(instruction, now, superseded=instruction.instruction_id in recalled_in_batch)
+            failed += await self._guarded(instruction.instruction_id, now, step)
+        return failed
+
+    async def _one(self, instruction: DispatchInstruction, now: datetime, *, superseded: bool) -> None:
+        if instruction.instruction_id in self._answered:
+            await self._reanswer(instruction)
+        elif instruction.kind == "AS_DEPLOYMENT":
+            await self._deployment(instruction, now, superseded=superseded)
+        elif instruction.kind == "AS_RECALL":
+            await self._recall(instruction, now)
+        else:
+            await self._finish(
+                instruction, "AS_INSTRUCTION_NOTED", True, None, now, {"text": instruction.text}
+            )
+
+    async def _guarded(self, instruction_id: str, now: datetime, step: Coroutine[Any, Any, None]) -> int:
+        """Run one instruction's step: 0 on success (clearing an earlier processing alert for it), 1 on an
+        exception (traced and alerted when the database allows; never acknowledged)."""
+        try:
+            await step
+        except Exception as exc:
+            logger.exception(
+                "ERCOT AS instruction processing failed", extra={"instruction_id": instruction_id}
+            )
+            await self._processing_failed(instruction_id, exc, now)
+            return 1
+        if instruction_id in self._processing_failed_ids:
+            self._processing_failed_ids.discard(instruction_id)
+            key = f"{ALR_PROCESSING_FAILED}:{instruction_id}"
+            try:
+                await self.alerts.clear(ALR_PROCESSING_FAILED, key)
+            except Exception:
+                logger.exception("ERCOT AS processing alert clear failed")
+        return 0
+
+    async def _processing_failed(self, instruction_id: str, exc: Exception, now: datetime) -> None:
+        self._processing_failed_ids.add(instruction_id)
+        error = f"{type(exc).__name__}: {exc}"[:300]
+        payload = {"origin": ORIGIN, "instruction_id": instruction_id, "error": error, "at": now.isoformat()}
+        try:
+            await self.trace.append(
+                TRACE_STREAM, TRACE_DECISION_TYPE, "AS_INSTRUCTION_PROCESSING_FAILED", payload
+            )
+        except Exception:
+            logger.exception("ERCOT AS processing failure could not be traced")
+        try:
+            await self.alerts.raise_once(
+                ALR_PROCESSING_FAILED,
+                f"{ALR_PROCESSING_FAILED}:{instruction_id}",
+                f"ERCOT AS instruction {instruction_id} could not be processed ({type(exc).__name__}); "
+                "not acknowledged, retried every poll",
+                payload,
+            )
+        except Exception:
+            logger.exception("ERCOT AS processing failure could not be alerted")
 
     # -- per kind ----------------------------------------------------------------------------------------
 
