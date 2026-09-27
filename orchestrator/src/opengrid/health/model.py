@@ -55,6 +55,7 @@ HEALTH_OWNED_ALERT_RULES: frozenset[str] = frozenset(
         "ALR-TEMPERATURE-LIMIT",
         "ALR-SCADA-SILENT",
         "ALR-SCADA-SILENT-BANK",
+        "ALR-TEST-DB-ON-PROD",
     }
 )
 

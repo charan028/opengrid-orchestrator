@@ -296,6 +296,26 @@ def evaluate_per_bank_scada_silent_alert(
     )
 
 
+def evaluate_test_db_on_prod_alert(test_db_names: Iterable[str]) -> AlertFinding | None:
+    """ALR-TEST-DB-ON-PROD (warning, r3.4.4): fires while any `og_t_*` (workspace/scratch) database
+    exists on the production cluster -- a cheap `pg_database` check on the regular health cadence
+    (`queries.fetch_test_database_names`). One alert covers every matching database at once (the
+    `detail`'s `database_names` lists them all), rather than one per name, since the remediation is the
+    same either way ("drop the leftover test database(s)") and the set can churn as workspaces come and
+    go. Clears itself (the usual raise-once/clear-on-resolve wiring in `evaluate_alerts()`) as soon as
+    none remain."""
+    names = sorted(test_db_names)
+    if not names:
+        return None
+    return AlertFinding(
+        rule="ALR-TEST-DB-ON-PROD",
+        severity="warning",
+        summary=f"{len(names)} test database(s) on the production cluster: {', '.join(names)}",
+        condition_key="ALR-TEST-DB-ON-PROD",
+        detail={"database_names": names, "scope_kind": "PROCESS", "scope_ref": "settle"},
+    )
+
+
 def evaluate_process_down_alert(process_health: ProcessHealth) -> AlertFinding | None:
     """ALR-PROCESS-DOWN (critical) -- any monitored `opengrid` process (`ALL_PROCESSES`)."""
     if process_health.status != "down":

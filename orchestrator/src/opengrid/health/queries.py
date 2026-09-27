@@ -57,6 +57,13 @@ GROUP BY h.bank_id
 """
 
 _FETCH_DEGRADED_MODES_SQL = "SELECT mode, since FROM og.degraded_mode_state"
+
+# ALR-TEST-DB-ON-PROD (r3.4.4): `pg_database` is a shared, cluster-wide catalog readable from any
+# database in the cluster (not just the one this connection happens to be in), so this needs no special
+# connection/database of its own -- one cheap catalog scan on the regular health cadence. `og_t_` is the
+# workspace/scratch-DB naming prefix (BUILD.md's per-agent test databases); none should ever exist on
+# the production cluster.
+_FETCH_TEST_DATABASE_NAMES_SQL = "SELECT datname FROM pg_database WHERE datname LIKE 'og\\_t\\_%' ESCAPE '\\'"
 _INSERT_DEGRADED_MODE_SQL = """
 INSERT INTO og.degraded_mode_state (mode, since) VALUES (%(mode)s, %(since)s)
 ON CONFLICT (mode) DO NOTHING
@@ -201,6 +208,16 @@ async def fetch_bad_signature_acks_by_bank(
         await cur.execute(_FETCH_BAD_SIGNATURE_ACKS_BY_BANK_SQL, {"since": since})
         rows = await cur.fetchall()
     return [(r[0], list(r[1]), int(r[2]), r[3]) for r in rows]
+
+
+async def fetch_test_database_names(pool: AsyncConnectionPool) -> list[str]:
+    """Every database on this cluster whose name matches the `og_t_*` workspace/scratch prefix --
+    `ALR-TEST-DB-ON-PROD` (r3.4.4): none should ever exist on production. Empty when none do (the
+    common, healthy case)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_FETCH_TEST_DATABASE_NAMES_SQL)
+        rows = await cur.fetchall()
+    return [r[0] for r in rows]
 
 
 async def fetch_degraded_modes(pool: AsyncConnectionPool) -> list[tuple[str, datetime]]:

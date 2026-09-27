@@ -32,6 +32,7 @@ from opengrid.health.rules import (
     evaluate_scada_silent_alert,
     evaluate_sim_offline_alert,
     evaluate_temperature_limit_alert,
+    evaluate_test_db_on_prod_alert,
     is_fallback_feed_needed,
     is_firm_blocking_feed,
     is_scada_silent,
@@ -762,6 +763,42 @@ def test_scada_silent_clears_once_reading_resumes() -> None:
     assert evaluate_scada_silent_alert(old, now=NOW, thresholds=THRESHOLDS) is not None
     fresh = NOW
     assert evaluate_scada_silent_alert(fresh, now=NOW, thresholds=THRESHOLDS) is None
+
+
+# --- ALR-TEST-DB-ON-PROD (r3.4.4) -------------------------------------------------------------------
+
+
+def test_test_db_on_prod_none_when_no_test_databases() -> None:
+    assert evaluate_test_db_on_prod_alert([]) is None
+
+
+def test_test_db_on_prod_warns_naming_every_database() -> None:
+    finding = evaluate_test_db_on_prod_alert(["og_t_bob_20260925", "og_t_alice_20260925"])
+    assert finding is not None
+    assert finding.rule == "ALR-TEST-DB-ON-PROD"
+    assert finding.severity == "warning"
+    assert finding.condition_key == "ALR-TEST-DB-ON-PROD"
+    # Sorted, for a stable summary/detail regardless of pg_database's own row order.
+    assert finding.detail["database_names"] == ["og_t_alice_20260925", "og_t_bob_20260925"]
+    assert "og_t_alice_20260925" in finding.summary
+    assert "og_t_bob_20260925" in finding.summary
+
+
+def test_test_db_on_prod_is_one_finding_not_one_per_database() -> None:
+    """The remediation (drop the leftover databases) is the same regardless of count, and the set can
+    churn -- one alert listing all of them, not N separate ones to raise/clear independently."""
+    finding = evaluate_test_db_on_prod_alert(["og_t_a", "og_t_b", "og_t_c"])
+    assert finding is not None
+    assert finding.condition_key == "ALR-TEST-DB-ON-PROD"  # not scoped per database name
+    assert len(finding.detail["database_names"]) == 3
+
+
+def test_test_db_on_prod_clears_once_none_remain() -> None:
+    """Not a stateful test (this module is pure) -- confirms the finding depends only on the names
+    given, so an empty list on the next cycle naturally stops it firing (raise-once/clear-on-resolve
+    wiring in `evaluate_alerts()` does the rest)."""
+    assert evaluate_test_db_on_prod_alert(["og_t_alice"]) is not None
+    assert evaluate_test_db_on_prod_alert([]) is None
 
 
 # --- ALR-COMMAND-BAD-SIGNATURE (#43 B3) ------------------------------------------------------------
