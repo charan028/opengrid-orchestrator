@@ -42,6 +42,14 @@ fi
 mkdir -p "$RELEASES" /var/log/opengrid
 ts() { date -Is; }
 
+install_units() {  # $1 = release dir; drop-ins under /etc/systemd/system/<unit>.d/ are left untouched
+  local dir="$1/deploy/systemd"
+  [ -d "$dir" ] || return 0
+  install -o root -g root -m 644 "$dir"/*.service "$dir"/*.target /etc/systemd/system/
+  if compgen -G "$dir/*.timer" >/dev/null; then install -o root -g root -m 644 "$dir"/*.timer /etc/systemd/system/; fi
+  systemctl daemon-reload
+}
+
 # FIRM and AS services (02a S3.7 priority buckets); ERCOT_ENERGY is market, HOME never delivers here.
 DELIVERING="$(runuser -u opengrid -- bash -c '
   set -a; . /etc/opengrid/secrets.env; set +a
@@ -77,6 +85,7 @@ rollback() {
   echo "$(ts) deploy FAILED, rolling back" | tee -a "$LOG"
   if [ -n "$PREV_TARGET" ]; then
     ln -sfn "$PREV_TARGET" "$CURRENT"
+    install_units "$PREV_TARGET" || true
     systemctl restart opengrid.target ogsim.target || true
     echo "$(ts) rolled back to $PREV_TARGET" | tee -a "$LOG"
   else
@@ -114,6 +123,9 @@ runuser -u opengrid -- bash -c '
 
 echo "$(ts) switching current -> $NEW_RELEASE" | tee -a "$LOG"
 ln -sfn "$NEW_RELEASE" "$CURRENT"
+
+echo "$(ts) installing systemd units from the release (timers are installed, never enabled here)" | tee -a "$LOG"
+install_units "$NEW_RELEASE"
 
 echo "$(ts) restarting opengrid.target ogsim.target" | tee -a "$LOG"
 systemctl restart opengrid.target ogsim.target

@@ -366,3 +366,9 @@ version = "1.20.0"
 hardware_revision = "RevD"
 sha256 = "75fa8708ca3d9b12d4976484efecd908d79223e1e5fc62265768f5ab61176ae8"
 release_note = "Demo image for the simulated fleet (RevD)"
+
+[allocator.veto_retry]
+# H1/H2 (workstation R3 review, 2026-09-26): the K4 re-solve ran under a new cycle id, so the guardian
+# granted fresh G-05/G-06/G-28..30 accumulator budgets, and it overwrote other banks' allocator state.
+# Off until the re-solve reuses the cycle id and touches only the vetoed bank.
+enabled = false

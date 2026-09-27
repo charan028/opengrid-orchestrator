@@ -5,6 +5,8 @@ Requires=postgresql.service mosquitto.service
 PartOf=opengrid.target
 
 [Service]
+# Production wins disk contention over agent test runs and the lifecycle job.
+IOWeight=500
 Type=simple
 User=opengrid
 Group=opengrid
@@ -20,7 +22,7 @@ MemoryMax=512M
 MemoryHigh=410M
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/opengrid /var/log/opengrid
+ReadWritePaths=/var/lib/opengrid /var/log/opengrid /srv/ogbackup/anchors
 PrivateTmp=true
 
 [Install]

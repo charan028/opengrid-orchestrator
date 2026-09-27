@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenGrid Orchestrator - data lifecycle every 10 minutes
+Documentation=file:///opt/opengrid/current/docs/orchestrator/07-delivery/15-data-lifecycle.md
+
+# Installed by deploy.sh but NOT enabled: enable only after an I/O check on the pgdata disk
+# (`systemctl enable --now og-lifecycle.timer`, see deploy/RUNBOOK.md "Data lifecycle").
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+Persistent=false
+Unit=og-lifecycle.service
+
+[Install]
+WantedBy=timers.target

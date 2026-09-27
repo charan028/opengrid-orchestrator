@@ -5,6 +5,8 @@ Requires=postgresql.service mosquitto.service
 PartOf=opengrid.target
 
 [Service]
+# Production wins disk contention over agent test runs and the lifecycle job.
+IOWeight=500
 Type=simple
 User=opengrid
 Group=opengrid
