@@ -6,11 +6,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from opengrid.core.models.platform import FeedObs
+from opengrid.feeds import configured_ercot_products
 from opengrid.feeds.breaker import CONSECUTIVE_FAILURE_THRESHOLD
 from opengrid.feeds.ercot import KeyRotationEvent
 from opengrid.feeds.http_client import FeedHttpError
-from opengrid.feeds.scheduler import FeedsScheduler
+from opengrid.feeds.scheduler import POLL_INTERVAL_S, FeedsScheduler, next_poll_delay_s
 from opengrid.feeds.token_bucket import TokenBucket
 
 T0 = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
@@ -180,3 +183,96 @@ async def test_staleness_transition_traced_once() -> None:
 
     stale_traces = [e for e in trace.events if e[2] == "STALE"]
     assert len(stale_traces) >= 1
+
+
+# --- R3.4: products list honoured; failed/skipped polls retried with backoff -------------------------
+
+
+@dataclass
+class CountingErcot(FakeErcot):
+    calls: list[str] = field(default_factory=list)
+    failing: set[str] = field(default_factory=set)
+
+    async def fetch_product(
+        self, product: str, *, now: datetime
+    ) -> tuple[list[FeedObs], list[KeyRotationEvent]]:
+        self.calls.append(product)
+        if product in self.failing:
+            raise FeedHttpError(503, "ercot down")
+        return await super().fetch_product(product, now=now)
+
+
+def _scheduler_with(ercot: FakeErcot, **kwargs: object) -> FeedsScheduler:
+    return FeedsScheduler(
+        ercot=ercot,  # type: ignore[arg-type]
+        eia=FakeEia(),  # type: ignore[arg-type]
+        nws=FakeNws(),  # type: ignore[arg-type]
+        store=FakeStore(),  # type: ignore[arg-type]
+        staleness_cfg=STALENESS_CFG,
+        nws_grid_point_pinned="EWX/156,91",
+        ercot_bucket=TokenBucket(capacity=100, refill_per_s=100),
+        trace=FakeTrace(),  # type: ignore[arg-type]
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+async def test_products_list_is_honoured_np4_745_not_polled_unless_listed() -> None:
+    ercot = CountingErcot()
+    scheduler = _scheduler_with(ercot, products=("np6-905-cd", "np4-188-cd"))
+    await scheduler.run_cycle(now=T0)
+    assert sorted(ercot.calls) == ["np4-188-cd", "np6-905-cd"]
+
+
+async def test_disabled_flag_still_removes_a_listed_product() -> None:
+    ercot = CountingErcot()
+    scheduler = _scheduler_with(
+        ercot, products=("np6-905-cd", "np4-745-cd"), disabled_products=frozenset({"np4-745-cd"})
+    )
+    await scheduler.run_cycle(now=T0)
+    assert ercot.calls == ["np6-905-cd"]
+
+
+def test_unknown_product_in_list_is_rejected() -> None:
+    with pytest.raises(ValueError, match="np9-999"):
+        _scheduler_with(CountingErcot(), products=("np6-905-cd", "np9-999"))
+
+
+def test_configured_ercot_products_from_config() -> None:
+    assert configured_ercot_products({}) is None
+    assert configured_ercot_products({"products": ["np6-905-cd"]}) == ("np6-905-cd",)
+    with pytest.raises(ValueError):
+        configured_ercot_products({"products": "np6-905-cd"})
+
+
+def test_next_poll_delay_backoff_is_capped_and_never_beyond_cadence() -> None:
+    day = POLL_INTERVAL_S["np4-188-cd"]
+    assert next_poll_delay_s("np4-188-cd", 0) == day
+    assert [next_poll_delay_s("np4-188-cd", n) / 60 for n in range(1, 7)] == [5, 10, 20, 40, 60, 60]
+    assert next_poll_delay_s("np6-905-cd", 3) == POLL_INTERVAL_S["np6-905-cd"]  # 5-min product: unchanged
+
+
+async def test_failed_daily_poll_retries_in_minutes_not_a_day() -> None:
+    ercot = CountingErcot(failing={"np4-188-cd"})
+    scheduler = _scheduler_with(ercot, products=("np4-188-cd",))
+    await scheduler.run_cycle(now=T0)
+    state = scheduler._product_state["np4-188-cd"]
+    assert state.next_poll_at == T0 + timedelta(minutes=5)
+
+    await scheduler.run_cycle(now=T0 + timedelta(minutes=4))  # not yet due
+    assert ercot.calls == ["np4-188-cd"]
+    await scheduler.run_cycle(now=T0 + timedelta(minutes=5))  # second failure -> 10 min
+    assert state.next_poll_at == T0 + timedelta(minutes=15)
+
+    ercot.failing.clear()
+    await scheduler.run_cycle(now=T0 + timedelta(minutes=15))  # recovers -> back to the daily cadence
+    assert state.consecutive_failures == 0
+    assert state.next_poll_at == T0 + timedelta(minutes=15) + timedelta(days=1)
+
+
+async def test_breaker_skipped_poll_counts_as_a_miss_and_retries_early() -> None:
+    ercot = CountingErcot()
+    scheduler = _scheduler_with(ercot, products=("np4-188-cd",))
+    scheduler._ercot_breaker.allow_request = lambda *, now: False  # type: ignore[method-assign]
+    await scheduler.run_cycle(now=T0)
+    assert ercot.calls == []
+    assert scheduler._product_state["np4-188-cd"].next_poll_at == T0 + timedelta(minutes=5)

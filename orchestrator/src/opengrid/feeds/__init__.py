@@ -110,7 +110,19 @@ def _build_scheduler(
         ercot_bucket=bucket,
         trace=trace,
         disabled_products=disabled_ercot_products(ercot_cfg),
+        products=configured_ercot_products(ercot_cfg),
     )
+
+
+def configured_ercot_products(ercot_cfg: dict[str, object]) -> tuple[str, ...] | None:
+    """`[feeds.ercot].products` as a tuple (None when unset: poll every known product). The scheduler
+    rejects unknown names at startup rather than silently skipping them."""
+    products = ercot_cfg.get("products")
+    if products is None:
+        return None
+    if not isinstance(products, list | tuple) or not all(isinstance(p, str) for p in products):
+        raise ValueError(f"[feeds.ercot].products must be a list of product ids, got {products!r}")
+    return tuple(products)
 
 
 def disabled_ercot_products(ercot_cfg: dict[str, object]) -> frozenset[str]:

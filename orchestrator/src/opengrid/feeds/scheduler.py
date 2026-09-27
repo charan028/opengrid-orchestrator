@@ -33,6 +33,11 @@ POLL_INTERVAL_S: dict[str, float] = {
     "np4-745-cd": 30 * 60,  # D-28 regional solar: hourly posting, polled like NP4-737-CD
 }
 NWS_POLL_INTERVAL_S = 60 * 60
+# A failed or skipped (breaker open) ERCOT poll is retried sooner than the product's normal cadence:
+# 5 min, doubling per consecutive failure, capped at 60 min (and never later than the normal cadence).
+# Without this a single miss of the daily NP4-188-CD poll held its data stale for ~24 h.
+FAILURE_RETRY_BASE_S = 5 * 60
+FAILURE_RETRY_CAP_S = 60 * 60
 EIA_FALLBACK_PRODUCT = "np6-345-cd"  # the only product EIA can stand in for (system load)
 
 FEED_CHANGE_STREAM = "feeds"
@@ -42,6 +47,18 @@ FEED_CHANGE_STREAM = "feeds"
 class _ProductState:
     next_poll_at: datetime
     was_stale: bool = False
+    consecutive_failures: int = 0
+
+
+def next_poll_delay_s(product: str, consecutive_failures: int) -> float:
+    """Seconds until `product` is polled again: its normal cadence after a success, otherwise the
+    capped exponential retry delay (`FAILURE_RETRY_BASE_S` .. `FAILURE_RETRY_CAP_S`), never longer
+    than the normal cadence."""
+    interval = POLL_INTERVAL_S[product]
+    if consecutive_failures <= 0:
+        return interval
+    retry = float(min(FAILURE_RETRY_CAP_S, FAILURE_RETRY_BASE_S * 2 ** (consecutive_failures - 1)))
+    return min(interval, retry)
 
 
 @dataclass
@@ -57,6 +74,9 @@ class FeedsScheduler:
     #: ERCOT products configured off (e.g. `[feeds.ercot].solar_by_region_enabled = false`): never polled,
     #: so they never write a `feed_status` row that health could read as stale.
     disabled_products: frozenset[str] = frozenset()
+    #: `[feeds.ercot].products`: the ERCOT products to poll (None = every known product). A product not
+    #: listed is never polled, whatever its own enable flag says; `disabled_products` then removes more.
+    products: tuple[str, ...] | None = None
     _ercot_breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker("ERCOT"))
     _eia_breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker("EIA"))
     _nws_breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker("NWS"))
@@ -66,7 +86,11 @@ class FeedsScheduler:
 
     def __post_init__(self) -> None:
         epoch = datetime.min.replace(tzinfo=UTC)
-        for product in PRODUCT_PATHS:
+        wanted = tuple(PRODUCT_PATHS) if self.products is None else self.products
+        unknown = sorted(set(wanted) - set(PRODUCT_PATHS))
+        if unknown:
+            raise ValueError(f"[feeds.ercot].products lists unknown ERCOT products: {unknown}")
+        for product in wanted:
             if product not in self.disabled_products:
                 self._product_state[product] = _ProductState(next_poll_at=epoch)
         self._nws_state = _ProductState(next_poll_at=epoch)
@@ -84,18 +108,22 @@ class FeedsScheduler:
         now = now or datetime.now(UTC)
         for product, state in self._product_state.items():
             if now >= state.next_poll_at:
-                await self._poll_ercot_product(product, now=now)
-                state.next_poll_at = now.replace(microsecond=0) + timedelta(seconds=POLL_INTERVAL_S[product])
+                ok = await self._poll_ercot_product(product, now=now)
+                state.consecutive_failures = 0 if ok else state.consecutive_failures + 1
+                delay_s = next_poll_delay_s(product, state.consecutive_failures)
+                state.next_poll_at = now.replace(microsecond=0) + timedelta(seconds=delay_s)
 
         if now >= self._nws_state.next_poll_at:
             await self._poll_nws(now=now)
             self._nws_state.next_poll_at = now.replace(microsecond=0) + timedelta(seconds=NWS_POLL_INTERVAL_S)
 
-    async def _poll_ercot_product(self, product: str, *, now: datetime) -> None:
+    async def _poll_ercot_product(self, product: str, *, now: datetime) -> bool:
+        """Poll one ERCOT product; True only if data was fetched and stored (False when the breaker
+        skipped the request or it failed -- the caller then retries with backoff)."""
         if not self._ercot_breaker.allow_request(now=now):
             if product == EIA_FALLBACK_PRODUCT:
                 await self._poll_eia_fallback(now=now)
-            return
+            return False
         if self._ercot_breaker.state == "HALF_OPEN":
             self._ercot_breaker.begin_half_open_probe()
 
@@ -117,7 +145,7 @@ class FeedsScheduler:
                 await self._trace("BREAKER_OPEN", {"source": "ERCOT", "product": product, "reason": str(exc)})
             if product == EIA_FALLBACK_PRODUCT and self._ercot_breaker.is_open:
                 await self._poll_eia_fallback(now=now)
-            return
+            return False
 
         self._ercot_breaker.record_success()
         for rotation in rotation_events:
@@ -145,6 +173,7 @@ class FeedsScheduler:
             self._eia_fallback_active = False
             await self._trace("EIA_FALLBACK_DISENGAGED", {"reason": "ercot_recovered"})
         await self._check_staleness_transition("ERCOT", product, last_value_at, now=now)
+        return True
 
     async def _poll_eia_fallback(self, *, now: datetime) -> None:
         if not self._eia_breaker.allow_request(now=now):
