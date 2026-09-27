@@ -54,11 +54,15 @@ p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-2
 # LZ_LCRA (Lower Colorado River Authority) and LZ_RAYBN (Rayburn Country Electric Cooperative) are
 # FREE-market ERCOT zones (unlike LZ_AEN/LZ_CPS above, which are REGULATED-utility zones) -- confirmed
 # present in live ERCOT NP6-905-CD settlement-point-price results (2026-09-26 probe, FLEET-SIM build
-# report: 8 LZ points returned, including these two). Added here, disabled, for the same reason as
-# AEN/CPS: the fleet-composition config surface should already know about every real ERCOT LZ before
-# any of them are turned on. See tdsp_tariffs.toml's `[zone_territory]` for their TDSP/delivery-charge
-# treatment (LCRA is itself a transmission/distribution utility -- no separate competitive TDSP charge;
-# RAYBN is a member-owned cooperative, outside retail competition -- no filed competitive TDSP tariff).
+# report: 8 LZ points returned, including these two).
+#
+# ENABLED (OWNER DECISION D-32, 2026-09-26): both free-market zones go live -- this adds 500 hubs/10
+# banks each (bank-060..069 LZ_LCRA, bank-070..079 LZ_RAYBN) on top of the base fleet + AEN/CPS,
+# 4,000 hubs / 80 banks total. LZ_AEN/LZ_CPS stay OFF here (`enabled: false`): production enables AEN
+# via its own override (the release manager regenerates it separately), not this shipped default. See
+# tdsp_tariffs.toml's `[zone_territory]` for LCRA/RAYBN's TDSP/delivery-charge treatment (LCRA is
+# itself a transmission/distribution utility -- no separate competitive TDSP charge; RAYBN is a
+# member-owned cooperative, outside retail competition -- no filed competitive TDSP tariff).
 zone_blocks:
   - zone: LZ_AEN
     banks: 10
@@ -71,11 +75,11 @@ zone_blocks:
   - zone: LZ_LCRA
     banks: 10
     homes_per_bank: 50
-    enabled: false
+    enabled: true
   - zone: LZ_RAYBN
     banks: 10
     homes_per_bank: 50
-    enabled: false
+    enabled: true
 
 # Substation-sited battery-set assets (build phase, 2026-09-26: 09-optimizer-dispatcher-update.md D11
 # SUBSTATION_BESS; `ogsim.common.config.SubstationAssetConfig`). Configurable and OFF by default, same

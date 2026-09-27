@@ -151,6 +151,13 @@ class ScadaEngine:
             pending = self.anomalies.take_pending_instruction(bank_id)
             if pending is not None:
                 instructions.append((f"scada/instruction/{bank_id}", self._instruction_message(pending, now)))
+                # R3.4 fix: a scenario-driven utility_instruction (BLOCK/ESTOP/LIMIT) now takes over
+                # this bank's instruction slot -- forget this rule's own auto-LIMIT bookkeeping for it,
+                # so a LATER auto-lift (`check_lift`) never fires and overwrites the scenario's own
+                # instruction with an expired LIMIT (the orchestrator's fleet twin stores the LATEST
+                # instruction per bank regardless of kind, so the auto-lift must only ever end an
+                # auto-LIMIT it itself issued).
+                self.overload_rule.cancel(bank_id)
             elif self.overload_rule.observe(bank_id, kva, self.kva_rating[bank_id], now):
                 msg = limit_instruction(
                     str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)

@@ -35,23 +35,32 @@ def seed():
     return ts.build_seed(ts.load_fleet_config(), TERRITORY)
 
 
-def test_default_blocks_are_scada_covered_and_match_add_austin_fleet() -> None:
-    """Test-data fix, 2026-09-26 (post-D-29(b)/V-32 follow-up): fleet.yaml/scada.yaml now also declare
-    LZ_LCRA/LZ_RAYBN zone blocks (disabled by default, unrelated to this test's own "Austin fleet"
-    concern -- confirmed present ERCOT LZs, added for future market-model coverage). `load_fleet_config`'s
-    default `--blocks` set is "every zone scada.yaml declares" (this module's own docstring), so the
-    shared `seed` fixture's default scope grew from 2 zones to 4 once scada.yaml's own zone_blocks list
-    picked up LCRA/RAYBN too. This test is specifically about the Austin/CPS add-on (dev/seed/
-    add_austin_fleet.sql: bank-040..049 LZ_AEN, bank-050..059 LZ_CPS), so it now builds its own seed
-    scoped explicitly to just those two blocks, independent of the shared fixture (or whatever else
-    scada.yaml comes to declare covered)."""
-    austin_seed = ts.build_seed(ts.load_fleet_config(blocks=["LZ_AEN", "LZ_CPS"]), TERRITORY)
-    banks = {b.bank_id: b.zone for b in austin_seed.topology.banks}
-    assert len(austin_seed.topology.hubs) == 3000 and len(banks) == 60
-    assert {banks[f"bank-{i:03d}"] for i in range(40, 50)} == {"LZ_AEN"}
-    assert {banks[f"bank-{i:03d}"] for i in range(50, 60)} == {"LZ_CPS"}
-    assert "LZ_LCRA" not in banks.values()
-    assert "LZ_RAYBN" not in banks.values()
+def test_default_blocks_are_scada_covered_and_match_add_austin_fleet(seed) -> None:
+    """OWNER DECISION D-32, 2026-09-26: LZ_LCRA/LZ_RAYBN (free-market ERCOT zones) are switched ON in
+    the shipped fleet.yaml/scada.yaml, alongside LZ_AEN/LZ_CPS (regulated, still off in the shipped
+    default -- production enables AEN via its own override). `load_fleet_config()`'s default `--blocks`
+    set is "every zone scada.yaml declares" (this module's own docstring), so the shared `seed`
+    fixture's scope is whatever the shipped configs currently enable -- computed here from the loaded
+    config itself (`config.zone_blocks`), not hardcoded, so this test tracks whichever blocks are
+    enabled without needing an update every time that changes. Each enabled block's ids are exactly
+    dev/seed/add_austin_fleet.sql's scheme extended in `zone_blocks:` list order (bank-040..049
+    LZ_AEN, bank-050..059 LZ_CPS, bank-060..069 LZ_LCRA, bank-070..079 LZ_RAYBN, when enabled)."""
+    config = ts.load_fleet_config()
+    enabled_blocks = [b for b in config.zone_blocks if b.enabled]
+    expected_hub_count = config.hub_count + sum(b.banks * b.homes_per_bank for b in enabled_blocks)
+    expected_bank_count = config.bank_count + sum(b.banks for b in enabled_blocks)
+
+    banks = {b.bank_id: b.zone for b in seed.topology.banks}
+    assert len(seed.topology.hubs) == expected_hub_count
+    assert len(banks) == expected_bank_count
+
+    offset = config.bank_count
+    for block in enabled_blocks:
+        assert {banks[f"bank-{offset + i:03d}"] for i in range(block.banks)} == {block.zone}
+        offset += block.banks
+    for block in config.zone_blocks:
+        if not block.enabled:
+            assert block.zone not in banks.values()
 
 
 @pytest.mark.parametrize(
@@ -186,8 +195,21 @@ def test_cli_writes_the_same_sql_to_a_file(tmp_path: Path) -> None:
 
 
 def test_blocks_can_be_narrowed_or_dropped() -> None:
-    none = ts.build_seed(ts.load_fleet_config(blocks=[]), TERRITORY)
-    assert len(none.topology.banks) == 40 and len(none.feeders) == 8
+    """OWNER DECISION D-32, 2026-09-26: LZ_LCRA/LZ_RAYBN are enabled directly in the shipped fleet.yaml
+    (`enabled: true`), not merely opted into via `--blocks` -- `load_fleet_config`'s own `b.enabled or
+    b.zone in wanted` means an explicit `blocks=[]` can no longer turn OFF a block the YAML itself
+    already turned on (`--blocks`/`blocks=` can only ADD to what's already enabled, never subtract).
+    Expected bank/feeder counts are computed from the loaded config's own zone_blocks (not hardcoded),
+    so this test tracks whichever blocks the shipped YAML enables without needing a manual update."""
+    config = ts.load_fleet_config(blocks=[])
+    none = ts.build_seed(config, TERRITORY)
+    enabled_blocks = [b for b in config.zone_blocks if b.enabled]
+    banks_per_zone = config.bank_count // len(config.zones)
+    base_feeders = len(config.zones) * -(-banks_per_zone // ts.BANKS_PER_FEEDER_DEFAULT)
+    expected_banks = config.bank_count + sum(b.banks for b in enabled_blocks)
+    expected_feeders = base_feeders + sum(-(-b.banks // ts.BANKS_PER_FEEDER_DEFAULT) for b in enabled_blocks)
+    assert len(none.topology.banks) == expected_banks
+    assert len(none.feeders) == expected_feeders
     with pytest.raises(ValueError, match=r"not in fleet.yaml"):
         ts.load_fleet_config(blocks=["LZ_NOWHERE"])
 

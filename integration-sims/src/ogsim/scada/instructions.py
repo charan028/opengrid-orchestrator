@@ -83,6 +83,19 @@ class OverloadRule:
         self._active_since.pop(bank_id, None)
         self._clear_consecutive.pop(bank_id, None)
 
+    def cancel(self, bank_id: str) -> None:
+        """Clears this rule's own bookkeeping for `bank_id` WITHOUT publishing a lift -- called
+        whenever a scenario-driven `utility_instruction` (BLOCK/ESTOP/LIMIT) takes over that bank's
+        instruction slot (`ScadaEngine.tick`'s `pending` branch). R3.4 fix: without this, a scenario's
+        BLOCK/ESTOP could be silently overwritten by this rule's own LATER auto-lift (`check_lift`
+        publishes an expired LIMIT the instant the overload clears, and the orchestrator's fleet twin
+        stores the LATEST instruction per bank regardless of kind) -- the auto-lift must only ever end
+        an auto-LIMIT it itself issued, never a scenario's separate instruction. Also clears the
+        overload-streak counter, so a still-ongoing overload after the scenario's instruction ends can
+        cleanly re-trigger a fresh auto-LIMIT rather than resuming a stale streak."""
+        self._reset(bank_id)
+        self._consecutive.pop(bank_id, None)
+
 
 def limit_instruction(
     instruction_id: str, bank_id: str, limit_kw: float, issued_at: str
