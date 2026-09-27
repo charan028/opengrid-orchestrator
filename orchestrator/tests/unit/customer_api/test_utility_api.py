@@ -123,6 +123,7 @@ def test_ts_d33_34_issue_status_history_and_cancel(api, calls) -> None:
 
     status = api.get(f"{BASE}/calls/{call['call_id']}", headers=AEN).json()
     assert status["state"] == "RAMPING" and status["delivered_kwh"] == 0.0
+    assert status["delivery_basis"] == "GRANTED_NOT_MEASURED"  # r3.4.1: grants, not metered
     history = api.get(f"{BASE}/calls", headers=AEN).json()["calls"]
     assert [c["call_id"] for c in history] == [call["call_id"]]
 

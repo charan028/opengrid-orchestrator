@@ -19,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 #: rule is the real cap (TOLLING 90 min, ECRS 60 min).
 MAX_CALL_MINUTES = 240
 MAX_TEXT_LEN = 200
+#: What `CallStatus.delivered_kw/_kwh` measure today: allocator grants, not metered delivery.
+DELIVERY_BASIS = "GRANTED_NOT_MEASURED"
 
 
 class CallOrigin(StrEnum):
@@ -181,6 +183,9 @@ class CallStatus(BaseModel):
             "state": self.state.value,
             "delivered_kw": self.delivered_kw,
             "delivered_kwh": self.delivered_kwh,
+            # r3.4.1: delivered_kw/kWh are the allocator's GRANTS, not metered delivery (a vetoed grant
+            # still counts). Measured delivery (DELIVERY-VERIFY) replaces this in r3.4.2.
+            "delivery_basis": DELIVERY_BASIS,
             "as_of": self.as_of.isoformat(),
         }
 
