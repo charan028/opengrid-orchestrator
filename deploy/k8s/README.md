@@ -5,11 +5,11 @@ service, the HTMX UI and the API), Postgres 17, the Mosquitto broker with the pr
 seeds, the data-lifecycle CronJob and the ogsim integration simulators. It first lists and checks every
 prerequisite. It stops on any failure, and every phase is safe to re-run.
 
-> **Status (r3.4.1, 2026-09-26): validated offline only, never deployed to a real cluster.** The chart passes
+> **Status (r3.4.3, chart 0.2.0, 2026-09-27): validated offline only, never deployed to a real cluster.** The chart passes
 > `helm lint --strict` (helm 3.22.0 and 4.3.0) and `kubeconform -strict` (Kubernetes 1.30 and 1.33 schemas). The
 > scripts pass `shellcheck`, the two images build, and `install.sh --dry-run` runs end to end. A smoke test ran every
 > workload from the built images in one isolated network namespace with podman, using the chart's rendered
-> ConfigMaps. In that test, `create_schema.sh` applied 43 migrations; the seed Job and `bootstrap_check.py --live`
+> ConfigMaps. In that test, `create_schema.sh` applied every migration through 0050; the seed Job and `bootstrap_check.py --live`
 > passed; every heartbeat was fresh; `/og/api/health` returned 200; the gateway returned 401 without credentials and
 > 200 as operator. No Kubernetes cluster was available, so the first real install is also the first integration test
 > of the Kubernetes objects themselves (scheduling, PVCs, Services, Ingress, NetworkPolicies). Treat it as a pilot,
@@ -39,7 +39,7 @@ The installer reuses the same building blocks as that script:
 | Mosquitto 2.0.22 | Deployment | `eclipse-mosquitto` | No anonymous access. One generated password per account, plus the production ACL. |
 | migrate, seed | Job | `opengrid-orchestrator` | migrate runs `create_schema.sh` with the bundled server's superuser password. Both are named by a hash of their inputs, so re-runs with the same inputs do nothing. |
 | og-lifecycle | CronJob, **suspended** | `opengrid-orchestrator` | Matches production's disabled `og-lifecycle.timer`. |
-| og-sim-market, -fleet, -scada, -control (-customer off) | Deployment | `opengrid-sims` | The same set that `ogsim.target` starts. |
+| og-sim-market, -fleet, -scada, -control, -utility (-customer off) | Deployment | `opengrid-sims` | The same set that `ogsim.target` starts. og-sim-utility (r3.4.3) is the Austin Energy EMS simulator: MQTT user `og_sim_utility`, and it calls the utility API as `og-util-aen` through the gateway. |
 | Ingress | `/og/`, `/ogsim/` go to the gateway | | Works with any controller; no controller-specific annotations. |
 | NetworkPolicies | ingress rules only | | Restrict the ports that are loopback-only in production. |
 
@@ -94,7 +94,7 @@ Requests (the scheduler reserves these) and limits (from the systemd `MemoryMax`
 | Ephemeral storage per node | 20 GiB | 40 GiB |
 
 No CPU limits are set, so the engine's dispatch cycle is never throttled. The fleet simulator's 3 GiB limit fits
-2,500 hubs (LZ_AEN). With `--d32` (3,500 hubs), raise `sims.fleet.resources`.
+2,500 hubs (LZ_AEN). With `--noie-blocks` (3,500 hubs), raise `sims.fleet.resources`.
 
 ## 3. Step by step
 
@@ -133,7 +133,9 @@ Common variations:
 | Use images already pushed | `--skip-build --tag <sha>` |
 | Local cluster (kind, k3d) | `--no-push`, then load the images into the cluster; use `--registry ""` if you need to |
 | Existing Postgres 17 | create the role and database first: `create_schema.sh --no-migrate --db-host db.example.com --etc DIR`, with `OG_PG_ADMIN_PASSWORD` exported (read it with `read -rs`, never on the command line), where `DIR/secrets.env` holds the role's `OG_DB_PASSWORD`; then `--external-db db.example.com:5432 --db-password-file ~/og-keys/dbpass`. The migrate Job then runs only the migrations. |
-| Also enable LZ_LCRA and LZ_RAYBN (decision D-32) | `--d32` (runs the seed Job again) |
+| Also enable LZ_LCRA and LZ_RAYBN (D-37 NOIE blocks: regulated, UNAVAILABLE, no contract; `noie_switch_seed.sql` always runs) | `--noie-blocks` (`--d32` is an alias; runs the seed Job again) |
+| D-34 grid link (off by default) | `--grid-link-config grid_link.toml --grid-link-certs DIR`: the `[grid_link]` override (as written by `deploy/scripts/grid_link_enable_loopback.sh`) and its TLS files go into Secret `og-gridlink`, which og-engine reads through `OG_GRID_LINK_CONFIG`; the MQTT user `og_gridlink` and its ACL block are added. Loopback (listen on 127.0.0.1 in the og-engine pod) exposes nothing. With `--values` `gridLink.service.enabled: true` plus `allowedCidrs`, the ports become a ClusterIP Service behind a NetworkPolicy. |
+| D-35 ERCOT AS instruction poller (off by default) | `--values` with `asPoll.enabled: true` |
 | Demo customers after install | `--phase verify --demo-customers` |
 | Re-run migrations or seeds | `--phase migrate` or `--phase seed` |
 | Turn on the data lifecycle | after the I/O check in BOOTSTRAP.md section 9: `kubectl -n opengrid patch cronjob opengrid-lifecycle -p '{"spec":{"suspend":false}}'`, or `--values` with `lifecycle.suspend: false` |
@@ -164,7 +166,7 @@ simulated hubs, and later real ones, trust its public keys.
 - that the migrate and seed Jobs succeeded
 - that `/og/api/health` answers 200 (probed from inside og-api, because the endpoint accepts loopback callers only)
 - that the gateway answers `/og/` without credentials with 401
-- that og-engine's `/metrics` answers 200
+- that og-engine's `/metrics` answers 200 (the guardian (9103) and safestop (9106, r3.4.2) metrics ports have liveness probes)
 - that the `og.heartbeat` rows of feeds, engine, guardian, safestop, settle and api are fresh
 - `bootstrap_check.py --live`: migrations, hubs per zone, banks, the substation asset, utilities, the toll contract,
   the customer contracts, transformers, the charge window, firmware, fresh telemetry and zero invariant violations

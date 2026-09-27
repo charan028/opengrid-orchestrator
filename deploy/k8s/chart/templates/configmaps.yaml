@@ -24,8 +24,8 @@ data:
     [health]
     engine_metrics_url = "http://{{ $fn }}-engine:{{ .Values.services.engine.metricsPort }}/metrics"
 
-    [market_sim]
-    base_url = "http://{{ $fn }}-sim-market:{{ .Values.sims.market.port }}"
+    [feeds.ercot_as_poll]
+    enabled = {{ .Values.asPoll.enabled }}
 
     [api]
     csrf_allowed_hosts = [{{ $host | quote }}]
@@ -127,5 +127,8 @@ data:
     {{- range .Values.mosquitto.users }}
     printf '%s:%s\n' {{ .user | quote }} "${{ .key }}" >> "$out"
     {{- end }}
+    {{- if .Values.gridLink.enabled }}
+    printf '%s:%s\n' "og_gridlink" "$OG_MQTT_GRIDLINK_PASSWORD" >> "$out"
+    {{- end }}
     mosquitto_passwd -U "$out"
-    echo "mosquitto passwd: {{ len .Values.mosquitto.users }} account(s)"
+    echo "mosquitto passwd: {{ add (len .Values.mosquitto.users) (ternary 1 0 .Values.gridLink.enabled) }} account(s)"

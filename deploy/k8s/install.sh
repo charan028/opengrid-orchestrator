@@ -40,7 +40,10 @@
 #   --no-api-keys           install without live-feed keys (og-feeds runs degraded; the market simulator stays)
 #   --anthropic-key-file F  the owner's ai_agent.env (ANTHROPIC_API_KEY); optional
 #   --pull-secret-file F    a .dockerconfigjson for the registry (creates Secret og-pull)
-#   --zones LIST            enabled zone blocks (default LZ_AEN)   --d32  also LZ_LCRA,LZ_RAYBN (decision D-32)
+#   --zones LIST            enabled zone blocks (default LZ_AEN)
+#   --noie-blocks           also LZ_LCRA,LZ_RAYBN: regulated NOIE, UNAVAILABLE, no contract (D-37; --d32 is an alias)
+#   --grid-link-config F    enable the D-34 grid link with this [grid_link] override (loopback by default; README)
+#   --grid-link-certs DIR   the TLS files the override names under /etc/opengrid/certs (with --grid-link-config)
 #   --demo-customers        verify: run dev/scripts/seed_demo_customers.py once the API is up
 #   --values FILE           extra helm values file (repeatable)
 #   --timeout DUR           helm/rollout wait (default 30m)
@@ -76,6 +79,8 @@ API_KEYS_FILE=""
 NO_API_KEYS=0
 ANTHROPIC_FILE=""
 PULL_SECRET_FILE=""
+GRID_LINK_CONFIG=""
+GRID_LINK_CERTS=""
 ZONES="LZ_AEN"
 DEMO=0
 VALUES_FILES=()
@@ -90,7 +95,7 @@ MIN_NODE_EPHEMERAL_GI=20 # images (~1.5 GiB) + emptyDirs + logs, per node
 REQUIRED_OWNER_KEYS="ERCOT_PUBLIC_API_KEY_PRIMARY EIA_API_KEY"
 UI_BASE_USERS="operator viewer tester"   # deploy/scripts/install.sh
 
-usage() { sed -n '2,50p' "$0"; }
+usage() { sed -n '2,53p' "$0"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -114,7 +119,9 @@ while [ $# -gt 0 ]; do
     --anthropic-key-file) ANTHROPIC_FILE="$2"; shift 2 ;;
     --pull-secret-file) PULL_SECRET_FILE="$2"; shift 2 ;;
     --zones) ZONES="$2"; shift 2 ;;
-    --d32) ZONES="$ZONES,LZ_LCRA,LZ_RAYBN"; shift ;;
+    --noie-blocks|--d32) ZONES="$ZONES,LZ_LCRA,LZ_RAYBN"; shift ;;
+    --grid-link-config) GRID_LINK_CONFIG="$2"; shift 2 ;;
+    --grid-link-certs) GRID_LINK_CERTS="$2"; shift 2 ;;
     --demo-customers) DEMO=1; shift ;;
     --values) VALUES_FILES+=("$2"); shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
@@ -186,7 +193,8 @@ customer_users() { toml_section_keys "$TOML" api.roles.customer; }
 ui_users() {
   { for u in $UI_BASE_USERS; do echo "$u"; done
     toml_string_array "$TOML" guardian stop_release_authorised_operators
-    customer_users; } | awk '!seen[$0]++'
+    customer_users
+    toml_section_keys "$TOML" api.roles.utility; } | awk '!seen[$0]++'   # og-util-* (r3.4.3 utility API)
 }
 
 # env-file reader: KEY=VALUE lines (systemd EnvironmentFile style, optional surrounding quotes).
@@ -234,6 +242,7 @@ build_helm_set() {
       --set "postgres.external.port=$port")
   fi
   [ -z "$PULL_SECRET_FILE" ] || HELM_SET+=(--set "image.pullSecrets={og-pull}")
+  [ -z "$GRID_LINK_CONFIG" ] || HELM_SET+=(--set gridLink.enabled=true)
   local f
   for f in "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"; do HELM_SET+=(-f "$f"); done
 }
@@ -315,6 +324,11 @@ phase_prereqs() {
     check FAIL "external database" "$EXTERNAL_DB (password file readable)" \
       "--db-password-file required and readable with --external-db" test -r "$DB_PASSWORD_FILE"
   fi
+  if [ -n "$GRID_LINK_CONFIG" ]; then
+    if [ -r "$GRID_LINK_CONFIG" ] && [ -d "$GRID_LINK_CERTS" ] && grep -q '^\[grid_link\]' "$GRID_LINK_CONFIG"; then
+      row PASS "grid link (D-34)" "$GRID_LINK_CONFIG + $(find "$GRID_LINK_CERTS" -maxdepth 1 -type f | wc -l) file(s) in $GRID_LINK_CERTS"
+    else row FAIL "grid link (D-34)" "--grid-link-config needs a readable [grid_link] file and --grid-link-certs DIR"; fi
+  else row PASS "grid link (D-34)" "off (default, as in production)"; fi
 
   # Cluster
   if have kubectl && k get --raw=/readyz >/dev/null 2>&1; then
@@ -544,8 +558,9 @@ phase_secrets() {
   if [ -n "$EXTERNAL_DB" ]; then ensure_secret og-db "OG_DB_PASSWORD=file:$DB_PASSWORD_FILE"
   else ensure_secret og-db OG_DB_PASSWORD=hex POSTGRES_PASSWORD=hex; fi
   ensure_secret og-mqtt OG_MQTT_ENGINE_PASSWORD=hex OG_MQTT_GUARDIAN_PASSWORD=hex OG_MQTT_API_PASSWORD=hex \
-    OG_MQTT_SAFESTOP_PASSWORD=hex
-  ensure_secret og-mqtt-sim OG_MQTT_SIM_PASSWORD=hex OG_MQTT_SIMCTL_PASSWORD=hex OG_MQTT_CUSTOMER_PASSWORD=hex
+    OG_MQTT_SAFESTOP_PASSWORD=hex OG_MQTT_GRIDLINK_PASSWORD=hex
+  ensure_secret og-mqtt-sim OG_MQTT_SIM_PASSWORD=hex OG_MQTT_SIMCTL_PASSWORD=hex OG_MQTT_CUSTOMER_PASSWORD=hex \
+    OG_MQTT_UTILITY_PASSWORD=hex
   ensure_secret og-api-proxy OG_API_PROXY_SECRET=hex
   for u in $(ui_users); do specs+=("$u=b64"); done
   ensure_secret og-ui-users "${specs[@]}"
@@ -555,6 +570,19 @@ phase_secrets() {
     : > "$WORK/empty.env"; replace_env_secret og-owner-keys "$WORK/empty.env"
   else echo "  og-owner-keys: present (kept; pass --api-keys-file to replace)"; fi
   if [ -n "$ANTHROPIC_FILE" ]; then replace_env_secret og-ai-agent "$ANTHROPIC_FILE"; fi
+
+  # D-34 grid link (optional): the operator's [grid_link] override and its TLS files in one Secret.
+  if [ -n "$GRID_LINK_CONFIG" ]; then
+    if [ "$DRY" -eq 1 ]; then echo "  DRY: og-gridlink: would load grid_link.toml and $GRID_LINK_CERTS/*"
+    else
+      kn create secret generic og-gridlink "--from-file=grid_link.toml=$GRID_LINK_CONFIG" "--from-file=$GRID_LINK_CERTS" \
+        --dry-run=client -o yaml > "$WORK/gridlink.yaml"
+      if kn get secret og-gridlink >/dev/null 2>&1; then k replace -f "$WORK/gridlink.yaml" >/dev/null
+      else k create -f "$WORK/gridlink.yaml" >/dev/null; fi
+      rm -f "$WORK/gridlink.yaml"
+      echo "  og-gridlink: grid_link.toml + $(find "$GRID_LINK_CERTS" -maxdepth 1 -type f | wc -l) TLS file(s) (not displayed)"
+    fi
+  fi
 
   # Ed25519 keys (guardian, safestop, trace anchor): bootstrap phase h inside the orchestrator image, streamed as a
   # tar to a private temp dir, loaded into the Secret, removed on exit.
