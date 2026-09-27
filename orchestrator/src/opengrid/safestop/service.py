@@ -78,6 +78,33 @@ class TraceAppender(Protocol):
     ) -> object: ...
 
 
+def outbox_scope(entry: OutboxEntry) -> str:
+    """The stop scope an outbox entry publishes to: its retained topic without the stop id
+    (`stop/<scope>/<id>/<stop_id>` -> `stop/<scope>/<id>`)."""
+    return entry.topic_suffix.rsplit("/", 1)[0]
+
+
+def drain_order(entries: list[OutboxEntry]) -> list[OutboxEntry]:
+    """The publish order of queued stop events (given in acceptance order): each scope's entries stay in
+    acceptance order; across scopes, the next ENGAGE at the head of any scope goes before any RELEASE at a
+    head (oldest first within each kind). So an ENGAGE never waits behind another scope's RELEASE, and never
+    overtakes an older RELEASE of its own scope (which the hubs would then drop, leaving the bank stopped)."""
+    queues: dict[str, list[OutboxEntry]] = {}
+    for entry in sorted(entries, key=lambda e: e.seq):
+        queues.setdefault(outbox_scope(entry), []).append(entry)
+    ordered: list[OutboxEntry] = []
+    while queues:
+        heads = [queue[0] for queue in queues.values()]
+        engages = [e for e in heads if e.action == "ENGAGE"]
+        chosen = min(engages or heads, key=lambda e: e.seq)
+        scope = outbox_scope(chosen)
+        queues[scope].pop(0)
+        if not queues[scope]:
+            del queues[scope]
+        ordered.append(chosen)
+    return ordered
+
+
 @dataclass
 class SafestopService:
     stop_key: StopSigningKey
@@ -180,7 +207,7 @@ class SafestopService:
                 await self.outbox.enqueue_publication(
                     stop_id=parsed.stop_id, action="RELEASE", topic_suffix=topic_suffix, payload=dict(event)
                 )
-                await self.drain_outbox()
+                await self._drain_after_accept()
             return True
         if self.trace is not None:
             await self.trace.append(
@@ -222,7 +249,7 @@ class SafestopService:
                 await self.publisher.publish_retained(topic_suffix, payload)
             return
         await self.outbox.record_and_enqueue(row, stop_id=stop_id, topic_suffix=topic_suffix, payload=payload)
-        await self.drain_outbox()
+        await self._drain_after_accept()
 
     async def ensure_l2_engage_published(self, instruction_id: UUID, bank_id: str) -> bool:
         """H5 repair on a redelivered utility L2 instruction the intake reports ALREADY_ACTED: if its ENGAGE
@@ -261,17 +288,22 @@ class SafestopService:
             "recorded utility ENGAGE had no publication: re-signed and queued",
             extra={"stop_id": str(record.stop_id), "bank_id": bank_id},
         )
-        await self.drain_outbox()
+        await self._drain_after_accept()
         return True
 
     async def drain_outbox(self, *, batch: int = 100) -> int:
-        """K8: publish every queued stop event the broker has not acknowledged -- every ENGAGE first (a stop
-        is never delayed behind a release), then the RELEASEs, each oldest first -- marking each once its
-        QoS 1 publish returned (the broker's PUBACK). A broker/connection failure stops the drain (the rest
-        go on the next drain: after a reconnect, or the next tick) and never counts against an entry. A
-        PERMANENT failure (a payload that can never be published) counts; at `outbox_max_attempts` the entry
-        is dead-lettered (skipped from then on, ALR-STOP-PUBLISH-DEAD-LETTER raised) and the drain moves on,
-        so a poison entry never blocks later stops. Serialised. Returns how many were published."""
+        """K8: publish every queued stop event the broker has not acknowledged, in `drain_order` -- in
+        acceptance order WITHIN a scope (a hub drops a RELEASE older than the newest ENGAGE on its scope, so a
+        newer ENGAGE must never overtake an older RELEASE of the same scope), with ENGAGE priority only ACROSS
+        scopes (a stop is never delayed behind another scope's release). Each is marked once its QoS 1 publish
+        returned (the broker's PUBACK). A broker/connection failure stops the drain (the rest go on the next
+        drain: after a reconnect, or the next tick) and never counts against an entry. A PERMANENT failure (a
+        payload that can never be published) counts, and holds the rest of ITS scope back until the entry is
+        published or dead-lettered; at `outbox_max_attempts` it is dead-lettered (skipped from then on) and
+        ALR-STOP-PUBLISH-DEAD-LETTER is raised -- re-raised idempotently on every drain for every dead-lettered
+        entry, so one dead-lettered by a crash between writes, or found at the cap after an upgrade, is never
+        silent. Other scopes carry on, so a poison entry never blocks later stops. Serialised. Returns how
+        many were published."""
         if self.outbox is None:
             return 0
         published = 0
@@ -279,7 +311,11 @@ class SafestopService:
             pending = await self.outbox.pending_publications(
                 limit=batch, max_attempts=self.outbox_max_attempts
             )
-            for entry in pending:
+            held: set[str] = set()  # scopes whose earlier entry failed permanently this drain
+            for entry in drain_order(pending):
+                scope = outbox_scope(entry)
+                if scope in held:
+                    continue
                 try:
                     await self.publisher.publish_retained(entry.topic_suffix, entry.payload)
                 except Exception as exc:
@@ -293,12 +329,31 @@ class SafestopService:
                             extra={"stop_id": str(entry.stop_id), "action": entry.action, "error": str(exc)},
                         )
                         break
-                    if attempts >= self.outbox_max_attempts:
-                        await self._dead_letter(entry, str(exc))
+                    if attempts < self.outbox_max_attempts:
+                        held.add(scope)
+                    else:
+                        await self._dead_letter(entry, str(exc))  # logged and traced once, at the cap
                     continue
                 await self.outbox.mark_published(entry.seq)
                 published += 1
+            # Idempotent (one open alert per entry): also covers entries dead-lettered without their alert.
+            for dead in await self.outbox.dead_lettered_publications(
+                limit=batch, max_attempts=self.outbox_max_attempts
+            ):
+                await self.outbox.raise_dead_letter_alert(
+                    dead, "publication failed permanently at the attempt cap"
+                )
         return published
+
+    async def _drain_after_accept(self) -> None:
+        """Drain right after a stop was accepted and durably queued. Never raises: the stop is recorded and
+        queued, so a failure here (another entry's error, a database hiccup) must neither fail the caller --
+        which would make the L2 intake or the API intake retry or die -- nor lose anything; the next drain
+        (tick or reconnect) publishes it."""
+        try:
+            await self.drain_outbox()
+        except Exception:
+            logger.exception("stop outbox drain after accept failed; the next drain retries it")
 
     async def _dead_letter(self, entry: OutboxEntry, error: str) -> None:
         logger.error(

@@ -17,14 +17,15 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.allocator.models import HubSnapshot
-from opengrid.core.reasons import COMMIT_LOCK_OVERRIDE_REASONS, R_AS_RELEASE, R_SUBSTITUTION
+from opengrid.core.reasons import K13_SHORTFALL_REASONS, R_AS_RELEASE, R_SUBSTITUTION
 from opengrid.invariants import checks
 from opengrid.invariants.models import CheckState, InvariantsSummary, Violation
 
 #: 00-invariants.md K13's own exception list (never re-declared -- BUILD.md S1 "no duplicated
 #: functions"): a grant dipping below its commitment's floor is not a lock violation if the trace
-#: carries one of these reason codes for that obligation in that window.
-ALLOWED_K13_TRACE_REASONS: frozenset[str] = COMMIT_LOCK_OVERRIDE_REASONS | {R_AS_RELEASE, R_SUBSTITUTION}
+#: carries one of these reason codes for that obligation in that window -- `core.reasons.K13_SHORTFALL_REASONS`
+#: (the same list the engine traces, incl. R-OPERATOR-OVERRIDE) plus R-AS-RELEASE and R-SUBSTITUTION.
+ALLOWED_K13_TRACE_REASONS: frozenset[str] = K13_SHORTFALL_REASONS | {R_AS_RELEASE, R_SUBSTITUTION}
 
 #: 02a S1.5 obligation states a live commitment-lock row must never survive on.
 _ORPHAN_COMMITMENT_STATES = ("REJECTED", "EXPIRED")

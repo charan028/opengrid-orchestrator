@@ -67,9 +67,10 @@ LIMIT 1
 """
 
 
-# K8 durable publish outbox (migration 0035): queued once per (stop_id, action). Drained ENGAGEs first (a stop is
-# never delayed behind a release), each in acceptance order. `attempts` counts PERMANENT failures only (a
-# payload that can never be published); at the cap an entry is dead-lettered: skipped by the drain, alerted.
+# K8 durable publish outbox (migration 0035): queued once per (stop_id, action), returned in acceptance order;
+# the service orders the drain (in order within a scope, ENGAGE priority only across scopes). `attempts` counts
+# PERMANENT failures only (a payload that can never be published); at the cap an entry is dead-lettered:
+# skipped by the drain, alerted.
 _ENQUEUE_SQL = """
 INSERT INTO og.stop_outbox (stop_id, action, topic_suffix, payload)
 VALUES (%(stop_id)s, %(action)s, %(topic_suffix)s, %(payload)s)
@@ -78,7 +79,13 @@ ON CONFLICT ON CONSTRAINT stop_outbox_once DO NOTHING
 _PENDING_SQL = """
 SELECT seq, stop_id, action, topic_suffix, payload FROM og.stop_outbox
 WHERE published_at IS NULL AND attempts < %(max_attempts)s
-ORDER BY (action = 'ENGAGE') DESC, seq
+ORDER BY seq
+LIMIT %(limit)s
+"""
+_DEAD_LETTERED_SQL = """
+SELECT seq, stop_id, action, topic_suffix, payload FROM og.stop_outbox
+WHERE published_at IS NULL AND attempts >= %(max_attempts)s
+ORDER BY seq
 LIMIT %(limit)s
 """
 _MARK_PUBLISHED_SQL = "UPDATE og.stop_outbox SET published_at = now() WHERE seq = %(seq)s"
@@ -218,6 +225,15 @@ class PgStopEventBackend:
     async def pending_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
         async with self.pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_PENDING_SQL, {"limit": limit, "max_attempts": max_attempts})
+            rows = await cur.fetchall()
+        return [
+            OutboxEntry(seq=int(r[0]), stop_id=r[1], action=r[2], topic_suffix=str(r[3]), payload=dict(r[4]))
+            for r in rows
+        ]
+
+    async def dead_lettered_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_DEAD_LETTERED_SQL, {"limit": limit, "max_attempts": max_attempts})
             rows = await cur.fetchall()
         return [
             OutboxEntry(seq=int(r[0]), stop_id=r[1], action=r[2], topic_suffix=str(r[3]), payload=dict(r[4]))
