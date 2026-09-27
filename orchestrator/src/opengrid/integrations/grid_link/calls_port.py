@@ -18,10 +18,10 @@ from datetime import UTC, datetime
 from opengrid.calls import (
     CallLimits,
     CallOrigin,
+    CallRecord,
     CallRefused,
     CallRequest,
     CallState,
-    CallRecord,
     CallStore,
     cancel_call,
     find_call_by_key,
