@@ -75,6 +75,27 @@ def test_an_ai_answer_carries_the_badge_and_its_model(monkeypatch: pytest.Monkey
     assert "confidence: High" in response.text
 
 
+def test_a_screened_console_answer_names_the_routing_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner report 2026-09-26: a working model was shown as "no model used" whenever the answer text
+    came from console data. The routing model that screened the question is named instead."""
+
+    async def fake_post(path: str, payload: dict[str, Any], *, remote_user: str | None = None) -> Any:
+        return {
+            "text": "700 hubs rated 78.4 kWh.",
+            "tier": "deterministic",
+            "citations": [{"source": "/og/api/fleet/summary", "ref": "{}", "label": "fleet summary"}],
+            "model": None,
+            "screened_by": "claude-haiku-4-5-20251001",
+        }
+
+    monkeypatch.setattr(copilot, "post_json", fake_post)
+    response = _client().post("/og/copilot/ask", data={"question": "how many units have capacity 78.4 kWh"})
+
+    assert "700 hubs rated 78.4 kWh." in response.text
+    assert "question screened by claude-haiku-4-5-20251001" in response.text
+    assert "no model used" not in response.text and "AI-assisted" not in response.text
+
+
 def test_an_empty_question_is_answered_without_calling_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     called = False
 

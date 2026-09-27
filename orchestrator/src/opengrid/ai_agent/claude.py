@@ -43,6 +43,50 @@ DEFAULT_EXPLAIN_MODEL = "claude-opus-5-5"
 
 _SCREEN_TOOL_NAME = "record_screening"
 
+#: For a fleet_query only: the question's conditions as the fleet tool's filters. Every property is
+#: optional (strict schemas allow that); `fleet.from_model` re-validates each value before use, so this
+#: schema narrows what the model may say but is not what the console trusts.
+_FLEET_FILTERS: dict[str, object] = {
+    "type": "object",
+    "description": (
+        "Only when intent is fleet_query: the conditions in the question. Omit anything not stated. "
+        "Zones are ERCOT load zones written like LZ_NORTH. Capacity is rated kWh per hub; power is rated "
+        "kW per hub; set min and max to the same value for an exact figure. SoC bounds are percentages."
+    ),
+    "properties": {
+        "zones": {"type": "array", "items": {"type": "string"}},
+        "asset_class": {"type": "string", "enum": ["home", "dual_unit", "substation", "truck"]},
+        "health": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["online", "stale", "degraded", "quarantined", "fault", "offline"],
+            },
+        },
+        "availability": {"type": "string", "enum": ["AVAILABLE", "UNAVAILABLE"]},
+        "soc_min_pct": {"type": "number"},
+        "soc_max_pct": {"type": "number"},
+        "capacity_min_kwh": {"type": "number"},
+        "capacity_max_kwh": {"type": "number"},
+        "power_min_kw": {"type": "number"},
+        "power_max_kw": {"type": "number"},
+        "bank": {"type": "string"},
+        "at_home": {
+            "type": "boolean",
+            "description": "Trucks only: at (true) or away from their home station.",
+        },
+        "group_by": {
+            "type": "string",
+            "enum": ["none", "zone", "availability", "soc_bucket", "health", "asset_class"],
+        },
+        "metric": {
+            "type": "string",
+            "enum": ["count", "available_kw", "available_kwh", "rated_kw", "rated_kwh"],
+        },
+    },
+    "additionalProperties": False,
+}
+
 _SCREEN_TOOL: ToolParam = {
     "name": _SCREEN_TOOL_NAME,
     "description": (
@@ -69,6 +113,7 @@ _SCREEN_TOOL: ToolParam = {
                 "type": "number",
                 "description": "Probability from 0 to 1 that: " + INJECTION_QUESTION + ".",
             },
+            "fleet": _FLEET_FILTERS,
         },
         "required": ["intent", "intent_confidence", "needs_trace", "injection_risk"],
         "additionalProperties": False,
@@ -222,6 +267,7 @@ class ClaudeProvider:
             injection_risk=answer.get("injection_risk"),
             provider=self.name,
             model=self._routing_model,
+            fleet=answer.get("fleet"),
         )
         return verdict, usage
 
