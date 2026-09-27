@@ -109,7 +109,7 @@ def test_ts_d33_34_issue_status_history_and_cancel(api, calls) -> None:
     created = _call(api, obligation_id=str(oid), idempotency_key="aen-001")
     assert created.status_code == 201
     call = created.json()
-    assert call["state"] in ("RAMPING", "ACCEPTED") and call["origin"] == "UTILITY"
+    assert call["state"] in ("ACTIVE", "ACCEPTED") and call["origin"] == "UTILITY"
     assert call["target_kw"] == -20_000
     (deployment,) = calls.deployments.values()
     assert deployment.source == "UTILITY" and deployment.requested_by == "og-util-aen"
@@ -122,7 +122,7 @@ def test_ts_d33_34_issue_status_history_and_cancel(api, calls) -> None:
     assert replay.status_code == 200 and replay.json()["call_id"] == call["call_id"]
 
     status = api.get(f"{BASE}/calls/{call['call_id']}", headers=AEN).json()
-    assert status["state"] == "RAMPING" and status["granted_kwh"] == 0.0
+    assert status["state"] == "ACTIVE" and status["granted_kwh"] == 0.0
     assert status["delivery_measured"] is False and "delivered_kw" not in status  # grants, not metered
     assert status["granted_description"].startswith("planned/granted, not measured")
     history = api.get(f"{BASE}/calls", headers=AEN).json()["calls"]

@@ -21,6 +21,7 @@ MAX_CALL_MINUTES = 240
 MAX_TEXT_LEN = 200
 #: `CallStatus.granted_kw/_kwh` are the allocator's grants over the call (planned/granted), never metered
 #: delivery: a grant the guardian vetoes still counts. Measured delivery arrives in r3.4.2 (DELIVERY-VERIFY).
+DELIVERY_STATE_UNMEASURED = "UNMEASURED"
 GRANTED_DESCRIPTION = "planned/granted, not measured; measured delivery arrives in r3.4.2"
 
 
@@ -49,13 +50,13 @@ class CallOutcome(StrEnum):
 
 
 class CallState(StrEnum):
-    """Read-back state of a call. ACCEPTED: before its start. RAMPING: started, delivering less than
-    `CallLimits.ramping_fraction` of its target. DELIVERING: at target. COMPLETED: ended or cancelled.
-    REFUSED: never deployed (see the record's reason code)."""
+    """Read-back state of a call. ACCEPTED: before its start. ACTIVE: its window is running and commands
+    are being issued -- delivery is NOT measured yet (r3.4.1: `delivery_state` UNMEASURED), so no
+    RAMPING/DELIVERING is claimed; those return in r3.4.2 from DELIVERY-VERIFY's measured data.
+    COMPLETED: ended or cancelled. REFUSED: never deployed (see the record's reason code)."""
 
     ACCEPTED = "ACCEPTED"
-    RAMPING = "RAMPING"
-    DELIVERING = "DELIVERING"
+    ACTIVE = "ACTIVE"
     COMPLETED = "COMPLETED"
     REFUSED = "REFUSED"
 
@@ -186,6 +187,7 @@ class CallStatus(BaseModel):
             "granted_kw": self.granted_kw,
             "granted_kwh": self.granted_kwh,
             "delivery_measured": False,
+            "delivery_state": DELIVERY_STATE_UNMEASURED,
             "granted_description": GRANTED_DESCRIPTION,
             "as_of": self.as_of.isoformat(),
         }

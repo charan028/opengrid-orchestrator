@@ -55,7 +55,7 @@ class Refusal:
 
 @dataclass(frozen=True, slots=True)
 class CallLimits:
-    """`[dispatch.calls]`: per-principal rate limits and the RAMPING threshold. Operators get the same
+    """`[dispatch.calls]`: per-principal rate limits, and the RAMPING threshold (unused in r3.4.1, where status is ACTIVE until delivery is measured; r3.4.2). Operators get the same
     limits as a utility (identical checks); the defaults are far above any real call cadence."""
 
     max_calls_per_hour: int = 30

@@ -370,11 +370,12 @@ async def test_ts_d33_24_status_states_follow_start_delivery_and_end(store, trac
 
     assert (await state_at(NOW)).state is CallState.ACCEPTED
     store.delivery[oid] = Granted(last_kw=5_000.0, kwh=100.0)
-    ramping = await state_at(start + timedelta(minutes=1))
-    assert ramping.state is CallState.RAMPING
-    assert ramping.granted_kw == -5_000.0 and ramping.granted_kwh == 100.0  # signed: discharge < 0
+    active = await state_at(start + timedelta(minutes=1))
+    assert active.state is CallState.ACTIVE  # r3.4.1: unmeasured, never RAMPING/DELIVERING from grants
+    assert active.granted_kw == -5_000.0 and active.granted_kwh == 100.0  # signed: discharge < 0
+    assert active.public()["delivery_state"] == "UNMEASURED" and active.public()["delivery_measured"] is False
     store.delivery[oid] = Granted(last_kw=19_500.0, kwh=900.0)
-    assert (await state_at(start + timedelta(minutes=5))).state is CallState.DELIVERING
+    assert (await state_at(start + timedelta(minutes=5))).state is CallState.ACTIVE  # even at target
     assert (await state_at(start + timedelta(minutes=31))).state is CallState.COMPLETED
 
 

@@ -24,7 +24,8 @@ from typing import Any, Protocol
 ChannelSettings = dict[str, Any]
 
 #: States a channel reports. The orchestrator's own states, plus UNKNOWN when a channel cannot tell.
-CALL_STATES = frozenset({"ACCEPTED", "RAMPING", "DELIVERING", "COMPLETED", "REFUSED", "UNKNOWN"})
+#: r3.4.1 reports ACTIVE (delivery unmeasured); RAMPING/DELIVERING come back in r3.4.2 with measured delivery.
+CALL_STATES = frozenset({"ACCEPTED", "ACTIVE", "RAMPING", "DELIVERING", "COMPLETED", "REFUSED", "UNKNOWN"})
 
 
 class ChannelError(RuntimeError):
