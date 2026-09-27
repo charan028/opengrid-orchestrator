@@ -99,14 +99,14 @@ def test_self_process_none_leaves_normal_classification() -> None:
 # --- hub health classification -------------------------------------------------------------------
 
 
-def test_hub_online_within_two_telemetry_intervals() -> None:
+def test_hub_online_within_hub_stale_s() -> None:
     state = classify_hub_health(
         last_seen_at=NOW - timedelta(seconds=1), fault_code=None, now=NOW, thresholds=THRESHOLDS
     )
     assert state == "online"
 
 
-def test_hub_stale_between_online_and_offline_thresholds() -> None:
+def test_hub_stale_between_stale_and_offline_thresholds() -> None:
     state = classify_hub_health(
         last_seen_at=NOW - timedelta(seconds=10), fault_code=None, now=NOW, thresholds=THRESHOLDS
     )
@@ -118,6 +118,32 @@ def test_hub_offline_past_offline_threshold() -> None:
         last_seen_at=NOW - timedelta(seconds=31), fault_code=None, now=NOW, thresholds=THRESHOLDS
     )
     assert state == "offline"
+
+
+def test_hub_classification_uses_configured_hub_stale_s_not_telemetry_interval() -> None:
+    """R3 review fix (MEDIUM): the stale/online boundary must be the configured `hub_stale_s` directly,
+    not a `telemetry_interval_s * 2` formula -- `health.hub_stale_s` used to be loaded into
+    `HealthThresholds` (`from_config`) but never actually read by `classify_hub_health`. Pick thresholds
+    where the old formula and the real config value disagree, and confirm the real value wins."""
+    thresholds = HealthThresholds(hub_stale_s=25.0, hub_offline_s=60.0, telemetry_interval_s=2.0)
+    # The old (buggy) boundary would have been telemetry_interval_s * 2 == 4.0s -- 10s would have already
+    # classified "stale" under that formula. The real configured hub_stale_s is 25.0s, so 10s must still
+    # be "online".
+    online_state = classify_hub_health(
+        last_seen_at=NOW - timedelta(seconds=10), fault_code=None, now=NOW, thresholds=thresholds
+    )
+    assert online_state == "online"
+
+    stale_state = classify_hub_health(
+        last_seen_at=NOW - timedelta(seconds=26), fault_code=None, now=NOW, thresholds=thresholds
+    )
+    assert stale_state == "stale"
+
+
+def test_health_thresholds_has_no_hub_online_s_property() -> None:
+    """R3 review fix: the `telemetry_interval_s * 2` derivation is gone -- `classify_hub_health` reads
+    `hub_stale_s` directly now, so nothing should still expose the old formula."""
+    assert not hasattr(HealthThresholds(), "hub_online_s")
 
 
 def test_hub_fault_overrides_timing() -> None:
