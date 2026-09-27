@@ -67,6 +67,10 @@ R_MANUAL_RAMP = "R-MANUAL-RAMP"
 #: those hubs is below the commitment floor.
 R_OPERATOR_OVERRIDE = "R-OPERATOR-OVERRIDE"
 
+#: A shortfall below the commitment lock carrying one of these is a K13 exception: the engine traces it
+#: (engine.gateways), G-19 signs it only on its own evidence, and opengrid.invariants accepts it. ONE list.
+K13_SHORTFALL_REASONS: frozenset[str] = COMMIT_LOCK_OVERRIDE_REASONS | {R_OPERATOR_OVERRIDE}
+
 #: A best-effort partial grant after a mid-window SHORTFALL (owner decision 2026-09-26) carries the shortfall
 #: reason; this is the K13 lock-exception it stands for. One copy, for the engine's escalation and the
 #: guardian's G-19 corroboration alike.

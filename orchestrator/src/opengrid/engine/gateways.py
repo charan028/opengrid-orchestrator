@@ -57,9 +57,8 @@ from opengrid.core.models.mqtt import ScadaUtilityInstruction
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.reasons import (
     ALR_ENERGY_SHORTFALL_RISK,
-    COMMIT_LOCK_OVERRIDE_REASONS,
+    K13_SHORTFALL_REASONS,
     LOCK_REASON_BY_SHORTFALL,
-    R_OPERATOR_OVERRIDE,
     R_SHORTFALL_RESTORED,
     R_SUBSTITUTION,
 )
@@ -85,7 +84,7 @@ logger = logging.getLogger(__name__)
 #: A shortfall with one of these reasons is a K13 exception and must be traced (K13's own exception list),
 #: including a reduction because a live operator target took the obligation's hubs (R-OPERATOR-OVERRIDE,
 #: corroborated by the guardian's G-19 on its own MANUAL_TARGET read).
-_K13_SHORTFALL_REASONS = COMMIT_LOCK_OVERRIDE_REASONS | {R_OPERATOR_OVERRIDE}
+_K13_SHORTFALL_REASONS = K13_SHORTFALL_REASONS
 
 # item 3's continuous energy-sufficiency check: every COMMITTED/DELIVERING obligation's remaining
 # committed draw against its bank(s), joined to the contract for customer_id and the obligation for

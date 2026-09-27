@@ -311,6 +311,10 @@ base_path = "/og"
 bind_host = "127.0.0.1"
 # og-engine /metrics (loopback only): cycle latency, gate duration, flush lag, MQTT ingest lag.
 engine_port = 9101
+# og-guardian /metrics: verdicts, clock offset, og_mqtt_reconnects_total{client="guardian"|"guardian-tel"}.
+guardian_port = 9103
+# og-safestop /metrics (02b S1.2): og_mqtt_reconnects_total{client="safestop"|"safestop-l2"}, og_mqtt_connected.
+safestop_port = 9106
 
 [assets]
 # Asset-health drift sweep in og-settle (WATCH -> guardian-signed calibration, DEGRADED -> work order).

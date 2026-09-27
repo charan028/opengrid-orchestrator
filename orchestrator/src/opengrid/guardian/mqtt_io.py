@@ -78,7 +78,11 @@ class MqttHubStatePort:
         if prior is None:
             return  # unknown hub (not in og.hub) -- G-01/G-02 will fail closed as HUB_UNKNOWN downstream
         self._snapshots[message.hub_id] = HubSnapshot(
-            params=prior.params, soc_kwh=message.soc_kwh, prev_p_kw=message.p_kw, health=message.health
+            params=prior.params,
+            soc_kwh=message.soc_kwh,
+            prev_p_kw=message.p_kw,
+            health=message.health,
+            telemetry_at=message.ts,
         )
         now = self._monotonic()
         self._received_at[message.hub_id] = now

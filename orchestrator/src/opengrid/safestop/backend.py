@@ -104,8 +104,13 @@ class StopOutboxBackend(Protocol):
         ...
 
     async def pending_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
-        """Unacknowledged, not dead-lettered entries (fewer than `max_attempts` permanent failures): every
-        ENGAGE first, then the RELEASEs, each oldest first."""
+        """Unacknowledged, not dead-lettered entries (fewer than `max_attempts` permanent failures), in
+        acceptance order (the drain orders them: `SafestopService.drain_order`)."""
+        ...
+
+    async def dead_lettered_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        """Unacknowledged entries at or past the cap (dead-lettered), oldest first -- re-alerted on every drain
+        (idempotently), so one dead-lettered by a crash between writes or by an upgrade is never silent."""
         ...
 
     async def mark_published(self, seq: int) -> None: ...
