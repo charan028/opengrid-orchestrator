@@ -24,6 +24,12 @@ pytest tests-e2e/functional -v -m "not slow"   # skip the delivery-window scenar
 Every test skips (not fails) when the stack is not reachable. Defaults read `dev/secrets` and `dev/.env`;
 override with `OG_E2E_API`, `OG_E2E_CONTROL`, `OG_E2E_DSN`, `OG_E2E_PROXY_SECRET`, `OG_E2E_INVERTER_CAP_KW`.
 
+`r3/test_broker_recovery.py` scrapes each service's loopback `/metrics` with `docker compose exec`. It reads the
+ports from `[metrics]` of `dev/config/docker.toml`, the file the stack's og-* services load. Set `OG_E2E_CONFIG`
+for a stack that loads another file. A port not set there falls back to the service's own default: og-guardian
+`guardian_port` 9103, og-safestop `safestop_port` 9106. og-engine serves no `/metrics` without `engine_port`.
+`OG_E2E_ENGINE_METRICS_PORT`, `OG_E2E_GUARDIAN_METRICS_PORT` and `OG_E2E_SAFESTOP_METRICS_PORT` override a port.
+
 ## Dev-stack settings these suites need
 
 As of `main` @ `e86cef0` the stack needs these local settings to run the orchestrator profile at all (reported to
