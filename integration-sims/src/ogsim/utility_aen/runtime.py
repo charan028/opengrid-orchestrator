@@ -151,6 +151,8 @@ class UtilitySim:
             delivered_kw=state.last.delivered_kw,
             delivered_kwh=state.last.delivered_kwh,
             delivery_state=state.last.delivery_state,
+            granted_kw=state.last.granted_kw,
+            granted_kwh=state.last.granted_kwh,
         )
 
     def handle_scenario_cmd(self, raw: dict[str, Any]) -> bool:

@@ -330,3 +330,48 @@ def test_channel_registry_refuses_an_unknown_channel_and_needs_credentials(monke
     monkeypatch.delenv("OGSIM_UTILITY_AEN_USER", raising=False)
     with pytest.raises(ChannelError):
         build_channel("customer_api", {"base_url": "https://example.test", "env_code": "AEN"})
+
+
+# --- status shapes: measured (r3.4.3+), measured + deprecated granted, and legacy granted-only ---------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (  # r3.4.3 DELIVERY-VERIFY: measured only
+            {
+                "delivered_kw": -900.0,
+                "delivered_kwh": 3.0,
+                "delivery_state": "IN_PROGRESS",
+                "delivery_measured": True,
+            },
+            (-900.0, 3.0, "IN_PROGRESS", None, None),
+        ),
+        (  # measured plus the deprecated planned figures: both kept, never mixed
+            {
+                "delivered_kw": -900.0,
+                "delivered_kwh": 3.0,
+                "delivery_state": "PASS",
+                "granted_kw": -1000.0,
+                "granted_kwh": 4.0,
+                "delivery_measured": True,
+            },
+            (-900.0, 3.0, "PASS", -1000.0, 4.0),
+        ),
+        (  # r3.4.1-r3.4.2: granted only, unmeasured -- a grant is never reported as delivered
+            {"granted_kw": -1000.0, "granted_kwh": 4.0, "delivery_measured": False},
+            (None, None, "UNMEASURED", -1000.0, 4.0),
+        ),
+    ],
+)
+async def test_customer_api_channel_reads_every_status_shape(body, expected) -> None:
+    transport = FakeTransport(
+        [
+            HttpResult(201, {"call_id": "c1", "outcome": "ACCEPTED", "state": "ACTIVE"}),
+            HttpResult(200, {"call_id": "c1", "outcome": "ACCEPTED", "state": "ACTIVE", **body}),
+        ]
+    )
+    channel = CustomerApiChannel(transport, ("u", "p"))
+    await channel.issue_call(_spec())
+    s = await channel.status("aen-1")
+    assert (s.delivered_kw, s.delivered_kwh, s.delivery_state, s.granted_kw, s.granted_kwh) == expected

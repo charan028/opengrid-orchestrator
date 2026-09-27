@@ -67,8 +67,15 @@ def _result(call_ref: str, http: HttpResult) -> CallResult:
         delivered_kw=body.get("delivered_kw"),
         delivered_kwh=body.get("delivered_kwh"),
         remote_id=body.get("call_id"),
-        delivery_state=body.get("delivery_state"),
+        delivery_state=body.get("delivery_state") or _legacy_state(body),
+        granted_kw=body.get("granted_kw"),
+        granted_kwh=body.get("granted_kwh"),
     )
+
+
+def _legacy_state(body: dict[str, Any]) -> str | None:
+    """A r3.4.1-r3.4.2 status (`granted_*`, `delivery_measured: false`, no `delivery_state`) is UNMEASURED."""
+    return "UNMEASURED" if body.get("delivery_measured") is False else None
 
 
 class CustomerApiChannel:

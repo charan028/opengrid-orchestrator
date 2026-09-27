@@ -60,6 +60,10 @@ class CallResult:
     remote_id: str | None = None
     #: The orchestrator's delivery verdict (IN_PROGRESS, PASS, PARTIAL, FAIL or UNMEASURED), if reported.
     delivery_state: str | None = None
+    #: PLANNED/granted kW and kWh (deprecated granted_* keys from r3.4.1-r3.4.2 orchestrators). Shown next to
+    #: the measured values, never copied into delivered_*: a grant is not a delivery.
+    granted_kw: float | None = None
+    granted_kwh: float | None = None
 
 
 class Channel(Protocol):
