@@ -5,7 +5,8 @@ guardian's own topology adapter (`PgGridTopologyPort`, the read behind ALR-XFMR-
 ALR-BANK-UNMAPPED-TOPOLOGY) finds every hub on a rated transformer and every bank on a feeder. Then the
 production backfill (`--only-missing`) from r3.4's state: only the missing rows, nothing existing rewritten.
 
-Server only: `OG_DB` names a disposable database on the 5433 test cluster (`OG_DB_PORT=5433`)."""
+Server only, 5433 test cluster (`OG_DB_PORT=5433`). Runs in its own fresh database `<OG_DB>_topo` (created,
+migrated and dropped by the module), so it is independent of what other tests leave in `OG_DB`."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -60,10 +62,48 @@ def _unmapped(dsn: str) -> dict[str, int]:
 
 
 @pytest.fixture(scope="module")
-def dsn(server_config, _migrated) -> str:
+def own_config(server_config) -> Iterator[Any]:
+    """Isolation: a database of this module's own (`<OG_DB>_topo`, created fresh and migrated, dropped
+    afterwards), so rows other tests leave in the shared `OG_DB` never reach the global unmapped counts."""
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    from opengrid.platform.config import Config
+    from opengrid.platform.db import build_dsn, migrate_sync
+
+    name = f"{server_config.postgres_database}_topo"
+    params = conninfo_to_dict(build_dsn(server_config))
+    admin = make_conninfo(**{**params, "dbname": "postgres"})
+
+    def _drop() -> None:
+        with psycopg.connect(admin, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+    _drop()
+    with psycopg.connect(admin, autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{name}"')
+    cfg = Config(
+        {
+            "postgres": {
+                "host": server_config.get("postgres.host", "127.0.0.1"),
+                "port": int(server_config.get("postgres.port", 5432)),
+                "database": name,
+                "pool_min": 1,
+                "pool_max": 4,
+            }
+        }
+    )
+    migrate_sync(build_dsn(cfg))
+    try:
+        yield cfg
+    finally:
+        _drop()
+
+
+@pytest.fixture(scope="module")
+def dsn(own_config) -> str:
     from opengrid.platform.db import build_dsn
 
-    return str(build_dsn(server_config))
+    return str(build_dsn(own_config))
 
 
 @pytest.fixture(scope="module")
@@ -72,21 +112,15 @@ def configs(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
 
 
 @pytest.fixture(scope="module")
-def seeded(dsn: str, server_config, configs: tuple[Path, Path]) -> str:
-    """Phase e up to the topology seed: fleet, market model, trucks (a clean slate of topology rows first)."""
+def seeded(dsn: str, own_config, configs: tuple[Path, Path]) -> str:
+    """Phase e up to the topology seed on the fresh database: fleet, market model, trucks."""
     from opengrid.fleet.seed import build_topology, seed_topology
     from opengrid.platform.db import make_pool
 
     fleet, scada = configs
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("UPDATE og.hub SET transformer_id = NULL WHERE transformer_id IS NOT NULL")
-        conn.execute("DELETE FROM og.service_transformer")
-        conn.execute("DELETE FROM og.asset WHERE asset_class = 'HOME_BANK'")
-        conn.execute("DELETE FROM og.feeder_limit WHERE feeder_id <> 'feeder-sub-LZ_AEN-00'")
-        conn.execute("DELETE FROM og.substation_limit WHERE substation_id <> 'sub-LZ_AEN-00'")
 
     async def _fleet() -> None:
-        pool = await make_pool(server_config)
+        pool = await make_pool(own_config)
         try:
             await seed_topology(pool, build_topology(ts.load_fleet_config(fleet, scada)))
         finally:
@@ -105,7 +139,7 @@ def _run_seed(dsn: str, configs: tuple[Path, Path], *extra: str) -> int:
 
 
 def test_fresh_bootstrap_has_zero_unmapped_and_a_clean_guardian_topology(
-    seeded: str, configs: tuple[Path, Path], server_config
+    seeded: str, configs: tuple[Path, Path], own_config
 ) -> None:
     before = _unmapped(seeded)
     assert before["hubs without a service transformer (ALR-XFMR-UNMAPPED)"] == 3500 + 1 + TRUCKS
@@ -149,7 +183,7 @@ def test_fresh_bootstrap_has_zero_unmapped_and_a_clean_guardian_topology(
     from opengrid.platform.db import make_pool
 
     async def _guardian_view() -> tuple[list[str], list[str]]:
-        pool = await make_pool(server_config)
+        pool = await make_pool(own_config)
         try:
             port = PgGridTopologyPort(pool, GuardianConfig(key_path="unused"), {"LZ_AEN": "AUSTIN_ENERGY"})
             unmapped_hubs = []
