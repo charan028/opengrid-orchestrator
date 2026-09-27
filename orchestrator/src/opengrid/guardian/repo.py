@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any, ClassVar, Literal
 from uuid import UUID, uuid4
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core import geo, manual_targets
@@ -126,19 +127,52 @@ SELECT max(created_at) FROM og.stop_event
 WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s AND action = 'ENGAGE'
 """
 
-#: r3.4.3 HIGH-A: every batch this guardian signed recently, with the proposal it signed (the RT_ALLOCATION
-#: trace row G-14 required before signing). `load_signed_anchors` keeps the live-lease setpoints.
+#: r3.4.3 HIGH-A: every batch this guardian signed in the last lease window, with the proposal it signed (the
+#: RT_ALLOCATION pre-image G-14 required before signing). Indexed end to end (prod EXPLAIN ANALYZE 2026-09-27:
+#: 1.6 ms, 377 buffers): the window on ix_trace_class_time, the batch by its primary key (and it must name that
+#: trace as its pre-image), the verdict by ix_verdict_batch. `load_signed_anchors` keeps the live-lease setpoints.
 _SIGNED_ANCHORS_SQL = """
 SELECT v.signed_at, t.payload
-FROM og.verdict v
-JOIN LATERAL (
-    SELECT tr.payload FROM og.trace tr
-    WHERE tr.decision_type = 'RT_ALLOCATION' AND tr.payload ->> 'command_batch_id' = v.command_batch_id::text
-    ORDER BY tr.seq DESC LIMIT 1
-) t ON true
-WHERE v.outcome = 'PASS' AND v.signed_at IS NOT NULL AND v.signed_at > %(since)s
+FROM og.trace t
+JOIN og.command_batch cb
+  ON cb.command_batch_id = (t.payload ->> 'command_batch_id')::uuid AND cb.trace_pre_image_id = t.trace_id
+JOIN og.verdict v ON v.command_batch_id = cb.command_batch_id
+WHERE t.event_class = 'RT_ALLOCATION' AND t.created_at > %(since)s
+  AND v.outcome = 'PASS' AND v.signed_at > %(since)s {published}
 ORDER BY v.signed_at
 """
+#: og.verdict.published_at (additive migration, agreed with DISPATCH): stamped once the signed batch is published;
+#: "signed" for G-04's anchor on both sides means PASS AND published. Absent on an older schema.
+_VERDICT_PUBLISHED_COLUMN_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'og' AND table_name = 'verdict' AND column_name = 'published_at'
+)
+"""
+_MARK_VERDICT_PUBLISHED_SQL = """
+UPDATE og.verdict SET published_at = now() WHERE command_batch_id = %(command_batch_id)s AND published_at IS NULL
+"""
+_published_column_missing = False
+
+
+async def mark_verdict_published(pool: AsyncConnectionPool, command_batch_id: UUID) -> None:
+    """Stamp og.verdict.published_at once the signed batch is published (the engine's and the startup reload's
+    signal that it became G-04's anchor). Never raises; on a schema without the column it stops trying."""
+    global _published_column_missing
+    if _published_column_missing:
+        return
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_MARK_VERDICT_PUBLISHED_SQL, {"command_batch_id": command_batch_id})
+    except psycopg.errors.UndefinedColumn:
+        _published_column_missing = True
+        logger.warning("og.verdict.published_at not migrated yet: publish stamps skipped")
+    except Exception:
+        logger.exception("failed to stamp og.verdict.published_at", extra={"batch": str(command_batch_id)})
+
+
+#: The reload never delays startup by more than this: on timeout G-04 starts on telemetry (DISPATCH contract).
+SIGNED_ANCHORS_TIMEOUT_MS = 2000
 
 _PROPOSAL_SQL = """
 SELECT payload FROM og.trace
@@ -648,16 +682,25 @@ def _trace_payload_to_proposal(payload: dict[str, Any]) -> ProposedBatch:
 
 
 async def load_signed_anchors(
-    pool: AsyncConnectionPool, *, now: datetime, lookback_s: float = 300.0
+    pool: AsyncConnectionPool,
+    *,
+    now: datetime,
+    lookback_s: float = 60.0,
+    timeout_ms: int = SIGNED_ANCHORS_TIMEOUT_MS,
 ) -> dict[str, tuple[float, datetime, datetime]]:
     """r3.4.3 HIGH-A: G-04's signed anchors after a guardian restart -- per hub, the net setpoint of the LATEST
-    batch this guardian signed (og.verdict PASS, its proposal from the RT_ALLOCATION trace) whose lease is still
-    live at `now`: `(setpoint_kw, signed_at, lease_expires_at)`, the shape `GuardianService._last_signed` keeps.
-    `lookback_s` only bounds the scan (a lease is seconds long); a batch whose lease has lapsed contributes
-    nothing. A later signature for a hub replaces an earlier one, even if the later lease is shorter."""
+    batch this guardian signed (og.verdict PASS, its proposal from the RT_ALLOCATION pre-image) whose lease is
+    still live at `now`: `(setpoint_kw, signed_at, lease_expires_at)`, the shape `GuardianService._last_signed`
+    keeps. `lookback_s` is the last lease window (2x the 30 s lease cap): an older signature's lease has lapsed.
+    A later signature for a hub replaces an earlier one. Read-only, under a `timeout_ms` statement timeout (the
+    caller falls back to telemetry anchors when it raises)."""
     since = datetime.fromtimestamp(now.timestamp() - lookback_s, tz=UTC)
-    async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_SIGNED_ANCHORS_SQL, {"since": since})
+    async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        await cur.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
+        await cur.execute(_VERDICT_PUBLISHED_COLUMN_SQL)
+        has_column = await cur.fetchone()
+        published = "AND v.published_at IS NOT NULL" if has_column is not None and has_column[0] else ""
+        await cur.execute(_SIGNED_ANCHORS_SQL.format(published=published), {"since": since})
         rows = await cur.fetchall()
     anchors: dict[str, tuple[float, datetime, datetime]] = {}
     for signed_at, payload in rows:  # oldest first: the latest signature per hub wins
@@ -1056,6 +1099,13 @@ WHERE t.event_class = 'GUARDIAN_VERDICT'
   AND t.created_at > now() - make_interval(secs => %(max_age_s)s)
   AND t.payload ->> 'kind' = 'STOP_RELEASE' AND t.payload ->> 'outcome' = 'SIGNED'
   AND NOT EXISTS (SELECT 1 FROM og.stop_event s WHERE s.signature = ev ->> 'signature')
+  -- og-safestop refused it as superseded by a newer ENGAGE (r3.4.2 review L-1): re-handing it can never help;
+  -- the operators re-issue the two-person release (ALR-STOP-RELEASE-SUPERSEDED)
+  AND NOT EXISTS (
+      SELECT 1 FROM og.trace r
+      WHERE r.event_class = 'SAFE_STOP' AND r.created_at > now() - make_interval(secs => %(max_age_s)s)
+        AND r.payload ->> 'superseded_signature' = ev ->> 'signature'
+  )
 ORDER BY t.created_at
 """
 

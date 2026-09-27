@@ -139,3 +139,38 @@ async def test_h5_atomic_write_priority_dead_letter_and_l2_record(pool):
                 "DELETE FROM og.alert WHERE rule = %s AND detail ->> 'stop_id' = %s",
                 ("ALR-STOP-PUBLISH-DEAD-LETTER", str(engage_id)),
             )
+
+
+async def test_l1_newest_engage_time_and_the_superseded_release_alert(pool):
+    """r3.4.2 review L-1 against the real schema: the newest ENGAGE time per scope, the once-while-open
+    ALR-STOP-RELEASE-SUPERSEDED alert, and the guardian's re-hand query that skips a superseded release."""
+    from datetime import UTC, datetime
+
+    from opengrid.guardian.repo import PgStopReleasePort
+    from opengrid.safestop.backend import StopEventRow
+    from opengrid.safestop.pg_backend import SUPERSEDED_RELEASE_ALERT_RULE
+
+    backend = PgStopEventBackend(pool)
+    bank, engage_id, signature = f"bank-l1-{uuid4().hex[:6]}", uuid4(), f"sig-{uuid4().hex}"
+    row = StopEventRow(engage_id, "BANK", bank, "ENGAGE", "UTILITY", "utility:it", "x", None, uuid4().hex)
+    try:
+        assert await backend.latest_engage_at("BANK", bank) is None
+        await backend.record_and_enqueue(
+            row, stop_id=engage_id, topic_suffix=f"stop/bank/{bank}/{engage_id}", payload={}
+        )
+        engaged = await backend.latest_engage_at("BANK", bank)
+        assert engaged is not None and engaged <= datetime.now(UTC)
+        kwargs = {"scope_kind": "BANK", "scope_ref": bank, "stop_id": engage_id, "signature": signature}
+        assert await backend.raise_superseded_release_alert(**kwargs, engage_at=engaged) is True
+        assert (
+            await backend.raise_superseded_release_alert(**kwargs, engage_at=engaged) is False
+        )  # once while open
+        assert isinstance(await PgStopReleasePort(pool).unpublished_release_events(max_age_s=60.0), list)
+    finally:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("DELETE FROM og.stop_outbox WHERE stop_id = %s", (engage_id,))
+            await cur.execute("DELETE FROM og.stop_event WHERE stop_event_id = %s", (engage_id,))
+            await cur.execute(
+                "DELETE FROM og.alert WHERE rule = %s AND detail ->> 'stop_id' = %s",
+                (SUPERSEDED_RELEASE_ALERT_RULE, str(engage_id)),
+            )

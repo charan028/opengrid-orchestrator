@@ -61,6 +61,7 @@ from opengrid.guardian.repo import (
     load_hub_params,
     load_signed_anchors,
     load_zones_by_bank,
+    mark_verdict_published,
 )
 from opengrid.guardian.service import GuardianService
 from opengrid.platform.config import Config, load_config, resolve_secret
@@ -149,6 +150,8 @@ async def _publish_signed_batch(
     """On a PASS verdict, publish the signed command batch and renew the bank's hub leases."""
     batch = build_signed_batch(service, key_id=key_id, proposal=proposal)
     await publish_command_batch(mqtt_client, cfg, batch)
+    # only a published batch moves G-04's signed anchors (a failed publish raised above: the hubs never got it)
+    service.confirm_published(proposal.command_batch_id)
     for item in proposal.items:
         lease = Lease(
             hub_id=item.hub_id,
@@ -425,7 +428,9 @@ async def main() -> None:
     # r3.4.3 HIGH-A: G-04's signed anchors survive a restart (live leases only). A failed read starts on
     # telemetry, which the engine also falls back to after the first veto (DISPATCH contract).
     try:
-        service.seed_signed_anchors(await load_signed_anchors(pool, now=datetime.now(UTC)))
+        # bounded twice: a 2 s statement timeout in the query, and this wall-clock limit around the whole read
+        anchors = await asyncio.wait_for(load_signed_anchors(pool, now=datetime.now(UTC)), timeout=2.5)
+        service.seed_signed_anchors(anchors)
     except Exception:
         logger.exception("signed-anchor reload failed: G-04 starts on telemetry")
     guardian_module.configure(service)
@@ -481,6 +486,8 @@ async def main() -> None:
                 key_id=guardian_cfg.key_id,
                 proposal=proposal,
             )
+            # published: the engine and the startup reload may now anchor on it (DISPATCH contract)
+            await mark_verdict_published(pool, batch.command_batch_id)
         if ports.pq is not None:
             # Isolated from batch signing: a calibration-path failure (e.g. og.calibration_attempt
             # not yet migrated) must never stop the guardian signing or holding dispatch (K7).
