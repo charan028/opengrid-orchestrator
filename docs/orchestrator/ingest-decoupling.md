@@ -1,6 +1,6 @@
 # Telemetry ingest decoupling
 
-Owner: DISPATCH. Status: step 1 is implemented (r3.4.4). Step 2 is a design only, not scheduled.
+Owner: DISPATCH. Status: step 1 is implemented behind `[ingest].telemetry_decoupled`, default OFF (deferred to r3.4.5: it is enabled after the workstation r3.4.3 perf before/after and a dev-stack test). Step 2 is a design only, not scheduled.
 
 ## Why
 
@@ -14,7 +14,7 @@ og-engine used to run everything that touches telemetry on its single asyncio lo
 
 The 2 s dispatch tick runs on that same loop. At fleet scale (7,500 hubs, 2–10 s telemetry each), decode and validation were the largest share of loop time outside the tick. A telemetry burst delayed the tick, and a slow tick delayed telemetry. That is the loop-lag coupling behind r3.4.1's 4–5 s event-loop stalls.
 
-## Step 1: parser thread and a latest-value buffer (r3.4.4, `engine/telemetry_ingest.py`)
+## Step 1: parser thread and a latest-value buffer (`engine/telemetry_ingest.py`, default OFF)
 
 ```
 MQTT loop ──submit(raw bytes)──► bounded raw deque ──► parser thread
@@ -40,7 +40,8 @@ MQTT loop ──submit(raw bytes)──► bounded raw deque ──► parser th
 - **Applier.** Every `apply_interval_s` (default 0.1 s) it swaps the buffer out and applies each hub's sample through `fleet.apply_telemetry`. It feeds the ingest-lag metric and yields every 500 samples.
 - **CPU.** Total work is unchanged: the same decode, validation and parse, now on another thread. Coalescing only removes duplicates within 100 ms. The GIL still serialises Python bytecode, but the loop no longer waits behind a burst.
 - **Latency.** At most one apply interval (100 ms) is added to a sample. Telemetry is 2–10 s, and G-04 anchors, K13 and eligibility all work at second scale.
-- **Switch.** `[ingest].telemetry_decoupled` defaults to true; false restores the pre-r3.4.4 inline path. The tunables are `[ingest].telemetry_raw_max`, `telemetry_max_hubs` and `telemetry_apply_interval_s`.
+- **Switch.** `[ingest].telemetry_decoupled` defaults to false, which keeps the inline path; true enables the decoupled path. The tunables are `[ingest].telemetry_raw_max`, `telemetry_max_hubs` and `telemetry_apply_interval_s`.
+- **Equivalence.** `tests/unit/fleet/test_telemetry_paths_equivalence.py` runs one in-order stream through both paths. The twin runtime state, the hub capability snapshots and the persisted telemetry rows are identical. For a burst of samples inside one apply interval, the twin is still identical; only the superseded intermediate rows are not persisted.
 - **Tests.** `tests/unit/engine/test_telemetry_ingest.py` covers:
   - newest-wins regardless of arrival order;
   - no rollback after apply;

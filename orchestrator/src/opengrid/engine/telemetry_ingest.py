@@ -1,4 +1,4 @@
-"""Telemetry ingest decoupling, step 1 (r3.4.4): parse and validate hub telemetry OFF the event loop.
+"""Telemetry ingest decoupling, step 1 (r3.4.5, behind `[ingest].telemetry_decoupled`, default OFF): parse and validate hub telemetry OFF the event loop.
 
 Until r3.4.3 every `<root>/tel/#` message was JSON-decoded, schema-validated (jsonschema) and parsed (pydantic)
 on the engine's asyncio loop, inline in the MQTT ingest loop -- at fleet scale the single largest share of

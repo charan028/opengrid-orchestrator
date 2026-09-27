@@ -160,12 +160,13 @@ async def test_run_applier_applies_about_every_interval() -> None:
         task.cancel()
 
 
-def test_the_switch_turns_the_inline_path_back_on() -> None:
+def test_the_switch_is_off_by_default_and_turns_the_decoupled_path_on() -> None:
     from opengrid.engine import build_telemetry_decoupler
     from opengrid.platform.config import Config
 
+    assert build_telemetry_decoupler(Config({})) is None  # default OFF: the inline path (r3.4.5 gate)
     assert build_telemetry_decoupler(Config({"ingest": {"telemetry_decoupled": False}})) is None
-    d = build_telemetry_decoupler(Config({}))
+    d = build_telemetry_decoupler(Config({"ingest": {"telemetry_decoupled": True}}))
     try:
         assert d is not None and d.apply_interval_s == pytest.approx(0.1)
     finally:

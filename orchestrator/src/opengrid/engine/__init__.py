@@ -1750,10 +1750,10 @@ async def main(cfg: Config) -> None:
 
 def build_telemetry_decoupler(cfg: Config) -> TelemetryDecoupler | None:
     """Telemetry ingest decoupling step 1 (`engine.telemetry_ingest`), `[ingest].telemetry_decoupled`
-    (default true; false = the pre-r3.4.4 inline path). The parser thread is started here."""
+    (default FALSE until the r3.4.5 perf before/after and dev-stack test: the inline path stays the default). The parser thread is started here."""
     from opengrid import fleet
 
-    if not bool(cfg.get("ingest.telemetry_decoupled", True)):
+    if not bool(cfg.get("ingest.telemetry_decoupled", False)):
         return None
 
     async def _apply(telemetry: Any) -> None:
