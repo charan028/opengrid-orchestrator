@@ -442,7 +442,7 @@ async def call_status(
 
 
 async def status_of(store: CallStore, record: CallRecord, *, limits: CallLimits, now: datetime) -> CallStatus:
-    """ "Status of a record. `limits` (the RAMPING threshold) is kept in the signature for r3.4.2's measured
+    """Status of a record. `limits` (the RAMPING threshold) is kept in the signature for r3.4.2's measured
     RAMPING/DELIVERING; in r3.4.1 a running call is ACTIVE with delivery UNMEASURED."""
     if record.outcome is CallOutcome.REFUSED or record.obligation_id is None:
         return CallStatus(call=record, state=CallState.REFUSED, granted_kw=None, granted_kwh=None, as_of=now)
