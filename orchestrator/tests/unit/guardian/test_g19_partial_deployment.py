@@ -69,24 +69,40 @@ class _ObligationWidePrior:
 
 
 def _world(
-    fakes, config, seed, reserved: dict[str, Decimal], *, service_type="ERCOT_AS", requested=REQUESTED_KW
+    fakes,
+    config,
+    seed,
+    reserved: dict[str, Decimal],
+    *,
+    service_type="ERCOT_AS",
+    requested=REQUESTED_KW,
+    deployed: bool = True,
 ):
     obligation_id = uuid4()
     service = service_with(fakes, config, seed)
     service.ports = replace(
         fakes.as_ports(),
         commitments=_Commitments(obligation_id, reserved),
-        as_awards=_Awards(service_type, deployed=True, requested=requested),
+        as_awards=_Awards(service_type, deployed=deployed, requested=requested),
     )
     return service, obligation_id
 
 
-async def _judge(fakes, service, obligation_id: UUID, bank_id: str, granted: Decimal, cycle: int, seq: int):
+async def _judge(
+    fakes,
+    service,
+    obligation_id: UUID,
+    bank_id: str,
+    granted: Decimal,
+    cycle: int,
+    seq: int,
+    reason: str = "R-GRANT-COMMITTED",
+):
     proposal = replace(
         make_proposal(bank_id=bank_id, seq=seq, obligation_id=obligation_id, obligation_granted_kw=granted,
-                      reason_code="R-GRANT-COMMITTED", p_kw_setpoint=-3.0),
+                      reason_code=reason, p_kw_setpoint=-3.0),
         cycle_id=f"cycle-{cycle}",
-        items=[ProposedItem("hub-" + bank_id, -3.0, "R-GRANT-COMMITTED", obligation_id, granted)],
+        items=[ProposedItem("hub-" + bank_id, -3.0, reason, obligation_id, granted)],
     )  # fmt: skip
     wire_default_passing_scenario(fakes, proposal)
     fakes.commitments.active_by_bank.pop(bank_id, None)  # the per-bank _Commitments fake is the read
@@ -172,3 +188,81 @@ async def test_the_prior_grant_read_is_this_banks_previous_cycle():
     sql, params = cursor.executed[0]
     assert "bank_id::text = %(bank_id)s" in sql and "cycle_id <> %(cycle_id)s" in sql
     assert params == {"obligation_id": obligation_id, "bank_id": "bank-034", "cycle_id": "cycle-9"}
+
+
+# --- the lead's regression set (r3.4.4 live, toll-critical) ------------------------------------------------------
+
+LIVE_RESERVED = {"bank-027": Decimal("250.707"), "bank-034": Decimal("249.293")}
+LIVE_SHARES = {"bank-027": Decimal("150.424"), "bank-034": Decimal("149.576")}
+
+
+@pytest.mark.parametrize("reason", ["R-GRANT-COMMITTED", "R-AS-PARTIAL-DEPLOYMENT"])
+async def test_the_live_two_bank_partial_ecrs_passes_every_cycle(
+    fakes, guardian_config, signing_seed, reason
+):
+    """300 of 500 kW on bank-027/bank-034 with exactly the live 150.424/149.576 split, untagged or tagged."""
+    service, obligation_id = _world(fakes, guardian_config, signing_seed, LIVE_RESERVED)
+    for bank in LIVE_RESERVED:
+        fakes.prior_grants.by_bank[(obligation_id, bank)] = Decimal(0)
+    seq = 0
+    for cycle in range(1, 21):
+        for bank, share in LIVE_SHARES.items():
+            seq += 1
+            verdict = await _judge(fakes, service, obligation_id, bank, share, cycle, seq, reason)
+            assert verdict.outcome == "PASS", (cycle, bank, verdict.vetoed_rule_ids)
+        for bank, share in LIVE_SHARES.items():
+            fakes.prior_grants.by_bank[(obligation_id, bank)] = share
+
+
+@pytest.mark.parametrize("reason", ["R-GRANT-COMMITTED", "R-AS-PARTIAL-DEPLOYMENT"])
+async def test_a_real_under_delivery_of_the_partial_call_is_still_vetoed(
+    fakes, guardian_config, signing_seed, reason
+):
+    service, obligation_id = _world(fakes, guardian_config, signing_seed, LIVE_RESERVED)
+    fakes.prior_grants.by_bank[(obligation_id, "bank-034")] = LIVE_SHARES["bank-034"]
+    verdict = await _judge(fakes, service, obligation_id, "bank-034", Decimal("120"), 2, 1, reason)
+    assert "G-19" in verdict.vetoed_rule_ids
+
+
+@pytest.mark.parametrize("reason", ["R-GRANT-COMMITTED", "R-AS-PARTIAL-DEPLOYMENT"])
+async def test_a_partial_toll_call_on_the_single_substation_bank_passes(
+    fakes, guardian_config, signing_seed, reason
+):
+    """The 16:45 AE sim call: -20 MW against the toll's larger commitment, on its one substation bank, from the
+    0 kW hold (and also with no prior grant on the bank at all)."""
+    reserved = {"bank-sub-LZ_AEN-00": Decimal("20408")}
+    service, obligation_id = _world(
+        fakes,
+        guardian_config,
+        signing_seed,
+        reserved,
+        service_type="REGULATED_CAPACITY",
+        requested=Decimal("20000"),
+    )
+    verdict = await _judge(
+        fakes, service, obligation_id, "bank-sub-LZ_AEN-00", Decimal("20000"), 1, 1, reason
+    )
+    assert verdict.outcome == "PASS", verdict.vetoed_rule_ids
+    fakes.prior_grants.by_bank[(obligation_id, "bank-sub-LZ_AEN-00")] = Decimal(0)
+    verdict = await _judge(
+        fakes, service, obligation_id, "bank-sub-LZ_AEN-00", Decimal("20000"), 2, 2, reason
+    )
+    assert verdict.outcome == "PASS", verdict.vetoed_rule_ids
+
+
+async def test_the_partial_tag_without_a_deployment_is_vetoed(fakes, guardian_config, signing_seed):
+    service, obligation_id = _world(fakes, guardian_config, signing_seed, LIVE_RESERVED, deployed=False)
+    verdict = await _judge(
+        fakes, service, obligation_id, "bank-034", LIVE_SHARES["bank-034"], 1, 1, "R-AS-PARTIAL-DEPLOYMENT"
+    )
+    assert "G-19" in verdict.vetoed_rule_ids
+    assert {v["reason"] for v in fakes.trace.appended[-1][1]["violations"]} == {
+        "AS_PARTIAL_DEPLOYMENT_UNVERIFIED"
+    }
+
+
+async def test_the_share_allows_the_grant_tables_rounding(fakes, guardian_config, signing_seed):
+    """og.grant keeps 3 decimals: a share rounded down by 0.0005 kW is not a lock dip."""
+    service, obligation_id = _world(fakes, guardian_config, signing_seed, {"bank-035": AWARD_KW})
+    verdict = await _judge(fakes, service, obligation_id, "bank-035", Decimal("299.9995"), 1, 1)
+    assert verdict.outcome == "PASS"
