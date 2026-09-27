@@ -21,7 +21,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, NamedTuple, Protocol, cast
 
 from prometheus_client import Counter
@@ -214,6 +214,77 @@ _pending_scada: dict[
 _pending_acks: list[Ack] = []  # hub acknowledgements not yet written, for `flush`
 _utility_instructions: dict[str, ScadaUtilityInstruction] = {}
 
+# Per-hub memo of the pure per-hub derivations the 2 s cycle reads for every hub, several times per cycle
+# (`capability` and `hub_capabilities` per bank, the ledger and energy-sufficiency reads): the capability
+# (`hub_capability(soc, params)`) and the snapshot. An entry is reused only when every input it was built
+# from is the very same object as now (`is`, so an equal-but-different value always recomputes): telemetry
+# ingest and topology loads assign new objects, never mutate them in place. Health is still classified on
+# every call (it depends on the clock) and is part of the snapshot's key. Cleared on `configure`/
+# `load_topology` (topology change); stale entries of removed hubs are dropped with them.
+_capability_memo: dict[str, tuple[float, HubParams, tuple[float, float]]] = {}
+_snapshot_memo: dict[str, tuple[tuple[object, ...], HubCapabilitySnapshot]] = {}
+#: hub_id -> (fault_code, last_seen_at, valid_from, valid_to, classification): the hub's health over an interval
+#: of instants, see `_classify`.
+_health_memo: dict[str, tuple[str | None, datetime | None, datetime, datetime, HubHealth]] = {}
+#: How far ahead `_classify` probes the one classifier (one telemetry interval at the production 10 s).
+_HEALTH_PROBE = timedelta(seconds=10)
+
+
+def _classify(runtime: _HubRuntime, now: datetime) -> HubHealth:
+    """`classify_hub_health` for one hub at `now` -- the one classifier's answer, without re-running it on
+    every read. For fixed inputs (`fault_code`, `last_seen_at`, the thresholds) the classifier is a step
+    function of `now` whose classes are contiguous intervals (fault: always; else online, then stale, then
+    offline as the age grows past each threshold -- `health.rules.classify_hub_health`, `is_stale`). So when it
+    gives the same class at two instants it gives that class at every instant between them: a hub classified
+    at `now` and at `now + _HEALTH_PROBE` alike keeps that class for any read in between, until telemetry
+    (new `last_seen_at`/`fault_code` objects) or `configure` (new thresholds, memo cleared) changes an input.
+    Exact by construction: the answer is always the classifier's own. `test_fleet_health_memo.py` pins the
+    contiguity this relies on."""
+    fault_code, last_seen_at = runtime.fault_code, runtime.last_seen_at
+    entry = _health_memo.get(runtime.hub_id)
+    if (
+        entry is not None
+        and entry[0] is fault_code
+        and entry[1] is last_seen_at
+        and entry[2] <= now <= entry[3]
+    ):
+        return entry[4]
+    classification = classify_hub_health(
+        fault_code=fault_code, last_seen_at=last_seen_at, now=now, thresholds=_thresholds
+    )
+    probe = now + _HEALTH_PROBE
+    same_later = (
+        classify_hub_health(
+            fault_code=fault_code, last_seen_at=last_seen_at, now=probe, thresholds=_thresholds
+        )
+        == classification
+    )
+    _health_memo[runtime.hub_id] = (
+        fault_code,
+        last_seen_at,
+        now,
+        probe if same_later else now,
+        classification,
+    )
+    return classification
+
+
+def _hub_capability_memo(runtime: _HubRuntime) -> tuple[float, float]:
+    """`hub_capability(runtime.soc_kwh, runtime.params)`, reused while both inputs are unchanged."""
+    soc, params = runtime.soc_kwh, runtime.params
+    entry = _capability_memo.get(runtime.hub_id)
+    if entry is not None and entry[0] is soc and entry[1] is params:
+        return entry[2]
+    result = hub_capability(soc, params)
+    _capability_memo[runtime.hub_id] = (soc, params, result)
+    return result
+
+
+def _clear_memos() -> None:
+    _capability_memo.clear()
+    _snapshot_memo.clear()
+    _health_memo.clear()
+
 
 def configure(backend: FleetBackend, cfg: Config) -> None:
     """Wire the twin to its storage backend and read its two health thresholds from config
@@ -236,6 +307,7 @@ def configure(backend: FleetBackend, cfg: Config) -> None:
     _pending_scada.clear()
     _pending_acks.clear()
     _utility_instructions.clear()
+    _clear_memos()
 
 
 def _require_backend() -> FleetBackend:
@@ -294,6 +366,7 @@ async def load_topology() -> None:
     _banks.update(banks_by_id)
     _hubs.clear()
     _hubs.update(hubs_by_id)
+    _clear_memos()
     logger.info("fleet topology loaded", extra={"hubs": len(_hubs), "banks": len(_banks)})
 
 
@@ -529,11 +602,16 @@ def _active_utility_limit_kw(bank_id: str, *, now: datetime) -> float | None:
     return None
 
 
-async def capability(bank_id: str, interval_start: datetime) -> AvailableCapability:
+async def capability(
+    bank_id: str, interval_start: datetime, *, now: datetime | None = None
+) -> AvailableCapability:
     """The single entry point `selector`/`allocator` call for a bank's capability at an interval
     (02b S4 interface). Derives its numbers from `opengrid.core.physics.hub_capability`/
     `bank_capability` applied to the latest `hub_state` rows, excluding hubs marked stale/offline/fault,
     and folds in any active L2 utility instruction (K5) as a hard ceiling.
+
+    `now`: the instant hub health and instructions are judged at (default: the current time); a caller
+    reading several views of the same bank passes one instant so they agree.
 
     Raises `LookupError` if `bank_id` is not a known bank.
     """
@@ -541,23 +619,18 @@ async def capability(bank_id: str, interval_start: datetime) -> AvailableCapabil
     if bank_rt is None:
         raise LookupError(f"unknown bank_id: {bank_id}")
 
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     excluded: set[str] = set()
     discharge_kw: list[float] = []
     charge_kw = 0.0
 
     for hub_id in bank_rt.hub_ids:
         runtime = _hubs[hub_id]
-        classification = classify_hub_health(
-            fault_code=runtime.fault_code,
-            last_seen_at=runtime.last_seen_at,
-            now=now,
-            thresholds=_thresholds,
-        )
+        classification = _classify(runtime, now)
         if classification != "online":
             excluded.add(hub_id)
             continue
-        d_kw, c_kw = hub_capability(runtime.soc_kwh, runtime.params)
+        d_kw, c_kw = _hub_capability_memo(runtime)
         discharge_kw.append(d_kw)
         charge_kw += c_kw
 
@@ -623,7 +696,7 @@ def bank_zone(bank_id: str) -> str:
     return bank_rt.zone
 
 
-def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
+def hub_capabilities(bank_id: str, *, now: datetime | None = None) -> list[HubCapabilitySnapshot]:
     """Per-hub eligibility snapshot for every hub on `bank_id` (merge task A3): the hub-level detail
     `capability()`'s bank-aggregate return throws away, needed so `opengrid.engine` can build the
     allocator's `HubSnapshot` sequence for its 2 s water-filling cycle (`opengrid.allocator.cycle`,
@@ -632,57 +705,68 @@ def hub_capabilities(bank_id: str) -> list[HubCapabilitySnapshot]:
 
     A hub excluded this instant (stale/offline/fault) is still returned, with `free_discharge_kw=0.0`,
     so the allocator can report *why* a hub got nothing (health) rather than seeing it silently vanish
-    from the bank's roster. Raises `LookupError` if `bank_id` is not a known bank.
+    from the bank's roster. `now` as in `capability`. Raises `LookupError` if `bank_id` is not a known bank.
     """
     bank_rt = _banks.get(bank_id)
     if bank_rt is None:
         raise LookupError(f"unknown bank_id: {bank_id}")
 
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     snapshots: list[HubCapabilitySnapshot] = []
     for hub_id in bank_rt.hub_ids:
         runtime = _hubs[hub_id]
-        classification = classify_hub_health(
-            fault_code=runtime.fault_code,
-            last_seen_at=runtime.last_seen_at,
-            now=now,
-            thresholds=_thresholds,
-        )
+        classification = _classify(runtime, now)
+        # Strings compare by value, every other input by identity (see `_snapshot_memo`).
+        key = (runtime.soc_kwh, runtime.p_kw, runtime.last_seen_at, runtime.flow, runtime.params)
+        memo = _snapshot_memo.get(hub_id)
+        if memo is not None:
+            k, cached = memo
+            if (
+                k[0] is key[0]
+                and k[1] is key[1]
+                and k[2] is key[2]
+                and k[3] is key[3]
+                and k[4] is key[4]
+                and cached.bank_id == bank_id
+                and cached.health == classification
+            ):
+                snapshots.append(cached)
+                continue
         free_discharge_kw = 0.0
         soc_kwh: float | None = None
         reserve_kwh: float | None = None
         e_kwh: float | None = None
         p_kw: float | None = None
         if classification == "online":
-            free_discharge_kw, _charge_kw = hub_capability(runtime.soc_kwh, runtime.params)
+            free_discharge_kw, _charge_kw = _hub_capability_memo(runtime)
             soc_kwh = runtime.soc_kwh
             reserve_kwh = runtime.params.r_kwh
             e_kwh = runtime.params.e_kwh
             p_kw = runtime.p_kw
         flow = runtime.flow if classification == "online" else {}
-        snapshots.append(
-            HubCapabilitySnapshot(
-                hub_id=hub_id,
-                bank_id=bank_id,
-                free_discharge_kw=free_discharge_kw,
-                health=classification,
-                last_seen_at=runtime.last_seen_at,
-                soc_kwh=soc_kwh,
-                reserve_kwh=reserve_kwh,
-                e_kwh=e_kwh,
-                eta_d=runtime.params.eta_d,
-                p_kw=p_kw,
-                ramp_kw_per_s=hub_ramp_kw_per_s(runtime.params),
-                rated_kw=runtime.params.p_kw,
-                home_load_kw=flow.get("home_load_kw"),
-                pv_kw=flow.get("pv_kw"),
-                meter_kw=flow.get("meter_kw"),
-                cell_temp_c=flow.get("cell_temp_c"),
-                p_dis_max_kw=flow.get("p_dis_max_kw"),
-                p_ch_max_kw=flow.get("p_ch_max_kw"),
-                peak_power_budget_kws=flow.get("peak_power_budget_kws"),
-                units=runtime.params.units,
-                utility_scale=runtime.params.utility_scale,
-            )
+        snapshot = HubCapabilitySnapshot(
+            hub_id=hub_id,
+            bank_id=bank_id,
+            free_discharge_kw=free_discharge_kw,
+            health=classification,
+            last_seen_at=runtime.last_seen_at,
+            soc_kwh=soc_kwh,
+            reserve_kwh=reserve_kwh,
+            e_kwh=e_kwh,
+            eta_d=runtime.params.eta_d,
+            p_kw=p_kw,
+            ramp_kw_per_s=hub_ramp_kw_per_s(runtime.params),
+            rated_kw=runtime.params.p_kw,
+            home_load_kw=flow.get("home_load_kw"),
+            pv_kw=flow.get("pv_kw"),
+            meter_kw=flow.get("meter_kw"),
+            cell_temp_c=flow.get("cell_temp_c"),
+            p_dis_max_kw=flow.get("p_dis_max_kw"),
+            p_ch_max_kw=flow.get("p_ch_max_kw"),
+            peak_power_budget_kws=flow.get("peak_power_budget_kws"),
+            units=runtime.params.units,
+            utility_scale=runtime.params.utility_scale,
         )
+        _snapshot_memo[hub_id] = (key, snapshot)
+        snapshots.append(snapshot)
     return snapshots
