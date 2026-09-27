@@ -269,3 +269,34 @@ async def test_run_cycle_can_re_solve_only_the_vetoed_banks() -> None:
         only_bank_ids=["b2"],
     )
     assert [g.bank_id for g in grants] == ["b2"]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_keeps_the_original_cycle_id_with_distinct_grant_ids() -> None:
+    """H3: K13 accounting sees one cycle; grant ids never collide with the first attempt's."""
+    from opengrid.allocator import grant_key
+
+    hub = HubSnapshot(
+        hub_id="h1", bank_id="b1", free_discharge_kw=50.0, soc_kwh=1e6, reserve_kwh=0.0, e_kwh=1e6
+    )
+    fleet = FakeFleetGateway(
+        FleetState(hubs=(hub,), banks=(BankSnapshot("b1", 50.0, kva_rating=50.0),)), ("b1",)
+    )
+    call = ObligationCall("o1", "b1", "PARTNER_CAPACITY", "T1", 10.0, ("h1",))
+
+    class _Ledger(FakeLedgerGateway):
+        def __init__(self, view):
+            super().__init__(view)
+            self.attempts: list[int] = []
+
+        async def persist_grants(self, cycle_id, grants, attempt=0):
+            self.attempts.append(attempt)
+            await super().persist_grants(cycle_id, grants)
+
+    ledger = _Ledger(LedgerView(calls=(call,)))
+    first = await run_cycle("c9", fleet=fleet, ledger=ledger, now=_T0)
+    retry = await run_cycle("c9", fleet=fleet, ledger=ledger, now=_T0, only_bank_ids=["b1"], attempt=1)
+    assert first[0].cycle_id == retry[0].cycle_id == "c9"
+    assert first[0].grant_id != retry[0].grant_id
+    assert ledger.attempts == [0, 1]
+    assert grant_key("c9", ledger.persisted[0], 1).endswith(":r1")
