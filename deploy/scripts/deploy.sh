@@ -42,6 +42,41 @@ fi
 mkdir -p "$RELEASES" /var/log/opengrid
 ts() { date -Is; }
 
+ensure_runtime_dirs() {  # directories the og-* units write to (ReadWritePaths); idempotent
+  install -d -o opengrid -g opengrid -m 750 /var/lib/opengrid /var/lib/opengrid/anchors /var/log/opengrid
+  if [ -d /srv/ogbackup ]; then
+    install -d -o opengrid -g opengrid -m 750 /srv/ogbackup/anchors /srv/ogbackup/cold
+  else
+    echo "$(ts) NOTE: /srv/ogbackup missing; anchors publish to /var/lib/opengrid/anchors only" | tee -a "$LOG"
+  fi
+}
+
+# Every unit the two targets pull in must be active AND every og-* process must write a heartbeat newer than
+# the restart; og-api's /health alone missed a unit that failed to start (review 2026-09-26).
+HEARTBEAT_PROCESSES="api engine feeds guardian safestop settle"
+post_restart_check() {  # $1 = restart timestamp (ISO); returns non-zero on failure (-> ERR trap -> rollback)
+  local since="$1" units unit bad hb
+  units="$(systemctl list-dependencies --plain --no-legend opengrid.target ogsim.target 2>/dev/null \
+           | awk '{print $1}' | grep -E '^og-.*\.service$' | sort -u | tr '\n' ' ')"
+  for _ in $(seq 1 30); do
+    bad=""
+    for unit in $units; do systemctl is-active --quiet "$unit" || bad="$bad $unit"; done
+    hb="$(runuser -u opengrid -- bash -c '
+      set -a; . /etc/opengrid/secrets.env; set +a
+      PGPASSWORD="$OG_DB_PASSWORD" psql -h 127.0.0.1 -U opengrid -d og -At -c "
+        SELECT count(DISTINCT process) FROM og.heartbeat WHERE ts > '"'$since'"'::timestamptz
+          AND process = ANY(string_to_array('"'$HEARTBEAT_PROCESSES'"', '"' '"'))"
+    ' 2>/dev/null || echo 0)"
+    if [ -z "$bad" ] && [ "$hb" = "$(echo $HEARTBEAT_PROCESSES | wc -w)" ]; then
+      echo "$(ts) post-restart check OK: $(echo $units | wc -w) units active, $hb/$(echo $HEARTBEAT_PROCESSES | wc -w) heartbeats fresh" | tee -a "$LOG"
+      return 0
+    fi
+    sleep 3
+  done
+  echo "$(ts) post-restart check FAILED: inactive:${bad:- none}; fresh heartbeats $hb/$(echo $HEARTBEAT_PROCESSES | wc -w)" | tee -a "$LOG"
+  return 1
+}
+
 install_units() {  # $1 = release dir; drop-ins under /etc/systemd/system/<unit>.d/ are left untouched
   local dir="$1/deploy/systemd"
   [ -d "$dir" ] || return 0
@@ -138,6 +173,8 @@ ln -sfn "$NEW_RELEASE" "$CURRENT"
 echo "$(ts) installing systemd units from the release (timers are installed, never enabled here)" | tee -a "$LOG"
 install_units "$NEW_RELEASE"
 
+ensure_runtime_dirs
+RESTART_AT="$(date -Is)"
 echo "$(ts) restarting opengrid.target ogsim.target" | tee -a "$LOG"
 systemctl restart opengrid.target ogsim.target
 
@@ -152,6 +189,10 @@ for _ in $(seq 1 15); do
 done
 if [ "$ok" -ne 1 ]; then
   echo "$(ts) health check failed" | tee -a "$LOG"
+  false   # triggers the ERR trap -> rollback
+fi
+
+if ! post_restart_check "$RESTART_AT"; then
   false   # triggers the ERR trap -> rollback
 fi
 
