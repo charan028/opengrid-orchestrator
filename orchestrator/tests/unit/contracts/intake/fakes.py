@@ -16,6 +16,8 @@ class FakeMarketDataPort:
     energy_prices: dict[str, float] = field(default_factory=dict)
     as_mcpc: dict[str, float] = field(default_factory=dict)
     as_mcpc_ts: dict[str, datetime] = field(default_factory=dict)
+    #: product_code -> {hour start (UTC): MCPC}: the hourly np4-188-cd rows `as_mcpc_between` returns.
+    as_mcpc_hourly: dict[str, dict[datetime, float]] = field(default_factory=dict)
 
     async def latest_energy_price_usd_per_mwh(self, series_key: str) -> float | None:
         return self.energy_prices.get(series_key)
@@ -28,6 +30,12 @@ class FakeMarketDataPort:
         if value is None:
             return None
         return PriceObservation(value, self.as_mcpc_ts.get(product_code, DEFAULT_AS_PRICE_TS))
+
+    async def as_mcpc_between(
+        self, product_code: str, start: datetime, end: datetime
+    ) -> list[PriceObservation]:
+        hourly = self.as_mcpc_hourly.get(product_code, {})
+        return [PriceObservation(v, ts) for ts, v in sorted(hourly.items()) if start <= ts < end]
 
 
 @dataclass

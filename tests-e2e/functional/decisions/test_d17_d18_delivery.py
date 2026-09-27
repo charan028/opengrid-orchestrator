@@ -39,7 +39,7 @@ def delivering(stack: Stack) -> Iterator[tuple[Offer, dict]]:
         contract_id, window_start=start, window_end=end, requested_kw=COMMITTED_KW, value_per_mwh=180
     )
     committed = stack.wait_decided(offer)
-    assert committed["state"] == "COMMITTED", committed
+    stack.require_committed(committed)
     wait_until(
         lambda: now_utc() >= start + timedelta(seconds=10),
         timeout_s=max((start - now_utc()).total_seconds(), 0) + 180,

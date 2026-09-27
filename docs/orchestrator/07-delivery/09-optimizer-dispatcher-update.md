@@ -477,7 +477,8 @@ supplemental table (§10).
 | **G-30** | Territory export: no net reverse flow out of a regulated territory (its boundary substations) | batch | K15 (c) |
 | **G-31** | Sustained vs peak over the lease | item | K4 |
 | **G-32** | Feeder ramp for **non-firm** steps (G-06 covers firm events only) | batch | K4 (e) |
-| **G-33** | K15 market segregation: `market.check_territory` per item (§11.6) | item | K15 (a, b) |
+| **G-33** | K15 market segregation: `market.check_territory` per item (§11.6); a 0 kW item passes (R3) | item | K15 (a, b) |
+| **G-34** (R3) | Every item's hub is on the proposal's bank, in the guardian's own topology (`R-HUB-NOT-IN-BANK`) | batch | K3/K4 |
 
 **The AS energy hold (Frank #6, D6, F7) is NOT a guardian check.** It is enforced by the selector (C3′) and the
 engine/allocator (S6 hold floor), and measured post hoc by the invariants checker (`CHECK_AS_HOLD`). Earlier
@@ -619,6 +620,47 @@ Market segregation per item (K15 a/b) is **G-33**, specified in §11.6.
 $e\ge\sum_kH_kr/\eta_d$ (plus firm energy owed and need-basis energy) is enforced by the selector (C3′) and by the
 engine/allocator (S6 discharges headroom only down to $e^{hold}$). The invariants checker measures it post hoc as
 `CHECK_AS_HOLD` (TS-19-36/37 run against the allocator and the checker, not the guardian).
+
+**As built at `r3` (`main` `451a2a2`).** Checked in the `r3` code; the full list with tests is in `02a` §6.8.
+
+- **G-34.** A batch whose item names a hub outside `proposal.bank_id` is VETOED, `R-HUB-NOT-IN-BANK`
+  (`orchestrator/src/opengrid/guardian/flow_checks.py:317`, wired `guardian/service.py:627`). The per-bank sums of
+  G-03, G-06/G-32 and G-28/G-29/G-30 can no longer credit a foreign hub's step to the wrong bank.
+- **Only signed batches count in the per-cycle sums.**
+  - G-28's "per-cycle accumulator across bank batches" above, and those of G-05, G-06/G-32, G-29 and G-30, are
+    staged while a batch is checked.
+  - They are committed on PASS and dropped on VETOED, PARTLY_VETOED or TIMEOUT (`guardian/service.py:185-193`).
+- **The flow signal and its sign.**
+  - $L^G$ for G-28/G-29/G-30 is the bank's latest GOOD `REAL_POWER_KW`: kW, + = the bank imports from the
+    feeder, − = export.
+  - Without it, `APPARENT_POWER_KVA` gives only $|F|$, so the flow is the interval $[\text{export floor},\,m]$.
+    The export floor comes from the guardian's own hub telemetry; with no hub read it is $-m$ (unknown
+    direction = export, fail closed).
+  - **Known at `r3`:** the floor is $\sum_h p_h - \sum_h \bar P^{pv}_h$ (`guardian/flow_repo.py:223-228`). No
+    process writes `og.hub.pv_rated_kw`, so $\bar P^{pv}_h$ = `default_pv_rated_kw` = 0 (`guardian/config.py:108`).
+    With idle batteries the floor is then ≥ 0, so rooftop-PV export is not seen on a kVA-only bank. Only
+    `REAL_POWER_KW` shows it.
+  - Rows stamped in the future are ignored (`guardian/flow_repo.py:8-17`, `:67`, `:73`).
+- **Two `[guardian.flow]` keys:**
+  - `fail_closed_missing_topology` (default **false** in R3, `true` at go-live) applies "a missing $F_f$ vetoes
+    any increase" to feeders without an `og.feeder_limit` row. With `false`, the configured defaults apply
+    (`guardian/flow_repo.py:274-278`).
+  - `scada_min_power_factor` (default 0 = strict) narrows the kVA interval once export is ruled out
+    (`orchestrator/config/orchestrator.toml:167`, `:170`).
+- **K4 fail-safe re-solve.** The hubs a VETOED or PARTLY_VETOED verdict names are excluded for 3 cycles
+  (`R-HUB-VETO-EXCLUDED`, traced), and the bank is re-proposed once in the same cycle without them
+  (`orchestrator/src/opengrid/engine/veto.py`, `engine/__init__.py:907-928`).
+  - **Known at `r3`:** the retry is proposed under cycle id `<cycle>-r1` (`engine/__init__.py:942`, `:965`).
+    The per-cycle accumulators of G-05, G-06/G-32 and G-28/G-29/G-30 are keyed on the cycle id
+    (`guardian/service.py:405`, `:416`, `:426`, `:529`), so a retried batch starts from fresh budgets within the
+    same physical cycle.
+  - `[allocator.veto_retry] enabled = false` turns the retry off (`engine/settings.py:61`, `:93`).
+- **Telemetry cadence 10 s** (`integration-sims/config/fleet.yaml:19`; `orchestrator.toml` `[fleet]`
+  `telemetry_interval_s = 10`, `[health]` `hub_offline_s = 60`).
+  - The guardian judges its own hub telemetry stale after `[guardian] telemetry_max_age_s`, default 60 s
+    (`guardian/config.py:34`, `:166`). It sets no value in `orchestrator.toml`.
+  - The health classifier's stale is 2 × the interval, 20 s (`health/model.py:182-184`).
+  - `[health] hub_stale_s = 25` is loaded but not read at `r3`.
 
 **Hub telemetry additions** (interface schema change, additive): `meter_kw`, `pv_kw`, `cell_temp_c`, `p_dis_max_kw`,
 `p_ch_max_kw`, `peak_budget_kws`. The guardian consumes them through its own hub-state port. The sim publishes them from its

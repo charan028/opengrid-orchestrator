@@ -790,7 +790,8 @@ On a stale reading or an unknown limit, the aggregate check vetoes any increase 
   hubs send `peak_power_budget_kws`, so every above-continuous setpoint is vetoed. This is safe, and reported.
 - G-29 and G-30 evaluate nothing until substation assets tied to a bank or regulated-zone banks exist.
 - Aggregate flows sum unsigned SCADA apparent power as import (`guardian/flow_repo.py:40-48`), so a measured
-  reverse flow is not seen.
+  reverse flow is not seen. Fixed in R3 (`451a2a2`): signed `REAL_POWER_KW`, or a kVA interval with unknown
+  direction treated as export (`02a` §6.8). R3 also adds G-34 and the K4 re-solve.
 - `[guardian.flow].telemetry_required` is false: a flow field a hub has never reported falls back to the static
   premise limits.
 

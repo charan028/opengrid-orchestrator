@@ -887,9 +887,10 @@ async def load_committed(
     horizon_start: datetime, horizon_end: datetime, bank_ids: tuple[str, ...]
 ) -> tuple[CommittedObligation, ...]:
     """Committed/delivering obligations overlapping the horizon, frozen per `db.load_frozen_commitments`
-    (02a S2.2). All configured banks are eligible for redistribution (bank *substitution*, not a
-    reduction -- see `types.CommittedObligation`); a future refinement can narrow this per obligation
-    once `contracts`/`ledger` expose an eligibility query."""
+    (02a S2.2). Each starts with every configured bank as a redistribution candidate (bank
+    *substitution*, not a reduction -- see `types.CommittedObligation`); the gate then narrows that set
+    to the banks its market allows (K15, `prepare_obligations`). No `contracts`/`ledger` eligibility
+    query narrows it further per obligation yet."""
     frozen = await db.load_frozen_commitments(horizon_start.isoformat(), horizon_end.isoformat())
     terms = await db.load_obligation_terms([str(o) for o in frozen])
     n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
@@ -932,9 +933,11 @@ async def load_candidates(
     module's final-report note asking the merge agent to add one there instead, so this reads the
     tables directly rather than staying a permanent placeholder.
 
-    Every configured bank is eligible for every candidate: no `contracts`/`ledger` query exists yet to
-    narrow eligibility per opportunity either (`load_committed`'s docstring documents the identical gap
-    for committed obligations)."""
+    Each candidate starts with every configured bank; the gate narrows that set afterwards -- K15
+    territory (`prepare_obligations`), NOT_FOR_FIRM price series (`withhold_unfit_series`) -- and the
+    model applies D-31's mobile-unit rule (`ModelInputs.may_serve`). No `contracts`/`ledger` query
+    narrows it per opportunity beyond those (`load_committed`'s docstring notes the same for committed
+    obligations)."""
     rows = await db.load_offered_opportunities_rows(
         horizon_start.isoformat(), horizon_end.isoformat(), contract_scope
     )
@@ -986,7 +989,12 @@ async def load_candidates(
 
 
 def _plan_mode_for(gate_kind: GateKind, horizon_start: datetime) -> str:
-    if gate_kind == "SCHEDULED_15MIN" and horizon_start.hour == 0 and horizon_start.minute < INTERVAL_MINUTES:
+    """02a S3.1: `L-DA` labels the one daily scheduled solve whose 24 h horizon is exactly an ERCOT
+    operating day, i.e. starts at 00:00 America/Chicago (issue #43 A11: it fired at 00:00 UTC, 7 PM
+    CT). It seeds the operating day; it is not a DAM run -- MVP-S submits no DAM offers, and ERCOT's
+    DAM for that day closed at 10:00 CT the day before."""
+    local_start = to_market_tz(horizon_start)
+    if gate_kind == "SCHEDULED_15MIN" and local_start.hour == 0 and local_start.minute < INTERVAL_MINUTES:
         return "L-DA"
     return "L-ID"
 

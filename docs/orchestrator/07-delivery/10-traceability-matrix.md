@@ -228,6 +228,7 @@ and territory":
 | G-31 | Sustained vs peak | built — `flow_checks.py:88`; wired `service.py:427` |
 | G-32 | Feeder ramp for non-firm steps | built — `o/core/limits.py:360`; wired `service.py:383-390` |
 | G-33 | K15 market segregation | built — `flow_checks.py:317` → `o/market/territory.py:131`; wired `service.py:584` |
+| G-34 | Hub on the proposal's bank | built in R3 — `o/guardian/flow_checks.py:317` (`check_hub_in_bank`, at `451a2a2`); wired `o/guardian/service.py:627`; tests `t/unit/guardian/test_flow_review_r3.py:323,339` |
 
 All eight are built at R2 (`main` `6470cfa`, the lines above), on the guardian's own reads (`o/guardian/main.py:349`
 wires the topology port). Tests: `t/unit/guardian/test_flow_checks.py` (29), `t/unit/guardian/test_service_flow.py`
@@ -236,7 +237,7 @@ is built in the allocator (`o/allocator/flow_limits.py:49-68`) and the guardian 
 `o/guardian/flow_checks.py:133`). Caveats, detailed under K4 in `00-invariants.md`:
 - G-31's peak path is dead because of a field-name mismatch (`o/guardian/mqtt_io.py:36`);
 - G-29 and G-30 are idle without substation or regulated-zone data;
-- reverse flow is not measured (`o/guardian/flow_repo.py:40-48`);
+- reverse flow is not measured (`o/guardian/flow_repo.py:40-48`); fixed in R3 (`451a2a2`), see `02a` §6.8;
 - the allocator's F2/F3 caps have no limit rows to apply.
 
 **The ERCOT_AS energy hold is not a guardian check.** Two built pieces enforce it:

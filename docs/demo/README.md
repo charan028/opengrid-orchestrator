@@ -8,7 +8,7 @@ says what to do, where to look, and what must happen.
 What changed since DEMO-1 (R1.6):
 - the two-person safe-stop release is built (steps 19-20);
 - ERCOT AS awards are held, and deployed by an operator (steps 9-10);
-- the guardian escalates on repeated vetoes (steps 15-16);
+- the guardian escalates on repeated vetoes (steps 15-16; not runnable at R3, see step 15);
 - a stale feed stops new commitments and shows a banner (step 18);
 - a lost delivery continues on best effort (step 14);
 - prices are per load zone (step 2).
@@ -60,6 +60,8 @@ simulator, as `dev/config/dev.toml` does. That switch is configuration plus `sys
     stays PENDING, refused as `OPERATOR_NOT_AUTHORISED`).
   - `viewer`: read only; every write panel is hidden.
   - `tester`: the `/ogsim/` control plane.
+- Since R3 every state-changing call to the simulator control plane (`POST`/`DELETE` on `$SIM`) needs the
+  header `X-OGSim-Request: 1` (a CSRF guard); the `curl` lines below carry it.
 - In the `curl` lines, `-u og-op-a:...` stands for that account's credentials behind Apache. On the local
   stack, drop `-u` and go through the dev proxy with `-H 'X-Remote-User: og-op-a'`.
 - **Fleet ids (server):** hubs `hub-00000`..`hub-01999`, banks `bank-000`..`bank-039`, zones `LZ_NORTH`,
@@ -74,7 +76,7 @@ simulator, as `dev/config/dev.toml` does. That switch is configuration plus `sys
 | AS award held, then deployed | operator action | the seeded ECRS award (contract `...0d03`) | Dispatch |
 | SCADA overload | [ogsim] `bank_overload` on the demo bank | `$BANK` | System Health, Dispatch |
 | Comms loss, best effort | [ogsim] `demo-03-zone-comms-loss` | `hub-00001`, then zone `LZ_SOUTH` | Fleet, System Health, Dispatch |
-| Guardian escalation (K7) | operator API burst | `$HUB`, a hub on the demo bank | Control room, System Health, Fleet |
+| Guardian escalation (K7) | operator API burst (R2 only; skip at R3, see step 15) | `$HUB`, a hub on the demo bank | Control room, System Health, Fleet |
 | Degraded mode | [ogsim] [feeds→sim] `stale_posting`, 60 min, started during setup | `np6-905-cd` | System Health, Control room |
 | Scoped safe stop and release | operator actions, two operators | `bank-022` | Fleet |
 | Energy runs low | [ogsim] `reserve_floor_pressure` on the demo bank's zone | `$ZONE` | Dispatch, System Health |
@@ -86,11 +88,12 @@ the id you `DELETE` to end a moment early.
 
 1. **Pause random anomalies.** They start unpaused, and each random arrival targets the whole fleet (all hubs,
    all banks or all products):
-   `curl -u tester:... -X POST $SIM/api/random/pause` → `"paused": true`. Pausing does not cancel what is
+   `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/random/pause` → `"paused": true`. Pausing does not cancel what is
    already active: list `curl -u tester:... "$SIM/api/anomalies?source=random"` and
-   `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>` each one, then check `$SIM/api/anomalies` returns
-   `{"active": []}`. Since R2 hotfix v3 the pause is saved across a restart of `og-sim-control`, but an
-   unreadable state file resumes random mode, so check `curl -u tester:... $SIM/api/random/status` after one.
+   `curl -u tester:... -H 'X-OGSim-Request: 1' -X DELETE $SIM/api/anomalies/<id>` each one, then check `$SIM/api/anomalies` returns
+   `{"active": []}`. Since R2 hotfix v3 the pause is saved across a restart of `og-sim-control`. Since R3 an
+   unreadable state file keeps random mode paused, but a pause that failed to save is still lost on restart, so
+   check `curl -u tester:... $SIM/api/random/status` after one.
 2. **All processes up.** Open **System Health**: every process in the Processes table has a heartbeat time from
    the last few seconds (the Status column always reads `ok`, so read the time), no `ALR-PROCESS-DOWN`, no
    degraded-mode banner, and no open critical alert. One `ALR-XFMR-UNMAPPED` warning per commanded bank is
@@ -182,7 +185,7 @@ Timing is the budget per step; the total is about 15 minutes.
 ### Topic 4: a price spike during delivery, the lock holds [feeds→sim]
 
 **Step 7 [JUDGES]: Inject a $5,000/MWh spike** [ogsim] (30 s)
-- **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-01-price-spike-lock/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
+- **Action:** `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/scenarios/demo-01-price-spike-lock/run -H 'Content-Type: application/json' -d '{"speed": 1}'`
 - **Show:** Control room "Market ticker", then Markets.
 - **Expect:** `{"ok": true, "scenario": "demo-01-price-spike-lock", "steps": 2}`. Within one feeds poll every
   load-zone price line jumps to `5000` (the simulator spikes the product, all zones at once) and RRS to `800`.
@@ -225,7 +228,7 @@ Timing is the budget per step; the total is about 15 minutes.
 change the SCADA readings yet (tests-e2e finding), so no alert fires there; if none appears on the server,
 skip to step 13.
 - **Action:** the same anomaly as scenario `demo-02-bank-overload` (which targets `bank-012`), on `$BANK`:
-  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "bank_overload", "target": "'$BANK'", "params": {"kva_over_rating_pct": 25}, "duration": 300}'`
+  `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "bank_overload", "target": "'$BANK'", "params": {"kva_over_rating_pct": 25}, "duration": 300}'`
   (the response carries the anomaly's `id`).
 - **Show:** System Health, "Alerts".
 - **Expect:** Within a few SCADA cycles an `ALR-SCADA-OVERLOAD` row for `$BANK`: warning above 100% of the
@@ -237,18 +240,18 @@ skip to step 13.
 - **Show:** The DIST_DEFERRAL grant on `$BANK`; the committed kW on the cards.
 - **Expect:** The DIST_DEFERRAL grant on `$BANK` rises (more discharge to relieve the feeder segment) while
   every committed kW is unchanged. The alert clears when the anomaly ends (300 s), or now:
-  `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`.
+  `curl -u tester:... -H 'X-OGSim-Request: 1' -X DELETE $SIM/api/anomalies/<id>`.
 - **Note:** after 3 overloaded readings the SCADA simulator also issues a LIMIT at 90% of the rating (540 kW) on
-  `$BANK` with no expiry, and in this release og-engine keeps applying it. `$BANK` stays capped at 540 kW for the
-  rest of the run, which does not affect the demo's 40-60 kW obligations.
+  `$BANK`. Since R3 it lifts that LIMIT after 3 readings back under the rating, or after 900 s at most, and
+  og-engine releases the cap on the next cycle. The cap does not affect the demo's 40-60 kW obligations.
 
 ### Topic 7: comms loss, substitution, then best effort
 
 **Step 13: One hub goes quiet, the bank covers for it** [ogsim] (45 s)
-- **Action:** `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/run -H 'Content-Type: application/json' -d '{"speed": 1}'`,
+- **Action:** `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/run -H 'Content-Type: application/json' -d '{"speed": 1}'`,
   then `/og/fleet?bank=bank-001`.
 - **Show:** bank-001's 50 hubs; `hub-00001`.
-- **Expect:** `hub-00001` goes `stale` after 6 s and `offline` after 30 s; the other 49 hubs pick up its share, so
+- **Expect:** `hub-00001` goes `stale` after 20 s and `offline` after 60 s (since R3 hubs report every 10 s, and a hub is stale after 2 × that); the other 49 hubs pick up its share, so
   the obligation on bank-001 keeps its granted kW (substitution: a grant change, never a commitment write).
 
 **Step 14: The whole zone goes quiet; best effort** (60 s)
@@ -260,21 +263,33 @@ skip to step 13.
   `shortfall-<obligation id>`, class `ALLOCATOR_SHORTFALL`), and its card turns amber (AT_RISK). Say (decision
   D-17): it keeps receiving the maximum feasible kW for the rest of the window, never 0, never stopped. The
   hubs themselves serve their homes on local autonomy once their lease lapses. The zone returns at 240 s; to end now,
-  `curl -u tester:... -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/stop` (cancels its pending steps and
+  `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/scenarios/demo-03-zone-comms-loss/stop` (cancels its pending steps and
   ends what it injected).
 - **Known gaps:**
   - The card moves to "Fulfilled / shortfall" with the text "Delivered short; penalty applies", although
     delivery continues.
   - The "Commitment-lock events (K13)" table is not populated yet; use the trace.
-  - A delivery cut by a utility (L2) instruction does not return to the full commitment when the instruction is
-    lifted, because og-engine keeps applying the expired instruction (a defect routed for fixing).
+  - (Fixed in R3: a delivery cut by a utility (L2) instruction now returns to its full commitment on the cycle
+    after the instruction expires.)
 
   The state itself stays SHORTFALL until the window closes.
 
 ### Topic 8: the guardian gets cautious (K7)
 
 **Step 15: A burst of vetoed commands** (45 s)
-- **Action:** From a shell, send over-limit commands to one hub (60 kW is above every hub's 11 or 20 kW
+- **Not runnable as written at R3 — skip steps 15 and 16.**
+  - Since R3 a confirmed manual command is a ramped operator target (operator guide 6.2). The confirm returns
+    `202` `RAMPING`, and the setpoint is not checked against the hub's rating when it is confirmed.
+  - So the loop below prints `202`s, not `409`s, and each confirm leaves a 15-minute +60 kW (charging) target
+    on `$HUB`.
+  - If `$BANK` carries no obligation grant, the guardian refuses every step with G-09 (the gap in step 17). The
+    escalation then does appear, but for that reason, and it stays until the targets end. If `$BANK` is
+    delivering, the engine ramps `$HUB` toward 60 kW instead.
+  - If it was run, cancel the targets: take each `trace_id` from `curl -s -u og-op-a:... "$OG/fleet/manual-targets"`
+    and call `curl -u og-op-a:... -X POST "$OG/fleet/manual-targets/<trace_id>/cancel"`.
+  - A way to trigger the K7 escalation from genuine vetoes is being routed with the matching e2e test. The text
+    below describes R2.
+- **Action (R2):** From a shell, send over-limit commands to one hub (60 kW is above every hub's 11 or 20 kW
   inverter), about one per second for 30 s:
   ```bash
   for i in $(seq 1 30); do
@@ -292,6 +307,7 @@ skip to step 13.
   stop" (`ALR-SAFE-STOP-REQUESTED`) with **Review safe stop (two-step)**.
 
 **Step 16: A person decides** (30 s)
+- **Needs step 15's escalation**, so skip it at R3 (see step 15).
 - **Action:** Click **Review safe stop (two-step)**.
 - **Show:** The Fleet screen's "Scoped safe stop" panel, prefilled.
 - **Expect:** Scope and scope id filled from the guardian's request, reason "Guardian escalation: safe stop
@@ -304,15 +320,23 @@ skip to step 13.
 ### Topic 9: a forged command, and the legitimate path
 
 **Step 17: The signed path, for contrast** (45 s)
-- **Order:** run this step before step 15. After step 15's burst the guardian refuses every manual command with
-  G-05 for a while (a known gap, operator guide 6.2).
-- **Action:** `/og/fleet`, "Manual command": hub `hub-00142` (idle, 0 kW), setpoint `0.1`, reason
-  `demo signed path`, **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown. A hub
-  moves at most about 0.12 kW per 2 s cycle (G-04), so a larger step would be refused.
+- **Known gap (R3; seen on the dev stack):** a target moves a hub only while the hub's bank carries an
+  obligation's grant in that cycle.
+  - On an idle bank the engine proposes the step with ledger version 0, and the guardian refuses it every cycle
+    (G-09, stale ledger version). The hub stays where it is.
+  - Within seconds the bank and its zone raise `ALR-SAFE-STOP-REQUESTED`.
+  - So run this step on `$HUB` (on the demo bank) while one of `$BANK`'s obligations is delivering, or skip it.
+  - If the progress bar does not move, cancel the target; the alert clears about 60 s later.
+- **Action:** `/og/fleet`, "Manual command": hub `$HUB`, setpoint `0.1`, duration `5`, reason `demo signed path`,
+  **Propose (step 1 of 2)**; read the summary; **Send command** within the countdown.
 - **Show:** The confirm dialog (focus starts on Cancel, Tab to the confirm button, Escape closes); the result.
-- **Expect:** `PASS` "Command accepted. Trace ..." (the drill-down's last command id changes), or `VETOED` "Vetoed
-  by guardian: <rule ids>. Trace ..."; the 409 in step 15 is the same veto seen from the API. Either way the
-  setpoint reached the hub only in a guardian-signed batch.
+- **Expect:**
+  - `RAMPING` "Ramping 1 hub to 0.1 kW ... Holds until <+5 min>. Trace ...", with a progress bar.
+  - The Fleet table shows `target 0.1 kW` on `$HUB`.
+  - Since R3 a manual command is an operator target: every engine cycle moves the hub toward it by at most
+    0.9 × its G-04 step, from the hub's last report, so about one step per 10 s report.
+  - Each step reached the hub only in a guardian-signed batch.
+- **End:** **Cancel target**, or let it expire after 5 minutes.
 - **Forged command:** `demo-04-tampered-command` still only registers an active anomaly (the simulator's
   self-test is not invoked), so there is nothing to show on screen; leave it out.
 
@@ -323,7 +347,7 @@ skip to step 13.
   (the simulator stamps prices like ERCOT, at the 15-min interval start). The `feed_outage_and_stale` scenario
   (120 s of 503, then 900 s without new data) no longer reaches it.
 - **Action:** during "Before you start", stop the price feed posting for an hour:
-  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "stale_posting", "target": "np6-905-cd", "params": {}, "duration": 3600}'`
+  `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "stale_posting", "target": "np6-905-cd", "params": {}, "duration": 3600}'`
   (the response carries the anomaly's `id`). At step 18, open System Health, then Dispatch.
 - **Show:** The banner at the top; "Feed freshness"; "Alerts"; then the Dispatch pipeline.
 - **Expect:** "Degraded mode: **Feed stale**" once the price is older than 2,700 s (`ALR-FEED-STALE` "... stale
@@ -332,7 +356,7 @@ skip to step 13.
   new, and the committed deliveries continue. The other modes (Engine down, Guardian down, SCADA silent) are
   shown and recorded only. "Engine down" and "Guardian down" need `systemctl stop` [root] and interrupt
   delivery, so they are not part of this run.
-- **End:** `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`. The banner clears once a fresh price posts.
+- **End:** `curl -u tester:... -H 'X-OGSim-Request: 1' -X DELETE $SIM/api/anomalies/<id>`. The banner clears once a fresh price posts.
 
 ### Topic 11: a scoped safe stop, released by two operators
 
@@ -373,8 +397,9 @@ skip to step 13.
 - **Expect:** Net margin positive; Forgone upside (lock) non-zero if step 8 ran. One row per settled
   obligation-interval; a shortfall from step 14 shows a penalty. "Economics per kW" shows $/kW-in, $/kW-out and
   payback per scope (operators only).
-- **Known gap:** "LP value added (latest selector gate)" reads "The LP value-added view is not available on this
-  deployment yet." in R2; show "LP vs rule baseline" instead.
+- **Also (since R3):** "LP value added (latest selector gate)" shows the latest gate's value added over the rule
+  baseline, with a per-gate trend. It reads "Not available yet: ..." until the optimizer has reported a gate; in
+  that case show "LP vs rule baseline".
 
 **Step 22: Invoice lines and M&V** (30 s)
 - **Action:** `/og/billing`; set From to today and To to tomorrow, then **Export CSV** (or
@@ -392,38 +417,38 @@ skip to step 13.
 - **Expect:** This run's operator actions: `SAFE_STOP_ENGAGE` on stream `operator_action:og-op-a` (step
   19); `SAFE_STOP_RELEASE` on stream `operator_action:og-op-b`, the approver (its payload records og-op-a as
   requester); the guardian's signed release (`GUARDIAN_VERDICT`); `AS_DEPLOYMENT` from step 10; the manual
-  command from step 17. Nothing from steps 7-8 reduced a commitment.
+  target from step 17 (`MANUAL_TARGET` on stream `operator_action:<operator>`). Nothing from steps 7-8 reduced a
+  commitment.
 
 **Step 24 [JUDGES]: Verify the chain** (30 s)
 - **Action:** `curl -s -u viewer:... -X POST $OG/trace/verify -H 'Content-Type: application/json' -d '{}'`
 - **Expect:** `"passed": true`, `"first_broken": null`, and `checked` = the number of streams verified. Say:
   records are hash-chained per stream, so nothing above could have been edited or removed without this turning
   to `passed: false` with the first broken `stream_id`/`seq`.
-- **Known gap:** the "Run chain verify" button on Billing & audit reports FAIL from an unfiltered page (its empty
-  From/To are refused); set From and To in the header filter first, or use the `curl`.
+- **Or** use the "Run chain verify" button on Billing & audit. Since R3 it also works from an unfiltered page.
 
 ### Topic 14: energy runs low
 
 **Step 25: Homes draining toward their reserve** [ogsim] (60 s)
 - **Action:** the anomaly of scenario `demo-05-energy-runs-low` (which targets `LZ_NORTH`), on `$ZONE`:
-  `curl -u tester:... -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "reserve_floor_pressure", "target": "'$ZONE'", "params": {"home_load_kw": 10}, "duration": 300}'`
+  `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/inject -H 'Content-Type: application/json' -d '{"type": "reserve_floor_pressure", "target": "'$ZONE'", "params": {"home_load_kw": 10}, "duration": 300}'`
   (home load 10 kW on every hub in the zone for 5 minutes).
 - **Show:** Dispatch, the `$BANK` cards; System Health, "Alerts"; the Control room "Promises kept".
 - **Expect:** The affected cards turn amber (AT_RISK) with a falling "energy margin" and "depletes in";
   `ALR-ENERGY-SHORTFALL-RISK` opens; substitution moves delivery to hubs with energy left; **Reserve breaches
   stays 0** throughout (K1 on energy, not only power). A negative margin held 60 s on a delivering obligation
-  escalates it to SHORTFALL, as in step 14. End early with `curl -u tester:... -X DELETE $SIM/api/anomalies/<id>`.
+  escalates it to SHORTFALL, as in step 14. End early with `curl -u tester:... -H 'X-OGSim-Request: 1' -X DELETE $SIM/api/anomalies/<id>`.
 
 ## Reset between runs (3 minutes)
 
-1. **End anything still active:** `curl -u tester:... -X POST $SIM/api/scenarios/stop-all` stops every scenario
+1. **End anything still active:** `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/scenarios/stop-all` stops every scenario
    and what it injected; `DELETE` any remaining direct injection (`curl -u tester:... $SIM/api/anomalies`, then
    `DELETE $SIM/api/anomalies/<id>`, such as step 18's stale posting); confirm `{"active": []}`.
 2. **Let health clear:** the overload and offline-ratio alerts clear once their condition ends.
 3. **Release any stop still engaged** with two operators, as in step 20 (og-op-a requests, og-op-b approves).
 4. **End any AS deployment still active:** Dispatch, **Stop deploy**, or
    `curl -u og-op-a:... -X DELETE $OG/dispatch/as-deployments/<deployment_id>`.
-5. **Random mode:** leave it paused for another run; `curl -u tester:... -X POST $SIM/api/random/resume` to
+5. **Random mode:** leave it paused for another run; `curl -u tester:... -H 'X-OGSim-Request: 1' -X POST $SIM/api/random/resume` to
    return to normal operation.
 6. **Fresh commitments:** run the demo seed again (item 3 of "Before you start") for the next window.
 

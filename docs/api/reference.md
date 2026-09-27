@@ -10,7 +10,51 @@ Seed Fleet Topology. Role: **operator**.
 
 Responses: `200`
 
+## ai
+
+### `POST /og/api/ai/ask`
+
+Ask. Role: **viewer**.
+
+Answer one copilot question. Always returns 200: an unavailable or refused assistant is a normal
+answer the panel renders, never an error the console has to handle.
+
+Body: `question` (string, required); `screen` (string | null)
+
+Responses: `200`, `422`
+
+### `GET /og/api/ai/status`
+
+Status. Role: **viewer**.
+
+What works and how much budget is left (UI-DAT-05, shown on System Health).
+
+Responses: `200`
+
 ## alerts
+
+### `GET /og/api/alerts`
+
+List Alerts. Role: **viewer**.
+
+Paged alert list (newest first) with filters, and -- with `group=true` -- a count per
+rule + scope over the SAME filters (for the grouped alert view).
+
+Parameters: `open_only` (query, boolean); `severity` (query, string | null); `rule` (query, string | null); `scope_kind` (query, string | null); `scope_ref` (query, string | null); `limit` (query, integer); `offset` (query, integer); `group` (query, boolean)
+
+Responses: `200`, `422`
+
+### `POST /og/api/alerts/ack-bulk`
+
+Ack Alerts Bulk. Role: **operator**.
+
+Acknowledge up to 500 alerts in one call, each through the same path as the single-alert ack
+(`_ack_one`). Per-id outcome: `acked`, `already_acked` (left as acked by whoever did it first, never
+re-attributed) or `not_found`. Duplicate ids are answered once.
+
+Body: `alert_ids` (array of integer, required)
+
+Responses: `200`, `422`
 
 ### `POST /og/api/alerts/{alert_id}/ack`
 
@@ -20,6 +64,19 @@ Screens 1/5's "Ack an alert" action (02b S8) -- acknowledgement only, does not c
 (clearing is `health`'s job when the underlying condition resolves).
 
 Parameters: `alert_id` (path, integer, required)
+
+Responses: `200`, `422`
+
+## banks
+
+### `GET /og/api/banks/{bank_id}/pq`
+
+Bank Pq. Role: **viewer**.
+
+S6.5 step 3: the measured per-bank aggregate (`bank_measurement`). `measurement` is `null` when no
+hub on the bank has a fresh summary with voltage and frequency (K1: missing is never compliant).
+
+Parameters: `bank_id` (path, string, required); `freshness_s` (query, number)
 
 Responses: `200`, `422`
 
@@ -81,6 +138,17 @@ List Customers. Role: **viewer**.
 
 Responses: `200`
 
+### `GET /og/api/customers/map`
+
+Customers Map. Role: **viewer**.
+
+`{count, consuming_count, sites[]}`. Each site: `customer_id, site_id, name, service_type,
+contract_services, lat, lon, coord_source, kw, consuming, reading_ts, reading_quality,
+has_active_contract`. Positions come from `config/grid/customer_sites.json` until the customer seed
+carries them; a metered site missing from that table is returned with `lat`/`lon` null.
+
+Responses: `200`
+
 ## dispatch
 
 ### `GET /og/api/dispatch/as-deployments`
@@ -93,10 +161,17 @@ Responses: `200`
 
 Create As Deployment. Role: **operator**.
 
-Deploy held ERCOT_AS award(s) now: while active, the allocator discharges them up to their
-committed kW (an AS award is otherwise a 0 kW capacity hold). Traced before it takes effect (K10).
+Deploy one held ERCOT_AS award now: while active, the allocator discharges it up to its committed
+kW (an AS award is otherwise a 0 kW capacity hold). The award must exist, be ERCOT_AS and be
+deployable now (404/409 otherwise), the duration is capped by the obligation's own product rule (ECRS
+60 min, Non-Spin 240; 409 when it has none), and a second deployment while one is active is refused
+(409, no chaining). Traced before it takes effect (K10).
 
-Body: `obligation_id` (string | null); `duration_minutes` (integer); `reason` (string, required)
+D-29: the same route issues a utility's discharge call on a tolling obligation (REGULATED_CAPACITY,
+contract variant TOLLING) -- same checks, capped by its product rule (TOLLING 90 min), recorded as
+source OPERATOR with a reason starting "utility call".
+
+Body: `obligation_id` (string | null); `scope` (string | null); `duration_minutes` (integer); `reason` (string, required)
 
 Responses: `201`, `422`
 
@@ -107,6 +182,19 @@ End As Deployment. Role: **operator**.
 End a deployment early: the award(s) return to a 0 kW capacity hold on the next cycle.
 
 Parameters: `deployment_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `GET /og/api/dispatch/ledger`
+
+Dispatch Ledger. Role: **viewer**.
+
+`{level, id, from, to, bucket_minutes, hub_count, available_hub_count, labels, basis, notes, now,
+timeline[], children[]}`. Every point: `t, capacity_kw, reserved_kw, committed_kw,
+uncommitted_capacity_kw, over_committed_kw, committed_by_service{}` (+ `unallocated_committed_kw` at
+fleet level). Default window: 2 h back to 24 h ahead.
+
+Parameters: `level` (query, string); `id` (query, string | null); `from` (query, string | null); `to` (query, string | null); `bucket_minutes` (query, integer)
 
 Responses: `200`, `422`
 
@@ -130,6 +218,124 @@ Latest selector plan and its rationale/value terms (02b S7.1).
 
 Responses: `200`
 
+## firmware
+
+### `GET /og/api/firmware/campaigns`
+
+List Campaigns. Role: **viewer**.
+
+Parameters: `limit` (query, integer)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns`
+
+Propose Campaign. Role: **operator**.
+
+Step 1 of 2: nothing is sent yet. Confirm within the proposal TTL.
+
+Body: `name` (string, required); `target_version` (string, required); `selection` (SelectionBody, required); `reason` (string, required); `waves` (WavesBody); `bank_max_concurrent_pct` (number | null); `feeder_max_concurrent_pct` (number | null); `max_failures` (integer | null); `max_failure_pct` (number | null); `window_start` (string | null); `window_end` (string | null); `allow_downgrade` (boolean); `override_committed` (boolean)
+
+Responses: `202`, `422`
+
+### `GET /og/api/firmware/campaigns/{campaign_id}`
+
+Get Campaign. Role: **viewer**.
+
+Parameters: `campaign_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/abort`
+
+Abort Campaign. Role: **operator**.
+
+Parameters: `campaign_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/approve`
+
+Approve Campaign. Role: **operator**.
+
+Parameters: `campaign_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/confirm`
+
+Confirm Campaign. Role: **operator**.
+
+Parameters: `campaign_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `GET /og/api/firmware/campaigns/{campaign_id}/events`
+
+Campaign Events. Role: **viewer**.
+
+Parameters: `campaign_id` (path, string, required); `after` (query, integer); `limit` (query, integer)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/hubs/{hub_id}/rollback`
+
+Propose Rollback. Role: **operator**.
+
+Parameters: `campaign_id` (path, string, required); `hub_id` (path, string, required)
+
+Responses: `202`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/hubs/{hub_id}/rollback/{proposal_id}/confirm`
+
+Confirm Rollback. Role: **operator**.
+
+Parameters: `campaign_id` (path, string, required); `hub_id` (path, string, required); `proposal_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/pause`
+
+Pause Campaign. Role: **operator**.
+
+Stop starting new hubs; hubs already updating finish.
+
+Parameters: `campaign_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/resume`
+
+Resume Campaign. Role: **operator**.
+
+Parameters: `campaign_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/retry-failed`
+
+Propose Retry Failed. Role: **operator**.
+
+Step 1 of 2 of "retry failed hubs".
+
+Parameters: `campaign_id` (path, string, required)
+
+Responses: `202`, `422`
+
+### `POST /og/api/firmware/campaigns/{campaign_id}/retry-failed/{proposal_id}/confirm`
+
+Confirm Retry Failed. Role: **operator**.
+
+Parameters: `campaign_id` (path, string, required); `proposal_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `GET /og/api/firmware/catalogue`
+
+Get Catalogue. Role: **viewer**.
+
+Responses: `200`
+
 ## fleet
 
 ### `GET /og/api/fleet/banks/{bank_id}`
@@ -140,13 +346,65 @@ Parameters: `bank_id` (path, string, required)
 
 Responses: `200`, `422`
 
+### `GET /og/api/fleet/charge-windows`
+
+List Charge Windows. Role: **viewer**.
+
+Responses: `200`
+
+### `GET /og/api/fleet/charge-windows/effective`
+
+Effective Charge Windows. Role: **viewer**.
+
+The windows that apply to one hub (or bank): the most specific scope with a row wins.
+
+Parameters: `hub_id` (query, string | null); `bank_id` (query, string | null)
+
+Responses: `200`, `422`
+
+### `POST /og/api/fleet/charge-windows/proposals/{proposal_id}/confirm`
+
+Confirm Charge Windows. Role: **viewer**.
+
+Step 2: apply. 409 if the scope changed since the proposal was made.
+
+Parameters: `proposal_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `DELETE /og/api/fleet/charge-windows/{scope_kind}/{scope_ref}`
+
+Propose Charge Window Removal. Role: **viewer**.
+
+Step 1: propose removing an override (the next less specific scope then applies). The FLEET
+default cannot be removed.
+
+Parameters: `scope_kind` (path, string, required); `scope_ref` (path, string, required)
+
+Body: `reason` (string, required)
+
+Responses: `202`, `422`
+
+### `PUT /og/api/fleet/charge-windows/{scope_kind}/{scope_ref}`
+
+Propose Charge Windows. Role: **viewer**.
+
+Step 1: validate and propose. Windows are "HH:MM-HH:MM" America/Chicago, may wrap midnight, max 4;
+an empty list means no grid charging at that scope.
+
+Parameters: `scope_kind` (path, string, required); `scope_ref` (path, string, required)
+
+Body: `windows` (array of string, required); `reason` (string, required)
+
+Responses: `202`, `422`
+
 ### `POST /og/api/fleet/command`
 
 Propose Command. Role: **operator**.
 
-Step 1 of 2: validates shape/role only (02b S7.3) -- the guardian check runs at confirm time.
+Step 1 of 2: validates shape/role only (02b S7.3); nothing is commanded until confirm.
 
-Body: `bank_id` (string | null); `hub_id` (string | null); `p_kw_setpoint` (number, required); `reason` (string, required)
+Body: `bank_id` (string | null); `hub_id` (string | null); `p_kw_setpoint` (number, required); `reason` (string, required); `duration_minutes` (integer | null)
 
 Responses: `202`, `422`
 
@@ -154,16 +412,49 @@ Responses: `202`, `422`
 
 Confirm Command. Role: **operator**.
 
-Step 2 of 2 (02b S7.3): writes the K10 decision pre-image (`decision_type="RT_ALLOCATION"`,
-the shape `opengrid.guardian.repo.PgProposalPort` reads back) and a `command_batch` header row,
-then polls `og.verdict` for the independently-running `og-guardian` process's PASS/VETOED/TIMEOUT
-result -- `api` never signs or evaluates a batch itself (K3: sole signer stays in `og-guardian`).
-A veto is returned as `409`, never silently retried; no verdict within the poll window is a `503`
-(guardian not keeping up or not running), not a silent success.
+Step 2 of 2: records the confirmed setpoint as a MANUAL_TARGET (K10 trace event, the contract in
+`opengrid.engine.manual`) for the hub, or for every hub of the selected bank. The ENGINE then ramps
+each hub toward it within G-04 every cycle, each step signed by the guardian, until `expires_at`
+(live finding: a one-shot manual command was always vetoed by G-04's step bound). Returns 202
+`{"status": "RAMPING", "trace_id", "expires_at", "hub_ids"}`; cancel with
+`POST /manual-targets/{trace_id}/cancel`.
+
+Parameters: `proposal_id` (path, string, required)
+
+Responses: `202`, `422`
+
+### `POST /og/api/fleet/commands/bulk`
+
+Propose Bulk. Role: **viewer**.
+
+Step 1: validates the selection and says whether a second confirmation will be needed, and why.
+Nothing is commanded until confirm.
+
+Body: `hub_ids` (array of string, required); `p_kw_setpoint` (number, required); `reason` (string, required); `duration_minutes` (integer | null)
+
+Responses: `202`, `422`
+
+### `POST /og/api/fleet/commands/bulk/{proposal_id}/confirm`
+
+Confirm Bulk. Role: **viewer**.
+
+Step 2 (and 3). With `requires_double_confirm`, the first confirm only records itself and returns
+`status=AWAITING_SECOND_CONFIRM`; the second executes: one MANUAL_TARGET for every selected hub
+(`status=RAMPING`, each hub `RAMPING`, with the target's `manual_target_trace_id` and `expires_at`;
+cancel with `POST /og/api/fleet/manual-targets/{manual_target_trace_id}/cancel`). Per-step guardian
+verdicts now happen cycle by cycle in the engine, not at confirm time.
 
 Parameters: `proposal_id` (path, string, required)
 
 Responses: `200`, `422`
+
+### `GET /og/api/fleet/home-stations`
+
+List Home Stations. Role: **viewer**.
+
+D-31 depots with their assigned mobile units (for the map's depot layer and truck lines).
+
+Responses: `200`
 
 ### `GET /og/api/fleet/hubs`
 
@@ -188,6 +479,85 @@ Parameters: `hub_id` (path, string, required)
 
 Responses: `200`, `422`
 
+### `GET /og/api/fleet/hubs/{hub_id}/detail`
+
+Hub Detail. Role: **viewer**.
+
+Everything the Fleet drawer shows for one hub in one call: status (live health from
+last_seen_at), the last telemetry message, recent alerts for the hub and its bank, location, asset
+and control. Columns that do not exist yet come back `null` ("not recorded").
+
+Parameters: `hub_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `GET /og/api/fleet/manual-targets`
+
+List Manual Targets. Role: **viewer**.
+
+Hubs under a live manual target (newest per hub, not expired): `{"items": [{hub_id, p_kw_target,
+issued_at, expires_at, trace_id, proposer, reason}]}`. The ramp rate is the engine's, not listed.
+
+Responses: `200`
+
+### `POST /og/api/fleet/manual-targets/{trace_id}/cancel`
+
+Cancel Manual Target. Role: **operator**.
+
+End a manual target now: appends a MANUAL_TARGET for the hubs it still controls with
+`expires_at = now` (`core.manual_targets.parse_targets`, shared with the engine: they return to
+the allocator next cycle). Hubs a NEWER target has since taken over are left alone. 404 when the
+target is unknown or no longer controls any hub.
+
+Parameters: `trace_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `GET /og/api/fleet/map`
+
+Fleet Map. Role: **viewer**.
+
+`{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,
+bank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,
+home_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[]`.
+`activity_counts` covers the filtered set.
+
+Parameters: `zone` (query, string | null); `bank` (query, string | null); `activity` (query, string | null)
+
+Responses: `200`, `422`
+
+### `GET /og/api/fleet/release-requests`
+
+Pending Release Requests. Role: **viewer**.
+
+PENDING safe-stop release requests (operator A has filed, no second operator has approved yet):
+`{items: [{proposal_id, scope, scope_ref, requested_by, reason, age_s}]}`, newest first. Expired
+requests are not listed (`ProposalStore.peek` drops them).
+
+Responses: `200`
+
+### `GET /og/api/fleet/search`
+
+Search. Role: **viewer**.
+
+Typeahead: `{items: [{id, ...}]}` by case-insensitive prefix. Hubs carry bank, zone, live health
+and rated kW (the command form's setpoint hint); banks carry their zone.
+
+Parameters: `kind` (query, string, required); `q` (query, string); `limit` (query, integer)
+
+Responses: `200`, `422`
+
+### `GET /og/api/fleet/selection`
+
+Select Matching. Role: **viewer**.
+
+Every hub id matching the filter, capped at `[api].fleet_selection_max` (default 5,000):
+`{hub_ids, count, capped, max}`. `capped` means more hubs match than were returned.
+
+Parameters: `max` (query, integer | null); `zone` (query, array of string | null); `bank` (query, string | null); `health` (query, array of string | null); `activity` (query, array of string | null); `soc_min` (query, number | null); `soc_max` (query, number | null); `q` (query, string | null); `hw` (query, array of string | null); `fw` (query, array of string | null); `fw_not` (query, string | null); `asset_class` (query, array of string | null)
+
+Responses: `200`, `422`
+
 ### `GET /og/api/fleet/stream`
 
 Stream Fleet. Role: **viewer**.
@@ -207,6 +577,16 @@ former; see `StoreProtocol.hub_health_summary`).
 
 Responses: `200`
 
+### `GET /og/api/fleet/table`
+
+Hub Table. Role: **viewer**.
+
+One keyset page of hubs: `{items, next_cursor, prev_cursor, approx_total, limit, sort, dir}`.
+
+Parameters: `sort` (query, string); `dir` (query, string); `limit` (query, integer); `cursor` (query, string | null); `zone` (query, array of string | null); `bank` (query, string | null); `health` (query, array of string | null); `activity` (query, array of string | null); `soc_min` (query, number | null); `soc_max` (query, number | null); `q` (query, string | null); `hw` (query, array of string | null); `fw` (query, array of string | null); `fw_not` (query, string | null); `asset_class` (query, array of string | null)
+
+Responses: `200`, `422`
+
 ## forecast
 
 ### `GET /og/api/forecast`
@@ -217,6 +597,26 @@ P10/P50/P90 quantile band, 96 steps (02b S3, S7.1), as parallel arrays --
 `opengrid.ui.routes.markets.forecast_band_view` reads `forecast["p10"/"p50"/"p90"/"ts"]` directly.
 
 Parameters: `series_key` (query, string, required); `kind` (query, string)
+
+Responses: `200`, `422`
+
+## grid
+
+### `GET /og/api/grid/layers`
+
+Grid Layers. Role: **viewer**.
+
+`{source, layers: [...], zones, weather_zones, utility_batteries, transmission_lines_by_kv,
+transmission_line_counts, grid_connection_points, heat_cells}` (only the requested layers).
+
+- `zones`: per load zone, `load_mw` = the sum of its mapped ERCOT weather zones' latest live load
+  (`live=false` falls back to the export's snapshot); `approximate_mapping` flags the LZ -> weather-
+  zone correspondence as approximate (see `opengrid.forecast.service`).
+- `transmission_lines_by_kv`: `{"345": [{path: [[lon, lat], ...], owner, status}, ...], ...}`.
+- `heat_cells`: per bank (SCADA `REAL_POWER_KW` demand) and per zone (ERCOT load), with
+  `served_kw` = the fleet's granted delivery there this cycle and `unserved_kw` = demand - served.
+
+Parameters: `layers` (query, string | null); `min_kv` (query, integer)
 
 Responses: `200`, `422`
 
@@ -231,6 +631,103 @@ the operator/viewer Health screen, and the Control room's first paint (both reac
 Apache, also loopback by the time they hit this process -- see `opengrid.api.auth`).
 
 Responses: `200`
+
+## hubs
+
+### `GET /og/api/hubs/{hub_id}/asset-health`
+
+Hub Asset Health. Role: **viewer**.
+
+S6.7: the hub's `og.hub_inverter_pq` row (characterization plus asset state), its recent
+`og.asset_event` history, and its open maintenance work order, if any.
+
+Parameters: `hub_id` (path, string, required); `limit` (query, integer)
+
+Responses: `200`, `422`
+
+### `POST /og/api/hubs/{hub_id}/calibrate`
+
+Propose Calibration. Role: **operator**.
+
+Step 1 of 2 (S6.7): validates the hub and stores a proposal; nothing is recorded yet.
+
+Parameters: `hub_id` (path, string, required)
+
+Body: `reason` (string, required)
+
+Responses: `202`, `422`
+
+### `POST /og/api/hubs/{hub_id}/calibrate/{proposal_id}/confirm`
+
+Confirm Calibration. Role: **operator**.
+
+Step 2 of 2 (S6.7): `AssetHealthService.request_calibration` builds the candidate and writes the
+PENDING `og.calibration_attempt` (traced `CALIBRATION_ATTEMPT`). `409` when the ladder's own primary
+checks refuse (a live PQ-sensitive grant on the hub, the 24h rate limit, or no fresh drift
+measurement). `202`: recorded, awaiting the guardian's G-25 decision; the API never signs (K3).
+
+Parameters: `hub_id` (path, string, required); `proposal_id` (path, string, required)
+
+Responses: `202`, `422`
+
+### `GET /og/api/hubs/{hub_id}/calibration-history`
+
+Hub Calibration History. Role: **viewer**.
+
+S6.7: `og.calibration_attempt` rows for the hub, newest first, with the guardian's G-25 decision
+(`command_status`) joined from `og.calibration_command`.
+
+Parameters: `hub_id` (path, string, required); `limit` (query, integer)
+
+Responses: `200`, `422`
+
+### `GET /og/api/hubs/{hub_id}/spectrum`
+
+Hub Spectrum. Role: **viewer**.
+
+S6.6: harmonic-order time series (order -> magnitude % of fundamental, angle) from summaries in
+[`from`, `to`] (default the last 15 minutes), oldest first.
+
+Parameters: `hub_id` (path, string, required); `from` (query, string | null); `to` (query, string | null)
+
+Responses: `200`, `422`
+
+### `GET /og/api/hubs/{hub_id}/waveform`
+
+Hub Waveform. Role: **viewer**.
+
+S6.6: the latest `og.pq_waveform_summary` at or before `at` (default now, within `lookback_s`)
+plus the newest `og.pq_waveform_raw_index` capture metadata. `summary` is `null` when nothing was
+reported in the window (never a synthesized reading). Use `POST .../waveform-capture` for a fresh one.
+
+Parameters: `hub_id` (path, string, required); `at` (query, string | null); `lookback_s` (query, number); `limit` (query, integer)
+
+Responses: `200`, `422`
+
+### `POST /og/api/hubs/{hub_id}/waveform-capture`
+
+Propose Waveform Capture. Role: **operator**.
+
+Step 1 of 2 (S6.6): validates the hub and stores a proposal; nothing is published yet.
+
+Parameters: `hub_id` (path, string, required)
+
+Body: `reason` (string, required)
+
+Responses: `202`, `422`
+
+### `POST /og/api/hubs/{hub_id}/waveform-capture/{proposal_id}/confirm`
+
+Confirm Waveform Capture. Role: **operator**.
+
+Step 2 of 2 (S6.4b/S6.6, TS-15a): builds a `WaveformCaptureRequest` (`build_capture_request`,
+trigger `API_REQUEST`), validates it against `waveform_capture_request.schema.json`, and publishes it
+to `<root>/scada/wave/<zone>/<bank_id>/<hub_id>/request`. The capture arrives asynchronously through
+the engine's ingest path and appears in `GET .../waveform`'s `raw_captures`.
+
+Parameters: `hub_id` (path, string, required); `proposal_id` (path, string, required)
+
+Responses: `200`, `422`
 
 ## ledger
 
@@ -249,6 +746,18 @@ Responses: `200`, `422`
 
 ## markets
 
+### `GET /og/api/markets/bid-funnel`
+
+Bid Funnel. Role: **viewer**.
+
+`{from, to, bucket, totals, by_product[], series[], rejection_reasons[], mms, sources}`. Stage
+counts everywhere are `available, submitted, awarded, rejected, expired`. Default window: the last
+7 days; default bucket: `hour` up to 48 h, else `day`.
+
+Parameters: `from` (query, string | null); `to` (query, string | null); `bucket` (query, string | null)
+
+Responses: `200`, `422`
+
 ### `GET /og/api/markets/feed-status`
 
 Feed Status. Role: **viewer**.
@@ -262,6 +771,20 @@ Responses: `200`
 Market Series. Role: **viewer**.
 
 Parameters: `product` (query, string | null); `series_key` (query, string | null); `from` (query, string | null); `to` (query, string | null)
+
+Responses: `200`, `422`
+
+## obligations
+
+### `GET /og/api/obligations/{obligation_id}/pq-compliance`
+
+Obligation Pq Compliance. Role: **viewer**.
+
+S5.4/S6.6: the obligation's bound PQ envelope checked against the measured aggregate of every bank
+it currently holds reservations on. Per bank: per-dimension verdicts and limit ratios; overall: the
+worst verdict. A bank with no fresh measurement is reported `NO_DATA`, never `NOMINAL` (K1).
+
+Parameters: `obligation_id` (path, string, required); `freshness_s` (query, number)
 
 Responses: `200`, `422`
 
@@ -279,6 +802,24 @@ Body: `contract_id` (string, required); `window_start` (string, required); `wind
 Responses: `201`, `422`
 
 ## profitability
+
+### `GET /og/api/profitability/lp-value`
+
+Lp Value Route. Role: **viewer**.
+
+Responses: `200`
+
+### `GET /og/api/profitability/per-kw`
+
+Profitability Per Kw Route. Role: **operator**.
+
+`PerKwSummary` (`method_version, period_hours, hardware_view_usd_per_kw, target_payback_years,
+contracts[], markets{REGULATED, FREE}, fleet, illustrative_home_unit`), decimals as strings. Default
+period: the current settlement month in America/Chicago. 400 when `end <= start`.
+
+Parameters: `start` (query, string | null); `end` (query, string | null)
+
+Responses: `200`, `422`
 
 ### `GET /og/api/profitability/summary`
 
@@ -316,7 +857,9 @@ Responses: `200`, `422`
 Propose Safestop. Role: **operator**.
 
 Step 1 of 2 (02b S7.1): arms `og-safestop`'s own `ConfirmationBroker` via a PROPOSE
-notification; nothing stops yet -- a single message can never engage the fleet (TS-10-03).
+notification; nothing stops yet -- a single message can never engage the fleet (TS-10-03). The
+proposal expires here at og-safestop's own `[safestop].confirm_window_s` (30 s), not the generic
+60 s: a confirm the broker would already reject is refused with 409 instead of timing out.
 
 Body: `scope` (string, required); `scope_id` (string | null); `reason` (string, required)
 
@@ -343,7 +886,8 @@ Confirm Safestop. Role: **operator**.
 Step 2 of 2 (02b S7.1/S7.3): NOTIFYs CONFIRM, then polls `og.stop_event` for the ENGAGE row
 `og-safestop` inserts on success. No matching event within the poll window means either the
 PROPOSE already expired in `og-safestop`'s own (shorter) `confirm_window_s`, or `og-safestop`
-is not running -- reported as `503`, never assumed to have engaged.
+is not running -- reported as `503`, never assumed to have engaged. A proposal older than the
+broker's window is refused up front with `409` ("proposal expired, propose again").
 
 Parameters: `proposal_id` (path, string, required)
 
@@ -429,5 +973,37 @@ Runs `trace.verify()` over `stream_id` (or every known stream) and returns pass/
 first broken link, if any (02b S7.1).
 
 Body: `class` (string | null); `from` (string | null); `to` (string | null); `stream_id` (string | null)
+
+Responses: `200`, `422`
+
+## views
+
+### `GET /og/api/views/scope-posture`
+
+Scope Posture. Role: **viewer**.
+
+The guardian's CURRENT safety posture: every scope held CONSERVATIVE right now (`og.scope_posture`,
+written only by og-guardian, K7). The console's posture strip reads this, not open alerts. A database
+without the table (before migration 0019) answers an empty list.
+
+Responses: `200`
+
+### `GET /og/api/views/settlement`
+
+Settlement View. Role: **viewer**.
+
+Parameters: `from` (query, string | null); `to` (query, string | null)
+
+Responses: `200`, `422`
+
+## work-orders
+
+### `GET /og/api/work-orders`
+
+List Work Orders. Role: **viewer**.
+
+S6.7: `og.maintenance_work_order` rows, newest first, optionally filtered by `status`.
+
+Parameters: `status` (query, string | null); `limit` (query, integer)
 
 Responses: `200`, `422`
