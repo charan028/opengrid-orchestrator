@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from opengrid.core.models.mqtt import ScadaUtilityInstruction
-from opengrid.integrations.grid_link.config import load_grid_link_settings
+from opengrid.integrations.grid_link.config import OVERRIDE_ENV, grid_link_table, load_grid_link_settings
 from opengrid.integrations.grid_link.model import (
     CallOutcome,
     CallPhase,
@@ -274,3 +274,19 @@ def test_unknown_utility_ids_are_skipped_not_fatal() -> None:
     settings = load_grid_link_settings({"enabled": True, "utilities": [{**raw, "enabled": True}, good]})
     assert [u.utility_id for u in settings.active_utilities()] == ["AUSTIN_ENERGY"]
     assert settings.unknown_utilities() == ["X"]
+
+
+def test_host_override_file_replaces_the_release_grid_link_table(tmp_path: Path, monkeypatch: Any) -> None:
+    release = {"enabled": False}
+    monkeypatch.delenv(OVERRIDE_ENV, raising=False)
+    assert grid_link_table(release) is release
+    override = tmp_path / "grid_link.toml"
+    override.write_text("[grid_link]\nenabled = true\n", encoding="utf-8")
+    monkeypatch.setenv(OVERRIDE_ENV, str(override))
+    assert grid_link_table(release) == {"enabled": True}
+    override.write_text("[other]\nx = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no \\[grid_link\\]"):
+        grid_link_table(release)
+    monkeypatch.setenv(OVERRIDE_ENV, str(tmp_path / "missing.toml"))
+    with pytest.raises(OSError):
+        grid_link_table(release)

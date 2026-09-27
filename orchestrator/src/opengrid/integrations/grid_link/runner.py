@@ -22,6 +22,7 @@ from opengrid.core.models.mqtt import ScadaBankSignal, ScadaUtilityInstruction
 from opengrid.integrations.grid_link.config import (
     GridLinkSettings,
     UtilityLinkSettings,
+    grid_link_table,
     load_grid_link_settings,
 )
 from opengrid.integrations.grid_link.dnp3_server import Dnp3GridLinkServer
@@ -164,8 +165,8 @@ def _server_for(utility: UtilityLinkSettings, service: GridLinkService) -> Dnp3G
 def start_grid_link(cfg: Config, pool: AsyncConnectionPool, trace: TraceStore) -> asyncio.Task[Any] | None:
     """Start the grid link when configured (module docstring); `None` when disabled."""
     try:
-        settings = load_grid_link_settings(cfg.get("grid_link"))
-    except ValueError as exc:
+        settings = load_grid_link_settings(grid_link_table(cfg.get("grid_link")))
+    except (OSError, ValueError) as exc:
         logger.error("invalid [grid_link] configuration; grid link disabled", extra={"error": str(exc)})
         return None
     for utility_id in settings.unknown_utilities():
