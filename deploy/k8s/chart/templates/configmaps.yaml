@@ -1,0 +1,131 @@
+{{- $fn := include "og.fullname" . -}}
+{{- $host := required "ingress.host is required (the public FQDN; install.sh --host)" .Values.ingress.host -}}
+# Overrides applied to the release's orchestrator.toml at container start (k8s_support.py render-config): the
+# Services replace production's loopback hosts. og-api itself stays on loopback behind the gateway sidecar.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fn }}-config
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "config") | nindent 4 }}
+data:
+  overrides.toml: |
+    [postgres]
+    host = {{ include "og.dbHost" . | quote }}
+    port = {{ include "og.dbPort" . }}
+
+    [mqtt]
+    host = "{{ $fn }}-mosquitto"
+    port = 1883
+
+    [metrics]
+    bind_host = "0.0.0.0"
+
+    [health]
+    engine_metrics_url = "http://{{ $fn }}-engine:{{ .Values.services.engine.metricsPort }}/metrics"
+
+    [market_sim]
+    base_url = "http://{{ $fn }}-sim-market:{{ .Values.sims.market.port }}"
+
+    [api]
+    csrf_allowed_hosts = [{{ $host | quote }}]
+{{- with .Values.config.extraOverrides }}
+
+{{ . | indent 4 }}
+{{- end }}
+---
+{{- $conf := required "gateway.apacheConf is required (install.sh passes --set-file gateway.apacheConf=deploy/apache/opengrid.conf)" .Values.gateway.apacheConf -}}
+{{- $simUpstream := "http://127.0.0.1:8091/" -}}
+{{- if not (contains $simUpstream $conf) -}}
+{{- fail "gateway.apacheConf: expected the /ogsim/ ProxyPass to http://127.0.0.1:8091/ (deploy/apache/opengrid.conf changed?)" -}}
+{{- end -}}
+{{- if not (contains "http://127.0.0.1:8080/og/" $conf) -}}
+{{- fail "gateway.apacheConf: expected the /og/ ProxyPass to http://127.0.0.1:8080/og/ (deploy/apache/opengrid.conf changed?)" -}}
+{{- end }}
+# The Apache gateway: deploy/apache/opengrid.conf unchanged except the /ogsim/ upstream (the control simulator
+# is its own Service here). og-api stays on the pod's loopback, exactly as in production.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fn }}-gateway
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+data:
+  httpd.conf: |
+    ServerRoot "/usr/local/apache2"
+    ServerName {{ $host }}
+    Listen {{ .Values.gateway.port }}
+    PidFile /tmp/httpd.pid
+    DefaultRuntimeDir /tmp
+    LoadModule mpm_event_module modules/mod_mpm_event.so
+    LoadModule unixd_module modules/mod_unixd.so
+    LoadModule authn_core_module modules/mod_authn_core.so
+    LoadModule authn_file_module modules/mod_authn_file.so
+    LoadModule authz_core_module modules/mod_authz_core.so
+    LoadModule authz_user_module modules/mod_authz_user.so
+    LoadModule auth_basic_module modules/mod_auth_basic.so
+    LoadModule headers_module modules/mod_headers.so
+    LoadModule env_module modules/mod_env.so
+    LoadModule log_config_module modules/mod_log_config.so
+    LoadModule proxy_module modules/mod_proxy.so
+    LoadModule proxy_http_module modules/mod_proxy_http.so
+    ErrorLog /proc/self/fd/2
+    LogLevel warn
+    LogFormat "%a %u \"%r\" %>s %b %D" og
+    CustomLog /proc/self/fd/1 og
+    ServerTokens Prod
+    ServerSignature Off
+    TraceEnable Off
+    <Location />
+        Require all denied
+    </Location>
+    Include /usr/local/apache2/conf-og/opengrid.conf
+  opengrid.conf: |
+    {{- replace $simUpstream (printf "http://%s-sim-control:%v/" $fn .Values.sims.control.port) $conf | nindent 4 }}
+  build-htpasswd.sh: |
+    #!/bin/sh
+    # One bcrypt entry per key of the UI-users Secret (password over stdin, never in argv or the log).
+    set -eu
+    out=/etc/opengrid/htpasswd
+    umask 077
+    : > "$out"
+    n=0
+    for f in /run/og-ui-users/*; do
+      [ -f "$f" ] || continue
+      htpasswd -iB "$out" "$(basename "$f")" < "$f" 2>/dev/null
+      n=$((n + 1))
+    done
+    echo "htpasswd: $n account(s)"
+    [ "$n" -gt 0 ]
+---
+# Mosquitto: listener for the cluster, no anonymous access, the generated password file and production's ACL.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fn }}-mosquitto
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "mosquitto") | nindent 4 }}
+data:
+  mosquitto.conf: |
+    listener 1883 0.0.0.0
+    allow_anonymous false
+    password_file /mosquitto/gen/opengrid.passwd
+    acl_file /mosquitto/gen/opengrid.acl
+    persistence {{ .Values.mosquitto.persistence }}
+    persistence_location /mosquitto/data/
+    log_dest stdout
+    log_type error
+    log_type warning
+    log_type notice
+  build-passwd.sh: |
+    #!/bin/sh
+    # user:password lines from the MQTT Secrets (printf is a shell builtin: nothing in argv), hashed in place.
+    set -eu
+    out=/mosquitto/gen/opengrid.passwd
+    umask 077
+    : > "$out"
+    {{- range .Values.mosquitto.users }}
+    printf '%s:%s\n' {{ .user | quote }} "${{ .key }}" >> "$out"
+    {{- end }}
+    mosquitto_passwd -U "$out"
+    echo "mosquitto passwd: {{ len .Values.mosquitto.users }} account(s)"

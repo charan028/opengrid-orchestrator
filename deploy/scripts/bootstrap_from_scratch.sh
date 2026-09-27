@@ -11,7 +11,7 @@
 #      extensions, schema og                                                          BOOTSTRAP.md 3
 #   d  create_schema.sh: migrations 0001 -> latest (opengrid.platform.db migrate)     BOOTSTRAP.md 6
 #   e  seeds, in order: fleet (base + enabled zone blocks) -> market model (utilities, $102 toll, substation
-#      asset) -> customer services -> services -> topology -> trucks (when the release has them); the
+#      asset) -> customer services -> services -> trucks (when the release has them) -> topology; the
 #      charge-window default and the firmware catalogue come with 0038 and [firmware.catalogue]; then
 #      deploy/scripts/bootstrap_check.py asserts the counts                          BOOTSTRAP.md 7, 8
 #   f  sim configs: <etc>/sim/{fleet,scada}.yaml with the approved zone blocks on     BOOTSTRAP.md 8
@@ -29,12 +29,17 @@
 #   --release DIR       release/repo root (default: this script's repo)
 #   --etc DIR           secrets/config dir (default /etc/opengrid)
 #   --db-port N --db-name NAME --db-role ROLE   (default 5432 / og / opengrid)
+#   --db-host HOST      database host of the DB phases (default 127.0.0.1)
+#   --config FILE       orchestrator.toml of the DB phases (default: the release's; its [postgres].host must be
+#                       --db-host -- deploy/k8s renders one per pod)
 #   --fresh-db          drop the database first (refused on port 5432)
 #   --zones LIST        zone blocks to enable (default LZ_AEN, the owner-approved production set)
 #   --d32               also enable LZ_LCRA and LZ_RAYBN (decision D-32)
 #   --demo-customers    phase l: run dev/scripts/seed_demo_customers.py once the API is up
 #   --backfill-days N   phase k window (default 14)
 #   --public-url URL    Apache-fronted URL the customer simulator calls (default https://<fqdn>)
+#   --migrate-key-perms phase h: move keys still in the legacy opengrid:opengrid 0600 layout to the per-service
+#                       groups (then restart og-guardian, og-safestop and og-settle)
 #
 # Idempotent: every phase converges (existing secrets, keys, users and rows are kept, never rotated or printed).
 # Secrets are generated on this host with openssl, written only to <etc> (640 root:opengrid, keys 600 opengrid)
@@ -50,6 +55,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ETC=/etc/opengrid
 DB_HOST=127.0.0.1
+CONFIG=""
 DB_PORT=5432
 DB_NAME=og
 DB_ROLE=opengrid
@@ -63,6 +69,10 @@ PUBLIC_URL="https://$(hostname -f 2>/dev/null || hostname)"
 OG_PY=/opt/opengrid/venv/bin/python
 SIM_PY=/opt/ogsim/venv/bin/python
 MQ_DIR=/etc/mosquitto
+# private key file -> group -> the one unit that signs with it
+KEY_GROUPS="guardian_ed25519:og-guardian-key@og-guardian safestop_ed25519:og-safestop-key@og-safestop trace_anchor_ed25519:og-anchor-key@og-settle"
+KEY_GROUPS_ALL="og-guardian-key og-safestop-key og-anchor-key"
+MIGRATE_KEY_PERMS=0
 CREDS=/root/opengrid-ui-credentials.txt
 MQTT_ROLES="ENGINE GUARDIAN SIM API SAFESTOP SIMCTL"
 SIM_UNITS="og-sim-market og-sim-fleet og-sim-scada og-sim-control"
@@ -77,12 +87,15 @@ while [ $# -gt 0 ]; do
     --db-port) DB_PORT="$2"; shift 2 ;;
     --db-name) DB_NAME="$2"; shift 2 ;;
     --db-role) DB_ROLE="$2"; shift 2 ;;
+    --db-host) DB_HOST="$2"; shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
     --fresh-db) FRESH_DB=1; shift ;;
     --zones) ZONES="$2"; shift 2 ;;
     --d32) ZONES="$ZONES,LZ_LCRA,LZ_RAYBN"; shift ;;
     --demo-customers) DEMO=1; shift ;;
     --backfill-days) BACKFILL_DAYS="$2"; shift 2 ;;
     --public-url) PUBLIC_URL="$2"; shift 2 ;;
+    --migrate-key-perms) MIGRATE_KEY_PERMS=1; shift ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -120,7 +133,7 @@ with_db() {
     OG_DB_PASSWORD="$(env_get "$ETC/secrets.env" OG_DB_PASSWORD)"
     [ -n "$OG_DB_PASSWORD" ] || die "OG_DB_PASSWORD missing in $ETC/secrets.env (run phase c)"
     export OG_DB_PASSWORD PGPASSWORD="$OG_DB_PASSWORD"
-    export OG_CONFIG="$RELEASE/orchestrator/config/orchestrator.toml" PYTHONPATH="$RELEASE/orchestrator/src"
+    export OG_CONFIG="${CONFIG:-$RELEASE/orchestrator/config/orchestrator.toml}" PYTHONPATH="$RELEASE/orchestrator/src"
     export OG_DB="$DB_NAME" OG_DB_PORT="$DB_PORT" OG_DB_USER="$DB_ROLE"
     export PGHOST="$DB_HOST" PGPORT="$DB_PORT" PGUSER="$DB_ROLE" PGDATABASE="$DB_NAME"
     export OG_FLEET_SIM_CONFIG="$SIM_DIR/fleet.yaml"
@@ -168,7 +181,8 @@ phase_b() {
   phase b "OS user and directories"
   if id opengrid >/dev/null 2>&1; then echo "  user opengrid: present"; else
     run useradd --system --home-dir /opt/opengrid --shell /usr/sbin/nologin opengrid; fi
-  run install -d -o root -g opengrid -m 750 "$ETC" "$SIM_DIR"
+  local d
+  for d in "$ETC" "$SIM_DIR"; do [ -d "$d" ] && echo "  $d: present (mode kept)" || run install -d -o root -g opengrid -m 750 "$d"; done
   if [ "$ETC" = /etc/opengrid ]; then
     run install -d -o opengrid -g opengrid -m 755 /opt/opengrid /opt/opengrid/releases
     run install -d -o opengrid -g opengrid -m 750 /var/lib/opengrid /var/lib/opengrid/anchors \
@@ -179,7 +193,9 @@ phase_b() {
 
 # Phases c and d are deploy/scripts/create_schema.sh (role, database, extensions, schema; then the migrations).
 schema_args() {
-  local a=(--release "$RELEASE" --etc "$ETC" --db-port "$DB_PORT" --db-name "$DB_NAME" --db-role "$DB_ROLE")
+  local a=(--release "$RELEASE" --etc "$ETC" --db-port "$DB_PORT" --db-name "$DB_NAME" --db-role "$DB_ROLE"
+    --db-host "$DB_HOST")
+  [ -z "$CONFIG" ] || a+=(--config "$CONFIG")
   [ "$DRY" -eq 1 ] && a+=(--dry-run)
   printf '%s\n' "${a[@]}"
 }
@@ -219,7 +235,7 @@ phase_e() {
   local seed="$RELEASE/dev/seed" trucks=""
   if [ "$DRY" -eq 1 ]; then
     echo "  DRY: fleet seed (OG_FLEET_SIM_CONFIG=$SIM_DIR/fleet.yaml), then market_model_seed.sql,"
-    echo "       customer_services_seed.sql, services_seed.sql, topology_seed.py, mobile_trucks_seed.sql (if present)"
+    echo "       customer_services_seed.sql, services_seed.sql, mobile_trucks_seed.sql (if present), topology_seed.py"
     return 0
   fi
   log "  1/6 fleet: base 2,000 hubs + enabled zone blocks ($ZONES)"
@@ -230,14 +246,15 @@ phase_e() {
   psql_file "$seed/customer_services_seed.sql"
   log "  4/6 services (PJM_CAPACITY, MOBILE_STORAGE, LARGE_LOAD)"
   psql_file "$seed/services_seed.sql"
-  log "  5/6 topology (transformers, feeder/substation limits, home-bank assets)"
+  if [ -f "$seed/mobile_trucks_seed.sql" ]; then
+    log "  5/6 mobile trucks"; psql_file "$seed/mobile_trucks_seed.sql"; trucks="--expect-trucks"
+  else
+    log "  5/6 mobile trucks: SKIPPED (dev/seed/mobile_trucks_seed.sql not in this release)"
+  fi
+  # Last: it maps every hub already in og.hub, the substation set's and the trucks' included.
+  log "  6/6 topology (transformers for every hub, feeder/substation limits, home-bank assets)"
   with_db bash -c '"$0" "$1/dev/seed/topology_seed.py" --fleet-config "$2/fleet.yaml" --scada-config "$2/scada.yaml" \
     --dsn "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER"' "$OG_PY" "$RELEASE" "$SIM_DIR" | sed 's/^/      /'
-  if [ -f "$seed/mobile_trucks_seed.sql" ]; then
-    log "  6/6 mobile trucks"; psql_file "$seed/mobile_trucks_seed.sql"; trucks="--expect-trucks"
-  else
-    log "  6/6 mobile trucks: SKIPPED (dev/seed/mobile_trucks_seed.sql not in this release)"
-  fi
   echo "  charge-window default: migration 0038; firmware catalogue: [firmware.catalogue] in orchestrator.toml"
   phase_check "$trucks"
 }
@@ -263,10 +280,8 @@ phase_g() {
 
   if [ ! -f "$MQ_DIR/opengrid.acl" ]; then
     tmp="$(mktemp)"
-    "$OG_PY" "$RELEASE/dev/scripts/gen_mosquitto_acl.py" --topic-root og/v1 --out "$tmp" --secrets-file "$f" >/dev/null
-    # Grants production carries beyond the six core users of gen_mosquitto_acl.py (wiring note: fold them in there).
-    sed -i '/^user og_api$/a topic write og/v1/scada/wave/+/+/+/request' "$tmp"
-    printf '\nuser og_sim_customer\ntopic write og/v1/site/#\ntopic write og/v1/corridor/#\n' >> "$tmp"
+    # the six core users of gen_mosquitto_acl.py plus production's two extra grants (shared with deploy/k8s)
+    OG_PY="$OG_PY" bash "$SCRIPT_DIR/render_mosquitto_acl.sh" "$tmp" "$f"
     install -o root -g mosquitto -m 640 "$tmp" "$MQ_DIR/opengrid.acl"; rm -f "$tmp"
     echo "  ACL: written ($MQ_DIR/opengrid.acl)"; changed=1
   else
@@ -319,10 +334,37 @@ phase_h() {
       mv "$tmp/trace_anchor_ed25519.key" "$tmp/trace_anchor_ed25519.pub" "$ETC/"; rm -rf "$tmp"
     fi
     echo "  trace anchor key: generated"; fi
-  if [ "$DRY" -eq 0 ]; then
-    chown opengrid:opengrid "$ETC"/*_ed25519.key "$ETC"/*_ed25519.pub
-    chmod 600 "$ETC"/*_ed25519.key; chmod 644 "$ETC"/*_ed25519.pub
-  fi
+  key_access
+}
+
+# Each private seed is root:<group> 0640 and only its signing service gets <group> as a supplementary group
+# (drop-in keys.conf): og-api, og-engine, og-feeds and the simulators, which also run as `opengrid`, cannot read
+# any of them. Public keys stay world-readable (the fleet simulator verifies with the guardian's).
+# A key still in the legacy layout (opengrid:opengrid 0600, production before r3.4) is migrated only with
+# --migrate-key-perms, because the running service needs the drop-in and a restart at the same moment.
+key_access() {
+  local pair key group unit owner g
+  for g in $KEY_GROUPS_ALL; do  # one group per private key; the opengrid user itself is never a member
+    if getent group "$g" >/dev/null; then echo "  group $g: present"; else run groupadd --system "$g"; fi
+  done
+  for pair in $KEY_GROUPS; do
+    key="${pair%%:*}"; group="${pair#*:}"; group="${group%%@*}"; unit="${pair##*@}"
+    [ -f "$ETC/$key.key" ] || [ "$DRY" -eq 1 ] || continue
+    owner="$(stat -c '%U:%G %a' "$ETC/$key.key" 2>/dev/null || echo 'new')"
+    if [ "$owner" = "opengrid:opengrid 600" ] && [ "$MIGRATE_KEY_PERMS" -ne 1 ]; then
+      echo "  $key.key: legacy layout (opengrid 0600) kept; --migrate-key-perms moves it to root:$group 0640 for $unit"
+      continue
+    fi
+    if [ "$DRY" -eq 1 ]; then echo "  DRY: $key.key -> root:$group 0640; $unit.service.d/keys.conf SupplementaryGroups=$group"; continue; fi
+    install -d "/etc/systemd/system/$unit.service.d"
+    printf '[Service]\n# Read access to its own signing key only (deploy/BOOTSTRAP.md section 5).\nSupplementaryGroups=%s\n' \
+      "$group" > "/etc/systemd/system/$unit.service.d/keys.conf"
+    chown "root:$group" "$ETC/$key.key"; chmod 640 "$ETC/$key.key"
+    [ -f "$ETC/$key.pub" ] && { chown root:root "$ETC/$key.pub"; chmod 644 "$ETC/$key.pub"; }
+    echo "  $key.key: root:$group 0640, readable by $unit only"
+  done
+  [ "$DRY" -eq 1 ] || systemctl daemon-reload
+  [ "$MIGRATE_KEY_PERMS" -ne 1 ] || [ "$DRY" -eq 1 ] || echo "  keys migrated: restart og-guardian og-safestop og-settle now (one at a time, not while delivering)"
 }
 
 phase_i() {
@@ -335,7 +377,9 @@ phase_i() {
     return 0
   fi
   secure_env "$ETC/api_proxy.env" root:root 600
-  if [ ! -f "$secret_conf" ] || ! grep -qF "$(env_get "$ETC/api_proxy.env" OG_API_PROXY_SECRET)" "$secret_conf"; then
+  # Compared and written only through printf (a bash builtin) and a process substitution: the secret never
+  # reaches any process's argv (visible in ps).
+  if ! cmp -s <(printf 'Define OG_API_PROXY_SECRET %s\n' "$(env_get "$ETC/api_proxy.env" OG_API_PROXY_SECRET)") "$secret_conf"; then
     ( umask 077; printf 'Define OG_API_PROXY_SECRET %s\n' "$(env_get "$ETC/api_proxy.env" OG_API_PROXY_SECRET)" > "$secret_conf" )
     a2enconf opengrid-proxy-secret >/dev/null
     echo "  Apache proxy secret Define: written"

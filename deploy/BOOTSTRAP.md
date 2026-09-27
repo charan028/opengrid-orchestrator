@@ -7,6 +7,10 @@ only the first build.
 
 Time: about 45 minutes, most of it the Postgres initialisation and the first fleet seed.
 
+To install on a new **Kubernetes** cluster instead, use `deploy/k8s/install.sh`; see
+[k8s/README.md](k8s/README.md) (prerequisites, sizing, step by step, troubleshooting). It reuses this page's
+scripts for the schema, migrations, seeds, sim configs, ACL, keys and checks.
+
 ## 0. Automated: `deploy/scripts/bootstrap_from_scratch.sh`
 
 Steps 3 to 10 are automated by one idempotent script. Do step 1 (storage) and step 2 (packages and the two venvs)
@@ -27,7 +31,7 @@ bash deploy/scripts/bootstrap_from_scratch.sh --phase c-e        # only the data
 | e | all seeds in order (see `dev/seed/README.md`), then `deploy/scripts/bootstrap_check.py` asserts the counts | 7, 8 |
 | f | `/etc/opengrid/sim/{fleet,scada}.yaml` with the approved zone blocks on (`deploy/scripts/gen_sim_overrides.py`) | 8 |
 | g | the MQTT users (`og_engine`, `og_guardian`, `og_safestop`, `og_api`, `og_sim`, `og_simctl`, `og_sim_customer`): passwords generated into `secrets.env`/`customer_sim.env`, hashed with `mosquitto_passwd -U`; the ACL from `dev/scripts/gen_mosquitto_acl.py` plus production's two extra grants; `conf.d/opengrid.conf` | 4, 5 |
-| h | the guardian, safestop and trace-anchor Ed25519 seeds (the orchestrator's own keygen CLIs) | 5 |
+| h | the guardian, safestop and trace-anchor Ed25519 seeds (the orchestrator's own keygen CLIs), each `root:<key group>` 0640 and readable only by its signing unit (section 5) | 5 |
 | i | the proxy secret (`api_proxy.env` and the Apache `Define`), then `install.sh` (Apache conf, htpasswd operator/viewer/tester/og-op-a/og-op-b, cron, logrotate, units), then the eight `og-cust-*` accounts with matching `customer_sim.env` entries | 4, 5 |
 | j | unit files and timers from the release, the sim drop-ins (`og-sim-{fleet,scada}.service.d/austin.conf`), `opengrid.target`/`ogsim.target` enabled; `og-lifecycle.timer` stays disabled | 6, 9 |
 | k | optional ERCOT backfill (`orchestrator/tools/ercot_backfill.py --days 14`), only when `api_keys.env` holds the ERCOT keys | 10 |
@@ -50,13 +54,17 @@ printed; generated passwords go only to the env files (640 root:opengrid, `api_p
 | `/etc/opengrid/ai_agent.env` (`ANTHROPIC_API_KEY`) | the AI copilot's model tier | optional; the copilot runs its no-model tier |
 
 **Check on the test cluster:** `make bootstrap-check` runs phases c-e into a fresh `og_t_boot` on port 5433 (role
-`og_boot`, secrets under `/srv/ogwork/bootstrap/etc`), never on 5432. Expected on r3.3 + rm-r34, LZ_AEN enabled:
-39/39 migrations; 2,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST, LZ_AEN; 500 dual-unit)
-plus the substation hub (2,501 `og.hub` rows); 50 home banks plus `bank-sub-LZ_AEN-00` (51); substation asset
+`og_boot`, secrets under `/srv/ogwork/bootstrap/etc`), never on 5432. Expected on r3.4.1 with `--d32` (production's
+blocks: LZ_AEN, LZ_LCRA, LZ_RAYBN): 43/43 migrations; 3,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH,
+LZ_HOUSTON, LZ_WEST, LZ_AEN, LZ_LCRA, LZ_RAYBN; 700 dual-unit) plus the substation hub and the 8 trucks (3,509
+`og.hub` rows); 70 home banks plus `bank-sub-LZ_AEN-00` and the 8 truck banks (79); substation asset
 `sub-LZ_AEN-00` ACTIVE; utilities AUSTIN_ENERGY ($102/kW-yr) and CPS_ENERGY; the toll contract
-(REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 350
-service transformers, every hub mapped; 17 feeder limits; 8 substation limits; 51 assets; the FLEET charge window
-`22:00-06:00`; 4 firmware catalogue entries from config. With `--d32`: 3,500 hubs and 70 banks.
+(REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 849
+service transformers (12 x 50 kVA per home bank, D-36; one each for the substation set and the 8 trucks), every hub mapped;
+23 feeder limits; 7 substation limits; 79 assets (70 HOME_BANK, 1 SUBSTATION, 8 MOBILE_STORAGE); every
+`opengrid.fleet.topology_audit` unmapped count 0 (no ALR-XFMR-UNMAPPED / ALR-BANK-UNMAPPED-TOPOLOGY source); the
+FLEET charge window `22:00-06:00`; 4 firmware catalogue entries from config. A database seeded before r3.4.1 gets
+the missing topology rows from `deploy/scripts/topology_backfill.sh` (dry run by default, insert-only).
 
 ### Database schema: `deploy/scripts/create_schema.sh` and `orchestrator/schema/og_schema.sql`
 
@@ -151,14 +159,28 @@ customer accounts and the proxy secret are done by `bootstrap_from_scratch.sh` p
 | `/etc/opengrid/api_proxy.env` | 640 root:opengrid | the Apache-to-API proxy secret |
 | `/etc/opengrid/ai_agent.env` | 640 root:opengrid | the owner's Anthropic key (installed by the owner) |
 | `/etc/opengrid/customer_sim.env` | 640 root:opengrid | customer-simulator MQTT user and account names |
-| `/etc/opengrid/guardian_ed25519.key` | 600 opengrid | raw 32-byte Ed25519 seed |
-| `/etc/opengrid/safestop_ed25519.key` | 600 opengrid | raw 32-byte Ed25519 seed |
-| `/etc/opengrid/trace_anchor_ed25519.key` | 600 opengrid | raw 32-byte Ed25519 seed (K11 anchors) |
+| `/etc/opengrid/guardian_ed25519.key` | 640 root:og-guardian-key | raw 32-byte Ed25519 seed; read by og-guardian only |
+| `/etc/opengrid/safestop_ed25519.key` | 640 root:og-safestop-key | raw 32-byte Ed25519 seed; read by og-safestop only |
+| `/etc/opengrid/trace_anchor_ed25519.key` | 640 root:og-anchor-key | raw 32-byte Ed25519 seed (K11 anchors); read by og-settle only |
 
 A seed is 32 random bytes:
 `/opt/opengrid/venv/bin/python -c "import os,sys; sys.stdout.buffer.write(os.urandom(32))" > <file>`, then
-`chown opengrid:opengrid <file>; chmod 600 <file>`. Check a file only by counting (`grep -c`), never by
-printing it.
+`chown root:<key group> <file>; chmod 640 <file>`. Check a file only by counting (`grep -c`), never by printing it.
+
+**Key access.** Every og-* unit and every simulator runs as `opengrid`, so a key owned by `opengrid` is
+readable by og-api and the simulators too. Each private seed therefore belongs to its own group
+(`og-guardian-key`, `og-safestop-key`, `og-anchor-key`; the `opengrid` user is a member of none), and only its
+signing unit gets that group through a drop-in, `/etc/systemd/system/<unit>.service.d/keys.conf` with
+`SupplementaryGroups=<key group>` (og-guardian, og-safestop, og-settle). `bootstrap_from_scratch.sh` phase h
+sets this up. The safe-stop CLI runs as root and is unaffected; the `.pub` files stay 644.
+
+*Production today (checked 2026-09-26, read-only):* the three keys are `opengrid:opengrid 0600` and no unit has
+a supplementary group. **r3.4.1 deploy step (proposal for the release manager, not applied):** only outside
+any FIRM/AS delivery window (`deploy.sh`'s DELIVERING preflight query must return no rows), run `bash deploy/scripts/bootstrap_from_scratch.sh --phase h
+--migrate-key-perms` from the release (it creates the groups, writes the three drop-ins, re-owns the keys and
+reloads systemd), then restart og-guardian, og-safestop and og-settle one at a time and check each is active.
+Without the flag, phase h leaves legacy-layout keys untouched. Folding `SupplementaryGroups=` into the three unit
+files would make the drop-ins unnecessary.
 
 ## 6. First release
 
@@ -174,7 +196,7 @@ build, enable the targets once: `systemctl enable opengrid.target ogsim.target`.
 ## 7. Seeds (after the first deploy)
 
 Phase e runs the complete list in order (fleet with the zone blocks, market model, customer services, services,
-topology, trucks); `dev/seed/README.md` describes each seed. By hand, the three SQL seeds are:
+trucks, topology); `dev/seed/README.md` describes each seed. By hand, the three SQL seeds are:
 
 As `opengrid`, with `PGPASSWORD` from `secrets.env`:
 

@@ -22,7 +22,9 @@ MemoryMax=512M
 MemoryHigh=410M
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/opengrid /var/log/opengrid /srv/ogbackup/anchors
+# '-': optional. The anchors dir is created by deploy.sh; a host without /srv/ogbackup still starts og-settle
+# (anchors then publish to the primary [trace].anchor_dir only).
+ReadWritePaths=/var/lib/opengrid /var/log/opengrid -/srv/ogbackup/anchors
 PrivateTmp=true
 
 [Install]

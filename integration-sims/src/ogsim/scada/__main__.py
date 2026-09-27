@@ -10,6 +10,7 @@ from typing import Any
 from ogsim.common.clock import RealClock
 from ogsim.common.config import load_scada_config
 from ogsim.common.mqtt_client import AiomqttTransportAdapter, SimMqttClient, mqtt_settings
+from ogsim.scada.grid_link import GridLinkBridgeSettings, ScadaGridLinkBridge
 from ogsim.scada.runtime import ScadaEngine, run_scada
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,12 @@ async def _run_forever() -> None:
             async for msg in client.messages():
                 _dispatch_message(engine, str(msg.topic), msg.payload)
 
-        await asyncio.gather(consume(), run_scada(client, engine, clock))
+        bridge_settings = GridLinkBridgeSettings.from_raw(config.grid_link)
+        bridge = ScadaGridLinkBridge(bridge_settings) if bridge_settings.enabled else None
+        tasks = [consume(), run_scada(client, engine, clock, bridge)]
+        if bridge is not None:
+            tasks.append(bridge.run())
+        await asyncio.gather(*tasks)
 
 
 def main() -> None:

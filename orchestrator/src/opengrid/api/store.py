@@ -242,6 +242,11 @@ class StoreProtocol(Protocol):
         """Whether `trace_id` is durably in `og.trace` (not only in a process's local trace journal)."""
         ...
 
+    async def manual_target_trace_id(self, request_id: str) -> UUID | None:
+        """The trace id of the MANUAL_TARGET row the API wrote with this `request_id` (last hour), if it
+        committed -- settles a write whose acknowledgement was lost."""
+        ...
+
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         """The recent MANUAL_TARGET trace rows `(trace_id, payload, created_at)` in `created_at` order
         (`opengrid.core.manual_targets.MANUAL_TARGET_ROWS_SQL`); `core.manual_targets.parse_targets` turns
@@ -305,32 +310,9 @@ class StoreProtocol(Protocol):
         guardian's `requested_at`; defaults to the insert time)."""
         ...
 
-    async def insert_as_deployment(
-        self,
-        *,
-        obligation_id: UUID | None,
-        start_at: datetime,
-        end_at: datetime,
-        requested_by: str,
-        reason: str,
-    ) -> UUID:
-        """An ERCOT_AS deployment (`og.as_deployment`, source OPERATOR): the held award(s) discharge up to
-        their committed kW while it is active. `obligation_id` None deploys every ERCOT_AS award."""
-        ...
-
-    async def list_active_as_deployments(self) -> list[dict[str, Any]]: ...
-
-    async def get_as_award(self, obligation_id: UUID) -> dict[str, Any] | None:
-        """`{service_type, state, variant, duration_minutes, has_active_deployment}` of an obligation, or
-        None if it does not exist -- the AS deployment / utility call route's validation read. `variant` is
-        its contract's (e.g. TOLLING); `duration_minutes` is the full-deployment duration of the obligation's
-        OWN product rule (its opportunity's `product_rule_id`), None when unknown; `has_active_deployment`
-        is true while an active `og.as_deployment` already covers it (its own row, or a fleet-wide row for
-        an ERCOT_AS award)."""
-        ...
-
-    async def cancel_as_deployment(self, deployment_id: UUID) -> bool:
-        """End an active deployment now (sets `cancelled_at`; never a delete). False if none active."""
+    async def list_active_as_deployments(self) -> list[dict[str, Any]]:
+        """Uncancelled, not yet ended `og.as_deployment` rows with their origin (`source`), requester,
+        requested kW and call id. Writes go through `opengrid.calls` (the one call path, D-33)."""
         ...
 
 
@@ -755,6 +737,14 @@ class PgStore:
         rows = await self._fetch("SELECT 1 AS ok FROM og.trace WHERE trace_id = %s LIMIT 1", (trace_id,))
         return bool(rows)
 
+    async def manual_target_trace_id(self, request_id: str) -> UUID | None:
+        rows = await self._fetch(
+            "SELECT trace_id FROM og.trace WHERE event_class = 'MANUAL_TARGET' "
+            "AND created_at > now() - interval '1 hour' AND payload ->> 'request_id' = %s LIMIT 1",
+            (request_id,),
+        )
+        return rows[0]["trace_id"] if rows else None
+
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         rows = await self._fetch(MANUAL_TARGET_ROWS_SQL)
         return [(r["trace_id"], dict(r["payload"]), r["created_at"]) for r in rows]
@@ -903,68 +893,18 @@ class PgStore:
         )
         return action_id
 
-    # -- ERCOT_AS deployments (og.as_deployment, migration 0020) -----------------------------------
-
-    async def insert_as_deployment(
-        self,
-        *,
-        obligation_id: UUID | None,
-        start_at: datetime,
-        end_at: datetime,
-        requested_by: str,
-        reason: str,
-    ) -> UUID:
-        deployment_id = uuid4()
-        await self._execute(
-            """
-            INSERT INTO og.as_deployment
-                (deployment_id, obligation_id, start_at, end_at, source, requested_by, reason)
-            VALUES (%s, %s, %s, %s, 'OPERATOR', %s, %s)
-            """,
-            (deployment_id, obligation_id, start_at, end_at, requested_by, reason),
-        )
-        return deployment_id
-
-    async def get_as_award(self, obligation_id: UUID) -> dict[str, Any] | None:
-        return _row_or_none(
-            await self._fetch(
-                """
-                SELECT o.service_type, o.state, c.variant, pr.duration_minutes,
-                       EXISTS (
-                           SELECT 1 FROM og.as_deployment d
-                           WHERE d.cancelled_at IS NULL AND d.start_at <= now() AND d.end_at > now()
-                             AND (d.obligation_id = o.obligation_id
-                                  OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
-                       ) AS has_active_deployment
-                FROM og.obligation o
-                JOIN og.contract c ON c.contract_id = o.contract_id
-                LEFT JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
-                LEFT JOIN og.product_rule pr ON pr.product_rule_id = op.product_rule_id
-                WHERE o.obligation_id = %s
-                """,
-                (obligation_id,),
-            )
-        )
+    # -- deployments (og.as_deployment, migrations 0020/0047; written only by opengrid.calls) ----------
 
     async def list_active_as_deployments(self) -> list[dict[str, Any]]:
         return await self._fetch(
             """
-            SELECT deployment_id, obligation_id, start_at, end_at, source, requested_by, reason
+            SELECT deployment_id, obligation_id, start_at, end_at, source, requested_by, reason,
+                   requested_kw, call_id
             FROM og.as_deployment
             WHERE cancelled_at IS NULL AND end_at > now()
             ORDER BY start_at
             """
         )
-
-    async def cancel_as_deployment(self, deployment_id: UUID) -> bool:
-        updated = await self._execute(
-            """
-            UPDATE og.as_deployment SET cancelled_at = now()
-            WHERE deployment_id = %s AND cancelled_at IS NULL AND end_at > now()
-            """,
-            (deployment_id,),
-        )
-        return updated > 0
 
 
 def jsonb(obj: dict[str, Any]) -> Jsonb:

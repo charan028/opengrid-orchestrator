@@ -293,12 +293,19 @@ class PgGridTopologyPort:
         )
 
     async def substation_flow(self, bank_id: str) -> AggregateFlow | None:
+        """None when the bank's substation topology is missing: no og.asset mapping (any asset class, so the
+        HOME_BANK rows map home banks too), or -- unless `fail_closed_missing_topology`, which makes the
+        limits unknown (increases vetoed) -- no og.substation_limit row for the mapped substation. The service
+        raises ALR-SUBSTATION-UNMAPPED-TOPOLOGY whenever G-29 is skipped."""
         t = await self._current()
         substation_id = t.substation_of_bank.get(bank_id)
         if substation_id is None:
             return None
         banks = t.substation_banks.get(substation_id, ())
-        rating, reverse = t.substation_limits.get(substation_id, (None, None))
+        limits = t.substation_limits.get(substation_id)
+        if limits is None and not self._config.flow_fail_closed_missing_topology:
+            return None
+        rating, reverse = limits if limits is not None else (None, None)
         territory = self._zone_territory.get(t.zone_of_bank.get(bank_id, ""))
         if territory is not None:
             reverse = 0.0  # K15: no reverse flow at a regulated territory's substations

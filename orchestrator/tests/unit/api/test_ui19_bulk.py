@@ -78,7 +78,7 @@ def test_single_confirm_executes_through_the_single_hub_path(client, store, fake
     assert [r["hub_id"] for r in body["results"]] == hubs
     # ONE manual target for the whole selection (the engine ramps each hub), no one-shot batches
     assert store.command_batches == []
-    records = asyncio.run(fake_trace_store._backend.fetch_range(STREAM, from_seq=0))
+    records = asyncio.run(fake_trace_store._backend.fetch_range("manual_target:operator", from_seq=0))
     (target,) = [r for r in records if r.event_class == "MANUAL_TARGET"]
     assert target.payload["hub_ids"] == hubs and target.payload["p_kw_command"] == 0.0
     assert body["manual_target_trace_id"]

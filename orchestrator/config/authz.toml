@@ -4,7 +4,7 @@
 # parses it into `Rule` objects and `decide()` matches against them.
 #
 # Fields per [[rule]]:
-#   role           -- "viewer" | "operator" | "customer" | "admin"
+#   role           -- "viewer" | "operator" | "customer" | "utility" | "admin"
 #   action         -- dotted action id. A trailing ".*" matches any action sharing that prefix
 #                     (e.g. "customer.*" matches "customer.read", "customer.cancel", ...).
 #   resource_scope -- "global" (default, no resource check) or "own" (the resource's customer_id must
@@ -90,6 +90,24 @@ audited = true
 role = "customer"
 action = "customer.renominate"
 resource_scope = "own"
+audited = true
+
+# --- utility customer API (D-33): a utility identity ([api.roles.utility], user = "<utility_id>") reads
+# and calls only its own tolling obligations. The utility_id scope is enforced by opengrid.calls (another
+# utility's obligation or call answers 404 and is traced as AUTHZ_DENY), so these rules are "global" for
+# the role; a non-utility caller on these actions is denied and audited. -------------------------------
+[[rule]]
+role = "utility"
+action = "utility.read"
+
+[[rule]]
+role = "utility"
+action = "utility.call"
+audited = true
+
+[[rule]]
+role = "utility"
+action = "utility.cancel"
 audited = true
 
 # --- admin role (reserved; no Apache account maps to it yet -- add via [api.roles.admin] when needed)

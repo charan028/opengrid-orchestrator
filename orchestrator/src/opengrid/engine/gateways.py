@@ -22,11 +22,13 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid import contracts, fleet, ledger
+from opengrid.allocator import grant_key
 from opengrid.allocator.energy_hold import (
     DEFAULT_AS_DEPLOYMENT_H,
     HOLD_MARGIN_FRACTION,
@@ -280,6 +282,26 @@ def valid_value(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def called_kw_scale(call_rows: Sequence[Sequence[Any]]) -> dict[str, float]:
+    """D-33: per obligation, the factor (0..1] that brings its committed kW (summed over its banks' rows)
+    down to an active call's requested magnitude (`_ACTIVE_CALLS_SQL` column 10, `deploy_kw`). Only
+    rows that are called (`as_deployed`, column 7) with a requested kW below the total are scaled; every
+    other obligation keeps 1.0 (its full committed kW, K13 unchanged)."""
+    totals: dict[str, float] = {}
+    requested: dict[str, float] = {}
+    for row in call_rows:
+        oid = str(row[0])
+        totals[oid] = totals.get(oid, 0.0) + float(row[2])
+        deploy_kw = row[10] if len(row) > 10 else None
+        if deploy_kw is not None and bool(row[7]):
+            requested[oid] = float(deploy_kw)
+    return {
+        oid: max(kw, 0.0) / totals[oid]
+        for oid, kw in requested.items()
+        if totals.get(oid, 0.0) > 0.0 and kw < totals[oid]
+    }
+
+
 def _bank_zone(bank_id: str) -> str | None:
     try:
         return fleet.bank_zone(bank_id)
@@ -315,7 +337,15 @@ SELECT r.obligation_id, r.bank_id, r.amount, o.service_type, o.tier, op.value_pe
            SELECT MAX(d.end_at) FROM og.as_deployment d
            WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
              AND (d.obligation_id = o.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
-       ) AS deploy_end
+       ) AS deploy_end,
+       -- D-33: a call may ask for less than the committed kW (og.as_deployment.requested_kw, signed,
+       -- < 0 = discharge). The magnitude caps the obligation's total across its banks while called;
+       -- NULL = the full committed kW (operator and market deployments).
+       (
+           SELECT MIN(-d.requested_kw) FROM og.as_deployment d
+           WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+             AND d.obligation_id = o.obligation_id AND d.requested_kw IS NOT NULL
+       ) AS deploy_kw
 FROM og.reservation r
 JOIN og.obligation o ON o.obligation_id = r.obligation_id
 JOIN og.opportunity op ON op.opportunity_id = o.opportunity_id
@@ -701,11 +731,13 @@ class EngineLedgerGateway:
         markets = await self._markets([str(row[0]) for row in call_rows])
 
         prior_by_obligation = {str(obligation_id): float(kw) for obligation_id, kw in prior_rows}
+        call_scale = called_kw_scale(call_rows)
         self._committed_kw = {}
         self._in_shortfall = set()
         for row in call_rows:
             oid = str(row[0])
-            self._committed_kw[oid] = self._committed_kw.get(oid, 0.0) + float(row[2])
+            scaled_kw = float(row[2]) * call_scale.get(oid, 1.0)
+            self._committed_kw[oid] = self._committed_kw.get(oid, 0.0) + scaled_kw
             if row[6] == "SHORTFALL":
                 self._in_shortfall.add(oid)
 
@@ -714,6 +746,7 @@ class EngineLedgerGateway:
             obligation_id, bank_id, amount, service_type, tier, value_per_mwh, state, as_deployed = row[:8]
             duration_minutes = row[8] if len(row) > 8 else None
             deploy_end = row[9] if len(row) > 9 else None
+            amount = float(amount) * call_scale.get(str(obligation_id), 1.0)
             try:
                 eligible_hub_ids = tuple(
                     s.hub_id for s in fleet.hub_capabilities(bank_id) if s.health == "online"
@@ -774,7 +807,7 @@ class EngineLedgerGateway:
     async def ledger_version(self) -> int:
         return await ledger.ledger_version()
 
-    async def persist_grants(self, cycle_id: str, grants: Sequence[ProposedGrant]) -> None:
+    async def persist_grants(self, cycle_id: str, grants: Sequence[ProposedGrant], attempt: int = 0) -> None:
         self._granted_kw = {}
         for g in grants:
             if g.obligation_id is not None and not g.is_headroom:
@@ -784,7 +817,7 @@ class EngineLedgerGateway:
         version = await ledger.ledger_version()
         records = [
             GrantRecord(
-                grant_id=uuid5(NAMESPACE_URL, f"{cycle_id}:{g.bank_id}:{g.obligation_id}:{g.is_headroom}"),
+                grant_id=uuid5(NAMESPACE_URL, grant_key(cycle_id, g, attempt)),
                 cycle_id=cycle_id,
                 bank_id=g.bank_id,
                 granted_kw=Decimal(str(round(g.granted_kw, 3))),

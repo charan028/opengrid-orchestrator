@@ -42,6 +42,7 @@
 <tr><td>DEVICE-INFO</td><td>In (MQTT, retained)</td><td>Identity, ratings, location as reported</td><td>On connect and firmware change</td><td><code>og.hub</code> <code>device_*</code> columns (r3.4)</td><td>Fleet drill-down, ALR-DEVICE-RATING-MISMATCH</td></tr>
 <tr><td>Firmware status</td><td>In (MQTT)</td><td>Phase changes of an update</td><td>Per phase change</td><td><code>og.firmware_job</code>, <code>og.firmware_job_event</code></td><td>Firmware executor</td></tr>
 <tr><td>Utility SCADA</td><td>In (MQTT today)</td><td>Bank signals, utility instructions</td><td>Per reading / per change</td><td><code>og.feed_obs</code> (source <code>scada</code>)</td><td>Guardian G-03/G-15, DIST_DEFERRAL PI loop, health</td></tr>
+<tr><td>Utility grid-control link (D-34)</td><td>In/out (DNP3 over mutual TLS)</td><td>Toll calls and L2 LIMIT/BLOCK in; available/delivered kW, call state, SoC and alarms out</td><td>EMS integrity polls (2&ndash;4 s); controls on demand</td><td><code>og.trace</code> (<code>GRID_LINK_COMMAND</code>), <code>og.dispatch_call</code> via the core</td><td>Disabled by default</td></tr>
 <tr><td>PQ waveforms</td><td>In (MQTT)</td><td>Summaries; triggered raw captures</td><td>Periodic / on request</td><td><code>og.pq_waveform_summary</code>, <code>og.pq_waveform_raw_index</code>, <code>og.hub_inverter_pq</code></td><td>Power quality screen, G-21..G-25</td></tr>
 <tr><td>Customer site ingest</td><td>In (MQTT)</td><td>Site meter, corridor current</td><td>Per reading, flushed in batches</td><td><code>og.customer_site_meter_reading</code>, <code>og.corridor_current_reading</code></td><td>DATA_CENTER / PIPELINE_AC closed loops</td></tr>
 <tr><td>Signed commands</td><td>Out (MQTT)</td><td>Command batches, leases, stops</td><td>Engine cycle (2 s)</td><td><code>og.trace</code> (pre-image before signing)</td><td>Hubs</td></tr>
@@ -95,6 +96,32 @@
 <tr><td><code>ieee2030_5</code></td><td>2030.5 client (CSIP aggregator): walks DeviceCapability to DERControlList; <code>opModEnergize=false</code> maps to ESTOP, <code>opModConnect=false</code> to BLOCK, W limits to LIMIT; posts DERControlResponse when required.</td><td>Implemented and tested against the simulator; not selected on any host.</td></tr>
 </tbody></table></div>
 <p class="hp-note">No <code>[integrations]</code> table exists in the shipped <code>orchestrator.toml</code> and no og-* process builds these backends at r3.4, so behaviour is plain MQTT SCADA with no market submission. Moving to a real utility needs its point list or bilateral table, certificates under <code>/etc/opengrid/certs/</code> and a release that wires the backend in.</p>
+</section>
+
+<section class="hp-sub" id="in-grid-link"><h3>Utility grid-control link (disabled)</h3>
+<p>From r3.4.1 a utility's control system (EMS), with Austin Energy first, can control OpenGrid directly (D-34; spec <code>docs/orchestrator/07-delivery/integrations/grid-link.md</code>). It sends D-29 toll calls (discharge only, at most 90 minutes) and the existing L2 LIMIT and BLOCK, per bank or zone. It reads back available and delivered kW, the call state, SoC (for the utility and per bank) and alarms. og-engine is the <b>DNP3 outstation</b> (IEEE 1815, on the in-house codec, no extra package) and the EMS is the master, over <b>mutual TLS</b>. Real Texas EMS links are usually ICCP: the link's service is protocol-neutral, so an ICCP transport can be added later with a licensed TASE.2 stack.</p>
+<dl class="hp-dl">
+<dt>Toll calls</dt><dd>The EMS stages setpoint kW, duration and its own call id on analog outputs 0&ndash;2, then operates CALL_EXECUTE (CROB 0, select-before-operate). The call goes through the <b>same core call function</b> as the Dispatch screen's utility call and the customer API, with origin <code>GRID_LINK</code> and the EMS call id as the idempotency key. The core checks the tolling obligation and the 90-minute cap, and it writes the deployment, the call ledger, the trace and the operator alert. The outcome shows on the CALL_STATE and CALL_REASON points.</dd>
+<dt>L2 LIMIT / BLOCK</dt><dd>The EMS sets a limit value (AO 16+t) and switches LIMIT or BLOCK per target (CROB 16+2t / 17+2t). A zone target applies to every bank in the zone, and the most restrictive level wins. The instructions are republished on the existing <code>&lt;root&gt;/scada/instruction/&lt;bank_id&gt;</code> topic by MQTT user <code>og_gridlink</code>, so og-engine and the guardian's own L2 port (G-15) see them exactly as SCADA instructions.</dd>
+<dt>Security</dt><dd>Each utility has:
+<ul>
+<li>a peer IP allow-list;</li>
+<li>a client-certificate CN allow-list, required whenever it listens on a non-loopback address;</li>
+<li>its point list as the allow-list for controls;</li>
+<li>a limit on concurrent associations.</li>
+</ul>
+Every inbound command except a heartbeat is traced before it takes effect (<code>GRID_LINK_COMMAND</code>, origin <code>GRID_LINK</code>). Refusals are traced as <code>AUTHZ_DENY</code>.</dd>
+<dt>Heartbeat loss</dt><dd>The EMS pulses CROB 2. If none arrives for <code>heartbeat_timeout_s</code> (30 s), then:
+<ul>
+<li>new toll calls are refused (control status AUTOMATION_INHIBIT);</li>
+<li>cancels are still accepted;</li>
+<li>a running call continues to its own end;</li>
+<li>L2 levels stay as last received.</li>
+</ul>
+</dd>
+<dt>Configuration</dt><dd><code>[grid_link]</code> in <code>orchestrator.toml</code>. The master switch and each utility's switch are <code>false</code>. Entries for AUSTIN_ENERGY (port 20001), LCRA (20002) and RAYBURN (20003) ship disabled with placeholder peers. LCRA and RAYBURN have no contract yet.</dd>
+<dt>Simulators</dt><dd><code>ogsim.scada</code> can send its L2 instructions over the link (<code>scada.yaml</code> <code>grid_link:</code>). The Austin Energy simulator can issue its toll calls over it (<code>utility_aen.yaml</code> <code>channel: grid_link</code>).</dd>
+</dl>
 </section>
 
 <section class="hp-sub" id="in-site-ingest"><h3>Customer site ingest</h3>

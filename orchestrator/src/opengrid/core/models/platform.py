@@ -92,7 +92,9 @@ class FeedObs(_Row):
     ts: datetime
     value: float
     unit: str
-    quality: Literal["GOOD", "ESTIMATED", "STALE"]
+    #: EXTREME_UNCORROBORATED (FR-ING-117 / V-P1, migration 0045): a real-time price outside the normal
+    #: -$250..$5,000/MWh band but inside the hard bounds, not yet corroborated -- stored, never clipped.
+    quality: Literal["GOOD", "ESTIMATED", "STALE", "EXTREME_UNCORROBORATED"]
     recorded_at: datetime
 
 

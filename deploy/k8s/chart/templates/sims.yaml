@@ -1,0 +1,182 @@
+{{- /* The ogsim integration simulators: deploy/systemd/og-sim-*.service as Deployments of the sims image. They
+reach the broker as og_sim / og_simctl / og_sim_customer, never the database. */ -}}
+{{- $fn := include "og.fullname" . -}}
+{{- $host := .Values.ingress.host -}}
+{{- range $name := list "market" "fleet" "scada" "control" "customer" }}
+{{- $sim := index $.Values.sims $name }}
+{{- if $sim.enabled }}
+{{- if $sim.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-sim-{{ $name }}
+  labels:
+    {{- include "og.labels" (dict "root" $ "component" (printf "sim-%s" $name)) | nindent 4 }}
+spec:
+  selector:
+    {{- include "og.selector" (dict "root" $ "component" (printf "sim-%s" $name)) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $sim.port }}
+      targetPort: http
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fn }}-sim-{{ $name }}
+  labels:
+    {{- include "og.labels" (dict "root" $ "component" (printf "sim-%s" $name)) | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" $ "component" (printf "sim-%s" $name)) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "og.labels" (dict "root" $ "component" (printf "sim-%s" $name)) | nindent 8 }}
+        opengrid.io/mqtt-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      {{- include "og.imagePullSecrets" $ | nindent 6 }}
+      securityContext:
+        {{- include "og.podSecurityContext" $ | nindent 8 }}
+      {{- if has $name (list "fleet" "scada") }}
+      initContainers:
+        # production's /etc/opengrid/sim/<name>.yaml: the approved zone blocks on (gen_sim_overrides.py)
+        - name: sim-configs
+          image: {{ include "og.image" (dict "root" $ "which" "sims") }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args: ["sim-configs"]
+          env:
+            - name: OG_ZONES
+              value: {{ $.Values.zones | quote }}
+          securityContext:
+            {{- include "og.containerSecurityContext" $ | nindent 12 }}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - name: run
+              mountPath: /run/og
+            - name: tmp
+              mountPath: /tmp
+      {{- end }}
+      containers:
+        - name: sim-{{ $name }}
+          image: {{ include "og.image" (dict "root" $ "which" "sims") }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args: [{{ printf "sim-%s" $name | quote }}]
+          env:
+            - name: OG_MQTT_HOST
+              value: "{{ $fn }}-mosquitto"
+            - name: OG_MQTT_PORT
+              value: "1883"
+            {{- if ne $name "market" }}
+            - name: OGSIM_ENV
+              value: prod
+            {{- end }}
+            {{- if eq $name "market" }}
+            - name: OGSIM_MARKET_HOST
+              value: 0.0.0.0
+            - name: OGSIM_MARKET_PORT
+              value: {{ $sim.port | quote }}
+            {{- end }}
+            {{- if eq $name "fleet" }}
+            - name: OGSIM_FLEET_CONFIG
+              value: /run/og/sim/fleet.yaml
+            {{- end }}
+            {{- if eq $name "scada" }}
+            - name: OGSIM_SCADA_CONFIG
+              value: /run/og/sim/scada.yaml
+            {{- end }}
+            {{- if eq $name "control" }}
+            - name: OGSIM_CONTROL_HOST
+              value: 0.0.0.0
+            - name: OGSIM_CONTROL_BASE_PATH
+              value: /ogsim
+            - name: OGSIM_MARKET_ADMIN_URL
+              value: "http://{{ $fn }}-sim-market:{{ $.Values.sims.market.port }}"
+            {{- end }}
+            {{- if eq $name "customer" }}
+            - name: OGSIM_CUSTOMER_API_BASE
+              value: {{ $sim.apiBase | default (printf "https://%s" $host) | quote }}
+            {{- range $user := $.Values.customerUsers }}
+            {{- $group := $user | trimPrefix "og-cust-" | upper }}
+            - name: OGSIM_CUSTOMER_{{ $group }}_USER
+              value: {{ $user | quote }}
+            - name: OGSIM_CUSTOMER_{{ $group }}_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.uiUsers }}
+                  key: {{ $user }}
+            {{- end }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ $.Values.secrets.mqttSim }}
+          {{- if $sim.port }}
+          ports:
+            - name: http
+              containerPort: {{ $sim.port }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 6
+          {{- end }}
+          securityContext:
+            {{- include "og.containerSecurityContext" $ | nindent 12 }}
+          resources:
+            {{- toYaml $sim.resources | nindent 12 }}
+          volumeMounts:
+            - name: run
+              mountPath: /run/og
+            - name: tmp
+              mountPath: /tmp
+            - name: varlib
+              mountPath: /var/lib/opengrid
+            - name: varlog
+              mountPath: /var/log/opengrid
+            {{- if ne $name "market" }}
+            # public keys only: the simulated hubs verify guardian/safestop signatures (interfaces/crypto.md)
+            - name: pubkeys
+              mountPath: /etc/opengrid
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: varlib
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: varlog
+          emptyDir:
+            sizeLimit: 256Mi
+        {{- if ne $name "market" }}
+        - name: pubkeys
+          secret:
+            secretName: {{ $.Values.secrets.signingKeys }}
+            defaultMode: 0444
+            items:
+              - key: guardian_ed25519.pub
+                path: guardian_ed25519.pub
+              - key: safestop_ed25519.pub
+                path: safestop_ed25519.pub
+        {{- end }}
+{{- end }}
+{{- end }}

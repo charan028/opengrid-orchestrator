@@ -25,10 +25,11 @@ from opengrid.api.routers.fleet_search import (
     shape_hub,
     where_clause,
 )
+from opengrid.health.model import HealthThresholds
 
 from .conftest import VIEWER_HEADERS
 
-TH = Thresholds(online_s=4.0, offline_s=30.0)
+TH = Thresholds(HealthThresholds(hub_stale_s=4.0, hub_offline_s=30.0))
 NOW = datetime(2026, 9, 26, 18, 0, tzinfo=UTC)
 
 
@@ -310,7 +311,7 @@ def test_search_firmware_lists_distinct_versions(
 
 
 def test_asset_class_is_derived_and_filterable() -> None:
-    th = Thresholds(online_s=4.0, offline_s=30.0, mobile=("trailer-mb-01",))
+    th = Thresholds(HealthThresholds(hub_stale_s=4.0, hub_offline_s=30.0), mobile=("trailer-mb-01",))
     w = where_clause(HubFilter(asset_class=("MOBILE", "UTILITY_SCALE")), th)
     assert "og.asset a WHERE a.asset_class = 'SUBSTATION'" in w.text
     assert w.params == [["trailer-mb-01"], ["trailer-mb-01"], ["MOBILE", "UTILITY_SCALE"]]
@@ -406,3 +407,20 @@ def test_classify_asset_matches_the_sql_rule() -> None:
     assert classify_asset("trailer-1", "trailer-1", **kw) == "MOBILE"
     assert classify_asset("sub-00", "bank-sub", **kw) == "UTILITY_SCALE"
     assert classify_asset("hub-1", "bank-1", **kw) == "HOME"
+
+
+def test_production_thresholds_10s_reports_25s_stale_60s_offline() -> None:
+    """R1 (r3.4 review): with the real config -- 10 s reports, hub_stale_s 25, hub_offline_s 60 -- a hub
+    between reports is OK (never WATCH next to a fresh badge), and the SQL health filter binds 60/25."""
+    from opengrid.platform.config import Config
+
+    cfg = Config({"fleet": {"telemetry_interval_s": 10}, "health": {"hub_stale_s": 25, "hub_offline_s": 60}})
+    th = Thresholds.from_config(cfg)
+    assert (th.online_s, th.offline_s) == (25.0, 60.0)
+    label = {
+        s: shape_hub(_row(1, last_seen_at=NOW - timedelta(seconds=s)), th, now=NOW)["health_label"]
+        for s in (9, 15, 24, 30, 59, 70)
+    }
+    assert label == {9: "OK", 15: "OK", 24: "OK", 30: "WATCH", 59: "WATCH", 70: "OFFLINE"}
+    w = where_clause(HubFilter(health=("online",)), th)
+    assert w.params[:2] == [60.0, 25.0] and ["online"] in w.params

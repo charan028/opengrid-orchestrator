@@ -18,6 +18,7 @@ The two share no code (BUILD.md §1). The wire contracts in this document are th
 | DNP3 master | **Real DNP3** (IEEE 1815-2012: link, transport and application layers with CRC), over TCP or TLS | `ogsim` DNP3 outstation, real DNP3 on localhost | Utility's point list, IP/port, DNP3 addresses. TLS certificates if the utility uses DNP3 over TLS. |
 | IEEE 2030.5 client | **Real 2030.5** resources (XML, `application/sep+xml`) over HTTPS with a client certificate | `ogsim` 2030.5 server | The utility's server URL, our device certificate (SERCA chain), and the LFDI/SFDI-to-bank mapping. |
 | ICCP / TASE.2 | Bilateral-table mapping is real. **The transport is a simulator transport, not MMS.** | `ogsim` ICCP control-centre simulator | A **vendor TASE.2/MMS stack** bound into `MmsIccpTransport`, the bilateral table, and IEC 62351 certificates. See §5.4. |
+| Utility grid-control link (D-34) | **Real DNP3** outstation (IEEE 1815; READ, SBO/direct operate of CROB and AO) over mutual TLS; toll calls and L2 LIMIT/BLOCK in, status out | ogsim EMS master (ogsim.protocols.dnp3_master), SCADA sim bridge, Austin Energy sim channel | The utility's signed point-list agreement, certificates, MQTT user `og_gridlink` and a firewall opening. Separate spec: [grid-link.md](grid-link.md). |
 | ERCOT MMS (QSE submission) | **Real EWS SOAP envelopes** with WS-Security X.509 signing (exclusive C14N) | `ogsim` MMS simulator, which verifies the signature | QSE registration, the ERCOT-issued client certificate, MOTE market trials, and confirmation of the spellings marked UNCONFIRMED in §6.2. |
 
 Default behaviour is unchanged. With no `[integrations]` table, SCADA stays on MQTT and nothing is ever
@@ -279,6 +280,8 @@ A value is `{name, type, value, quality: {validity, current_source}}`.
 4. Get IEC 62351 certificates for the association.
 
 The adapter, mapping and tests stay unchanged.
+
+The **utility grid-control link** (D-34, [grid-link.md](grid-link.md)) runs the other direction: the utility EMS controls OpenGrid. It uses DNP3 for the same reason. Its service is protocol-neutral, so an ICCP transport can later be added beside the DNP3 one on the same licensed TASE.2 stack (grid-link.md §8).
 
 ## 6. ERCOT MMS submission (`integrations/ercot_mms`)
 

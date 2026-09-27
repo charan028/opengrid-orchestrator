@@ -21,5 +21,5 @@ TimeoutStartSec=50min
 MemoryMax=512M
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/opengrid /var/log/opengrid /srv/ogbackup/cold
+ReadWritePaths=/var/lib/opengrid /var/log/opengrid -/srv/ogbackup/cold
 PrivateTmp=true

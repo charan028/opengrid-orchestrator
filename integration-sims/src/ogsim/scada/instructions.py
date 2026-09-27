@@ -38,13 +38,28 @@ class OverloadRule:
     #: bank_id -> the `now` this rule auto-issued a still-outstanding LIMIT for it, unix epoch
     #: seconds. Present only while that LIMIT has not yet been lifted.
     _active_since: dict[str, float] = field(default_factory=dict)
+    #: bank_id -> True while `cancel()` has taken this bank's instruction slot away (a scenario
+    #: BLOCK/ESTOP/LIMIT took over) and the overload condition has not yet CLEARED since. R7 fix,
+    #: 2026-09-26: `observe()` refuses to re-arm here even while the SAME overload persists
+    #: uninterrupted -- a held bank needs a fresh rising edge (clear, then overloaded again) before
+    #: this rule will issue a new auto-LIMIT, so a cancel() can never be followed by an immediate
+    #: re-arm that replaces a still-active scenario BLOCK/ESTOP.
+    _held: dict[str, bool] = field(default_factory=dict)
 
     def observe(self, bank_id: str, kva_load: float, kva_rating: float, now: float) -> bool:
         """Records one overload sample; returns True the instant a NEW LIMIT should be issued (i.e.
         on the sample that reaches `threshold_samples`), then resets the overload streak so it does
         not re-fire every tick while still overloaded. Never fires while an auto-issued LIMIT for
-        `bank_id` is already outstanding (call `check_lift` to end that one first)."""
+        `bank_id` is already outstanding (call `check_lift` to end that one first), nor while `bank_id`
+        is HELD (see `cancel()`/`_held`'s docstring) and the overload condition has not yet cleared."""
         if bank_id in self._active_since:
+            return False
+        if self._held.get(bank_id, False):
+            if kva_load <= kva_rating:
+                # Rising-edge reset: the condition cleared at least once since cancel() -- the next
+                # overload is a FRESH trigger, so un-hold and count normally from here.
+                self._held[bank_id] = False
+                self._consecutive[bank_id] = 0
             return False
         if kva_load > kva_rating:
             count = self._consecutive.get(bank_id, 0) + 1
@@ -90,11 +105,18 @@ class OverloadRule:
         BLOCK/ESTOP could be silently overwritten by this rule's own LATER auto-lift (`check_lift`
         publishes an expired LIMIT the instant the overload clears, and the orchestrator's fleet twin
         stores the LATEST instruction per bank regardless of kind) -- the auto-lift must only ever end
-        an auto-LIMIT it itself issued, never a scenario's separate instruction. Also clears the
-        overload-streak counter, so a still-ongoing overload after the scenario's instruction ends can
-        cleanly re-trigger a fresh auto-LIMIT rather than resuming a stale streak."""
+        an auto-LIMIT it itself issued, never a scenario's separate instruction.
+
+        R7 fix, 2026-09-26: this used to also reset the overload-streak counter to 0, which let
+        `observe()` re-arm and issue a FRESH auto-LIMIT after just `threshold_samples` more ticks --
+        immediately replacing a scenario BLOCK/ESTOP that was still active (the same "latest wins"
+        clobbering, one level up). This now HOLDS the bank instead (`_held`): `observe()` won't fire
+        again while the overload condition persists uninterrupted, only once it first clears and then
+        recurs -- a genuine fresh trigger, not a continuation of the condition the scenario was
+        already handling."""
         self._reset(bank_id)
         self._consecutive.pop(bank_id, None)
+        self._held[bank_id] = True
 
 
 def limit_instruction(

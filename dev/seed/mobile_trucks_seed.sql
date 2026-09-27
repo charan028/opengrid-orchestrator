@@ -21,6 +21,10 @@
 -- (needs migration 0044) so the guardian's G-02 rates it at its 500 kW nameplate; the UI still classifies
 -- MOBILE from the registry (api/routers/fleet_search.py).
 --
+-- Topology: dev/seed/topology_seed.py (run after this file) maps each truck hub to its depot service
+-- transformer 'xfmr-bank-<truck id>-00' rated at this kva_rating, and gives 'feeder-<truck id>' an
+-- og.feeder_limit row. Trucks are mapped, not exempt from G-27 (reasoning in that script's docstring).
+--
 -- units: migration 0032's insert trigger sets units = 2 for e_kwh >= 70 (a dual-unit HOME rule); a truck is
 -- one PCS/battery unit, so the insert is followed by an explicit UPDATE ... SET units = 1.
 --

@@ -173,6 +173,19 @@ class ScadaAnomalyManager:
             self._revert(anomaly)
             del self._active[anomaly.id]
 
+    def has_active_utility_instruction(self, bank_id: str, now: float) -> bool:
+        """True while a scenario-driven `utility_instruction` anomaly (BLOCK/ESTOP/LIMIT) targeting
+        `bank_id` is currently active. R7 fix, 2026-09-26: `ScadaEngine.tick` uses this to keep the
+        rule-based auto-LIMIT/auto-lift (`OverloadRule`) completely out of the way of a scenario's own
+        instruction for the bank's ENTIRE duration -- not just the tick it was issued on -- so "an
+        active scenario BLOCK/ESTOP is never replaced by auto-LIMIT" holds absolutely, regardless of
+        whether the overload condition clears and recurs while the scenario instruction is still in
+        force."""
+        return any(
+            a.type == "utility_instruction" and bank_id in a.bank_ids and a.is_active_at(now)
+            for a in self._active.values()
+        )
+
     def _apply(self, anomaly: ActiveScadaAnomaly, now: float) -> None:
         for bank_id in anomaly.bank_ids:
             m = self.modifiers[bank_id]

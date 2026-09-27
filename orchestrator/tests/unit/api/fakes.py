@@ -67,15 +67,17 @@ class FakeStore:
     notifications: list[dict[str, Any]] = field(default_factory=list)
     _pending_stop_proposals: dict[str, tuple[str, str]] = field(default_factory=dict, init=False)
     stop_events: dict[tuple[str, str], tuple[str, datetime]] = field(default_factory=dict)
-    as_deployments: dict[UUID, dict[str, Any]] = field(default_factory=dict)
-    #: obligation_id -> {service_type, state, duration_minutes} for `get_as_award`.
-    as_awards: dict[UUID, dict[str, Any]] = field(default_factory=dict)
+    #: The `FakeCallStore` the dispatch-call routes write to (`opengrid.calls`, D-33), linked by the
+    #: fixtures so `list_active_as_deployments` shows what those calls deployed.
+    call_store: Any = None
     #: MANUAL_TARGET trace rows `(trace_id, payload, created_at)` served by `manual_target_rows`.
     manual_target_rows_data: list[tuple[Any, dict[str, Any], datetime]] = field(default_factory=list)
     #: og.stop_event rows `(stop_event_id, scope_kind, scope_ref, action, created_at)` for `stop_event_rows`.
     stop_event_rows_data: list[tuple[Any, ...]] = field(default_factory=list)
     #: trace ids `trace_recorded` reports as NOT in og.trace (the backend journaled them).
     unrecorded_trace_ids: set[str] = field(default_factory=set)
+    #: request_id -> trace_id for writes that committed although the append raised (lost ack).
+    committed_request_ids: dict[str, UUID] = field(default_factory=dict)
     #: (scope_kind, scope_ref) -> og.owner_charge_window row (D-30).
     charge_windows: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     #: ("HUB", hub_id) / ("BANK", bank_id) -> {hub_id, bank_id, zone, feeder_id, substation_id}.
@@ -464,6 +466,9 @@ class FakeStore:
     async def trace_recorded(self, trace_id: UUID) -> bool:
         return str(trace_id) not in self.unrecorded_trace_ids
 
+    async def manual_target_trace_id(self, request_id: str) -> UUID | None:
+        return self.committed_request_ids.get(request_id)
+
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         """Test-set `manual_target_rows_data` (the SQL itself runs in the integration suite)."""
         return list(self.manual_target_rows_data)
@@ -499,45 +504,25 @@ class FakeStore:
             )
         ]
 
-    async def insert_as_deployment(self, *, obligation_id, start_at, end_at, requested_by, reason) -> UUID:
-        deployment_id = uuid4()
-        self.as_deployments[deployment_id] = {
-            "deployment_id": deployment_id,
-            "obligation_id": obligation_id,
-            "start_at": start_at,
-            "end_at": end_at,
-            "source": "OPERATOR",
-            "requested_by": requested_by,
-            "reason": reason,
-            "cancelled": False,
-        }
-        return deployment_id
-
-    async def get_as_award(self, obligation_id) -> dict[str, Any] | None:
-        award = self.as_awards.get(obligation_id)
-        if award is None:
-            return None
-        now = datetime.now(UTC)
-        active = any(
-            not d["cancelled"] and d["start_at"] <= now < d["end_at"] and d["obligation_id"] == obligation_id
-            for d in self.as_deployments.values()
-        )
-        return {**award, "has_active_deployment": active}
-
     async def list_active_as_deployments(self) -> list[dict[str, Any]]:
-        now = datetime.now(UTC)
+        """Deployments are written only by `opengrid.calls`; the API fixtures link this fake to the
+        `FakeCallStore` those writes land in (`call_store`)."""
+        if self.call_store is None:
+            return []
         return [
-            {k: v for k, v in d.items() if k != "cancelled"}
-            for d in self.as_deployments.values()
-            if not d["cancelled"] and d["end_at"] > now
+            {
+                "deployment_id": d.deployment_id,
+                "obligation_id": d.obligation_id,
+                "start_at": d.start_at,
+                "end_at": d.end_at,
+                "source": d.source,
+                "requested_by": d.requested_by,
+                "reason": d.reason,
+                "requested_kw": d.requested_kw,
+                "call_id": d.call_id,
+            }
+            for d in self.call_store.active_deployments()
         ]
-
-    async def cancel_as_deployment(self, deployment_id) -> bool:
-        d = self.as_deployments.get(deployment_id)
-        if d is None or d["cancelled"] or d["end_at"] <= datetime.now(UTC):
-            return False
-        d["cancelled"] = True
-        return True
 
 
 class FakeTraceBackend:

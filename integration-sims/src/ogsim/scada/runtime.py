@@ -20,6 +20,7 @@ from ogsim.common.scenario import parse_scenario_cmd, utc_timestamp
 from ogsim.scada.aggregation import BankTelemetryBuffer, bank_load_kw, kw_to_kva
 from ogsim.scada.anomalies import SCADA_ANOMALY_TYPES, ScadaAnomalyManager
 from ogsim.scada.background import BackgroundLoadModel
+from ogsim.scada.grid_link import ScadaGridLinkBridge
 from ogsim.scada.instructions import OverloadRule, lift_instruction, limit_instruction
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,14 @@ class ScadaEngine:
                 # instruction per bank regardless of kind, so the auto-lift must only ever end an
                 # auto-LIMIT it itself issued).
                 self.overload_rule.cancel(bank_id)
+            elif self.anomalies.has_active_utility_instruction(bank_id, now):
+                # R7 fix, 2026-09-26: a scenario-driven BLOCK/ESTOP/LIMIT is still in force for this
+                # bank -- the auto rule must not touch it (neither issue nor lift) for as long as that
+                # lasts, absolutely, regardless of whether the overload condition clears and recurs in
+                # the meantime. Nothing published here; the scenario's own instruction already covers
+                # this bank until it ends (naturally, or a manual cancel republishes it via `pending`
+                # above).
+                pass
             elif self.overload_rule.observe(bank_id, kva, self.kva_rating[bank_id], now):
                 msg = limit_instruction(
                     str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
@@ -202,15 +211,24 @@ class ScadaEngine:
         }
 
 
-async def run_scada(client: SimMqttClient, engine: ScadaEngine, clock: Clock) -> None:
+async def run_scada(
+    client: SimMqttClient,
+    engine: ScadaEngine,
+    clock: Clock,
+    grid_link: ScadaGridLinkBridge | None = None,
+) -> None:
     """Async shell: subscribes to fleet telemetry and scenario commands,
     ticks `engine` on `config.publish_interval_s`. Kept thin and not
-    unit-tested (the engine above is)."""
+    unit-tested (the engine above is). With `grid_link`, L2 instructions also
+    (or only, when `also_mqtt` is false) go to OpenGrid over the grid-control link."""
     await client.subscribe("tel/#", qos=0)
     await client.subscribe("scenario/cmd", qos=1)
     while True:
         now = clock.now()
         signals, instructions = engine.tick(now)
         await client.publish_batch("scada_bank_signal", signals, qos=0)
-        await client.publish_batch("scada_utility_instruction", instructions, qos=1)
+        if grid_link is not None:
+            grid_link.submit(instructions)
+        if grid_link is None or grid_link.settings.also_mqtt:
+            await client.publish_batch("scada_utility_instruction", instructions, qos=1)
         await clock.sleep(engine.config.publish_interval_s)

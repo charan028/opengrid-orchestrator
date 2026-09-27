@@ -649,4 +649,138 @@ def test_check_unmapped_bank_relief_semantics():
     assert not flow_checks.check_unmapped_bank("b", 0.0, -1.0).ok
     assert not flow_checks.check_unmapped_bank("b", 2.0, 3.0).ok
     assert flow_checks.check_unmapped_bank("b", -5.0, -1.0).ok
-    assert flow_checks.check_unmapped_bank("b", -5.0, 5.0).ok  # same magnitude
+    assert flow_checks.check_unmapped_bank("b", 5.0, 1.0).ok
+    assert flow_checks.check_unmapped_bank("b", -5.0, -5.0).ok  # unchanged
+    assert flow_checks.check_unmapped_bank("b", -5.0, 0.0).ok  # to zero from either side
+    assert flow_checks.check_unmapped_bank("b", 5.0, 0.0).ok
+    assert flow_checks.check_unmapped_bank("b", 0.0, 0.0).ok
+
+
+# --- r3.4.1 (workstation review LOW): a sign flip is never relief -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("prev_kw", "new_kw"),
+    [
+        (200.0, -250.0),  # the review's case: import to a larger export
+        (200.0, -150.0),  # a flip is never relief, even at a smaller magnitude
+        (-200.0, 150.0),  # export to import
+        (-5.0, 5.0),  # same magnitude, other side
+    ],
+)
+def test_a_sign_flip_on_an_unmapped_bank_is_never_relief(prev_kw, new_kw):
+    outcome = flow_checks.check_unmapped_bank("b", prev_kw, new_kw)
+
+    assert not outcome.ok and outcome.reason == flow_checks.BANK_TOPOLOGY_UNMAPPED
+
+
+async def test_a_sign_flip_batch_on_an_unmapped_bank_is_vetoed_through_the_service(fakes, signing_seed):
+    config = GuardianConfig(key_path="", cycle_interval_s=2.0, flow_fail_closed_missing_topology=True)
+    proposal, alerts = _unmapped_world(fakes, -2.5, 2.0)  # charging 2 kW -> discharging 2.5 kW
+
+    verdict = await _service(
+        fakes, config, signing_seed, topology=FakeTopology(), alerts=alerts
+    ).evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.outcome == "VETOED" and "G-28" in verdict.vetoed_rule_ids
+    violations = fakes.trace.appended[-1][1]["violations"]
+    assert (BANK_ID, flow_checks.BANK_TOPOLOGY_UNMAPPED) in {(v["hub_id"], v["reason"]) for v in violations}
+
+
+# --- r3.4.1 (M11): missing substation topology is alerted, and fail-closed vetoes increases ------------------------------
+
+
+def _fed_bank_world(fakes, p_kw: float, prev_kw: float):
+    """A bank WITH a feeder mapping, so only the substation topology is missing."""
+    proposal, alerts = _unmapped_world(fakes, p_kw, prev_kw)
+    fakes.banks.banks[BANK_ID] = replace(fakes.banks.banks[BANK_ID], feeder_id="f1")
+    return proposal, alerts
+
+
+def _flow_config(fail_closed: bool) -> GuardianConfig:
+    return GuardianConfig(
+        key_path="",
+        cycle_interval_s=2.0,
+        default_feeder_ramp_ceiling_kw_per_min=1e9,
+        flow_fail_closed_missing_topology=fail_closed,
+    )
+
+
+async def test_a_bank_without_substation_topology_is_alerted_and_g29_skipped(fakes, signing_seed):
+    proposal, alerts = _fed_bank_world(fakes, -4.0, -2.0)
+
+    verdict = await _service(
+        fakes, _flow_config(False), signing_seed, topology=FakeTopology(), alerts=alerts
+    ).evaluate_and_sign(make_batch_row(proposal))
+
+    assert "G-29" not in verdict.vetoed_rule_ids
+    assert ("ALR-SUBSTATION-UNMAPPED-TOPOLOGY", BANK_ID) in alerts.raised
+    assert ("ALR-BANK-UNMAPPED-TOPOLOGY", BANK_ID) not in alerts.raised  # the feeder IS mapped
+
+
+@pytest.mark.parametrize(
+    ("p_kw", "prev_kw", "vetoed"),
+    [(-4.0, -2.0, True), (2.5, -2.0, True), (-1.0, -2.0, False), (-2.0, -2.0, False)],
+)
+async def test_fail_closed_vetoes_increases_and_flips_on_a_bank_without_substation_topology(
+    fakes, signing_seed, p_kw, prev_kw, vetoed
+):
+    proposal, alerts = _fed_bank_world(fakes, p_kw, prev_kw)
+
+    verdict = await _service(
+        fakes, _flow_config(True), signing_seed, topology=FakeTopology(), alerts=alerts
+    ).evaluate_and_sign(make_batch_row(proposal))
+
+    assert ("G-29" in verdict.vetoed_rule_ids) is vetoed
+    if vetoed:
+        violations = fakes.trace.appended[-1][1]["violations"]
+        assert (BANK_ID, flow_checks.SUBSTATION_TOPOLOGY_UNMAPPED) in {
+            (v["hub_id"], v["reason"]) for v in violations
+        }
+    assert ("ALR-SUBSTATION-UNMAPPED-TOPOLOGY", BANK_ID) in alerts.raised
+
+
+async def test_a_mapped_substation_raises_no_substation_alert(fakes, signing_seed):
+    topology = FakeTopology()
+    topology.substations[BANK_ID] = AggregateFlow("sub-1", 5.0, 1.0, -100.0, 1000.0)
+    proposal, alerts = _fed_bank_world(fakes, -4.0, -2.0)
+
+    verdict = await _service(
+        fakes, _flow_config(True), signing_seed, topology=topology, alerts=alerts
+    ).evaluate_and_sign(make_batch_row(proposal))
+
+    assert "G-29" not in verdict.vetoed_rule_ids
+    assert ("ALR-SUBSTATION-UNMAPPED-TOPOLOGY", BANK_ID) not in alerts.raised
+
+
+def _home_bank_pool(*, with_limit_row: bool) -> FakePool:
+    """TOPOLOGY-FIX's r3.4.1 data: HOME_BANK og.asset rows map the home banks to their substation."""
+    pool = _topology_pool({"b1": (-5.0, 1.0, None, None), "b2": (2.0, 1.0, None, None)})
+    pool.responses[flow_repo._ASSETS_SQL] = [
+        ("home-b1", "HOME_BANK", "b1", "sub-1", None, None),
+        ("home-b2", "HOME_BANK", "b2", "sub-1", None, None),
+    ]
+    pool.responses[flow_repo._SUBSTATION_LIMITS_SQL] = [("sub-1", 1000.0, 200.0)] if with_limit_row else []
+    return pool
+
+
+async def test_home_bank_asset_rows_make_g29_evaluate_for_home_banks():
+    port = _port(_home_bank_pool(with_limit_row=True))
+
+    flow = await port.substation_flow("b1")
+
+    assert flow is not None and flow.ref == "sub-1" and flow.banks == ("b1", "b2")
+    assert flow.flow_kw == -3.0 and flow.lower_kw == -200.0 and flow.upper_kw == pytest.approx(950.0)
+    assert await port.poi_limit("b1") is None  # HOME_BANK rows are not a POI
+
+
+async def test_a_mapped_substation_without_limits_is_missing_topology_unless_fail_closed():
+    permissive = await _port(_home_bank_pool(with_limit_row=False)).substation_flow("b1")
+    strict = await _port(
+        _home_bank_pool(with_limit_row=False), flow_fail_closed_missing_topology=True
+    ).substation_flow("b1")
+
+    assert permissive is None  # skipped (and alerted by the service), not a veto of every increase
+    assert (
+        strict is not None and strict.lower_kw is None and strict.upper_kw is None
+    )  # unknown: increases vetoed

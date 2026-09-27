@@ -148,4 +148,15 @@ def test_a_stop_cancelled_target_is_never_active_and_names_the_stop() -> None:
 
 
 def test_stop_rows_sql_selects_the_id_first() -> None:
-    assert mt.STOP_EVENT_ROWS_SQL.split("FROM")[0].split()[1].rstrip(",") == "stop_event_id"
+    assert mt.STOP_EVENT_ROWS_SQL.split("FROM")[0].split()[1].rstrip(",").split(".")[-1] == "stop_event_id"
+
+
+def test_a_stop_engaged_days_ago_and_never_released_still_cancels_a_target() -> None:
+    """The stop read keeps each scope's latest event whatever its age (effective_targets' in-force rule)."""
+    target = _row(["h1"], -5.0, issued=NOW - timedelta(minutes=1))
+    old_engage = [(uuid4(), "BANK", "b1", "ENGAGE", NOW - timedelta(days=3))]
+    got = _states([target], old_engage)
+    assert got["h1"].status is mt.TargetStatus.CANCELLED_BY_SAFE_STOP
+    sql = " ".join(mt.STOP_EVENT_ROWS_SQL.split())
+    assert "OR s.created_at = ( SELECT max(l.created_at) FROM og.stop_event l" in sql
+    assert "l.scope_kind = s.scope_kind AND l.scope_ref = s.scope_ref" in sql

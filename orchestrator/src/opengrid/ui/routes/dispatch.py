@@ -666,6 +666,10 @@ def as_awards_view(
                 "state": state,
                 "deployment_id": str(deployment["deployment_id"]) if deployment else None,
                 "deployment_end": deployment.get("end_at") if deployment else None,
+                # D-33: who called it -- OPERATOR, UTILITY (customer API), GRID_LINK, ERCOT, MARKET_SIM, SCENARIO.
+                "deployment_origin": deployment.get("source") if deployment else None,
+                "deployment_by": deployment.get("requested_by") if deployment else None,
+                "deployment_kw": deployment.get("requested_kw") if deployment else None,
                 "utility_call": is_toll,
             }
         )
@@ -743,9 +747,12 @@ async def confirm_as_deployment(
             remote_user=remote_user(request),
         )
     except ApiUnavailable as exc:
-        if exc.status_code == 409:
-            # overlap (an active deployment already covers it), over the product cap, or not deployable
+        if exc.status_code in (404, 409, 422, 429):
+            # D-33 refusal from the shared call path: {"detail": {"reason_code", "detail"}} -- overlap,
+            # over the product cap, not deployable, sign/size, window or rate limit.
             detail = exc.detail.get("detail") if isinstance(exc.detail, dict) else exc.detail
+            if isinstance(detail, dict):
+                detail = f"{detail.get('reason_code', '')}: {detail.get('detail', '')}"
             return _action_result(request, message=f"Refused by the API: {detail or exc}")
         return _action_result(request, message=str(exc))
     return _action_result(

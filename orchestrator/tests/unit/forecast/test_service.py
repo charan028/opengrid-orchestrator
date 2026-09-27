@@ -356,3 +356,23 @@ async def test_public_interface_end_to_end_via_configure():
         assert all(p.scenario in ("P10", "P50", "P90") for p in points)
     finally:
         forecast._state = None
+
+
+@pytest.mark.asyncio
+async def test_uncorroborated_extreme_latest_price_makes_the_series_not_for_firm():
+    """FR-ING-117: nothing firm is declared off a series whose latest price is EXTREME_UNCORROBORATED
+    (the rich history alone would be FIRM_OK everywhere)."""
+    horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    history = FakeHistory(
+        {"HB_TEST": _rich_history("HB_TEST", horizon_start)}, quality="EXTREME_UNCORROBORATED"
+    )
+    rows = await compute_and_persist(_cfg(load_series=[]), history, FakeBackend(), now=_NOW)
+    assert rows and all(r.firm_fitness == "NOT_FOR_FIRM" for r in rows)
+    fresh = await compute_and_persist(
+        _cfg(load_series=[]),
+        FakeHistory({"HB_TEST": _rich_history("HB_TEST", horizon_start)}),
+        FakeBackend(),
+        now=_NOW,
+    )
+    assert all(r.firm_fitness == "FIRM_OK" for r in fresh)
+    assert [r.p50 for r in rows] == [r.p50 for r in fresh]  # flagged, not widened or smoothed
