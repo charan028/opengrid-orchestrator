@@ -73,7 +73,14 @@ class Heartbeat(_Row):
 class Alert(_Row):
     id: int | None = None
     rule: str
-    severity: Literal["warning", "critical"]
+    # R3.4.3 fix: `og.alert.severity` is plain TEXT (migration 0001, no CHECK constraint), and
+    # `opengrid.health.model.AlertSeverity` already allows "info" (firmware campaign progress, R3) --
+    # this Literal was never widened to match, so `Alert(**row)`/`Alert(severity=...)` raised a
+    # ValidationError as soon as any info-severity alert was open, breaking every caller of
+    # `health.queries.fetch_open_alerts` (e.g. `engine/alerts.py`'s alert clearing) and `api.store`'s
+    # `Alert(**row)` construction. Kept as its own Literal (not imported from `health.model`) rather
+    # than having `core` depend on `health`.
+    severity: Literal["info", "warning", "critical"]
     summary: str
     detail: dict[str, Any] | None = None
     opened_at: datetime

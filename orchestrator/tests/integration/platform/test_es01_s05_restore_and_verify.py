@@ -31,6 +31,8 @@ from opengrid.platform.db import build_dsn, migrate_sync
 from opengrid.trace.pg_backend import PgTraceBackend
 from opengrid.trace.store import TraceStore
 
+from ..cluster_guard import require_test_cluster
+
 pytestmark = pytest.mark.asyncio
 
 _CONFIG_PATH = os.environ.get(
@@ -129,6 +131,7 @@ async def test_restored_database_still_verifies_the_trace_chain(tmp_path) -> Non
         assert drop_schema.returncode == 0, drop_schema.stderr
     else:
         restore_db = f"{source_parts['dbname']}_restore_{uuid.uuid4().hex[:8]}"
+        require_test_cluster(restore_db, source_parts["port"])
         create = _run(["createdb", *host_port_user, restore_db], env)
         if create.returncode != 0:
             pytest.skip(

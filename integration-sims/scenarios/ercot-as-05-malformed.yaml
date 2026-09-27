@@ -1,0 +1,13 @@
+name: ercot_as_05_malformed
+description: >
+  Malformed instruction: MW and start time cannot be parsed. Expected: refused as 422, acknowledged
+  REJECT with the reason, ALR-ERCOT-AS-REFUSED raised, nothing deployed.
+  Publishes ERCOT AS dispatch instructions on ogsim.market's MMS/EWS endpoint (/mms/ews/, D-35). The
+  orchestrator sees them only when [feeds.ercot_as_poll] is enabled and points at this simulator; its
+  decision and acknowledgement are listed at GET /mms/admin/vdis on the market sim.
+steps:
+  - at_s: 0
+    type: ercot_as_malformed
+    target: OG_ESR_1
+    params: {service: ECRS}
+    duration: 60

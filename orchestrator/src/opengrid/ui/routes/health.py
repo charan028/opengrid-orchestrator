@@ -57,9 +57,13 @@ def _process_row(process: str, entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def format_age(age_s: float | None) -> str:
-    """`5s`, `34m`, `1h 34m`: day-ahead feeds are legitimately hours old and `5675s` reads as a fault."""
+    """`5s`, `34m`, `1h 34m`: day-ahead feeds are legitimately hours old and `5675s` reads as a fault.
+    A value timestamped in the future (a forecast product) reads `ahead: 2h 5m`, the same wording as the
+    live `[data-since]` badges (`og.js`), never a negative age."""
     if age_s is None:
         return "unknown"
+    if age_s < 0:
+        return f"ahead: {format_age(-age_s)}"
     total = int(age_s)
     if total < 60:
         return f"{total}s"

@@ -41,6 +41,20 @@ class _Backend:
     async def latest_action(self, scope_kind: str, scope_ref: str) -> str | None:
         return None
 
+    engaged_at: dict[tuple[str, str], datetime] = field(default_factory=dict)
+    alerts: list[str] = field(default_factory=list)
+
+    async def latest_engage_at(self, scope_kind: str, scope_ref: str) -> datetime | None:
+        return self.engaged_at.get((scope_kind, scope_ref))
+
+    async def raise_superseded_release_alert(
+        self, *, scope_kind, scope_ref, stop_id, signature, engage_at
+    ) -> bool:
+        if signature in self.alerts:
+            return False
+        self.alerts.append(signature)
+        return True
+
 
 @dataclass
 class _Publisher:
@@ -299,3 +313,40 @@ async def test_due_releases_query_reads_only_uncleared_safestop_release_rows():
     assert await backend.releases_due_for_clearing(retain_s=60.0, limit=5) == [
         {"action": "RELEASE", "stop_id": "s"}
     ]
+
+
+# --- r3.4.2 review L-1 (lead-approved): a RELEASE superseded by a newer ENGAGE is refused ----------------------
+
+
+async def test_a_release_signed_before_a_newer_engage_is_refused_alerted_and_traced(keys):
+    """The bank stays stopped consistently: nothing is published to the hubs (which would drop it anyway) and
+    no RELEASE row is written to og.stop_event; the operators are alerted to re-issue the release, and the
+    trace marks it superseded so the guardian stops re-handing it. A re-hand is refused again, alerted once."""
+    service, backend, publisher, trace = _service(keys)
+    event = _guardian_release(keys)  # signed at NOW
+    backend.engaged_at[("BANK", "bank-001")] = NOW + timedelta(seconds=30)  # a newer stop on the same bank
+
+    assert await service.relay_guardian_release(event) is False
+    assert await service.relay_guardian_release(event) is False
+
+    assert publisher.published == [] and backend.rows == []
+    assert backend.alerts == [event["signature"]]
+    superseded = [args[3] for args, _kw in trace.rows if args[3].get("release") == "SUPERSEDED"]
+    assert superseded and superseded[0]["superseded_signature"] == event["signature"]
+
+
+async def test_a_release_signed_after_the_latest_engage_is_relayed(keys):
+    service, backend, publisher, _ = _service(keys)
+    backend.engaged_at[("BANK", "bank-001")] = NOW - timedelta(hours=1)  # the stop it releases
+    event = _guardian_release(keys)
+
+    assert await service.relay_guardian_release(event) is True
+    assert len(publisher.published) == 1 and backend.rows[0]["action"] == "RELEASE" and backend.alerts == []
+
+
+def test_the_guardian_never_re_hands_a_superseded_release():
+    from opengrid.guardian.repo import _UNPUBLISHED_RELEASES_SQL
+
+    sql = " ".join(_UNPUBLISHED_RELEASES_SQL.split())
+    assert "r.payload ->> 'superseded_signature' = ev ->> 'signature'" in sql
+    assert "r.event_class = 'SAFE_STOP'" in sql

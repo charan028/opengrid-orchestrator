@@ -70,6 +70,8 @@ def own_config(server_config) -> Iterator[Any]:
     from opengrid.platform.config import Config
     from opengrid.platform.db import build_dsn, migrate_sync
 
+    from ..cluster_guard import require_test_cluster_dsn
+
     name = f"{server_config.postgres_database}_topo"
     params = conninfo_to_dict(build_dsn(server_config))
     admin = make_conninfo(**{**params, "dbname": "postgres"})
@@ -78,6 +80,7 @@ def own_config(server_config) -> Iterator[Any]:
         with psycopg.connect(admin, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
+    require_test_cluster_dsn(make_conninfo(**{**params, "dbname": name}))
     _drop()
     with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{name}"')
@@ -128,7 +131,11 @@ def seeded(dsn: str, own_config, configs: tuple[Path, Path]) -> str:
 
     asyncio.run(_fleet())
     with psycopg.connect(dsn, autocommit=True) as conn:
-        for name in ("market_model_seed.sql", "mobile_trucks_seed.sql"):
+        for name in (
+            "market_model_seed.sql",
+            "noie_switch_seed.sql",
+            "mobile_trucks_seed.sql",
+        ):  # phase e order
             conn.execute((SEED_DIR / name).read_text(encoding="utf-8").encode("utf-8"))
     return dsn
 
@@ -173,7 +180,7 @@ def test_fresh_bootstrap_has_zero_unmapped_and_a_clean_guardian_topology(
     assert {v for k, v in dedicated.items() if k.startswith("truck-")} == {600.0}
     assert truck_feeders == (TRUCKS,)
     assert sub_feeder == (24000.0, 20000.0)  # market_model_seed.sql's row kept
-    assert lcra == [("LZ_LCRA", None)]
+    assert lcra == [("LZ_LCRA", "LCRA")]  # D-37: regulated territory, not the ERCOT competitive area
     assert off_rating == (0,)  # D-36: every bank's transformers sum to its og.bank.kva_rating
 
     # The guardian's own read: the conditions under which it raises ALR-XFMR-UNMAPPED /

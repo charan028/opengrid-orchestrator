@@ -65,3 +65,18 @@ Every `command_batch` carries `epoch` (strictly increasing per hub, replay/rollb
 absolute deadline after which the batch is void even if delivered late (lease-bounded, `fleet.lease_ttl_s`
 = 30s by default). A hub holds its last signed setpoint if its lease expires without a fresh batch (local
 autonomy, §4.4 of `02b`).
+
+## Device info position cadence for MOBILE_STORAGE (D-31 trucks)
+
+`<root>/hub/<hub_id>/info` (`device_info.schema.json`) is published RETAINED, QoS 1, on connect and whenever a
+field changes. A unit whose `asset_class` is `MOBILE_STORAGE` MUST also:
+
+- publish on **every move** (a new `lat`/`lon`), at once; and
+- publish at least **every 300 s** while powered (position heartbeat), even when parked.
+
+The orchestrator (`opengrid.core.geo`, used by the guardian's G-35 and the selector) trusts a mobile unit's
+last reported position while that report is at most 300 s old, or, if older, while the unit's telemetry is
+fresh (`[health].hub_stale_s`): a unit that is still talking and has reported no move is where it last
+reported. With no reported position, or an old report and stale telemetry, the unit counts as **away** from
+its home station and is never charged (fail closed). The simulator (`ogsim.fleet`) implements both rules
+(`mobile_position_interval_s`, 60 s, and a publish on every scenario move).

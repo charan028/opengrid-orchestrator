@@ -49,7 +49,7 @@ def test_seed_applies_idempotently(dsn: str) -> None:
         conn.execute(sql)
         conn.execute(sql)
         utilities = conn.execute("SELECT utility_id FROM og.utility ORDER BY 1").fetchall()
-        assert [u[0] for u in utilities] == ["AUSTIN_ENERGY", "CPS_ENERGY"]
+        assert [u[0] for u in utilities] == ["AUSTIN_ENERGY", "CPS_ENERGY", "LCRA", "RAYBURN"]  # D-37
         contract = conn.execute(
             "SELECT service_type, market, utility_id FROM og.contract WHERE contract_id = %s",
             (DEMO_CONTRACT,),

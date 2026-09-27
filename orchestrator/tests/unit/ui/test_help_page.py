@@ -48,7 +48,14 @@ def test_every_screen_and_playbook_section_is_documented(client: TestClient) -> 
     body = client.get("/og/help", headers=VIEWER).text
     for section in help_screen.TOC[4][2]:
         assert f'id="{section[0]}"' in body
-    for pb in ("pb-safe-stop", "pb-manual-target", "pb-price-spike", "pb-rebuild", "pb-customer-onboarding"):
+    for pb in (
+        "pb-safe-stop",
+        "pb-utility-stop-release",
+        "pb-manual-target",
+        "pb-price-spike",
+        "pb-rebuild",
+        "pb-customer-onboarding",
+    ):
         assert f'id="{pb}"' in body, pb
 
 
@@ -121,3 +128,16 @@ def test_the_production_app_renders_the_generated_api_reference() -> None:
     body = client.get("/og/help", headers=VIEWER).text
     assert "/og/api/safestop" in body
     assert 'id="api-console"' in body
+
+
+def test_api_reference_names_the_utility_and_policy_roles() -> None:
+    """Dependency factories (`require_utility_action(...)`, `require_action(...)`) return closures; the
+    reference names them by their factory, not as a plain signed-in identity (r3.4.3)."""
+    from fastapi import FastAPI
+
+    from opengrid import customer_api
+
+    app = FastAPI()
+    app.include_router(customer_api.utility_router)
+    roles = {ep["role"] for g in help_screen.api_reference(app) for ep in g["endpoints"]}
+    assert roles == {"utility key"}

@@ -143,6 +143,7 @@ def _include_routers(app: FastAPI) -> None:
         ai,
         billing,
         contracts,
+        delivery,
         dispatch,
         dispatch_ledger,
         firmware,
@@ -177,6 +178,7 @@ def _include_routers(app: FastAPI) -> None:
         markets_funnel,
         dispatch,
         dispatch_ledger,
+        delivery,
         lp_value,
         profitability,
         pq,
@@ -201,6 +203,7 @@ def _include_routers(app: FastAPI) -> None:
         app.include_router(customer_api.router)
         app.include_router(customer_api.operator_router)
         app.include_router(customer_api.utility_router)
+        app.include_router(customer_api.delivery_router)
 
 
 def customer_api_enabled() -> bool:

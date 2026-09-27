@@ -30,6 +30,24 @@ async def pool(server_config, _migrated):
     await pool.close()
 
 
+IT_ACTOR = "operator:it-test"
+
+
+@pytest.fixture(autouse=True)
+async def _remove_it_stops(pool):
+    """Every stop these tests engage (BANK, and the FLEET one in TS-06-23) is removed afterwards, with its outbox
+    rows: a leftover FLEET ENGAGE is the latest stop for every scope and breaks other suites on the same DB
+    (tests/integration/firmware/test_firmware_db under the latest-stop rule)."""
+    yield
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "DELETE FROM og.stop_outbox WHERE stop_id IN "
+            "(SELECT stop_event_id FROM og.stop_event WHERE initiator_ref = %s)",
+            (IT_ACTOR,),
+        )
+        await cur.execute("DELETE FROM og.stop_event WHERE initiator_ref = %s", (IT_ACTOR,))
+
+
 @pytest.fixture
 def stop_key():
     from opengrid.core.crypto import generate_keypair

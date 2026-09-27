@@ -19,6 +19,8 @@ sims:
   scada: { enabled: true }
   fleet: { enabled: true }
   customer: { enabled: true }
+  # The utility EMS calls the REAL orchestrator (production toll calls): never random, on demand only.
+  utility: { enabled: false }
 
 profiles:
   calm: { rate_multiplier: 0.25, duration_multiplier: 0.75 }
@@ -79,6 +81,43 @@ types:
     rate_per_hour: 0.0
     duration_s: [0, 0]
     params: {}
+  # D-35 ERCOT AS dispatch instructions: scenario/manual only, never random (a deployment on a committed
+  # award discharges it). Listed so the catalogue stays fully covered; enabled: false and rate 0.
+  ercot_as_deploy:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_recall:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_duplicate:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_out_of_order:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_malformed:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_unknown_award:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  ercot_as_exceed_award:
+    enabled: false
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
 
   # ---- SCADA ----
   bank_overload:
@@ -89,6 +128,11 @@ types:
     rate_per_hour: 0.25
     duration_s: [60, 300]
     params: { multiplier: [1.5, 3.0] }
+  # D-38: manual/scenario only (rate 0): a random meter disagreement would raise delivery alerts on real calls.
+  meter_mismatch:
+    rate_per_hour: 0.0
+    duration_s: [300, 1200]
+    params: { battery_scale: [0.3, 0.7] }
   frozen_value:
     rate_per_hour: 0.1
     duration_s: [120, 600]
@@ -248,3 +292,30 @@ types:
     rate_per_hour: 0.02
     duration_s: [120, 600]
     params: { step_kw: [1000, 3000] }
+
+  # ---- utility EMS (ogsim.utility_aen): on demand only (sims.utility disabled; each type disabled) ----
+  utility_call_normal:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_overlap:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_over_cap:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_charge:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}
+  utility_call_cancel_mid:
+    enabled: false
+    rate_per_hour: 0
+    duration_s: [1, 1]
+    params: {}

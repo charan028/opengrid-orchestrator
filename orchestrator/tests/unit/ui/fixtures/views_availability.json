@@ -1,0 +1,94 @@
+{
+  "as_of": "2026-09-26T23:30:00+00:00",
+  "available_kw": 30000.0,
+  "unavailable_kw": 12000.0,
+  "unavailable_reason": "REGULATED_NO_CONTRACT",
+  "unavailable_badge": "Regulated market – no contract",
+  "unavailable_text": "Unavailable: regulated (NOIE) territory, so energy can't be sold into ERCOT, and there is no utility capacity contract to reserve it. Available once a contract is signed.",
+  "zones": [
+    {
+      "zone": "LZ_AEN",
+      "banks": 10,
+      "unavailable_banks": 0,
+      "rated_kw": 6000.0,
+      "available_kw": 6000.0,
+      "unavailable_kw": 0.0,
+      "availability": "AVAILABLE",
+      "availability_reason": null,
+      "availability_text": null,
+      "availability_badge": null
+    },
+    {
+      "zone": "LZ_HOUSTON",
+      "banks": 10,
+      "unavailable_banks": 0,
+      "rated_kw": 6000.0,
+      "available_kw": 6000.0,
+      "unavailable_kw": 0.0,
+      "availability": "AVAILABLE",
+      "availability_reason": null,
+      "availability_text": null,
+      "availability_badge": null
+    },
+    {
+      "zone": "LZ_LCRA",
+      "banks": 10,
+      "unavailable_banks": 10,
+      "rated_kw": 6000.0,
+      "available_kw": 0.0,
+      "unavailable_kw": 6000.0,
+      "availability": "UNAVAILABLE",
+      "availability_reason": "REGULATED_NO_CONTRACT",
+      "availability_text": "Unavailable: regulated (NOIE) territory, so energy can't be sold into ERCOT, and there is no utility capacity contract to reserve it. Available once a contract is signed.",
+      "availability_badge": "Regulated market – no contract"
+    },
+    {
+      "zone": "LZ_NORTH",
+      "banks": 10,
+      "unavailable_banks": 0,
+      "rated_kw": 6000.0,
+      "available_kw": 6000.0,
+      "unavailable_kw": 0.0,
+      "availability": "AVAILABLE",
+      "availability_reason": null,
+      "availability_text": null,
+      "availability_badge": null
+    },
+    {
+      "zone": "LZ_RAYBN",
+      "banks": 10,
+      "unavailable_banks": 10,
+      "rated_kw": 6000.0,
+      "available_kw": 0.0,
+      "unavailable_kw": 6000.0,
+      "availability": "UNAVAILABLE",
+      "availability_reason": "REGULATED_NO_CONTRACT",
+      "availability_text": "Unavailable: regulated (NOIE) territory, so energy can't be sold into ERCOT, and there is no utility capacity contract to reserve it. Available once a contract is signed.",
+      "availability_badge": "Regulated market – no contract"
+    },
+    {
+      "zone": "LZ_SOUTH",
+      "banks": 10,
+      "unavailable_banks": 0,
+      "rated_kw": 6000.0,
+      "available_kw": 6000.0,
+      "unavailable_kw": 0.0,
+      "availability": "AVAILABLE",
+      "availability_reason": null,
+      "availability_text": null,
+      "availability_badge": null
+    },
+    {
+      "zone": "LZ_WEST",
+      "banks": 10,
+      "unavailable_banks": 0,
+      "rated_kw": 6000.0,
+      "available_kw": 6000.0,
+      "unavailable_kw": 0.0,
+      "availability": "AVAILABLE",
+      "availability_reason": null,
+      "availability_text": null,
+      "availability_badge": null
+    }
+  ]
+}

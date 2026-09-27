@@ -7,7 +7,7 @@ the utility customer API call. This adapter only translates:
 
 - origin `GRID_LINK`, principal `grid_link:<utility_id>`, idempotency key `ems:<ems_call_id>`;
 - the link's discharge MAGNITUDE into the core's signed kW (`-setpoint_kw`, -discharge);
-- `CallState` / `CallRefused` into `CallOutcome` (ACCEPTED -> ACCEPTED, ACTIVE -> ACTIVE,
+- `CallState` / `CallRefused` into `CallOutcome` (ACCEPTED -> ACCEPTED, ACTIVE/RAMPING/DELIVERING -> ACTIVE,
   COMPLETED -> ENDED, REFUSED -> REJECTED with the core's reason code).
 """
 
@@ -36,6 +36,9 @@ __all__ = ["CoreTollCallPort", "idempotency_key", "principal_of"]
 _PHASE: dict[CallState, CallPhase] = {
     CallState.ACCEPTED: CallPhase.ACCEPTED,
     CallState.ACTIVE: CallPhase.ACTIVE,
+    # Measured RAMPING/DELIVERING (D-38) are one ACTIVE phase on the link; the kW point carries the level.
+    CallState.RAMPING: CallPhase.ACTIVE,
+    CallState.DELIVERING: CallPhase.ACTIVE,
     CallState.COMPLETED: CallPhase.ENDED,
     CallState.REFUSED: CallPhase.REJECTED,
 }
@@ -105,9 +108,10 @@ class CoreTollCallPort:
 
     async def _status_of(self, record: CallRecord) -> CallOutcome:
         status = await status_of(self._store, record, limits=self._limits, now=datetime.now(UTC))
-        granted = status.granted_kw
+        # the measured delivered kW (opengrid.delivery, D-38); None while unmeasured or stale
+        delivered = status.delivered_kw
         return CallOutcome(
             phase=_PHASE[status.state],
             reason_code=status.call.reason_code,
-            granted_kw=round(max(0.0, -granted), 3) if granted is not None else None,
+            delivered_kw=round(max(0.0, -delivered), 3) if delivered is not None else None,
         )

@@ -337,6 +337,14 @@ def test_platform_models():
     alert = platform.Alert(rule="feed-stale", severity="warning", summary="stale", opened_at=NOW)
     assert alert.severity == "warning"
 
+    # R3.4.3 fix: firmware campaign-progress alerts are "info" severity (health.model.AlertSeverity
+    # already allowed it); this Literal must too, or every `fetch_open_alerts` caller broke as soon as
+    # one was open.
+    info_alert = platform.Alert(
+        rule="ALR-FIRMWARE-CAMPAIGN-PROGRESS", severity="info", summary="3/10", opened_at=NOW
+    )
+    assert info_alert.severity == "info"
+
     feed_obs = platform.FeedObs(
         source="ercot",
         product="np6-905-cd",

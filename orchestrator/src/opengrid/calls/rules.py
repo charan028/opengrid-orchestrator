@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from opengrid.calls.models import ALLOWED_KINDS, AwardView, CallKind, CallRequest
+from opengrid.core.services import ERCOT_AS_SERVICE_TYPE, REGULATED_CAPACITY_SERVICE_TYPE
 
 # --- reason codes (the only place they are spelled) ---------------------------------------------------
 R_NOT_FOUND = "R-CALL-NOT-FOUND"
@@ -31,7 +32,9 @@ R_FLEET_WIDE = "R-CALL-FLEET-WIDE"
 R_NO_OBLIGATION = "R-CALL-OBLIGATION-REQUIRED"
 R_ALREADY_ENDED = "R-CALL-ALREADY-ENDED"
 R_CANNOT_EXTEND = "R-CALL-CANNOT-EXTEND"
+R_NOT_ISSUER = "R-CALL-NOT-ISSUER"
 
+HTTP_FORBIDDEN = 403
 HTTP_NOT_FOUND = 404
 HTTP_CONFLICT = 409
 HTTP_UNPROCESSABLE = 422
@@ -39,9 +42,9 @@ HTTP_TOO_MANY = 429
 
 #: Obligation states a call can deploy (a held award inside its window; SHORTFALL keeps delivering).
 DEPLOYABLE_STATES = frozenset({"COMMITTED", "DELIVERING", "SHORTFALL"})
-TOLLING_SERVICE_TYPE = "REGULATED_CAPACITY"
+TOLLING_SERVICE_TYPE = REGULATED_CAPACITY_SERVICE_TYPE
 TOLLING_VARIANT = "TOLLING"
-AS_SERVICE_TYPE = "ERCOT_AS"
+AS_SERVICE_TYPE = ERCOT_AS_SERVICE_TYPE
 #: kW compared with a small tolerance: numeric(12,3) storage rounds to the watt.
 KW_TOLERANCE = 1e-3
 

@@ -40,8 +40,9 @@ INTERVAL = timedelta(minutes=15)
 #: control plane and database, so the suites refuse to run unless every target is set explicitly.
 PRODUCTION_HOST_MARKER = Path("/etc/opengrid")
 #: Regulated-utility territories (K15): a manual operator command is FREE-market work, which G-33 correctly vetoes
-#: on these hubs, so generic guardian scenarios pick competitive-area hubs.
-REGULATED_ZONES = ("LZ_AEN", "LZ_CPS")
+#: on these hubs, so generic guardian scenarios pick competitive-area hubs. The `market = "REGULATED"` zones of
+#: `[zone_territory]` (orchestrator/config/tdsp_tariffs.toml), LZ_LCRA and LZ_RAYBN since D-37.
+REGULATED_ZONES = ("LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN")
 #: The `slow` marker promises a delivery scenario waits at most about this long for its window (conftest.py).
 MAX_DELIVERY_WAIT = timedelta(minutes=20)
 EXPLICIT_TARGETS = ("OG_E2E_API", "OG_E2E_CONTROL", "OG_E2E_DSN")
@@ -392,7 +393,8 @@ class Stack:
     def metric(self, service: str, port: int, name: str) -> float | None:
         """Sum of a Prometheus counter/gauge `name` scraped from a dev-stack container's loopback-only
         `/metrics` (via `docker compose exec`, since the endpoint never binds a published port). `None` when
-        the endpoint or the series is absent."""
+        the endpoint or the series is absent. A declared counter with no sample yet counts as 0: a labelled
+        counter (e.g. `og_mqtt_reconnects_total{client}`) shows no series until its first increment."""
         docker = shutil.which("docker")
         if docker is None:
             pytest.skip("docker CLI not available to scrape a loopback metrics endpoint")
@@ -415,6 +417,8 @@ class Stack:
             for line in done.stdout.splitlines()
             if line.startswith(name) and not line.startswith("#")
         ]
+        if not values and f"# TYPE {name} counter" in done.stdout:
+            return 0.0
         return sum(values) if values else None
 
     def restart_count(self, service: str) -> int:

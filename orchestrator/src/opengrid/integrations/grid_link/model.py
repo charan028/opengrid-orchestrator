@@ -145,8 +145,9 @@ class CallOutcome:
 
     phase: CallPhase
     reason_code: str | None = None
-    # GRANTED discharge magnitude (>= 0) from the core, NOT measured delivery (served COMM_LOST, r3.4.1)
-    granted_kw: float | None = None
+    # MEASURED discharge magnitude (>= 0) from the core's delivery verification (D-38); None while unmeasured
+    # or stale, and then served with the COMM_LOST flag, never invented
+    delivered_kw: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +183,7 @@ class LinkStatus:
     call_phase: CallPhase
     ems_call_id: int
     call_reason: int
-    call_granted_kw: float
+    call_delivered_kw: float | None
     soc_pct: float | None
     heartbeat_count: int
     link_healthy: bool

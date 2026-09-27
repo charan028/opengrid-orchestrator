@@ -26,6 +26,7 @@ from opengrid.core.models.market import (
     UtilityId,
     ZoneOwner,
 )
+from opengrid.core.services import REGULATED_CAPACITY_SERVICE_TYPE
 
 #: The asset sits outside the regulated utility's territory (K15 a), or a regulated-territory asset
 #: would serve a different utility.
@@ -38,7 +39,7 @@ R_TERRITORY_UNKNOWN: Final = "R-TERRITORY-UNKNOWN"
 TERRITORY_REASONS: Final = frozenset({R_TERRITORY_OUTSIDE, R_TERRITORY_NO_FREE_ACCESS, R_TERRITORY_UNKNOWN})
 
 #: Service types that only exist in the regulated market.
-REGULATED_ONLY_SERVICE_TYPES: Final = frozenset({"REGULATED_CAPACITY"})
+REGULATED_ONLY_SERVICE_TYPES: Final = frozenset({REGULATED_CAPACITY_SERVICE_TYPE})
 
 
 class MarketModelError(ValueError):

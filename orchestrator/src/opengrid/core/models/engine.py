@@ -57,6 +57,10 @@ class Contract(_Row):
     # utility; `utility_id` is set iff `market == "REGULATED"` (a DB CHECK enforces it).
     market: Market = "FREE"
     utility_id: UtilityId | None = None
+    # D-37 (migration 0046): a display name, and the sample flag. A sample contract (named "Sample
+    # Contract: ...") is never ACTIVE (a DB CHECK), so it is never callable, reserved or billed.
+    name: str | None = None
+    is_sample: bool = False
 
 
 VariableKind = Literal["CONTINUOUS", "SEMI_CONTINUOUS", "BINARY"]

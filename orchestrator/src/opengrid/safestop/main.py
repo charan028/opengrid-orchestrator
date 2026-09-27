@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from prometheus_client import start_http_server
+
 import opengrid.safestop as safestop
 from opengrid.platform.config import Config, load_config
 from opengrid.platform.db import make_pool
@@ -41,6 +43,8 @@ from opengrid.safestop.confirmation import (
     UnknownProposalError,
 )
 from opengrid.safestop.keys import load_signing_key
+from opengrid.safestop.l2_intake import DEFAULT_MAX_BACKOFF_S as L2_MAX_BACKOFF_S
+from opengrid.safestop.l2_intake import DEFAULT_RECONNECT_DELAY_S as L2_MIN_BACKOFF_S
 from opengrid.safestop.l2_intake import build_l2_session
 from opengrid.safestop.mqtt_publish import AiomqttStopPublisher
 from opengrid.safestop.pg_backend import PgStopEventBackend, listen_for_requests, retry_trace_conflict
@@ -61,8 +65,11 @@ GUARDIAN_PUBLIC_KEY_LENGTH = 32
 #: hub may be offline and still hold its in-memory stop set; after that a reconnecting hub that lost its
 #: memory starts unstopped anyway, which is correct once the stop is released.
 DEFAULT_RELEASE_RETAIN_S = 86_400.0
-#: K8 fail closed: seconds the stop publish connection may stay down before the process exits for a restart.
-DEFAULT_MQTT_DOWN_EXIT_S = 30.0
+#: K8 fail closed: seconds the stop publish connection (or the L2 listener) may stay down before the process exits for
+#: a restart -- the guardian's value (r3.4.4 live: at 30 s every ~15-20 s broker blip restarted og-safestop).
+DEFAULT_MQTT_DOWN_EXIT_S = 60.0
+#: og-safestop's /metrics port (02b S1.2's process table), e.g. og_mqtt_reconnects_total{client="safestop"}.
+DEFAULT_METRICS_PORT = 9106
 
 
 async def _handle_request(payload: dict[str, Any], broker: ConfirmationBroker) -> None:
@@ -126,6 +133,12 @@ async def _request_intake_loop(pool: Any, broker: ConfirmationBroker) -> None:
             logger.warning(
                 "malformed safestop request ignored", extra={"error": str(exc), "payload": payload}
             )
+        except Exception:
+            # One failed request (a database error, a publish problem) must never end the intake task: every
+            # later stop request would then go unheard while the process looks healthy (r3.4.1 review).
+            logger.exception(
+                "safestop request failed; intake continues", extra={"action": payload.get("action")}
+            )
 
 
 async def main(cfg: Config | None = None) -> None:
@@ -146,6 +159,7 @@ async def main(cfg: Config | None = None) -> None:
     )
 
     heartbeat_interval_s = float(cfg.get("health.heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S))
+    start_metrics_server(cfg)
 
     # K8: the stop publish connection survives broker disconnects (reconnect with backoff under the same
     # client id, never two clients at once); while it is down the heartbeat stops, and past
@@ -153,6 +167,8 @@ async def main(cfg: Config | None = None) -> None:
     client = MqttSession(
         lambda: build_client(cfg, username=mqtt_username, password=mqtt_password, process="safestop"),
         name="safestop",
+        min_backoff_s=L2_MIN_BACKOFF_S,  # the stop path retries fast: 1 s, at most 5 s apart
+        max_backoff_s=L2_MAX_BACKOFF_S,
     )
     mqtt_down_exit_s = float(cfg.get("safestop.mqtt_down_exit_s", DEFAULT_MQTT_DOWN_EXIT_S))
     publisher = AiomqttStopPublisher(client=client, config=cfg)
@@ -180,6 +196,7 @@ async def main(cfg: Config | None = None) -> None:
         engage_fn=_l2_engage,
         already_acted_fn=backend.has_l2_engage,
         ensure_published_fn=service.ensure_l2_engage_published,
+        record_lift_fn=service.record_utility_lift,
     )
     l2_task = asyncio.create_task(l2_session.run())
     try:
@@ -206,6 +223,14 @@ async def main(cfg: Config | None = None) -> None:
                 await task
         await pool.close()
         safestop.configure_service(None)
+
+
+def start_metrics_server(cfg: Config) -> int:
+    """Serve /metrics on [metrics].safestop_port (default 9106) at [metrics].bind_host (loopback by default),
+    like the guardian's [metrics].guardian_port. Returns the port."""
+    port = int(cfg.get("metrics.safestop_port", DEFAULT_METRICS_PORT))
+    start_http_server(port, addr=str(cfg.get("metrics.bind_host", "127.0.0.1")))
+    return port
 
 
 def stop_path_ready(*sessions: MqttSession, exit_after_s: float) -> bool:

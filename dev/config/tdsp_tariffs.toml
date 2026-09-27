@@ -60,10 +60,10 @@ metering_charge_usd_per_month = 6.72
 load_zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_WEST"]  # non-contiguous territory; needs a per-site TDSP attribute
 
 # Default TDSP per load zone, for simulated banks that have no explicit TDSP. Real sites carry their TDSP (ESI ID).
-# LZ_AEN/LZ_CPS (see [zone_territory] below) are deliberately absent here: `settle.tariffs.tdsp_for_zone`
+# LZ_AEN/LZ_CPS/LZ_LCRA/LZ_RAYBN (see [zone_territory] below) are deliberately absent here: `settle.tariffs.tdsp_for_zone`
 # returns `None` for a zone with no entry, and `m1_delivery_charge` prices `None` at $0 -- exactly the
 # "never inside a regulated utility's own territory" rule this module's docstring already states, with
-# no code change needed. Never add LZ_AEN/LZ_CPS to this table.
+# no code change needed. Never add LZ_AEN/LZ_CPS/LZ_LCRA/LZ_RAYBN to this table (D-37: no M1 in them).
 [zone_default_tdsp]
 LZ_NORTH = "ONCOR"
 LZ_HOUSTON = "CENTERPOINT"
@@ -90,22 +90,17 @@ LZ_WEST = "AEP_NORTH"
 LZ_AEN = { utility = "AUSTIN_ENERGY", market = "REGULATED", delivery_charge = "NONE" }
 LZ_CPS = { utility = "CPS_ENERGY", market = "REGULATED", delivery_charge = "NONE" }
 
-# LZ_LCRA and LZ_RAYBN (build phase, 2026-09-26: FLEET-SIM reassignment) are FREE-market ERCOT zones --
-# confirmed present in live ERCOT NP6-905-CD results (2026-09-26 probe, FLEET-SIM build report) -- so
-# they belong here for `delivery_charge` documentation only, NOT in `[zone_default_tdsp]` above (that
-# table is only ever a competitively-filed TDSP tariff to charge against). Assumptions, to confirm:
-#   - LZ_LCRA (Lower Colorado River Authority): LCRA is itself a transmission AND distribution utility
-#     in its service area, not a retail customer of one of the four TDSPs above, so there is no separate
-#     competitive TDSP delivery tariff to apply -- $0 M1, same mechanism as a regulated zone even though
-#     LCRA is not vertically-integrated-retail like Austin/CPS (`market = "FREE"`, not "REGULATED": LCRA
-#     wholesale customers still transact in the ERCOT free market, unlike Austin/CPS's utility-as-
-#     customer regulated contracts).
-#   - LZ_RAYBN (Rayburn Country Electric Cooperative): a member-owned distribution cooperative, exempt
-#     from PUCT's competitive retail TDSP tariff filing requirement -- there is no filed
-#     `volumetric_usd_per_kwh` for it to add as a `[[tariff]]` block, so $0 M1 here too, documented as
-#     "non-competitive" rather than "regulated territory."
-# Both assumptions need confirmation from the owner/Base before they inform real settlement; until then
-# `[zone_default_tdsp]` has no entry for either (so `m1_delivery_charge` already prices $0, no code
-# change needed), and this table records WHY, distinctly from the Austin/CPS regulated-market reason.
-LZ_LCRA = { utility = "LCRA", market = "FREE", delivery_charge = "NONE" }  # LCRA is itself the TDSP
-LZ_RAYBN = { utility = "RAYBURN_COUNTRY_EC", market = "FREE", delivery_charge = "NONE" }  # co-op, non-competitive
+# LZ_LCRA and LZ_RAYBN: REGULATED (NOIE) territory, D-37 (owner decision 2026-09-26, supersedes D-32's
+# "free market"). They are modelled exactly like LZ_AEN (market = "REGULATED", their own utility id), not
+# with market = "NOIE": a NOIE owner serves neither market, so it could never carry the utility's own
+# (sample) toll contract, while a REGULATED owner gets K15 (no ERCOT energy/AS/headroom from its banks),
+# G-33 (manual discharges vetoed unless they serve that utility's own obligation), K15(c) no net export,
+# and no M1 (absent from [zone_default_tdsp], delivery_charge = "NONE").
+#   - LCRA (Lower Colorado River Authority) and RAYBURN (Rayburn Country Electric Cooperative): the real
+#     counterparties may be their member cities and distribution co-ops; the utility ids stand for them.
+#   - NO real contract exists: their banks are og.bank.availability = UNAVAILABLE, reason
+#     REGULATED_NO_CONTRACT (migration 0046), until a real contract is activated (D-37, operator guide).
+# Committed ERCOT obligations already on their banks at the switch complete untouched (K13 grandfathering,
+# opengrid.market.availability).
+LZ_LCRA = { utility = "LCRA", market = "REGULATED", delivery_charge = "NONE" }
+LZ_RAYBN = { utility = "RAYBURN", market = "REGULATED", delivery_charge = "NONE" }

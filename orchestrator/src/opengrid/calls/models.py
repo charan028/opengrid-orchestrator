@@ -19,10 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 #: rule is the real cap (TOLLING 90 min, ECRS 60 min).
 MAX_CALL_MINUTES = 240
 MAX_TEXT_LEN = 200
-#: `CallStatus.granted_kw/_kwh` are the allocator's grants over the call (planned/granted), never metered
-#: delivery: a grant the guardian vetoes still counts. Measured delivery arrives in r3.4.2 (DELIVERY-VERIFY).
+#: `CallStatus.delivered_kw/_kwh` are MEASURED from telemetry by `opengrid.delivery` (D-38), never grants.
+#: Before the first evaluated bucket (or with no record yet) delivery is UNMEASURED and the state is ACTIVE.
 DELIVERY_STATE_UNMEASURED = "UNMEASURED"
-GRANTED_DESCRIPTION = "planned/granted, not measured; measured delivery arrives in r3.4.2"
+#: The deprecated `granted_*` status fields: the allocator's grants (planned), kept for compatibility.
+GRANTED_DESCRIPTION = "planned; removed in r3.5; use delivered_*"
 
 
 class CallOrigin(StrEnum):
@@ -50,13 +51,15 @@ class CallOutcome(StrEnum):
 
 
 class CallState(StrEnum):
-    """Read-back state of a call. ACCEPTED: before its start. ACTIVE: its window is running and commands
-    are being issued -- delivery is NOT measured yet (r3.4.1: `delivery_state` UNMEASURED), so no
-    RAMPING/DELIVERING is claimed; those return in r3.4.2 from DELIVERY-VERIFY's measured data.
+    """Read-back state of a call. ACCEPTED: before its start. RAMPING / DELIVERING: its window is running
+    and MEASURED delivery (`opengrid.delivery`, D-38) is below / at or above `ramping_fraction` of the
+    call's target. ACTIVE: running, but no measurement yet (no evaluated bucket, or stale telemetry).
     COMPLETED: ended or cancelled. REFUSED: never deployed (see the record's reason code)."""
 
     ACCEPTED = "ACCEPTED"
     ACTIVE = "ACTIVE"
+    RAMPING = "RAMPING"
+    DELIVERING = "DELIVERING"
     COMPLETED = "COMPLETED"
     REFUSED = "REFUSED"
 
@@ -168,26 +171,43 @@ class CallRecord(BaseModel):
 
 
 class CallStatus(BaseModel):
-    """`call_status`: the record, its state and what the allocator granted over it (planned/granted, NOT measured:
-    see `GRANTED_DESCRIPTION`). `granted_kw` is signed
-    (< 0 = discharge, None before the start); `granted_kwh` is the discharged energy magnitude."""
+    """`call_status`: the record, its state and its MEASURED delivery (`opengrid.delivery`, D-38).
+    `delivered_kw` is signed (< 0 = discharge; None before the start or while unmeasured), the latest
+    evaluated bucket's; `delivered_kwh` is the discharged energy magnitude so far. `delivery` is None
+    until the delivery job has evaluated the call."""
 
     model_config = ConfigDict(frozen=True)
 
     call: CallRecord
     state: CallState
-    granted_kw: float | None
-    granted_kwh: float | None
+    delivered_kw: float | None
+    delivered_kwh: float | None
     as_of: datetime
+    delivery: MeasuredDelivery | None = None
+    #: Deprecated (planned/granted, NOT measured; removed in r3.5): the allocator's grants over the call.
+    granted_kw: float | None = None
+    granted_kwh: float | None = None
 
     def public(self) -> dict[str, Any]:
+        measured = self.delivery is not None and self.delivery.is_measured
         return {
             **self.call.public(),
             "state": self.state.value,
+            "delivered_kw": self.delivered_kw,
+            "delivered_kwh": self.delivered_kwh,
+            "delivery_measured": measured,
+            "delivery_state": self.delivery.result
+            if measured and self.delivery
+            else DELIVERY_STATE_UNMEASURED,
+            "delivery_reasons": list(self.delivery.reasons) if self.delivery else [],
+            "meter_status": self.delivery.meter_status if self.delivery else None,
+            "delivery_as_of": (
+                self.delivery.evaluated_to.isoformat()
+                if self.delivery and self.delivery.evaluated_to
+                else None
+            ),
             "granted_kw": self.granted_kw,
             "granted_kwh": self.granted_kwh,
-            "delivery_measured": False,
-            "delivery_state": DELIVERY_STATE_UNMEASURED,
             "granted_description": GRANTED_DESCRIPTION,
             "as_of": self.as_of.isoformat(),
         }
@@ -211,11 +231,34 @@ class AwardView:
 
 @dataclass(frozen=True, slots=True)
 class Granted:
-    """Grants to a called obligation over the call so far (not metered delivery): the latest cycle's granted discharge (kW magnitude,
-    None when no cycle yet) and the energy discharged (kWh)."""
+    """Deprecated (removed in r3.5): grants to a called obligation over the call so far, planned and NOT
+    metered: the latest cycle's granted discharge (kW magnitude, None when no cycle yet) and kWh."""
 
     last_kw: float | None
     kwh: float
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredDelivery:
+    """A call's measured delivery, from its `og.delivery_record` (`opengrid.delivery.store.fetch_record`):
+    the latest evaluated bucket's delivered kW (signed, < 0 = discharge; None = stale), discharged kWh so
+    far, the verification result (IN_PROGRESS/PASS/PARTIAL/FAIL) with reasons, and the meter check."""
+
+    delivered_kw: float | None
+    discharged_kwh: float
+    result: str
+    reasons: tuple[str, ...]
+    meter_status: str
+    evaluated_to: datetime | None
+
+    @property
+    def is_measured(self) -> bool:
+        """A measured value exists: a delivered kW in the latest bucket, or a final verdict. A running call
+        whose first buckets had no telemetry yet is NOT measured (delivery_state UNMEASURED)."""
+        return self.delivered_kw is not None or self.result != "IN_PROGRESS"
+
+
+CallStatus.model_rebuild()
 
 
 class CallRefused(Exception):  # noqa: N818 -- a domain outcome, named for what it is

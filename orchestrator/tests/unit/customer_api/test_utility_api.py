@@ -122,9 +122,12 @@ def test_ts_d33_34_issue_status_history_and_cancel(api, calls) -> None:
     assert replay.status_code == 200 and replay.json()["call_id"] == call["call_id"]
 
     status = api.get(f"{BASE}/calls/{call['call_id']}", headers=AEN).json()
-    assert status["state"] == "ACTIVE" and status["granted_kwh"] == 0.0
-    assert status["delivery_measured"] is False and "delivered_kw" not in status  # grants, not metered
-    assert status["granted_description"].startswith("planned/granted, not measured")
+    assert status["state"] == "ACTIVE" and status["delivered_kwh"] == 0.0  # running, not measured yet
+    assert status["delivery_measured"] is False and status["delivered_kw"] is None
+    assert status["delivery_state"] == "UNMEASURED"
+    assert status["granted_kwh"] == 0.0 and status["granted_description"].startswith(
+        "planned; removed in r3.5"
+    )
     history = api.get(f"{BASE}/calls", headers=AEN).json()["calls"]
     assert [c["call_id"] for c in history] == [call["call_id"]]
 
@@ -201,3 +204,52 @@ def test_ts_d33_40_a_missing_idempotency_key_is_rejected(api, calls) -> None:
     _toll_now(calls)
     resp = api.post(f"{BASE}/calls", headers=AEN, json={"kw": -1000, "duration_minutes": 10})
     assert resp.status_code == 422
+
+
+# --- W1 review (r3.4.3) --------------------------------------------------------------------------------
+
+
+def test_ts_d33_41_a_timestamp_without_utc_offset_is_422_not_500(api, calls) -> None:
+    _toll_now(calls)
+    naive = datetime.now(UTC).replace(tzinfo=None).isoformat()
+    resp = _call(api, start_at=naive)
+    assert resp.status_code == 422 and "timezone" in resp.text
+    call_id = _call(api).json()["call_id"]
+    cancel = api.post(f"{BASE}/calls/{call_id}/cancel", headers=AEN, json={"end_at": naive})
+    assert cancel.status_code == 422
+    assert api.get(f"{BASE}/calls", headers=AEN, params={"since": naive}).status_code == 422
+
+
+async def test_ts_d33_42_a_utility_reads_but_cannot_cancel_an_operator_call(
+    api, calls, trace_backend
+) -> None:
+    from opengrid.calls import CallLimits, CallOrigin, CallRequest, issue_call
+    from opengrid.trace.store import TraceStore
+
+    oid = _toll_now(calls)
+    operator_call = await issue_call(
+        calls,
+        TraceStore(trace_backend),
+        CallRequest(
+            origin=CallOrigin.OPERATOR,
+            principal="operator",
+            reason="op",
+            duration_minutes=30,
+            obligation_id=oid,
+        ),
+        limits=CallLimits(),
+    )
+    path = f"{BASE}/calls/{operator_call.call_id}"
+    assert api.get(path, headers=AEN).status_code == 200  # transparency: its own toll
+    denied = api.post(f"{path}/cancel", headers=AEN, json={})
+    assert denied.status_code == 403 and denied.json()["detail"]["reason_code"] == "R-CALL-NOT-ISSUER"
+    assert calls.deployments[operator_call.deployment_id].cancelled_at is None
+    denies = [r for r in trace_backend.rows if r["stream_id"] == "authz_deny:og-util-aen"]
+    assert denies and denies[-1]["payload"]["action"] == "dispatch.call.cancel"
+
+
+def test_ts_d33_43_utility_read_denials_are_traced(api, trace_backend) -> None:
+    for headers in (CUSTOMER, LCRA, BAD):
+        assert api.get(f"{BASE}/me", headers=headers).status_code == 403
+    denied = {r["stream_id"] for r in trace_backend.rows if r["event_class"] == "TRACE_AUTHZ_DENY"}
+    assert {"authz_deny:og-cust-a", "authz_deny:og-util-lcra", "authz_deny:og-util-bad"} <= denied

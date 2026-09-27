@@ -159,7 +159,7 @@ def pnl_view(
             "legend": {},
             "tooltip": {"trigger": "axis"},
             "series": [
-                {"name": "LP net value", "type": "bar", "data": [r["net_value"] for r in compared]},
+                {"name": "MILP net value", "type": "bar", "data": [r["net_value"] for r in compared]},
                 {
                     "name": "Rule baseline",
                     "type": "bar",
@@ -328,7 +328,7 @@ def lp_value_view(payload: Any) -> dict[str, Any]:
             "tooltip": {"trigger": "axis"},
             "series": [
                 {
-                    "name": "Value added (LP - rule)",
+                    "name": "Value added (MILP - rule)",
                     "type": "line",
                     "showSymbol": True,
                     "data": [[r.get("created_at"), num(r.get("value_added"))] for r in rows],

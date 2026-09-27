@@ -14,6 +14,8 @@ and get a `ControlVerdict` back at once. Accepted commands are queued and applie
 Fail safe (S5.3): the link is healthy only while heartbeats arrive within `heartbeat_timeout_s`. When it
 is not, NEW toll calls are refused (INHIBITED); cancels are still accepted; a call already running
 continues to its own end (bounded by its product rule, D-29); L2 levels stay exactly as last received.
+Across an og-engine restart the L2 levels are rebuilt from the link's own trace (
+estore_l2, pg_history).
 """
 
 from __future__ import annotations
@@ -205,7 +207,7 @@ class GridLinkService:
             call_phase=outcome.phase,
             ems_call_id=call.ems_call_id if call is not None else 0,
             call_reason=reason_number(outcome.reason_code),
-            call_granted_kw=outcome.granted_kw or 0.0,
+            call_delivered_kw=outcome.delivered_kw,
             soc_pct=round(100.0 * sum(b.soc_kwh for b in banks) / capacity, 2) if capacity > 0 else None,
             heartbeat_count=self._heartbeats,
             link_healthy=self.link_healthy(),
@@ -256,15 +258,40 @@ class GridLinkService:
                 await self._issue(call, traced=traced)
             case CancelCall(ems_call_id=call_id):
                 await self._cancel(call_id)
+            case L2LimitValue() | L2Limit() | L2Block() as l2_command:
+                self._apply_l2(l2_command)
+                await self._publish_l2()
+
+    async def restore_l2(self, payloads: list[dict[str, Any]]) -> int:
+        """Re-apply traced L2 commands (oldest first; `pg_history.load_l2_commands`) at start-up, WITHOUT
+        tracing them again, then deliver the resulting instructions so the fleet twin and the guardian see
+        the levels the link held before the restart. Commands for targets no longer configured are skipped.
+        Returns how many commands were applied."""
+        applied = 0
+        for payload in payloads:
+            command = _l2_command(payload)
+            if command is None or not self.l2.knows(command.target):
+                continue
+            self._apply_l2(command)
+            applied += 1
+        if applied:
+            await self._publish_l2()
+            await self._append(
+                TRACE_DECISION, TRACE_EVENT_LINK, {"state": "L2_RESTORED", "commands": applied}
+            )
+            logger.info(
+                "grid link L2 levels restored", extra={"utility_id": self.utility_id, "commands": applied}
+            )
+        return applied
+
+    def _apply_l2(self, command: L2LimitValue | L2Limit | L2Block) -> None:
+        match command:
             case L2LimitValue(target=target, limit_kw=limit_kw):
                 self.l2.set_limit_value(target, limit_kw)
-                await self._publish_l2()
             case L2Limit(target=target, active=active):
                 self.l2.set_limit_active(target, active)
-                await self._publish_l2()
             case L2Block(target=target, active=active):
                 self.l2.set_block(target, active)
-                await self._publish_l2()
 
     async def tick(self) -> None:
         """Heartbeat transitions, telemetry refresh, live-call status refresh, and L2 re-delivery."""
@@ -316,8 +343,9 @@ class GridLinkService:
         except Exception:
             logger.exception("grid link cancel failed", extra={"utility_id": self.utility_id})
             return
-        if self._call is None or self._call.ems_call_id == target:
-            self._call = _CallView(target, outcome)
+        # the call points always show the latest call event, so a cancel is visible even after a newer
+        # call was refused
+        self._call = _CallView(target, outcome)
 
     async def _refresh_call(self) -> None:
         call = self._call
@@ -366,6 +394,22 @@ class GridLinkService:
                 )
                 self._unsent = pending[index:]
                 return
+
+
+def _l2_command(payload: dict[str, Any]) -> L2LimitValue | L2Limit | L2Block | None:
+    """Rebuild an L2 command from its GRID_LINK_COMMAND trace payload (`_command_payload`); None when malformed."""
+    try:
+        target = str(payload["target"])
+        match payload.get("command"):
+            case "L2LimitValue":
+                return L2LimitValue(target, float(payload["limit_kw"]))
+            case "L2Limit":
+                return L2Limit(target, bool(payload["active"]))
+            case "L2Block":
+                return L2Block(target, bool(payload["active"]))
+    except (KeyError, TypeError, ValueError):
+        logger.warning("skipped a malformed traced L2 command", extra={"payload_keys": sorted(payload)})
+    return None
 
 
 def _command_payload(work: _Work) -> dict[str, Any]:

@@ -8,6 +8,8 @@
 | `[allocator].enforce_territory` | true | K15: obligations only on banks their market may use |
 | `[allocator].wear_usd_per_kwh` | 0.03 | 09 D8 wear rate in the stored-energy threshold fallback |
 | `[allocator.flow_limits]` | on | 09 S1.9 F2/F3 caps where the 0029 registry (or config) has data; F1 always |
+| `[allocator].propose_timeout_s` | 2.0 | bound on the whole propose phase; banks cut off hold (`engine.propose_guard`) |
+| `[allocator].guardian_check_timeout_s` | 0.5 | bound on the guardian heartbeat read; a timeout = unavailable |
 
 The closed-loop and site-ingest switches are the owner's to turn on; both default off.
 """
@@ -19,6 +21,7 @@ from typing import Any
 
 from opengrid.allocator.models import FlowLimits
 from opengrid.engine.gateways import DEFAULT_WEAR_USD_PER_KWH
+from opengrid.engine.propose_guard import DEFAULT_GUARDIAN_CHECK_TIMEOUT_S, DEFAULT_PROPOSE_TIMEOUT_S
 from opengrid.engine.veto import DEFAULT_EXCLUDE_CYCLES, DEFAULT_VERDICT_WAIT_S
 from opengrid.platform.config import Config
 
@@ -63,6 +66,9 @@ class DispatchSettings:
     verdict_wait_s: float = DEFAULT_VERDICT_WAIT_S
     #: How often the K15 market model is rebuilt (re-zoning, market changes).
     market_refresh_s: float = 60.0
+    #: Bounded guardian hand-off (`engine.propose_guard`): the whole propose phase, and the heartbeat read.
+    propose_timeout_s: float = DEFAULT_PROPOSE_TIMEOUT_S
+    guardian_check_timeout_s: float = DEFAULT_GUARDIAN_CHECK_TIMEOUT_S
 
 
 def dispatch_settings(cfg: Config) -> DispatchSettings:
@@ -94,6 +100,10 @@ def dispatch_settings(cfg: Config) -> DispatchSettings:
         veto_exclude_cycles=int(cfg.get("allocator.veto_retry.exclude_cycles", DEFAULT_EXCLUDE_CYCLES)),
         verdict_wait_s=float(cfg.get("allocator.veto_retry.wait_s", DEFAULT_VERDICT_WAIT_S)),
         market_refresh_s=float(cfg.get("allocator.market_refresh_s", 60.0)),
+        propose_timeout_s=float(cfg.get("allocator.propose_timeout_s", DEFAULT_PROPOSE_TIMEOUT_S)),
+        guardian_check_timeout_s=float(
+            cfg.get("allocator.guardian_check_timeout_s", DEFAULT_GUARDIAN_CHECK_TIMEOUT_S)
+        ),
         pipeline_ac=PipelineAcDefaults(
             line_kv=float(pac.get("line_kv", 138.0)) if isinstance(pac, dict) else 138.0,
             power_factor=float(pac.get("power_factor", 0.95)) if isinstance(pac, dict) else 0.95,

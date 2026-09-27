@@ -5,7 +5,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from opengrid.settle.pg_backend import charging_cost_from_proxy, measured_need_kwh_from_row
+from opengrid.settle.pg_backend import (
+    as_price_from_mcpc,
+    charging_cost_from_proxy,
+    measured_need_kwh_from_row,
+)
 
 
 def test_charging_cost_proxy_averages_off_peak_spp_in_dollars_per_kwh():
@@ -30,3 +34,16 @@ def test_measured_need_kwh_is_average_site_kw_times_duration():
 def test_measured_need_kwh_is_none_when_no_reading():
     assert measured_need_kwh_from_row({"avg_kw": None, "sample_count": 0}, Decimal("0.25")) is None
     assert measured_need_kwh_from_row(None, Decimal("0.25")) is None
+
+
+def test_as_price_is_the_cleared_mcpc_else_the_opportunity_flagged() -> None:
+    fallback = Decimal("0.001")
+    assert as_price_from_mcpc({"product_code": "ECRS", "value": 0.28}, fallback) == (
+        Decimal("0.00028"),
+        "MCPC",
+    )
+    assert as_price_from_mcpc({"product_code": "ECRS", "value": None}, fallback) == (
+        fallback,
+        "OPPORTUNITY_PRICE",
+    )
+    assert as_price_from_mcpc(None, fallback) == (fallback, "OPPORTUNITY_PRICE")

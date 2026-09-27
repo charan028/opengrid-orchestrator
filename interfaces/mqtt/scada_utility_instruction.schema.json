@@ -16,6 +16,11 @@
     },
     "issued_at": { "type": "string", "format": "date-time" },
     "expires_at": { "type": ["string", "null"], "format": "date-time" },
-    "issued_by": { "type": "string", "minLength": 1 }
+    "issued_by": { "type": "string", "minLength": 1 },
+    "lifts_instruction_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "On a lift (expires_at <= issued_at): the instruction_id of the instruction this lift ends. A utility-initiated stop is released only after the utility's lift names the instruction that engaged it, then the operators' two-person release (Q10)."
+    }
   }
 }

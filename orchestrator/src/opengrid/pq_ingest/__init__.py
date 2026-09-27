@@ -51,6 +51,7 @@ Never imports `ogsim` (BUILD.md S1: opengrid and ogsim share only `interfaces/`)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from collections.abc import Sequence
@@ -69,7 +70,11 @@ from opengrid.pq_ingest import metrics
 from opengrid.pq_ingest.aggregation import bank_measurement, fresh_summaries
 from opengrid.pq_ingest.blob_store import BlobStore
 from opengrid.pq_ingest.capture import PendingCaptureTracker, build_capture_request
-from opengrid.pq_ingest.characterize import HubCharacterization, characterize_fleet
+from opengrid.pq_ingest.characterize import (
+    HubCharacterization,
+    HubSummaryAggregate,
+    characterize_fleet_from_aggregates,
+)
 from opengrid.pq_ingest.raw_codec import decode_raw_samples, encode_raw_samples
 
 logger = logging.getLogger(__name__)
@@ -111,6 +116,13 @@ DEFAULT_FLUSH_INTERVAL_S = 2.0
 # would read are also what characterizes the "OK" baseline it compares against.
 DEFAULT_CHARACTERIZATION_INTERVAL_S = 300.0
 DEFAULT_CHARACTERIZATION_WINDOW_S = 900.0
+# R3.4.1 PROD-IO fix: production's characterization pass (fetch + convert + characterize_fleet) is
+# bounded by this timeout so a hung/slow pass degrades (logs + a `metrics.characterization_passes_total`
+# "timeout" outcome) instead of running unbounded on top of the event-loop-blocking issue this fix
+# addresses. 60s is generous relative to the pass's normal duration (now ~3,509 rows, not ~101,761) but
+# still well inside `characterization_interval_s`'s 5 min cadence, so a timed-out pass never overlaps
+# the next one.
+DEFAULT_CHARACTERIZATION_TIMEOUT_S = 60.0
 
 
 class PqIngestBackend(Protocol):
@@ -129,6 +141,14 @@ class PqIngestBackend(Protocol):
     async def latest_summaries(
         self, hub_ids: Sequence[str], *, since: datetime
     ) -> list[PqWaveformSummaryRow]: ...
+
+    async def latest_summary_aggregates(
+        self, hub_ids: Sequence[str], *, since: datetime
+    ) -> list[HubSummaryAggregate]:
+        """R3.4.1 PROD-IO fix: `run_characterization_pass`'s production read, ~1 row/hub instead of
+        `latest_summaries`'s ~1 row/sample -- see `pg_backend.PgPqIngestBackend.
+        latest_summary_aggregates`/`characterize.HubSummaryAggregate`'s docstrings."""
+        ...
 
     async def upsert_hub_inverter_pq_batch(self, rows: Sequence[HubCharacterization]) -> None:
         """Blocker fix: one batched upsert for every hub characterized this pass -- see
@@ -285,17 +305,40 @@ async def latest_summaries(hub_ids: Sequence[str], *, since: datetime) -> list[P
     return await _require_backend().latest_summaries(hub_ids, since=since)
 
 
+async def _fetch_and_characterize(
+    backend: PqIngestBackend, hub_ids: list[str], *, since: datetime, now: datetime
+) -> list[HubCharacterization]:
+    """R3.4.1 PROD-IO fix: the fetch (now ~1 row/hub via `latest_summary_aggregates`, not ~1 row/sample)
+    plus the characterization assembly, run together under `run_characterization_pass`'s
+    `asyncio.wait_for` timeout. The assembly step (`characterize_fleet_from_aggregates`, pure Python, no
+    I/O) is offloaded to a thread -- cheap now (~3,509 dataclass assemblies, the per-sample statistics
+    that used to dominate this cost are now computed in SQL) but still not worth risking on the loop."""
+    aggregates = await backend.latest_summary_aggregates(hub_ids, since=since)
+    return await asyncio.to_thread(characterize_fleet_from_aggregates, aggregates, now=now)
+
+
 async def run_characterization_pass(
     hub_ids: Sequence[str],
     *,
     now: datetime | None = None,
     window_s: float = DEFAULT_CHARACTERIZATION_WINDOW_S,
+    timeout_s: float = DEFAULT_CHARACTERIZATION_TIMEOUT_S,
 ) -> int:
     """Blocker fix: derives and upserts `og.hub_inverter_pq` characterization (S3.1/S5.1) for
     every hub in `hub_ids` with enough measured summary history in the trailing `window_s`
-    (default 15 min). ONE batched read (`latest_summaries`, already grouped by hub in Python
-    by `characterize_fleet`) and ONE batched, async-commit upsert
-    (`PqIngestBackend.upsert_hub_inverter_pq_batch`) -- never one query/write per hub.
+    (default 15 min). ONE batched, per-hub-aggregated read (`latest_summary_aggregates`) and ONE
+    batched, async-commit upsert (`PqIngestBackend.upsert_hub_inverter_pq_batch`) -- never one
+    query/write per hub.
+
+    R3.4.1 PROD-IO fix: production was fetching ~101,761 raw sample rows (15 min window x ~3,509 hubs),
+    building that many `PqWaveformSummaryRow` objects and running `characterize_fleet` over them, all
+    synchronously on the event loop thread every `characterization_interval_s` -- 4-5s of loop-blocking
+    work (heartbeat pool timeouts, inflated allocator/stuck_selected phases). Fixed two ways: (1) the
+    read is now aggregated per hub IN SQL (`latest_summary_aggregates`, ~3,509 rows, not ~100k -- see
+    `characterize.HubSummaryAggregate`'s docstring for the equivalence proof), and (2) the fetch +
+    characterize step runs under `asyncio.wait_for(timeout_s)` with the characterization itself
+    (`characterize_fleet_from_aggregates`) offloaded to a thread, so a slow pass degrades (times out,
+    traced below) instead of stalling the loop indefinitely.
 
     Called by the caller's own periodic timer AT MOST every `[pq_ingest].
     characterization_interval_s` (default `DEFAULT_CHARACTERIZATION_INTERVAL_S`, 5 min; see
@@ -305,10 +348,15 @@ async def run_characterization_pass(
     since = now - timedelta(seconds=window_s)
     backend = _require_backend()
     try:
-        summaries = await backend.latest_summaries(list(hub_ids), since=since)
-        characterizations = characterize_fleet(summaries, now=now)
+        characterizations = await asyncio.wait_for(
+            _fetch_and_characterize(backend, list(hub_ids), since=since, now=now), timeout=timeout_s
+        )
         if characterizations:
             await backend.upsert_hub_inverter_pq_batch(characterizations)
+    except TimeoutError:
+        metrics.characterization_passes_total.labels(outcome="timeout").inc()
+        logger.error("pq characterization pass timed out after %.0fs", timeout_s)
+        raise
     except Exception:
         metrics.characterization_passes_total.labels(outcome="failed").inc()
         logger.exception("pq characterization pass failed")

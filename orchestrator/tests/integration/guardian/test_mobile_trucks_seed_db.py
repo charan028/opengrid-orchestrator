@@ -94,15 +94,60 @@ async def test_guardian_rates_trucks_at_nameplate_and_homes_at_the_unit_cap(pool
     assert continuous_power_kw(HubParams(e_kwh=1000.0, r_kwh=200.0, p_kw=500.0, units=1)) == 11.0
 
 
-async def test_seeded_trucks_are_at_home_for_the_selector_and_g35(pool):
-    from opengrid.selector import db as selector_db
+async def _report(pool: AsyncConnectionPool, lat: float | None, lon: float | None, age: str | None) -> None:
+    """Record every truck's device-reported position `age` ago (as the device-info intake does)."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE og.hub SET device_lat = %s, device_lon = %s, "
+            "device_info_at = CASE WHEN %s::interval IS NULL THEN NULL ELSE now() - %s::interval END "
+            "WHERE hub_id = ANY(%s)",
+            (lat, lon, age, age, TRUCKS),
+        )
 
-    await _seed(pool)
+
+async def _at_home(pool: AsyncConnectionPool) -> tuple[dict[str, bool], list[bool | None]]:
+    """(selector view by bank id, G-35 view per truck hub) through the one shared position query."""
+    from datetime import UTC, datetime
+
+    from opengrid.core import geo
+
     ids = [f"bank-{t}" for t in TRUCKS]
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(selector_db._HUB_POSITIONS_SQL, {"ids": ids})
-        positions = {str(b): (float(lat), float(lon)) async for b, _h, lat, lon in cur}
-    assert mobile_units_at_home(ids, load_mobile_home_station_sites(), positions) == dict.fromkeys(ids, True)
-
+        await cur.execute(geo.DEVICE_POSITIONS_SQL, {"ids": ids})
+        positions = geo.fresh_positions(await cur.fetchall(), datetime.now(UTC))
+    selector = mobile_units_at_home(ids, load_mobile_home_station_sites(), positions)
     port = repo.ConfigMobileUnitPort(ids, load_mobile_home_station_sites(), pool)
-    assert all([await port.at_home_station(t) for t in TRUCKS])
+    return selector, [await port.at_home_station(t) for t in TRUCKS]
+
+
+async def test_trucks_are_at_home_only_on_a_fresh_device_report_from_the_depot(pool):
+    """The seed puts og.hub.lat/lon at the depot, but that is never evidence: with no device report every
+    truck is unknown (away, fail closed); a fresh report from the depot is at home; the same report once stale,
+    or a fresh one from a deployment site, is not."""
+    await _seed(pool)
+    ids = [f"bank-{t}" for t in TRUCKS]
+
+    await _report(pool, None, None, None)
+    selector, g35 = await _at_home(pool)
+    assert selector == dict.fromkeys(ids, False) and g35 == [None] * len(TRUCKS)
+
+    # A fresh report from each truck's own depot: og.hub.lat/lon is the seeded home station.
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE og.hub SET device_lat = lat, device_lon = lon, device_info_at = now() - interval '5 seconds' "
+            "WHERE hub_id = ANY(%s)",
+            (TRUCKS,),
+        )
+    selector, g35 = await _at_home(pool)
+    assert selector == dict.fromkeys(ids, True) and g35 == [True] * len(TRUCKS)
+
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE og.hub SET device_info_at = now() - interval '1 hour' WHERE hub_id = ANY(%s)", (TRUCKS,)
+        )
+    selector, g35 = await _at_home(pool)
+    assert selector == dict.fromkeys(ids, False) and g35 == [None] * len(TRUCKS)
+
+    await _report(pool, 31.9973, -102.0779, "5 seconds")  # all deployed to a Midland site
+    selector, g35 = await _at_home(pool)
+    assert selector == dict.fromkeys(ids, False) and g35 == [False] * len(TRUCKS)

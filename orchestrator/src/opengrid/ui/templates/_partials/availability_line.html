@@ -1,0 +1,18 @@
+{#- D-37: capacity split -- banks UNAVAILABLE because they sit in regulated (NOIE) territory with no utility
+    contract are never counted as available kW; they get their own line with the owner's reason. `availability`
+    is `/og/api/views/availability` (None when the API is unreachable: nothing is shown). -#}
+{% if availability and availability.unavailable_kw %}
+<p class="og-card-meta og-unavail-line" id="{{ line_id|default('capacity-unavailable') }}"
+   title="{{ availability.unavailable_text }}">
+  Available: {{ '%.0f'|format(availability.available_kw) }} kW &middot;
+  <span class="og-badge og-unavail" title="{{ availability.unavailable_text }}">{{ availability.unavailable_badge }}</span>:
+  {{ '%.0f'|format(availability.unavailable_kw) }} kW
+</p>
+{% if show_zones|default(false) %}
+<ul class="og-unavail-zones" id="{{ line_id|default('capacity-unavailable') }}-zones">
+  {% for z in availability.zones if z.unavailable_banks %}
+  <li title="{{ z.availability_text or availability.unavailable_text }}">{{ z.zone }}: {{ z.unavailable_banks }}/{{ z.banks }} banks, {{ '%.0f'|format(z.unavailable_kw) }} kW &ndash; {{ z.availability_badge or availability.unavailable_badge }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endif %}

@@ -33,18 +33,37 @@ from opengrid.core.models.engine import Plan
 from opengrid.core.models.market import ERCOT_COMPETITIVE, Utility, UtilityId
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.reasons import R_DEGRADED_NO_NEW_COMMIT
+from opengrid.core.services import (
+    DATA_CENTER_SERVICE_TYPE,
+    DIST_DEFERRAL_SERVICE_TYPE,
+    ERCOT_AS_SERVICE_TYPE,
+    ERCOT_ENERGY_SERVICE_TYPE,
+    HOME_SERVICE_TYPE,
+    LARGE_LOAD_SERVICE_TYPE,
+    MOBILE_STORAGE_SERVICE_TYPE,
+    PARTNER_CAPACITY_SERVICE_TYPE,
+    PIPELINE_AC_SERVICE_TYPE,
+    PJM_CAPACITY_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.core.solar_share import SolarShare
 from opengrid.core.timeutil import floor_to_interval, to_market_tz
 from opengrid.fleet import bank_feeder as fleet_bank_feeder
 from opengrid.fleet import capability as fleet_capability
 from opengrid.fleet import hub_capabilities as fleet_hub_capabilities
 from opengrid.fleet import rated_discharge_kw as fleet_rated_discharge_kw
+from opengrid.health.model import HealthThresholds
 from opengrid.market import (
     MarketModel,
     MarketModelError,
     MarketRef,
     load_market_model,
     market_of,
+)
+from opengrid.market.availability import (
+    grandfathered_banks_by_obligation,
+    parse_availability,
+    unavailable_bank_ids,
 )
 from opengrid.market.capacity import capacity_value_usd_per_mwh
 from opengrid.market.territory import utility_of_territory
@@ -81,22 +100,22 @@ SCHEDULED_HORIZON_INTERVALS = 96  # 24h / 15min, 02a S3.2
 # (`CandidateOpportunity.category`'s docstring). `ERCOT_ENERGY` (spot-like) falls back to `MARKET`.
 # Every `core.models.engine.ServiceType` value must be here (tested).
 _CATEGORY_BY_SERVICE_TYPE: dict[str, Literal["FIRM", "AS", "MARKET"]] = {
-    "HOME": "FIRM",
-    "DIST_DEFERRAL": "FIRM",
-    "PARTNER_CAPACITY": "FIRM",
-    "DATA_CENTER": "FIRM",  # firm bridging capacity (06-service-profiles S4.b)
-    "PIPELINE_AC": "FIRM",
-    "REGULATED_CAPACITY": "FIRM",  # regulated market: selected first, in stage R (09 D3)
-    "PJM_CAPACITY": "MARKET",  # a simulated ISO capacity market (SERVICES agent)
-    "MOBILE_STORAGE": "FIRM",
-    "LARGE_LOAD": "FIRM",
-    "ERCOT_AS": "AS",
-    "ERCOT_ENERGY": "MARKET",
+    HOME_SERVICE_TYPE: "FIRM",
+    DIST_DEFERRAL_SERVICE_TYPE: "FIRM",
+    PARTNER_CAPACITY_SERVICE_TYPE: "FIRM",
+    DATA_CENTER_SERVICE_TYPE: "FIRM",  # firm bridging capacity (06-service-profiles S4.b)
+    PIPELINE_AC_SERVICE_TYPE: "FIRM",
+    REGULATED_CAPACITY_SERVICE_TYPE: "FIRM",  # regulated market: selected first, in stage R (09 D3)
+    PJM_CAPACITY_SERVICE_TYPE: "MARKET",  # a simulated ISO capacity market (SERVICES agent)
+    MOBILE_STORAGE_SERVICE_TYPE: "FIRM",
+    LARGE_LOAD_SERVICE_TYPE: "FIRM",
+    ERCOT_AS_SERVICE_TYPE: "AS",
+    ERCOT_ENERGY_SERVICE_TYPE: "MARKET",
 }
 
 #: Capacity-hold services outside the AS category: a regulated capacity commitment is a need-basis
 #: reservation (09 D9) -- kW locked, energy held for its sustain duration, nothing drained while held.
-_CAPACITY_HOLD_SERVICE_TYPES = frozenset({"REGULATED_CAPACITY"})
+_CAPACITY_HOLD_SERVICE_TYPES = frozenset({REGULATED_CAPACITY_SERVICE_TYPE})
 
 #: 09 S1.3 psi: expected share of a held ERCOT_AS award actually deployed, for its wear (D8). A planning
 #: ASSUMPTION (~30 min/day for Non-Spin/ECRS) until settle measures deployment from og.as_deployment.
@@ -562,21 +581,35 @@ def mobile_units_at_home(
     positions: Mapping[str, tuple[float, float]],
 ) -> dict[str, bool]:
     """Pure: which mobile units are at their home station now, by the one D-31 rule G-35 also uses
-    (`core.geo.at_home_station`, 250 m): the unit's recorded position vs its station's coordinates. Only
-    units known to be at home are True; away or unknown is False (fail closed)."""
+    (`core.geo.at_home_station`, 250 m): the unit's fresh device-reported position (`db.load_hub_positions`)
+    vs its station's coordinates. Only units known to be at home are True; away, or a missing or stale
+    report, is False (fail closed)."""
     return {
         bank_id: geo.at_home_station(positions.get(bank_id), sites.get(bank_id)) is True
         for bank_id in mobile_bank_ids
     }
 
 
+def _hub_stale_s() -> float | None:
+    """`[health].hub_stale_s` for the stationary position rule (`core.geo.fresh_positions`); None (report
+    age only, stricter) when the config is unreadable."""
+    try:
+        return float(HealthThresholds.from_config(load_config()).hub_stale_s)
+    except Exception:
+        logger.warning(
+            "selector: config unreadable; mobile positions judged on report age only", exc_info=True
+        )
+        return None
+
+
 async def load_mobile_units_at_home(mobile_bank_ids: Sequence[str]) -> dict[str, bool]:
-    """`mobile_units_at_home` over the registry's station coordinates and each unit's `og.hub` position. A
-    failed position read plans no mobile charging this gate (fail closed), never a crash."""
+    """`mobile_units_at_home` over the registry's station coordinates and each unit's fresh device-reported
+    position (never the seeded `og.hub.lat/lon`, which is the home station). A failed position read plans
+    no mobile charging this gate (fail closed), never a crash."""
     if not mobile_bank_ids:
         return {}
     try:
-        positions = await db.load_hub_positions(list(mobile_bank_ids))
+        positions = await db.load_hub_positions(list(mobile_bank_ids), telemetry_max_age_s=_hub_stale_s())
     except Exception:
         logger.warning(
             "selector: mobile unit positions unreadable; no mobile charging this gate", exc_info=True
@@ -816,6 +849,81 @@ def prepare_obligations(
             )
         narrowed_committed.append(dataclasses.replace(co, eligible_bank_ids=eligible))
     return tuple(narrowed_candidates), tuple(narrowed_committed)
+
+
+@dataclass(frozen=True, slots=True)
+class GateAvailability:
+    """D-37 bank availability for one gate: the UNAVAILABLE banks, and the K13-grandfathered
+    `(obligation -> banks)` pairs (`opengrid.market.availability`, the one rule)."""
+
+    unavailable: frozenset[str] = frozenset()
+    grandfathered: Mapping[str, frozenset[str]] = dataclasses.field(default_factory=dict)
+
+
+async def load_availability() -> GateAvailability:
+    """`og.bank.availability` and the grandfathered pairs. An unreadable table raises: the gate fails
+    loudly rather than plan on banks whose availability it cannot see (migration 0046 is a precondition)."""
+    rows = await db.load_bank_availability()
+    pairs = await db.load_grandfathered_pairs()
+    return GateAvailability(
+        unavailable=unavailable_bank_ids(parse_availability(b, a, r, s) for b, a, r, s in rows),
+        grandfathered=grandfathered_banks_by_obligation(pairs),
+    )
+
+
+def apply_availability(
+    banks: tuple[BankSnapshot, ...],
+    candidates: tuple[CandidateOpportunity, ...],
+    committed: tuple[CommittedObligation, ...],
+    availability: GateAvailability,
+    bank_ids: Sequence[str],
+) -> tuple[tuple[BankSnapshot, ...], tuple[CandidateOpportunity, ...], tuple[CommittedObligation, ...]]:
+    """D-37: nothing is offered or planned on an UNAVAILABLE bank.
+
+    - Candidates (new commitments, ERCOT or utility): never eligible there.
+    - Committed obligations: never newly placed there, but a K13-grandfathered obligation keeps the
+      unavailable banks it already holds (and only those), even where K15 (`prepare_obligations`) removed
+      them: it was committed while the zone was ERCOT competitive and completes untouched.
+    - The bank itself: no FREE headroom, no charging (idle hold: no grid window, no solar, 0 kW charge
+      envelope), and no discharge envelope unless a grandfathered obligation is on it."""
+    unavailable = availability.unavailable
+    if not unavailable:
+        return banks, candidates, committed
+    order = {b: i for i, b in enumerate(bank_ids)}
+    out_candidates = tuple(
+        dataclasses.replace(
+            c, eligible_bank_ids=tuple(b for b in c.eligible_bank_ids if b not in unavailable)
+        )
+        for c in candidates
+    )
+    out_committed = []
+    for co in committed:
+        kept = {b for b in co.eligible_bank_ids if b not in unavailable}
+        kept |= {b for b in availability.grandfathered.get(co.obligation_id, frozenset()) if b in order}
+        out_committed.append(
+            dataclasses.replace(co, eligible_bank_ids=tuple(sorted(kept, key=lambda b: order.get(b, 0))))
+        )
+    carrying = {b for banks_of in availability.grandfathered.values() for b in banks_of}
+    out_banks = []
+    for bank in banks:
+        if bank.bank_id not in unavailable:
+            out_banks.append(bank)
+            continue
+        out_banks.append(
+            dataclasses.replace(
+                bank,
+                free_market_access=False,
+                grid_charge_intervals=frozenset(),
+                solar_charge_kw={},
+                max_charge_kw=dict.fromkeys(bank.max_charge_kw, 0.0),
+                max_discharge_kw=(
+                    bank.max_discharge_kw
+                    if bank.bank_id in carrying
+                    else dict.fromkeys(bank.max_discharge_kw, 0.0)
+                ),
+            )
+        )
+    return tuple(out_banks), out_candidates, tuple(out_committed)
 
 
 async def new_commitments_allowed() -> bool:
@@ -1268,6 +1376,10 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         ),
     )
     candidates, committed = prepare_obligations(candidates, committed, market)
+    # D-37: nothing offered or planned on an UNAVAILABLE bank; K13-grandfathered obligations keep theirs.
+    banks, candidates, committed = apply_availability(
+        banks, candidates, committed, await load_availability(), bank_ids
+    )
     # 02b S6.5 row 1: no new selection on stale data. The structural (pre-freeze) eligibility is kept for
     # the R-ADMIT-REJECT check, so a candidate withheld only for a stale series is never rejected for it.
     structural_by_id = {c.opportunity_id: c for c in candidates}

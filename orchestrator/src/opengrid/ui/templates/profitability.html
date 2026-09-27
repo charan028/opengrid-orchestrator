@@ -49,14 +49,14 @@
   </section>
 
   <section class="og-panel" aria-labelledby="lp-value-heading" id="lp-value">
-    <h2 id="lp-value-heading">LP value added (latest selector gate)</h2>
+    <h2 id="lp-value-heading">MILP value added (latest selector gate)</h2>
     {% if lp_value.available %}
     {% set lv = lp_value.latest %}
     <p class="og-card-meta">Gate {{ (lv.plan_id or '')[:8] }} &middot; <span class="stale-badge" data-since="{{ lv.created_at }}" data-stale-after="1800" title="{{ lv.created_at }}">age: unknown</span>
       &middot; {{ lp_value.count }} gate{{ '' if lp_value.count == 1 else 's' }} in the trend. Gates overlap in time, so values are shown per gate and never summed.</p>
     <section class="og-kpis" aria-label="Latest gate">
-      {% with label='Value added (LP - rule)', value='%.2f'|format(lv.value_added), unit='USD', severity=('good' if lv.value_added > 0 else ('caution' if lv.value_added < 0 else 'neutral')), tile_id='kpi-lp-value-added' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
-      {% with label='LP net value', value='%.2f'|format(lv.lp_net_value), unit='USD' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+      {% with label='Value added (MILP - rule)', value='%.2f'|format(lv.value_added), unit='USD', severity=('good' if lv.value_added > 0 else ('caution' if lv.value_added < 0 else 'neutral')), tile_id='kpi-lp-value-added' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
+      {% with label='MILP net value', value='%.2f'|format(lv.lp_net_value), unit='USD' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
       {% with label='Rule baseline net', value='%.2f'|format(lv.rule_net_value), unit='USD' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
       {% with label='Forgone upside (lock)', value='%.2f'|format(lv.forgone_upside), unit='USD' %}{% include "_partials/kpi_tile.html" %}{% endwith %}
     </section>
@@ -72,6 +72,7 @@
 
   <section class="og-panel" aria-labelledby="per-kw-heading" id="per-kw">
     <h2 id="per-kw-heading">Economics per kW (annualised)</h2>
+{% with line_id='profitability-capacity-unavailable' %}{% include "_partials/availability_line.html" %}{% endwith %}
     {% if per_kw %}
     <p class="og-card-meta">Net = Out - In - wear - O&amp;M; the O&amp;M allowance is (Assumed)
       {% if per_kw.period_hours %}&middot; from {{ per_kw.period_hours }} h of this month{% endif %} &middot; <span title="method">{{ per_kw.method_version }}</span></p>
@@ -153,8 +154,8 @@
   </section>
 
   <section class="og-panel" aria-labelledby="lp-baseline-heading">
-    <h2 id="lp-baseline-heading">LP vs rule baseline ({{ pnl.compared_count }} intervals)</h2>
-    <div id="lp-baseline-chart" style="height: 260px;" role="img" aria-label="Bar chart comparing LP net value to rule baseline" data-empty="No settled obligations yet to compare against the rule baseline."></div>
+    <h2 id="lp-baseline-heading">MILP vs rule baseline ({{ pnl.compared_count }} intervals)</h2>
+    <div id="lp-baseline-chart" style="height: 260px;" role="img" aria-label="Bar chart comparing MILP net value to rule baseline" data-empty="No settled obligations yet to compare against the rule baseline."></div>
   </section>
 
   <script>

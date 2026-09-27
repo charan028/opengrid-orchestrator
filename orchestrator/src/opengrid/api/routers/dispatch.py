@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from opengrid.api.auth import Identity, require_operator, require_viewer
@@ -82,7 +82,7 @@ class AsDeploymentCreate(BaseModel):
     duration_minutes: int = Field(default=15, ge=1, le=MAX_CALL_MINUTES)
     reason: str = Field(min_length=1, max_length=200)
     requested_kw: float | None = None
-    start_at: datetime | None = None
+    start_at: AwareDatetime | None = None
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 

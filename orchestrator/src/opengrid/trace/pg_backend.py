@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import asdict, dataclass
@@ -196,13 +197,42 @@ def _open_lock_file(lock_path: Path) -> int:
     return os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o660)
 
 
+_LOCK_SYNC_TIMEOUT_S = 1.0
+
+
+class JournalLockTimeoutError(RuntimeError):
+    """R3.4.3 fix (L-6): `pending_count()` used a plain BLOCKING `flock()` here, on whatever thread calls
+    it -- if that is the event loop's own thread (its only caller today is a plain sync method with no
+    `to_thread` of its own) and the lock is currently held by an ASYNC holder (`_append_journal`/
+    `replay()`) that is itself waiting on the loop to resume it (e.g. its shielded `asyncio.to_thread`
+    write finishing), the blocking call freezes the one thread that could ever deliver that resumption:
+    a real deadlock, not just a stall. Bounded and non-blocking instead (matches `_journal_lock`'s async
+    polling shape): give up loudly after `_LOCK_SYNC_TIMEOUT_S` rather than hang forever."""
+
+
 @contextlib.contextmanager
 def _journal_lock_sync(journal_path: Path, *, exclusive: bool) -> Iterator[None]:
-    """Blocking lock for the synchronous callers (`pending_count`); held only for a file read."""
+    """Bounded, non-blocking lock for the synchronous callers (`pending_count`); held only for a file
+    read. Raises `JournalLockTimeoutError` rather than blocking indefinitely (L-6)."""
     fd = _open_lock_file(_lock_path_for(journal_path))
     try:
         if sys.platform != "win32":
-            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            mode = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+            delay = _LOCK_POLL_S
+            waited = 0.0
+            while True:
+                try:
+                    fcntl.flock(fd, mode)
+                    break
+                except BlockingIOError:
+                    if waited >= _LOCK_SYNC_TIMEOUT_S:
+                        raise JournalLockTimeoutError(
+                            f"could not acquire the journal lock for {journal_path} "
+                            f"within {_LOCK_SYNC_TIMEOUT_S}s"
+                        ) from None
+                    time.sleep(delay)
+                    waited += delay
+                    delay = min(delay * 2, _LOCK_POLL_MAX_S)
         yield
     finally:
         os.close(fd)
@@ -226,6 +256,25 @@ async def _journal_lock(journal_path: Path, *, exclusive: bool) -> AsyncIterator
         yield
     finally:
         os.close(fd)
+
+
+async def _run_in_thread_uncancellable(func: Any) -> None:
+    """Run a zero-arg `func` via `asyncio.to_thread`, guaranteeing it runs to completion even if the
+    awaiting coroutine is cancelled (R3.4.3 fix, L-5). Every caller here holds the journal's exclusive
+    lock for the DURATION of this call (`async with _journal_lock(...): ... await
+    _run_in_thread_uncancellable(...)`); a timeout/cancellation landing while the thread is still
+    writing must not let that `async with` block exit (releasing the lock) before the write actually
+    finishes, or a concurrent reader/rewriter could interleave with an unfinished write and lose or
+    corrupt a journal row. `asyncio.shield` alone does not fix this: it stops the INNER task from being
+    cancelled, but the OUTER `await` still raises immediately, so the enclosing `async with` still exits
+    right away. Catching that and waiting for the (still-shielded) task before letting it propagate is
+    what actually keeps the lock held until the thread is done."""
+    task = asyncio.ensure_future(asyncio.to_thread(func))
+    try:
+        await asyncio.shield(task)
+    finally:
+        if not task.done():
+            await asyncio.shield(task)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -465,13 +514,23 @@ class PgTraceBackend:
 
     async def _append_journal(self, entry: _JournalEntry) -> None:
         """Append one line under the exclusive journal lock, and fsync it: this is the only durable copy
-        of the row until Postgres is back."""
+        of the row until Postgres is back. R3.4.1 PROD-IO fix (latent, same class of bug as
+        `pq_ingest.run_characterization_pass`): the write+fsync is synchronous disk I/O, so it ran
+        directly on the event loop thread; on a contended disk (the base server's WAL fsync has been
+        observed at ~0.5s) that stalls the whole tick, not just this trace append. Moved to a thread --
+        small and safe: the lock is still held for the whole `to_thread` call (L-5 fix: guaranteed by
+        `_run_in_thread_uncancellable`, not just by the `async with` block's ordinary control flow), so
+        ordering/exclusivity with `_rewrite_journal_locked`/`_read_journal_locked` is unchanged."""
         async with _journal_lock(self._journal_path, exclusive=True):
-            self._journal_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._journal_path.open("a", encoding="utf-8") as fh:
-                fh.write(_journal_entry_to_line(entry) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
+
+            def _write() -> None:
+                self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._journal_path.open("a", encoding="utf-8") as fh:
+                    fh.write(_journal_entry_to_line(entry) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+
+            await _run_in_thread_uncancellable(_write)
 
     def _read_journal_locked(self) -> list[_JournalEntry]:
         """Parse the journal. The caller must hold the journal lock (shared or exclusive)."""
@@ -563,7 +622,11 @@ class PgTraceBackend:
         async with _journal_lock(self._journal_path, exclusive=True):
             current = self._read_journal_locked()
             remaining = [entry for entry in current if entry.trace_id not in removed]
-            self._rewrite_journal_locked(remaining)
+            # R3.4.1 PROD-IO fix (latent): same synchronous-fsync-on-the-loop issue as
+            # `_append_journal`, moved off the loop the same way; L-5: the exclusive lock is guaranteed
+            # held until the thread actually finishes (`_run_in_thread_uncancellable`), not just for as
+            # long as nothing cancels this await.
+            await _run_in_thread_uncancellable(lambda: self._rewrite_journal_locked(remaining))
         if quarantined:
             await self._quarantine(quarantined)
         logger.info(
@@ -574,16 +637,23 @@ class PgTraceBackend:
     async def _quarantine(self, entries: list[tuple[_JournalEntry, BaseException]]) -> None:
         """Keep each refused row in `<journal>.quarantine.jsonl` (with the error), then report it ONCE: a
         `TRACE_QUARANTINED` trace row (identifiers only, never the refused payload) and a critical
-        `ALR-TRACE-QUARANTINED` alert. Reporting is best-effort; the quarantine file is the evidence."""
+        `ALR-TRACE-QUARANTINED` alert. Reporting is best-effort; the quarantine file is the evidence.
+        R3.4.1: the file write is the same synchronous-fsync-on-the-loop shape as `_append_journal`,
+        moved off the loop for the same reason -- L-5: the exclusive lock is guaranteed held until the
+        thread actually finishes (`_run_in_thread_uncancellable`)."""
         qpath = quarantine_path_for(self._journal_path)
         async with _journal_lock(self._journal_path, exclusive=True):
-            qpath.parent.mkdir(parents=True, exist_ok=True)
-            with qpath.open("a", encoding="utf-8") as fh:
-                for entry, exc in entries:
-                    record = {**asdict(entry), "error": f"{type(exc).__name__}: {exc}"[:500]}
-                    fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
+
+            def _write() -> None:
+                qpath.parent.mkdir(parents=True, exist_ok=True)
+                with qpath.open("a", encoding="utf-8") as fh:
+                    for entry, exc in entries:
+                        record = {**asdict(entry), "error": f"{type(exc).__name__}: {exc}"[:500]}
+                        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+
+            await _run_in_thread_uncancellable(_write)
         for entry, exc in entries:
             logger.error(
                 "trace row quarantined: Postgres refused its content",

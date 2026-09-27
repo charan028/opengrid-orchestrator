@@ -89,6 +89,10 @@ class _FakeQueries:
     async def fetch_grant_cycle_series(self, pool, *, obligation_id, window_start, window_end):
         return self.grant_cycle_series_by_obligation.get(obligation_id, [])
 
+    async def fetch_hold_windows(self, pool, *, obligation_id, committed_kw, window_start, window_end):
+        # r3.4.3: None = not a capacity hold (floor = committed_kw throughout), else its deployment windows
+        return getattr(self, "hold_windows_by_obligation", {}).get(obligation_id)
+
     async def fetch_covering_trace_info(self, pool, *, obligation_id, window_start, window_end):
         return self.covering_trace_info_by_obligation.get(obligation_id, (None, frozenset()))
 

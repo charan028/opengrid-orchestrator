@@ -26,6 +26,7 @@ from opengrid.allocator.energy_hold import (
 from opengrid.allocator.models import HubSnapshot
 from opengrid.core.limits import continuous_power_kw
 from opengrid.core.physics import BankParams, HubParams, bank_capability
+from opengrid.core.services import ERCOT_AS_SERVICE_TYPE
 from opengrid.invariants.models import Violation
 
 # Float-compare tolerances, matching `opengrid.core.limits`' own 1e-9-scale epsilons (no separate,
@@ -177,6 +178,35 @@ class DipResult:
     at: datetime
     cycle_id: str | None
     is_gap: bool
+    #: the K13 floor in force at `at`: `committed_kw`, or for a capacity hold the deployed kW (see `HoldWindow`)
+    floor_kw: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class HoldWindow:
+    """One `og.as_deployment` window covering a capacity-hold obligation (`HOLD_SERVICE_TYPES`: ERCOT_AS,
+    REGULATED_CAPACITY): `[start, end)` with `end = min(end_at, cancelled_at)`, and the kW it deployed --
+    `|requested_kw|` capped at the commitment, or the full commitment when the deployment names none."""
+
+    start: datetime
+    end: datetime
+    floor_kw: float
+
+
+def hold_floor_kw(at: datetime, windows: tuple[HoldWindow, ...]) -> float:
+    """K13 floor of a capacity hold at `at` (r3.4.3, DISPATCH's diagnosis): 0 kW outside every deployment
+    window -- an undeployed hold is granted 0 kW with its reservation locked (R-GRANT-AS-HOLD), which is the
+    commitment kept, not a dip -- and the deployed kW inside one (the largest when several overlap)."""
+    return max((w.floor_kw for w in windows if w.start <= at < w.end), default=0.0)
+
+
+def _hold_gap_floor(prev: datetime, nxt: datetime, windows: tuple[HoldWindow, ...]) -> tuple[float, datetime]:
+    """The highest hold floor any deployment imposes during a silent stretch `[prev, nxt)`, and from when."""
+    best = (0.0, prev)
+    for w in windows:
+        if w.start < nxt and w.end > prev and w.floor_kw > best[0]:
+            best = (w.floor_kw, max(prev, w.start))
+    return best
 
 
 def find_dip(
@@ -186,6 +216,7 @@ def find_dip(
     committed_kw: float,
     cycles: list[tuple[datetime, float, str]],
     max_gap_s: float = DEFAULT_K13_MAX_GRANT_GAP_S,
+    hold_windows: tuple[HoldWindow, ...] | None = None,
 ) -> DipResult | None:
     """K13: the worst (lowest) delivery point for one committed obligation-interval, comparing the
     OBLIGATION's total delivery (already summed across every bank it holds -- see
@@ -201,24 +232,42 @@ def find_dip(
     worst point found (a low-water mark is enough: the lock is either held throughout the interval or it
     is not), or `None` if the interval never fell below `committed_kw` -- including no gap large enough
     to count -- at all.
+
+    `hold_windows` (not None only for a capacity-hold obligation, `queries.fetch_hold_windows`): the floor is
+    `hold_floor_kw` -- 0 outside every `og.as_deployment` window, the deployed kW inside one -- instead of
+    `committed_kw` throughout, so an undeployed hold's 0 kW cycles (R-GRANT-AS-HOLD, no covering deployment)
+    and its silent stretches are covered, while a deployed hold that under-delivers is still a dip. The worst
+    point is the largest shortfall below the floor then in force; on a tie a real cycle sample is preferred
+    over an implicit gap (it names the cycle, so the trace coverage can match it).
     """
     worst: DipResult | None = None
+    worst_deficit = 0.0
 
-    def _consider(kw: float, at: datetime, cycle_id: str | None, *, is_gap: bool) -> None:
-        nonlocal worst
-        if worst is None or kw < worst.kw:
-            worst = DipResult(kw=kw, at=at, cycle_id=cycle_id, is_gap=is_gap)
+    def _floor(at: datetime) -> float:
+        return committed_kw if hold_windows is None else hold_floor_kw(at, hold_windows)
+
+    def _consider(kw: float, at: datetime, cycle_id: str | None, floor: float, *, is_gap: bool) -> None:
+        nonlocal worst, worst_deficit
+        deficit = floor - kw
+        if deficit <= _KW_TOLERANCE:
+            return
+        # samples are considered first, so a gap replaces one only when strictly worse (tie -> the sample)
+        if worst is None or deficit > worst_deficit + 1e-9:
+            worst, worst_deficit = DipResult(kw, at, cycle_id, is_gap, floor), deficit
+
+    for ts, total_kw, cycle_id in cycles:
+        _consider(total_kw, ts, cycle_id, _floor(ts), is_gap=False)
 
     boundary_points = [interval_start, *(ts for ts, _kw, _cid in cycles), interval_end]
     for prev, nxt in itertools.pairwise(boundary_points):
         if (nxt - prev).total_seconds() > max_gap_s:
-            _consider(0.0, prev, None, is_gap=True)  # nothing delivered: the worst possible point
+            # nothing delivered: the worst possible point
+            if hold_windows is None:
+                _consider(0.0, prev, None, committed_kw, is_gap=True)
+            else:
+                floor, at = _hold_gap_floor(prev, nxt, hold_windows)
+                _consider(0.0, at, None, floor, is_gap=True)
 
-    for ts, total_kw, cycle_id in cycles:
-        _consider(total_kw, ts, cycle_id, is_gap=False)
-
-    if worst is None or worst.kw >= committed_kw - _KW_TOLERANCE:
-        return None
     return worst
 
 
@@ -553,7 +602,7 @@ class HoldReservation:
 
     @property
     def is_as(self) -> bool:
-        return self.service_type == "ERCOT_AS"
+        return self.service_type == ERCOT_AS_SERVICE_TYPE
 
 
 def _energy_owed_kwh(res: HoldReservation, now: datetime, eta_d: float) -> float:

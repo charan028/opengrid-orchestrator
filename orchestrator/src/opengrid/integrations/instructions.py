@@ -7,7 +7,8 @@ EVENT (`ScadaUtilityInstruction`) whose end is expressed by `expires_at <= now` 
 instruction). `InstructionTracker` turns levels into exactly one instruction per change:
 
 - precedence ESTOP > BLOCK > LIMIT (the most restrictive active level wins, K5);
-- a lifted level emits the previous instruction kind with `expires_at == issued_at` (already expired);
+- a lifted level emits the previous instruction kind with `expires_at == issued_at` (already expired), naming the
+  instruction it ends in `lifts_instruction_id` (Q10: a utility stop is released only after that lift);
 - unchanged levels emit nothing, so a 2 s poll never floods the ingest path.
 
 Instruction ids are UUIDv5 over (source, bank, change key), so a reconnect that re-reads the same
@@ -69,6 +70,8 @@ class InstructionTracker:
         self._source = source
         self._issued_by = issued_by
         self._current: dict[str, DesiredInstruction] = {}
+        #: the id of the instruction that set each bank's current level: a lift names it (Q10, r3.4.5)
+        self._current_ids: dict[str, uuid.UUID] = {}
         self._epoch: dict[str, int] = {}
 
     def active(self, bank_id: str) -> DesiredInstruction | None:
@@ -86,6 +89,7 @@ class InstructionTracker:
             if previous is None:  # unreachable: equal values returned above
                 return None
             del self._current[bank_id]
+            lifted_id = self._current_ids.pop(bank_id, None)
             return ScadaUtilityInstruction(
                 instruction_id=instruction_uuid(
                     self._source, bank_id, f"lift:{epoch}:{previous.change_key()}"
@@ -96,10 +100,13 @@ class InstructionTracker:
                 issued_at=now,
                 expires_at=now,
                 issued_by=self._issued_by,
+                lifts_instruction_id=lifted_id,
             )
         self._current[bank_id] = desired
+        set_id = instruction_uuid(self._source, bank_id, f"set:{epoch}:{desired.change_key()}")
+        self._current_ids[bank_id] = set_id
         return ScadaUtilityInstruction(
-            instruction_id=instruction_uuid(self._source, bank_id, f"set:{epoch}:{desired.change_key()}"),
+            instruction_id=set_id,
             bank_id=bank_id,
             kind=desired.kind,
             limit_kw=desired.limit_kw if desired.kind == "LIMIT" else None,

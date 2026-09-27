@@ -81,6 +81,10 @@ class ScadaEngine:
             clear_samples=config.overload_clear_samples,
             max_duration_s=config.overload_limit_max_duration_s,
         )
+        # Q10 (r3.4.5): a lift names the instruction it ends (`lifts_instruction_id`) -- the only way a
+        # utility-initiated stop can be released. The last scenario- and auto-issued instruction per bank.
+        self._scenario_instruction_ids: dict[str, str] = {}
+        self._auto_limit_ids: dict[str, str] = {}
 
     def ingest_telemetry(self, hub_id: str, bank_id: str, p_kw: float) -> None:
         buffer = self.buffers.get(bank_id)
@@ -118,7 +122,9 @@ class ScadaEngine:
             if modifiers.suppressed:
                 continue
             bg_kw = float(background_kw[i]) if i < self._home_bank_count else 0.0
-            real_kw = bank_load_kw(self.buffers[bank_id].net_battery_kw(), bg_kw)
+            # The meter sees the batteries as they are, unless a meter_mismatch anomaly distorts it (D-38).
+            battery_kw = self.buffers[bank_id].net_battery_kw() * modifiers.meter_battery_scale
+            real_kw = bank_load_kw(battery_kw + modifiers.meter_offset_kw, bg_kw)
             value_kw, quality = self.anomalies.apply_reading(
                 bank_id, real_kw, "good", now, kva_rating=self.kva_rating[bank_id]
             )
@@ -177,8 +183,9 @@ class ScadaEngine:
                 # above).
                 pass
             elif self.overload_rule.observe(bank_id, kva, self.kva_rating[bank_id], now):
+                self._auto_limit_ids[bank_id] = str(uuid.uuid4())
                 msg = limit_instruction(
-                    str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
+                    self._auto_limit_ids[bank_id], bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
                 )
                 instructions.append((f"scada/instruction/{bank_id}", msg))
             elif self.overload_rule.check_lift(bank_id, kva, self.kva_rating[bank_id], now):
@@ -186,7 +193,11 @@ class ScadaEngine:
                 # a bank_overload demo capped at 90% of rating forever. Lifted once the overload
                 # clears for `clear_samples` readings, or after `max_duration_s`, whichever first.
                 msg = lift_instruction(
-                    str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
+                    str(uuid.uuid4()),
+                    bank_id,
+                    self.kva_rating[bank_id] * 0.9,
+                    utc_timestamp(now),
+                    lifts_instruction_id=self._auto_limit_ids.pop(bank_id, None),
                 )
                 instructions.append((f"scada/instruction/{bank_id}", msg))
         return signals, instructions
@@ -200,14 +211,24 @@ class ScadaEngine:
         age out), so this needs no orchestrator-side change: it is the model's own existing
         way an instruction ends, applied here explicitly instead of never being used."""
         ts = utc_timestamp(now)
+        instruction_id = str(uuid.uuid4())
+        bank_id = pending["bank_id"]
+        lifts: str | None = None
+        if pending.get("lift"):
+            # Q10: name the instruction this lift ends -- an explicit `lifts_instruction_id` param (to lift
+            # one issued before a sim restart, e.g. from the stop's reason), else the one this sim issued.
+            lifts = pending.get("lifts_instruction_id") or self._scenario_instruction_ids.pop(bank_id, None)
+        else:
+            self._scenario_instruction_ids[bank_id] = instruction_id
         return {
-            "instruction_id": str(uuid.uuid4()),
-            "bank_id": pending["bank_id"],
+            "instruction_id": instruction_id,
+            "bank_id": bank_id,
             "kind": pending["kind"],
             "limit_kw": pending.get("limit_kw"),
             "issued_at": ts,
             "expires_at": ts if pending.get("lift") else None,
             "issued_by": "SCENARIO_ANOMALY",
+            "lifts_instruction_id": lifts,
         }
 
 

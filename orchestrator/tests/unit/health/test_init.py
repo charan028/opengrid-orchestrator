@@ -56,6 +56,8 @@ class _FakeQueries:
         self.bad_signature_acks: list[tuple[str, list[str], int, datetime]] = []
         self.bad_signature_since: datetime | None = None
         self.degraded_mode_state: dict[str, datetime] = {}
+        # Empty by default (the healthy case) -- ALR-TEST-DB-ON-PROD.
+        self.test_db_names: list[str] = []
         self._next_alert_id = 1
 
     async def fetch_heartbeats(self, pool):
@@ -90,6 +92,9 @@ class _FakeQueries:
 
     async def fetch_degraded_modes(self, pool):
         return list(self.degraded_mode_state.items())
+
+    async def fetch_test_database_names(self, pool):
+        return self.test_db_names
 
     async def write_degraded_modes(self, pool, active_modes, *, now):
         for mode in set(active_modes) - set(self.degraded_mode_state):
@@ -513,6 +518,51 @@ async def test_evaluate_alerts_raises_then_clears_a_bad_signature_ack_alert(
     fake_queries.bad_signature_acks = []  # the window passed with no new rejection
     await health.evaluate_alerts()
     assert not any(a.rule == "ALR-COMMAND-BAD-SIGNATURE" for a in fake_queries.open_alerts)
+
+
+async def test_evaluate_alerts_raises_test_db_on_prod_when_one_exists(fake_queries: _FakeQueries) -> None:
+    """r3.4.4: an `og_t_*` database on the cluster raises ALR-TEST-DB-ON-PROD (warning), naming it."""
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.test_db_names = ["og_t_alice_20260925"]
+
+    await health.evaluate_alerts()
+
+    assert "ALR-TEST-DB-ON-PROD" in fake_queries.raised
+    alert = next(a for a in fake_queries.open_alerts if a.rule == "ALR-TEST-DB-ON-PROD")
+    assert alert.severity == "warning"
+    assert alert.detail["database_names"] == ["og_t_alice_20260925"]
+
+
+async def test_evaluate_alerts_no_test_db_alert_when_none_exist(fake_queries: _FakeQueries) -> None:
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    assert fake_queries.test_db_names == []
+
+    await health.evaluate_alerts()
+
+    assert "ALR-TEST-DB-ON-PROD" not in fake_queries.raised
+
+
+async def test_evaluate_alerts_clears_test_db_on_prod_once_all_are_dropped(
+    fake_queries: _FakeQueries,
+) -> None:
+    fake_queries.heartbeats = [
+        Heartbeat(process=p, pid=1, ts=NOW, status="ok")
+        for p in ("feeds", "engine", "guardian", "safestop", "settle", "api")
+    ]
+    fake_queries.test_db_names = ["og_t_alice_20260925", "og_t_bob_20260925"]
+    await health.evaluate_alerts()
+    assert any(a.rule == "ALR-TEST-DB-ON-PROD" for a in fake_queries.open_alerts)
+
+    fake_queries.test_db_names = []  # both dropped
+    await health.evaluate_alerts()
+
+    assert not any(a.rule == "ALR-TEST-DB-ON-PROD" for a in fake_queries.open_alerts)
 
 
 async def test_evaluate_once_persists_dist_deferral_open_loop_when_scada_silent(

@@ -32,7 +32,10 @@ TLS on and a non-empty CN allow-list; every utility needs a non-empty peer allow
 from __future__ import annotations
 
 import ipaddress
+import os
+import tomllib
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -43,10 +46,12 @@ from opengrid.integrations.tls import ServerTlsSettings
 __all__ = [
     "MAX_BANKS",
     "MAX_TARGETS",
+    "OVERRIDE_ENV",
     "Dnp3LinkSettings",
     "GridLinkSettings",
     "L2TargetSettings",
     "UtilityLinkSettings",
+    "grid_link_table",
     "load_grid_link_settings",
 ]
 
@@ -181,6 +186,26 @@ def utility_known(utility_id: str) -> bool:
     """True when `utility_id` is one of `opengrid.core.models.market.UTILITY_IDS` (the ids the core call
     function resolves tolling obligations by)."""
     return utility_id in UTILITY_IDS
+
+
+#: Env var naming a host-local TOML file whose `[grid_link]` table REPLACES the release config's (so enabling
+#: a utility on a host survives deploys; written by deploy/scripts/grid_link_enable_loopback.sh).
+OVERRIDE_ENV = "OG_GRID_LINK_CONFIG"
+
+
+def grid_link_table(release_table: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """The `[grid_link]` table to use: the override file's when `OG_GRID_LINK_CONFIG` is set, else the
+    release config's. A set-but-unreadable override raises (`OSError` / `ValueError`): the caller disables
+    the link rather than silently falling back to another configuration."""
+    path = os.environ.get(OVERRIDE_ENV, "").strip()
+    if not path:
+        return release_table
+    with Path(path).open("rb") as handle:
+        data = tomllib.load(handle)
+    table = data.get("grid_link")
+    if not isinstance(table, dict):
+        raise ValueError(f"{OVERRIDE_ENV}={path} has no [grid_link] table")
+    return table
 
 
 def load_grid_link_settings(raw: Mapping[str, Any] | None) -> GridLinkSettings:

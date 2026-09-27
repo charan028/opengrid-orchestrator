@@ -18,14 +18,14 @@ from typing import TYPE_CHECKING, Any, Literal
 from opengrid.core.models.engine import ServiceType
 from opengrid.core.models.market import Territory
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
+
+# Services held at 0 kW until called (`og.as_deployment` active for the obligation), then delivered up to
+# `committed_kw`: ONE definition in core (ERCOT_AS and the D-29 toll), re-exported for this package's callers.
+from opengrid.core.services import HOLD_SERVICE_TYPES as HOLD_SERVICE_TYPES
 from opengrid.market.territory import FREE, MarketRef
 
 if TYPE_CHECKING:
     from opengrid.allocator.pq_eligibility import EligibilityResult
-
-#: Services held at 0 kW until called (`og.as_deployment` active for the obligation), then delivered up to
-#: `committed_kw`: ERCOT_AS (NPRR1282) and the utility toll (D-29: REGULATED_CAPACITY, variant TOLLING).
-HOLD_SERVICE_TYPES: frozenset[str] = frozenset({"ERCOT_AS", "REGULATED_CAPACITY"})
 
 Tier = Literal["T1", "T2", "T3", "T4"]
 TIER_ORDER: tuple[Tier, ...] = ("T1", "T2", "T3", "T4")
@@ -104,6 +104,9 @@ class BankSnapshot:
     territory: Territory | None = None
     #: K15(b): the territory's utility grants wholesale (FREE) access. Ignored for competitive-area banks.
     free_access: bool = False
+    #: D-37 (`og.bank.availability`, migration 0046): False = UNAVAILABLE (regulated, no contract). The
+    #: allocator dispatches nothing on it (no headroom, no obligation) except K13-grandfathered calls.
+    available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +141,13 @@ class ObligationCall:
     #: K15: the obligation's market (its contract's `market`/`utility_id`). `None` = unknown or
     #: inconsistent market data: never served while territory is enforced (fail closed).
     market_ref: MarketRef | None = FREE
+    #: D-37 / K13: committed before its (now UNAVAILABLE, regulated) bank switched, and still holding its
+    #: reservation there (`opengrid.market.availability.GRANDFATHERED_SQL`): it completes untouched, exempt
+    #: from the availability block and from the K15 territory check.
+    grandfathered: bool = False
+    #: D-33: called for less than the committed kW (`og.as_deployment.requested_kw`); `committed_kw` is then
+    #: already this bank's pro-rata share of the requested kW, and its grant carries R-AS-PARTIAL-DEPLOYMENT.
+    partial_call: bool = False
 
     @property
     def is_capacity_hold(self) -> bool:

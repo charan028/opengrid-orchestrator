@@ -22,6 +22,7 @@ from opengrid.core.models.mqtt import ScadaBankSignal, ScadaUtilityInstruction
 from opengrid.integrations.grid_link.config import (
     GridLinkSettings,
     UtilityLinkSettings,
+    grid_link_table,
     load_grid_link_settings,
 )
 from opengrid.integrations.grid_link.dnp3_server import Dnp3GridLinkServer
@@ -41,6 +42,8 @@ __all__ = ["BridgeHolder", "start_grid_link"]
 MQTT_PROCESS_NAME = "gridlink"
 RECONNECT_MIN_S = 1.0
 RECONNECT_MAX_S = 30.0
+#: Bound on reading the link's L2 history from og.trace at start-up.
+RESTORE_TIMEOUT_S = 10.0
 
 
 class BridgeHolder:
@@ -115,6 +118,7 @@ async def _run(cfg: Config, pool: AsyncConnectionPool, trace: TraceStore, settin
                 sink=holder,
                 banks_of_zone=banks_of_zone,
             )
+            await _restore_l2(pool, service)
             server = _server_for(utility, service)
             try:
                 await server.start()
@@ -133,6 +137,23 @@ async def _run(cfg: Config, pool: AsyncConnectionPool, trace: TraceStore, settin
                 await server.stop()
 
 
+async def _restore_l2(pool: AsyncConnectionPool, service: GridLinkService) -> None:
+    """Re-apply the link's traced L2 levels before listening (pg_history). A failure is logged and the link
+    starts with no L2 levels of its own; the EMS re-asserts them on reconnect."""
+    from opengrid.integrations.grid_link.pg_history import load_l2_commands
+
+    try:
+        payloads = await asyncio.wait_for(
+            load_l2_commands(pool, f"grid_link:{service.utility_id}"), timeout=RESTORE_TIMEOUT_S
+        )
+        await service.restore_l2(payloads)
+    except Exception:
+        logger.exception(
+            "grid link L2 restore failed; starting without restored levels",
+            extra={"utility_id": service.utility_id},
+        )
+
+
 def _server_for(utility: UtilityLinkSettings, service: GridLinkService) -> Dnp3GridLinkServer:
     """The transport for utility.protocol. Only DNP3 exists today; an ICCP server would be chosen here
     (grid-link.md S8), and the service would not change."""
@@ -144,8 +165,8 @@ def _server_for(utility: UtilityLinkSettings, service: GridLinkService) -> Dnp3G
 def start_grid_link(cfg: Config, pool: AsyncConnectionPool, trace: TraceStore) -> asyncio.Task[Any] | None:
     """Start the grid link when configured (module docstring); `None` when disabled."""
     try:
-        settings = load_grid_link_settings(cfg.get("grid_link"))
-    except ValueError as exc:
+        settings = load_grid_link_settings(grid_link_table(cfg.get("grid_link")))
+    except (OSError, ValueError) as exc:
         logger.error("invalid [grid_link] configuration; grid link disabled", extra={"error": str(exc)})
         return None
     for utility_id in settings.unknown_utilities():

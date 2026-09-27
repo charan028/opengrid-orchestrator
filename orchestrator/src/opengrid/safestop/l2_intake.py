@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -37,7 +38,10 @@ logger = logging.getLogger(__name__)
 #: daemon's publishing client `og-safestop`, so this subscriber can reconnect on its own.
 L2_PROCESS_NAME = "safestop-l2"
 INSTRUCTION_TOPIC_SUFFIX = "scada/instruction/+"
-DEFAULT_RECONNECT_DELAY_S = 5.0
+#: Stop-path reconnect backoff (r3.4.4 live: 5-10-20 s let a 20 s broker blip run past the process's exit timer and
+#: restart og-safestop): retry from 1 s, never waiting more than 5 s, well inside `safestop.mqtt_down_exit_s`.
+DEFAULT_RECONNECT_DELAY_S = 1.0
+DEFAULT_MAX_BACKOFF_S = 5.0
 
 #: (bank_id, reason, initiator_ref) -> engage a BANK stop with initiator_kind UTILITY.
 EngageFn = Callable[[str, str, str], Awaitable[object]]
@@ -46,8 +50,12 @@ AlreadyActedFn = Callable[[UUID, str], Awaitable[bool]]
 #: (instruction_id, bank_id) -> queue the recorded ENGAGE's publication if it has none (H5 repair).
 EnsurePublishedFn = Callable[[UUID, str], Awaitable[object]]
 
+#: (bank_id, lifted instruction id, the lift's own instruction id, issued_by) -> record the utility's lift (Q10).
+RecordLiftFn = Callable[[str, UUID, UUID, str], Awaitable[object]]
+
 L2Outcome = Literal[
     "ENGAGED",
+    "LIFT_RECORDED",
     "IGNORED_LIMIT",
     "IGNORED_EXPIRED",
     "DUPLICATE",
@@ -67,6 +75,21 @@ def l2_reason(instruction: ScadaUtilityInstruction) -> str:
 
 def l2_initiator_ref(instruction: ScadaUtilityInstruction) -> str:
     return f"utility:{instruction.issued_by}"
+
+
+_L2_REASON = re.compile(r"^L2 (?:BLOCK|ESTOP) ([0-9a-fA-F-]{36}) from ")
+
+
+def instruction_id_from_reason(reason: str | None) -> str | None:
+    """The instruction id a UTILITY stop's reason names (`l2_reason`), canonical lower-case; None when the reason
+    is not an L2 stop reason. The guardian matches it against the utility's recorded lifts (Q10)."""
+    match = _L2_REASON.match(reason or "")
+    if match is None:
+        return None
+    try:
+        return str(UUID(match.group(1)))
+    except ValueError:
+        return None
 
 
 def parse_instruction(
@@ -92,6 +115,7 @@ async def handle_instruction(
     already_acted_fn: AlreadyActedFn,
     topic_bank_id: str | None = None,
     ensure_published_fn: EnsurePublishedFn | None = None,
+    record_lift_fn: RecordLiftFn | None = None,
 ) -> L2Outcome:
     """Act on one utility instruction. Never raises (except cancellation): a malformed message or a
     failed engage is logged and reported as an outcome, so one bad message never kills the listener.
@@ -125,6 +149,26 @@ async def handle_instruction(
     if expires_at is not None and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)  # a naive wire timestamp is taken as UTC
     if expires_at is not None and expires_at <= now:
+        lifted = instruction.lifts_instruction_id
+        if lifted is not None and record_lift_fn is not None:
+            # Q10: the utility lifts the exact instruction that engaged a stop -- recorded durably, so the
+            # guardian lets the operators' two-person release through for THAT stop (never releases it here:
+            # the stop-only key cannot sign a RELEASE).
+            if instruction.instruction_id in handled:
+                return "DUPLICATE"
+            try:
+                await record_lift_fn(bank_id, lifted, instruction.instruction_id, instruction.issued_by)
+            except Exception:
+                logger.exception(
+                    "recording a utility L2 lift FAILED", extra={"lifted": str(lifted), "bank_id": bank_id}
+                )
+                return "FAILED"
+            handled.add(instruction.instruction_id)
+            logger.warning(
+                "utility lifted its L2 instruction: the operators may now approve the stop's release",
+                extra={"lifted": str(lifted), "bank_id": bank_id, "kind": instruction.kind},
+            )
+            return "LIFT_RECORDED"
         logger.info(
             "expired utility L2 instruction ignored",
             extra={"instruction_id": str(instruction.instruction_id), "bank_id": bank_id},
@@ -174,7 +218,9 @@ def build_l2_session(
     already_acted_fn: AlreadyActedFn,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     min_backoff_s: float = DEFAULT_RECONNECT_DELAY_S,
+    max_backoff_s: float = DEFAULT_MAX_BACKOFF_S,
     ensure_published_fn: EnsurePublishedFn | None = None,
+    record_lift_fn: RecordLiftFn | None = None,
 ) -> MqttSession:
     """The utility L2 instruction listener: `<root>/scada/instruction/+` (QoS 1) on its own connection
     (`L2_PROCESS_NAME`), kept up across broker disconnects by `MqttSession` (backoff from `min_backoff_s`,
@@ -200,6 +246,7 @@ def build_l2_session(
             already_acted_fn=already_acted_fn,
             topic_bank_id=topic_bank_id,
             ensure_published_fn=ensure_published_fn,
+            record_lift_fn=record_lift_fn,
         )
 
     return MqttSession(
@@ -208,4 +255,5 @@ def build_l2_session(
         subscriptions=[(topic(cfg, INSTRUCTION_TOPIC_SUFFIX), 1)],
         on_message=on_message,
         min_backoff_s=min_backoff_s,
+        max_backoff_s=max_backoff_s,
     )

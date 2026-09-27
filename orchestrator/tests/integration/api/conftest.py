@@ -22,6 +22,8 @@ from opengrid.platform.config import Config
 from opengrid.platform.db import build_dsn, migrate_sync
 from opengrid.trace.store import TraceStore
 
+from ..cluster_guard import require_test_cluster_dsn
+
 OPERATOR_HEADERS = {"X-Remote-User": "operator"}
 VIEWER_HEADERS = {"X-Remote-User": "viewer"}
 # Apache's proxy secret (`opengrid.api.auth.proxy_authenticated`); the client sends it by default.
@@ -54,6 +56,7 @@ def _integration_config() -> Config:
 def pg_dsn() -> str:
     cfg = _integration_config()
     dsn = build_dsn(cfg)
+    require_test_cluster_dsn(dsn)
     try:
         with psycopg.connect(dsn, connect_timeout=3):
             pass

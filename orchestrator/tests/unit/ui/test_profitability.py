@@ -43,7 +43,7 @@ def test_lp_vs_baseline_view_only_includes_rows_with_a_baseline() -> None:
     assert view["compared_count"] == 1
     assert view["chart_option"]["xAxis"]["data"] == ["OBL-2001"]
     series_by_name = {s["name"]: s for s in view["chart_option"]["series"]}
-    assert series_by_name["LP net value"]["data"] == [365.0]
+    assert series_by_name["MILP net value"]["data"] == [365.0]
     assert series_by_name["Rule baseline"]["data"] == [300.0]
 
 

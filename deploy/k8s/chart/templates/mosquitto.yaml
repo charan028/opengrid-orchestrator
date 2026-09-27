@@ -48,6 +48,9 @@ spec:
           image: {{ include "og.image" (dict "root" . "which" "orchestrator") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["mqtt-acl", "/mosquitto/gen/opengrid.acl"]
+          env:
+            - name: OG_GRIDLINK_ACL
+              value: {{ ternary "1" "0" .Values.gridLink.enabled | quote }}
           securityContext:
             {{- include "og.containerSecurityContext" . | nindent 12 }}
           resources:

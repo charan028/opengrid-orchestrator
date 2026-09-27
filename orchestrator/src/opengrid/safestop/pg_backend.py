@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -52,6 +53,22 @@ LIMIT %(limit)s
 
 _HAS_SIGNATURE_SQL = "SELECT 1 FROM og.stop_event WHERE signature = %(signature)s LIMIT 1"
 
+_LATEST_ENGAGE_AT_SQL = """
+SELECT max(created_at) FROM og.stop_event
+WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s AND action = 'ENGAGE'
+"""
+#: r3.4.2 review L-1: a guardian RELEASE signed before the newest ENGAGE on its scope is refused (the hubs would
+#: drop it); the operators must re-issue the two-person release. Written in `health.queries.raise_alert`'s shape.
+SUPERSEDED_RELEASE_ALERT_RULE = "ALR-STOP-RELEASE-SUPERSEDED"
+_SUPERSEDED_RELEASE_ALERT_SQL = """
+INSERT INTO og.alert (rule, severity, summary, detail, opened_at, scope_kind, scope_ref)
+SELECT %(rule)s, 'warning', %(summary)s, %(detail)s, now(), 'STOP', %(scope_ref)s
+WHERE NOT EXISTS (
+    SELECT 1 FROM og.alert
+    WHERE rule = %(rule)s AND cleared_at IS NULL AND detail ->> 'condition_key' = %(condition_key)s
+)
+"""
+
 _LATEST_ACTION_SQL = """
 SELECT action FROM og.stop_event
 WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s
@@ -67,18 +84,34 @@ LIMIT 1
 """
 
 
-# K8 durable publish outbox (migration 0035): queued once per (stop_id, action). Drained ENGAGEs first (a stop is
-# never delayed behind a release), each in acceptance order. `attempts` counts PERMANENT failures only (a
-# payload that can never be published); at the cap an entry is dead-lettered: skipped by the drain, alerted.
+# K8 durable publish outbox (migration 0035): queued once per (stop_id, action), returned in acceptance order;
+# the service orders the drain (in order within a scope, ENGAGE priority only across scopes). `attempts` counts
+# PERMANENT failures only (a payload that can never be published); at the cap an entry is dead-lettered:
+# skipped by the drain, alerted.
 _ENQUEUE_SQL = """
 INSERT INTO og.stop_outbox (stop_id, action, topic_suffix, payload)
 VALUES (%(stop_id)s, %(action)s, %(topic_suffix)s, %(payload)s)
 ON CONFLICT ON CONSTRAINT stop_outbox_once DO NOTHING
 """
+#: The oldest `limit` live entries PLUS every live entry of each scope that has a queued ENGAGE (the oldest `limit`
+#: ENGAGEs, anywhere in the queue), so an ENGAGE is never stuck behind a long backlog (r3.4.2 review L-2) while its
+#: own scope's older entries still come with it, in order. A scope is the topic without its stop id
+#: (`service.outbox_scope`).
 _PENDING_SQL = """
+WITH live AS (
+    SELECT seq, stop_id, action, topic_suffix, payload, regexp_replace(topic_suffix, '/[^/]*$', '') AS scope
+    FROM og.stop_outbox
+    WHERE published_at IS NULL AND attempts < %(max_attempts)s
+)
+SELECT seq, stop_id, action, topic_suffix, payload FROM live
+WHERE seq IN (SELECT seq FROM live ORDER BY seq LIMIT %(limit)s)
+   OR scope IN (SELECT scope FROM live WHERE action = 'ENGAGE' ORDER BY seq LIMIT %(limit)s)
+ORDER BY seq
+"""
+_DEAD_LETTERED_SQL = """
 SELECT seq, stop_id, action, topic_suffix, payload FROM og.stop_outbox
-WHERE published_at IS NULL AND attempts < %(max_attempts)s
-ORDER BY (action = 'ENGAGE') DESC, seq
+WHERE published_at IS NULL AND attempts >= %(max_attempts)s
+ORDER BY seq
 LIMIT %(limit)s
 """
 _MARK_PUBLISHED_SQL = "UPDATE og.stop_outbox SET published_at = now() WHERE seq = %(seq)s"
@@ -181,6 +214,40 @@ class PgStopEventBackend:
             row = await cur.fetchone()
             return None if row is None else str(row[0])
 
+    async def latest_engage_at(self, scope_kind: str, scope_ref: str) -> datetime | None:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LATEST_ENGAGE_AT_SQL, {"scope_kind": scope_kind, "scope_ref": scope_ref})
+            row = await cur.fetchone()
+        return None if row is None else row[0]
+
+    async def raise_superseded_release_alert(
+        self, *, scope_kind: str, scope_ref: str, stop_id: UUID, signature: str, engage_at: datetime
+    ) -> bool:
+        condition_key = f"{SUPERSEDED_RELEASE_ALERT_RULE}:{signature[:32]}"
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                _SUPERSEDED_RELEASE_ALERT_SQL,
+                {
+                    "rule": SUPERSEDED_RELEASE_ALERT_RULE,
+                    "summary": (
+                        f"release of {scope_kind} {scope_ref} superseded by a newer stop; "
+                        "re-issue the two-person release"
+                    ),
+                    "detail": Jsonb(
+                        {
+                            "condition_key": condition_key,
+                            "stop_id": str(stop_id),
+                            "scope_kind": scope_kind,
+                            "scope_ref": scope_ref,
+                            "newer_engage_at": engage_at.isoformat(),
+                        }
+                    ),
+                    "scope_ref": f"{scope_kind}:{scope_ref}",
+                    "condition_key": condition_key,
+                },
+            )
+            return cur.rowcount == 1
+
     async def enqueue_publication(
         self,
         *,
@@ -224,6 +291,15 @@ class PgStopEventBackend:
             for r in rows
         ]
 
+    async def dead_lettered_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_DEAD_LETTERED_SQL, {"limit": limit, "max_attempts": max_attempts})
+            rows = await cur.fetchall()
+        return [
+            OutboxEntry(seq=int(r[0]), stop_id=r[1], action=r[2], topic_suffix=str(r[3]), payload=dict(r[4]))
+            for r in rows
+        ]
+
     async def mark_published(self, seq: int) -> None:
         async with self.pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_MARK_PUBLISHED_SQL, {"seq": seq})
@@ -234,7 +310,7 @@ class PgStopEventBackend:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
 
-    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> None:
+    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> bool:
         condition_key = f"{DEAD_LETTER_ALERT_RULE}:{entry.stop_id}:{entry.action}"
         async with self.pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -255,6 +331,7 @@ class PgStopEventBackend:
                     "condition_key": condition_key,
                 },
             )
+            return cur.rowcount == 1  # False: already open
 
     async def l2_engage_record(self, instruction_id: UUID, bank_id: str) -> RecordedL2Engage | None:
         async with self.pool.connection() as conn, conn.cursor() as cur:

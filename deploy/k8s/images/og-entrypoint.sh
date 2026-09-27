@@ -6,7 +6,7 @@
 #   orchestrator image: engine guardian safestop feeds settle api lifecycle
 #                       migrate seed check keygen-tar mqtt-acl wait-db wait-schema probe-http probe-heartbeat
 #                       demo-customers
-#   sims image:         sim-market sim-fleet sim-scada sim-control sim-customer sim-configs
+#   sims image:         sim-market sim-fleet sim-scada sim-control sim-customer sim-utility sim-configs
 #
 # Environment (set by the chart): OG_CONFIG (rendered config path), OG_CONFIG_OVERRIDES (TOML fragment),
 # OG_DB/OG_DB_USER/OG_DB_PORT/OG_DB_PASSWORD, OG_ZONES (enabled zone blocks), OG_SIM_DIR.
@@ -96,7 +96,6 @@ case "$svc" in
   seed)  # bootstrap phase e (all seeds in order, then bootstrap_check.py), against the Service DB
     render_config
     db_etc
-    OG_SIM_DIR="$ETC_DIR/sim" sim_configs "$OG_PY"
     "$OG_PY" "$SUPPORT" wait-schema
     exec bash "$RELEASE/deploy/scripts/bootstrap_from_scratch.sh" --phase e --etc "$ETC_DIR" "${DB_ARGS[@]}" \
       --zones "$OG_ZONES" ;;
@@ -116,8 +115,21 @@ case "$svc" in
       trace_anchor_ed25519.key trace_anchor_ed25519.pub
     rm -rf "$out" ;;
 
-  mqtt-acl)  # the production ACL (deploy/scripts/render_mosquitto_acl.sh) into $1
-    exec bash "$RELEASE/deploy/scripts/render_mosquitto_acl.sh" "${1:?output path}" ;;
+  mqtt-acl)  # the production ACL (deploy/scripts/render_mosquitto_acl.sh) into $1; with OG_GRIDLINK_ACL=1 also
+             # the og_gridlink block of deploy/mosquitto/provision_grid_link_user.py (its render_acl)
+    bash "$RELEASE/deploy/scripts/render_mosquitto_acl.sh" "${1:?output path}"
+    if [ "${OG_GRIDLINK_ACL:-0}" = 1 ]; then
+      "$OG_PY" - "$1" "$RELEASE/deploy/mosquitto" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+from provision_grid_link_user import render_acl  # noqa: E402
+
+acl = Path(sys.argv[1])
+acl.write_text(render_acl(acl.read_text(encoding="utf-8"), "og/v1"), encoding="utf-8")
+PY
+    fi ;;
 
   probe-http|probe-heartbeat)
     exec "$OG_PY" "$SUPPORT" "$svc" "$@" ;;
@@ -131,6 +143,7 @@ case "$svc" in
   sim-scada)    sim_service ogsim.scada ;;
   sim-control)  sim_service ogsim.control ;;
   sim-customer) sim_service ogsim.customer ;;
+  sim-utility)  sim_service ogsim.utility_aen ;;
 
   *) echo "og-entrypoint: unknown service '$svc'" >&2; exit 2 ;;
 esac

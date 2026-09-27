@@ -29,7 +29,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -45,6 +45,7 @@ from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import HubParams, apply_ramp_limit
 from opengrid.core.reasons import (
     COMMIT_LOCK_OVERRIDE_REASONS,
+    R_AS_PARTIAL_DEPLOYMENT,
     R_GRANT_AS_HOLD,
     R_GRANT_CLOSED_LOOP,
     R_HUB_VETO_EXCLUDED,
@@ -63,9 +64,20 @@ from opengrid.engine.gates import (
     gate_failure_matches,
     run_due_gates,
 )
-from opengrid.engine.gateways import is_utility_scale_bank, load_utility_scale_banks, set_utility_scale_banks
+from opengrid.engine.gateways import (
+    is_utility_scale_bank,
+    load_unavailable_banks,
+    load_utility_scale_banks,
+    set_unavailable_banks,
+    set_utility_scale_banks,
+)
 from opengrid.engine.latency import CycleLatencyWindow, LoopLagProbe, PhaseTimer
-from opengrid.engine.lifecycle import LifecycleBackend, advance_obligations, resolve_stuck_selected
+from opengrid.engine.lifecycle import (
+    LifecycleBackend,
+    Transition,
+    advance_obligations,
+    resolve_stuck_selected,
+)
 from opengrid.engine.manual import ManualTarget, ManualTargetSource, manual_items
 from opengrid.engine.mqtt_supervisor import (
     DEFAULT_BACKOFF_INITIAL_S,
@@ -76,7 +88,20 @@ from opengrid.engine.mqtt_supervisor import (
     IngestHealth,
     supervise_ingest,
 )
+from opengrid.engine.propose_guard import GuardianGate, propose_banks
+from opengrid.engine.ramp_anchor import (
+    AnchorVerdictReader,
+    PgAnchorVerdictReader,
+    RampAnchors,
+    stopped_banks,
+)
 from opengrid.engine.settings import dispatch_settings
+from opengrid.engine.telemetry_ingest import (
+    DEFAULT_APPLY_INTERVAL_S,
+    DEFAULT_MAX_HUBS,
+    DEFAULT_RAW_MAX,
+    TelemetryDecoupler,
+)
 from opengrid.engine.veto import (
     DEFAULT_VERDICT_WAIT_S,
     HubVetoExclusions,
@@ -229,29 +254,27 @@ def build_command_batch_row(
 RAMP_SAFETY_FACTOR = 0.9
 
 
-#: Last commanded setpoint per utility-scale hub: `hub_id -> (kW, monotonic time)`.
-_last_commanded_kw: dict[str, tuple[float, float]] = {}
+#: Utility-scale ramp anchors (`engine.ramp_anchor`): last SIGNED setpoint per hub, pending batches, stops.
+_ramp_anchors = RampAnchors()
 
 
-def _ramped_setpoint_kw(hub: Any, target_kw: float, cycle_interval_s: float | None) -> float:
+def _ramped_setpoint_kw(
+    hub: Any, target_kw: float, cycle_interval_s: float | None, *, now: datetime | None = None
+) -> float:
     """K4/G-04: move from the hub's measured power toward `target_kw` by at most one cycle's ramp. The
     obligation's grant is unchanged (G-19 compares the grant); only the per-hub command ramps.
 
-    A utility-scale asset (the D-29 20 MW toll set) steps from its last COMMANDED setpoint while that
-    command is younger than the lease: its telemetry lags ~10 s, and stepping from it every 2 s cycle held
-    a 20 MW call to a fraction of its G-04 rate."""
-    prev_kw = getattr(hub, "p_kw", None)
+    A utility-scale asset (the D-29 20 MW toll set) steps from its last SIGNED setpoint while that
+    signature's lease is live, else from telemetry (or 0 kW after a safe stop until fresh telemetry) --
+    `engine.ramp_anchor`, the same anchor as the guardian's G-04. Never from its own last proposal: an
+    unsigned proposal is not where the hub is (HIGH-A)."""
     utility_scale = bool(getattr(hub, "utility_scale", False)) or is_utility_scale_bank(
         str(getattr(hub, "bank_id", ""))
     )
     if utility_scale:
-        last = _last_commanded_kw.get(str(hub.hub_id))
-        if last is not None and time.monotonic() - last[1] <= DEFAULT_LEASE_TTL_S:
-            prev_kw = last[0]
-        stepped = _ramp_from(hub, prev_kw, target_kw, cycle_interval_s)
-        _last_commanded_kw[str(hub.hub_id)] = (stepped, time.monotonic())
-        return stepped
-    return _ramp_from(hub, prev_kw, target_kw, cycle_interval_s)
+        anchor = _ramp_anchors.anchor_kw(hub, now if now is not None else datetime.now(UTC))
+        return _ramp_from(hub, anchor, target_kw, cycle_interval_s)
+    return _ramp_from(hub, getattr(hub, "p_kw", None), target_kw, cycle_interval_s)
 
 
 def _ramp_from(hub: Any, prev_kw: float | None, target_kw: float, cycle_interval_s: float | None) -> float:
@@ -265,7 +288,11 @@ def _ramp_from(hub: Any, prev_kw: float | None, target_kw: float, cycle_interval
 #: closed-loop grant whose controller asks for nothing this cycle.
 _ZERO_KW_REASONS = frozenset({R_GRANT_AS_HOLD, R_GRANT_CLOSED_LOOP}) | TERRITORY_REASONS
 #: Reasons a committed grant below its commitment carries onto its hub items (G-19 judges them).
-_ITEM_REASONS = COMMIT_LOCK_OVERRIDE_REASONS | {R_GRANT_CLOSED_LOOP, R_OPERATOR_OVERRIDE}
+_ITEM_REASONS = COMMIT_LOCK_OVERRIDE_REASONS | {
+    R_GRANT_CLOSED_LOOP,
+    R_OPERATOR_OVERRIDE,
+    R_AS_PARTIAL_DEPLOYMENT,
+}
 
 
 def _as_hold_items(
@@ -297,7 +324,9 @@ def _as_hold_items(
             items.append(
                 {
                     "hub_id": hub.hub_id,
-                    "p_kw_setpoint": _ramped_setpoint_kw(hub, 0.0, cycle_interval_s),
+                    "p_kw_setpoint": _ramped_setpoint_kw(hub, 0.0, cycle_interval_s)
+                    if cycle_interval_s is not None
+                    else 0.0,
                     "reason_code": grant.reason_code,
                     "obligation_id": str(grant.obligation_id),
                     "obligation_granted_kw": "0",
@@ -337,6 +366,7 @@ def _distribute_hub_items(
     cycle_interval_s: float | None = None,
     hub_allocations: Mapping[tuple[str, str], Mapping[str, float]] | None = None,
     excluded_hub_ids: frozenset[str] = frozenset(),
+    now: datetime | None = None,
 ) -> list[dict[str, object]]:
     """S8 command build (02a S1.10: "per-hub detail ... derivable from the command log referenced by
     command_batch_id"): distribute each bank-level `Grant`'s kW across the bank's currently-online hubs,
@@ -359,7 +389,7 @@ def _distribute_hub_items(
     if not hubs or sum(h.free_discharge_kw for h in hubs) <= 0:
         return items
     items.extend(
-        _as_hold_items(bank_id, grants, fleet_module=fleet_module, cycle_interval_s=cycle_interval_s)
+        _as_hold_items(bank_id, grants, fleet_module=fleet_module, cycle_interval_s=None)  # raw: 0 kW
     )
     allocations = hub_allocations or {}
     by_id = {h.hub_id: h for h in hubs}
@@ -396,7 +426,7 @@ def _distribute_hub_items(
             items.append(
                 {
                     "hub_id": hub.hub_id,
-                    "p_kw_setpoint": _ramped_setpoint_kw(hub, -share_kw, cycle_interval_s),
+                    "p_kw_setpoint": -share_kw,  # raw target; ramped per hub on the net below
                     "reason_code": reason_code,
                     "obligation_id": str(grant.obligation_id) if grant.obligation_id else None,
                     # This hub's share of the grant: guardian G-19 sums the shares per obligation.
@@ -404,6 +434,43 @@ def _distribute_hub_items(
                     "obligation_granted_kw": str(share_kw) if grant.obligation_id else None,
                 }
             )
+    return ramp_net_per_hub(items, fleet_module.hub_capabilities(bank_id), cycle_interval_s, now=now)
+
+
+def ramp_net_per_hub(
+    items: list[dict[str, object]],
+    hubs: Iterable[Any],
+    cycle_interval_s: float | None,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """A hub executes the SUM of its items in a batch (`guardian.checks.hub_setpoints`), so G-04's ramp
+    applies to that net, not to each item: with a 0 kW hold item plus a discharge item on one utility-scale
+    hub, stepping each from the same anchor asked for ~2x the bound (r3.4.3 MEDIUM, probe 56/60 vetoed).
+    `items` carry RAW targets; per hub the net target is stepped ONCE from the hub's anchor and the items
+    are scaled to sum to it (a 0 kW hold item stays 0 and only carries its reason); a hub whose items net
+    to 0 gets the whole step on its first item."""
+    if cycle_interval_s is None:
+        return items
+    by_id = {str(h.hub_id): h for h in hubs}
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for item in items:
+        grouped.setdefault(str(item["hub_id"]), []).append(item)
+    for hub_id, hub_items in grouped.items():
+        hub = by_id.get(hub_id)
+        if hub is None:
+            continue
+        targets = [float(str(i["p_kw_setpoint"])) for i in hub_items]
+        total = sum(targets)
+        net = _ramped_setpoint_kw(hub, total, cycle_interval_s, now=now)
+        if abs(total) > 1e-9:
+            factor = net / total
+            for item, target in zip(hub_items, targets, strict=True):
+                item["p_kw_setpoint"] = target * factor
+        else:
+            hub_items[0]["p_kw_setpoint"] = net
+            for item in hub_items[1:]:
+                item["p_kw_setpoint"] = 0.0
     return items
 
 
@@ -441,7 +508,7 @@ async def propose_batch_to_guardian(
         bank_id,
         manual_targets or {},
         fleet_module.hub_capabilities(bank_id) if manual_targets else [],
-        lambda hub, target_kw: _ramped_setpoint_kw(hub, target_kw, cycle_interval_s),
+        lambda hub, target_kw: target_kw,  # raw: ramped per hub on the net below
     )
     if not grants and not extra_items:
         return None
@@ -453,11 +520,12 @@ async def propose_batch_to_guardian(
         bank_id,
         grants,
         fleet_module=fleet_module,
-        cycle_interval_s=cycle_interval_s,
+        cycle_interval_s=None,  # raw targets: one ramp per hub over every item of the batch (below)
         hub_allocations=hub_allocations,
         excluded_hub_ids=excluded_hub_ids | frozenset(manual_targets or {}),
     )
     items.extend(extra_items)
+    items = ramp_net_per_hub(items, fleet_module.hub_capabilities(bank_id), cycle_interval_s, now=now)
     trace_payload = {
         "command_batch_id": str(command_batch_id),
         "bank_id": bank_id,
@@ -482,20 +550,30 @@ async def propose_batch_to_guardian(
         attempt=attempt,
     )
     await backend.insert_command_batch(row)
+    # Utility-scale setpoints become ramp anchors only once the guardian signs this batch (HIGH-A).
+    _ramp_anchors.record_proposal(row.command_batch_id, items, expires_at)
     await backend.notify_guardian(row.command_batch_id)
     return row.command_batch_id
 
 
 async def guardian_is_available(
-    backend: EngineBackend, *, now: datetime | None = None, miss_threshold_s: float
+    backend: EngineBackend,
+    *,
+    now: datetime | None = None,
+    miss_threshold_s: float,
+    gate: GuardianGate | None = None,
 ) -> bool:
     """Degraded mode (02b S6.5): "guardian process down / verdict timeout -> hold". Engine skips
     proposing new batches when the guardian's heartbeat is missing or older than the configured
-    miss threshold, rather than piling up unread `command_batch` rows no one will ever sign."""
-    age_s = await backend.process_heartbeat_age_s(GUARDIAN_PROCESS_NAME, now=now)
-    if age_s is None:
-        return False
-    return age_s <= miss_threshold_s
+    miss threshold, rather than piling up unread `command_batch` rows no one will ever sign. `gate`
+    (`engine.propose_guard`) bounds the heartbeat read and holds after a propose timeout until the
+    guardian beats again."""
+    at = now if now is not None else datetime.now(UTC)
+    return await (gate or GuardianGate()).available(
+        lambda: backend.process_heartbeat_age_s(GUARDIAN_PROCESS_NAME, now=at),
+        now=at,
+        miss_threshold_s=miss_threshold_s,
+    )
 
 
 @dataclass(slots=True)
@@ -541,6 +619,10 @@ class _EngineState:
     veto_exclusions: HubVetoExclusions = field(default_factory=HubVetoExclusions)
     verdict_wait_s: float = DEFAULT_VERDICT_WAIT_S
     pending_verdicts: dict[UUID, str] = field(default_factory=dict)
+    #: Verdicts of the engine's utility-scale batches -> signed ramp anchors (`engine.ramp_anchor`).
+    anchor_verdicts: AnchorVerdictReader | None = None
+    #: Bounded guardian hand-off (`engine.propose_guard`): propose/heartbeat-read timeouts, stall hold.
+    guardian_gate: GuardianGate = field(default_factory=GuardianGate)
     #: Operator setpoints ramped by the engine (`engine.manual`); None = off.
     manual_source: ManualTargetSource | None = None
     manual_targets: dict[str, ManualTarget] = field(default_factory=dict)
@@ -551,6 +633,9 @@ class _EngineState:
     gate_backlog: list[GateTrigger] = field(
         default_factory=list
     )  # `[pq_ingest].flush_interval_s`; None when waveform ingest is off
+    #: R3.4.1: the clock-triggered obligation lifecycle pass (`advance_obligations`), backgrounded off
+    #: the 2 s tick the same way gates are; single-flight via `start_lifecycle_in_background`.
+    lifecycle_task: asyncio.Task[None] | None = None
 
 
 async def timed_tick(state: _EngineState) -> None:
@@ -701,6 +786,57 @@ def start_gates_in_background(
     return True
 
 
+#: R3.4.1 PROD-IO: at 3,509+ hubs `advance_obligations`'s backend reads/CAS updates were occasionally
+#: slow enough (contended Postgres) to add to the 4-5 s event-loop freezes traced to `pq_ingest`; moved
+#: off the tick the same way, with a cap so one bad pass cannot wedge every pass after it.
+DEFAULT_LIFECYCLE_TIMEOUT_S = 30.0
+
+
+def start_lifecycle_in_background(
+    state: Any,
+    transition: Transition,
+    expire_unselected: Callable[..., Coroutine[Any, Any, list[UUID]]],
+    now: datetime,
+    *,
+    timeout_s: float = DEFAULT_LIFECYCLE_TIMEOUT_S,
+) -> bool:
+    """Run the clock-triggered obligation lifecycle edges (`advance_obligations`) as ONE background
+    task, never awaited by the 2 s tick (mirrors `start_gates_in_background`). Single-flight: if the
+    previous pass hasn't finished, this cycle is SKIPPED (never queued) and logged -- a stuck pass must
+    not pile up a backlog of concurrent scans over the same obligations. A pass that runs past
+    `timeout_s` is abandoned (logged, not raised): the next cycle gets a fresh attempt rather than the
+    tick waiting on a wedged DB call forever (K7 -- dispatch keeps ticking either way, since neither the
+    allocator nor escalation reads `state.lifecycle_task`).
+
+    Safe to run concurrently with `escalate_sustained_shortfalls`'s own `transition_obligation` calls in
+    the same tick: `contracts.transition_obligation` persists through
+    `ContractsRepo.update_obligation_state`'s `UPDATE ... WHERE obligation_id = %s AND version = %s`,
+    a single conditional statement Postgres applies atomically per row, so two writers racing the SAME
+    obligation never both succeed -- the loser's `RETURNING *` comes back empty and `transition_obligation`
+    raises `ConcurrentUpdateError`, which both call sites (`lifecycle._apply` and
+    `escalate_sustained_shortfalls`) already catch and log rather than propagate. No additional lock
+    between the two is needed as a result. Returns True if a pass was started now."""
+    if state.lifecycle_backend is None:
+        return False
+    if state.lifecycle_task is not None and not state.lifecycle_task.done():
+        logger.warning("obligation lifecycle pass still running; skipping this cycle's run")
+        return False
+
+    async def _run() -> None:
+        try:
+            await asyncio.wait_for(
+                advance_obligations(state.lifecycle_backend, transition, expire_unselected, now),
+                timeout=timeout_s,
+            )
+        except TimeoutError:
+            logger.error("obligation lifecycle pass timed out", extra={"timeout_s": timeout_s})
+        except Exception:
+            logger.exception("obligation lifecycle step failed")
+
+    state.lifecycle_task = asyncio.create_task(_run())
+    return True
+
+
 async def _flush_pq_summaries(state: _EngineState) -> None:
     """Write buffered waveform summaries on `[pq_ingest].flush_interval_s` (one batched insert). A failed
     flush is logged and retried next time; it never costs the dispatch tick (K7)."""
@@ -760,27 +896,18 @@ async def propose_all_banks[G](
     propose: Callable[[str, list[G]], Coroutine[Any, Any, None]],
     *,
     concurrency: int,
+    timeout_s: float | None = None,
+    gate: GuardianGate | None = None,
 ) -> list[str]:
     """Propose every bank's batch, up to `concurrency` banks at once. Each bank is its own trace stream,
     so batches are independent; within a bank `propose_batch_to_guardian` keeps K10's order (pre-image,
     then batch row, then NOTIFY). A bank whose proposal fails is logged and returned; the others still go
-    out this cycle (K7)."""
-    gate = asyncio.Semaphore(concurrency)
-
-    async def _one(bank_id: str, bank_grants: list[G]) -> None:
-        async with gate:
-            await propose(bank_id, bank_grants)
-
-    bank_ids = list(grants_by_bank)
-    results = await asyncio.gather(*(_one(b, grants_by_bank[b]) for b in bank_ids), return_exceptions=True)
-    failed: list[str] = []
-    for bank_id, result in zip(bank_ids, results, strict=True):
-        if isinstance(result, BaseException):
-            if isinstance(result, asyncio.CancelledError):
-                raise result
-            logger.error("command batch proposal failed", exc_info=result, extra={"bank_id": bank_id})
-            failed.append(bank_id)
-    return failed
+    out this cycle (K7). `timeout_s` bounds the whole phase (`engine.propose_guard.propose_banks`); a
+    timeout is noted on `gate` so the next cycles hold until the guardian beats again."""
+    result = await propose_banks(grants_by_bank, propose, concurrency=concurrency, timeout_s=timeout_s)
+    if result.timed_out and gate is not None:
+        gate.note_stall()
+    return list(result.failed)
 
 
 async def characterize_hubs() -> int:
@@ -918,6 +1045,42 @@ def hub_bank_id(fleet_module: Any, hub_id: str) -> str | None:
     return None
 
 
+def _safe_bank_zone(fleet_module: Any, bank_id: str) -> str | None:
+    try:
+        return str(fleet_module.bank_zone(bank_id))
+    except Exception:
+        return None
+
+
+async def refresh_ramp_anchors(state: Any, now: datetime, fleet_module: Any) -> None:
+    """HIGH-A (`engine.ramp_anchor`): learn which of last cycle's utility-scale batches the guardian signed
+    or vetoed, and which hubs a safe stop covers, before this cycle's setpoints are stepped."""
+    source = getattr(state, "manual_source", None)
+    if source is not None:
+        _ramp_anchors.apply_stops(
+            source.stop_scopes(), zone_of_bank=lambda bank_id: _safe_bank_zone(fleet_module, bank_id)
+        )
+    reader = getattr(state, "anchor_verdicts", None)
+    if reader is not None:
+        await _ramp_anchors.refresh(reader.outcomes, now)
+
+
+def drop_stopped_banks(state: Any, grants_by_bank: dict[str, list[Grant]], fleet_module: Any) -> None:
+    """No proposals for a bank under an engaged safe stop (FLEET, its BANK or its ZONE)."""
+    source = getattr(state, "manual_source", None)
+    if source is None:
+        return
+    stopped = stopped_banks(
+        list(grants_by_bank),
+        source.stop_scopes(),
+        zone_of_bank=lambda bank_id: _safe_bank_zone(fleet_module, bank_id),
+    )
+    for bank_id in stopped:
+        del grants_by_bank[bank_id]
+    if stopped:
+        logger.info("safe stop engaged: no proposals for %d bank(s)", len(stopped))
+
+
 async def trace_new_manual_targets(state: Any, cycle_id: str) -> None:
     """Record once per target that the engine adopted it and ramps it (R-MANUAL-RAMP)."""
     current = {t.trace_id for t in state.manual_targets.values()}
@@ -953,6 +1116,9 @@ async def refresh_market_model(fleet_gateway: Any, fleet_module: Any, pool: Any 
         banks = await load_utility_scale_banks(pool)
         if banks is not None:
             set_utility_scale_banks(banks)
+        unavailable = await load_unavailable_banks(pool)
+        if unavailable is not None:
+            set_unavailable_banks(unavailable)
 
 
 async def handle_vetoes(state: Any, proposed: dict[UUID, str], *, wait_s: float, cycle_id: str) -> list[str]:
@@ -1015,6 +1181,7 @@ async def repropose_banks(
     for bank_id in bank_ids:
         if bank_id in manual_bank_ids(state.manual_targets, fleet_module):
             grants_by_bank.setdefault(bank_id, [])
+    drop_stopped_banks(state, grants_by_bank, fleet_module)
     cycle_ledger_version = await ledger_version_for_cycle(state, grants)
 
     async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
@@ -1037,7 +1204,14 @@ async def repropose_banks(
             manual_targets=state.manual_targets,
         )
 
-    await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+    guard = getattr(state, "guardian_gate", None) or GuardianGate()
+    await propose_all_banks(
+        grants_by_bank,
+        _propose,
+        concurrency=PROPOSE_CONCURRENCY,
+        timeout_s=guard.propose_timeout_s,
+        gate=guard,
+    )
 
 
 async def _engine_tick(state: _EngineState) -> None:
@@ -1065,12 +1239,12 @@ async def _engine_tick(state: _EngineState) -> None:
 
     if state.lifecycle_backend is not None:
         with phase("lifecycle"):
-            try:
-                await advance_obligations(
-                    state.lifecycle_backend, contracts.transition_obligation, contracts.expire_unselected, now
-                )
-            except Exception:
-                logger.exception("obligation lifecycle step failed", extra={"cycle_id": cycle_id})
+            # R3.4.1: backgrounded (single-flight, timed out) rather than awaited inline -- see
+            # `start_lifecycle_in_background`'s docstring for why this is safe to run alongside this
+            # same tick's `escalate_sustained_shortfalls` below.
+            start_lifecycle_in_background(
+                state, contracts.transition_obligation, contracts.expire_unselected, now
+            )
 
     state.veto_exclusions.next_cycle()
     if state.pending_verdicts:
@@ -1086,6 +1260,9 @@ async def _engine_tick(state: _EngineState) -> None:
         with phase("manual_targets"):
             state.manual_targets = await state.manual_source.targets(now)
             await trace_new_manual_targets(state, cycle_id)
+
+    with phase("ramp_anchors"):
+        await refresh_ramp_anchors(state, now, fleet)
 
     with phase("allocator"):
         grants = await allocator.run_cycle(
@@ -1105,6 +1282,7 @@ async def _engine_tick(state: _EngineState) -> None:
             state.backend,
             now=now,
             miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold,
+            gate=state.guardian_gate,
         )
     if available:
         grants_by_bank: dict[str, list[Grant]] = {}
@@ -1112,6 +1290,7 @@ async def _engine_tick(state: _EngineState) -> None:
             grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
         for bank_id in manual_bank_ids(state.manual_targets, fleet):
             grants_by_bank.setdefault(bank_id, [])
+        drop_stopped_banks(state, grants_by_bank, fleet)
 
         proposed: dict[UUID, str] = {}
         cycle_ledger_version = await ledger_version_for_cycle(state, grants)
@@ -1138,7 +1317,13 @@ async def _engine_tick(state: _EngineState) -> None:
                 proposed[batch_id] = bank_id
 
         with phase("propose"):
-            await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+            await propose_all_banks(
+                grants_by_bank,
+                _propose,
+                concurrency=PROPOSE_CONCURRENCY,
+                timeout_s=state.guardian_gate.propose_timeout_s,
+                gate=state.guardian_gate,
+            )
         if state.verdict_reader is not None and proposed:
             with phase("veto_retry"):
                 retry_banks = await handle_vetoes(
@@ -1354,6 +1539,9 @@ async def main(cfg: Config) -> None:
         banks_at_start = await load_utility_scale_banks(pool)
         if banks_at_start is not None:
             set_utility_scale_banks(banks_at_start)
+        unavailable_at_start = await load_unavailable_banks(pool)
+        if unavailable_at_start is not None:
+            set_unavailable_banks(unavailable_at_start)
         veto_exclusions = HubVetoExclusions(exclude_cycles=settings.veto_exclude_cycles)
         from opengrid.firmware.catalogue import Catalogue
         from opengrid.firmware.config import load_firmware_config
@@ -1403,8 +1591,13 @@ async def main(cfg: Config) -> None:
             schedule_gateway=schedule_gateway,
             extras_gateway=extras_gateway,
             verdict_reader=PgVerdictReader(pool) if settings.veto_retry_enabled else None,
+            anchor_verdicts=PgAnchorVerdictReader(pool),
             veto_exclusions=veto_exclusions,
             verdict_wait_s=settings.verdict_wait_s,
+            guardian_gate=GuardianGate(
+                propose_timeout_s=settings.propose_timeout_s,
+                check_timeout_s=settings.guardian_check_timeout_s,
+            ),
             manual_source=manual_source,
             firmware=firmware,
             energy_sufficiency_gateway=EnergySufficiencyGateway(
@@ -1451,6 +1644,12 @@ async def main(cfg: Config) -> None:
         firmware_status_worker = BackgroundIngest("firmware-status", make_firmware_status_handler(pool))
         firmware_status_task = asyncio.create_task(firmware_status_worker.run())
         device_info_task = asyncio.create_task(device_info_worker.run())
+        telemetry_decoupler = build_telemetry_decoupler(cfg)
+        telemetry_apply_task = (
+            asyncio.create_task(telemetry_decoupler.run_applier())
+            if telemetry_decoupler is not None
+            else asyncio.create_task(asyncio.sleep(0))
+        )
         # One client at a time, rebuilt with the same client id after every disconnect (reconnect
         # with backoff; the loop resubscribes on each connection).
         ingest_task = asyncio.create_task(
@@ -1465,6 +1664,7 @@ async def main(cfg: Config) -> None:
                     site_ingest_on=settings.site_ingest_enabled,
                     device_info_worker=device_info_worker,
                     firmware_status_worker=firmware_status_worker,
+                    telemetry_decoupler=telemetry_decoupler,
                 ),
                 ingest_health,
                 on_give_up=_give_up,
@@ -1539,15 +1739,41 @@ async def main(cfg: Config) -> None:
                 device_info_task,
                 firmware_status_task,
                 grid_link_task,
+                telemetry_apply_task,
             )
             for task in {ingest_task, *background}:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            if telemetry_decoupler is not None:
+                telemetry_decoupler.stop()
         if fatal_exit:
             raise SystemExit(fatal_exit[0])
     finally:
         await pool.close()
+
+
+def build_telemetry_decoupler(cfg: Config) -> TelemetryDecoupler | None:
+    """Telemetry ingest decoupling step 1 (`engine.telemetry_ingest`), `[ingest].telemetry_decoupled`
+    (default FALSE until the r3.4.5 perf before/after and dev-stack test: the inline path stays the default). The parser thread is started here."""
+    from opengrid import fleet
+
+    if not bool(cfg.get("ingest.telemetry_decoupled", False)):
+        return None
+
+    async def _apply(telemetry: Any) -> None:
+        fleet.apply_telemetry(telemetry)
+
+    decoupler = TelemetryDecoupler(
+        fleet.parse_telemetry,
+        _apply,
+        observe=engine_metrics.observe_ingest,
+        raw_max=int(cfg.get("ingest.telemetry_raw_max", DEFAULT_RAW_MAX)),
+        max_hubs=int(cfg.get("ingest.telemetry_max_hubs", DEFAULT_MAX_HUBS)),
+        apply_interval_s=float(cfg.get("ingest.telemetry_apply_interval_s", DEFAULT_APPLY_INTERVAL_S)),
+    )
+    decoupler.start()
+    return decoupler
 
 
 #: ~100 s of waveform summaries at 2,000 hubs; beyond that the newest are dropped (counted) rather than
@@ -1672,6 +1898,7 @@ async def _mqtt_ingest_loop(
     site_ingest_on: bool = False,
     device_info_worker: BackgroundIngest | None = None,
     firmware_status_worker: BackgroundIngest | None = None,
+    telemetry_decoupler: TelemetryDecoupler | None = None,
 ) -> None:
     """Subscribe to `<root>/tel/#`, `<root>/scada/#`, `<root>/scada/instruction/#` (topics.md) and route
     validated payloads into the fleet twin. Split out of `main` so it runs concurrently with the 2 s
@@ -1712,6 +1939,11 @@ async def _mqtt_ingest_loop(
         await client.subscribe(firmware_status_topic)
 
     async for message in client.messages:
+        if telemetry_decoupler is not None and message.topic.matches(tel_topic):
+            # r3.4.4: decode/validate/parse on the parser thread; the twin gets each hub's newest sample
+            # every ~100 ms (`engine.telemetry_ingest`). Nothing else is under tel/.
+            telemetry_decoupler.submit(message.payload)
+            continue
         msg_topic = str(message.topic)
         try:
             payload = json.loads(message.payload)

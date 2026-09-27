@@ -30,6 +30,7 @@ from ogsim.control import catalogue
 from ogsim.control.scenarios import ScenarioStep, load_scenarios_dir
 from ogsim.fleet.pq import PQ_ANOMALY_TYPES
 from ogsim.fleet.runtime import FleetEngine
+from ogsim.market.as_dispatch import SIMULATED_ERCOT_RESOURCES
 from ogsim.market.data import PRODUCTS, SIMULATED_PJM_ZONES
 from ogsim.scada.runtime import ScadaEngine
 
@@ -67,7 +68,9 @@ def _config_ids(config_dir: Path) -> set[str]:
 
 # ogsim.market.anomalies: a market anomaly's target is a real product id, a registered simulated zone
 # id (SIMULATED_PJM_ZONES), "eia", "nws", or "*".
-KNOWN_MARKET_TARGETS = set(PRODUCTS) | set(SIMULATED_PJM_ZONES) | {"*", "eia", "nws"}
+KNOWN_MARKET_TARGETS = (
+    set(PRODUCTS) | set(SIMULATED_PJM_ZONES) | set(SIMULATED_ERCOT_RESOURCES) | {"*", "eia", "nws"}
+)
 
 
 def _scenario_steps() -> list[Any]:

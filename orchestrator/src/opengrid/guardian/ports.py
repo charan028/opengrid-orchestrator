@@ -28,6 +28,7 @@ from opengrid.guardian.pq_ports import (
     PqMeasurementPort,
     SensitiveGrantPort,
 )
+from opengrid.market.availability import BankAvailability
 
 SafeStopScope = Literal["FLEET", "ZONE", "BANK"]
 UtilityInstructionKind = Literal["LIMIT", "BLOCK", "ESTOP"]
@@ -109,6 +110,9 @@ class HubSnapshot:
     prev_p_kw: float
     health: Literal["online", "stale", "offline", "fault"]
     flow: HubFlowTelemetry = HubFlowTelemetry()
+    #: the hub's own timestamp of the telemetry sample `prev_p_kw` came from (None: none yet); G-04 anchors a
+    #: utility-scale hub at the guardian's last signed setpoint only while that is not clearly older than this
+    telemetry_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +208,15 @@ class TerritoryPort(Protocol):
 
     async def free_access(self, utility_id: str) -> bool: ...
 
+    async def bank_availability(self, bank_id: str) -> BankAvailability | None:
+        """D-37: the bank's og.bank.availability (None = unknown bank)."""
+        ...
+
+    async def grandfathered(self, obligation_id: UUID, bank_id: str) -> bool:
+        """D-37/K13: the obligation is grandfathered on this unavailable bank
+        (`opengrid.market.availability.GRANDFATHERED_SQL`, the guardian's own read)."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class BankSnapshot:
@@ -282,6 +295,8 @@ class ActiveObligation:
 
     obligation_id: UUID
     frozen_kw: Decimal
+    #: the obligation's reservation across EVERY bank now (this bank's `frozen_kw` is its share); None: not read
+    total_frozen_kw: Decimal | None = None
 
 
 class CommitmentPort(Protocol):
@@ -299,9 +314,15 @@ class CommitmentPort(Protocol):
 
 
 class PriorGrantPort(Protocol):
-    async def prior_granted_kw(self, obligation_id: UUID) -> Decimal | None:
-        """The PRIOR cycle's actually-granted kw for this obligation (02a S6.2's `prior_grants`), or
-        None if there is none yet (falls back to the frozen commitment as the floor)."""
+    async def prior_granted_kw(
+        self, obligation_id: UUID, bank_id: str | None = None, cycle_id: str | None = None
+    ) -> Decimal | None:
+        """The PRIOR cycle's actually-granted kw for this obligation ON THIS BANK (02a S6.2's `prior_grants`):
+        the latest grant row for (obligation, bank) from a cycle other than `cycle_id` -- the current cycle's
+        own grants are persisted before the guardian judges them. None if there is none yet (falls back to the
+        frozen commitment as the floor). Per bank, because G-19 judges one bank's batch against that bank's
+        reservation: an obligation-wide latest row (another bank's share) vetoed the smaller share every cycle
+        (r3.4.4 live, ECRS 046a2ebb: 150.424 kW on bank-027 vs 149.576 kW on bank-034)."""
         ...
 
 
@@ -358,6 +379,11 @@ class AsAwardPort(Protocol):
         """An uncancelled og.as_deployment covering now, for this obligation or for every AS award."""
         ...
 
+    async def deployment_requested_kw(self, obligation_id: UUID) -> Decimal | None:
+        """The active deployment's requested kW (magnitude) for this obligation; None when no deployment is
+        active or it names none (the full commitment is deployed)."""
+        ...
+
 
 class MobileUnitPort(Protocol):
     """D-31 / G-35: which hubs are MOBILE_STORAGE units, and whether each is at its home station now."""
@@ -366,6 +392,16 @@ class MobileUnitPort(Protocol):
 
     async def at_home_station(self, hub_id: str) -> bool | None:
         """True at its home station, False away, None unknown (G-35 treats unknown as away)."""
+        ...
+
+
+class FirmwareUpdatingPort(Protocol):
+    """The guardian's own read of hubs a firmware campaign has taken out of service (`og.firmware_job`)."""
+
+    async def updating_hub_ids(self, bank_id: str) -> set[str]:
+        """Hubs on `bank_id` with a firmware job in flight -- SENT or UPDATING, or PENDING with its command
+        already requested -- in a campaign that is not ABORTED: the same hubs the engine's firmware executor
+        excludes from dispatch (`firmware.executor.updating_hub_ids`)."""
         ...
 
 
@@ -392,6 +428,11 @@ class SafeStopPort(Protocol):
     async def is_stopped(self, scope: SafeStopScope, scope_ref: str) -> bool:
         """Whether an ENGAGE stop_event with no matching RELEASE is in force for this scope/scope_ref,
         or for a containing scope (FLEET stops everything; ZONE stops its banks)."""
+        ...
+
+    async def last_engaged_at(self, scope: SafeStopScope, scope_ref: str) -> datetime | None:
+        """When the latest ENGAGE on exactly this scope/scope_ref was recorded (None: never). G-04 drops a hub's
+        signed anchor when a stop engaged over it at or after the signature (r3.4.3, DISPATCH contract)."""
         ...
 
 
@@ -422,9 +463,18 @@ class EngagedStop:
     stop_id: UUID
     initiator_kind: str
     engaged_at: datetime
+    #: `og.stop_event.reason`: for a UTILITY stop it names the L2 instruction that engaged it
+    #: (`safestop.l2_intake.l2_reason`), which only that instruction's lift can end (Q10)
+    reason: str | None = None
 
 
 class StopReleasePort(Protocol):
+    async def utility_lifts(self, bank_ids: list[str]) -> dict[str, datetime]:
+        """Q10: the utility L2 instructions that the utility itself has LIFTED on these banks -- a lift carrying
+        the instruction's own id, recorded durably by og-safestop's L2 intake -- as `instruction_id -> lifted at`
+        (the first recorded lift of each)."""
+        ...
+
     async def pending_requests(self, *, max_age_s: float) -> list[ReleaseRequest]:
         """Approved Tier-2 release requests the guardian has not yet decided (no verdict trace row)."""
         ...
@@ -491,3 +541,6 @@ class GuardianPorts:
     # None: no mobile-unit registry wired, so G-35 has nothing to check (no hub is known to be mobile).
     # Production always wires it (`guardian.main`).
     mobile_units: MobileUnitPort | None = None
+    # None: no firmware read, so G-19's capability evidence counts firmware-updating hubs as available (an
+    # R-COMMIT-LOCK-OVERRIDE-L0 for them is then not corroborated: VETO). Production wires it (`repo`).
+    firmware_updating: FirmwareUpdatingPort | None = None

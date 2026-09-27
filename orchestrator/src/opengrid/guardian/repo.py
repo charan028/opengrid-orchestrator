@@ -31,11 +31,14 @@ from decimal import Decimal
 from typing import Any, ClassVar, Literal
 from uuid import UUID, uuid4
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core import geo, manual_targets
+from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.core.pq import OffsetVector
+from opengrid.guardian import checks
 from opengrid.guardian.config import DEFAULT_CLOCK_CACHE_S, ClockSource
 from opengrid.guardian.ports import (
     ActiveObligation,
@@ -100,7 +103,10 @@ ORDER BY interval_start DESC LIMIT 1
 # not part of it. Unscoped, every future commitment on the bank counted as "omitted, 0 kW" and G-19
 # vetoed every batch (live 2026-09-26).
 _ACTIVE_OBLIGATIONS_FOR_BANK_SQL = """
-SELECT r.obligation_id, SUM(r.amount) AS frozen_kw
+SELECT r.obligation_id, SUM(r.amount) AS frozen_kw,
+       (SELECT SUM(a.amount) FROM og.reservation a
+        WHERE a.obligation_id = r.obligation_id AND a.released_at IS NULL
+          AND a.interval_start <= now() AND a.interval_end > now()) AS total_frozen_kw
 FROM og.reservation r
 JOIN og.commitment c ON c.obligation_id = r.obligation_id AND c.supersedes IS NULL
     AND c.interval_start = r.interval_start
@@ -109,7 +115,15 @@ WHERE r.bank_id = %(bank_id)s AND r.released_at IS NULL
 GROUP BY r.obligation_id
 """
 
+
+#: The PRIOR cycle's grant for this obligation ON THIS BANK (the current cycle's rows are written before the
+#: verdict, so they are excluded). Obligation-wide it compared another bank's share (r3.4.4 live G-19 veto burst).
 _PRIOR_GRANT_SQL = """
+SELECT granted_kw FROM og.grant
+WHERE obligation_id = %(obligation_id)s AND bank_id::text = %(bank_id)s AND cycle_id <> %(cycle_id)s
+ORDER BY created_at DESC LIMIT 1
+"""
+_PRIOR_GRANT_ANY_BANK_SQL = """
 SELECT granted_kw FROM og.grant WHERE obligation_id = %(obligation_id)s
 ORDER BY created_at DESC LIMIT 1
 """
@@ -119,6 +133,58 @@ SELECT action FROM og.stop_event WHERE scope_kind = %(scope_kind)s AND scope_ref
 ORDER BY created_at DESC LIMIT 1
 """
 
+_LAST_ENGAGE_SQL = """
+SELECT max(created_at) FROM og.stop_event
+WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s AND action = 'ENGAGE'
+"""
+
+#: r3.4.3 HIGH-A: every batch this guardian signed in the last lease window, with the proposal it signed (the
+#: RT_ALLOCATION pre-image G-14 required before signing). Indexed end to end (prod EXPLAIN ANALYZE 2026-09-27:
+#: 1.6 ms, 377 buffers): the window on ix_trace_class_time, the batch by its primary key (and it must name that
+#: trace as its pre-image), the verdict by ix_verdict_batch. `load_signed_anchors` keeps the live-lease setpoints.
+_SIGNED_ANCHORS_SQL = """
+SELECT v.signed_at, t.payload
+FROM og.trace t
+JOIN og.command_batch cb
+  ON cb.command_batch_id = (t.payload ->> 'command_batch_id')::uuid AND cb.trace_pre_image_id = t.trace_id
+JOIN og.verdict v ON v.command_batch_id = cb.command_batch_id
+WHERE t.event_class = 'RT_ALLOCATION' AND t.created_at > %(since)s
+  AND v.outcome = 'PASS' AND v.signed_at > %(since)s {published}
+ORDER BY v.signed_at
+"""
+#: og.verdict.published_at (additive migration, agreed with DISPATCH): stamped once the signed batch is published;
+#: "signed" for G-04's anchor on both sides means PASS AND published. Absent on an older schema.
+_VERDICT_PUBLISHED_COLUMN_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'og' AND table_name = 'verdict' AND column_name = 'published_at'
+)
+"""
+_MARK_VERDICT_PUBLISHED_SQL = """
+UPDATE og.verdict SET published_at = now() WHERE command_batch_id = %(command_batch_id)s AND published_at IS NULL
+"""
+_published_column_missing = False
+
+
+async def mark_verdict_published(pool: AsyncConnectionPool, command_batch_id: UUID) -> None:
+    """Stamp og.verdict.published_at once the signed batch is published (the engine's and the startup reload's
+    signal that it became G-04's anchor). Never raises; on a schema without the column it stops trying."""
+    global _published_column_missing
+    if _published_column_missing:
+        return
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_MARK_VERDICT_PUBLISHED_SQL, {"command_batch_id": command_batch_id})
+    except psycopg.errors.UndefinedColumn:
+        _published_column_missing = True
+        logger.warning("og.verdict.published_at not migrated yet: publish stamps skipped")
+    except Exception:
+        logger.exception("failed to stamp og.verdict.published_at", extra={"batch": str(command_batch_id)})
+
+
+#: The reload never delays startup by more than this: on timeout G-04 starts on telemetry (DISPATCH contract).
+SIGNED_ANCHORS_TIMEOUT_MS = 2000
+
 _PROPOSAL_SQL = """
 SELECT payload FROM og.trace
 WHERE decision_type = 'RT_ALLOCATION' AND payload ->> 'command_batch_id' = %(command_batch_id)s
@@ -126,20 +192,13 @@ ORDER BY seq DESC LIMIT 1
 """
 
 
-#: Asset classes rated at their nameplate `og.hub.p_kw`, never the home per-unit cap (11 kW per unit): the D-29
-#: substation set, and the D-31 mobile trucks (e.g. 1000 kWh / 500 kW, units=1).
-NAMEPLATE_ASSET_CLASSES = ("SUBSTATION", "MOBILE_STORAGE")
-
-#: `utility_scale`: the hub belongs to a nameplate-rated og.asset -- linked by its (one-hub) bank or by its
-#: own id. Home hubs have no such asset row and keep the home unit rules.
-_ALL_HUB_PARAMS_SQL = """
+#: `utility_scale`: the hub belongs to a nameplate-rated og.asset (`core.nameplate`, the one rule the planners
+#: share): the D-29 substation set or a D-31 truck. Home hubs keep the home unit rules.
+_ALL_HUB_PARAMS_SQL = f"""
 SELECT h.hub_id, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, h.units,
-       EXISTS (
-           SELECT 1 FROM og.asset a
-           WHERE (a.bank_id = h.bank_id OR a.asset_id = h.hub_id) AND a.asset_class = ANY(%(nameplate)s)
-       ) AS utility_scale
+       {NAMEPLATE_HUB_EXISTS_SQL} AS utility_scale
 FROM og.hub h
-"""
+"""  # noqa: S608 -- NAMEPLATE_HUB_EXISTS_SQL is a fixed module-level literal
 
 
 async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
@@ -148,7 +207,7 @@ async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
     otherwise keeps via MQTT). `soc_kwh`/`prev_p_kw` start at 0 and `health="stale"` until the first
     telemetry message for that hub arrives. `units` (migration 0032) feeds G-02's per-unit cap."""
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_ALL_HUB_PARAMS_SQL, {"nameplate": list(NAMEPLATE_ASSET_CLASSES)})
+        await cur.execute(_ALL_HUB_PARAMS_SQL)
         rows = await cur.fetchall()
     return {
         hub_id: HubSnapshot(
@@ -223,16 +282,31 @@ class PgCommitmentPort:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_ACTIVE_OBLIGATIONS_FOR_BANK_SQL, {"bank_id": bank_id})
             rows = await cur.fetchall()
-        return [ActiveObligation(obligation_id=row[0], frozen_kw=Decimal(str(row[1]))) for row in rows]
+        return [
+            ActiveObligation(
+                obligation_id=row[0],
+                frozen_kw=Decimal(str(row[1])),
+                total_frozen_kw=Decimal(str(row[2])) if row[2] is not None else None,
+            )
+            for row in rows
+        ]
 
 
 class PgPriorGrantPort:
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
 
-    async def prior_granted_kw(self, obligation_id: UUID) -> Decimal | None:
+    async def prior_granted_kw(
+        self, obligation_id: UUID, bank_id: str | None = None, cycle_id: str | None = None
+    ) -> Decimal | None:
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_PRIOR_GRANT_SQL, {"obligation_id": obligation_id})
+            if bank_id is None:  # no bank to scope to (legacy caller): the latest row, as before
+                await cur.execute(_PRIOR_GRANT_ANY_BANK_SQL, {"obligation_id": obligation_id})
+            else:
+                await cur.execute(
+                    _PRIOR_GRANT_SQL,
+                    {"obligation_id": obligation_id, "bank_id": bank_id, "cycle_id": cycle_id or ""},
+                )
             row = await cur.fetchone()
         return Decimal(str(row[0])) if row else None
 
@@ -323,6 +397,17 @@ SELECT EXISTS (
 """
 
 
+#: The active deployment's requested kW for this obligation (the largest when several; NULL when one deploys the
+#: full commitment or none is active):
+#: a partial deployment (0.3 MW of a 0.5 MW award) is what the bank shares must deliver, not the whole award.
+_AS_DEPLOYMENT_REQUESTED_SQL = """
+SELECT CASE WHEN bool_or(d.requested_kw IS NULL) THEN NULL ELSE max(abs(d.requested_kw)) END
+FROM og.as_deployment d JOIN og.obligation o ON o.obligation_id = %(obligation_id)s
+WHERE d.start_at <= now() AND d.end_at > now() AND d.cancelled_at IS NULL
+  AND (d.obligation_id = o.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS'))
+"""
+
+
 class PgAsAwardPort:
     """G-19 R-GRANT-AS-HOLD: the guardian's own reads of the award's service type and its deployment."""
 
@@ -341,6 +426,12 @@ class PgAsAwardPort:
             row = await cur.fetchone()
         return bool(row and row[0])
 
+    async def deployment_requested_kw(self, obligation_id: UUID) -> Decimal | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_AS_DEPLOYMENT_REQUESTED_SQL, {"obligation_id": obligation_id})
+            row = await cur.fetchone()
+        return Decimal(str(row[0])) if row and row[0] is not None else None
+
 
 #: An open alert's condition key: the one this port stores in `detail`, else rebuilt from its scope (the
 #: structured columns of migration 0031, or `detail`'s scope keys) -- so an alert raised without the stored
@@ -358,19 +449,19 @@ WHERE h.hub_id = ANY(%(hub_ids)s)
 """
 
 
-_HUB_POSITION_SQL = "SELECT lat, lon FROM og.hub WHERE hub_id = %(hub_id)s"
-
-
 class ConfigMobileUnitPort:
     """G-35 (D-31) from SERVICES' home-station registry (`config/service_profiles/mobile_storage_home_stations
     .toml`, read by `selector.gate`, the one reader of that file). A mobile unit is a single-hub bank; its
     bank id (and, for a truck, its hub id) is listed under `[[assignment]]`.
 
-    Location: the guardian's own read of the unit's position in `og.hub` (lat/lon; the device-info intake,
-    `opengrid.fleet.device_info`, re-rates it whenever the device reports a new position, with a K10 trace).
-    The unit is at home per `opengrid.core.geo.at_home_station` (the one rule the selector's charge planning
-    uses too): within `radius_km` of its home station. No pool, no station
-    coordinates, or no recorded position is UNKNOWN, which G-35 treats as away (fail closed)."""
+    Location: the guardian's own read of the unit's DEVICE-REPORTED position (`core.geo.DEVICE_POSITIONS_SQL`:
+    `og.hub.device_lat/device_lon`, stamped `device_info_at`, written by the device-info intake from each
+    report), trusted per `core.geo.fresh_positions`: while younger than `max_age_s`, or -- the stationary
+    rule -- while the unit's telemetry is younger than `telemetry_max_age_s` (`[health].hub_stale_s`; a unit
+    that moves must re-report). Never `og.hub.lat/lon`, which is the seeded home station and never moves. The
+    unit is at home per `core.geo.at_home_station` (the one rule the selector's charge planning uses too). No
+    pool, no station coordinates, no reported position, or an old report with stale telemetry is UNKNOWN,
+    which G-35 treats as away (fail closed)."""
 
     def __init__(
         self,
@@ -379,11 +470,17 @@ class ConfigMobileUnitPort:
         pool: AsyncConnectionPool | None = None,
         *,
         radius_km: float = geo.HOME_STATION_RADIUS_KM,
+        max_age_s: float = geo.MOBILE_POSITION_MAX_AGE_S,
+        telemetry_max_age_s: float | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sites = dict(sites or {})
         self._mobile = frozenset(mobile_ids) | frozenset(self._sites)
         self._pool = pool
         self._radius_km = radius_km
+        self._max_age_s = max_age_s
+        self._telemetry_max_age_s = telemetry_max_age_s
+        self._clock = clock
 
     def is_mobile(self, hub_or_bank_id: str) -> bool:
         return hub_or_bank_id in self._mobile
@@ -392,17 +489,42 @@ class ConfigMobileUnitPort:
         if self._pool is None:
             return None
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_HUB_POSITION_SQL, {"hub_id": hub_id})
-            row = await cur.fetchone()
-        if row is None or row[0] is None or row[1] is None:
-            return None
-        return float(row[0]), float(row[1])
+            await cur.execute(geo.DEVICE_POSITIONS_SQL, {"ids": [hub_id]})
+            rows = await cur.fetchall()
+        return geo.fresh_positions(
+            rows, self._clock(), max_age_s=self._max_age_s, telemetry_max_age_s=self._telemetry_max_age_s
+        ).get(hub_id)
 
     async def at_home_station(self, hub_id: str) -> bool | None:
         site = self._sites.get(hub_id)
         if site is None:
             return None
         return geo.at_home_station(await self._position(hub_id), site, radius_km=self._radius_km)
+
+
+#: Hubs out of service for firmware: the job states the engine's executor excludes (IN_FLIGHT_JOB_STATES plus a
+#: PENDING job whose command was already requested), in a campaign that was not aborted -- as
+#: `firmware.repo._IN_FLIGHT_SQL` counts them, per hub.
+_FIRMWARE_UPDATING_SQL = """
+SELECT DISTINCT j.hub_id
+FROM og.firmware_job j JOIN og.firmware_campaign c ON c.campaign_id = j.campaign_id
+WHERE j.bank_id::text = %(bank_id)s
+  AND (j.state IN ('SENT', 'UPDATING') OR (j.state = 'PENDING' AND j.command_id IS NOT NULL))
+  AND c.state <> 'ABORTED'
+"""
+
+
+class PgFirmwareUpdatingPort:
+    """G-19 capability evidence (r3.4.3, with DISPATCH's M1): the guardian's own read of hubs a firmware campaign
+    has taken out of service, so an R-COMMIT-LOCK-OVERRIDE-L0 for them corroborates."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def updating_hub_ids(self, bank_id: str) -> set[str]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_FIRMWARE_UPDATING_SQL, {"bank_id": bank_id})
+            return {str(r[0]) for r in await cur.fetchall()}
 
 
 class PgManualTargetPort:
@@ -572,6 +694,12 @@ class PgSafeStopPort:
             return False
         return bool(row[0] == "ENGAGE")
 
+    async def last_engaged_at(self, scope: SafeStopScope, scope_ref: str) -> datetime | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LAST_ENGAGE_SQL, {"scope_kind": scope, "scope_ref": scope_ref})
+            row = await cur.fetchone()
+        return row[0] if row is not None else None
+
 
 def _trace_payload_to_proposal(payload: dict[str, Any]) -> ProposedBatch:
     items = [
@@ -600,6 +728,35 @@ def _trace_payload_to_proposal(payload: dict[str, Any]) -> ProposedBatch:
         items=items,
         is_firm_event=bool(payload.get("is_firm_event", False)),
     )
+
+
+async def load_signed_anchors(
+    pool: AsyncConnectionPool,
+    *,
+    now: datetime,
+    lookback_s: float = 60.0,
+    timeout_ms: int = SIGNED_ANCHORS_TIMEOUT_MS,
+) -> dict[str, tuple[float, datetime, datetime]]:
+    """r3.4.3 HIGH-A: G-04's signed anchors after a guardian restart -- per hub, the net setpoint of the LATEST
+    batch this guardian signed (og.verdict PASS, its proposal from the RT_ALLOCATION pre-image) whose lease is
+    still live at `now`: `(setpoint_kw, signed_at, lease_expires_at)`, the shape `GuardianService._last_signed`
+    keeps. `lookback_s` is the last lease window (2x the 30 s lease cap): an older signature's lease has lapsed.
+    A later signature for a hub replaces an earlier one. Read-only, under a `timeout_ms` statement timeout (the
+    caller falls back to telemetry anchors when it raises)."""
+    since = datetime.fromtimestamp(now.timestamp() - lookback_s, tz=UTC)
+    async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        await cur.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
+        await cur.execute(_VERDICT_PUBLISHED_COLUMN_SQL)
+        has_column = await cur.fetchone()
+        published = "AND v.published_at IS NOT NULL" if has_column is not None and has_column[0] else ""
+        await cur.execute(_SIGNED_ANCHORS_SQL.format(published=published), {"since": since})
+        rows = await cur.fetchall()
+    anchors: dict[str, tuple[float, datetime, datetime]] = {}
+    for signed_at, payload in rows:  # oldest first: the latest signature per hub wins
+        proposal = _trace_payload_to_proposal(dict(payload))
+        for item in checks.hub_setpoints(proposal.items):
+            anchors[item.hub_id] = (item.p_kw_setpoint, signed_at, proposal.expires_at)
+    return {hub: entry for hub, entry in anchors.items() if entry[2] > now}
 
 
 class PgProposalPort:
@@ -965,7 +1122,7 @@ LIMIT 20
 """
 
 _OUTSTANDING_ENGAGES_SQL = """
-SELECT e.stop_event_id, e.initiator_kind, e.created_at
+SELECT e.stop_event_id, e.initiator_kind, e.created_at, e.reason
 FROM og.stop_event e
 WHERE e.scope_kind = %(scope_kind)s AND e.scope_ref = %(scope_ref)s AND e.action = 'ENGAGE'
   AND e.created_at > COALESCE(
@@ -973,6 +1130,16 @@ WHERE e.scope_kind = %(scope_kind)s AND e.scope_ref = %(scope_ref)s AND e.action
        WHERE r.scope_kind = %(scope_kind)s AND r.scope_ref = %(scope_ref)s AND r.action = 'RELEASE'),
       '-infinity'::timestamptz)
 ORDER BY e.created_at
+"""
+
+#: Q10: lifts of utility L2 instructions og-safestop recorded (`safestop.l2_intake`: an expired BLOCK/ESTOP whose
+#: `lifts_instruction_id` names the instruction it ends), on the ix_trace_class_time index. The FIRST lift counts: a
+#: retained re-delivery re-recorded after a restart never moves it later.
+_UTILITY_LIFTS_SQL = """
+SELECT t.payload ->> 'lifted_instruction_id', min(t.created_at)
+FROM og.trace t
+WHERE t.event_class = 'SAFE_STOP' AND t.payload ->> 'l2' = 'LIFT' AND t.payload ->> 'bank_id' = ANY(%(bank_ids)s)
+GROUP BY 1
 """
 
 _BANKS_SQL = {
@@ -991,6 +1158,13 @@ WHERE t.event_class = 'GUARDIAN_VERDICT'
   AND t.created_at > now() - make_interval(secs => %(max_age_s)s)
   AND t.payload ->> 'kind' = 'STOP_RELEASE' AND t.payload ->> 'outcome' = 'SIGNED'
   AND NOT EXISTS (SELECT 1 FROM og.stop_event s WHERE s.signature = ev ->> 'signature')
+  -- og-safestop refused it as superseded by a newer ENGAGE (r3.4.2 review L-1): re-handing it can never help;
+  -- the operators re-issue the two-person release (ALR-STOP-RELEASE-SUPERSEDED)
+  AND NOT EXISTS (
+      SELECT 1 FROM og.trace r
+      WHERE r.event_class = 'SAFE_STOP' AND r.created_at > now() - make_interval(secs => %(max_age_s)s)
+        AND r.payload ->> 'superseded_signature' = ev ->> 'signature'
+  )
 ORDER BY t.created_at
 """
 
@@ -1054,7 +1228,18 @@ class PgStopReleasePort:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_OUTSTANDING_ENGAGES_SQL, {"scope_kind": scope_kind, "scope_ref": scope_ref})
             rows = await cur.fetchall()
-        return [EngagedStop(stop_id=row[0], initiator_kind=str(row[1]), engaged_at=row[2]) for row in rows]
+        return [
+            EngagedStop(stop_id=row[0], initiator_kind=str(row[1]), engaged_at=row[2], reason=row[3])
+            for row in rows
+        ]
+
+    async def utility_lifts(self, bank_ids: list[str]) -> dict[str, datetime]:
+        if not bank_ids:
+            return {}
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_UTILITY_LIFTS_SQL, {"bank_ids": bank_ids})
+            rows = await cur.fetchall()
+        return {str(row[0]): row[1] for row in rows}
 
     async def banks_in_scope(self, scope_kind: StopScopeKind, scope_ref: str) -> list[str]:
         async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -1139,6 +1324,7 @@ def build_pg_ports(
         topology=topology,
         territory=territory,
         manual_targets=PgManualTargetPort(pool),
+        firmware_updating=PgFirmwareUpdatingPort(pool),
         pq=PqPorts(
             envelopes=PgPqEnvelopeStatePort(pool),
             measurements=PgPqMeasurementPort(pool),

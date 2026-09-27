@@ -15,6 +15,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# This checkout's opengrid first: delivery_check judges with `opengrid.core.delivery`, and a venv may carry an
+# install of another checkout, which would otherwise be imported instead of the code under test.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "orchestrator" / "src"))
 
 from e2e_stack import Stack
 

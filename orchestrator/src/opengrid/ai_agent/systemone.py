@@ -111,7 +111,8 @@ class TypeSafeProvider:
         return self._client.model if purpose == "screen" else None
 
     async def screen(self, request: ModelRequest, *, timeout_s: float) -> tuple[RouterVerdict, TokenUsage]:
-        state = {"evidence": request.evidence, "operator_question": request.question}
+        # Screening classifies the operator's words only: never the console snapshot (same as Claude).
+        state = {"operator_question": request.question}
         try:
             answers, usage = await self._client.ask(state, SCREEN_QUESTIONS, timeout_s=timeout_s)
         except SystemOneUnavailable as exc:

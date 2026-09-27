@@ -24,7 +24,7 @@ from opengrid.calls import (
     list_calls,
 )
 from opengrid.calls import rules as r
-from opengrid.calls.models import Granted
+from opengrid.calls.models import Granted, MeasuredDelivery
 
 from .fakes import FakeDeployment, make_award
 
@@ -369,13 +369,35 @@ async def test_ts_d33_24_status_states_follow_start_delivery_and_end(store, trac
         )
 
     assert (await state_at(NOW)).state is CallState.ACCEPTED
-    store.delivery[oid] = Granted(last_kw=5_000.0, kwh=100.0)
-    active = await state_at(start + timedelta(minutes=1))
-    assert active.state is CallState.ACTIVE  # r3.4.1: unmeasured, never RAMPING/DELIVERING from grants
-    assert active.granted_kw == -5_000.0 and active.granted_kwh == 100.0  # signed: discharge < 0
-    assert active.public()["delivery_state"] == "UNMEASURED" and active.public()["delivery_measured"] is False
-    store.delivery[oid] = Granted(last_kw=19_500.0, kwh=900.0)
-    assert (await state_at(start + timedelta(minutes=5))).state is CallState.ACTIVE  # even at target
+    # The delivery job has evaluated the call, but its first bucket had no telemetry yet: not measured.
+    store.measured[record.deployment_id] = MeasuredDelivery(None, 0.0, "IN_PROGRESS", (), "NO_METER", start)
+    unmeasured = await state_at(start + timedelta(seconds=10))
+    assert unmeasured.state is CallState.ACTIVE  # running, nothing measured yet: never RAMPING from grants
+    assert (
+        unmeasured.public()["delivery_state"] == "UNMEASURED"
+        and unmeasured.public()["delivery_measured"] is False
+    )
+
+    def measured(kw: float | None, kwh: float) -> MeasuredDelivery:
+        return MeasuredDelivery(kw, kwh, "IN_PROGRESS", (), "CORROBORATED", start + timedelta(minutes=1))
+
+    store.measured[record.deployment_id] = measured(-5_000.0, 100.0)
+    store.delivery[oid] = Granted(last_kw=20_000.0, kwh=300.0)  # planned: the full target, never delivered
+    ramping = await state_at(start + timedelta(minutes=1))
+    assert ramping.state is CallState.RAMPING  # measured 5 MW of the 20 MW target
+    assert ramping.delivered_kw == -5_000.0 and ramping.delivered_kwh == 100.0  # signed: discharge < 0
+    body = ramping.public()
+    assert body["delivery_measured"] is True and body["delivery_state"] == "IN_PROGRESS"
+    # Deprecated granted_* (planned) stay alongside the measured values until r3.5 (lead decision).
+    assert body["granted_kw"] == -20_000.0 and body["granted_kwh"] == 300.0
+    assert body["granted_description"] == "planned; removed in r3.5; use delivered_*"
+    assert body["delivered_kw"] == -5_000.0 and body["delivered_kwh"] == 100.0
+    store.measured[record.deployment_id] = measured(-19_500.0, 900.0)
+    assert (await state_at(start + timedelta(minutes=5))).state is CallState.DELIVERING  # measured at target
+    store.measured[record.deployment_id] = measured(None, 900.0)
+    stale = await state_at(start + timedelta(minutes=6))
+    assert stale.state is CallState.ACTIVE  # stale: not claimed
+    assert stale.public()["delivery_measured"] is False and stale.public()["delivery_state"] == "UNMEASURED"
     assert (await state_at(start + timedelta(minutes=31))).state is CallState.COMPLETED
 
 
@@ -434,3 +456,63 @@ def test_ts_d33_29_limits_come_from_config_and_are_validated() -> None:
         CallLimits(max_calls_per_hour=10, max_calls_per_day=5)
     with pytest.raises(ValueError):
         CallLimits(ramping_fraction=0.0)
+
+
+async def test_ts_d33_44_cancelling_an_ended_call_is_already_ended_not_cannot_extend(store, trace) -> None:
+    record = await issue_call(
+        store, trace, _utility(_toll(store), duration_minutes=10), limits=LIMITS, now=NOW
+    )
+    later = NOW + timedelta(minutes=30)
+    for end_at in (None, later + timedelta(minutes=5)):
+        with pytest.raises(CallRefused) as info:
+            await cancel_call(
+                store,
+                trace,
+                record.call_id,
+                origin=CallOrigin.UTILITY,
+                principal="og-util-aen",
+                end_at=end_at,
+                now=later,
+            )
+        assert info.value.reason_code == r.R_ALREADY_ENDED
+
+
+async def test_ts_d33_45_only_the_issuer_or_an_operator_may_cancel(store, trace) -> None:
+    oid = _toll(store, window_end=WINDOW[0] + timedelta(hours=3))
+    record = await issue_call(store, trace, _utility(oid), limits=LIMITS, now=NOW)
+    for origin, principal in (
+        (CallOrigin.UTILITY, "og-util-other"),
+        (CallOrigin.GRID_LINK, "grid_link:AUSTIN_ENERGY"),
+    ):
+        with pytest.raises(CallRefused) as info:
+            await cancel_call(store, trace, record.call_id, origin=origin, principal=principal, now=NOW)
+        assert (info.value.reason_code, info.value.http_status) == (r.R_NOT_ISSUER, 403)
+    assert trace.classes().count("TRACE_AUTHZ_DENY") == 2
+    refused = [a for a in store.alerts if a["detail"].get("reason_code") == r.R_NOT_ISSUER]
+    assert [a["rule"] for a in refused] == ["ALR-UTILITY-CALL-REFUSED"] * 2
+    assert {a["severity"] for a in refused} == {"warning"}
+    assert {a["detail"]["scope_ref"] for a in refused} == {
+        f"og-util-other:{record.call_id}",
+        f"grid_link:AUSTIN_ENERGY:{record.call_id}",
+    }  # keyed per (principal, call): the store coalesces repeats of the same key
+    ended = await cancel_call(
+        store, trace, record.call_id, origin=CallOrigin.OPERATOR, principal="operator", now=NOW
+    )
+    assert ended.cancelled_at == NOW
+
+
+async def test_ts_d33_46_other_cancel_refusals_raise_no_alert(store, trace) -> None:
+    record = await issue_call(
+        store, trace, _utility(_toll(store), duration_minutes=10), limits=LIMITS, now=NOW
+    )
+    before = len(store.alerts)
+    with pytest.raises(CallRefused):
+        await cancel_call(
+            store,
+            trace,
+            record.call_id,
+            origin=CallOrigin.UTILITY,
+            principal="og-util-aen",
+            now=NOW + timedelta(minutes=30),
+        )
+    assert len(store.alerts) == before

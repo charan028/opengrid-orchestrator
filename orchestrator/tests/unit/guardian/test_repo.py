@@ -141,10 +141,14 @@ async def test_pg_commitment_port_active_obligations_for_bank():
     """GUARD-01: guardian's own enumeration reads og.reservation/og.commitment directly, independent of
     anything a proposed batch claims."""
     obligation_id = uuid4()
-    cursor = FakeCursor([[(obligation_id, Decimal("5.0"))]])
+    cursor = FakeCursor([[(obligation_id, Decimal("5.0"), Decimal("8.0"))]])
     port = repo.PgCommitmentPort(FakePool(cursor))
     obligations = await port.active_obligations_for_bank("bank-1", "cycle-1")
-    assert obligations == [repo.ActiveObligation(obligation_id=obligation_id, frozen_kw=Decimal("5.0"))]
+    assert obligations == [
+        repo.ActiveObligation(
+            obligation_id=obligation_id, frozen_kw=Decimal("5.0"), total_frozen_kw=Decimal("8.0")
+        )
+    ]
 
 
 async def test_pg_commitment_port_active_obligations_for_bank_none_active():
@@ -273,7 +277,8 @@ async def test_load_hub_params():
     assert params["sub-LZ_AEN-00"].params.utility_scale  # og.asset SUBSTATION: rated at its nameplate
     sql, sql_params = cursor.executed[0]
     assert "a.asset_id = h.hub_id" in sql
-    assert sql_params == {"nameplate": ["SUBSTATION", "MOBILE_STORAGE"]}  # D-31 trucks at nameplate too
+    assert "'SUBSTATION'" in sql and "'MOBILE_STORAGE'" in sql  # core.nameplate: D-31 trucks too
+    assert sql_params is None
 
 
 # ---------------------------------------------------------------------------------------------------

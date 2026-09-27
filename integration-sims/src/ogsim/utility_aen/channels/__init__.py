@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from ogsim.utility_aen.channels import customer_api
+from ogsim.utility_aen.channels import customer_api, grid_link
 from ogsim.utility_aen.channels.base import (
     CallResult,
     CallSpec,
@@ -15,6 +15,7 @@ from ogsim.utility_aen.channels.base import (
 
 CHANNEL_FACTORIES: dict[str, ChannelFactory] = {
     customer_api.NAME: customer_api.build,
+    grid_link.NAME: grid_link.build,
 }
 
 

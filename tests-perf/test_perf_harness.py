@@ -13,6 +13,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import analyze
+import dispatch
 import perfenv
 import sampler
 import targets
@@ -116,6 +117,10 @@ def test_acl_monitor_variants() -> None:
     assert "user og_perfmon" not in compose
     simctl = compose.split("user og_simctl")[1].split("user ")[0]
     assert "topic read $SYS/#" in simctl
+    # Production's DEVICE-INFO grants: every hub's retained device report reaches og-engine (3,509/3,509 on base).
+    sim = compose.split("user og_sim\n")[1].split("user ")[0]
+    engine = compose.split("user og_engine")[1].split("user ")[0]
+    assert "topic write og/v1/hub/#" in sim and "topic read og/v1/hub/#" in engine
 
 
 def test_secrets_generated_once_and_kept(tmp_path: Path) -> None:
@@ -185,3 +190,32 @@ def test_slope_and_knee() -> None:
 def test_percentile_nearest_rank() -> None:
     assert analyze.pct([5.0, 1.0, 3.0, 2.0, 4.0], 50) == 3.0
     assert analyze.pct([], 95) is None
+
+
+def test_delivery_window_starts_on_a_quarter_after_the_lead() -> None:
+    from datetime import UTC, datetime
+
+    start, end = dispatch.window_for(datetime(2026, 9, 27, 10, 7, 30, tzinfo=UTC), lead_min=4, length_min=20)
+    assert (start, end) == (
+        datetime(2026, 9, 27, 10, 15, tzinfo=UTC),
+        datetime(2026, 9, 27, 10, 45, tzinfo=UTC),
+    )
+    # exactly on a quarter after the lead: that quarter; at least one quarter long
+    start, end = dispatch.window_for(datetime(2026, 9, 27, 10, 11, tzinfo=UTC), lead_min=4, length_min=1)
+    assert (start, end) == (
+        datetime(2026, 9, 27, 10, 15, tzinfo=UTC),
+        datetime(2026, 9, 27, 10, 30, tzinfo=UTC),
+    )
+
+
+def test_offers_needed_never_negative() -> None:
+    assert dispatch.offers_needed(75, 0) == 75
+    assert dispatch.offers_needed(75, 80) == 0
+
+
+def test_markdown_has_one_table_per_regime() -> None:
+    w = {"expected_hubs": 1009, "trace_p99_ms": 90.0, "banks_per_cycle": 10.0, "bank_share": 0.5}
+    md = analyze.markdown({"steps": {"1000": {**w, "banks_per_cycle": 0.0}}, "deliver": {"1000": w}})
+    assert "IDLE" in md and "DELIVERING" in md and md.count("| Metric |") == 2
+    assert "Home banks with grants per cycle" in md
+    assert analyze.markdown({"steps": {"1000": w}}).count("| Metric |") == 1  # no DELIVERING run: one table

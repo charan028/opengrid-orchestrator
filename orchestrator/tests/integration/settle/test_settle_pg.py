@@ -206,8 +206,15 @@ async def test_wholesale_price_is_the_zone_spp_not_the_contract_price(pg_pool):
             (obligation_id,),
         )
         revenue, energy_cost = await cur.fetchone()
-    assert revenue > 0
-    assert energy_cost < revenue  # a spread above SPP / eta_d is no longer a guaranteed loss
+    # D-10: ERCOT_ENERGY revenue is delivered kWh x the zone SPP at delivery -- never the contract price.
+    delivered_kwh = Decimal("2.5")  # 10 kW for the whole 15-minute interval
+    assert revenue == (delivered_kwh * Decimal("0.01647")).quantize(Decimal("0.000001"))
+    assert revenue != (delivered_kwh * ctx.price_per_kwh).quantize(Decimal("0.000001"))
+    # G4: energy cost is what was paid to CHARGE (the trailing off-peak SPP proxy) / eta_d, not the
+    # discharge-interval SPP. Its size depends on the wall-clock hour (the 99 $/MWh row above counts as
+    # off-peak at night), which is why the old `energy_cost < revenue` check failed overnight.
+    expected_cost = (ctx.charging_cost_per_kwh / ctx.eta_d * delivered_kwh).quantize(Decimal("0.000001"))
+    assert abs(energy_cost - expected_cost) <= Decimal("0.000001")
 
 
 async def test_wholesale_price_falls_back_to_prior_spp_within_one_hour_then_missing(pg_pool):
@@ -469,3 +476,54 @@ async def test_correction_supersedes_the_original_pnl_row(pg_pool):
     assert rows[0][1] is not None  # the original is now superseded
     assert rows[1][1] is None  # the correction is the active row
     assert active_count == 1  # never more than one active pnl row per obligation-interval
+
+
+async def test_ercot_as_capacity_is_priced_at_the_cleared_mcpc_not_the_opportunity(pg_pool):
+    """r3.4 spot-check: a 0.5 MW ECRS award held for 15 minutes settled 0.125 (the opportunity's 1.00 $/MW-h)
+    instead of 0.035 (the cleared 0.28 $/MW-h DAM MCPC for ECRS in that hour). Capacity revenue must price at
+    the market's cleared MCPC for the award's product and hour, like D-10's zone SPP for energy."""
+    obligation_id, _hub_id = await _insert_as_fixture(
+        pg_pool, committed_kw=Decimal("500"), mcpc_usd_per_mwh=Decimal("1.00")
+    )
+    product_rule_id = uuid4()
+    interval_start = _quarter(20)
+    hour_start = interval_start.replace(minute=0)
+    async with pg_pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """INSERT INTO og.product_rule
+                (product_rule_id, contract_id, product_code, duration_minutes, variable_kind)
+               SELECT %s, contract_id, 'ECRS', 60, 'CONTINUOUS' FROM og.obligation WHERE obligation_id = %s""",
+            (product_rule_id, obligation_id),
+        )
+        await cur.execute(
+            """UPDATE og.opportunity SET product_rule_id = %s
+               WHERE opportunity_id = (SELECT opportunity_id FROM og.obligation WHERE obligation_id = %s)""",
+            (product_rule_id, obligation_id),
+        )
+        await cur.execute(
+            """INSERT INTO og.feed_obs (source, product, series, ts, value, unit, quality)
+               VALUES ('ERCOT', 'np4-188-cd', 'ECRS', %s, 0.28, 'usd_per_mwh', 'GOOD')
+               ON CONFLICT (source, product, series, ts) DO UPDATE SET value = EXCLUDED.value""",
+            (hour_start,),
+        )
+
+    backend = PgSettleBackend(pg_pool)
+    ctx = await backend.fetch_context(obligation_id, interval_start)
+    assert ctx.price_per_kwh == Decimal("0.00028") and ctx.price_flag == "MCPC"
+
+    settle_module.configure(backend, TraceStore(PgTraceBackend(pg_pool)), trace_pool=pg_pool)
+    await settle(obligation_id, interval_start, interval_start + timedelta(minutes=15))
+    async with pg_pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT revenue FROM og.pnl WHERE obligation_id = %s AND superseded_by IS NULL", (obligation_id,)
+        )
+        (revenue,) = await cur.fetchone()
+    assert revenue == Decimal("0.035000")  # 500 kW x 0.25 h x 0.28 $/MW-h (held, nothing deployed)
+
+
+async def test_ercot_as_without_an_mcpc_observation_falls_back_to_the_opportunity_flagged(pg_pool):
+    obligation_id, _hub_id = await _insert_as_fixture(
+        pg_pool, committed_kw=Decimal("500"), mcpc_usd_per_mwh=Decimal("1.00")
+    )
+    ctx = await PgSettleBackend(pg_pool).fetch_context(obligation_id, _quarter(20))
+    assert ctx.price_per_kwh == Decimal("0.001") and ctx.price_flag == "OPPORTUNITY_PRICE"

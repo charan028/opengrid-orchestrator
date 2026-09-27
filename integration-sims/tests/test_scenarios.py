@@ -27,14 +27,27 @@ CORE_SCENARIOS = {
 
 def test_all_shipped_scenarios_load_without_error():
     """The six core scenarios, the DEMO pack (`demo-*.yaml`, docs/demo) and the service-catalogue scenarios
-    (`svc-*.yaml`, FLEET-SIM 2026-09-26) all load, with unique names."""
+    (`svc-*.yaml`, FLEET-SIM 2026-09-26) and the utility EMS scenarios (`utility-aen-*.yaml`) all load,
+    with unique names."""
     scenarios = load_scenarios_dir(SCENARIOS_DIR)
     names = {s.name for s in scenarios}
     assert len(names) == len(scenarios)
     assert names >= CORE_SCENARIOS
     demo_files = sorted(SCENARIOS_DIR.glob("demo-*.yaml"))
     svc_files = sorted(SCENARIOS_DIR.glob("svc-*.yaml"))
-    assert len(scenarios) == len(CORE_SCENARIOS) + len(demo_files) + len(svc_files)
+    delivery_files = sorted(SCENARIOS_DIR.glob("delivery-*.yaml"))  # D-38 delivery corroboration
+    ercot_as_files = sorted(SCENARIOS_DIR.glob("ercot-as-*.yaml"))  # D-35 AS dispatch instructions
+    assert len(ercot_as_files) == 7
+    utility_files = sorted(SCENARIOS_DIR.glob("utility-aen-*.yaml"))  # ogsim.utility_aen (r3.4.3)
+    assert len(utility_files) == 5
+    assert len(scenarios) == (
+        len(CORE_SCENARIOS)
+        + len(demo_files)
+        + len(svc_files)
+        + len(ercot_as_files)
+        + len(utility_files)
+        + len(delivery_files)
+    )
 
 
 def test_missing_scenarios_dir_returns_empty_list(tmp_path: Path):

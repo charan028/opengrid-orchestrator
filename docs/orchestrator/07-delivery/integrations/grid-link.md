@@ -135,7 +135,7 @@ in its `banks` list.
 | BI | 16 + 2t, 17 + 2t | Echoes of target t's LIMIT and BLOCK. |
 
 - A bank with no telemetry is served with the COMM_LOST flag. Its value is never invented.
-- **CALL_DELIVERED_KW (AI 5) is served with the COMM_LOST flag in r3.4.1.** The core call status reports granted kW, not measured delivery, and a guardian-vetoed call still has grants. Measured discharge is DELIVERED_KW (AI 1, fleet twin). AI 5 becomes a measured value in r3.4.2 (delivery-verify).
+- **CALL_DELIVERED_KW (AI 5) is the call's MEASURED delivery** (r3.4.3, D-38). The value comes from the core call status, which reads `og.delivery_record`, written by og-settle every 15 s in 30 s buckets. It lags real time by about 30–60 s. While the call is unmeasured or its data is stale, AI 5 is served with the COMM_LOST flag and is never invented. It was always COMM_LOST in r3.4.1 and r3.4.2, when only granted kW existed. DELIVERED_KW (AI 1) remains the fleet-twin discharge over the utility's banks.
 - An unknown SoC is served as −1.
 - Static data only. Class 1/2/3 polls return empty, so the EMS scans with integrity (Class 0) polls at its
   own rate, typically every 2–4 s.
@@ -253,7 +253,7 @@ While it is not healthy:
 | Core call function slow (> `core_timeout_s`, 5 s) | CALL_STATE shows REJECTED with reason 51. The next status refresh re-reads the call by its idempotency key and corrects the state. The EMS may re-send the same id; it is idempotent. |
 | MQTT bridge down | An L2 instruction is kept and re-sent on each status tick until it is delivered. It is never lost, even though the tracker has moved on. |
 | Telemetry missing | The affected banks' points are served with COMM_LOST and ALARM_TELEMETRY_STALE is on. Nothing is invented. |
-| og-engine restart | The link's L2 levels and call view are held in memory. After a restart the EMS must re-assert its L2 levels when it reconnects (standard EMS behaviour on association restart). Call state is re-read from the core by the EMS's call id. See the open points. |
+| og-engine restart | **L2 levels are restored (r3.4.3).** Before it listens, the link replays its own traced L2 commands from `og.trace` in sequence order: stream `grid_link:<utility>`, `GRID_LINK_COMMAND`, kept 400 days as operator actions. It then re-delivers the resulting instructions, and traces `GRID_LINK_STATE` = `L2_RESTORED`. There is no extra table: the audit trail is the persisted state. Refused commands were never traced, so they are never replayed. If the read fails (10 s bound), the failure is logged and the link starts without restored levels. Call state is re-read from the core by the EMS's call id. |
 | TLS or bind error at start | That utility's link is logged and stays down. og-engine keeps running. |
 | Unknown `utility_id` (not in `UTILITY_IDS`) | That entry is skipped and logged. The other utilities start. |
 
@@ -287,6 +287,35 @@ To enable a utility:
 5. Set `[grid_link].enabled = true` and the utility's `enabled = true`.
 6. Restart og-engine.
 
+**Loopback enablement (r3.4.3, owner request).** The owner asked for the link to be operational after
+deploy, so `deploy/scripts/grid_link_enable_loopback.sh` (run as root by the release manager) enables
+AUSTIN_ENERGY on **127.0.0.1:20001 only**. No firewall change is made and nothing listens off-host. It runs
+as a dry run by default; `--apply` makes the changes.
+
+What `--apply` does:
+
+1. It generates a test PKI in `/etc/opengrid/certs`:
+   - CA `gridlink-test-ca`, whose key is 0600 root:root;
+   - server `og-gridlink` with SAN IP:127.0.0.1;
+   - client `aen-ems-loopback`.
+
+   The other keys and certificates are 0640 root:opengrid. Keys are never printed.
+2. It creates `OG_MQTT_GRIDLINK_PASSWORD` in `secrets.env` when it is absent.
+3. It creates MQTT user `og_gridlink`, publish-only on `og/v1/scada/instruction/#`, through
+   `deploy/mosquitto/provision_grid_link_user.py`. That tool backs up the broker files, reloads mosquitto,
+   and restores the backups if mosquitto is not active afterwards.
+4. It writes the host override `/etc/opengrid/grid_link.toml`. og-engine reads it through
+   `OG_GRID_LINK_CONFIG`, set by the drop-in `og-engine.service.d/grid-link.conf`. The override replaces
+   the release `[grid_link]` table, so the release config is never edited and the enablement survives
+   deploys.
+5. It restarts og-engine and waits for the listener.
+
+`--test-call` issues one 5-minute AUSTIN_ENERGY call through the Austin Energy sim's `grid_link` channel and
+cancels it straight away. Outside the tolling window the core refuses the call (for example
+R-CALL-OUTSIDE-WINDOW). That refusal still proves the TLS link, the outstation and the core call function end
+to end.
+
+`--disable --apply` switches the link off again by removing the drop-in and the override.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | false | Master switch. |
@@ -313,7 +342,18 @@ The simulators:
   `targets {bank: t}`, `tls`, and `also_mqtt`. It makes `ogsim.scada` send its L2 LIMIT/BLOCK over the
   link. ESTOP stays on MQTT: it is not a grid-link point.
 - **`utility_aen.yaml` `channel: grid_link`**, with `channels.grid_link: {...}`, makes the Austin Energy
-  simulator issue its toll calls over the link instead of the customer API.
+  simulator issue its toll calls over the link instead of the customer API (r3.4.3,
+  `ogsim.utility_aen.channels.grid_link`). The sub-table keys are `host`, `port`, `master_address` (1),
+  `outstation_address` (10), `heartbeat_s` (5), `sbo` (true), `tls {ca_file, cert_file, key_file,
+  server_hostname}`, `timeout_s` (5) and `status_wait_s` (5). How the channel behaves:
+  - it heartbeats from first use until the runtime calls `aclose()`;
+  - the EMS call id is the numeric `call_ref`, or a stable CRC-32 of it;
+  - a call starts on receipt, because the link has no scheduled start;
+  - a charge call (kW > 0) is sent as-is and refused by the outstation as R-CALL-CHARGE-REFUSED;
+  - shortening a call to a later `end_at` is refused locally as R-GL-SHORTEN-UNSUPPORTED;
+  - `status` of any call other than the link's latest reads UNKNOWN.
+
+  The call points always show the latest call event, a cancel included.
 
 ## 8. Adding ICCP (TASE.2) later
 
@@ -344,7 +384,6 @@ Nothing in `service.py`, `l2.py`, `calls_port.py` or the core changes.
 
 ## 10. Open points
 
-- **L2 levels are not persisted across an og-engine restart.** They are re-asserted by the EMS on reconnect. Persisting them would need a small table; this is deferred until a real utility asks for it.
 - **Event classes and unsolicited responses are not implemented.** The EMS uses integrity polls.
 - **DNP3 Secure Authentication (SAv5) is not implemented.** Mutual TLS is required on every non-loopback listener instead.
 - **ICCP needs a licensed TASE.2 stack** (§8).

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -76,6 +77,33 @@ class TraceAppender(Protocol):
         payload: dict[str, object],
         reason_codes: list[str] | None = None,
     ) -> object: ...
+
+
+def outbox_scope(entry: OutboxEntry) -> str:
+    """The stop scope an outbox entry publishes to: its retained topic without the stop id
+    (`stop/<scope>/<id>/<stop_id>` -> `stop/<scope>/<id>`)."""
+    return entry.topic_suffix.rsplit("/", 1)[0]
+
+
+def drain_order(entries: list[OutboxEntry]) -> list[OutboxEntry]:
+    """The publish order of queued stop events (given in acceptance order): each scope's entries stay in
+    acceptance order; across scopes, the next ENGAGE at the head of any scope goes before any RELEASE at a
+    head (oldest first within each kind). So an ENGAGE never waits behind another scope's RELEASE, and never
+    overtakes an older RELEASE of its own scope (which the hubs would then drop, leaving the bank stopped)."""
+    queues: dict[str, list[OutboxEntry]] = {}
+    for entry in sorted(entries, key=lambda e: e.seq):
+        queues.setdefault(outbox_scope(entry), []).append(entry)
+    ordered: list[OutboxEntry] = []
+    while queues:
+        heads = [queue[0] for queue in queues.values()]
+        engages = [e for e in heads if e.action == "ENGAGE"]
+        chosen = min(engages or heads, key=lambda e: e.seq)
+        scope = outbox_scope(chosen)
+        queues[scope].pop(0)
+        if not queues[scope]:
+            del queues[scope]
+        ordered.append(chosen)
+    return ordered
 
 
 @dataclass
@@ -180,17 +208,22 @@ class SafestopService:
                 await self.outbox.enqueue_publication(
                     stop_id=parsed.stop_id, action="RELEASE", topic_suffix=topic_suffix, payload=dict(event)
                 )
-                await self.drain_outbox()
+                await self._drain_after_accept()
             return True
+        scope_kind = _WIRE_TO_KIND[parsed.scope]
+        scope_ref = parsed.scope_id or "FLEET"
+        engage_at = await self.backend.latest_engage_at(scope_kind, scope_ref)
+        if engage_at is not None and parsed.issued_at < engage_at:
+            await self._refuse_superseded_release(parsed, scope_kind, scope_ref, engage_at)
+            return False
         if self.trace is not None:
             await self.trace.append(
                 "safestop", "SAFE_STOP", "SAFE_STOP", dict(event), reason_codes=["SAFE_STOP_RELEASE"]
             )
-        scope_kind = _WIRE_TO_KIND[parsed.scope]
         row = StopEventRow(
             stop_event_id=uuid4(),
             scope_kind=scope_kind,
-            scope_ref=parsed.scope_id or "FLEET",
+            scope_ref=scope_ref,
             action="RELEASE",
             initiator_kind="GUARDIAN",
             initiator_ref=parsed.issued_by,
@@ -204,6 +237,42 @@ class SafestopService:
             extra={"scope": scope_kind, "scope_ref": parsed.scope_id, "stop_id": str(parsed.stop_id)},
         )
         return True
+
+    async def _refuse_superseded_release(
+        self, parsed: StopEvent, scope_kind: str, scope_ref: str, engage_at: datetime
+    ) -> None:
+        """r3.4.2 review L-1 (lead-approved): a guardian RELEASE signed BEFORE the newest ENGAGE on its scope is
+        never relayed. The hubs would drop it as older than that ENGAGE, so relaying it would record the scope as
+        released in og.stop_event while the hubs stay stopped. It is traced as superseded (the guardian stops
+        re-handing it: `guardian.repo._UNPUBLISHED_RELEASES_SQL`), and ALR-STOP-RELEASE-SUPERSEDED asks the
+        operators to re-issue the two-person release, which the guardian then signs after the ENGAGE."""
+        logger.warning(
+            "refused a stop RELEASE superseded by a newer ENGAGE on its scope",
+            extra={"scope": scope_kind, "scope_ref": scope_ref, "stop_id": str(parsed.stop_id)},
+        )
+        if self.trace is not None:
+            await self.trace.append(
+                "safestop",
+                "SAFE_STOP",
+                "SAFE_STOP",
+                {
+                    "release": "SUPERSEDED",
+                    "superseded_signature": parsed.signature,
+                    "stop_id": str(parsed.stop_id),
+                    "scope_kind": scope_kind,
+                    "scope_ref": scope_ref,
+                    "release_issued_at": parsed.issued_at.isoformat(),
+                    "newer_engage_at": engage_at.isoformat(),
+                },
+                reason_codes=["SAFE_STOP_RELEASE_SUPERSEDED"],
+            )
+        await self.backend.raise_superseded_release_alert(
+            scope_kind=scope_kind,
+            scope_ref=scope_ref,
+            stop_id=parsed.stop_id,
+            signature=parsed.signature,
+            engage_at=engage_at,
+        )
 
     async def _record_and_publish(
         self, row: StopEventRow, stop_id: UUID, topic_suffix: str, payload: dict[str, Any]
@@ -222,7 +291,31 @@ class SafestopService:
                 await self.publisher.publish_retained(topic_suffix, payload)
             return
         await self.outbox.record_and_enqueue(row, stop_id=stop_id, topic_suffix=topic_suffix, payload=payload)
-        await self.drain_outbox()
+        await self._drain_after_accept()
+
+    async def record_utility_lift(
+        self, bank_id: str, lifted_instruction_id: UUID, lift_instruction_id: UUID, issued_by: str
+    ) -> None:
+        """Q10 (r3.4.5): the utility lifted the L2 instruction `lifted_instruction_id` on `bank_id` -- the only way
+        a UTILITY stop can become releasable. Durably traced (the guardian reads it: `guardian.repo`
+        `_UTILITY_LIFTS_SQL`); it releases nothing itself (the stop-only key never signs a RELEASE) -- the operators'
+        two-person release, approved after this lift, does. Raises when there is no trace to record it in, so the
+        L2 intake reports FAILED and the lift is retried on redelivery."""
+        if self.trace is None:
+            raise RuntimeError("no trace backend: a utility lift cannot be recorded")
+        await self.trace.append(
+            "safestop",
+            "SAFE_STOP",
+            "SAFE_STOP",
+            {
+                "l2": "LIFT",
+                "bank_id": bank_id,
+                "lifted_instruction_id": str(lifted_instruction_id),
+                "lift_instruction_id": str(lift_instruction_id),
+                "issued_by": issued_by,
+            },
+            reason_codes=["SAFE_STOP_L2_LIFT"],
+        )
 
     async def ensure_l2_engage_published(self, instruction_id: UUID, bank_id: str) -> bool:
         """H5 repair on a redelivered utility L2 instruction the intake reports ALREADY_ACTED: if its ENGAGE
@@ -261,17 +354,22 @@ class SafestopService:
             "recorded utility ENGAGE had no publication: re-signed and queued",
             extra={"stop_id": str(record.stop_id), "bank_id": bank_id},
         )
-        await self.drain_outbox()
+        await self._drain_after_accept()
         return True
 
     async def drain_outbox(self, *, batch: int = 100) -> int:
-        """K8: publish every queued stop event the broker has not acknowledged -- every ENGAGE first (a stop
-        is never delayed behind a release), then the RELEASEs, each oldest first -- marking each once its
-        QoS 1 publish returned (the broker's PUBACK). A broker/connection failure stops the drain (the rest
-        go on the next drain: after a reconnect, or the next tick) and never counts against an entry. A
-        PERMANENT failure (a payload that can never be published) counts; at `outbox_max_attempts` the entry
-        is dead-lettered (skipped from then on, ALR-STOP-PUBLISH-DEAD-LETTER raised) and the drain moves on,
-        so a poison entry never blocks later stops. Serialised. Returns how many were published."""
+        """K8: publish every queued stop event the broker has not acknowledged, in `drain_order` -- in
+        acceptance order WITHIN a scope (a hub drops a RELEASE older than the newest ENGAGE on its scope, so a
+        newer ENGAGE must never overtake an older RELEASE of the same scope), with ENGAGE priority only ACROSS
+        scopes (a stop is never delayed behind another scope's release). Each is marked once its QoS 1 publish
+        returned (the broker's PUBACK). A broker/connection failure stops the drain (the rest go on the next
+        drain: after a reconnect, or the next tick) and never counts against an entry. A PERMANENT failure (a
+        payload that can never be published) counts, and holds the rest of ITS scope back until the entry is
+        published or dead-lettered; at `outbox_max_attempts` it is dead-lettered (skipped from then on) and
+        ALR-STOP-PUBLISH-DEAD-LETTER is raised -- re-raised idempotently on every drain for every dead-lettered
+        entry, so one dead-lettered by a crash between writes, or found at the cap after an upgrade, is never
+        silent. Other scopes carry on, so a poison entry never blocks later stops. Serialised. Returns how
+        many were published."""
         if self.outbox is None:
             return 0
         published = 0
@@ -279,7 +377,15 @@ class SafestopService:
             pending = await self.outbox.pending_publications(
                 limit=batch, max_attempts=self.outbox_max_attempts
             )
-            for entry in pending:
+            held: set[str] = set()  # scopes whose earlier entry failed permanently this drain
+            dead_now: set[int] = set()
+            for entry in drain_order(pending):
+                scope = outbox_scope(entry)
+                if scope in held and entry.action != "ENGAGE":
+                    # A failing entry holds back its scope's later RELEASEs, never an ENGAGE (r3.4.2 review L-3):
+                    # published ahead of an older RELEASE, the ENGAGE wins at the hubs (they drop a RELEASE older
+                    # than the newest ENGAGE), which is the safe side.
+                    continue
                 try:
                     await self.publisher.publish_retained(entry.topic_suffix, entry.payload)
                 except Exception as exc:
@@ -293,12 +399,76 @@ class SafestopService:
                             extra={"stop_id": str(entry.stop_id), "action": entry.action, "error": str(exc)},
                         )
                         break
-                    if attempts >= self.outbox_max_attempts:
-                        await self._dead_letter(entry, str(exc))
+                    if attempts < self.outbox_max_attempts:
+                        held.add(scope)
+                    else:
+                        await self._dead_letter(entry, str(exc))  # logged and traced once, at the cap
+                        dead_now.add(entry.seq)
                     continue
                 await self.outbox.mark_published(entry.seq)
                 published += 1
+            published += await self._sweep_dead_letters(batch, skip=dead_now)
         return published
+
+    async def _sweep_dead_letters(self, batch: int, *, skip: set[int]) -> int:
+        """Every drain (r3.4.2 review L-4): each dead-lettered entry -- including one dead-lettered by a crash
+        between writes, or found at the cap after an upgrade (pre-upgrade attempts also counted broker outages)
+        -- is alerted, idempotently, and TRACED when its alert is newly raised. A dead-lettered ENGAGE is a stop
+        that never reached the hubs, so it is re-tried here on every drain (after the live queue, never ahead of
+        it) and published as soon as it can be; a RELEASE is only alerted. Returns how many it published."""
+        if self.outbox is None:
+            return 0
+        published = 0
+        for dead in await self.outbox.dead_lettered_publications(
+            limit=batch, max_attempts=self.outbox_max_attempts
+        ):
+            if dead.action == "ENGAGE" and dead.seq not in skip:
+                try:
+                    await self.publisher.publish_retained(dead.topic_suffix, dead.payload)
+                except Exception as exc:
+                    logger.warning(
+                        "dead-lettered stop ENGAGE still cannot be published",
+                        extra={"stop_id": str(dead.stop_id), "error": str(exc)},
+                    )
+                else:
+                    await self.outbox.mark_published(dead.seq)
+                    await self._trace_outbox("DEAD_LETTER_PUBLISHED", dead, "published on a later drain")
+                    published += 1
+                    continue
+            error = "publication failed permanently at the attempt cap"
+            if await self.outbox.raise_dead_letter_alert(dead, error) and dead.seq not in skip:
+                await self._trace_outbox("DEAD_LETTER", dead, error)
+        return published
+
+    async def _trace_outbox(self, outcome: str, entry: OutboxEntry, error: str) -> None:
+        """Best-effort audit trace of an outbox outcome (never raises: the outbox row is the durable record)."""
+        if self.trace is None:
+            return
+        try:
+            await self.trace.append(
+                "safestop",
+                "SAFE_STOP",
+                "SAFE_STOP",
+                {
+                    "outbox": outcome,
+                    "stop_id": str(entry.stop_id),
+                    "action": entry.action,
+                    "error": error[:500],
+                },
+                reason_codes=[f"SAFE_STOP_{outcome}"],
+            )
+        except Exception:
+            logger.exception("stop outbox trace failed", extra={"stop_id": str(entry.stop_id)})
+
+    async def _drain_after_accept(self) -> None:
+        """Drain right after a stop was accepted and durably queued. Never raises: the stop is recorded and
+        queued, so a failure here (another entry's error, a database hiccup) must neither fail the caller --
+        which would make the L2 intake or the API intake retry or die -- nor lose anything; the next drain
+        (tick or reconnect) publishes it."""
+        try:
+            await self.drain_outbox()
+        except Exception:
+            logger.exception("stop outbox drain after accept failed; the next drain retries it")
 
     async def _dead_letter(self, entry: OutboxEntry, error: str) -> None:
         logger.error(
@@ -307,19 +477,7 @@ class SafestopService:
         )
         if self.outbox is not None:
             await self.outbox.raise_dead_letter_alert(entry, error)
-        if self.trace is not None:
-            await self.trace.append(
-                "safestop",
-                "SAFE_STOP",
-                "SAFE_STOP",
-                {
-                    "outbox": "DEAD_LETTER",
-                    "stop_id": str(entry.stop_id),
-                    "action": entry.action,
-                    "error": error[:500],
-                },
-                reason_codes=["SAFE_STOP_DEAD_LETTER"],
-            )
+        await self._trace_outbox("DEAD_LETTER", entry, error)
 
     async def clear_released_retained(
         self, housekeeping: ReleaseHousekeepingBackend, *, retain_s: float

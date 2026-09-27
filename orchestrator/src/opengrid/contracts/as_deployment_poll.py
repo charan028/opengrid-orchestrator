@@ -1,288 +1,517 @@
-"""ERCOT_AS deployment intake from the market simulator (build phase 2026-09-26).
+"""ERCOT AS deployment instruction poller, hosted by og-feeds (D-35; protocol-adapters.md S6.7).
 
-The market sim declares simulated AS deployments at `GET {base_url}/admin/as_deployment`:
-`{"active": null}` when none is declared, else `{"active": {"id", "service", "deployed_mw", "recall",
-"declared_at"}}`. This poller mirrors that into `og.as_deployment` (migration 0020) exactly like an
-operator-declared deployment (`POST /og/api/dispatch/as-deployments`), with `source = 'MARKET_SIM'`
-(allowed by 0020's CHECK) -- the allocator/invariants read the table and never know the difference.
+Every `interval_s` the poller asks a `DispatchInstructionSource` (the `ercot_mms` adapter: ERCOT EWS, or the
+ogsim MMS simulator on the same wire) for the dispatch instructions not yet acknowledged, and turns each
+one into exactly what the operator route `POST /og/api/dispatch/as-deployments` would do -- through the
+SAME core function (`AsCallGateway` -> `opengrid.calls`), never a copy of its checks:
 
-Semantics (one `poll_once` per `interval_s`):
-- active, not recalled: open a row for that sim id (`requested_by = "market_sim:<id>"`) if none is open,
-  else extend it. The sim publishes no end time, so every row is a LEASE: `end_at = now + lease_s`,
-  renewed on each poll. If the sim or this poller goes quiet the deployment ends on its own (fail-safe:
-  a held award never keeps discharging on a stale declaration).
-- `recall: true`: end that sim id's open row now (`cancelled_at`, never a delete -- audit trail).
-- `active: null`, or a different sim id: end every other open MARKET_SIM row now.
-- HTTP failure or an unreadable payload: no change (the lease handles it) and a warning.
+- AS_DEPLOYMENT: the instruction names a resource and an AS type; `[feeds.ercot_as_poll.awards]` maps
+  `"<resource>:<SERVICE>"` to the contract that carries those awards, and the ERCOT_AS obligation of that
+  contract whose window covers the instruction's start is the award deployed. The core decides (404 no
+  such award, 409 not deployable / not ERCOT_AS / overlap / over the product duration / over the awarded
+  kW, 422 malformed) and writes the deployment; the poller only acknowledges and alerts.
+- AS_RECALL: ends the deployment it names (`recalls`) through the core's cancel.
+- Anything else (a plain VDI) is acknowledged and traced for operator attention; it never dispatches.
 
-`obligation_id` is left NULL -- "deploys every ERCOT_AS award", as the operator endpoint's default; the
-sim's `service` (RRS/ECRS/...) is recorded in `reason`. Every open/end is traced first (K10) as
-`FEED_CHANGE` on stream `market_sim` when a `TraceStore` is given.
+Guarantees:
 
-Off by default: `[market_sim].as_deployment_poll = false`. `build_as_deployment_poller` returns `None`
-unless it is switched on.
+- **Idempotent by instruction id**: the id is the core's idempotency key (principal `ercot:<backend>`), so a
+  duplicate delivery (at-least-once transport, or a restart before the acknowledgement) never deploys twice;
+  it is acknowledged again with the first answer.
+- **Out-of-order safe**: a batch is processed in issue order, and a recall that arrives before its
+  deployment is held (left unacknowledged, so the source keeps re-sending it) for `recall_hold_s`; the
+  deployment, when it arrives, is superseded -- never started. A late instruction (older than
+  `max_instruction_age_s` on first sight) is refused, never acted on.
+- **Never the TOLLING contract**: origin ERCOT_POLL is limited to ERCOT_AS obligations by the core, and the
+  award map only ever names ERCOT_AS contracts.
+- **Traced** (`origin = ERCOT_POLL`) on stream `ercot_as_poll` before each acknowledgement (K10).
+- **Alerts**: `ALR-ERCOT-AS-REFUSED` per refused instruction; `ALR-ERCOT-AS-POLL-FAILED` after
+  `failure_alert_after` consecutive failed polls and `ALR-ERCOT-AS-POLL-STALE` once no poll has succeeded
+  for `stale_after_s` (both cleared by the next good poll). A poll whose source cannot be read is retried
+  with the feeds' capped doubling backoff, scaled to this cadence: `interval_s`, 2x, 4x ... up to
+  `retry_cap_s`.
+- **One instruction never blocks the rest**: each runs in its own guard. One that raises is traced
+  (`AS_INSTRUCTION_PROCESSING_FAILED`), alerted (`ALR-ERCOT-AS-PROCESSING-FAILED`, critical, per instruction,
+  cleared when it later succeeds) and left unacknowledged so the source re-sends it; the poll then counts
+  as failed (POLL-FAILED, and STALE if it persists) without slowing the cadence.
+
+Off by default (`[feeds.ercot_as_poll].enabled = false`): `build_as_deployment_poller` then returns None and
+nothing is polled, traced or written. With it on and no instruction received, nothing is written either:
+committed ERCOT_AS obligations keep their 0 kW capacity hold until ERCOT actually deploys them.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Mapping
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
-from uuid import UUID, uuid4
+from uuid import UUID
 
-import httpx
-from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from opengrid.trace.store import TraceStore
+from opengrid.integrations.ercot_mms.client import ErcotMmsSettings
+from opengrid.integrations.ercot_mms.intake import AwardContractMap
+from opengrid.integrations.interfaces import DispatchInstruction, DispatchInstructionSource, InstructionBatch
 
 logger = logging.getLogger(__name__)
 
-SOURCE_MARKET_SIM = "MARKET_SIM"
-TRACE_STREAM = "market_sim"
-REQUESTED_BY_PREFIX = "market_sim:"
-
-DEFAULT_BASE_URL = "http://127.0.0.1:8090"  # ogsim.market's loopback default (OGSIM_MARKET_PORT)
-DEFAULT_INTERVAL_S = 10.0
-DEFAULT_LEASE_S = 60.0
-DEFAULT_TIMEOUT_S = 5.0
-
-
-@dataclass(frozen=True, slots=True)
-class PollConfig:
-    enabled: bool
-    base_url: str
-    interval_s: float
-    lease_s: float
-
-
-def poll_config_from(cfg: object) -> PollConfig:
-    """`[market_sim]`: `as_deployment_poll` (default false), `base_url`, `as_deployment_poll_interval_s`,
-    `as_deployment_lease_s`. `cfg` is duck-typed (`.get(dotted_key, default)`, i.e. `Config`)."""
-
-    def get(key: str, default: Any) -> Any:
-        return cfg.get(f"market_sim.{key}", default) if hasattr(cfg, "get") else default
-
-    interval_s = float(get("as_deployment_poll_interval_s", DEFAULT_INTERVAL_S))
-    lease_s = float(get("as_deployment_lease_s", DEFAULT_LEASE_S))
-    if lease_s <= interval_s:
-        raise ValueError("[market_sim].as_deployment_lease_s must exceed as_deployment_poll_interval_s")
-    return PollConfig(
-        enabled=bool(get("as_deployment_poll", False)),
-        base_url=str(get("base_url", DEFAULT_BASE_URL)).rstrip("/"),
-        interval_s=interval_s,
-        lease_s=lease_s,
-    )
+ORIGIN = "ERCOT_POLL"
+TRACE_STREAM = "ercot_as_poll"
+TRACE_DECISION_TYPE = "FEED_CHANGE"
+ALR_REFUSED = "ALR-ERCOT-AS-REFUSED"
+ALR_POLL_FAILED = "ALR-ERCOT-AS-POLL-FAILED"
+ALR_POLL_STALE = "ALR-ERCOT-AS-POLL-STALE"
+ALR_PROCESSING_FAILED = "ALR-ERCOT-AS-PROCESSING-FAILED"
+#: Critical rules (the others are warnings): a deployment may be missed while either is open.
+CRITICAL_ALERT_RULES = frozenset({ALR_POLL_STALE, ALR_PROCESSING_FAILED})
+#: Local refusal codes (before the core is reached). Everything else is the core's own reason code.
+R_MALFORMED = "R-ERCOT-AS-MALFORMED"
+R_NO_AWARD = "R-ERCOT-AS-NO-AWARD"
+R_AMBIGUOUS = "R-ERCOT-AS-AMBIGUOUS-AWARD"
+R_LATE = "R-ERCOT-AS-LATE"
+R_NOTHING_TO_RECALL = "R-ERCOT-AS-NOTHING-TO-RECALL"
 
 
-@dataclass(frozen=True, slots=True)
-class SimDeployment:
-    """The sim's `active` object, validated."""
+class ErcotAsPollSettings(BaseModel):
+    """`[feeds.ercot_as_poll]`; `mms` is `[feeds.ercot_as_poll.mms]` (an `ErcotMmsSettings`: the sim URL
+    in `endpoint`, `signing = "none"` against the sim), `awards` is `[feeds.ercot_as_poll.awards]`."""
 
-    sim_id: str
-    service: str
-    deployed_mw: float
-    recall: bool
-    declared_at: datetime
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    interval_s: float = Field(default=5.0, gt=0, le=60)
+    retry_cap_s: float = Field(default=60.0, gt=0)
+    failure_alert_after: int = Field(default=3, ge=1)
+    stale_after_s: float = Field(default=60.0, gt=0)
+    lookback_s: float = Field(default=900.0, gt=0)
+    max_instruction_age_s: float = Field(default=300.0, gt=0)
+    recall_hold_s: float = Field(default=300.0, gt=0)
+    mms: ErcotMmsSettings | None = None
+    awards: dict[str, UUID] = {}
+
+    @model_validator(mode="after")
+    def _validate(self) -> ErcotAsPollSettings:
+        if self.enabled and self.mms is None:
+            raise ValueError("[feeds.ercot_as_poll].enabled needs [feeds.ercot_as_poll.mms]")
+        if self.stale_after_s <= self.interval_s:
+            raise ValueError("[feeds.ercot_as_poll].stale_after_s must exceed interval_s")
+        return self
 
     @property
-    def requested_by(self) -> str:
-        return f"{REQUESTED_BY_PREFIX}{self.sim_id}"
+    def award_map(self) -> AwardContractMap:
+        return AwardContractMap(ancillary=dict(self.awards))
 
 
-class PayloadError(ValueError):
-    """The sim's response did not have the documented shape."""
+def settings_from(cfg: object) -> ErcotAsPollSettings:
+    """`[feeds.ercot_as_poll]` from a `Config` (duck-typed `.get(dotted, default)`)."""
+    raw = cfg.get("feeds.ercot_as_poll", {}) if hasattr(cfg, "get") else {}
+    return ErcotAsPollSettings.model_validate(dict(raw or {}))
 
 
-def parse_active(payload: object) -> SimDeployment | None:
-    """`{"active": null}` -> None; `{"active": {...}}` -> `SimDeployment`; anything else -> `PayloadError`."""
-    if not isinstance(payload, Mapping) or "active" not in payload:
-        raise PayloadError("missing 'active'")
-    active = payload["active"]
-    if active is None:
-        return None
-    if not isinstance(active, Mapping):
-        raise PayloadError("'active' is not an object")
-    try:
-        declared_at = datetime.fromisoformat(str(active["declared_at"]))
-        return SimDeployment(
-            sim_id=str(active["id"]),
-            service=str(active.get("service", "")),
-            deployed_mw=float(active.get("deployed_mw", 0.0)),
-            recall=bool(active.get("recall", False)),
-            declared_at=declared_at if declared_at.tzinfo else declared_at.replace(tzinfo=UTC),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise PayloadError(f"malformed 'active': {exc}") from exc
+def retry_delay_s(settings: ErcotAsPollSettings, consecutive_failures: int) -> float:
+    """Seconds to the next poll: `interval_s` while healthy, else doubling from `interval_s` up to
+    `retry_cap_s` (the feeds' FAILURE_RETRY shape at this poller's cadence)."""
+    if consecutive_failures <= 0:
+        return settings.interval_s
+    return float(min(settings.retry_cap_s, settings.interval_s * 2 ** (consecutive_failures - 1)))
+
+
+# -- ports ------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
-class OpenDeployment:
-    """An open (not cancelled, lease not expired) MARKET_SIM row."""
+class CallOutcome:
+    """The core's answer to one deployment or recall."""
 
-    deployment_id: UUID
-    requested_by: str
+    accepted: bool
+    reason_code: str | None = None
+    http_status: int | None = None
+    detail: str | None = None
+    call_id: str | None = None
+    duplicate: bool = False
 
 
-class AsDeploymentRepo(Protocol):
-    async def list_open(self, *, now: datetime) -> list[OpenDeployment]: ...
+class AsCallGateway(Protocol):
+    """The shared AS-deployment core (`opengrid.calls`), seen from the poller."""
 
-    async def insert(
-        self, *, deployment_id: UUID, start_at: datetime, end_at: datetime, requested_by: str, reason: str
+    async def deploy(
+        self, instruction: DispatchInstruction, *, obligation_id: UUID, principal: str, now: datetime
+    ) -> CallOutcome: ...
+
+    async def recall(
+        self, deployment_instruction_id: str, *, principal: str, now: datetime
+    ) -> CallOutcome: ...
+
+    async def has_call(self, instruction_id: str, *, principal: str) -> bool: ...
+
+
+class AwardLookup(Protocol):
+    async def awards_covering(self, contract_id: UUID, at: datetime) -> list[UUID]:
+        """ERCOT_AS obligations of `contract_id` whose delivery window covers `at` (any live state)."""
+        ...
+
+
+class PollAlerts(Protocol):
+    async def raise_once(
+        self, rule: str, condition_key: str, summary: str, detail: dict[str, Any]
     ) -> None: ...
 
-    async def extend(self, deployment_id: UUID, *, end_at: datetime) -> None: ...
-
-    async def close(self, deployment_id: UUID, *, at: datetime) -> None: ...
+    async def clear(self, rule: str, condition_key: str) -> None: ...
 
 
-_LIST_OPEN_SQL = """
-    SELECT deployment_id, requested_by FROM og.as_deployment
-    WHERE source = 'MARKET_SIM' AND cancelled_at IS NULL AND end_at > %(now)s
-    ORDER BY start_at
-"""
-
-_INSERT_SQL = """
-    INSERT INTO og.as_deployment (deployment_id, obligation_id, start_at, end_at, source, requested_by, reason)
-    VALUES (%(deployment_id)s, NULL, %(start_at)s, %(end_at)s, 'MARKET_SIM', %(requested_by)s, %(reason)s)
-"""
-
-_EXTEND_SQL = """
-    UPDATE og.as_deployment SET end_at = %(end_at)s
-    WHERE deployment_id = %(deployment_id)s AND source = 'MARKET_SIM' AND cancelled_at IS NULL
-"""
-
-_CLOSE_SQL = """
-    UPDATE og.as_deployment SET cancelled_at = %(at)s
-    WHERE deployment_id = %(deployment_id)s AND source = 'MARKET_SIM' AND cancelled_at IS NULL
-"""
+class PollTrace(Protocol):
+    async def append(
+        self, stream_id: str, decision_type: str, event_class: str, payload: dict[str, Any]
+    ) -> object: ...
 
 
-class PgAsDeploymentRepo:
-    """`AsDeploymentRepo` over `og.as_deployment`; touches only `source = 'MARKET_SIM'` rows, so an
-    operator's own deployments are never extended or ended by the poller."""
-
-    def __init__(self, pool: AsyncConnectionPool) -> None:
-        self._pool = pool
-
-    async def list_open(self, *, now: datetime) -> list[OpenDeployment]:
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_LIST_OPEN_SQL, {"now": now})
-            rows = await cur.fetchall()
-        return [OpenDeployment(deployment_id=r[0], requested_by=str(r[1] or "")) for r in rows]
-
-    async def _write(self, sql: str, params: dict[str, Any]) -> None:
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(sql, params)
-            await conn.commit()
-
-    async def insert(
-        self, *, deployment_id: UUID, start_at: datetime, end_at: datetime, requested_by: str, reason: str
-    ) -> None:
-        await self._write(
-            _INSERT_SQL,
-            {
-                "deployment_id": deployment_id,
-                "start_at": start_at,
-                "end_at": end_at,
-                "requested_by": requested_by,
-                "reason": reason,
-            },
-        )
-
-    async def extend(self, deployment_id: UUID, *, end_at: datetime) -> None:
-        await self._write(_EXTEND_SQL, {"deployment_id": deployment_id, "end_at": end_at})
-
-    async def close(self, deployment_id: UUID, *, at: datetime) -> None:
-        await self._write(_CLOSE_SQL, {"deployment_id": deployment_id, "at": at})
+# -- the poller -------------------------------------------------------------------------------------------
 
 
 @dataclass
-class AsDeploymentPoller:
-    http_client: httpx.AsyncClient
-    repo: AsDeploymentRepo
-    config: PollConfig
-    trace: TraceStore | None = None
+class ErcotAsPoller:
+    source: DispatchInstructionSource
+    calls: AsCallGateway
+    awards: AwardLookup
+    alerts: PollAlerts
+    trace: PollTrace
+    settings: ErcotAsPollSettings
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _next_poll_at: datetime | None = field(default=None, init=False)
+    _failures: int = field(default=0, init=False)
+    _last_success_at: datetime | None = field(default=None, init=False)
+    _answered: dict[str, tuple[bool, str | None]] = field(default_factory=dict, init=False)
+    _held_recalls: dict[str, DispatchInstruction] = field(default_factory=dict, init=False)
+    _superseded: set[str] = field(default_factory=set, init=False)
+    _last_error: str = field(default="", init=False)
+    _fetch_failures: int = field(default=0, init=False)
+    _processing_failed_ids: set[str] = field(default_factory=set, init=False)
 
     @property
-    def url(self) -> str:
-        return f"{self.config.base_url}/admin/as_deployment"
+    def principal(self) -> str:
+        return f"ercot:{self.source.backend}"
 
     async def poll_if_due(self, *, now: datetime | None = None) -> None:
-        """For a host loop ticking faster than `interval_s` (og-feeds' 5 s tick)."""
+        """For og-feeds' 5 s tick: poll when due, never raise. A poll counts as failed when the source could
+        not be read OR any instruction could not be processed (POLL-FAILED, then STALE); only an unreadable
+        source backs the cadence off -- a poison instruction must not slow every other instruction down."""
         now = now or datetime.now(UTC)
         if self._next_poll_at is not None and now < self._next_poll_at:
             return
-        self._next_poll_at = now + timedelta(seconds=self.config.interval_s)
-        await self.poll_once(now=now)
-
-    async def poll_once(self, *, now: datetime | None = None) -> None:
-        now = now or datetime.now(UTC)
+        fetched = False
         try:
-            response = await self.http_client.get(self.url, timeout=DEFAULT_TIMEOUT_S)
-            response.raise_for_status()
-            active = parse_active(response.json())
-        except (httpx.HTTPError, ValueError) as exc:  # PayloadError and JSON decode errors are ValueErrors
+            fetched, processed = await self.poll_once(now=now)
+        except Exception as exc:  # last resort: poll_once guards itself; never lose the failure accounting
+            logger.exception("ERCOT AS instruction poll raised")
+            self._last_error, processed = str(exc)[:300], False
+        ok = fetched and processed
+        self._failures = 0 if ok else self._failures + 1
+        self._fetch_failures = 0 if fetched else self._fetch_failures + 1
+        self._next_poll_at = now + timedelta(seconds=retry_delay_s(self.settings, self._fetch_failures))
+        try:
+            await self._health_alerts(ok, now)
+        except Exception:
+            logger.exception("ERCOT AS poll health alert failed")
+
+    async def poll_once(self, *, now: datetime) -> tuple[bool, bool]:
+        """One poll and every instruction in it: (source read, every instruction processed). The poll counts as
+        a success -- and `_last_success_at` moves -- only when both hold."""
+        try:
+            batch = await self.source.fetch_instruction_batch(
+                now - timedelta(seconds=self.settings.lookback_s)
+            )
+        except Exception as exc:  # any adapter/transport failure: counted, alerted, retried with backoff
+            logger.warning("ERCOT AS instruction poll failed", extra={"error": str(exc)[:300]})
+            self._last_error = str(exc)[:300]
+            return False, False
+        failed = await self.process(batch, now=now)
+        if failed:
+            self._last_error = f"{failed} instruction(s) could not be processed"
+            return True, False
+        self._last_success_at = now
+        return True, True
+
+    async def process(self, batch: InstructionBatch, *, now: datetime) -> int:
+        """Every instruction in its own guard: one that raises is traced, alerted and left unacknowledged
+        (the source re-sends it), and the rest of the batch still runs. Returns how many failed."""
+        failed = 0
+        for bad in batch.malformed:
+            key = bad.instruction_id or "unreadable"
+            failed += await self._guarded(
+                key, now, self._answer_malformed(bad.instruction_id, bad.error, now)
+            )
+        ordered = sorted(batch.instructions, key=lambda i: (i.issued_at, i.instruction_id))
+        recalled_in_batch = {i.recalls for i in ordered if i.kind == "AS_RECALL" and i.recalls}
+        for instruction in ordered:
+            step = self._one(instruction, now, superseded=instruction.instruction_id in recalled_in_batch)
+            failed += await self._guarded(instruction.instruction_id, now, step)
+        return failed
+
+    async def _one(self, instruction: DispatchInstruction, now: datetime, *, superseded: bool) -> None:
+        if instruction.instruction_id in self._answered:
+            await self._reanswer(instruction)
+        elif instruction.kind == "AS_DEPLOYMENT":
+            await self._deployment(instruction, now, superseded=superseded)
+        elif instruction.kind == "AS_RECALL":
+            await self._recall(instruction, now)
+        else:
+            await self._finish(
+                instruction, "AS_INSTRUCTION_NOTED", True, None, now, {"text": instruction.text}
+            )
+
+    async def _guarded(self, instruction_id: str, now: datetime, step: Coroutine[Any, Any, None]) -> int:
+        """Run one instruction's step: 0 on success (clearing an earlier processing alert for it), 1 on an
+        exception (traced and alerted when the database allows; never acknowledged)."""
+        try:
+            await step
+        except Exception as exc:
+            logger.exception(
+                "ERCOT AS instruction processing failed", extra={"instruction_id": instruction_id}
+            )
+            await self._processing_failed(instruction_id, exc, now)
+            return 1
+        if instruction_id in self._processing_failed_ids:
+            self._processing_failed_ids.discard(instruction_id)
+            key = f"{ALR_PROCESSING_FAILED}:{instruction_id}"
+            try:
+                await self.alerts.clear(ALR_PROCESSING_FAILED, key)
+            except Exception:
+                logger.exception("ERCOT AS processing alert clear failed")
+        return 0
+
+    async def _processing_failed(self, instruction_id: str, exc: Exception, now: datetime) -> None:
+        self._processing_failed_ids.add(instruction_id)
+        error = f"{type(exc).__name__}: {exc}"[:300]
+        payload = {"origin": ORIGIN, "instruction_id": instruction_id, "error": error, "at": now.isoformat()}
+        try:
+            await self.trace.append(
+                TRACE_STREAM, TRACE_DECISION_TYPE, "AS_INSTRUCTION_PROCESSING_FAILED", payload
+            )
+        except Exception:
+            logger.exception("ERCOT AS processing failure could not be traced")
+        try:
+            await self.alerts.raise_once(
+                ALR_PROCESSING_FAILED,
+                f"{ALR_PROCESSING_FAILED}:{instruction_id}",
+                f"ERCOT AS instruction {instruction_id} could not be processed ({type(exc).__name__}); "
+                "not acknowledged, retried every poll",
+                payload,
+            )
+        except Exception:
+            logger.exception("ERCOT AS processing failure could not be alerted")
+
+    # -- per kind ----------------------------------------------------------------------------------------
+
+    async def _deployment(self, instruction: DispatchInstruction, now: datetime, *, superseded: bool) -> None:
+        # Already applied (a re-delivery, e.g. after a restart): answer it; a recall in the same batch then
+        # ends the real call instead of treating the deployment as never started.
+        if await self.calls.has_call(instruction.instruction_id, principal=self.principal):
+            await self._finish(instruction, "AS_INSTRUCTION_DUPLICATE", True, None, now)
+            return
+        held = next((r for r in self._held_recalls.values() if r.recalls == instruction.instruction_id), None)
+        if superseded or held is not None:
+            self._superseded.add(instruction.instruction_id)
+            await self._finish(
+                instruction, "AS_INSTRUCTION_SUPERSEDED", True, "recalled before it started", now
+            )
+            if held is not None:
+                self._held_recalls.pop(held.instruction_id, None)
+                await self._finish(held, "AS_RECALL_APPLIED", True, None, now, {"superseded": True})
+            return
+        if (now - instruction.issued_at).total_seconds() > self.settings.max_instruction_age_s:
+            await self._refuse(instruction, 409, R_LATE, "instruction arrived too late to act on", now)
+            return
+        obligation_id = await self._resolve(instruction, now)
+        if obligation_id is None:
+            return
+        outcome = await self.calls.deploy(
+            instruction, obligation_id=obligation_id, principal=self.principal, now=now
+        )
+        if outcome.accepted:
+            extra = {
+                "obligation_id": str(obligation_id),
+                "call_id": outcome.call_id,
+                "duplicate": outcome.duplicate,
+            }
+            await self._finish(instruction, "AS_INSTRUCTION_ACCEPTED", True, None, now, extra)
+        else:
+            await self._refuse_outcome(instruction, outcome, now, obligation_id)
+
+    async def _recall(self, instruction: DispatchInstruction, now: datetime) -> None:
+        target = instruction.recalls
+        if not target:
+            await self._refuse(instruction, 422, R_NOTHING_TO_RECALL, "recall names no deployment", now)
+            return
+        if not await self.calls.has_call(target, principal=self.principal):
+            settled = target in self._superseded or target in self._answered
+            held_since = (now - instruction.issued_at).total_seconds()
+            if not settled and held_since < self.settings.recall_hold_s:
+                # Out of order: its deployment has not arrived. Leave it unacknowledged (the source re-sends it)
+                # and supersede the deployment when it comes.
+                self._held_recalls[instruction.instruction_id] = instruction
+                return
+            self._held_recalls.pop(instruction.instruction_id, None)
+            await self._finish(instruction, "AS_RECALL_APPLIED", True, None, now, {"nothing_active": True})
+            return
+        outcome = await self.calls.recall(target, principal=self.principal, now=now)
+        self._held_recalls.pop(instruction.instruction_id, None)
+        if outcome.accepted:
+            await self._finish(
+                instruction, "AS_RECALL_APPLIED", True, None, now, {"call_id": outcome.call_id}
+            )
+        else:
+            await self._refuse_outcome(instruction, outcome, now, None)
+
+    async def _resolve(self, instruction: DispatchInstruction, now: datetime) -> UUID | None:
+        contract_id = self.settings.award_map.contract_for_as(instruction.resource_id, instruction.service)
+        found = (
+            []
+            if contract_id is None
+            else await self.awards.awards_covering(contract_id, instruction.start_at)
+        )
+        if len(found) == 1:
+            return found[0]
+        if not found:
+            detail = f"no award for {instruction.resource_id}:{instruction.service} at {instruction.start_at}"
+            await self._refuse(instruction, 404, R_NO_AWARD, detail, now)
+        else:
+            await self._refuse(instruction, 409, R_AMBIGUOUS, f"{len(found)} awards cover the start", now)
+        return None
+
+    # -- answers -----------------------------------------------------------------------------------------
+
+    async def _answer_malformed(self, instruction_id: str | None, error: str, now: datetime) -> None:
+        payload = {"origin": ORIGIN, "instruction_id": instruction_id, "http_status": 422, "error": error}
+        await self.trace.append(TRACE_STREAM, TRACE_DECISION_TYPE, "AS_INSTRUCTION_REFUSED", payload)
+        # An instruction with no readable id cannot be acknowledged, so the source re-sends it every poll:
+        # key its alert on the error itself so it opens once.
+        key = instruction_id or f"unreadable:{hashlib.sha256(error.encode()).hexdigest()[:16]}"
+        await self.alerts.raise_once(
+            ALR_REFUSED,
+            f"{ALR_REFUSED}:{key}",
+            f"ERCOT AS instruction {key} refused (422 malformed)",
+            payload,
+        )
+        if instruction_id is not None and instruction_id not in self._answered:
+            await self._ack(instruction_id, False, f"422 {R_MALFORMED}: {error}"[:200])
+
+    async def _refuse_outcome(
+        self,
+        instruction: DispatchInstruction,
+        outcome: CallOutcome,
+        now: datetime,
+        obligation_id: UUID | None,
+    ) -> None:
+        status = outcome.http_status or 409
+        await self._refuse(
+            instruction, status, outcome.reason_code or "R-REFUSED", outcome.detail or "", now, obligation_id
+        )
+
+    async def _refuse(
+        self,
+        instruction: DispatchInstruction,
+        status: int,
+        code: str,
+        detail: str,
+        now: datetime,
+        obligation_id: UUID | None = None,
+    ) -> None:
+        reason = f"{status} {code}: {detail}"[:200]
+        extra = {"http_status": status, "reason_code": code, "detail": detail}
+        if obligation_id is not None:
+            extra["obligation_id"] = str(obligation_id)
+        await self._finish(instruction, "AS_INSTRUCTION_REFUSED", False, reason, now, extra)
+        await self.alerts.raise_once(
+            ALR_REFUSED,
+            f"{ALR_REFUSED}:{instruction.instruction_id}",
+            f"ERCOT {instruction.service or 'AS'} instruction {instruction.instruction_id} refused ({status} {code})",
+            {"origin": ORIGIN, "instruction_id": instruction.instruction_id, "resource": instruction.resource_id,
+             "service": instruction.service, "mw": str(instruction.mw), **extra},
+        )  # fmt: skip
+
+    async def _finish(
+        self,
+        instruction: DispatchInstruction,
+        event_class: str,
+        accepted: bool,
+        reason: str | None,
+        now: datetime,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Trace (K10), then acknowledge, then remember the answer for duplicates."""
+        await self.trace.append(
+            TRACE_STREAM, TRACE_DECISION_TYPE, event_class, {**_payload(instruction), **(extra or {}),
+                                                              "accepted": accepted, "reason": reason,
+                                                              "decided_at": now.isoformat()},
+        )  # fmt: skip
+        await self._ack(instruction.instruction_id, accepted, reason)
+
+    async def _reanswer(self, instruction: DispatchInstruction) -> None:
+        accepted, reason = self._answered[instruction.instruction_id]
+        await self.trace.append(
+            TRACE_STREAM,
+            TRACE_DECISION_TYPE,
+            "AS_INSTRUCTION_DUPLICATE",
+            {**_payload(instruction), "accepted": accepted},
+        )
+        await self._ack(instruction.instruction_id, accepted, reason)
+
+    async def _ack(self, instruction_id: str, accepted: bool, reason: str | None) -> None:
+        self._answered[instruction_id] = (accepted, reason)
+        try:
+            receipt = await self.source.acknowledge_instruction(
+                instruction_id, accepted=accepted, reason=reason
+            )
+        except Exception as exc:  # the source re-sends an unacknowledged instruction; the answer is kept
             logger.warning(
-                "market sim AS deployment poll failed; leases left to expire", extra={"error": str(exc)}
+                "ERCOT AS acknowledgement failed", extra={"instruction_id": instruction_id, "error": str(exc)}
             )
             return
-        await self.apply(active, now=now)
+        if not receipt.accepted:
+            logger.warning(
+                "ERCOT AS acknowledgement not accepted",
+                extra={"instruction_id": instruction_id, "status": receipt.status, "errors": receipt.errors},
+            )
 
-    async def apply(self, active: SimDeployment | None, *, now: datetime) -> None:
-        """Reconcile the open MARKET_SIM rows with the sim's current declaration (module docstring)."""
-        open_rows = await self.repo.list_open(now=now)
-        keep = active.requested_by if active is not None and not active.recall else None
-        for row in open_rows:
-            if row.requested_by != keep:
-                await self._trace(
-                    "AS_DEPLOYMENT_END", {"deployment_id": str(row.deployment_id), "sim": row.requested_by}
-                )
-                await self.repo.close(row.deployment_id, at=now)
-        if keep is None or active is None:
+    # -- poll health -------------------------------------------------------------------------------------
+
+    async def _health_alerts(self, ok: bool, now: datetime) -> None:
+        if ok:
+            await self.alerts.clear(ALR_POLL_FAILED, ALR_POLL_FAILED)
+            await self.alerts.clear(ALR_POLL_STALE, ALR_POLL_STALE)
             return
-        end_at = now + timedelta(seconds=self.config.lease_s)
-        current = [row for row in open_rows if row.requested_by == keep]
-        if current:
-            for row in current:
-                await self.repo.extend(row.deployment_id, end_at=end_at)
-            return
-        deployment_id = uuid4()
-        start_at = min(active.declared_at, now)
-        reason = f"market sim {active.service} deployment, {active.deployed_mw:g} MW"
-        await self._trace(
-            "AS_DEPLOYMENT_START",
-            {
-                "deployment_id": str(deployment_id),
-                "sim": keep,
-                "service": active.service,
-                "deployed_mw": active.deployed_mw,
-                "start_at": start_at.isoformat(),
-                "end_at": end_at.isoformat(),
-            },
-        )
-        await self.repo.insert(
-            deployment_id=deployment_id, start_at=start_at, end_at=end_at, requested_by=keep, reason=reason
-        )
-
-    async def _trace(self, event_class: str, payload: dict[str, Any]) -> None:
-        if self.trace is not None:
-            await self.trace.append(TRACE_STREAM, "FEED_CHANGE", event_class, payload)
+        detail = {"origin": ORIGIN, "consecutive_failures": self._failures, "error": self._last_error}
+        if self._failures >= self.settings.failure_alert_after:
+            await self.alerts.raise_once(
+                ALR_POLL_FAILED,
+                ALR_POLL_FAILED,
+                f"ERCOT AS instruction poll failing ({self._failures} in a row)",
+                detail,
+            )
+        last_good = self._last_success_at or self.started_at
+        if (now - last_good).total_seconds() >= self.settings.stale_after_s:
+            await self.alerts.raise_once(
+                ALR_POLL_STALE,
+                ALR_POLL_STALE,
+                f"No ERCOT AS instructions read since {last_good.isoformat(timespec='seconds')}: deployments may be missed",
+                {**detail, "last_success_at": last_good.isoformat()},
+            )
 
 
-def build_as_deployment_poller(
-    cfg: object,
-    pool: AsyncConnectionPool,
-    http_client: httpx.AsyncClient,
-    *,
-    trace: TraceStore | None = None,
-) -> AsDeploymentPoller | None:
-    """The poller for a host process, or `None` while `[market_sim].as_deployment_poll` is false."""
-    config = poll_config_from(cfg)
-    if not config.enabled:
-        return None
-    return AsDeploymentPoller(
-        http_client=http_client, repo=PgAsDeploymentRepo(pool), config=config, trace=trace
-    )
+def _payload(instruction: DispatchInstruction) -> dict[str, Any]:
+    return {
+        "origin": ORIGIN,
+        "instruction_id": instruction.instruction_id,
+        "kind": instruction.kind,
+        "resource": instruction.resource_id,
+        "service": instruction.service,
+        "mw": str(instruction.mw) if instruction.mw is not None else None,
+        "start_at": instruction.start_at.isoformat(),
+        "end_at": instruction.end_at.isoformat() if instruction.end_at else None,
+        "ramp_minutes": instruction.ramp_minutes,
+        "recalls": instruction.recalls,
+        "issued_at": instruction.issued_at.isoformat(),
+    }

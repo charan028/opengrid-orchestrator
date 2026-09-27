@@ -15,6 +15,7 @@ import logging
 import math
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -48,6 +49,7 @@ from opengrid.guardian.ports import (
     ProposedBatch,
     ProposedItem,
     ReleaseRequest,
+    SafeStopScope,
     ServiceTransformer,
 )
 from opengrid.guardian.pq_ports import (
@@ -144,7 +146,15 @@ def manual_charge_territory_exempt(
         if all(i.reason_code == reasons.R_MANUAL_RAMP and i.p_kw_setpoint >= 0 for i in items)
     }
     return [
-        o for o in outcomes if not (o.rule_id == "G-33" and o.obligation_id is None and o.hub_id in exempt)
+        o
+        for o in outcomes
+        if not (
+            o.rule_id == "G-33"
+            and o.obligation_id is None
+            and o.hub_id in exempt
+            # D-37: an UNAVAILABLE bank (regulated, no contract) is an idle hold -- no manual charge either.
+            and o.reason != reasons.R_BANK_UNAVAILABLE
+        )
     ]
 
 
@@ -158,6 +168,10 @@ def vetoed_hub_ids(violations: list[CheckOutcome]) -> list[str]:
 def _iso_z(dt: datetime) -> str:
     """RFC 3339 UTC with a literal 'Z' suffix, per interfaces/crypto.md S1."""
     return dt.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+#: og.grant keeps 3 decimals: a pro-rata share is judged with this much rounding slack (with DISPATCH, r3.4.4 live).
+PARTIAL_DEPLOYMENT_TOLERANCE_KW = 0.001
 
 
 @dataclass
@@ -178,6 +192,82 @@ class GuardianService:
     _evaluated: OrderedDict[UUID, ProposedBatch] = field(default_factory=OrderedDict, init=False)
     _clock_alert_open: bool = field(default=False, init=False)
     _violations: OrderedDict[UUID, list[CheckOutcome]] = field(default_factory=OrderedDict, init=False)
+    #: G-04 anchor: per hub, the last net setpoint this guardian SIGNED, when, and its lease expiry
+    _last_signed: dict[str, tuple[float, datetime, datetime]] = field(default_factory=dict, init=False)
+
+    #: signed batches whose commands are not yet published: they become G-04 anchors only once they are
+    _signed_unpublished: OrderedDict[UUID, datetime] = field(default_factory=OrderedDict, init=False)
+
+    def confirm_published(self, command_batch_id: UUID) -> None:
+        """The signed batch reached the hubs (`guardian.main` after a successful publish): its per-hub net setpoints
+        become G-04's signed anchors. A batch signed but never published leaves the anchors where the hubs are
+        (r3.4.3 LOW: anchoring at signing put both sides a step ahead of the hub after a failed publish)."""
+        signed_at = self._signed_unpublished.pop(command_batch_id, None)
+        if signed_at is not None:
+            self._record_signed_setpoints(command_batch_id, signed_at)
+
+    def _record_signed_setpoints(self, command_batch_id: UUID, signed_at: datetime) -> None:
+        """Remember each hub's signed net setpoint (G-04's utility-scale anchor, `checks.g04_anchor_kw`)."""
+        proposal = self._evaluated.get(command_batch_id)
+        if proposal is None:
+            return
+        for item in checks.hub_setpoints(proposal.items):
+            self._last_signed[item.hub_id] = (item.p_kw_setpoint, signed_at, proposal.expires_at)
+
+    def seed_signed_anchors(self, anchors: dict[str, tuple[float, datetime, datetime]]) -> None:
+        """r3.4.3 HIGH-A: after a restart, reload the last signed setpoint per hub whose lease is still live
+        (`repo.load_signed_anchors`, from og.verdict PASS + the batch's RT_ALLOCATION trace), so G-04 keeps the
+        same anchor as the engine instead of falling back to stale telemetry. Never overwrites a newer entry."""
+        for hub_id, entry in anchors.items():
+            current = self._last_signed.get(hub_id)
+            if current is None or current[1] < entry[1]:
+                self._last_signed[hub_id] = entry
+
+    def _drop_signed_anchors(self, hub_ids: Iterable[str]) -> None:
+        """Contract with DISPATCH (r3.4.3): only a stop engaged over a hub since the signature (or its lease
+        lapsing, `checks.g04_anchor_kw`) ends that hub's signed anchor -- never a veto -- and both sides then
+        anchor on telemetry."""
+        for hub_id in hub_ids:
+            self._last_signed.pop(hub_id, None)
+
+    async def _drop_anchors_stopped_since_signing(self, bank_id: str, hub_ids: Iterable[str]) -> None:
+        """A FLEET/ZONE/BANK stop ENGAGE at or after a hub's signature means the hub ramped to 0 kW: its signed
+        setpoint is no longer where it is (a release inside the lease would otherwise let a step from the
+        pre-stop setpoint pass G-04 while the hub sits at 0)."""
+        signed = {h: self._last_signed[h][1] for h in hub_ids if h in self._last_signed}
+        if not signed:
+            return
+        port = self.ports.safe_stop
+        scopes: list[tuple[SafeStopScope, str]] = [("FLEET", "FLEET"), ("BANK", bank_id)]
+        zone = self.ports.zones_by_bank.get(bank_id)
+        if zone:
+            scopes.append(("ZONE", zone))
+        engaged: list[datetime] = []
+        for kind, ref in scopes:
+            try:
+                at = await port.last_engaged_at(kind, ref)
+            except Exception:
+                logger.exception("stop read failed: signed anchors dropped", extra={"bank_id": bank_id})
+                self._drop_signed_anchors(signed)
+                return
+            if at is not None:
+                engaged.append(at)
+        if engaged:
+            latest = max(engaged)
+            self._drop_signed_anchors([h for h, signed_at in signed.items() if latest >= signed_at])
+
+    def _g04_anchor(self, hub_id: str, hub: HubSnapshot) -> checks.G04Anchor:
+        signed = self._last_signed.get(hub_id)
+        return checks.g04_anchor_kw(
+            prev_telemetry_kw=hub.prev_p_kw,
+            telemetry_ts=hub.telemetry_at,
+            last_signed_kw=signed[0] if signed else None,
+            last_signed_at=signed[1] if signed else None,
+            lease_expires_at=signed[2] if signed else None,
+            now=self.now_fn(),
+            utility_scale=hub.params.utility_scale,
+            cycle_interval_s=self.config.cycle_interval_s,
+        )
 
     async def evaluate_and_sign(self, batch: CommandBatchRow) -> Verdict:
         """Run every applicable G-check against independently-read state; PASS signs, any veto returns
@@ -345,7 +435,8 @@ class GuardianService:
 
     async def _check_hubs_and_bank(self, proposal: ProposedBatch) -> list[CheckOutcome]:
         violations: list[CheckOutcome] = []
-        fleet_delta_kw = 0.0
+        fleet_delta_kw = 0.0  # measured change vs telemetry: bank loading (G-03) and the flow checks
+        ramp_delta_kw = 0.0  # the step for the RATE checks (G-05, G-06, G-32), on G-04's anchor
         gross_step_kw = 0.0
         additional_charge_kw = 0.0
         snapshots: dict[str, HubSnapshot] = {}
@@ -359,6 +450,7 @@ class GuardianService:
         # A hub may carry several items (one per obligation) and executes their SUM: every hub-level limit
         # (reserve, energy over the lease, power, meter, ramp) is checked on that sum, never per item.
         hub_items = checks.hub_setpoints(proposal.items)
+        await self._drop_anchors_stopped_since_signing(proposal.bank_id, [i.hub_id for i in hub_items])
         for item in hub_items:
             hub = await self.ports.hubs.snapshot(item.hub_id)
             if hub is None:
@@ -389,14 +481,16 @@ class GuardianService:
                 if not g26.ok:
                     violations.append(g26)
 
-            g04 = checks.check_g04_hub_ramp(
-                item, hub.prev_p_kw, self.config.cycle_interval_s, hub_ramp_kw_per_s(hub.params)
-            )
+            # telemetry, or a utility-scale hub's last signed setpoint
+            anchor = self._g04_anchor(item.hub_id, hub)
+            g04 = checks.check_g04_hub_ramp(item, anchor.kw, anchor.dt_s, hub_ramp_kw_per_s(hub.params))
             if not g04.ok:
                 violations.append(g04)
 
             fleet_delta_kw += item.p_kw_setpoint - hub.prev_p_kw
-            gross_step_kw += abs(item.p_kw_setpoint - hub.prev_p_kw)
+            ramp_step_kw = checks.ramp_step_kw(item.p_kw_setpoint, anchor)
+            ramp_delta_kw += ramp_step_kw
+            gross_step_kw += abs(ramp_step_kw)
             additional_charge_kw += max(item.p_kw_setpoint, 0.0) - max(hub.prev_p_kw, 0.0)
 
         bank = await self.ports.banks.snapshot(proposal.bank_id)
@@ -407,7 +501,7 @@ class GuardianService:
                 self._check_bank_loading(proposal.bank_id, bank, additional_charge_kw, fleet_delta_kw)
             )
 
-        cumulative_fleet = self._accumulate(self._fleet_delta_by_cycle, proposal.cycle_id, fleet_delta_kw)
+        cumulative_fleet = self._accumulate(self._fleet_delta_by_cycle, proposal.cycle_id, ramp_delta_kw)
         g05 = checks.check_g05_fleet_ramp(
             cumulative_fleet,
             self.config.cycle_interval_s,
@@ -429,7 +523,7 @@ class GuardianService:
 
         if bank is not None and bank.feeder_id is not None:
             feeder_key = (proposal.cycle_id, bank.feeder_id)
-            cumulative_feeder = self._accumulate(self._feeder_delta_by_cycle, feeder_key, fleet_delta_kw)
+            cumulative_feeder = self._accumulate(self._feeder_delta_by_cycle, feeder_key, ramp_delta_kw)
             ceiling = bank.feeder_ceiling_kw_per_min or self.config.feeder_ramp_ceiling_kw_per_min.get(
                 bank.feeder_id, self.config.default_feeder_ramp_ceiling_kw_per_min
             )
@@ -695,8 +789,19 @@ class GuardianService:
             return violations
         zone_territory = port.zone_territory()
         markets: dict[UUID, MarketRef | None] = {}
+        availability = await port.bank_availability(proposal.bank_id)
         for item in proposal.items:
             if flow_checks.is_idle(item):
+                continue
+            # D-37 / K13: an obligation grandfathered on this (now unavailable, regulated) bank completes
+            # untouched -- exempt from the availability veto and from K15 (the guardian's own read).
+            if item.obligation_id is not None and await port.grandfathered(
+                item.obligation_id, proposal.bank_id
+            ):
+                continue
+            unavailable = flow_checks.check_g33_available(item, availability)
+            if not unavailable.ok:
+                violations.append(unavailable)
                 continue
             if item.obligation_id is None:
                 ref: MarketRef | None = flow_checks.HEADROOM_MARKET
@@ -924,10 +1029,15 @@ class GuardianService:
 
         engaged = await port.outstanding_engages(request.scope_kind, request.scope_ref)
         instruction_kinds: list[str] = []
-        for bank_id in await port.banks_in_scope(request.scope_kind, request.scope_ref):
+        banks = await port.banks_in_scope(request.scope_kind, request.scope_ref)
+        for bank_id in banks:
             instruction = await self.ports.l2_instructions.active_instruction(bank_id)
             if instruction is not None:
                 instruction_kinds.append(instruction.kind)
+        # Q10: the utility's own lifts, read only when a UTILITY stop is outstanding (else never needed)
+        utility_lifts = (
+            await port.utility_lifts(banks) if any(s.initiator_kind == "UTILITY" for s in engaged) else {}
+        )
         traced = request.trace_id is not None and await self.ports.trace.exists_preimage(request.trace_id)
         now = self.now_fn()
         outcome = stop_release.check_stop_release(
@@ -939,6 +1049,7 @@ class GuardianService:
             approval_max_age_s=self.config.stop_release_max_age_s,
             max_clock_skew_s=self.config.stop_release_max_clock_skew_s,
             request_traced=traced,
+            utility_lifts=utility_lifts,
         )
         if not outcome.ok:
             await self._trace_release_verdict(request, "REFUSED", reason=outcome.reason)
@@ -1099,6 +1210,28 @@ class GuardianService:
         g15 = checks.check_g15_l2_boundary(instruction, proposal.bank_id, aggregate_abs_kw)
         return [] if g15.ok else [g15]
 
+    async def _deployed_share_kw(self, obligation: ActiveObligation, frozen_kw: float) -> float | None:
+        """G-19's lock for a capacity hold (ERCOT_AS, REGULATED_CAPACITY) while a PARTIAL deployment is active: this
+        bank's pro-rata share of the requested kW -- its reservation x requested / the obligation's reservation on
+        every bank -- never more than the reservation, less `PARTIAL_DEPLOYMENT_TOLERANCE_KW` (og.grant keeps 3
+        decimals). r3.4.4 live: an ECRS 0.3 MW call of a 0.5 MW award; the same for a toll call below its
+        commitment. The guardian's own reads (og.obligation, og.as_deployment, og.reservation). None when there is
+        no such verified partial deployment (not a hold, none active, the full commitment deployed, or unread) --
+        then the full reservation stays the lock (never a looser lock on a missing read)."""
+        port = self.ports.as_awards
+        total = obligation.total_frozen_kw
+        if port is None or total is None or total <= 0:
+            return None
+        if await port.service_type(obligation.obligation_id) not in checks.HOLD_SERVICE_TYPES:
+            return None
+        if not await port.deployment_active(obligation.obligation_id):
+            return None
+        requested = await port.deployment_requested_kw(obligation.obligation_id)
+        if requested is None:
+            return None
+        share = min(frozen_kw, frozen_kw * min(1.0, float(requested) / float(total)))
+        return max(share - PARTIAL_DEPLOYMENT_TOLERANCE_KW, 0.0)
+
     async def _check_commitment_lock(self, proposal: ProposedBatch) -> list[CheckOutcome]:
         """GUARD-01/K13: enumerate ACTIVE obligations independently (never from the batch's own item
         list) so omitting an obligation, or relabelling it `obligation_id=None`, cannot evade G-19. A
@@ -1123,9 +1256,35 @@ class GuardianService:
             obligation_key = str(obligation.obligation_id)
             new_kw = float(totals.get(obligation_key, Decimal(0)))  # omitted from the batch -> 0 kw
             frozen_kw = float(obligation.frozen_kw)
-            prior = await self.ports.prior_grants.prior_granted_kw(obligation.obligation_id)
+            # this bank's own previous-cycle grant (never another bank's share, never this cycle's own row)
+            prior = await self.ports.prior_grants.prior_granted_kw(
+                obligation.obligation_id, proposal.bank_id, proposal.cycle_id
+            )
             prior_kw = float(prior) if prior is not None else frozen_kw
             reason_code = reason_by_obligation.get(obligation_key)
+            if reason_code == reasons.R_AS_PARTIAL_DEPLOYMENT:
+                # the engine's claim "the call asked for less": signed only on the guardian's own read of that
+                # partial deployment, at this bank's pro-rata share of it
+                share = await self._deployed_share_kw(obligation, frozen_kw)
+                if share is None:
+                    violations.append(
+                        CheckOutcome(
+                            "G-19", False, "AS_PARTIAL_DEPLOYMENT_UNVERIFIED", obligation_id=obligation_key
+                        )
+                    )
+                elif new_kw < share - 1e-9:
+                    violations.append(
+                        CheckOutcome(
+                            "G-19", False, reasons.R_COMMIT_LOCK_VIOLATION, obligation_id=obligation_key
+                        )
+                    )
+                continue
+            if checks.g19_reduction_below_floor(new_kw, frozen_kw, prior_kw):
+                # a PARTIAL deployment of a capacity hold: the lock is this bank's share of what was deployed
+                share = await self._deployed_share_kw(obligation, frozen_kw)
+                if share is not None:
+                    frozen_kw = share
+                    prior_kw = float(prior) if prior is not None else frozen_kw
             if reason_code == reasons.R_GRANT_AS_HOLD and checks.g19_reduction_below_floor(
                 new_kw, frozen_kw, prior_kw
             ):
@@ -1250,6 +1409,11 @@ class GuardianService:
         port = self.ports.territory
         if port is None or not proposal.items:
             return None
+        if await port.grandfathered(obligation_id, proposal.bank_id):
+            return None  # D-37/K13: served here untouched, never a territory reduction
+        availability = await port.bank_availability(proposal.bank_id)
+        if availability is not None and not availability.available:
+            return reasons.R_BANK_UNAVAILABLE
         ref = flow_checks.obligation_market_ref(await port.obligation_market(obligation_id))
         zone = await port.hub_zone(proposal.items[0].hub_id)
         territory = territory_of_zone(zone, port.zone_territory())
@@ -1275,6 +1439,15 @@ class GuardianService:
         members_port = self.ports.bank_members
         bank = await self.ports.banks.snapshot(proposal.bank_id)
         members = await members_port.member_snapshots(proposal.bank_id) if members_port is not None else []
+        updating = await self._firmware_updating_hubs(proposal.bank_id)
+        if updating and members_port is not None:
+            # A hub a firmware campaign has taken out of service cannot deliver (the engine excludes it, and a
+            # commitment it served becomes R-COMMIT-LOCK-OVERRIDE-L0): unavailable here, seen or not.
+            members = [
+                snap
+                for hub_id in await members_port.member_hub_ids(proposal.bank_id)
+                if hub_id not in updating and (snap := await self.ports.hubs.snapshot(hub_id)) is not None
+            ]
         if bank is None or not members:
             return _OverrideEvidence(
                 instruction is not None, bank_capability_kw=None, bank_capability_upper_kw=None
@@ -1302,6 +1475,21 @@ class GuardianService:
             manual_target_hubs=manual_hubs,
             capability_without_manual_upper_kw=without_manual_kw,
         )
+
+    async def _firmware_updating_hubs(self, bank_id: str) -> frozenset[str]:
+        """Hubs on `bank_id` a firmware job has in flight (the guardian's own `og.firmware_job` read). A failed or
+        missing read is empty: the hubs then count as available, which can only make an override claim look
+        LESS true (never corroborates one)."""
+        port = self.ports.firmware_updating
+        if port is None:
+            return frozenset()
+        try:
+            return frozenset(await port.updating_hub_ids(bank_id))
+        except Exception:
+            logger.exception(
+                "firmware-updating read failed: counted as available", extra={"bank_id": bank_id}
+            )
+            return frozenset()
 
     async def _manual_target_evidence(
         self, bank_id: str, bank: BankSnapshot, policy: flow_checks.FlowPolicy, lease_h: float
@@ -1470,6 +1658,12 @@ class GuardianService:
                 "signed_at": _iso_z(signed_at),
             }
             signature = sign_payload(self.signing_seed, payload)
+            self._signed_unpublished[batch.command_batch_id] = signed_at  # anchored on `confirm_published`
+            while len(self._signed_unpublished) > _MAX_EVALUATED_PROPOSALS:
+                self._signed_unpublished.popitem(last=False)
+        # A veto never ends a signed anchor (r3.4.3 HIGH, contract with DISPATCH): while that lease is live the
+        # hub keeps following the last SIGNED setpoint, so that is where the next step starts. Re-anchoring on
+        # telemetry up to ~10 s stale let a step of 4-5x the bound sign right after an item-level veto.
 
         verdict = Verdict(
             verdict_id=verdict_id,

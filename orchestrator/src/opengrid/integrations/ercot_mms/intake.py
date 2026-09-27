@@ -51,7 +51,12 @@ class AwardContractMap(BaseModel):
     def contract_for(self, award: Award) -> UUID | None:
         if award.kind == "ENERGY":
             return self.energy.get(award.resource_id)
-        return self.ancillary.get(f"{award.resource_id}:{award.service}")
+        return self.contract_for_as(award.resource_id, award.service)
+
+    def contract_for_as(self, resource_id: str, service: str | None) -> UUID | None:
+        """The contract carrying `resource_id`'s awards of AS `service` (also how an AS deployment
+        instruction, which names only the resource and AS type, finds its award -- D-35)."""
+        return self.ancillary.get(f"{resource_id}:{service}")
 
 
 @dataclass(frozen=True, slots=True)

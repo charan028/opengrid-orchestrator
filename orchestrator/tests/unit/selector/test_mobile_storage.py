@@ -255,7 +255,7 @@ def test_truck_charging_is_priced_at_the_station_and_kept_in_the_owner_window():
 
 
 async def test_positions_unreadable_plans_no_mobile_charging(monkeypatch):
-    async def _boom(_ids):
+    async def _boom(_ids, **_kw):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(gate.db, "load_hub_positions", _boom)
@@ -263,7 +263,7 @@ async def test_positions_unreadable_plans_no_mobile_charging(monkeypatch):
 
 
 async def test_positions_from_og_hub_decide_at_home(monkeypatch):
-    async def _positions(_ids):
+    async def _positions(_ids, **_kw):
         return {"bank-truck-dfw-01": (32.8385, -96.9730), "truck-dfw-01": (32.8385, -96.9730)}
 
     monkeypatch.delenv("OG_CONFIG", raising=False)

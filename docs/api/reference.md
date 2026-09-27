@@ -149,11 +149,48 @@ carries them; a metered site missing from that table is returned with `lat`/`lon
 
 Responses: `200`
 
+## delivery
+
+### `GET /og/api/delivery/records`
+
+List Delivery Records. Role: **viewer**.
+
+Delivery records newest first (without their per-bucket series), filtered by service, contract,
+call kind, result, utility, call ids and window-start date range.
+
+Parameters: `service_type` (query, string | null); `contract_id` (query, string | null); `call_kind` (query, string | null); `result` (query, string | null); `utility_id` (query, string | null); `call_ids` (query, string | null); `since` (query, string | null); `until` (query, string | null); `limit` (query, integer)
+
+Responses: `200`, `422`
+
+### `GET /og/api/delivery/records/{call_id}`
+
+Get Delivery Record. Role: **viewer**.
+
+One call's delivery record with its per-bucket series (committed, commanded, delivered, meter).
+
+Parameters: `call_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `GET /og/api/delivery/summary`
+
+Delivery Summary. Role: **viewer**.
+
+Per contract per CT day over final records: calls, PASS/PARTIAL/FAIL, compliance % (PASS share),
+mean sustained compliance, meter mismatches, discharged vs committed kWh.
+
+Parameters: `days` (query, integer)
+
+Responses: `200`, `422`
+
 ## dispatch
 
 ### `GET /og/api/dispatch/as-deployments`
 
 List As Deployments. Role: **viewer**.
+
+Active deployments with their origin (`source`: OPERATOR, UTILITY, GRID_LINK, ERCOT, MARKET_SIM,
+SCENARIO) and who asked (`requested_by`), for the Dispatch screen.
 
 Responses: `200`
 
@@ -161,17 +198,13 @@ Responses: `200`
 
 Create As Deployment. Role: **operator**.
 
-Deploy one held ERCOT_AS award now: while active, the allocator discharges it up to its committed
-kW (an AS award is otherwise a 0 kW capacity hold). The award must exist, be ERCOT_AS and be
-deployable now (404/409 otherwise), the duration is capped by the obligation's own product rule (ECRS
-60 min, Non-Spin 240; 409 when it has none), and a second deployment while one is active is refused
-(409, no chaining). Traced before it takes effect (K10).
+Deploy one held award now (or at `start_at`) through the one call path, `opengrid.calls.issue_call`
+(D-33): the same checks as a utility's own call -- deployable state, the obligation's own product
+cap (ECRS 60, Non-Spin 240, TOLLING 90 min; refused when it has none), no overlap, discharge only,
+within the committed kW and the reservation window, idempotency and rate limits. Traced before it
+takes effect (K10), with origin OPERATOR.
 
-D-29: the same route issues a utility's discharge call on a tolling obligation (REGULATED_CAPACITY,
-contract variant TOLLING) -- same checks, capped by its product rule (TOLLING 90 min), recorded as
-source OPERATOR with a reason starting "utility call".
-
-Body: `obligation_id` (string | null); `scope` (string | null); `duration_minutes` (integer); `reason` (string, required)
+Body: `obligation_id` (string | null); `scope` (string | null); `duration_minutes` (integer); `reason` (string, required); `requested_kw` (number | null); `start_at` (string | null); `idempotency_key` (string | null)
 
 Responses: `201`, `422`
 
@@ -179,9 +212,19 @@ Responses: `201`, `422`
 
 End As Deployment. Role: **operator**.
 
-End a deployment early: the award(s) return to a 0 kW capacity hold on the next cycle.
+End a deployment early (any origin): the award returns to a 0 kW capacity hold on the next cycle.
 
 Parameters: `deployment_id` (path, string, required)
+
+Responses: `200`, `422`
+
+### `GET /og/api/dispatch/calls`
+
+List Dispatch Calls. Role: **viewer**.
+
+The call ledger (every origin, refusals included), newest first.
+
+Parameters: `utility_id` (query, string | null); `limit` (query, integer)
 
 Responses: `200`, `422`
 
@@ -525,7 +568,8 @@ Fleet Map. Role: **viewer**.
 `{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,
 bank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,
 home_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[],
-asset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`). `depots` are the D-31 home
+asset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`) and the D-37 availability
+fields (`opengrid.market.availability.availability_fields`). `depots` are the D-31 home
 stations with their assigned units. `activity_counts` covers the filtered set.
 
 Parameters: `zone` (query, string | null); `bank` (query, string | null); `activity` (query, string | null)
@@ -560,7 +604,7 @@ Select Matching. Role: **viewer**.
 Every hub id matching the filter, capped at `[api].fleet_selection_max` (default 5,000):
 `{hub_ids, count, capped, max}`. `capped` means more hubs match than were returned.
 
-Parameters: `max` (query, integer | null); `zone` (query, array of string | null); `bank` (query, string | null); `health` (query, array of string | null); `activity` (query, array of string | null); `soc_min` (query, number | null); `soc_max` (query, number | null); `q` (query, string | null); `hw` (query, array of string | null); `fw` (query, array of string | null); `fw_not` (query, string | null); `asset_class` (query, array of string | null)
+Parameters: `max` (query, integer | null); `zone` (query, array of string | null); `bank` (query, string | null); `health` (query, array of string | null); `activity` (query, array of string | null); `soc_min` (query, number | null); `soc_max` (query, number | null); `q` (query, string | null); `hw` (query, array of string | null); `fw` (query, array of string | null); `fw_not` (query, string | null); `asset_class` (query, array of string | null); `e_kwh_min` (query, number | null); `e_kwh_max` (query, number | null); `p_kw_min` (query, number | null); `p_kw_max` (query, number | null); `units` (query, array of integer | null); `availability` (query, array of string | null)
 
 Responses: `200`, `422`
 
@@ -589,7 +633,7 @@ Hub Table. Role: **viewer**.
 
 One keyset page of hubs: `{items, next_cursor, prev_cursor, approx_total, limit, sort, dir}`.
 
-Parameters: `sort` (query, string); `dir` (query, string); `limit` (query, integer); `cursor` (query, string | null); `zone` (query, array of string | null); `bank` (query, string | null); `health` (query, array of string | null); `activity` (query, array of string | null); `soc_min` (query, number | null); `soc_max` (query, number | null); `q` (query, string | null); `hw` (query, array of string | null); `fw` (query, array of string | null); `fw_not` (query, string | null); `asset_class` (query, array of string | null)
+Parameters: `sort` (query, string); `dir` (query, string); `limit` (query, integer); `cursor` (query, string | null); `zone` (query, array of string | null); `bank` (query, string | null); `health` (query, array of string | null); `activity` (query, array of string | null); `soc_min` (query, number | null); `soc_max` (query, number | null); `q` (query, string | null); `hw` (query, array of string | null); `fw` (query, array of string | null); `fw_not` (query, string | null); `asset_class` (query, array of string | null); `e_kwh_min` (query, number | null); `e_kwh_max` (query, number | null); `p_kw_min` (query, number | null); `p_kw_max` (query, number | null); `units` (query, array of integer | null); `availability` (query, array of string | null)
 
 Responses: `200`, `422`
 
@@ -983,6 +1027,16 @@ Body: `class` (string | null); `from` (string | null); `to` (string | null); `st
 Responses: `200`, `422`
 
 ## views
+
+### `GET /og/api/views/availability`
+
+Availability View. Role: **viewer**.
+
+D-37: bank availability per zone and the fleet capacity split -- available kW vs "Regulated market -
+no contract" kW -- for the Profitability capacity line and the Control room zone summary. Rated kW is
+the bank's kVA rating (the bank's discharge ceiling). A database before 0046 reads all AVAILABLE.
+
+Responses: `200`
 
 ### `GET /og/api/views/scope-posture`
 

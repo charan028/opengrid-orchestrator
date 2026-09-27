@@ -1,6 +1,6 @@
 # 16 — Firmware updates from the console (operator note)
 
-Status: R3.1, 2026-09-26 (owner decision: operators dispatch firmware updates to batteries from the console,
+Status: R3.1, 2026-09-26; updated for r3.4.3 on 2026-09-27 (owner decision: operators dispatch firmware updates to batteries from the console,
 safely). Code: `opengrid.firmware`, guardian check G-36 (`opengrid.guardian.firmware_check`), API
 `/og/api/firmware/*`, migration 0037, wire schemas `interfaces/mqtt/firmware_command.schema.json` and
 `firmware_status.schema.json`. Related runbook: RB-005 (firmware cohort regression, settings drift) in
@@ -41,6 +41,19 @@ SoC ≥ reserve + 10% of capacity; the image and its sha256 are in the catalogue
 bank and feeder caps hold. A refusal is a hold, not a failure: the hub is re-checked 60 s later. Catalogue
 refusals are terminal.
 
+## A hub that is updating (r3.4.1, r3.4.3)
+
+- **Dispatch treats it as a device exclusion, like a FAULT (r3.4.1).** A hub the campaign has in flight
+  (`og.firmware_job` SENT or UPDATING, or PENDING with its command requested, campaign not ABORTED) is left out
+  of the engine's dispatch. Its committed kW is substituted within the same obligation; a shortfall it causes
+  carries `R-COMMIT-LOCK-OVERRIDE-L0` (a device exclusion under K13), not an uncorroborated INFEASIBLE.
+- **The guardian corroborates that L0 claim (G-19, r3.4.3).** The guardian reads the same in-flight set on its
+  own (`FirmwareUpdatingPort`, `PgFirmwareUpdatingPort`) and drops those hubs from the bank capability it checks
+  (hubs seen and the upper bound), so a commitment-lock reduction caused by an update is accepted as L0. A failed
+  or missing read counts the hubs as available: it is never taken as evidence for a reduction.
+- **Regulated banks with no contract (D-37)** are still updated: availability `UNAVAILABLE` stops dispatch and
+  planning there, not monitoring, safe stop or firmware.
+
 ## Watching it
 
 - `GET .../campaigns/{id}` shows per-hub state (PENDING, SENT, UPDATING, SUCCEEDED, FAILED, ROLLED_BACK,
@@ -52,6 +65,10 @@ refusals are terminal.
 - **Alerts** (alerts panel, bulk ack): `ALR-FIRMWARE-CAMPAIGN-STARTED` and `ALR-FIRMWARE-CAMPAIGN-COMPLETED`
   (info), `ALR-FIRMWARE-HUB-FAILED` (warning, one per hub that failed for good) and
   `ALR-FIRMWARE-CAMPAIGN-HALTED` (critical).
+- **Info alerts no longer break alert reads (fixed in r3.4.3).** Before r3.4.3 an open info-severity alert
+  (the campaign started/completed alerts) made every open-alert read raise a validation error (the health
+  auto-clear pass, `GET /og/api/alerts`, the alerts stream, engine alert details). The shared `Alert` model now
+  accepts `info`.
 
 ## Failures and retries
 

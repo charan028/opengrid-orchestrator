@@ -7,9 +7,10 @@ unsourced assertion (`04-ui/01-ui-ux-specification.md` S3.0(h): "never an unsour
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ConfigReader(Protocol):
@@ -23,8 +24,53 @@ class ConfigReader(Protocol):
 #: switched off (UI-GLB-08's AI-off parity), so it is always the preferred answer when it applies.
 AnswerTier = Literal["deterministic", "routed", "prose", "declined", "unavailable"]
 
-#: What the operator's question wants, as decided by the System One router.
-Intent = Literal["deterministic_query", "explain_decision", "draft_action", "out_of_scope"]
+#: What the operator's question wants, as decided by the System One router. `fleet_query` is a count,
+#: total or list of hubs matching conditions, answered by the read-only fleet tool.
+Intent = Literal["deterministic_query", "fleet_query", "explain_decision", "draft_action", "out_of_scope"]
+
+#: The fleet tool's closed vocabularies (the owner's words, mapped onto the Fleet filters by the API).
+FleetAssetClass = Literal["home", "dual_unit", "substation", "truck"]
+FleetHealth = Literal["online", "stale", "degraded", "quarantined", "fault", "offline"]
+FleetAvailability = Literal["AVAILABLE", "UNAVAILABLE"]
+FleetGroupBy = Literal["none", "zone", "availability", "soc_bucket", "health", "asset_class"]
+FleetMetric = Literal["count", "available_kw", "available_kwh", "rated_kw", "rated_kwh"]
+
+
+class FleetQuery(BaseModel):
+    """One read-only fleet question, as filters over the Fleet table. Built only by `fleet.parse` (the
+    deterministic parser) or `fleet.from_model` (the routing model's validated extraction); the API turns
+    it into bound SQL parameters, never into SQL text."""
+
+    model_config = ConfigDict(frozen=True)
+
+    zones: tuple[str, ...] = ()
+    asset_class: FleetAssetClass | None = None
+    health: tuple[FleetHealth, ...] = ()
+    availability: FleetAvailability | None = None
+    #: Percent of rated energy, inclusive bounds.
+    soc_min_pct: float | None = None
+    soc_max_pct: float | None = None
+    #: Rated energy per hub (og.hub.e_kwh) and rated power per hub (og.hub.p_kw), inclusive bounds.
+    capacity_min_kwh: float | None = None
+    capacity_max_kwh: float | None = None
+    power_min_kw: float | None = None
+    power_max_kw: float | None = None
+    bank: str | None = None
+    hw: str | None = None
+    fw: str | None = None
+    #: Trucks only: at (True) or away from (False) their D-31 home station.
+    at_home: bool | None = None
+    group_by: FleetGroupBy = "none"
+    metric: FleetMetric = "count"
+
+    @property
+    def has_filter(self) -> bool:
+        return any(value not in (None, ()) for name, value in self if name not in ("group_by", "metric"))
+
+
+#: Runs one `FleetQuery` against the console's data and returns the tool result (JSON primitives only;
+#: never coordinates or personal data). Raises on a failed read.
+FleetTool = Callable[[FleetQuery], Awaitable[dict[str, Any]]]
 
 ConfidenceLabel = Literal["High", "Medium", "Low"]
 
@@ -46,6 +92,9 @@ class ModelCall(BaseModel):
     usd: float = 0.0
     ok: bool = True
     error: str | None = None
+    #: Wall time of this attempt, and which attempt it was (screening is retried once on a timeout).
+    latency_ms: int | None = None
+    attempt: int = 1
 
 
 class Citation(BaseModel):
@@ -78,6 +127,9 @@ class CopilotAnswer(BaseModel):
     model_calls: list[ModelCall] = Field(default_factory=list)
     #: SHA-256 of the redacted payload the models were sent; None when no model was called.
     payload_sha256: str | None = None
+    #: The routing model that screened the question (intent + injection risk), when one did. Set even
+    #: when the answer text itself came from console data, so the panel can say a model was used.
+    screened_by: str | None = None
 
     @property
     def is_ai_assisted(self) -> bool:
@@ -101,6 +153,8 @@ class RouterVerdict(BaseModel):
     injection_risk: float = 0.0
     model: str = "unavailable"
     provider: ProviderName | None = None
+    #: For a `fleet_query`, the filters the routing model extracted (already validated), else None.
+    fleet: FleetQuery | None = None
 
     @property
     def is_confident(self) -> bool:

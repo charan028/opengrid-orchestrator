@@ -64,11 +64,16 @@ class _Backend:
         )
 
     async def pending_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        """Like `_PENDING_SQL`: the oldest `limit` live entries plus every entry of a scope with a queued ENGAGE."""
         live = [e for e in self.outbox if not e["published"] and e["attempts"] < max_attempts]
-        live.sort(key=lambda e: (e["action"] != "ENGAGE", e["seq"]))
+        oldest = {e["seq"] for e in live[:limit]}
+        engage_scopes = {e["topic_suffix"].rsplit("/", 1)[0] for e in live if e["action"] == "ENGAGE"}
+        chosen = [
+            e for e in live if e["seq"] in oldest or e["topic_suffix"].rsplit("/", 1)[0] in engage_scopes
+        ]
         return [
-            OutboxEntry(e["seq"], e["stop_id"], e["action"], e["topic_suffix"], e["payload"]) for e in live
-        ][:limit]
+            OutboxEntry(e["seq"], e["stop_id"], e["action"], e["topic_suffix"], e["payload"]) for e in chosen
+        ]
 
     async def mark_published(self, seq: int) -> None:
         self.outbox[seq - 1]["published"] = True
@@ -78,8 +83,17 @@ class _Backend:
             self.outbox[seq - 1]["attempts"] += 1
         return int(self.outbox[seq - 1]["attempts"])
 
-    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> None:
-        self.alerts.append((entry.stop_id, entry.action))
+    async def dead_lettered_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        dead = [e for e in self.outbox if not e["published"] and e["attempts"] >= max_attempts]
+        return [
+            OutboxEntry(e["seq"], e["stop_id"], e["action"], e["topic_suffix"], e["payload"]) for e in dead
+        ]
+
+    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> bool:
+        if (entry.stop_id, entry.action) not in self.alerts:  # one open alert per entry, like og.alert
+            self.alerts.append((entry.stop_id, entry.action))
+            return True
+        return False
 
     async def l2_engage_record(self, instruction_id: UUID, bank_id: str):
         from opengrid.safestop.backend import RecordedL2Engage
@@ -99,6 +113,9 @@ class _Backend:
         return None
 
     released: bool = False
+
+    async def latest_engage_at(self, scope_kind: str, scope_ref: str) -> None:
+        return None  # L-1 is covered in test_release_relay
 
     async def has_signature(self, signature: str) -> bool:
         return any(row.get("signature") == signature for row in self.rows)
@@ -370,3 +387,164 @@ async def test_a_recorded_release_without_a_queued_publication_is_queued_on_rede
     assert [action for _t, action in publisher.published] == ["RELEASE"]
     await svc.relay_guardian_release(event)
     assert len(backend.outbox) == 1  # queued once
+
+
+# --- r3.4.1: order within a scope, ENGAGE priority only across scopes; dead-letter sweep; non-fatal drain -------
+
+
+def _entry(seq: int, action: str, scope: str) -> OutboxEntry:
+    stop_id = uuid4()
+    return OutboxEntry(seq, stop_id, action, f"stop/bank/{scope}/{stop_id}", {"action": action})  # type: ignore[arg-type]
+
+
+def test_drain_order_keeps_a_scopes_own_order_and_prioritises_engages_across_scopes():
+    from opengrid.safestop.service import drain_order
+
+    release_x = _entry(1, "RELEASE", "bank-x")
+    release_y = _entry(2, "RELEASE", "bank-y")
+    engage_x = _entry(3, "ENGAGE", "bank-x")  # after X's older RELEASE: must not overtake it
+    engage_z = _entry(4, "ENGAGE", "bank-z")  # another scope: goes before the RELEASEs
+    order = drain_order([release_x, release_y, engage_x, engage_z])
+    assert [e.seq for e in order] == [4, 1, 3, 2]
+    assert order.index(release_x) < order.index(engage_x)
+
+
+async def test_a_newer_engage_never_overtakes_an_older_release_of_its_own_scope(world):
+    """The review scenario: RELEASE A for bank X queued while the broker is down, then ENGAGE B on X. On
+    reconnect A must go first -- the hubs drop a RELEASE older than the newest ENGAGE on its scope, which would
+    leave X stopped after B is released."""
+    from .test_release_relay import _guardian_release, _Keys
+
+    keys = _Keys()
+    svc, _backend, publisher = world
+    svc.guardian_public_key = keys.guardian_public
+    await svc.relay_guardian_release(_guardian_release(keys))  # scope bank-001
+    newer = await svc.engage("BANK", "bank-001", "again", "op")
+    publisher.up = True
+    await svc.drain_outbox()
+    assert [action for _t, action in publisher.published] == ["RELEASE", "ENGAGE"]
+    assert publisher.published[1][0].endswith(str(newer))
+
+
+async def test_a_permanently_failing_entry_holds_back_only_its_own_scopes_releases(world):
+    from .test_release_relay import _guardian_release, _Keys
+
+    keys = _Keys()
+    svc, _backend, publisher = world
+    svc.guardian_public_key = keys.guardian_public
+    svc.outbox_max_attempts = 3
+    first = await svc.engage("BANK", "bank-001", "a", "op")
+    await svc.relay_guardian_release(_guardian_release(keys))  # a RELEASE on bank-001, behind `first`
+    other = await svc.engage("BANK", "bank-y", "c", "op")
+    publisher.up = True
+    real = publisher.publish_retained
+
+    async def reject_first(topic_suffix: str, payload: dict[str, Any]) -> None:
+        if topic_suffix.endswith(str(first)):
+            raise StopPublishError("invalid", transient=False)
+        await real(topic_suffix, payload)
+
+    publisher.publish_retained = reject_first  # type: ignore[method-assign]
+    await svc.drain_outbox()
+    assert publisher.published == [(publisher.published[0][0], "ENGAGE")]  # bank-001's RELEASE held
+    assert publisher.published[0][0].endswith(str(other))
+    await svc.drain_outbox()
+    await svc.drain_outbox()  # `first` reaches the cap: dead-lettered, bank-001 moves on
+    assert [action for _t, action in publisher.published] == ["ENGAGE", "RELEASE"]
+
+
+async def test_a_failing_entry_never_holds_back_an_engage_on_its_scope(world):
+    """r3.4.2 review L-3: an ENGAGE never waits behind a permanently failing entry of its own scope."""
+    svc, _backend, publisher = world
+    first = await svc.engage("BANK", "bank-x", "a", "op")
+    second = await svc.engage("BANK", "bank-x", "b", "op")
+    publisher.up = True
+    real = publisher.publish_retained
+
+    async def reject_first(topic_suffix: str, payload: dict[str, Any]) -> None:
+        if topic_suffix.endswith(str(first)):
+            raise StopPublishError("invalid", transient=False)
+        await real(topic_suffix, payload)
+
+    publisher.publish_retained = reject_first  # type: ignore[method-assign]
+    assert await svc.drain_outbox() == 1
+    assert publisher.published[0][0].endswith(str(second))
+
+
+async def test_an_engage_behind_a_long_backlog_is_published_first(world):
+    """r3.4.2 review L-2: ENGAGE priority reaches past the drain batch (the oldest 100 entries)."""
+    svc, backend, publisher = world
+    for i in range(120):  # 120 queued RELEASE publications on other scopes, older than the stop
+        await backend.enqueue_publication(
+            stop_id=uuid4(),
+            action="RELEASE",
+            topic_suffix=f"stop/bank/r-{i}/{uuid4()}",
+            payload={"action": "RELEASE"},
+        )
+    publisher.up = True
+    stop_id = await svc.engage("BANK", "bank-late", "x", "op")  # the drain after accept publishes it
+    assert publisher.published[0] == (publisher.published[0][0], "ENGAGE")
+    assert publisher.published[0][0].endswith(str(stop_id))
+
+
+@dataclass
+class _Trace:
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+    async def append(self, stream_id, decision_type, event_class, payload, reason_codes=None) -> object:
+        self.events.append(dict(payload))
+        return None
+
+
+async def test_a_dead_lettered_engage_is_published_by_the_sweep_and_traced(world):
+    """r3.4.2 review L-4: an ENGAGE dead-lettered before the upgrade (its attempts also counted outages) is a stop
+    that never reached the hubs: the sweep publishes it as soon as it can, and traces it."""
+    svc, backend, publisher = world
+    svc.trace = _Trace()  # type: ignore[assignment]
+    stop_id = await svc.engage("BANK", "bank-07", "x", "op")
+    backend.outbox[0]["attempts"] = svc.outbox_max_attempts  # found at the cap after an upgrade
+    publisher.up = True
+    assert await svc.drain_outbox() == 1
+    assert publisher.published[0][0].endswith(str(stop_id)) and backend.outbox[0]["published"] is True
+    assert [e["outbox"] for e in svc.trace.events if "outbox" in e] == ["DEAD_LETTER_PUBLISHED"]  # type: ignore[attr-defined]
+
+
+async def test_a_dead_lettered_release_is_alerted_and_traced_once(world):
+    from .test_release_relay import _guardian_release, _Keys
+
+    keys = _Keys()
+    svc, backend, publisher = world
+    svc.guardian_public_key = keys.guardian_public
+    svc.trace = _Trace()  # type: ignore[assignment]
+    await svc.relay_guardian_release(_guardian_release(keys))
+    backend.outbox[0]["attempts"] = svc.outbox_max_attempts
+    publisher.up = True
+    await svc.drain_outbox()
+    await svc.drain_outbox()
+    assert publisher.published == []  # a RELEASE is never re-tried from the dead letters
+    assert len(backend.alerts) == 1
+    assert [e["outbox"] for e in svc.trace.events if "outbox" in e] == ["DEAD_LETTER"]  # type: ignore[attr-defined]
+
+
+async def test_an_entry_dead_lettered_without_its_alert_is_alerted_on_the_next_drain(world):
+    """A crash between the failure write and the alert, or an upgrade finding rows already at the cap: the
+    drain's sweep raises the missing alert (idempotently)."""
+    svc, backend, _publisher = world
+    stop_id = await svc.engage("BANK", "bank-07", "x", "op")
+    backend.outbox[0]["attempts"] = svc.outbox_max_attempts  # at the cap, no alert yet
+    await svc.drain_outbox()
+    await svc.drain_outbox()
+    assert backend.alerts == [(stop_id, "ENGAGE")]
+
+
+async def test_a_drain_failure_after_accept_never_fails_the_caller(world):
+    """Another entry's failure (here a database error in the drain) must not fail engage() -- the L2 intake
+    would retry it and the API intake task would die -- the stop is recorded and queued for the next drain."""
+    svc, backend, _publisher = world
+
+    async def broken(*_a: Any, **_k: Any) -> list[OutboxEntry]:
+        raise RuntimeError("database hiccup")
+
+    backend.pending_publications = broken  # type: ignore[method-assign]
+    stop_id = await svc.engage("BANK", "bank-07", "x", "op")  # does not raise
+    assert backend.rows[0]["stop_event_id"] == stop_id and backend.outbox[0]["published"] is False

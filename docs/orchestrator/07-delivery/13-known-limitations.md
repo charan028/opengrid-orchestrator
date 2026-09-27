@@ -3,7 +3,8 @@
 Status: hand-over document, written against branch `wp/docs-lane` at `main` commit `434d230`
 (`434d2301a99d6643dce6c9e9a6d29fd76f374d15`). What changed at R2 (`main` `6470cfa`) is in "Changes at R2" below
 the method note, and the Summary marks those items. What R3 (`main` `451a2a2`, tag `r3`) fixed is marked in that
-table, and the limitations the R3 review found are in "Open at R3". Audience: a technical, finance-literate owner and the next
+table, and the limitations the R3 review found are in "Open at R3". What r3.4.1 to r3.4.3 closed, and what is new
+or still open at r3.4.3, is in "Status at r3.4.3" directly below. Audience: a technical, finance-literate owner and the next
 engineering team.
 
 Purpose: an honest inventory of everything that is **built but dark** (present in the code, gated by a config flag,
@@ -22,11 +23,62 @@ finding depends on server-side state this checkout cannot see (for example wheth
 
 ---
 
+## Status at r3.4.3 (2026-09-27)
+
+Re-checked by static reads of the r3.4.3 tree (main `897965f` plus the r3.4.3 lanes); nothing was run. Line
+numbers below are r3.4.3's. Decisions D-33 to D-38 are in [11-decision-log.md](11-decision-log.md).
+
+### Closed or narrowed since R3
+
+"By r3.4" means the fix was already in the tree before r3.4.1 and is confirmed at r3.4.3.
+
+| # | Status | How |
+|---|---|---|
+| R3-1 | **Partly fixed (r3.4.1).** Still off. | The K4 retry keeps the original cycle id on its grant rows (only grant ids get `:r1`) and on its batch, so the guardian's per-cycle accumulators see one cycle (`orchestrator/src/opengrid/engine/__init__.py:1064-1066`). `[allocator.veto_retry] enabled = false` is unchanged, and its config comment still says the re-solve does not reuse the cycle id, which is now stale. |
+| R3-3 | **Fixed (by r3.4; hardened r3.4.1).** | og-engine passes the topic and its trace store to `upsert_device_info` (`engine/__init__.py:1734-1736`); r3.4.1 bounds the free-text fields (128 chars, no control characters) and restricts `hub_id`. |
+| R3-4 | **Fixed (by r3.4; r3.4.1).** | The stop row and its outbox entry are written in one transaction (`safestop/backend.py:91`); an entry that fails `max_attempts` times is dead-lettered and re-alerted on every drain (`:85`, `:111-113`); r3.4.1 drains in per-scope sequence order with a dead-letter sweep alert and a safe in-request drain. |
+| R3-5 | **Fixed (r3.4.1).** | Health reads `[health].hub_stale_s` (`health/model.py:200`), and fleet search classifies hubs with the same `HealthThresholds.from_config` instead of a hand-built 6 s default. |
+| R3-6 | **Fixed (by r3.4; r3.4.1).** | Migration 0041 lets `og.trace` accept `AUTHZ_DENY`. r3.4.1 quarantines any row Postgres refuses for its content (`<journal>.quarantine.jsonl`, `ALR-TRACE-QUARANTINED`), and replay continues past it (`trace/pg_backend.py:91-116`, `:437-440`). |
+| R3-7 | **Fixed (by r3.4).** | A failed poll is retried after 5 min, doubling to 1 h, so a missed daily NP4-188-CD poll no longer holds the data stale for a day (`feeds/scheduler.py:45-67`). |
+| R3-9 | **Fixed (by r3.4).** | The `ogsim` CLI and the smoke test send `X-OGSim-Request: 1` (`integration-sims/src/ogsim/control/cli.py:48`, `tests-e2e/smoke.py:77`). |
+| R3-10 | **Partly fixed.** | `deploy/systemd/og-lifecycle.service` and `.timer` exist and `deploy.sh` installs them, but the timer is not enabled until an I/O check of the pgdata disk; the Kubernetes CronJob ships `suspend: true` (see [15-data-lifecycle.md](15-data-lifecycle.md)). |
+| R3-11 | **Fixed (by r3.4).** | A bank proposed with no grants uses the ledger's current version (`engine/__init__.py:955-962`), not 0, so G-09 no longer vetoes it for a stale version. |
+| NB-9 | **Narrowed (r3.4.1).** | The repo's og-settle unit may write the secondary anchor copy (`ReadWritePaths=... -/srv/ogbackup/anchors`, `deploy/systemd/og-settle.service:27`); r3.4.1 made the backup paths optional. The anchor is still on the same host, not off-node. |
+| R2-4 | **Mostly fixed (r3.4.1, r3.4.2).** | Every deployment goes through `opengrid.calls` (D-33): the product cap, no overlap (checked under a lock), within the awarded kW (409 `R-CALL-OVER-COMMITTED`); the engine caps a called obligation at the call's requested kW. |
+| R2-5 | **Fixed for data (r3.4.1, D-36).** | The topology seed maps every hub, bank and feeder (transformers, feeder limits, HOME_BANK assets, premise limits); `deploy/scripts/topology_backfill.sh` inserts the missing rows on existing databases. `fail_closed_missing_topology` is still `false` (see N-6). |
+| BD-1 | **Changed (r3.4.2, D-37).** | The Austin substation set and the LZ_LCRA and LZ_RAYBN blocks are enabled in the simulator; LZ_LCRA and LZ_RAYBN are regulated and UNAVAILABLE (no contract). LZ_CPS stays off. |
+| BD-3b | **Customer API enabled (r3.4.1, D-33)** for the utility role only (AUSTIN_ENERGY). | `[api.customer_api].enabled = true`, `[api.utility_api].enabled_utilities = ["AUSTIN_ENERGY"]`. Site ingest stays off. |
+| NB-1 | **Partly built (r3.4.1, D-34).** | A DNP3 outstation over mutual TLS exists in og-engine but ships disabled (N-1). ICCP is not built. SCADA is still simulated. |
+| NB-4 | **Installer built (r3.4.1).** | `deploy/k8s/install.sh` and a Helm chart install the whole stack on one cluster. It was validated offline (lint, kubeconform, podman smoke test) and not deployed to a real cluster. Production still runs on systemd, and it is not HA. |
+| NB-5 | **Built as an advisory copilot.** | `[ai_agent]`: read-only, never in the control loop; r3.4.2 adds fleet queries through a read-only fleet tool and names the screening model. |
+| OL-2 | **Harness built (r3.4.1).** | `tests-perf/` runs the scale and stress campaign up to 7,500 homes; no campaign results are in the repo yet. |
+| OL-5 | **Narrowed (r3.4.2).** | Regulated zones (LZ_AEN, LZ_CPS, LZ_LCRA, LZ_RAYBN) carry no M1 by design (D-37). |
+
+### New or still open at r3.4.3
+
+| # | Limitation | Evidence |
+|---|---|---|
+| N-1 | **The utility grid link is disabled by default.** Nothing listens until `[grid_link].enabled` and a utility's own `enabled` are both true. Peer addresses (192.0.2.0/28, a documentation range), CNs and certificate paths are placeholders; only a loopback test PKI and enablement script exist (r3.4.3). When both switches are on, og-engine starts the link at startup (`start_grid_link` in `engine/__init__.py`). No real utility EMS has connected. | `orchestrator/config/orchestrator.toml:462-543` |
+| N-2 | **AS-POLL is off in the repo and talks only to the simulator.** `[feeds.ercot_as_poll].enabled = false`; the MMS endpoint is the ogsim simulator with `signing = "none"`. A real ERCOT MMS endpoint and credentials are not configured (NB-2). | `orchestrator.toml:398-418` |
+| N-3 | **LCRA and Rayburn have sample contracts only.** Their banks are UNAVAILABLE (`REGULATED_NO_CONTRACT`), their sample toll contracts are SUSPENDED, and their utility API and grid link identities are disabled; no Apache accounts exist for them. | `orchestrator.toml:338-346`, migration 0046 |
+| N-4 | **Delivery verification has a partial console view (r3.4.3).** The Dispatch screen's AS/toll awards table has a Delivery column and a detail drawer (committed/commanded/delivered/meter chart) for deployed calls. Manual discharge targets and the per-contract summary are served only by the operator API (`/og/api/delivery/records`, `/records/{call_id}`, `/summary`). The call status keeps the deprecated `granted_kw`/`granted_kwh`/`granted_description` fields for one release (removed in r3.5). | `ui/templates/dispatch.html`, `ui/static/og-delivery.js`, `api/routers/delivery.py`, `calls/models.py` |
+| N-5 | **No deleting retention for `og.dispatch_call` or `og.delivery_record`.** `dispatch_call` has no `og.data_retention` row; `delivery_record` has a mode `NONE` row since 0051 (r3.4.3). Both are kept forever and never archived; only the per-bucket `series` of a final delivery record is emptied, after `[delivery].series_keep_days` (60 d). | migrations 0047, 0050, 0051; `lifecycle/retention.py:47`; `delivery/job.py` |
+| N-6 | **Missing topology still does not fail closed.** `[guardian.flow] fail_closed_missing_topology = false`; with D-36's mapping a fresh install has no unmapped rows, so this matters only where data is missing. | `orchestrator.toml:185` |
+| N-7 | **Meter corroboration covers few banks.** Only SUBSTATION asset banks are metered by default (`[delivery].meter_bank_ids = []`); home-bank calls report `NO_METER`. | `orchestrator.toml:283-286` |
+| N-8 | **AS capacity settles at the opportunity price when no MCPC is stored.** Without an NP4-188-CD observation for the product and hour, settle falls back to the opportunity's stored value (flag `OPPORTUNITY_PRICE`, logged). | `orchestrator/src/opengrid/settle/pg_backend.py:156-160` |
+| N-9 | **`[retention]` in `orchestrator.toml` is not read.** Trace pruning reads `og.retention_policy`, and table lifecycle reads `og.data_retention`. | Help maintenance page; `trace/pg_backend.py:307-309` |
+| N-10 | **The utility simulator is on demand only.** `ogsim.utility_aen` ships with its `random.yaml` types disabled; LCRA and RAYBURN are disabled in it. | `integration-sims/config/random.yaml:22-23`, `:291` |
+| N-11 | **Toll ramp re-anchoring is proven in unit tests and the loopback, not on a real 20 MW asset (r3.4.3).** og-engine steps a utility-scale hub from its last guardian-signed setpoint (`engine/ramp_anchor.py`) and the guardian's G-04 bounds one cycle from the same anchor (full step for the G-05/G-06/G-32 rate checks), reloading its signed anchors after a restart. A lapsed lease or a safe stop drops the anchor; a veto does not (the hub keeps following its last signed setpoint). A batch anchors only once published (`og.verdict.published_at`, migration 0053); after a release the hub is held at 0 kW until fresh telemetry. The r3.4.2 behaviour (anchor refreshed on unsigned proposals, stretched G-04 dt) is fixed. | `engine/ramp_anchor.py`; `guardian/checks.py` (`g04_anchor_kw`, `ramp_step_kw`); `tests/unit/guardian/test_toll_reanchor.py` |
+
+---
+
 ## Open at R3 (`main` `451a2a2`, tag `r3`)
 
 Found by the R3 adversarial review. Each item was read at `451a2a2` and is still in the code at `main` `fdb0cdd`
 (tag `r3.3`). The rules are the same as for the rest of this document (static reads, nothing run), except R3-11,
-which was also observed on the local dev stack. Line numbers are `451a2a2`'s.
+which was also observed on the local dev stack. Line numbers are `451a2a2`'s. **At r3.4.3, R3-1 and R3-10 are
+partly fixed and R3-3 to R3-7, R3-9 and R3-11 are fixed; see "Status at r3.4.3" above. R3-2 and R3-8 were not
+re-verified.**
 
 | # | Limitation | Evidence |
 |---|---|---|

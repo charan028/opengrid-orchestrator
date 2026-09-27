@@ -25,6 +25,10 @@ class _FakeCursor:
     async def execute(self, sql=None, params=None) -> None:
         self.executed.append((sql, params))
 
+    async def executemany(self, sql, params_seq) -> None:
+        for params in params_seq:
+            self.executed.append((sql, params))
+
     async def fetchall(self) -> list[tuple]:
         return self.rows
 

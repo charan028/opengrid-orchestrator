@@ -5,6 +5,7 @@ and the real Postgres/MQTT implementations (`pg_backend.py`, `mqtt_publish.py`) 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -38,6 +39,18 @@ class StopEventBackend(Protocol):
     async def latest_action(self, scope_kind: str, scope_ref: str) -> str | None:
         """Most recent `action` for this scope, or None if never stopped. Used only for observability
         (e.g. `main.py` refuses a redundant ENGAGE) -- never for release, which `safestop` can't do."""
+        ...
+
+    async def latest_engage_at(self, scope_kind: str, scope_ref: str) -> datetime | None:
+        """When the newest ENGAGE on exactly this scope was recorded (None: never). A guardian RELEASE signed
+        before it is superseded (r3.4.2 review L-1): the hubs would drop it as older than that ENGAGE."""
+        ...
+
+    async def raise_superseded_release_alert(
+        self, *, scope_kind: str, scope_ref: str, stop_id: UUID, signature: str, engage_at: datetime
+    ) -> bool:
+        """ALR-STOP-RELEASE-SUPERSEDED: the operators must re-issue the two-person release. Once per release
+        while open; True when newly raised."""
         ...
 
 
@@ -81,8 +94,7 @@ class RecordedL2Engage:
 
 class StopOutboxBackend(Protocol):
     """K8 durable publish outbox: every accepted ENGAGE/RELEASE is queued and (re)published until the broker
-    acknowledges it. ENGAGEs go before RELEASEs (a stop is never delayed behind a release), each in acceptance
-    order; an entry that fails permanently `max_attempts` times is dead-lettered (skipped, alerted) so it
+    acknowledges it, in acceptance order within a scope and ENGAGE first across scopes; an entry that fails permanently `max_attempts` times is dead-lettered (skipped, alerted) so it
     never blocks later stops."""
 
     async def record_and_enqueue(
@@ -104,8 +116,14 @@ class StopOutboxBackend(Protocol):
         ...
 
     async def pending_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
-        """Unacknowledged, not dead-lettered entries (fewer than `max_attempts` permanent failures): every
-        ENGAGE first, then the RELEASEs, each oldest first."""
+        """Unacknowledged, not dead-lettered entries (fewer than `max_attempts` permanent failures), in
+        acceptance order (the drain orders them: `SafestopService.drain_order`): the oldest `limit` plus every entry
+        of each scope with a queued ENGAGE, wherever it sits in the queue (an ENGAGE never waits behind a backlog)."""
+        ...
+
+    async def dead_lettered_publications(self, *, limit: int, max_attempts: int) -> list[OutboxEntry]:
+        """Unacknowledged entries at or past the cap (dead-lettered), oldest first -- re-alerted on every drain
+        (idempotently), so one dead-lettered by a crash between writes or by an upgrade is never silent."""
         ...
 
     async def mark_published(self, seq: int) -> None: ...
@@ -115,8 +133,8 @@ class StopOutboxBackend(Protocol):
         outage never dead-letters a stop). Returns the entry's permanent-failure count."""
         ...
 
-    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> None:
-        """ALR-STOP-PUBLISH-DEAD-LETTER (critical), once per entry."""
+    async def raise_dead_letter_alert(self, entry: OutboxEntry, error: str) -> bool:
+        """ALR-STOP-PUBLISH-DEAD-LETTER (critical), once per entry while open. True when newly raised."""
         ...
 
     async def l2_engage_record(self, instruction_id: UUID, bank_id: str) -> RecordedL2Engage | None: ...

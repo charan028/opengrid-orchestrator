@@ -374,11 +374,9 @@ ERCOT's public REST API (api.ercot.com) is public data only. Submissions remain 
   - MW becomes kW (× 1000), and the award price becomes `value_per_mwh`.
   - An ESR **charging** award (negative MW) is not an obligation and is skipped for the charging model.
   - One rejection never blocks the rest.
-- **AS deployments** (VDIs mapped to `AS_DEPLOYMENT`) become `og.as_deployment` rows (migration 0020),
-  which already release held ERCOT_AS awards.
-  - The simulator path uses `source = 'MARKET_SIM'`, which the CHECK allows.
-  - **A real-ERCOT source value needs one additive migration at go-live** (a number to claim from the
-    lead then). None is needed now.
+- **AS deployments** (VDIs mapped to `AS_DEPLOYMENT` / `AS_RECALL`) are applied by the og-feeds instruction
+  poller (§6.8, D-35) through the same core as the operator route. `deployments_for` is kept for tests
+  only; nothing in production inserts its rows.
 
 ### 6.6 Simulator (`ogsim.protocols.ercot_mms`)
 
@@ -389,9 +387,79 @@ ERCOT's public REST API (api.ercot.com) is public data only. Submissions remain 
   - an energy curve clears the largest MW priced at or below the SPP;
   - an ESR bid clears when its price is at or above the SPP;
   - an AS curve clears the largest MW priced at or below the MCPC.
-- **Admin API:** `PUT /admin/prices`, `POST /admin/vdis`, `GET /admin/submissions`.
+- **Admin API:** `PUT /admin/prices`, `POST /admin/vdis`, `GET /admin/vdis` (every instruction and the
+  QSE's answer), `GET /admin/submissions`.
+- **Dispatch instructions (D-35, `ogsim.protocols.ercot_as_dispatch`).** An `AsDispatchBook` holds the AS
+  deployment and recall instructions ERCOT issued to the QSE. `get VDIs` lists the visible, unacknowledged
+  ones, and `change VDIs` records the answer. Delivery is deliberately imperfect: a latency drawn from
+  `latency_s`, a probability of one redelivery after the acknowledgement (duplicate), and a probability of
+  returning a batch in reverse order.
+- **Mounted in ogsim.market** at `/mms` (`POST /mms/ews/`, `GET /mms/admin/vdis`), so the running market
+  sim serves it with no new unit. It is fed by the `ercot_as_*` market anomalies (control page `/ogsim/`,
+  scenarios `ercot-as-01..07`), which random mode never draws. Environment: `OGSIM_AS_AWARDS`
+  (`RESOURCE:SERVICE:MW,...`), `OGSIM_AS_LATENCY_S` (`1,4`), `OGSIM_AS_DUPLICATE_PROBABILITY` (0.05),
+  `OGSIM_AS_REORDER_PROBABILITY` (0.1), `OGSIM_MMS_QSE_CODE`, `OGSIM_MMS_RESOURCES`.
 
-### 6.7 Going real
+**Instruction wire (VDI `Details`, D-35 additions UNCONFIRMED like §6.2):**
+
+| Element | Meaning |
+| --- | --- |
+| `mRID` / `vdiRefNum` | Instruction id: the idempotency key |
+| `resource` | ERCOT resource name (ESR) |
+| `notificationTime` | When ERCOT issued it (issue order) |
+| `Details/instructionType` | `DEPLOY_AS` or `RECALL_AS` (mapped by `vdi_type_map`); anything else is a plain VDI |
+| `Details/asType` | `ECRS`, `RRS` (or `RRSPF`/`RRSFF`/`RRSUF`), `REGUP`, `REGDN`, `NSPIN` (`ONNS`/`OFFNS`) |
+| `Details/mw` | Deployed MW: required and > 0 (missing, 0 or negative is refused 422 malformed, never read as the full award); never above the award |
+| `Details/startTime`, `endTime` | Deployment window, CPT with offset; no end means the product's full duration |
+| `Details/rampMinutes` | Ramp to full deployment (ECRS 10 min; RRS 0 for a frequency event) |
+| `Details/recallOf` | On `RECALL_AS`: the deployment instruction it ends |
+| ack `VDI/response`, `VDI/reason` | `ACCEPT`, or `REJECT` with `<status> <reason code>: <detail>` |
+
+ERCOT really deploys an ESR's AS energy through SCED base points (ICCP, out of scope for this seam) and
+announces the deployment and its recall as dispatch instructions that the QSE acknowledges. This seam carries
+the instruction; base-point following stays in the allocator.
+
+### 6.8 AS deployment instruction poller (D-35, `opengrid.contracts.as_deployment_poll`)
+
+- **Host and cadence.** og-feeds runs it first in every 5 s tick, independent of the ERCOT/EIA/NWS cycle.
+  It polls every `interval_s` (5 s).
+- **Source.** An `ErcotMmsClient` built from `[feeds.ercot_as_poll.mms]` (`endpoint`, `qse_code`,
+  `user_id`, `signing`, `tls`), used through the `DispatchInstructionSource` protocol
+  (`fetch_instruction_batch`, `acknowledge_instruction`). Any adapter that satisfies it can replace the
+  simulator. `[integrations.market]` stays off: nothing is submitted.
+- **Award.** `[feeds.ercot_as_poll.awards]` maps `"<resource>:<AS type>"` to the ERCOT_AS contract. The
+  obligation of that contract whose window covers the instruction's start is the award deployed. None
+  gives 404 `R-ERCOT-AS-NO-AWARD`, more than one gives 409 `R-ERCOT-AS-AMBIGUOUS-AWARD`.
+- **Core.** Deployments and recalls go through `opengrid.calls` (`issue_call` / `cancel_call` /
+  `find_call_by_key`), the same function as `POST /og/api/dispatch/as-deployments`, with origin
+  `ERCOT_POLL`, principal `ercot:<backend>` and the instruction id as idempotency key. All deployability
+  rules (404/409/422, product duration, overlap, awarded kW, ERCOT_AS only and never TOLLING) live there.
+- **Order and duplicates.**
+  - Each batch is processed in issue order.
+  - A duplicate is answered again with its first answer.
+  - A recall whose deployment has not arrived is held unacknowledged for `recall_hold_s`, and the
+    deployment is then superseded, never started.
+  - An instruction first seen more than `max_instruction_age_s` after issue is refused (409
+    `R-ERCOT-AS-LATE`).
+- **Malformed.** The batch parser isolates a bad instruction (`InstructionBatch.malformed`). It is refused
+  422 `R-ERCOT-AS-MALFORMED` and the rest of the poll proceeds.
+- **Trace, then acknowledge.** Stream `ercot_as_poll`, decision type `FEED_CHANGE`, every payload with
+  `origin = ERCOT_POLL`. Event classes: `AS_INSTRUCTION_ACCEPTED`, `_REFUSED`, `_DUPLICATE`,
+  `_SUPERSEDED`, `_NOTED` (plain VDI), `AS_RECALL_APPLIED`.
+- **Alerts.**
+  - `ALR-ERCOT-AS-REFUSED` (warning), one per refused instruction.
+  - `ALR-ERCOT-AS-POLL-FAILED` (warning), after `failure_alert_after` (3) failed polls.
+  - `ALR-ERCOT-AS-POLL-STALE` (critical), when no good poll for `stale_after_s` (60 s).
+  - `ALR-ERCOT-AS-PROCESSING-FAILED` (critical, r3.4.3), per instruction that raised while being applied.
+    Each instruction runs in its own guard: the failing one is traced (`AS_INSTRUCTION_PROCESSING_FAILED`)
+    and left unacknowledged (re-sent, retried each poll), the rest of the batch still runs, and the poll
+    counts as failed (POLL-FAILED, then STALE) without backing off. Cleared when the instruction succeeds.
+  - The last two clear on the next good poll. A failed poll is retried after 5, 10, 20, 40 and then 60 s
+    (`retry_cap_s`): the feeds' backoff shape at this cadence.
+- **Off by default.** `enabled = false` in `config/orchestrator.toml`. With it on and no instruction, the
+  poller writes nothing.
+
+### 6.9 Going real
 
 1. **QSE registration** with ERCOT (Registration and Qualification), with the ESR resources registered
    under the QSE.
@@ -400,7 +468,8 @@ ERCOT's public REST API (api.ercot.com) is public data only. Submissions remain 
 3. **MOTE market trials.** Confirm the seven UNCONFIRMED items in §6.2 and the signature algorithm.
 4. **Configuration.** Set `endpoint`, `qse_code`, `user_id`, `tls.*`, `esr_resources`, the production
    `vdi_type_map` and `contracts`, then `enabled = true`.
-5. **Migration.** Add an `og.as_deployment.source` value for ERCOT (additive).
+5. **AS instructions.** Point `[feeds.ercot_as_poll.mms]` at the ERCOT endpoint with x509 signing, map the
+   real resources in `[feeds.ercot_as_poll.awards]`, and confirm the D-35 wire elements (§6.6) at MOTE.
 6. **Deadlines.** DAM bids and offers are due by **10:00 CPT** the day before. Submission scheduling
    belongs to the selector/gate owner.
 
@@ -415,8 +484,11 @@ the OS assigns (≥ 18000, asserted).
 | `.../test_ieee2030_5.py` | Resource walk, LIMIT/ESTOP/BLOCK mapping, scheduled vs active events, DefaultDERControl, DERControlResponse, XML entity rejection, LFDI/SFDI. |
 | `.../test_iccp.py` | Association accept and reject, access denial, reads, transfer-set reports, reconnect, the MMS seat failing loudly, bilateral validation. |
 | `.../test_ercot_mms.py` | Signed submission to award to intake, an unsigned request rejected, a tampered body rejected, validation errors, cancel, replay, ESR charging, the VDI to `as_deployment` flow, no-resend on transport failure. |
+| `.../test_ercot_as_instructions.py` | D-35: lenient batch parsing (malformed isolated with its id), ramp/recall fields, ACCEPT/REJECT acknowledgements against the simulator. |
+| `orchestrator/tests/unit/contracts/test_as_deployment_poll.py` | D-35 poller: idempotency, duplicates (also after a restart), out-of-order batches and held recalls, recalls, every refusal (404/409/422, late, ambiguous), alerts, backoff. |
 | `.../test_common.py` | Default MQTT with no market, config selection, the market staying OFF until enabled, bridge topics and schema validation, fleet sink, instruction tracker, fail-closed limit, TLS context. |
 | `integration-sims/tests/test_protocols_*.py` | Each simulator on its own, with no opengrid import. |
+| `integration-sims/tests/test_ercot_as_dispatch.py` | D-35 instruction book (latency, duplicate, out-of-order) and `/mms/ews/` driven by every `ercot_as_*` scenario. |
 
 ## 8. Wiring and requests to other owners
 

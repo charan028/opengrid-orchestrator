@@ -125,3 +125,37 @@ For the selector and forecast, this means:
 3. Territory data: the service-territory boundaries, and the feeder and substation list for siting.
 4. Substation asset sizes (kW / kWh per site) and the interconnection limits.
 5. The exact "$/kW in vs out" formula Base uses internally, so the orchestrator's reports match their ROI model.
+
+## D-37: LCRA and Rayburn zones (2026-09-26, supersedes D-32)
+
+| Zone | Utility (`og.utility`) | Market | M1 | Banks (production) | Availability |
+|---|---|---|---|---|---|
+| LZ_AEN | AUSTIN_ENERGY | REGULATED | none | bank-040..049 + the 20 MW set | AVAILABLE (real toll) |
+| LZ_CPS | CPS_ENERGY | REGULATED | none | off | -- |
+| LZ_LCRA | LCRA ("LCRA (Lower Colorado River Authority)") | REGULATED (NOIE) | none | bank-050..059 | UNAVAILABLE, `REGULATED_NO_CONTRACT` |
+| LZ_RAYBN | RAYBURN ("Rayburn Country Electric Cooperative") | REGULATED (NOIE) | none | bank-060..069 | UNAVAILABLE, `REGULATED_NO_CONTRACT` |
+
+LCRA and Rayburn are modelled like Austin Energy: the utility is the customer and energy is territory-bound (K15).
+The real counterparties may be their member cities and distribution co-ops; `LCRA` and `RAYBURN` stand for them
+until contracts name them. No contract exists, so each utility has one **"Sample Contract: ... Tolling (placeholder
+terms)"** cloned from the Austin toll (REGULATED_CAPACITY / TOLLING, 90 min, $102/kW-yr placeholder, 6,000 kW), kept
+SUSPENDED with `is_sample = true` (shown as SAMPLE – INACTIVE; never called, reserved or billed, so it never
+enters revenue). Their banks show "Regulated market – no contract" and contribute nothing to available kW.
+
+**D-32 is superseded.** D-32 had switched LZ_LCRA and LZ_RAYBN on as ERCOT free-market zones. Since D-37 (shipped
+in r3.4.2) they are regulated: no ERCOT energy, AS or headroom there (K15), no M1 (`tdsp_tariffs.toml` gives them
+`delivery_charge = "NONE"`), and manual discharges are vetoed by G-33 unless they serve the utility's own
+obligation. The banks stay monitored (telemetry, alerts, health, safe stop, firmware, invariants). They flip to
+AVAILABLE only when a real contract is activated for the utility (operator guide 6.10); the utility API and grid
+link identities for LCRA and RAYBURN exist in config but stay disabled until then.
+
+## As built at r3.4.3: how the two markets are served
+
+| Topic | Regulated (utility) | Free (ERCOT) |
+|---|---|---|
+| How a call arrives | Austin Energy issues toll calls through the utility customer API (D-33, enabled for AUSTIN_ENERGY only) or, once enabled, the DNP3 grid link (D-34, **disabled by default**). Every origin goes through the one core call function, `opengrid.calls`. | ERCOT AS deployments (DEPLOY_AS / RECALL_AS) are polled by og-feeds every 5 s (AS-POLL, D-35, `[feeds.ercot_as_poll]`, **off in the repo**) and go through the same core. |
+| Settlement | Capacity on availability, $102/kW-yr (D-29); no M1 | AS capacity is priced at the **cleared DAM MCPC** of the award's product for the delivery hour (r3.4.3; flag `MCPC`), falling back to the opportunity's own price when no MCPC observation exists (flag `OPPORTUNITY_PRICE`, logged). Energy settles at the zone SPP (D-10); M1 applies. |
+| Delivery evidence | Measured per call (D-38, r3.4.3): `og.delivery_record`, PASS / PARTIAL / FAIL, meter check on metered banks; the utility sees measured delivered kW. | Same record per AS deployment. |
+
+Details for the optimizer and dispatcher (feeder ramp ceilings, truck positions, nameplate rating, delivery
+alerts and AT_RISK) are in [09 §11.9](09-optimizer-dispatcher-update.md#119-changes-at-r341-to-r343).

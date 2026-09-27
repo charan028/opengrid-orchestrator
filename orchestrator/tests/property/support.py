@@ -130,7 +130,9 @@ class World:
     async def active_obligations_for_bank(self, bank_id: str, cycle_id: str) -> list[ActiveObligation]:
         return list(self.active)
 
-    async def prior_granted_kw(self, obligation_id: UUID) -> Decimal | None:
+    async def prior_granted_kw(
+        self, obligation_id: UUID, bank_id: str | None = None, cycle_id: str | None = None
+    ) -> Decimal | None:
         return self.prior.get(obligation_id)
 
     async def last_accepted(self, bank_id: str) -> tuple[int, int]:
@@ -141,6 +143,9 @@ class World:
 
     async def is_stopped(self, scope: str, scope_ref: str) -> bool:
         return self.stopped and scope == "BANK"
+
+    async def last_engaged_at(self, scope: str, scope_ref: str) -> None:
+        return None  # G-04 signed-anchor drop (r3.4.3): these properties use telemetry-anchored homes
 
     def ports(self) -> GuardianPorts:
         return GuardianPorts(

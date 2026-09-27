@@ -44,6 +44,7 @@ EVENT_CALL = "DISPATCH_CALL"
 EVENT_CALL_REFUSED = "DISPATCH_CALL_REFUSED"
 EVENT_CALL_END = "DISPATCH_CALL_END"
 AUTHZ_ACTION_CALL = "dispatch.call"
+AUTHZ_ACTION_CANCEL = "dispatch.call.cancel"
 ALERT_UTILITY_CALL = "ALR-UTILITY-CALL"
 ALERT_UTILITY_CALL_REFUSED = "ALR-UTILITY-CALL-REFUSED"
 ALERT_CALL = "ALR-DISPATCH-CALL"
@@ -345,6 +346,41 @@ async def _own_call(
     return record
 
 
+async def _require_issuer(
+    store: CallStore, trace: TraceStore, record: CallRecord, *, origin: CallOrigin, principal: str
+) -> None:
+    """A utility (customer API or grid link) may READ every call on its own toll, but cancel or shorten only
+    the calls it issued itself (same origin and principal); an operator may end any call. Anything else is
+    403 NOT-ISSUER, traced as AUTHZ_DENY and alerted (ALR-UTILITY-CALL-REFUSED, warning: someone tried to end
+    a call they do not own), one open alert per (principal, call) however often it is repeated."""
+    if origin is CallOrigin.OPERATOR or (record.origin is origin and record.principal == principal):
+        return
+    await audit_deny(
+        trace,
+        actor=principal,
+        action=AUTHZ_ACTION_CANCEL,
+        decision=Decision(False, f"call {record.call_id} was issued by {record.origin.value}", audited=True),
+        resource=None,
+    )
+    await _safe_alert(
+        store,
+        ALERT_UTILITY_CALL_REFUSED,
+        "warning",
+        f"{origin.value} {principal} tried to end call {record.call_id} issued by {record.origin.value}",
+        {
+            "reason_code": rules.R_NOT_ISSUER,
+            "call_id": str(record.call_id),
+            "call_origin": record.origin.value,
+            "origin": origin.value,
+            "scope_kind": "principal_call",
+            "scope_ref": f"{principal}:{record.call_id}",
+        },
+    )
+    raise CallRefused(
+        rules.R_NOT_ISSUER, "only the issuer of a call may cancel or shorten it", rules.HTTP_FORBIDDEN
+    )
+
+
 async def cancel_call(
     store: CallStore,
     trace: TraceStore,
@@ -361,10 +397,13 @@ async def cancel_call(
     Traced before it takes effect; the allocator returns the obligation to its 0 kW hold next cycle."""
     now = now or datetime.now(UTC)
     record = await _own_call(store, trace, call_id, principal, utility_id)
+    await _require_issuer(store, trace, record, origin=origin, principal=principal)
     if record.outcome is CallOutcome.REFUSED or record.deployment_id is None:
         raise CallRefused(
             rules.R_ALREADY_ENDED, "the call was refused; nothing to cancel", rules.HTTP_CONFLICT
         )
+    if record.cancelled_at is not None or record.end_at <= now:
+        raise CallRefused(rules.R_ALREADY_ENDED, "the call has already ended", rules.HTTP_CONFLICT)
     target_end = max(end_at or now, now)
     if target_end > record.end_at:
         raise CallRefused(
@@ -434,27 +473,54 @@ async def call_status(
     limits: CallLimits | None = None,
     now: datetime | None = None,
 ) -> CallStatus:
-    """State and grants of a call (see `CallState`; planned/granted, NOT measured delivery). What the allocator granted the
-    obligation per cycle over the call (`og.grant`), signed per the convention (< 0 = discharge)."""
+    """State and MEASURED delivery of a call (see `CallState`): delivered kW (signed, < 0 = discharge) and
+    kWh from the call's `og.delivery_record` (`opengrid.delivery`, D-38), never the allocator's grants."""
     now = now or datetime.now(UTC)
     record = await _own_call(store, trace, call_id, principal, utility_id)
     return await status_of(store, record, limits=limits or CallLimits(), now=now)
 
 
+def running_state(
+    target_kw: float | None, delivered_kw: float | None, *, ramping_fraction: float
+) -> CallState:
+    """A running call's state from measured delivery: DELIVERING at or above `ramping_fraction` of the
+    target (both signed, discharge < 0), RAMPING below it, ACTIVE when unmeasured or without a target."""
+    if delivered_kw is None or target_kw is None or target_kw >= 0.0:
+        return CallState.ACTIVE
+    return CallState.DELIVERING if -delivered_kw >= ramping_fraction * -target_kw else CallState.RAMPING
+
+
 async def status_of(store: CallStore, record: CallRecord, *, limits: CallLimits, now: datetime) -> CallStatus:
-    """Status of a record. `limits` (the RAMPING threshold) is kept in the signature for r3.4.2's measured
-    RAMPING/DELIVERING; in r3.4.1 a running call is ACTIVE with delivery UNMEASURED."""
+    """Status of a record, from its measured delivery (`CallStore.delivery`)."""
     if record.outcome is CallOutcome.REFUSED or record.obligation_id is None:
-        return CallStatus(call=record, state=CallState.REFUSED, granted_kw=None, granted_kwh=None, as_of=now)
+        return CallStatus(
+            call=record, state=CallState.REFUSED, delivered_kw=None, delivered_kwh=None, as_of=now
+        )
     effective_end = min(record.end_at, record.cancelled_at or record.end_at)
     if now < record.start_at:
         state = CallState.COMPLETED if record.cancelled_at is not None else CallState.ACCEPTED
-        return CallStatus(call=record, state=state, granted_kw=None, granted_kwh=0.0, as_of=now)
+        return CallStatus(
+            call=record, state=state, delivered_kw=None, delivered_kwh=0.0, as_of=now, granted_kwh=0.0
+        )
+    measured = (
+        await store.measured_delivery(record.deployment_id) if record.deployment_id is not None else None
+    )
     granted = await store.granted(record.obligation_id, record.start_at, min(now, effective_end))
-    granted_kw = -granted.last_kw if granted.last_kw is not None else None
-    # Nothing is measured yet (r3.4.1): never claim RAMPING/DELIVERING from grants.
-    state = CallState.COMPLETED if now >= effective_end else CallState.ACTIVE
-    return CallStatus(call=record, state=state, granted_kw=granted_kw, granted_kwh=granted.kwh, as_of=now)
+    delivered_kw = measured.delivered_kw if measured is not None else None
+    if now >= effective_end:
+        state = CallState.COMPLETED
+    else:
+        state = running_state(record.target_kw, delivered_kw, ramping_fraction=limits.ramping_fraction)
+    return CallStatus(
+        call=record,
+        state=state,
+        delivered_kw=delivered_kw,
+        delivered_kwh=measured.discharged_kwh if measured is not None else 0.0,
+        as_of=now,
+        delivery=measured,
+        granted_kw=-granted.last_kw if granted.last_kw is not None else None,
+        granted_kwh=granted.kwh,
+    )
 
 
 async def list_calls(

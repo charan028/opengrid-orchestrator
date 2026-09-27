@@ -15,6 +15,8 @@ from opengrid.ai_agent.types import ConfigReader
 
 #: A request may never be allowed to run longer than this, whatever the config says (issue #26: <= 20 s).
 TIMEOUT_CEILING_S = 20.0
+#: At most this many screening retries, whatever the config says (each one is charged and rate-limited).
+SCREEN_RETRIES_CEILING = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,16 +28,26 @@ class BudgetLimits:
     daily_usd: float = 5.0
     requests_per_minute: int = 20
     timeout_s: float = 20.0
+    #: Screening is one small tool call on the fast model: it gets a short timeout and is retried (on a
+    #: timeout, connection error or 5xx only), so one slow attempt costs seconds, not the whole 20 s.
+    screen_timeout_s: float = 5.0
+    screen_retries: int = 1
+    #: Consecutive failed screenings (after retries) that raise the ALR-COPILOT-SCREENING warning.
+    screen_alert_after: int = 3
 
     @classmethod
     def from_config(cls, cfg: ConfigReader) -> BudgetLimits:
         """Build from anything with a `.get(dotted_path, default)`, i.e. `opengrid.platform.config.Config`."""
         read = cfg.get
+        timeout_s = min(float(read("ai_agent.timeout_s", 20.0)), TIMEOUT_CEILING_S)
         return cls(
             daily_tokens=int(read("ai_agent.daily_tokens", 200_000)),
             daily_usd=float(read("ai_agent.daily_usd", 5.0)),
             requests_per_minute=int(read("ai_agent.requests_per_minute", 20)),
-            timeout_s=min(float(read("ai_agent.timeout_s", 20.0)), TIMEOUT_CEILING_S),
+            timeout_s=timeout_s,
+            screen_timeout_s=min(float(read("ai_agent.screen_timeout_s", 5.0)), timeout_s),
+            screen_retries=max(0, min(int(read("ai_agent.screen_retries", 1)), SCREEN_RETRIES_CEILING)),
+            screen_alert_after=max(1, int(read("ai_agent.screen_alert_after", 3))),
         )
 
 
@@ -148,5 +160,7 @@ class Budget:
             "requests_last_minute": len(self._state.recent),
             "requests_per_minute_limit": self._limits.requests_per_minute,
             "timeout_s": self._limits.timeout_s,
+            "screen_timeout_s": self._limits.screen_timeout_s,
+            "screen_retries": self._limits.screen_retries,
             "day": self._state.day.isoformat(),
         }

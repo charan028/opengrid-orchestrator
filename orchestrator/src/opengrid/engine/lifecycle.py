@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
+from opengrid.contracts.errors import ConcurrentUpdateError
+
 logger = logging.getLogger(__name__)
 
 R_FULFILLED = "R-FULFILLED"
@@ -125,6 +127,16 @@ async def resolve_stuck_selected(
 async def _apply(transition: Transition, obligation_id: UUID, to_state: str, reason_code: str | None) -> bool:
     try:
         await transition(obligation_id, to_state, reason_code=reason_code)
+    except ConcurrentUpdateError:
+        # R3.4.1: expected, not exceptional -- an abandoned (timed-out) lifecycle pass's shielded write
+        # can still be in flight when the NEXT cycle's pass starts a fresh one for the same obligation;
+        # the CAS makes at most one of them win, and the loser landing here is that ordinary case, not a
+        # bug. Logged quietly so a timeout doesn't also produce a noisy error-level follow-up.
+        logger.info(
+            "obligation lifecycle transition lost the optimistic-lock race; leaving it to the winner",
+            extra={"obligation_id": str(obligation_id), "to_state": to_state},
+        )
+        return False
     except Exception:
         logger.exception(
             "obligation lifecycle transition failed",

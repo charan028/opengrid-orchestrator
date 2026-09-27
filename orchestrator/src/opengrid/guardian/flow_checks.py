@@ -30,6 +30,7 @@ from opengrid.guardian.ports import (
     Reading,
     ServiceTransformer,
 )
+from opengrid.market.availability import BankAvailability
 from opengrid.market.territory import (
     FREE,
     MarketModelError,
@@ -374,6 +375,22 @@ def check_g33_territory(
         return CheckOutcome.passed(G33, hub_id=item.hub_id)
     return CheckOutcome(
         G33, False, reason, item.hub_id, str(item.obligation_id) if item.obligation_id is not None else None
+    )
+
+
+def check_g33_available(item: ProposedItem, availability: BankAvailability | None) -> CheckOutcome:
+    """D-37 / G-33: a non-idle item on an UNAVAILABLE bank (regulated (NOIE) territory with no utility
+    contract) is vetoed with R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT: no discharge (ERCOT or manual) and no
+    charge (idle hold). The caller exempts a K13-grandfathered obligation first. An unknown bank passes here;
+    G-34 and the territory check fail it closed."""
+    if is_idle(item) or availability is None or availability.available:
+        return CheckOutcome.passed(G33, hub_id=item.hub_id)
+    return CheckOutcome(
+        G33,
+        False,
+        reasons.R_BANK_UNAVAILABLE,
+        item.hub_id,
+        str(item.obligation_id) if item.obligation_id is not None else None,
     )
 
 

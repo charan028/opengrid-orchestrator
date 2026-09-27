@@ -33,6 +33,8 @@ from opengrid.ui.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profitability")
+#: D-37 capacity split (available vs "Regulated market - no contract" kW).
+AVAILABILITY_VIEW_PATH = "/og/api/views/availability"
 
 _PNL_FIELDS: tuple[str, ...] = (
     "revenue",
@@ -48,6 +50,16 @@ def _num(value: Any, default: float = 0.0) -> float:
     """Coerce a `Decimal`-as-JSON-string (or number, or None) money/quantity field to `float` for
     display and arithmetic. The API (02b S7.1) serializes Pydantic `Decimal` fields as strings."""
     return float(value) if value is not None else default
+
+
+async def availability_view() -> dict[str, Any] | None:
+    """D-37 capacity split (/og/api/views/availability); None when unreachable (the line is omitted)."""
+    try:
+        raw = await get_json(AVAILABILITY_VIEW_PATH)
+    except ApiUnavailable as exc:
+        logger.info("availability view unavailable: %s", exc)
+        return None
+    return raw if isinstance(raw, dict) else None
 
 
 def profitability_table_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -90,7 +102,7 @@ def lp_vs_baseline_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "tooltip": {"trigger": "axis"},
             "series": [
                 {
-                    "name": "LP net value",
+                    "name": "MILP net value",
                     "type": "bar",
                     "data": [_num(row["net_value"]) for row in with_baseline],
                 },
@@ -158,15 +170,17 @@ async def profitability_page(
             404: "The $/kW view is not available on this deployment yet.",
         }.get(exc.status_code or 0, f"The $/kW view is unavailable: {exc}")
 
+    availability = await availability_view()
+
     lp_payload: Any = None
     lp_note: str | None = None
     try:
         lp_payload = await get_json(LP_VALUE_PATH)
     except ApiUnavailable as exc:
         lp_note = {
-            403: "Operator role required for the LP value-added view.",
-            404: "The LP value-added view is not available on this deployment yet.",
-        }.get(exc.status_code or 0, f"The LP value-added view is unavailable: {exc}")
+            403: "Operator role required for the MILP value-added view.",
+            404: "The MILP value-added view is not available on this deployment yet.",
+        }.get(exc.status_code or 0, f"The MILP value-added view is unavailable: {exc}")
 
     filters = {"service": service, "day": day, "customer": customer, "contract": contract}
     return templates.TemplateResponse(
@@ -181,6 +195,7 @@ async def profitability_page(
             "pnl": pnl_view(view, customer=customer, contract=contract, service=service, day=day),
             "per_kw": per_kw_view(per_kw, view),
             "per_kw_note": per_kw_note,
+            "availability": availability,
             "lp_value": lp_value_view(lp_payload),
             "lp_note": lp_note,
             "last_settled_at": last_updated(view, "pnl"),

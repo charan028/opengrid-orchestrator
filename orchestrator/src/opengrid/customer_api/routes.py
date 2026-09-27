@@ -41,6 +41,7 @@ from opengrid.customer_api.rules import (
     renominate_decision,
 )
 from opengrid.customer_api.store import CustomerStore, OpenItemExistsError, get_customer_store
+from opengrid.market.availability import contract_labels
 from opengrid.trace.store import TraceStore
 
 router = APIRouter(prefix="/og/api/customer", tags=["customer"])
@@ -111,7 +112,7 @@ async def me(who: Who) -> dict[str, str]:
 async def my_contracts(who: Who) -> dict[str, Any]:
     """`{"contracts": [...]}` with an `id` per contract (the customer simulator discovers its contract here)."""
     rows = await contracts.list_contracts(customer_id=who.customer_id)
-    return {"contracts": [{"id": str(c.contract_id), **c.model_dump(mode="json")} for c in rows]}
+    return {"contracts": [{"id": str(c.contract_id), **contract_labels(c)} for c in rows]}
 
 
 @router.post("/opportunities", status_code=status.HTTP_201_CREATED, response_model=None)

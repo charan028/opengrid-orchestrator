@@ -59,9 +59,12 @@ from opengrid.guardian.repo import (
     build_pg_ports,
     load_bank_membership,
     load_hub_params,
+    load_signed_anchors,
     load_zones_by_bank,
+    mark_verdict_published,
 )
 from opengrid.guardian.service import GuardianService
+from opengrid.health.model import HealthThresholds
 from opengrid.platform.config import Config, load_config, resolve_secret
 from opengrid.platform.db import POOL_OPEN_TIMEOUT_S, build_dsn
 from opengrid.platform.heartbeat import write_heartbeat
@@ -148,6 +151,8 @@ async def _publish_signed_batch(
     """On a PASS verdict, publish the signed command batch and renew the bank's hub leases."""
     batch = build_signed_batch(service, key_id=key_id, proposal=proposal)
     await publish_command_batch(mqtt_client, cfg, batch)
+    # only a published batch moves G-04's signed anchors (a failed publish raised above: the hubs never got it)
+    service.confirm_published(proposal.command_batch_id)
     for item in proposal.items:
         lease = Lease(
             hub_id=item.hub_id,
@@ -416,11 +421,26 @@ async def main() -> None:
     # The at-home check reads each unit's position from og.hub against its home station's coordinates.
     ports = dataclasses.replace(
         ports,
-        mobile_units=ConfigMobileUnitPort(load_mobile_units(), load_mobile_home_station_sites(), pool),
+        mobile_units=ConfigMobileUnitPort(
+            load_mobile_units(),
+            load_mobile_home_station_sites(),
+            pool,
+            # Stationary rule (core.geo): a parked truck that reports on change only stays at its last
+            # reported position while its telemetry is fresh ([health].hub_stale_s).
+            telemetry_max_age_s=HealthThresholds.from_config(cfg).hub_stale_s,
+        ),
     )
     calibration_queue = PgCalibrationQueuePort(pool)
 
     service = GuardianService(ports=ports, config=guardian_cfg, signing_seed=signing_seed)
+    # r3.4.3 HIGH-A: G-04's signed anchors survive a restart (live leases only). A failed read starts on
+    # telemetry, which the engine also falls back to after the first veto (DISPATCH contract).
+    try:
+        # bounded twice: a 2 s statement timeout in the query, and this wall-clock limit around the whole read
+        anchors = await asyncio.wait_for(load_signed_anchors(pool, now=datetime.now(UTC)), timeout=2.5)
+        service.seed_signed_anchors(anchors)
+    except Exception:
+        logger.exception("signed-anchor reload failed: G-04 starts on telemetry")
     guardian_module.configure(service)
 
     mqtt_password = resolve_secret("OG_MQTT_GUARDIAN_PASSWORD")
@@ -474,6 +494,8 @@ async def main() -> None:
                 key_id=guardian_cfg.key_id,
                 proposal=proposal,
             )
+            # published: the engine and the startup reload may now anchor on it (DISPATCH contract)
+            await mark_verdict_published(pool, batch.command_batch_id)
         if ports.pq is not None:
             # Isolated from batch signing: a calibration-path failure (e.g. og.calibration_attempt
             # not yet migrated) must never stop the guardian signing or holding dispatch (K7).

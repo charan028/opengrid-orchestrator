@@ -1,0 +1,24 @@
+name: ercot_as_03_recall
+description: >
+  Recall: an ECRS deployment recalled after 2 minutes, then a deployment and recall delivered out of
+  order (the recall first). Expected: the first deployment ends at the recall; the out-of-order pair
+  never discharges (the late deployment is superseded by the recall already received).
+  Publishes ERCOT AS dispatch instructions on ogsim.market's MMS/EWS endpoint (/mms/ews/, D-35). The
+  orchestrator sees them only when [feeds.ercot_as_poll] is enabled and points at this simulator; its
+  decision and acknowledgement are listed at GET /mms/admin/vdis on the market sim.
+steps:
+  - at_s: 0
+    type: ercot_as_deploy
+    target: OG_ESR_1
+    params: {service: ECRS, duration_min: 30}
+    duration: 120
+  - at_s: 120
+    type: ercot_as_recall
+    target: OG_ESR_1
+    params: {service: ECRS}
+    duration: 1
+  - at_s: 180
+    type: ercot_as_out_of_order
+    target: OG_ESR_1
+    params: {service: ECRS}
+    duration: 60

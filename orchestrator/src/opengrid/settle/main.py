@@ -33,6 +33,7 @@ from opengrid.assets.runner import run_once as run_asset_drift_sweep
 from opengrid.assets.service import AssetHealthService
 from opengrid.assets.wiring import build_asset_health_service
 from opengrid.contracts.pg_repo import PgContractsRepo
+from opengrid.delivery.job import DeliveryJob, DeliverySettings
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import clear_alert, fetch_open_alerts, raise_alert
 from opengrid.platform.config import load_config
@@ -272,6 +273,13 @@ async def _run() -> None:
                 make_asset_drift_job(build_asset_health_service(pool, trace_store)),
             )
         )
+    delivery_settings = DeliverySettings.from_config(cfg)
+    if delivery_settings.enabled:
+        # D-38: measured delivery of every discharge call (records, live alerts, AT_RISK), observation only.
+        delivery_job = DeliveryJob(
+            pool, trace_store, delivery_settings, set_at_risk=contracts.set_obligation_at_risk
+        )
+        jobs.append(("delivery", Cadence(delivery_settings.interval_s), delivery_job.run_once))
     runner = JobRunner(jobs)
     watch = StallWatch(
         lambda: runner.stalled({"settle": _STALL_INTERVALS * settle_interval_s}),

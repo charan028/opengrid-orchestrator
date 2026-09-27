@@ -1285,7 +1285,7 @@ def test_the_retry_stays_off_unless_the_owner_enables_it() -> None:
     assert dispatch_settings(Config({})).veto_retry_enabled is False
 
 
-def test_utility_scale_hubs_step_from_the_last_commanded_setpoint() -> None:
+def test_utility_scale_hubs_step_from_the_last_signed_setpoint(monkeypatch) -> None:
     @dataclass
     class _Big:
         hub_id: str = "sub-1"
@@ -1294,11 +1294,23 @@ def test_utility_scale_hubs_step_from_the_last_commanded_setpoint() -> None:
         ramp_kw_per_s: float = 100.0
         utility_scale: bool = True
 
-    engine._last_commanded_kw.pop("sub-1", None)
+    from datetime import UTC, datetime, timedelta
+
+    from opengrid.engine.ramp_anchor import RampAnchors
+
+    anchors = RampAnchors()
+    monkeypatch.setattr(engine, "_ramp_anchors", anchors)
     hub = _Big()
     step1 = engine._ramped_setpoint_kw(hub, -20000.0, 2.0)
     step2 = engine._ramped_setpoint_kw(hub, -20000.0, 2.0)
-    assert step1 == pytest.approx(-180.0) and step2 == pytest.approx(-360.0)  # keeps climbing
+    # HIGH-A: an unsigned proposal is not where the hub is -- no climbing on proposals alone.
+    assert step1 == pytest.approx(-180.0) and step2 == pytest.approx(-180.0)
+    batch = uuid4()
+    anchors.record_proposal(
+        batch, [{"hub_id": "sub-1", "p_kw_setpoint": step1}], datetime.now(UTC) + timedelta(seconds=30)
+    )
+    anchors.apply_verdicts({batch: "PASS"}, datetime.now(UTC))
+    assert engine._ramped_setpoint_kw(hub, -20000.0, 2.0) == pytest.approx(-360.0)  # signed: climbs
     home = _HubCap("h1", "b1", 10.0)
     home_hub = SimpleNamespaceHub(p_kw=0.0, ramp_kw_per_s=0.1)
     assert engine._ramped_setpoint_kw(home_hub, -5.0, 2.0) == engine._ramped_setpoint_kw(home_hub, -5.0, 2.0)

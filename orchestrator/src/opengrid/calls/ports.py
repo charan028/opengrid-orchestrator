@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from opengrid.calls.models import AwardView, CallRecord, Granted
+from opengrid.calls.models import AwardView, CallRecord, Granted, MeasuredDelivery
 from opengrid.health.model import AlertSeverity
 
 
@@ -72,7 +72,13 @@ class CallStore(Protocol):
         ...
 
     async def granted(self, obligation_id: UUID, start: datetime, end: datetime) -> Granted:
-        """Granted discharge for the obligation over `[start, end)` (`og.grant`, per allocator cycle)."""
+        """Granted (planned, NOT measured) discharge for the obligation over `[start, end)` (`og.grant`, per
+        allocator cycle). Deprecated: kept for the `granted_*` status fields until r3.5; use
+        `measured_delivery`."""
+        ...
+
+    async def measured_delivery(self, deployment_id: UUID) -> MeasuredDelivery | None:
+        """The call's MEASURED delivery (`opengrid.delivery`, D-38), None until it has been evaluated."""
         ...
 
     async def raise_alert(

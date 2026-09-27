@@ -58,6 +58,7 @@ SCADA_ANOMALY_TYPES = frozenset(
         "comms_loss",
         "utility_instruction",
         "time_skew",
+        "meter_mismatch",
     }
 )
 
@@ -85,12 +86,17 @@ def _utility_instruction_payload(
     `_revert` (lifting, `lift=True`) so both construct `kind`/`limit_kw` from `params` the
     same way -- never two independent copies of that mapping."""
     mode = str(params.get("mode", "limit"))
-    return {
+    payload: dict[str, Any] = {
         "bank_id": bank_id,
         "kind": mode.upper(),
         "limit_kw": float(params.get("limit_kw", 0.0)) if mode == "limit" else None,
         "lift": lift,
     }
+    if lift and params.get("lifts_instruction_id"):
+        # Q10 (r3.4.5): cancelling with an explicit id lifts THAT instruction -- e.g. one this sim issued
+        # before a restart (its id is in the orchestrator's stop reason); otherwise the sim names its own.
+        payload["lifts_instruction_id"] = str(params["lifts_instruction_id"])
+    return payload
 
 
 @dataclass
@@ -107,6 +113,9 @@ class BankModifiers:
     breaker_open: bool = False
     comms_loss: bool = False
     time_skew_s: float = 0.0
+    #: meter_mismatch (D-38): the meter sees battery_scale x the batteries' net power plus offset_kw.
+    meter_battery_scale: float = 1.0
+    meter_offset_kw: float = 0.0
     pending_instruction: dict[str, Any] | None = None
 
 
@@ -221,6 +230,9 @@ class ScadaAnomalyManager:
                 m.quality_override = "comm_fail"
             elif anomaly.type == "time_skew":
                 m.time_skew_s = float(p.get("skew_s", 300.0))
+            elif anomaly.type == "meter_mismatch":
+                m.meter_battery_scale = float(p.get("battery_scale", 0.5))
+                m.meter_offset_kw = float(p.get("offset_kw", 0.0))
             elif anomaly.type == "utility_instruction":
                 m.pending_instruction = _utility_instruction_payload(bank_id, p)
 
@@ -253,6 +265,9 @@ class ScadaAnomalyManager:
                 m.quality_override = None
             elif anomaly.type == "time_skew":
                 m.time_skew_s = 0.0
+            elif anomaly.type == "meter_mismatch":
+                m.meter_battery_scale = 1.0
+                m.meter_offset_kw = 0.0
             elif anomaly.type == "utility_instruction":
                 # Blocker fix: ending a utility_instruction anomaly (natural duration elapse,
                 # via tick()'s expiry sweep, OR a manual cancel, via start()'s immediate-revert

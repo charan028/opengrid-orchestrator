@@ -43,6 +43,10 @@ R_GRANT_CLOSED_LOOP = "R-GRANT-CLOSED-LOOP"
 #: An ERCOT_AS award held at 0 kW until ERCOT deploys it (og.as_deployment, migration 0020): a capacity
 #: hold, its reservation stays locked (K13).
 R_GRANT_AS_HOLD = "R-GRANT-AS-HOLD"
+#: A capacity hold (ERCOT_AS, REGULATED_CAPACITY) granted its share of a PARTIAL deployment (requested kW below the
+#: commitment, og.as_deployment): below the reservation by the call's own request, not a lock dip. G-19 signs it only
+#: on its own read of that deployment, at the bank's pro-rata share of the requested kW.
+R_AS_PARTIAL_DEPLOYMENT = "R-AS-PARTIAL-DEPLOYMENT"
 
 # --- Shortfall reasons reported against the obligation that could not be fully served (never a
 # reallocation to a different obligation -- 00-invariants.md K13) ---------------------------------
@@ -66,6 +70,10 @@ R_MANUAL_RAMP = "R-MANUAL-RAMP"
 #: signs it only when its own read shows a live MANUAL_TARGET on the bank and the bank's capability without
 #: those hubs is below the commitment floor.
 R_OPERATOR_OVERRIDE = "R-OPERATOR-OVERRIDE"
+
+#: A shortfall below the commitment lock carrying one of these is a K13 exception: the engine traces it
+#: (engine.gateways), G-19 signs it only on its own evidence, and opengrid.invariants accepts it. ONE list.
+K13_SHORTFALL_REASONS: frozenset[str] = COMMIT_LOCK_OVERRIDE_REASONS | {R_OPERATOR_OVERRIDE}
 
 #: A best-effort partial grant after a mid-window SHORTFALL (owner decision 2026-09-26) carries the shortfall
 #: reason; this is the K13 lock-exception it stands for. One copy, for the engine's escalation and the
@@ -103,6 +111,11 @@ R_PEAK_POWER_LIMIT = "PEAK_POWER_LIMIT"  # G-31: above continuous without a vali
 R_FEEDER_RAMP_NON_FIRM = "FEEDER_RAMP_NON_FIRM"  # G-32: feeder ramp for non-firm steps
 R_SYNC_STEP_LIMIT = "SYNC_STEP_LIMIT"  # G-05: synchronized (unstaggered) step in one tick
 R_TERRITORY_INELIGIBLE = "R-TERRITORY-INELIGIBLE"  # G-33/K15: REG obligation served outside its territory
+#: D-37: a bank that is og.bank.availability = UNAVAILABLE (reason REGULATED_NO_CONTRACT): regulated (NOIE)
+#: territory with no utility contract. Nothing is offered, planned or dispatched on it (idle hold), except
+#: an obligation grandfathered under K13 (`opengrid.market.availability`). Allocator 0 kW grant/block, G-33
+#: veto and the engine's manual-target refusal all carry it.
+R_BANK_UNAVAILABLE = "R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT"
 
 # --- G-01-ENERGY: lease-duration energy projection (K1), independent of the instantaneous G-01 check
 R_RESERVE_FLOOR_LEASE = "RESERVE_FLOOR_LEASE"

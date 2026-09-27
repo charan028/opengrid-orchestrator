@@ -119,6 +119,10 @@ class ObligationSettlementContext:
     #: proxy (the trailing 24h off-peak SPP average for the obligation's bank zone), "MISSING" = no
     #: off-peak SPP observation in that window (energy cost 0, logged).
     charging_cost_flag: str = "TRAILING_24H_OFFPEAK_PROXY"
+    #: Where `price_per_kwh` came from: "MCPC" (ERCOT_AS: the cleared DAM MCPC of the award's product in
+    #: the delivery hour), "OPPORTUNITY_PRICE" (ERCOT_AS with no MCPC observation -- the opportunity's own
+    #: figure, logged), "CONTRACT" (every other service: the opportunity/contract price).
+    price_flag: str = "CONTRACT"
     #: Informational only (no longer drives `energy_cost`, kept for the settlement trace/audit trail):
     #: the bank zone's real-time SPP AT the discharge interval, "what the market was paying when we
     #: actually delivered" -- see `charging_cost_per_kwh` for what actually prices the energy.

@@ -49,6 +49,10 @@ def _contract_from_row(row: dict[str, Any]) -> Contract:
         # a database before 0025, is FREE with no utility -- the column default, never a guess.
         market=row.get("market") or "FREE",
         utility_id=row.get("utility_id"),
+        # Migration 0046 (D-37). `.get`: an older database or a narrower query reads as a named-less,
+        # non-sample contract (the column defaults).
+        name=row.get("name"),
+        is_sample=bool(row.get("is_sample") or False),
     )
 
 
@@ -157,8 +161,9 @@ class PgContractsRepo:
                 INSERT INTO og.contract (
                     contract_id, customer_id, service_type, variant, tier, profile_ref, territory_id,
                     start_at, end_at, renomination_allowed, penalty_alpha, penalty_beta, penalty_theta,
-                    degradation_cost, fallback_allowed, status, market, utility_id, updated_at
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+                    degradation_cost, fallback_allowed, status, market, utility_id, name, is_sample,
+                    updated_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
                 ON CONFLICT (contract_id) DO UPDATE SET
                     customer_id = EXCLUDED.customer_id, service_type = EXCLUDED.service_type,
                     variant = EXCLUDED.variant, tier = EXCLUDED.tier, profile_ref = EXCLUDED.profile_ref,
@@ -168,6 +173,10 @@ class PgContractsRepo:
                     penalty_theta = EXCLUDED.penalty_theta, degradation_cost = EXCLUDED.degradation_cost,
                     fallback_allowed = EXCLUDED.fallback_allowed, status = EXCLUDED.status,
                     market = EXCLUDED.market, utility_id = EXCLUDED.utility_id,
+                    -- D-37: a sample stays a sample (sticky), so an upsert can never turn a "Sample
+                    -- Contract" into a callable one: activating it fails 0046's CHECK instead.
+                    name = COALESCE(EXCLUDED.name, og.contract.name),
+                    is_sample = og.contract.is_sample OR EXCLUDED.is_sample,
                     updated_at = now()
                 RETURNING *
                 """,
@@ -190,6 +199,8 @@ class PgContractsRepo:
                     contract.status,
                     contract.market,
                     contract.utility_id,
+                    contract.name,
+                    contract.is_sample,
                 ),
             )
             row = await cur.fetchone()

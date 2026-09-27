@@ -75,6 +75,11 @@ spec:
           args: [{{ $name | quote }}]
           env:
             {{- include "og.dbEnv" $ | nindent 12 }}
+            {{- if and (eq $name "engine") $.Values.gridLink.enabled }}
+            # D-34 grid link: production's og-engine drop-in grid-link.conf sets the same override
+            - name: OG_GRID_LINK_CONFIG
+              value: /etc/opengrid/certs/grid_link.toml
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ $.Values.secrets.mqtt }}
@@ -84,6 +89,12 @@ spec:
           ports:
             - name: metrics
               containerPort: {{ $svc.metricsPort }}
+            {{- if and (eq $name "engine") $.Values.gridLink.enabled $.Values.gridLink.service.enabled }}
+            {{- range $i, $p := $.Values.gridLink.service.ports }}
+            - name: gridlink-{{ $i }}
+              containerPort: {{ $p }}
+            {{- end }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /metrics
@@ -124,6 +135,11 @@ spec:
               subPath: {{ . }}
               readOnly: true
             {{- end }}
+            {{- if and (eq $name "engine") $.Values.gridLink.enabled }}
+            - name: gridlink
+              mountPath: /etc/opengrid/certs
+              readOnly: true
+            {{- end }}
       volumes:
         {{- include "og.runVolumes" $ | nindent 8 }}
         {{- if $svc.persistence }}
@@ -144,4 +160,29 @@ spec:
               - key: {{ . }}
                 path: {{ . }}
         {{- end }}
+        {{- if and (eq $name "engine") $.Values.gridLink.enabled }}
+        - name: gridlink
+          secret:
+            secretName: {{ $.Values.secrets.gridLink }}
+            defaultMode: 0440
+        {{- end }}
+{{- end }}
+{{- if and .Values.gridLink.enabled .Values.gridLink.service.enabled }}
+---
+# D-34 grid link listen ports of og-engine, in-cluster only (NetworkPolicy: gridLink.service.allowedCidrs).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-grid-link
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "engine") | nindent 4 }}
+spec:
+  selector:
+    {{- include "og.selector" (dict "root" . "component" "engine") | nindent 4 }}
+  ports:
+    {{- range $i, $p := .Values.gridLink.service.ports }}
+    - name: gridlink-{{ $i }}
+      port: {{ $p }}
+      targetPort: {{ $p }}
+    {{- end }}
 {{- end }}

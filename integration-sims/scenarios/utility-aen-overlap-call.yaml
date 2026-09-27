@@ -1,0 +1,11 @@
+name: utility_aen_overlap_call
+description: >
+  Two overlapping Austin Energy toll calls. Expected: the first ACCEPTED, the second REFUSED R-CALL-OVERLAP (409); the first is then cancelled.
+  Runs in ogsim.utility_aen (unit og-sim-utility) against the orchestrator; the result (PASS/FAIL
+  against the expectation) is logged as utility_scenario_result.
+steps:
+  - at_s: 0
+    type: utility_call_overlap
+    target: AUSTIN_ENERGY
+    params: {kw: 5000, duration_min: 15}
+    duration: 1

@@ -8,13 +8,18 @@
   {% set ac = detail.asset_class or 'HOME' %}
   <p class="fl-type-badge fl-type-{{ ac|lower }}" id="drawer-asset-type"><span class="fl-asset-icon fl-asset-{{ ac|lower }}" aria-hidden="true"></span> {{ (asset_labels or {}).get(ac, ac) }}</p>
   <h2>Hub {{ detail.hub_id }}</h2>
+  {% if detail.availability and detail.availability.availability == 'UNAVAILABLE' %}
+  <p class="fl-unavail-line" id="drawer-availability"><span class="fl-unavail">{{ detail.availability.availability_badge }}</span> {{ detail.availability.availability_text }}</p>
+  {% endif %}
   {% if detail.mobile %}{% set m = detail.mobile %}
   <section class="fl-dsec" aria-label="Truck" id="drawer-truck">
     <h3>Truck</h3>
     <dl class="fl-kv">
-      <div><dt>Status</dt><dd>{{ 'At home station' if m.status == 'AT_HOME_STATION' else 'Away from home station (in transit or deployed)' }}</dd></div>
-      <div><dt>Home station</dt><dd>{% if m.home_station %}{{ m.home_station.home_station_id }} ({{ m.home_station.zone }}){% else %}not assigned{% endif %}</dd></div>
-      <div><dt>Current location</dt><dd>{% if m.location.lat is not none %}{{ m.location.lat }}, {{ m.location.lon }}{% else %}not reported{% endif %}</dd></div>
+      <div><dt>Status</dt><dd id="drawer-truck-status">{% if m.status == 'AT_HOME_STATION' %}At home station{% elif m.status == 'AWAY' %}Away from home station (in transit or deployed){% else %}Unknown &mdash; no fresh position report (treated as away){% endif %}</dd></div>
+      <div><dt>Current location</dt><dd id="drawer-truck-location">{% if m.location.lat is not none %}{{ m.location.lat }}, {{ m.location.lon }} <span class="og-card-meta">device-reported</span>
+        {% if m.location.reported_at %}<span class="stale-badge" data-since="{{ m.location.reported_at }}" data-stale-after="{{ 1e9 if m.location.stationary else m.location.max_age_s|default(300) }}">age: unknown</span>{% endif %}{% if m.location.stationary %} <span class="og-card-meta">(parked: trusted while its telemetry is fresh)</span>{% elif not m.location.fresh %} <span class="og-card-meta">(not trusted: older than {{ (m.location.max_age_s|default(300))|int }} s and no fresh telemetry)</span>{% endif %}
+        {% else %}not reported by the device{% endif %}</dd></div>
+      <div><dt>Home station</dt><dd id="drawer-truck-home">{% if m.home_station %}{{ m.home_station.home_station_id }} ({{ m.home_station.zone }}){% if m.home_station.lat is not none %} &middot; {{ m.home_station.lat }}, {{ m.home_station.lon }} <span class="og-card-meta">seeded</span>{% endif %}{% else %}not assigned{% endif %}</dd></div>
       <div><dt>Charging allowed</dt><dd title="{{ m.charging_note }}">{{ 'Yes' if m.charging_allowed else 'No' }} &middot; only at its home station (D-31)</dd></div>
       <div><dt>Next planned return</dt><dd>{{ m.next_return or 'not scheduled (no deployment schedule yet)' }}</dd></div>
     </dl>

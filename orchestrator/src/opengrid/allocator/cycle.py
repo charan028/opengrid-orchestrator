@@ -56,6 +56,7 @@ from opengrid.allocator.pq_eligibility import EligibilityResult, HubEligibilityV
 from opengrid.allocator.price_response import price_responsive_schedule
 from opengrid.allocator.substitution import realize_obligation
 from opengrid.core.physics import hub_sustainable_discharge_kw
+from opengrid.core.services import DIST_DEFERRAL_SERVICE_TYPE
 from opengrid.market.territory import FREE, check_territory
 
 _EPS = 1e-9
@@ -91,6 +92,7 @@ def cycle(
     excluded_hub_ids: frozenset[str] = frozenset(),
     operator_hub_ids: frozenset[str] = frozenset(),
     device_excluded_hub_ids: frozenset[str] = frozenset(),
+    prep_memo: MutableMapping[str, PrepMemoEntry] | None = None,
 ) -> CycleResult:
     """Run one S1-S7 cycle across every bank in `fleet_state`.
 
@@ -114,6 +116,10 @@ def cycle(
       comes off their bank's capability.
     - `operator_hub_ids`: the excluded hubs held by a live operator target (`engine.manual`); a shortfall on
       their bank carries R-OPERATOR-OVERRIDE.
+    - `prep_memo`: optional, carried by the caller across cycles (`run_cycle`): each hub's preparation
+      (`_prepare_hub`) is reused while its inputs are the very same objects (`is`) -- the engine's fleet
+      gateway hands back the same `HubSnapshot` while a hub's telemetry and health are unchanged. It only
+      saves work: the result is identical with or without it.
     """
     cycle_id = cycle_id or t.isoformat()
     pi_states = {} if pi_states is None else pi_states
@@ -129,25 +135,26 @@ def cycle(
     # its bank's capability, so the tiers never allocate kW the hubs cannot deliver.
     flow_cut_by_bank: dict[str, float] = {}
     for hub in fleet_state.hubs:
-        if hub.hub_id in device_excluded_hub_ids and hub.is_healthy:
-            # Device work (firmware update): out like a FAULT hub -- L0 attribution (`classify_hub_loss`).
-            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + max(
-                hub.free_discharge_kw, 0.0
-            )
-            hub = hub.evolve(health="FAULT", free_discharge_kw=0.0)
-        if hub.hub_id in excluded_hub_ids and hub.is_healthy:
-            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + max(
-                hub.free_discharge_kw, 0.0
-            )
-            hub = hub.evolve(health="LAGGING", free_discharge_kw=0.0)
-        if flow_limits.enabled:
-            hub = with_topology(hub, flow_limits)
-        sustainable = _cap_sustainable_discharge(hub, lease_ttl_s)
-        capped = cap_hub(sustainable, flow_limits)
-        if capped is not sustainable and sustainable.is_healthy:
-            cut = sustainable.free_discharge_kw - capped.free_discharge_kw
-            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + cut
-        hubs_by_bank.setdefault(hub.bank_id, []).append(capped)
+        device_out = hub.hub_id in device_excluded_hub_ids
+        vetoed = hub.hub_id in excluded_hub_ids
+        memo = prep_memo.get(hub.hub_id) if prep_memo is not None else None
+        if (
+            memo is not None
+            and memo[0] is hub
+            and memo[1] is device_out
+            and memo[2] is vetoed
+            and memo[3] is flow_limits
+            and memo[4] == lease_ttl_s
+        ):
+            capped, cuts = memo[5], memo[6]
+        else:
+            capped, cuts = _prepare_hub(hub, device_out, vetoed, flow_limits, lease_ttl_s)
+            if prep_memo is not None:
+                prep_memo[hub.hub_id] = (hub, device_out, vetoed, flow_limits, lease_ttl_s, capped, cuts)
+        bank_id = hub.bank_id
+        for cut in cuts:
+            flow_cut_by_bank[bank_id] = flow_cut_by_bank.get(bank_id, 0.0) + cut
+        hubs_by_bank.setdefault(bank_id, []).append(capped)
     for bank in fleet_state.banks:
         cut = flow_cut_by_bank.get(bank.bank_id, 0.0)
         if cut > _EPS:
@@ -206,7 +213,7 @@ def cycle(
         # per DIST_DEFERRAL call on this bank. Its relief is applied to at most one obligation (the
         # first DIST_DEFERRAL call in deterministic order) rather than compounded across several.
         pi_extra_kw = 0.0
-        dist_deferral_calls = [c for c in calls if c.service_type == "DIST_DEFERRAL"]
+        dist_deferral_calls = [c for c in calls if c.service_type == DIST_DEFERRAL_SERVICE_TYPE]
         if dist_deferral_calls and bank_id in scada:
             pi_state = pi_states.get(bank_id, PiState())
             pi = DistDeferralPI(bank)
@@ -239,10 +246,17 @@ def cycle(
         for call in sorted(calls, key=lambda c: (_pq_result(pq, c) is None, c.obligation_id)):
             oid = call.obligation_id
             tier_granted = tier_result.granted_kw.get(oid, 0.0)
-            reason_code = reasons.R_GRANT_COMMITTED
+            # D-33: a partial call's grant is below the commitment by the call's own terms (G-19 corroborates
+            # it from og.as_deployment); a K13 shortfall below that share still overrides it (below).
+            reason_code = reasons.R_AS_PARTIAL_DEPLOYMENT if call.partial_call else reasons.R_GRANT_COMMITTED
 
-            if enforce_territory:
-                block = check_territory(call.market_ref, bank.territory, free_access=bank.free_access)
+            # D-37: nothing is dispatched on an UNAVAILABLE bank (regulated, no contract) except a call
+            # grandfathered under K13, which is also exempt from K15 (committed while the zone was ERCOT).
+            unavailable_block = None if bank.available or call.grandfathered else reasons.R_BANK_UNAVAILABLE
+            if unavailable_block is not None or (enforce_territory and not call.grandfathered):
+                block = unavailable_block or check_territory(
+                    call.market_ref, bank.territory, free_access=bank.free_access
+                )
                 if block is not None:
                     # K15 fail-safe: never served here; the shortfall is recorded against the same
                     # obligation. Its tier capacity stays locked (never exported as headroom).
@@ -265,7 +279,11 @@ def cycle(
                 grants.append(_zero_grant(bank_id, oid, reasons.R_GRANT_AS_HOLD))
                 continue
 
-            if call.service_type == "DIST_DEFERRAL" and not pi_extra_applied and pi_extra_kw > _EPS:
+            if (
+                call.service_type == DIST_DEFERRAL_SERVICE_TYPE
+                and not pi_extra_applied
+                and pi_extra_kw > _EPS
+            ):
                 tier_granted += pi_extra_kw
                 reason_code = reasons.R_GRANT_DIST_DEFERRAL_PI
                 pi_extra_applied = True
@@ -397,6 +415,34 @@ def cycle(
     )
 
 
+#: `cycle`'s per-hub preparation memo entry: (input hub, device-excluded, veto-excluded, flow limits, lease TTL,
+#: the prepared hub, its bank-capability cuts in order).
+PrepMemoEntry = tuple[HubSnapshot, bool, bool, FlowLimits, float, HubSnapshot, tuple[float, ...]]
+
+
+def _prepare_hub(
+    hub: HubSnapshot, device_out: bool, vetoed: bool, flow_limits: FlowLimits, lease_ttl_s: float
+) -> tuple[HubSnapshot, tuple[float, ...]]:
+    """One hub as the cycle offers it: device work and a K4 veto exclusion, the registry topology, the
+    lease-horizon energy cap and the F1/F2 caps; plus the kW each step takes off its bank's capability, in
+    the order they are deducted. A pure function of its arguments (`cycle`'s `prep_memo` relies on it)."""
+    cuts: list[float] = []
+    if device_out and hub.is_healthy:
+        # Device work (firmware update): out like a FAULT hub -- L0 attribution (`classify_hub_loss`).
+        cuts.append(max(hub.free_discharge_kw, 0.0))
+        hub = hub.evolve(health="FAULT", free_discharge_kw=0.0)
+    if vetoed and hub.is_healthy:
+        cuts.append(max(hub.free_discharge_kw, 0.0))
+        hub = hub.evolve(health="LAGGING", free_discharge_kw=0.0)
+    if flow_limits.enabled:
+        hub = with_topology(hub, flow_limits)
+    sustainable = _cap_sustainable_discharge(hub, lease_ttl_s)
+    capped = cap_hub(sustainable, flow_limits)
+    if capped is not sustainable and sustainable.is_healthy:
+        cuts.append(sustainable.free_discharge_kw - capped.free_discharge_kw)
+    return capped, tuple(cuts)
+
+
 def _zero_grant(bank_id: str, obligation_id: str, reason_code: str) -> ProposedGrant:
     return ProposedGrant(
         bank_id=bank_id,
@@ -434,6 +480,10 @@ def _headroom_kw(
     - 09 D7: only when the price clears the stored-energy value (`threshold`); unknown value: none.
     """
     bank_id = bank.bank_id
+    if not bank.available:
+        # D-37: an UNAVAILABLE bank (regulated, no contract) takes no headroom, whatever the territory says.
+        territory_blocks.append(TerritoryBlock(bank_id, None, reasons.R_BANK_UNAVAILABLE))
+        return 0.0
     if enforce_territory:
         block = check_territory(FREE, bank.territory, free_access=bank.free_access)
         if block is not None:

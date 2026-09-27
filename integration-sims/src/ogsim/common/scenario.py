@@ -41,6 +41,7 @@ WIRE_TYPE_TO_CATALOGUE_ID: dict[str, str] = {
     "SCADA_COMMS_LOSS": "comms_loss",
     "SCADA_UTILITY_INSTRUCTION": "utility_instruction",
     "SCADA_TIME_SKEW": "time_skew",
+    "SCADA_METER_MISMATCH": "meter_mismatch",
     "SCADA_SITE_SAG_SWELL": "site_sag_swell",
     # PQ / inverter imperfection (06-service-profiles-and-power-quality.md §7.2/§7.5).
     "FLEET_FREQUENCY_DRIFT": "frequency_drift",
@@ -66,6 +67,12 @@ WIRE_TYPE_TO_CATALOGUE_ID: dict[str, str] = {
     "CUSTOMER_INVOICE_DISPUTE": "invoice_dispute",
     "CUSTOMER_SITE_METER_STALE": "site_meter_stale",
     "CUSTOMER_LARGE_LOAD_CURTAILMENT_REQUEST": "large_load_curtailment_request",
+    # ogsim.utility_aen (the simulated utility EMS, D-29/D-33).
+    "UTILITY_CALL_NORMAL": "utility_call_normal",
+    "UTILITY_CALL_OVERLAP": "utility_call_overlap",
+    "UTILITY_CALL_OVER_CAP": "utility_call_over_cap",
+    "UTILITY_CALL_CHARGE": "utility_call_charge",
+    "UTILITY_CALL_CANCEL_MID": "utility_call_cancel_mid",
 }
 
 

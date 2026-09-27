@@ -27,9 +27,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from opengrid.ai_agent import deterministic
+from opengrid.ai_agent import deterministic, fleet
 from opengrid.ai_agent.budgets import Budget, BudgetLimits, Pricing
-from opengrid.ai_agent.gateway import ModelGateway
+from opengrid.ai_agent.gateway import ModelGateway, ScreeningHealth
+from opengrid.ai_agent.grounding import ungrounded_numbers
 from opengrid.ai_agent.providers import ModelProvider, ModelRequest
 from opengrid.ai_agent.redaction import contains_personal_data, redact_text
 from opengrid.ai_agent.router import INJECTION_THRESHOLD
@@ -39,7 +40,10 @@ from opengrid.ai_agent.types import (
     ConfidenceLabel,
     ConfigReader,
     CopilotAnswer,
+    FleetQuery,
+    FleetTool,
     ModelCall,
+    RouterVerdict,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,7 +66,12 @@ _DECLINE_ACTION = (
 )
 _NO_ANSWER = (
     "I can only answer from what this console holds, and nothing here answers that. Try asking which "
-    "obligations are at risk, why an offer was declined, or how the fleet is."
+    "obligations are at risk, why an offer was declined, how many hubs are below 30% charge in LZ_NORTH, "
+    "or the total available kW in LZ_AEN."
+)
+_UNGROUNDED = (
+    "The explanation cited figures that are not in the console's data, so it was withheld. Ask for the "
+    "count or total directly and the console will answer from its own records."
 )
 UNAVAILABLE = "assistant unavailable -- deterministic controls unaffected"
 
@@ -83,6 +92,11 @@ class CopilotService:
     def budget(self) -> Budget:
         return self._gateway.budget
 
+    @property
+    def screening(self) -> ScreeningHealth:
+        """Screening outcomes in a row (drives ALR-COPILOT-SCREENING, raised by the API router)."""
+        return self._gateway.screening
+
     def status(self) -> dict[str, Any]:
         """What System Health renders (UI-DAT-05): what works, and how much budget is left."""
         return {
@@ -99,11 +113,15 @@ class CopilotService:
         trace: TraceSink,
         screen: str | None = None,
         user: str | None = None,
+        fleet_tool: FleetTool | None = None,
     ) -> CopilotAnswer:
         """Answer `question` over `context` and trace it. Never raises. If the trace cannot be written
-        the answer is withheld and "assistant unavailable" is returned instead."""
+        the answer is withheld and "assistant unavailable" is returned instead.
+
+        `fleet_tool` is the API's read-only fleet query (counts, totals, top rows); without it, fleet
+        questions fall back to the snapshot's hub health counts."""
         screened = redact_text((question or "").strip())
-        answer = await self._answer(screened.text, context)
+        answer = await self._answer(screened.text, context, fleet_tool)
         record = _trace_record(
             answer, question=screened.text, redactions=screened.found, screen=screen, user=user
         )
@@ -115,7 +133,9 @@ class CopilotService:
         answer.trace_id = trace_id
         return answer
 
-    async def _answer(self, question: str, context: dict[str, Any]) -> CopilotAnswer:
+    async def _answer(
+        self, question: str, context: dict[str, Any], fleet_tool: FleetTool | None
+    ) -> CopilotAnswer:
         if not question:
             return CopilotAnswer(
                 text="Ask a question about the fleet, the market or a decision.", tier="declined"
@@ -127,20 +147,39 @@ class CopilotService:
         if contains_personal_data(context):
             return CopilotAnswer(text=_DECLINE_PERSONAL, tier="declined", refusal_reason="personal_data")
 
-        # Tier 1 is computed first: it is the answer whenever the models cannot be trusted or reached.
-        early = deterministic.answer(question, context)
+        # Tier 1 is computed first: it is the answer whenever the models cannot be trusted or reached. A
+        # fleet question the parser recognises is answered from the fleet tool, ahead of the snapshot's
+        # generic hub counts.
+        # A fleet question whose condition the parser could not read is never answered with a count
+        # that ignores the condition -- not the fleet tool's, and not the snapshot's hub totals.
+        # The same parse decides every path (no model, screening down, screened): a parsed fleet query is
+        # answered from the fleet tool, an unread condition is refused, and a question that names a fleet
+        # filter is never answered with the snapshot's whole-fleet hub totals.
+        reading = fleet.parse(question)
+        parsed = reading if isinstance(reading, FleetQuery) else None
+        unparsed = reading if isinstance(reading, fleet.UnparsedCondition) else None
+        if unparsed is not None:
+            early: CopilotAnswer | None = fleet.not_understood(unparsed)
+        elif parsed is not None and _filtered(parsed):
+            early = None
+        else:
+            early = deterministic.answer(question, context)
 
         if not self._gateway.available:
-            return early or _unavailable("no model provider is configured")
+            fleet_answer = await _fleet_answer(parsed, fleet_tool)
+            return fleet_answer or early or _unavailable("no model provider is configured")
 
-        request = ModelRequest.build(question, context)
+        # Screening is sent the operator's question only (r3.4.5): classifying intent and injection risk
+        # needs the words, not the console snapshot, which was ~9.4k of its ~9.5k input tokens.
+        request = ModelRequest.build(question, {})
         screened = await self._gateway.screen(request)
         calls: list[ModelCall] = list(screened.calls)
         verdict = screened.value
         if verdict is None:
-            # Screening unavailable: the injection risk is unknown, not zero. Stay on no-model answers.
+            # Screening unavailable: the injection risk is unknown, not zero, so no model is used. The
+            # parsed fleet query involves no model (typed values, bound parameters): it still answers.
             reason = screened.budget_refusal or "screening unavailable"
-            fallback = early or _unavailable(reason)
+            fallback = await _fleet_answer(parsed, fleet_tool) or early or _unavailable(reason)
             return _with_calls(fallback, calls, request)
 
         if verdict.injection_risk >= INJECTION_THRESHOLD:
@@ -158,35 +197,156 @@ class CopilotService:
             declined = CopilotAnswer(text=_DECLINE_ACTION, tier="declined", intent="draft_action")
             return _with_calls(declined, calls, request)
 
-        if early is not None:
+        # The parser's reading wins; otherwise the routing model's validated extraction (only when it is
+        # confident). Either way the query is typed values over a fixed vocabulary, run read-only.
+        # The routing model's filters are used only when the parser found no fleet question at all: an
+        # unread condition is refused on every path (the model's reading of it is not trusted over ours),
+        # and a model query with no filter, grouping or metric would be the whole-fleet total.
+        model_query = verdict.fleet if verdict.is_confident and reading is None else None
+        if model_query is not None and not _filtered(model_query):
+            model_query = None
+        query = parsed or model_query
+        explaining = verdict.intent == "explain_decision"
+
+        if not explaining:
+            fleet_answer = await _fleet_answer(query, fleet_tool)
+            if fleet_answer is not None:
+                if parsed is None:
+                    fleet_answer.tier = "routed"  # the routing model chose the filters; code wrote the text
+                return _with_calls(fleet_answer, calls, request)
+
+        if early is not None and (not explaining or query is None):
             early.intent = verdict.intent
             return _with_calls(early, calls, request)
 
-        if verdict.intent == "explain_decision":
-            explained = await self._gateway.explain(request)
-            calls.extend(explained.calls)
-            if explained.value is not None:
-                prose = CopilotAnswer(
-                    text=explained.value,
-                    tier="prose",
-                    intent=verdict.intent,
-                    model=explained.model,
-                    provider=explained.provider,
-                    confidence=verdict.intent_confidence,
-                    confidence_label=confidence_label(verdict.intent_confidence),
-                    citations=[Citation(source="/og/api/health", ref="context", label="live console state")],
-                )
-                return _with_calls(prose, calls, request)
-            if explained.budget_refusal is not None:
-                return _with_calls(_unavailable(explained.budget_refusal), calls, request)
+        if explaining:
+            return await self._explain(question, context, verdict, query, fleet_tool, calls)
 
         routed = CopilotAnswer(text=_NO_ANSWER, tier="routed", intent=verdict.intent)
         return _with_calls(routed, calls, request)
+
+    async def _explain(
+        self,
+        question: str,
+        context: dict[str, Any],
+        verdict: RouterVerdict,
+        query: FleetQuery | None,
+        fleet_tool: FleetTool | None,
+        calls: list[ModelCall],
+    ) -> CopilotAnswer:
+        """Prose over the evidence. A fleet result, when the question names fleet conditions, is added to
+        the evidence as query output only; the prose is then checked so that every number it cites is in
+        that evidence (`grounding`). Ungrounded prose is withheld in favour of the console's own answer."""
+        result = await _run_fleet(query, fleet_tool)
+        fleet_answer: CopilotAnswer | None = None
+        fleet_result = result if query is not None and isinstance(result, dict) else None
+        if query is not None and fleet_result is not None:
+            fleet_answer = fleet.render(query, fleet_result)
+        request = ModelRequest.build(question, explain_evidence(context, fleet_result))
+        explained = await self._gateway.explain(request)
+        calls.extend(explained.calls)
+        if explained.value is not None:
+            ungrounded = ungrounded_numbers(explained.value, request.evidence, request.question)
+            if ungrounded:
+                logger.info("copilot prose withheld: %d number(s) not in the evidence", len(ungrounded))
+                fallback = fleet_answer or CopilotAnswer(
+                    text=_UNGROUNDED, tier="routed", refusal_reason="ungrounded_numbers"
+                )
+                fallback.intent = verdict.intent
+                return _with_calls(fallback, calls, request)
+            citations = [Citation(source="/og/api/health", ref="context", label="live console state")]
+            if fleet_answer is not None:
+                citations = fleet_answer.citations + citations
+            prose = CopilotAnswer(
+                text=explained.value,
+                tier="prose",
+                intent=verdict.intent,
+                model=explained.model,
+                provider=explained.provider,
+                confidence=verdict.intent_confidence,
+                confidence_label=confidence_label(verdict.intent_confidence),
+                citations=citations,
+            )
+            return _with_calls(prose, calls, request)
+        if explained.budget_refusal is not None:
+            return _with_calls(_unavailable(explained.budget_refusal), calls, request)
+        if fleet_answer is not None:
+            return _with_calls(fleet_answer, calls, request)
+        routed = CopilotAnswer(text=_NO_ANSWER, tier="routed", intent=verdict.intent)
+        return _with_calls(routed, calls, request)
+
+
+#: How much of the board an explanation may carry (the snapshot itself holds up to 60 obligations).
+EXPLAIN_OBLIGATIONS = 20
+EXPLAIN_ALERTS = 10
+
+
+def explain_evidence(context: dict[str, Any], fleet_result: dict[str, Any] | None) -> dict[str, Any]:
+    """The explanation's evidence, trimmed to the sections an `explain_decision` answer can use.
+
+    * A question about fleet conditions (a fleet query ran): the fleet tool's result and the hub health
+      counts only -- obligations and alerts would be noise the model might cite.
+    * Otherwise ("why was this offer declined?"): the health counters and at most `EXPLAIN_ALERTS`
+      alerts, the hub counts, and at most `EXPLAIN_OBLIGATIONS` obligations, the ones a "why" is usually
+      about first (at risk, then open offers, then the rest).
+
+    `unavailable` always travels, so the model can say what it could not see. Everything still goes
+    through `ModelRequest.build`, i.e. redaction."""
+    evidence: dict[str, Any] = {"unavailable": list(context.get("unavailable") or [])}
+    evidence["hubs"] = dict(context.get("hubs") or {})
+    if fleet_result is not None:
+        evidence["fleet"] = fleet_result
+        return evidence
+    health = dict(context.get("health") or {})
+    if "alerts" in health:
+        health["alerts"] = list(health.get("alerts") or [])[:EXPLAIN_ALERTS]
+    evidence["health"] = health
+    if "obligations" in context:
+        obligations = list(context.get("obligations") or [])
+        ranked = sorted(obligations, key=lambda o: (not o.get("at_risk"), o.get("state") != "OFFERED"))
+        evidence["obligations"] = ranked[:EXPLAIN_OBLIGATIONS]
+    return evidence
+
+
+async def _run_fleet(query: FleetQuery | None, tool: FleetTool | None) -> dict[str, Any] | Exception | None:
+    """The fleet tool's result for `query`; the exception when the read failed; None when there is no
+    query or no tool. A result carrying a personal-data field is discarded (never sent, never shown)."""
+    if query is None or tool is None:
+        return None
+    try:
+        result = await tool(query)
+    except Exception as exc:
+        logger.info("copilot fleet tool unavailable (%s)", type(exc).__name__)
+        return exc
+    if contains_personal_data(result):
+        logger.warning("copilot fleet tool returned a personal-data field; result discarded")
+        return None
+    return result
+
+
+async def _fleet_answer(query: FleetQuery | None, tool: FleetTool | None) -> CopilotAnswer | None:
+    """The deterministic fleet answer; "can't verify" when the read failed, or when there is no tool for
+    a filtered question (whose honest answer is never the snapshot's whole-fleet count); None when there
+    is no query, or an unfiltered one and no tool."""
+    result = await _run_fleet(query, tool)
+    if query is None:
+        return None
+    if result is None:
+        return fleet.unavailable() if _filtered(query) else None
+    if isinstance(result, Exception):
+        return fleet.unavailable()
+    return fleet.render(query, result)
+
+
+def _filtered(query: FleetQuery) -> bool:
+    """A query that narrows or shapes the fleet: any filter, a breakdown, or a metric other than count."""
+    return query.has_filter or query.group_by != "none" or query.metric != "count"
 
 
 def _with_calls(answer: CopilotAnswer, calls: list[ModelCall], request: ModelRequest) -> CopilotAnswer:
     answer.model_calls = calls
     answer.payload_sha256 = request.payload_sha256 if calls else None
+    answer.screened_by = next((c.model for c in calls if c.purpose == "screen" and c.ok), None)
     return answer
 
 
@@ -218,6 +378,7 @@ def _trace_record(
         "confidence": answer.confidence,
         "refusal_reason": answer.refusal_reason,
         "citations": [c.ref for c in answer.citations][:10],
+        "screened_by": answer.screened_by,
     }
 
 
@@ -295,10 +456,13 @@ __all__ = [
     "UNAVAILABLE",
     "CopilotAnswer",
     "CopilotService",
+    "FleetQuery",
+    "FleetTool",
     "TraceSink",
     "build_service",
     "confidence_label",
     "configure",
+    "explain_evidence",
     "service",
     "set_service",
 ]

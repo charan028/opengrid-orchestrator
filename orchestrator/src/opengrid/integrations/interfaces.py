@@ -30,7 +30,10 @@ __all__ = [
     "AsService",
     "Award",
     "DispatchInstruction",
+    "DispatchInstructionSource",
     "EnergyOffer",
+    "InstructionBatch",
+    "MalformedInstruction",
     "MarketSubmission",
     "OfferCurvePoint",
     "ScadaSink",
@@ -217,6 +220,58 @@ class DispatchInstruction(_Model):
     end_at: datetime | None = None
     issued_at: datetime
     text: str | None = None
+    ramp_minutes: int | None = Field(default=None, ge=0)
+    recalls: str | None = None  # AS_RECALL: the deployment instruction it ends, when the operator names it
+
+    @model_validator(mode="after")
+    def _validate(self) -> DispatchInstruction:
+        if not self.instruction_id:
+            raise ValueError("instruction_id is required")
+        if self.mw is not None and self.mw < 0:
+            raise ValueError("mw must not be negative")
+        if self.kind == "AS_DEPLOYMENT" and (self.mw is None or self.mw <= 0):
+            # ERCOT always states the deployed MW; a missing or zero MW must never become "the full award".
+            raise ValueError("an AS deployment must carry a positive mw")
+        if self.end_at is not None and self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        return self
+
+
+class MalformedInstruction(_Model):
+    """An instruction the adapter received but could not parse. `instruction_id` is None when even the
+    id was unreadable (it can then not be acknowledged)."""
+
+    instruction_id: str | None
+    error: str
+
+
+class InstructionBatch(_Model):
+    """One poll of the market operator: the parsed instructions and the ones that failed to parse. One
+    bad instruction never hides the others."""
+
+    instructions: list[DispatchInstruction] = []
+    malformed: list[MalformedInstruction] = []
+
+
+@runtime_checkable
+class DispatchInstructionSource(Protocol):
+    """Where AS deployment instructions come from (D-35). `ercot_mms` implements it against ERCOT EWS
+    (or the ogsim MMS simulator, same wire); a replacement adapter only has to satisfy this."""
+
+    @property
+    def backend(self) -> str: ...
+
+    async def fetch_instruction_batch(self, since: datetime) -> InstructionBatch:
+        """Instructions not yet acknowledged, issued at or after `since`. Raises on transport failure."""
+        ...
+
+    async def acknowledge_instruction(
+        self, instruction_id: str, *, accepted: bool, reason: str | None
+    ) -> SubmissionReceipt:
+        """Tell the market operator the QSE accepted or rejected (with `reason`) this instruction."""
+        ...
+
+    async def close(self) -> None: ...
 
 
 @runtime_checkable

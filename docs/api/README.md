@@ -11,6 +11,8 @@ The REST and SSE API served by `og-api` (`opengrid.api`, port 8080 on loopback, 
 | [health.md](health.md) | The health payload, degraded modes, and the guardian's K7 escalation alerts |
 | [scenarios.md](scenarios.md) | The operator scenario route: request shape, anomaly types, and how it differs from the simulator control plane |
 | [console-endpoints.md](console-endpoints.md) | The console's map, search, bulk-command, ledger, AS-deployment and utility-toll, alerts, bid-funnel and profitability endpoints, with example requests and responses |
+| [utility-api.md](utility-api.md) | The utility customer API (D-33, `/og/api/customer/v1/utility/`): Austin Energy's own toll calls. Account to utility_id mapping, endpoints and status codes, call states, isolation (404, never 403), limits. Hand-maintained: the generated reference does not list the customer routes |
+| [delivery.md](delivery.md) | Delivery verification (D-38): the operator `/og/api/delivery/records`, `/records/{call_id}` and `/summary` routes, the utility and customer delivery-record routes, the per-bucket series, sign convention, and the call-status measured fields. The console shows the same records in the Dispatch Delivery column and drawer |
 | [integration-howto.md](integration-howto.md) | Switching between live ERCOT/EIA/NWS and the market simulator, the ERCOT token flow |
 
 ## Regenerating the reference

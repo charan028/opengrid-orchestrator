@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from opengrid.calls.models import AwardView, CallKind, CallRecord, Granted
+from opengrid.calls.models import AwardView, CallKind, CallRecord, Granted, MeasuredDelivery
 from opengrid.calls.ports import IdempotencyKeyTakenError, OverlapError
 
 
@@ -58,6 +58,9 @@ class FakeCallStore:
     deployments: dict[UUID, FakeDeployment] = field(default_factory=dict)
     operator_actions: list[dict[str, Any]] = field(default_factory=list)
     alerts: list[dict[str, Any]] = field(default_factory=list)
+    #: Measured delivery per deployment id (what opengrid.delivery would have recorded).
+    measured: dict[UUID, MeasuredDelivery] = field(default_factory=dict)
+    #: Deprecated granted (planned) discharge per obligation (the `granted_*` status fields).
     delivery: dict[UUID, Granted] = field(default_factory=dict)
     fail_alerts: bool = False
 
@@ -193,6 +196,9 @@ class FakeCallStore:
         else:
             d.end_at = end_at
         return True
+
+    async def measured_delivery(self, deployment_id: UUID) -> MeasuredDelivery | None:
+        return self.measured.get(deployment_id)
 
     async def granted(self, obligation_id: UUID, start: datetime, end: datetime) -> Granted:
         return self.delivery.get(obligation_id, Granted(last_kw=None, kwh=0.0))
