@@ -9,7 +9,8 @@
 #   - Assume the FULL delivery charge applies to battery charging energy. Behind-the-meter batteries on a shared
 #     retail meter do not qualify as Wholesale Storage Load; there is no ADER exemption.
 #   - Serving the home's own load avoids it; exports do not recover it.
-# Not yet wired into the selector objective or settle P&L. That is M1 implementation work.
+# Wired (09 D5): the selector objective charges it on grid-drawn kWh (engine M1-by-zone lookup) and settle
+# books it (`opengrid.settle.tariffs.m1_delivery_charge`).
 
 [[tariff]]
 tdsp = "ONCOR"
@@ -63,9 +64,10 @@ LZ_SOUTH = "AEP_CENTRAL"
 LZ_WEST = "AEP_NORTH"
 
 # Regulated-utility territory per load zone (build phase, 2026-09-26: market-model-two-markets.md S3a/
-# S3c -- "a regulated contract is served only by assets inside that utility's service territory"). Data
-# only today: no selector/allocator/guardian code reads this table yet (those modules are the live-path
-# agent's, per BUILD.md ownership) -- this is the config surface for that wiring, not the wiring itself.
+# S3c -- "a regulated contract is served only by assets inside that utility's service territory"). Read
+# through `opengrid.market` (`load_zone_territory` / `territory_of_zone`) by the selector (K15 bank
+# eligibility, no FREE headroom from a regulated bank), the allocator (`enforce_territory`) and the
+# guardian (G-33), and by the engine's M1-by-zone lookup and the charge-window API.
 #
 # `market`: REGULATED (vertically integrated, outside ERCOT retail choice) or FREE (ERCOT competitive
 # area, already the implicit default for every zone not listed here). `delivery_charge`: "NONE" marks a

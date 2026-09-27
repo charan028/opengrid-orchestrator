@@ -858,9 +858,10 @@ async def load_committed(
     horizon_start: datetime, horizon_end: datetime, bank_ids: tuple[str, ...]
 ) -> tuple[CommittedObligation, ...]:
     """Committed/delivering obligations overlapping the horizon, frozen per `db.load_frozen_commitments`
-    (02a S2.2). All configured banks are eligible for redistribution (bank *substitution*, not a
-    reduction -- see `types.CommittedObligation`); a future refinement can narrow this per obligation
-    once `contracts`/`ledger` expose an eligibility query."""
+    (02a S2.2). Each starts with every configured bank as a redistribution candidate (bank
+    *substitution*, not a reduction -- see `types.CommittedObligation`); the gate then narrows that set
+    to the banks its market allows (K15, `prepare_obligations`). No `contracts`/`ledger` eligibility
+    query narrows it further per obligation yet."""
     frozen = await db.load_frozen_commitments(horizon_start.isoformat(), horizon_end.isoformat())
     terms = await db.load_obligation_terms([str(o) for o in frozen])
     n_intervals = int((horizon_end - horizon_start).total_seconds() // (INTERVAL_MINUTES * 60))
@@ -903,9 +904,11 @@ async def load_candidates(
     module's final-report note asking the merge agent to add one there instead, so this reads the
     tables directly rather than staying a permanent placeholder.
 
-    Every configured bank is eligible for every candidate: no `contracts`/`ledger` query exists yet to
-    narrow eligibility per opportunity either (`load_committed`'s docstring documents the identical gap
-    for committed obligations)."""
+    Each candidate starts with every configured bank; the gate narrows that set afterwards -- K15
+    territory (`prepare_obligations`), NOT_FOR_FIRM price series (`withhold_unfit_series`) -- and the
+    model applies D-31's mobile-unit rule (`ModelInputs.may_serve`). No `contracts`/`ledger` query
+    narrows it per opportunity beyond those (`load_committed`'s docstring notes the same for committed
+    obligations)."""
     rows = await db.load_offered_opportunities_rows(
         horizon_start.isoformat(), horizon_end.isoformat(), contract_scope
     )
