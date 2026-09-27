@@ -60,7 +60,7 @@ quantiles = [0.10, 0.50, 0.90]
 hub_count = 200
 banks = 8
 zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"]
-telemetry_interval_s = 2
+telemetry_interval_s = 10  # hub telemetry cadence (V-32, R3); matches production
 lease_ttl_s = 30
 
 [allocator]
@@ -82,8 +82,9 @@ ramp_fleet_s = 120
 [health]
 heartbeat_interval_s = 5
 heartbeat_miss_threshold = 3
-hub_stale_s = 6
-hub_offline_s = 30
+hub_stale_s = 25
+hub_offline_s = 60
+sim_offline_s = 90
 
 [retention]
 "trace.selection".days = 90
