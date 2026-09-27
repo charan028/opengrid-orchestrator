@@ -242,6 +242,11 @@ class StoreProtocol(Protocol):
         """Whether `trace_id` is durably in `og.trace` (not only in a process's local trace journal)."""
         ...
 
+    async def manual_target_trace_id(self, request_id: str) -> UUID | None:
+        """The trace id of the MANUAL_TARGET row the API wrote with this `request_id` (last hour), if it
+        committed -- settles a write whose acknowledgement was lost."""
+        ...
+
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         """The recent MANUAL_TARGET trace rows `(trace_id, payload, created_at)` in `created_at` order
         (`opengrid.core.manual_targets.MANUAL_TARGET_ROWS_SQL`); `core.manual_targets.parse_targets` turns
@@ -754,6 +759,14 @@ class PgStore:
     async def trace_recorded(self, trace_id: UUID) -> bool:
         rows = await self._fetch("SELECT 1 AS ok FROM og.trace WHERE trace_id = %s LIMIT 1", (trace_id,))
         return bool(rows)
+
+    async def manual_target_trace_id(self, request_id: str) -> UUID | None:
+        rows = await self._fetch(
+            "SELECT trace_id FROM og.trace WHERE event_class = 'MANUAL_TARGET' "
+            "AND created_at > now() - interval '1 hour' AND payload ->> 'request_id' = %s LIMIT 1",
+            (request_id,),
+        )
+        return rows[0]["trace_id"] if rows else None
 
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         rows = await self._fetch(MANUAL_TARGET_ROWS_SQL)

@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.api.csrf import CSRFMiddleware
 from opengrid.api.proposals import ProposalStore
 from opengrid.api.store import PgStore
-from opengrid.api.trace_backend import PgTraceBackend
+from opengrid.api.trace_backend import PgTraceBackend, journal_path_from_config
 from opengrid.contracts import AdmissionError
 from opengrid.contracts import configure as configure_contracts
 from opengrid.contracts.pg_repo import PgContractsRepo
@@ -38,7 +38,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging("api")
     cfg = load_config()
     pool = await make_pool(cfg)
-    trace_store = TraceStore(PgTraceBackend(pool))
+    # K11 journal at the configured path ([trace].journal_path): og-api runs under ProtectSystem=strict,
+    # so the relative default is never writable. Manual targets use their own DB-or-nothing store
+    # (routers/fleet.get_manual_target_trace_store), never this journal.
+    trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
     app.state.config = cfg
     app.state.pool = pool
     app.state.store = PgStore(pool)

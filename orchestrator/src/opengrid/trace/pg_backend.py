@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -72,6 +73,47 @@ class TraceJournalUnavailableError(RuntimeError):
     stream has no journal entry and no in-process cached head to safely resume from. Guessing a starting
     seq here risks writing a second, forked chain for a stream this process has never actually seen --
     refusing is the safe failure (the caller's `append()` fails loudly; nothing is silently corrupted)."""
+
+
+class TraceNotRecordedError(RuntimeError):
+    """A write on a backend built with `journal_failed_writes=False` could not be recorded in Postgres.
+    Nothing was journaled, so nothing will ever replay it: the record does not exist, now or later. Callers
+    that promise "not recorded" (og-api's manual targets) rely on exactly this."""
+
+    def __init__(self, stream_id: str, seq: int, cause: Exception) -> None:
+        super().__init__(f"trace row not recorded on stream {stream_id!r} at seq {seq}: {cause}")
+        self.stream_id = stream_id
+        self.seq = seq
+
+
+#: Postgres refuses these rows for what they CONTAIN (e.g. a NUL in a jsonb string: UntranslatableCharacter;
+#: a decision_type outside the CHECK: CheckViolation), not because it is unreachable. Retrying them can
+#: never succeed, so they are quarantined, never journaled for replay (workstation review R4 / B2): one
+#: such row at the head of the shared journal used to stop replay for every process, forever.
+_NON_RETRYABLE_ERRORS: tuple[type[BaseException], ...] = (
+    psycopg.errors.DataError,
+    psycopg.errors.IntegrityError,
+    ValueError,
+    TypeError,
+)
+QUARANTINE_STREAM = "trace_quarantine"
+ALR_TRACE_QUARANTINED = "ALR-TRACE-QUARANTINED"
+#: Set while a quarantine is being reported, so the report's own trace append neither drains the journal
+#: (a nested replay) nor reports again.
+_REPORTING_QUARANTINE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "trace_reporting_quarantine", default=False
+)
+
+
+def is_non_retryable(exc: BaseException) -> bool:
+    """A row-content error (quarantine it) rather than a connectivity/outage error (journal and retry).
+    A UNIQUE violation is neither: it means "already applied" / a concurrent append, handled by callers."""
+    return isinstance(exc, _NON_RETRYABLE_ERRORS) and not isinstance(exc, psycopg.errors.UniqueViolation)
+
+
+def quarantine_path_for(journal_path: Path) -> Path:
+    """`<journal>.quarantine.jsonl`: the rows Postgres refused for their content, kept as evidence."""
+    return journal_path.with_name(f"{journal_path.name}.quarantine.jsonl")
 
 
 class TraceAppendConflictError(RuntimeError):
@@ -286,8 +328,17 @@ class PgTraceBackend:
     never drop another's append. `replay()`/`pending_count()` are also exposed directly for a caller
     (e.g. `opengrid.invariants`) that wants to force/observe this."""
 
-    def __init__(self, pool: AsyncConnectionPool, *, journal_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        pool: AsyncConnectionPool,
+        *,
+        journal_path: Path | None = None,
+        journal_failed_writes: bool = True,
+    ) -> None:
         self._pool = pool
+        #: False: a write that cannot be recorded raises `TraceNotRecordedError` instead of being journaled
+        #: (DB-or-nothing; og-api's manual targets). True (default): the K11 fail-safe journal.
+        self._journal_failed_writes = journal_failed_writes
         # Best-effort in-process serialization for same-stream concurrent appends (reduces, but does
         # not replace, the DB unique-constraint safety net above -- see module docstring.
         self._stream_locks: dict[str, asyncio.Lock] = {}
@@ -368,7 +419,27 @@ class PgTraceBackend:
                     await conn.commit()
             except psycopg.errors.UniqueViolation as exc:
                 raise TraceAppendConflictError(stream_id, seq, exc) from exc
-            except Exception:
+            except Exception as exc:
+                if is_non_retryable(exc):
+                    # Postgres refused the CONTENT: journaling it would block replay for every process.
+                    entry = _JournalEntry(
+                        trace_id=str(trace_id),
+                        stream_id=stream_id,
+                        seq=seq,
+                        decision_type=decision_type,
+                        event_class=event_class,
+                        payload=payload,
+                        reason_codes=reason_codes,
+                        prev_hash=prev_hash,
+                        record_hash=record_hash,
+                        created_at=created_at.isoformat(),
+                    )
+                    await self._quarantine([(entry, exc)])
+                    if not self._journal_failed_writes:
+                        raise TraceNotRecordedError(stream_id, seq, exc) from exc
+                    return  # quarantined; the stream head is NOT advanced (the row is not in og.trace)
+                if not self._journal_failed_writes:
+                    raise TraceNotRecordedError(stream_id, seq, exc) from exc
                 logger.error(
                     "trace DB unavailable; journaling trace row locally (K11 fail-safe)",
                     extra={"stream_id": stream_id, "seq": seq},
@@ -432,7 +503,9 @@ class PgTraceBackend:
     async def _drain_journal_if_pending(self) -> None:
         """Opportunistic self-heal: if anything is journaled, try to flush it before this call's own DB
         round trip. A no-op (one cheap file-existence check) when the journal is empty, which is the
-        overwhelming common case."""
+        overwhelming common case -- and while a quarantine is being reported (no nested replay)."""
+        if _REPORTING_QUARANTINE.get():
+            return
         if self._journal_path.exists() and self._journal_path.stat().st_size > 0:
             await self.replay()
 
@@ -454,6 +527,7 @@ class PgTraceBackend:
         if not entries:
             return 0
         applied: set[str] = set()
+        quarantined: list[tuple[_JournalEntry, BaseException]] = []
         for entry in entries:
             try:
                 async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -476,19 +550,93 @@ class PgTraceBackend:
                 applied.add(entry.trace_id)
             except psycopg.errors.UniqueViolation:
                 applied.add(entry.trace_id)  # already applied (earlier partial replay, or another process)
-            except Exception:
+            except Exception as exc:
+                if is_non_retryable(exc):
+                    # Never retryable: quarantine it and let replay continue past it (R4 / B2).
+                    quarantined.append((entry, exc))
+                    continue
                 logger.warning("trace journal replay stopped: DB still unavailable", exc_info=True)
                 break
-        if not applied:
+        if not applied and not quarantined:
             return 0  # the DB is still down: nothing to remove, so no rewrite churn
+        removed = applied | {entry.trace_id for entry, _exc in quarantined}
         async with _journal_lock(self._journal_path, exclusive=True):
             current = self._read_journal_locked()
-            remaining = [entry for entry in current if entry.trace_id not in applied]
+            remaining = [entry for entry in current if entry.trace_id not in removed]
             self._rewrite_journal_locked(remaining)
+        if quarantined:
+            await self._quarantine(quarantined)
         logger.info(
             "trace journal replay progress", extra={"replayed": len(applied), "remaining": len(remaining)}
         )
         return len(applied)
+
+    async def _quarantine(self, entries: list[tuple[_JournalEntry, BaseException]]) -> None:
+        """Keep each refused row in `<journal>.quarantine.jsonl` (with the error), then report it ONCE: a
+        `TRACE_QUARANTINED` trace row (identifiers only, never the refused payload) and a critical
+        `ALR-TRACE-QUARANTINED` alert. Reporting is best-effort; the quarantine file is the evidence."""
+        qpath = quarantine_path_for(self._journal_path)
+        async with _journal_lock(self._journal_path, exclusive=True):
+            qpath.parent.mkdir(parents=True, exist_ok=True)
+            with qpath.open("a", encoding="utf-8") as fh:
+                for entry, exc in entries:
+                    record = {**asdict(entry), "error": f"{type(exc).__name__}: {exc}"[:500]}
+                    fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        for entry, exc in entries:
+            logger.error(
+                "trace row quarantined: Postgres refused its content",
+                extra={"trace_id": entry.trace_id, "stream_id": entry.stream_id, "error": type(exc).__name__},
+            )
+        if _REPORTING_QUARANTINE.get():
+            return
+        token = _REPORTING_QUARANTINE.set(True)
+        try:
+            await self._report_quarantined(entries, qpath)
+        finally:
+            _REPORTING_QUARANTINE.reset(token)
+
+    async def _report_quarantined(
+        self, entries: list[tuple[_JournalEntry, BaseException]], qpath: Path
+    ) -> None:
+        from opengrid.health.model import AlertFinding  # local: trace must not import health at load time
+        from opengrid.health.queries import raise_alert
+        from opengrid.trace.store import TraceStore
+
+        store = TraceStore(self)
+        now = datetime.now(UTC)
+        for entry, exc in entries:
+            detail = {
+                "trace_id": entry.trace_id,
+                "stream_id": entry.stream_id,
+                "seq": entry.seq,
+                "decision_type": entry.decision_type,
+                "event_class": entry.event_class,
+                "error": type(exc).__name__,
+                "quarantine_file": str(qpath),
+            }
+            try:
+                await store.append(QUARANTINE_STREAM, "ALERT", "TRACE_QUARANTINED", detail)
+            except Exception:
+                logger.warning("could not trace a quarantined row", exc_info=True)
+            try:
+                await raise_alert(
+                    self._pool,
+                    AlertFinding(
+                        rule=ALR_TRACE_QUARANTINED,
+                        severity="critical",
+                        summary=(
+                            f"Trace row {entry.trace_id} ({entry.event_class} on {entry.stream_id}) refused by "
+                            f"Postgres ({type(exc).__name__}); quarantined, replay continues"
+                        ),
+                        condition_key=f"{ALR_TRACE_QUARANTINED}:{entry.trace_id}",
+                        detail={"scope_kind": "PROCESS", "scope_ref": entry.stream_id, **detail},
+                    ),
+                    opened_at=now,
+                )
+            except Exception:
+                logger.warning("could not raise the trace-quarantine alert", exc_info=True)
 
     def _rewrite_journal_locked(self, entries: list[_JournalEntry]) -> None:
         """Atomically replace the journal with `entries`. The caller must hold the exclusive lock. The
