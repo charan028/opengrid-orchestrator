@@ -38,8 +38,8 @@
   <div class="og-panel" aria-label="Cycle latency">
     <h2>Cycle latency (p50/p99)</h2>
     <p>How long each 2-second control cycle takes. A slow loop means late commands.</p>
-    <div id="cycle-latency-chart" style="height: 140px;" data-empty="No samples yet: the engine does not export cycle metrics on this stack."></div>
-    <p class="og-card-meta">No cycle-latency samples in the health payload yet (og-engine exports no metrics).</p>
+    <div id="cycle-latency-chart" style="height: 140px;" data-latency='{{ (health.cycle_latency or {})|tojson }}' data-empty="No samples yet: og-engine reports its cycle latency every 60 s ([health] engine_metrics_url)."></div>
+    <p class="og-card-meta" id="cycle-latency-meta">No cycle-latency samples yet: og-engine reports every 60 s.</p>
   </div>
   <div class="og-panel" aria-labelledby="health-alerts-heading">
     <h2 id="health-alerts-heading">Alerts</h2>
@@ -113,20 +113,40 @@
     }
     // First paint from the same `hub_health_counts` the stream re-sends (was empty until the first frame).
     renderHubHealth(JSON.parse(document.getElementById("hub-health-chart").dataset.counts || "{}"));
-    og.chart("#cycle-latency-chart", {
-      grid: { left: 50, right: 10, top: 10, bottom: 20 },
-      legend: { data: ["p50", "p99"] },
-      xAxis: { type: "category", data: [] },
-      yAxis: { type: "value", name: "ms" },
-      series: [
-        { name: "p50", type: "line", data: [], showSymbol: false },
-        { name: "p99", type: "line", data: [], showSymbol: false },
-      ],
-    });
+    // #43 B7: `cycle_latency` ({p50_ms, p99_ms, max_ms}: og-engine's rolling window, republished every
+    // 60 s) rides on the health payload; a point is added whenever the reported window changes.
+    var latencyX = [], latencyP50 = [], latencyP99 = [], lastLatencyKey = null;
+    function drawCycleLatency() {
+      og.chart("#cycle-latency-chart", {
+        grid: { left: 50, right: 10, top: 10, bottom: 20 },
+        legend: { data: ["p50", "p99"] },
+        xAxis: { type: "category", data: latencyX.slice() },
+        yAxis: { type: "value", name: "ms" },
+        series: [
+          { name: "p50", type: "line", data: latencyP50.slice(), showSymbol: false },
+          { name: "p99", type: "line", data: latencyP99.slice(), showSymbol: false },
+        ],
+      });
+    }
+    function noteCycleLatency(latency) {
+      if (!latency || typeof latency.p99_ms !== "number") return;
+      var key = latency.p50_ms + "/" + latency.p99_ms + "/" + latency.max_ms;
+      if (key === lastLatencyKey) return;
+      lastLatencyKey = key;
+      latencyX.push(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      latencyP50.push(latency.p50_ms);
+      latencyP99.push(latency.p99_ms);
+      if (latencyX.length > 60) { latencyX.shift(); latencyP50.shift(); latencyP99.shift(); }
+      drawCycleLatency();
+      document.getElementById("cycle-latency-meta").textContent =
+        "Latest window: p50 " + latency.p50_ms + " ms, p99 " + latency.p99_ms + " ms, max " + latency.max_ms + " ms.";
+    }
+    drawCycleLatency();
+    noteCycleLatency(JSON.parse(document.getElementById("cycle-latency-chart").dataset.latency || "{}"));
 
     // Live updates (02b S7.2): `/api/stream/health` re-emits the full health payload roughly every 2s
-    // (same shape as first paint) -- rebuild the hub-health-by-zone chart from `hub_health_counts`. It
-    // has no cycle-latency series, so that chart stays as of first paint until the api agent adds one.
+    // (same shape as first paint) -- rebuild the hub-health-by-zone chart from `hub_health_counts`, and
+    // add a cycle-latency point when the engine's reported window changed.
     og.sse("{{ base_path }}/api/stream/health", function (data) {
       og.noteDegradedModes(data && data.degraded_modes);
       document.getElementById("health-updated").textContent = "live";
@@ -134,6 +154,7 @@
       if (data && data.hub_health_counts && typeof data.hub_health_counts === "object") {
         renderHubHealth(data.hub_health_counts);
       }
+      noteCycleLatency(data && data.cycle_latency);
     }, {
       onError: function () {
         document.getElementById("health-updated").textContent = "reconnecting";

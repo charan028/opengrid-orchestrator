@@ -218,3 +218,63 @@ def test_opportunity_creation_surfaces_not_implemented_as_503(client) -> None:
         },
     )
     assert resp.status_code == 503
+
+
+# --- #43 B7: System Health cycle latency ---------------------------------------------------------------
+
+_ENGINE_METRICS = """# HELP og_engine_cycle_latency_ms og-engine dispatch tick latency over the rolling window (A11), by quantile.
+# TYPE og_engine_cycle_latency_ms gauge
+og_engine_cycle_latency_ms{quantile="p50"} 41.2
+og_engine_cycle_latency_ms{quantile="p99"} 88.5
+og_engine_cycle_latency_ms{quantile="max"} 97.0
+"""
+
+
+def test_cycle_latency_from_metrics_reads_the_engine_gauge() -> None:
+    from opengrid.api.routers.health import cycle_latency_from_metrics
+    from opengrid.health.metrics_scrape import parse_prometheus_text
+
+    assert cycle_latency_from_metrics(parse_prometheus_text(_ENGINE_METRICS)) == {
+        "p50_ms": 41.2,
+        "p99_ms": 88.5,
+        "max_ms": 97.0,
+    }
+    assert cycle_latency_from_metrics({}) is None  # before og-engine's first 60 s report
+
+
+def test_health_payload_cycle_latency_is_none_without_an_engine_metrics_url(client) -> None:
+    assert client.get("/og/api/health").json()["cycle_latency"] is None
+
+
+def test_health_payload_carries_the_engine_cycle_latency(client, fake_config, monkeypatch) -> None:
+    import opengrid.api.routers.health as health_router
+
+    scraped: list[str] = []
+
+    async def fake_scrape(url: str, *, timeout_s: float) -> str:
+        scraped.append(url)
+        return _ENGINE_METRICS
+
+    monkeypatch.setattr(health_router, "scrape_metrics_text", fake_scrape)
+    monkeypatch.setitem(fake_config._data, "health", {"engine_metrics_url": "http://127.0.0.1:9101/metrics"})
+
+    body = client.get("/og/api/health").json()
+
+    assert scraped == ["http://127.0.0.1:9101/metrics"]
+    assert body["cycle_latency"] == {"p50_ms": 41.2, "p99_ms": 88.5, "max_ms": 97.0}
+
+
+def test_health_payload_cycle_latency_degrades_when_the_engine_is_unreachable(
+    client, fake_config, monkeypatch
+) -> None:
+    import opengrid.api.routers.health as health_router
+
+    async def failing_scrape(url: str, *, timeout_s: float) -> str:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(health_router, "scrape_metrics_text", failing_scrape)
+    monkeypatch.setitem(fake_config._data, "health", {"engine_metrics_url": "http://127.0.0.1:9101/metrics"})
+
+    resp = client.get("/og/api/health")
+    assert resp.status_code == 200
+    assert resp.json()["cycle_latency"] is None

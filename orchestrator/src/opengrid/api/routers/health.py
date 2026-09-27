@@ -25,6 +25,7 @@ from opengrid.api.deps import get_config, get_store
 from opengrid.api.sse import sse_response
 from opengrid.api.store import AlertQuery, HealthSnapshot, StoreProtocol
 from opengrid.core.models.platform import Alert
+from opengrid.health.metrics_scrape import parse_prometheus_text, scrape_metrics_text
 from opengrid.health.queries import fetch_degraded_modes
 from opengrid.invariants import InvariantsSummary, read_summary
 from opengrid.platform.config import Config
@@ -108,6 +109,38 @@ async def _merge_alert_scopes(pool: AsyncConnectionPool | None, alerts: list[Ale
     ]
 
 
+#: og-engine's rolling-window cycle latency gauge (`opengrid.engine.metrics.cycle_latency_ms`, republished
+#: with each "engine cycle latency" log line, every 60 s).
+_CYCLE_LATENCY_METRIC = "og_engine_cycle_latency_ms"
+#: A short scrape budget: `GET /og/api/health` is also the deploy poll and the 2 s health stream.
+_CYCLE_LATENCY_SCRAPE_TIMEOUT_S = 0.5
+
+
+def cycle_latency_from_metrics(samples: dict[str, float]) -> dict[str, float] | None:
+    """`{"p50_ms", "p99_ms", "max_ms"}` from og-engine's `/metrics` samples, or `None` before its first
+    rolling-window report (the gauge has no sample until then)."""
+    values = {q: samples.get(f'{_CYCLE_LATENCY_METRIC}{{quantile="{q}"}}') for q in ("p50", "p99", "max")}
+    if values["p50"] is None or values["p99"] is None:
+        return None
+    return {f"{q}_ms": float(v) for q, v in values.items() if v is not None}
+
+
+async def _cycle_latency(cfg: Config | None) -> dict[str, float] | None:
+    """#43 B7: System Health's "Cycle latency" panel always read "no samples" because nothing in this
+    payload carried the figure: og-engine keeps it in its own process (`/metrics` and the log line), and
+    og-settle's health evaluator scrapes it for ALR-CYCLE-P99 without persisting it. This scrapes the same
+    `[health].engine_metrics_url`. Unset, unreachable or not yet reported degrades to `None` (K7)."""
+    url = cfg.get("health.engine_metrics_url") if cfg is not None else None
+    if not url:
+        return None
+    try:
+        text = await scrape_metrics_text(str(url), timeout_s=_CYCLE_LATENCY_SCRAPE_TIMEOUT_S)
+    except Exception:
+        logger.debug("engine metrics scrape failed", extra={"url": url})
+        return None
+    return cycle_latency_from_metrics(parse_prometheus_text(text))
+
+
 def _feed_payload(f: Any) -> dict[str, Any]:
     return {
         "source": f.source,
@@ -119,7 +152,9 @@ def _feed_payload(f: Any) -> dict[str, Any]:
     }
 
 
-async def _health_payload(store: StoreProtocol, pool: AsyncConnectionPool | None) -> dict[str, Any]:
+async def _health_payload(
+    store: StoreProtocol, pool: AsyncConnectionPool | None, cfg: Config | None = None
+) -> dict[str, Any]:
     snapshot: HealthSnapshot = await store.health_snapshot(heartbeat_miss_threshold_s=15.0)
     hubs = await store.list_hubs(zone=None, bank_id=None, health=None, limit=2000, offset=0)
     fleet_mw = sum(h["p_kw"] for h in hubs) / 1000.0
@@ -128,6 +163,7 @@ async def _health_payload(store: StoreProtocol, pool: AsyncConnectionPool | None
     invariants = await _invariants_summary(pool)
     degraded_modes = await _degraded_modes(pool)
     scoped_alerts = await _merge_alert_scopes(pool, snapshot.open_alerts)
+    cycle_latency = await _cycle_latency(cfg)
     return {
         "status": "ok",
         "as_of": datetime.now(UTC).isoformat(),
@@ -137,6 +173,7 @@ async def _health_payload(store: StoreProtocol, pool: AsyncConnectionPool | None
         },
         "feeds": [_feed_payload(f) for f in snapshot.feeds],
         "hub_health_counts": snapshot.hub_health_counts,
+        "cycle_latency": cycle_latency,
         "alerts": [_alert_payload(a) for a in scoped_alerts],
         "open_alert_count": len(snapshot.open_alerts),
         "fleet_mw": fleet_mw,
@@ -167,11 +204,13 @@ async def _todays_net_margin(store: StoreProtocol) -> float | None:
 async def get_health(
     store: Annotated[StoreProtocol, Depends(get_store)],
     pool: Annotated[AsyncConnectionPool | None, Depends(_get_optional_pool)],
+    # Trailing + defaulted: `opengrid.api.routers.ai` calls this coroutine directly with `store`/`pool`.
+    cfg: Annotated[Config | None, Depends(get_config)] = None,
 ) -> dict[str, Any]:
     """Aggregated health for the deploy poll (`deploy/scripts/deploy.sh`, loopback, no auth header),
     the operator/viewer Health screen, and the Control room's first paint (both reached through
     Apache, also loopback by the time they hit this process -- see `opengrid.api.auth`)."""
-    return await _health_payload(store, pool)
+    return await _health_payload(store, pool, cfg)
 
 
 @router.get("/og/api/stream/health")
@@ -186,7 +225,7 @@ async def stream_health(
     pool: Annotated[AsyncConnectionPool | None, Depends(_get_optional_pool)] = None,
 ) -> EventSourceResponse:
     async def fetch() -> dict[str, Any]:
-        return await _health_payload(store, pool)
+        return await _health_payload(store, pool, cfg)
 
     return sse_response(request, interval_s=2.0, heartbeat_s=cfg.get("api.sse_heartbeat_s", 15), fetch=fetch)
 

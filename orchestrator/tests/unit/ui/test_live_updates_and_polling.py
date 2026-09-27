@@ -20,6 +20,7 @@ _SSE_SCREENS: tuple[tuple[str, str], ...] = (
     ("control_room.html", "data.fleet_mw"),
     ("fleet.html", "data.hubs"),
     ("health.html", "data.hub_health_counts"),
+    ("health.html", "data.cycle_latency"),  # #43 B7: the latency panel used to be static "no samples"
     ("dispatch.html", "data.opportunities"),
 )
 

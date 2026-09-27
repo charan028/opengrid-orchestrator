@@ -179,9 +179,10 @@ down (the browser reconnects by itself). Screens marked "poll: 30s" re-fetch eve
 - **Feed freshness** (at load): per feed, its quality and age. STALE shows only while the feed's breaker is open;
   a feed that is merely old shows GOOD with a large age, while the banner already says "Feed stale".
 - **Hub health:** how many hubs are online, stale, offline or in fault.
-- **Cycle latency (p50/p99):** always empty: the panel is not wired to any data (its note says "og-engine
-  exports no metrics"). og-engine does export `/metrics` on the server's loopback (`127.0.0.1:9101`), and the
-  health evaluator reads it for `ALR-CYCLE-P99`.
+- **Cycle latency (p50/p99):** og-engine's rolling-window p50 and p99, read by og-api from its loopback
+  `/metrics` (`[health] engine_metrics_url`, `127.0.0.1:9101`). og-engine republishes the window every 60 s, so
+  a new point appears about once a minute (none in the first minute after an engine start, or with the URL
+  unset); the note under the chart gives the latest p50, p99 and max.
 - **Alerts:** live list of open alerts; operators acknowledge by id (section 6.8). Every rule is in section 8.
 
 ### 3.6 Power quality & assets (`/og/pq`)
