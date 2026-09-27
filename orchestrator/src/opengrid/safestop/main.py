@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from prometheus_client import start_http_server
+
 import opengrid.safestop as safestop
 from opengrid.platform.config import Config, load_config
 from opengrid.platform.db import make_pool
@@ -63,6 +65,8 @@ GUARDIAN_PUBLIC_KEY_LENGTH = 32
 DEFAULT_RELEASE_RETAIN_S = 86_400.0
 #: K8 fail closed: seconds the stop publish connection may stay down before the process exits for a restart.
 DEFAULT_MQTT_DOWN_EXIT_S = 30.0
+#: og-safestop's /metrics port (02b S1.2's process table), e.g. og_mqtt_reconnects_total{client="safestop"}.
+DEFAULT_METRICS_PORT = 9106
 
 
 async def _handle_request(payload: dict[str, Any], broker: ConfirmationBroker) -> None:
@@ -126,6 +130,12 @@ async def _request_intake_loop(pool: Any, broker: ConfirmationBroker) -> None:
             logger.warning(
                 "malformed safestop request ignored", extra={"error": str(exc), "payload": payload}
             )
+        except Exception:
+            # One failed request (a database error, a publish problem) must never end the intake task: every
+            # later stop request would then go unheard while the process looks healthy (r3.4.1 review).
+            logger.exception(
+                "safestop request failed; intake continues", extra={"action": payload.get("action")}
+            )
 
 
 async def main(cfg: Config | None = None) -> None:
@@ -146,6 +156,7 @@ async def main(cfg: Config | None = None) -> None:
     )
 
     heartbeat_interval_s = float(cfg.get("health.heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S))
+    start_metrics_server(cfg)
 
     # K8: the stop publish connection survives broker disconnects (reconnect with backoff under the same
     # client id, never two clients at once); while it is down the heartbeat stops, and past
@@ -206,6 +217,14 @@ async def main(cfg: Config | None = None) -> None:
                 await task
         await pool.close()
         safestop.configure_service(None)
+
+
+def start_metrics_server(cfg: Config) -> int:
+    """Serve /metrics on [metrics].safestop_port (default 9106) at [metrics].bind_host (loopback by default),
+    like the guardian's [metrics].guardian_port. Returns the port."""
+    port = int(cfg.get("metrics.safestop_port", DEFAULT_METRICS_PORT))
+    start_http_server(port, addr=str(cfg.get("metrics.bind_host", "127.0.0.1")))
+    return port
 
 
 def stop_path_ready(*sessions: MqttSession, exit_after_s: float) -> bool:

@@ -178,6 +178,29 @@ class GuardianService:
     _evaluated: OrderedDict[UUID, ProposedBatch] = field(default_factory=OrderedDict, init=False)
     _clock_alert_open: bool = field(default=False, init=False)
     _violations: OrderedDict[UUID, list[CheckOutcome]] = field(default_factory=OrderedDict, init=False)
+    #: G-04 anchor: per hub, the last net setpoint this guardian SIGNED, when, and its lease expiry
+    _last_signed: dict[str, tuple[float, datetime, datetime]] = field(default_factory=dict, init=False)
+
+    def _record_signed_setpoints(self, command_batch_id: UUID, signed_at: datetime) -> None:
+        """Remember each hub's signed net setpoint (G-04's utility-scale anchor, `checks.g04_anchor_kw`)."""
+        proposal = self._evaluated.get(command_batch_id)
+        if proposal is None:
+            return
+        for item in checks.hub_setpoints(proposal.items):
+            self._last_signed[item.hub_id] = (item.p_kw_setpoint, signed_at, proposal.expires_at)
+
+    def _g04_anchor(self, hub_id: str, hub: HubSnapshot) -> checks.G04Anchor:
+        signed = self._last_signed.get(hub_id)
+        return checks.g04_anchor_kw(
+            prev_telemetry_kw=hub.prev_p_kw,
+            telemetry_ts=hub.telemetry_at,
+            last_signed_kw=signed[0] if signed else None,
+            last_signed_at=signed[1] if signed else None,
+            lease_expires_at=signed[2] if signed else None,
+            now=self.now_fn(),
+            utility_scale=hub.params.utility_scale,
+            cycle_interval_s=self.config.cycle_interval_s,
+        )
 
     async def evaluate_and_sign(self, batch: CommandBatchRow) -> Verdict:
         """Run every applicable G-check against independently-read state; PASS signs, any veto returns
@@ -345,7 +368,8 @@ class GuardianService:
 
     async def _check_hubs_and_bank(self, proposal: ProposedBatch) -> list[CheckOutcome]:
         violations: list[CheckOutcome] = []
-        fleet_delta_kw = 0.0
+        fleet_delta_kw = 0.0  # measured change vs telemetry: bank loading (G-03) and the flow checks
+        ramp_delta_kw = 0.0  # the step for the RATE checks (G-05, G-06, G-32), on G-04's anchor
         gross_step_kw = 0.0
         additional_charge_kw = 0.0
         snapshots: dict[str, HubSnapshot] = {}
@@ -389,14 +413,18 @@ class GuardianService:
                 if not g26.ok:
                     violations.append(g26)
 
-            g04 = checks.check_g04_hub_ramp(
-                item, hub.prev_p_kw, self.config.cycle_interval_s, hub_ramp_kw_per_s(hub.params)
-            )
+            # telemetry, or a utility-scale hub's last signed setpoint
+            anchor = self._g04_anchor(item.hub_id, hub)
+            g04 = checks.check_g04_hub_ramp(item, anchor.kw, anchor.dt_s, hub_ramp_kw_per_s(hub.params))
             if not g04.ok:
                 violations.append(g04)
 
             fleet_delta_kw += item.p_kw_setpoint - hub.prev_p_kw
-            gross_step_kw += abs(item.p_kw_setpoint - hub.prev_p_kw)
+            ramp_step_kw = checks.ramp_step_per_cycle_kw(
+                item.p_kw_setpoint, anchor, self.config.cycle_interval_s
+            )
+            ramp_delta_kw += ramp_step_kw
+            gross_step_kw += abs(ramp_step_kw)
             additional_charge_kw += max(item.p_kw_setpoint, 0.0) - max(hub.prev_p_kw, 0.0)
 
         bank = await self.ports.banks.snapshot(proposal.bank_id)
@@ -407,7 +435,7 @@ class GuardianService:
                 self._check_bank_loading(proposal.bank_id, bank, additional_charge_kw, fleet_delta_kw)
             )
 
-        cumulative_fleet = self._accumulate(self._fleet_delta_by_cycle, proposal.cycle_id, fleet_delta_kw)
+        cumulative_fleet = self._accumulate(self._fleet_delta_by_cycle, proposal.cycle_id, ramp_delta_kw)
         g05 = checks.check_g05_fleet_ramp(
             cumulative_fleet,
             self.config.cycle_interval_s,
@@ -429,7 +457,7 @@ class GuardianService:
 
         if bank is not None and bank.feeder_id is not None:
             feeder_key = (proposal.cycle_id, bank.feeder_id)
-            cumulative_feeder = self._accumulate(self._feeder_delta_by_cycle, feeder_key, fleet_delta_kw)
+            cumulative_feeder = self._accumulate(self._feeder_delta_by_cycle, feeder_key, ramp_delta_kw)
             ceiling = bank.feeder_ceiling_kw_per_min or self.config.feeder_ramp_ceiling_kw_per_min.get(
                 bank.feeder_id, self.config.default_feeder_ramp_ceiling_kw_per_min
             )
@@ -1470,6 +1498,7 @@ class GuardianService:
                 "signed_at": _iso_z(signed_at),
             }
             signature = sign_payload(self.signing_seed, payload)
+            self._record_signed_setpoints(batch.command_batch_id, signed_at)
 
         verdict = Verdict(
             verdict_id=verdict_id,

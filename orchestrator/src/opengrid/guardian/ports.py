@@ -109,6 +109,9 @@ class HubSnapshot:
     prev_p_kw: float
     health: Literal["online", "stale", "offline", "fault"]
     flow: HubFlowTelemetry = HubFlowTelemetry()
+    #: the hub's own timestamp of the telemetry sample `prev_p_kw` came from (None: none yet); G-04 anchors a
+    #: utility-scale hub at the guardian's last signed setpoint only while that is not clearly older than this
+    telemetry_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
