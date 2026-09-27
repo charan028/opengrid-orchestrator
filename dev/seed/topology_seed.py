@@ -32,14 +32,16 @@ Inputs
 
 Rows (every one is an upsert; the output is deterministic, so re-running is a no-op)
 -----------------------------------------------------------------------------------
-* `og.service_transformer` + `og.hub.transformer_id`: every hub mapped. Assumed (Texas residential
-  distribution practice, not utility GIS data): pole/pad-mount transformers of 25, 50 or 75 kVA, each
-  serving 4-10 homes -- 25 kVA for 4-5 homes, 50 kVA for 6-8, 75 kVA for 9-10 (5-8.3 kVA per home). A
-  bank's homes (in hub-id order) are grouped by the cycle `TRANSFORMER_GROUP_PATTERN` (10, 8, 4, 7, 10, 5,
-  6 homes = 50, one 50-home bank), the tail adjusted so no group falls below 4 homes. A 50-home bank thus
-  gets 7 transformers, 350 kVA in total, against 640 kW of battery inverters: G-27 and the allocator's F3
-  group cap now bind a simultaneous full-fleet export at zero home load. Every single home stays feasible:
-  the one dual-unit (20 kW) home behind each 25 kVA transformer can discharge at full power.
+* `og.service_transformer` + `og.hub.transformer_id`: every hub mapped. Sizing per D-5 (decision D-36): a
+  home bank's service transformers SUM TO THE BANK'S kVA RATING (~600 kVA). A bank gets
+  `ceil(rating / TRANSFORMER_UNIT_KVA)` transformers (never more than it has homes), each rated
+  `og.bank.kva_rating / n` -- the rating in og.bank where the row exists, the config's otherwise -- so a
+  600 kVA, 50-home bank gets 12 x 50 kVA. Homes are dealt round-robin in hub-id order (the hub's rank in
+  its bank), so groups differ by at most one home (4-5 of 50) and the dual-unit homes (every 5th rank,
+  `opengrid.fleet.seed._is_dual_unit`) land on distinct transformers. Every single home stays feasible
+  (a 20 kW dual-unit home at full power behind a 50 kVA unit), and G-27/F3 bind only where a whole group's
+  inverters exceed its unit (4 x 11 + 20 = 64 kW behind 50 kVA): the bank total equals the bank rating
+  the guardian already enforces.
 * `og.feeder_limit`: one row per feeder (`feeder-<zone>-NN`, 5 banks each): the 8 competitive feeders
   plus every included block's. Assumed: `thermal_kw` 10,000 (a 12.47 kV, 600 A-class Texas distribution
   feeder's normal rating, the `[guardian.flow]` default made explicit); `reverse_kw` the member banks'
@@ -86,6 +88,7 @@ always rolls back and prints the plan: rows per statement and the unmapped count
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
@@ -110,10 +113,9 @@ DEFAULT_FLEET_CONFIG = REPO_ROOT / "integration-sims" / "config" / "fleet.yaml"
 DEFAULT_SCADA_CONFIG = REPO_ROOT / "integration-sims" / "config" / "scada.yaml"
 DEFAULT_TDSP_TARIFFS = REPO_ROOT / "orchestrator" / "config" / "tdsp_tariffs.toml"
 
-# Assumed service-transformer sizing (module docstring): homes per transformer, cycled over a bank's homes.
-TRANSFORMER_GROUP_PATTERN: tuple[int, ...] = (10, 8, 4, 7, 10, 5, 6)
-MIN_HOMES_PER_TRANSFORMER = 4
-MAX_HOMES_PER_TRANSFORMER = 10
+# Service-transformer sizing (D-5 / D-36, module docstring): a home bank's units sum to its kVA rating, each
+# about this size (a standard residential pad-mount unit).
+TRANSFORMER_UNIT_KVA = 50.0
 
 # Assumed feeder and substation equipment ratings (module docstring).
 FEEDER_THERMAL_KW = 10_000.0
@@ -129,8 +131,9 @@ PROTECTED_IDS = frozenset({"feeder-sub-LZ_AEN-00", "sub-LZ_AEN-00", "sub-aen-01"
 class TransformerRow:
     transformer_id: str
     bank_id: str
-    rating_kva: float
+    rating_kva: float  # config rating / units; the SQL rates it og.bank.kva_rating / units
     hub_ids: tuple[str, ...]
+    units: int  # transformers on this bank
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,30 +244,18 @@ def load_fleet_config(
 # --- rows --------------------------------------------------------------------------------------------------
 
 
-def transformer_group_sizes(homes: int) -> tuple[int, ...]:
-    """Homes per transformer for a bank of `homes` homes: `TRANSFORMER_GROUP_PATTERN` cycled, the tail
-    adjusted so every group has 4-10 homes (a bank of fewer than 4 homes is one group)."""
-    sizes: list[int] = []
-    remaining = homes
-    while remaining > 0:
-        if remaining <= MAX_HOMES_PER_TRANSFORMER:
-            size = remaining
-        else:
-            size = TRANSFORMER_GROUP_PATTERN[len(sizes) % len(TRANSFORMER_GROUP_PATTERN)]
-            if remaining - size < MIN_HOMES_PER_TRANSFORMER:
-                size = remaining - MIN_HOMES_PER_TRANSFORMER
-        sizes.append(size)
-        remaining -= size
-    return tuple(sizes)
+def transformer_count(bank_kva: float, homes: int) -> int:
+    """Transformers on a home bank (D-36): `ceil(bank_kva / TRANSFORMER_UNIT_KVA)`, at least 1, at most one
+    per home."""
+    return max(1, min(homes, math.ceil(bank_kva / TRANSFORMER_UNIT_KVA - 1e-9)))
 
 
-def transformer_kva_for(homes: int) -> float:
-    """Assumed rating for a transformer serving `homes` homes (module docstring)."""
-    if homes <= 5:
-        return 25.0
-    if homes <= 8:
-        return 50.0
-    return 75.0
+def transformer_groups(hub_ids: Sequence[str], units: int) -> tuple[tuple[str, ...], ...]:
+    """`hub_ids` (sorted: the hub's rank in its bank) dealt round-robin onto `units` transformers: rank r goes
+    to unit r % units, so group sizes differ by at most one and evenly spaced ranks (the dual-unit homes)
+    land on distinct units."""
+    ordered = sorted(hub_ids)
+    return tuple(tuple(ordered[g::units]) for g in range(units))
 
 
 def build_seed(
@@ -281,14 +272,14 @@ def build_seed(
 
     transformers: list[TransformerRow] = []
     for bank in topology.banks:
-        hub_ids = sorted(h.hub_id for h in hubs_of_bank.get(bank.bank_id, []))
-        start = 0
-        for g, size in enumerate(transformer_group_sizes(len(hub_ids))):
-            members = tuple(hub_ids[start : start + size])
-            start += size
+        hub_ids = [h.hub_id for h in hubs_of_bank.get(bank.bank_id, [])]
+        if not hub_ids:
+            continue
+        units = transformer_count(bank.kva_rating, len(hub_ids))
+        for g, members in enumerate(transformer_groups(hub_ids, units)):
             transformers.append(
                 TransformerRow(
-                    f"xfmr-{bank.bank_id}-{g:02d}", bank.bank_id, transformer_kva_for(size), members
+                    f"xfmr-{bank.bank_id}-{g:02d}", bank.bank_id, bank.kva_rating / units, members, units
                 )
             )
 
@@ -410,15 +401,16 @@ def seed_statements(seed: TopologySeed, *, only_missing: bool = False) -> tuple[
     statements = [
         Statement(
             "og.service_transformer (home banks)",
-            "-- Service transformers, for banks already in og.bank (bank_id is a foreign key).",
+            "-- Service transformers, for banks already in og.bank (bank_id is a foreign key): each of a bank's\n"
+            "-- units rated og.bank.kva_rating / units, so they sum to the bank's rating (D-5, D-36).",
             "\n".join(
                 [
                     "INSERT INTO og.service_transformer (transformer_id, bank_id, rating_kva)",
-                    "SELECT v.transformer_id, v.bank_id, v.rating_kva",
+                    "SELECT v.transformer_id, v.bank_id, b.kva_rating / v.units",
                     "FROM (VALUES",
-                    _values((x.transformer_id, x.bank_id, x.rating_kva) for x in seed.transformers),
-                    ") AS v(transformer_id, bank_id, rating_kva)",
-                    "WHERE EXISTS (SELECT 1 FROM og.bank b WHERE b.bank_id = v.bank_id)",
+                    _values((x.transformer_id, x.bank_id, float(x.units)) for x in seed.transformers),
+                    ") AS v(transformer_id, bank_id, units)",
+                    "JOIN og.bank b ON b.bank_id = v.bank_id",
                     upsert_xfmr,
                 ]
             ),
@@ -601,11 +593,16 @@ _GUARDED_ROWS: dict[str, str] = {
 }
 
 #: Informational, in the plan: what G-27/F3 will bind once the rows exist (read inside the transaction).
+#: Per zone: transformers, their kVA, the hubs' inverter kW, and the export G-27/F3 allow at zero home load
+#: (per transformer, the lesser of its rating and its members' inverter kW).
 _IMPACT_SQL = """
-SELECT b.zone, count(DISTINCT st.transformer_id), round(sum(st.rating_kva)::numeric, 0),
-       round((SELECT sum(h.p_kw) FROM og.hub h JOIN og.bank hb ON hb.bank_id = h.bank_id
-              WHERE hb.zone = b.zone)::numeric, 0)
-FROM og.service_transformer st JOIN og.bank b ON b.bank_id = st.bank_id
+SELECT b.zone, count(*), round(sum(x.rating_kva)::numeric, 0), round(sum(x.hub_kw)::numeric, 0),
+       round(sum(least(x.rating_kva, x.hub_kw))::numeric, 0)
+FROM (
+    SELECT st.transformer_id, st.bank_id, st.rating_kva, coalesce(sum(h.p_kw), 0) AS hub_kw
+    FROM og.service_transformer st LEFT JOIN og.hub h ON h.transformer_id = st.transformer_id
+    GROUP BY st.transformer_id, st.bank_id, st.rating_kva
+) x JOIN og.bank b ON b.bank_id = x.bank_id
 GROUP BY b.zone ORDER BY b.zone
 """
 _OVER_RATING_SQL = """
@@ -667,9 +664,10 @@ def apply_statements(
             print("applied:")
         for label, count in rows:
             print(f"  {count:6d}  {label}")
-        for zone, n_xfmr, kva, hub_kw in conn.execute(_IMPACT_SQL).fetchall():
+        for zone, n_xfmr, kva, hub_kw, export_kw in conn.execute(_IMPACT_SQL).fetchall():
             print(
-                f"  [info] {zone}: {n_xfmr} service transformers, {kva} kVA for {hub_kw} kW of hub inverters"
+                f"  [info] {zone}: {n_xfmr} service transformers, {kva} kVA; hub inverters {hub_kw} kW,"
+                f" G-27/F3 export cap at zero home load {export_kw} kW"
             )
         over = conn.execute(_OVER_RATING_SQL).fetchone()
         print(

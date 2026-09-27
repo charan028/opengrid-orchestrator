@@ -128,6 +128,10 @@ def test_fresh_bootstrap_has_zero_unmapped_and_a_clean_guardian_topology(
         lcra = conn.execute(
             "SELECT DISTINCT a.zone, a.utility_id FROM og.asset a WHERE a.bank_id BETWEEN 'bank-050' AND 'bank-059'"
         ).fetchall()
+        off_rating = conn.execute(
+            "SELECT count(*) FROM og.bank b JOIN (SELECT bank_id, sum(rating_kva) AS kva FROM og.service_transformer"
+            " GROUP BY bank_id) t ON t.bank_id = b.bank_id WHERE abs(t.kva - b.kva_rating) > 0.001"
+        ).fetchone()
         hub_ids = [r[0] for r in conn.execute("SELECT hub_id FROM og.hub ORDER BY 1").fetchall()]
         bank_ids = [r[0] for r in conn.execute("SELECT bank_id FROM og.bank ORDER BY 1").fetchall()]
     assert len(dedicated) == 1 + TRUCKS
@@ -136,6 +140,7 @@ def test_fresh_bootstrap_has_zero_unmapped_and_a_clean_guardian_topology(
     assert truck_feeders == (TRUCKS,)
     assert sub_feeder == (24000.0, 20000.0)  # market_model_seed.sql's row kept
     assert lcra == [("LZ_LCRA", None)]
+    assert off_rating == (0,)  # D-36: every bank's transformers sum to its og.bank.kva_rating
 
     # The guardian's own read: the conditions under which it raises ALR-XFMR-UNMAPPED /
     # ALR-BANK-UNMAPPED-TOPOLOGY (guardian.service._check_transformers / _check_unmapped_bank).

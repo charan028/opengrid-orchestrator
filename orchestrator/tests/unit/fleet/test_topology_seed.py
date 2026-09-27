@@ -1,6 +1,6 @@
 """dev/seed/topology_seed.py (WP-L, issue #39): the migration 0029 registry rows generated from the sim's
 fleet.yaml + scada.yaml. Pure generation is tested here (no database): every hub, bank and feeder is covered,
-a dual-unit home behind a 25 kVA transformer passes the real G-27 check, the SQL is idempotent, the zone
+each bank's units sum to its kVA rating (D-36), a dual-unit home behind a 50 kVA unit passes the real G-27 check, the SQL is idempotent, the zone
 blocks are exactly the fleet seed's, the substation set and the trucks get their own transformer, and the
 `--only-missing` backfill never rewrites a row. The database side is tests/integration/fleet/
 test_topology_seed_db.py."""
@@ -119,48 +119,52 @@ def test_every_hub_is_mapped_to_exactly_one_transformer_on_its_own_bank(fleet: P
     assert set(mapped.values()) == {1}
     for x in seed.transformers:
         assert {bank_of_hub[h] for h in x.hub_ids} == {x.bank_id}
-        assert ts.MIN_HOMES_PER_TRANSFORMER <= len(x.hub_ids) <= ts.MAX_HOMES_PER_TRANSFORMER
-        assert x.rating_kva in (25.0, 50.0, 75.0)
     assert len({x.transformer_id for x in seed.transformers}) == len(seed.transformers)
 
 
-def test_every_bank_has_transformers_a_feeder_and_a_substation(seed) -> None:
-    banks = {b.bank_id for b in seed.topology.banks}
-    assert {x.bank_id for x in seed.transformers} == banks
-    assets = {a.bank_id: a for a in seed.assets}
-    assert set(assets) == banks
-    substations = {s.substation_id for s in seed.substations}
-    feeder_limits = {f.feeder_id for f in seed.feeders}
-    for bank in seed.topology.banks:
-        assert bank.feeder_id in feeder_limits
-        assert assets[bank.bank_id].feeder_id == bank.feeder_id
-        assert assets[bank.bank_id].substation_id in substations
-        assert assets[bank.bank_id].utility_id == TERRITORY.get(bank.zone)
+def test_d36_each_banks_transformers_sum_to_its_kva_rating_12_x_50_kva(seed) -> None:
+    """D-36 (sizing per D-5): a 600 kVA, 50-home bank gets 12 x 50 kVA units summing to 600 kVA; group sizes
+    differ by at most one home; the SQL rates each unit og.bank.kva_rating / units."""
+    by_bank: dict[str, list[Any]] = {}
+    for x in seed.transformers:
+        by_bank.setdefault(x.bank_id, []).append(x)
+    rating = {b.bank_id: b.kva_rating for b in seed.topology.banks}
+    assert set(by_bank) == set(rating)
+    for bank_id, units in by_bank.items():
+        assert sum(x.rating_kva for x in units) == pytest.approx(rating[bank_id])
+        assert {x.units for x in units} == {len(units)}
+        sizes = [len(x.hub_ids) for x in units]
+        assert max(sizes) - min(sizes) <= 1
+    assert {len(u) for u in by_bank.values()} == {12}
+    assert {x.rating_kva for x in seed.transformers} == {50.0}
+    xfmr_sql = next(
+        s.sql for s in ts.seed_statements(seed) if s.label == "og.service_transformer (home banks)"
+    )
+    assert "b.kva_rating / v.units" in xfmr_sql and "JOIN og.bank b ON b.bank_id = v.bank_id" in xfmr_sql
 
 
-def test_every_feeder_has_limits_eight_competitive_plus_the_austin_block(seed) -> None:
-    feeders = {f.feeder_id: f for f in seed.feeders}
-    competitive = {f for f in feeders if f.split("-")[1] in ("LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST")}
-    assert len(competitive) == 8
-    assert {"feeder-LZ_AEN-00", "feeder-LZ_AEN-01"} <= set(feeders)
-    assert {b.feeder_id for b in seed.topology.banks} == set(feeders)
-    for f in feeders.values():
-        assert f.thermal_kw == ts.FEEDER_THERMAL_KW
-        assert f.reverse_kw == pytest.approx(5 * 600.0)  # five 600 kVA segments
-    covered = {f for s in seed.substations for f in s.feeder_ids}
-    assert covered == set(feeders)
-
-
-def test_a_20_kw_dual_unit_home_behind_a_25_kva_transformer_is_feasible(seed) -> None:
-    """The real guardian G-27 check (default [guardian.flow] policy): the dual-unit home discharging at its
-    full 20 kW while its transformer neighbours idle stays inside the 25 kVA reverse rating."""
+def test_dual_unit_homes_are_spread_one_per_transformer(seed) -> None:
     hubs = {h.hub_id: h for h in seed.topology.hubs}
-    candidates = [
-        x for x in seed.transformers if x.rating_kva == 25.0 and any(hubs[h].p_kw == 20.0 for h in x.hub_ids)
-    ]
-    assert candidates, "no 25 kVA transformer serves a dual-unit home"
+    for x in seed.transformers:
+        assert sum(1 for h in x.hub_ids if hubs[h].units == 2) <= 1
+    per_bank = Counter(x.bank_id for x in seed.transformers if any(hubs[h].units == 2 for h in x.hub_ids))
+    assert set(per_bank.values()) == {10}  # 10 dual-unit homes per bank on 10 distinct units
+
+
+def test_sizing_rule() -> None:
+    assert ts.transformer_count(600.0, 50) == 12
+    assert ts.transformer_count(600.0, 5) == 5  # never more units than homes
+    assert ts.transformer_count(625.0, 50) == 13
+    assert ts.transformer_count(10.0, 3) == 1
+    groups = ts.transformer_groups([f"hub-{i:05d}" for i in range(50)], 12)
+    assert [len(g) for g in groups] == [5, 5] + [4] * 10
+    assert groups[0] == ("hub-00000", "hub-00012", "hub-00024", "hub-00036", "hub-00048")
+    assert sorted(h for g in groups for h in g) == [f"hub-{i:05d}" for i in range(50)]
+
+
+def _policy() -> flow_checks.FlowPolicy:
     c = GuardianConfig(key_path="unused")
-    policy = flow_checks.FlowPolicy(
+    return flow_checks.FlowPolicy(
         telemetry_required=c.flow_telemetry_required,
         max_age_s=c.flow_max_age_s,
         unknown_temp_factor=c.unknown_temp_factor,
@@ -173,6 +177,16 @@ def test_a_20_kw_dual_unit_home_behind_a_25_kva_transformer_is_feasible(seed) ->
         xfmr_max_stale_fraction=c.xfmr_max_stale_fraction,
         unmapped_xfmr_kva_per_home=c.unmapped_xfmr_kva_per_home,
     )
+
+
+def test_a_20_kw_dual_unit_home_behind_a_50_kva_unit_is_feasible_and_the_group_binds(seed) -> None:
+    """The real guardian G-27 check (default [guardian.flow] policy): the dual-unit home at its full 20 kW
+    while its neighbours idle fits the 50 kVA unit; the whole group at full power (4 x 11 + 20 = 64 kW) does
+    not -- the rating binds per group, and the bank's units together equal its 600 kVA rating."""
+    hubs = {h.hub_id: h for h in seed.topology.hubs}
+    candidates = [x for x in seed.transformers if any(hubs[h].p_kw == 20.0 for h in x.hub_ids)]
+    assert candidates, "no transformer serves a dual-unit home"
+    policy = _policy()
     for x in candidates:
         members = {
             h: flow_checks.TransformerMember(
@@ -195,18 +209,10 @@ def test_a_20_kw_dual_unit_home_behind_a_25_kva_transformer_is_feasible(seed) ->
         }
         transformer = ServiceTransformer(x.transformer_id, x.rating_kva, tuple(sorted(x.hub_ids)))
         assert flow_checks.check_g27_transformer(transformer, members, -20.0, policy) == (True, None)
-        # ...and the rating binds: a second full-power home on the same transformer would not fit.
-        assert flow_checks.check_g27_transformer(transformer, members, -31.0, policy)[0] is False
-
-
-def test_sizing_rule() -> None:
-    assert ts.transformer_group_sizes(50) == ts.TRANSFORMER_GROUP_PATTERN
-    assert sum(ts.TRANSFORMER_GROUP_PATTERN) == 50
-    for homes in range(4, 200):
-        sizes = ts.transformer_group_sizes(homes)
-        assert sum(sizes) == homes
-        assert all(4 <= s <= 10 for s in sizes)
-    assert [ts.transformer_kva_for(n) for n in (4, 5, 6, 8, 9, 10)] == [25.0, 25.0, 50.0, 50.0, 75.0, 75.0]
+        full = -sum(hubs[h].p_kw for h in x.hub_ids)
+        assert full < -x.rating_kva
+        assert flow_checks.check_g27_transformer(transformer, members, full, policy)[0] is False
+        assert flow_checks.check_g27_transformer(transformer, members, -x.rating_kva, policy) == (True, None)
 
 
 def test_the_austin_substation_set_rows_are_never_overwritten(seed) -> None:

@@ -55,8 +55,8 @@ blocks: LZ_AEN, LZ_LCRA, LZ_RAYBN): 43/43 migrations; 3,500 home hubs (500 in ea
 LZ_HOUSTON, LZ_WEST, LZ_AEN, LZ_LCRA, LZ_RAYBN; 700 dual-unit) plus the substation hub and the 8 trucks (3,509
 `og.hub` rows); 70 home banks plus `bank-sub-LZ_AEN-00` and the 8 truck banks (79); substation asset
 `sub-LZ_AEN-00` ACTIVE; utilities AUSTIN_ENERGY ($102/kW-yr) and CPS_ENERGY; the toll contract
-(REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 499
-service transformers (490 for the home banks, one each for the substation set and the 8 trucks), every hub mapped;
+(REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 849
+service transformers (12 x 50 kVA per home bank, D-36; one each for the substation set and the 8 trucks), every hub mapped;
 23 feeder limits; 7 substation limits; 79 assets (70 HOME_BANK, 1 SUBSTATION, 8 MOBILE_STORAGE); every
 `opengrid.fleet.topology_audit` unmapped count 0 (no ALR-XFMR-UNMAPPED / ALR-BANK-UNMAPPED-TOPOLOGY source); the
 FLEET charge window `22:00-06:00`; 4 firmware catalogue entries from config. A database seeded before r3.4.1 gets

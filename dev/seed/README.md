@@ -15,7 +15,7 @@ telemetry (`og.hub_state` rows are insert-only) or a committed obligation.
 | 3 | `customer_services_seed.sql` | the DATA_CENTER and PIPELINE_AC customers and contracts (`og-cust-dc`, `og-cust-pipe`) | 0 (0025, 0026) |
 | 4 | `services_seed.sql` | the PJM_CAPACITY, MOBILE_STORAGE and LARGE_LOAD customers and contracts (`og-cust-pjm`, `-mobile`, `-largeld`) | 0 (0025) |
 | 5 | `mobile_trucks_seed.sql` (TRUCKS lane; applied when present in the release) | the mobile truck units | 0 (0044) |
-| 6 | `topology_seed.py --fleet-config /etc/opengrid/sim/fleet.yaml --scada-config /etc/opengrid/sim/scada.yaml --dsn ...` | service transformers (every hub mapped: home hubs in groups of 4-10, the substation set and each truck on its own transformer at its bank's kVA rating), feeder limits (the trucks' depot feeders included), substation limits, HOME_BANK asset rows. Uses fleet.yaml's enabled zone blocks, exactly as step 1; the substation set's rows from 2 are kept | 1, 2, 5 |
+| 6 | `topology_seed.py --fleet-config /etc/opengrid/sim/fleet.yaml --scada-config /etc/opengrid/sim/scada.yaml --dsn ...` | service transformers (every hub mapped: each home bank's units sum to its kVA rating, 12 x 50 kVA for a 600 kVA bank (D-36), homes dealt round-robin; the substation set and each truck on its own transformer at its bank's kVA rating), feeder limits (the trucks' depot feeders included), substation limits, HOME_BANK asset rows. Uses fleet.yaml's enabled zone blocks, exactly as step 1; the substation set's rows from 2 are kept | 1, 2, 5 |
 
 The firmware catalogue needs no seed: `[[firmware.catalogue]]` in `orchestrator/config/orchestrator.toml` (4 entries)
 is merged with `og.firmware_catalogue` (0037, empty on a fresh database).
