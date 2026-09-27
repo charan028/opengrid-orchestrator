@@ -45,6 +45,30 @@ def _chicago_local_to_utc(naive_local: datetime, *, dst_flag: bool) -> datetime:
 EIA_SYSTEM_LOAD_SERIES = "ERCOT_SYSTEM"
 
 
+#: ERCOT energy-price sanity bounds (issue #43 A12). The system-wide offer cap (SWCAP, $5,000/MWh) bounds
+#: day-ahead and real-time settlement point prices (the ORDC adder is capped so a price plus its adder
+#: cannot exceed it); the offer floor is -$250/MWh. A value outside [floor, cap] is a feed error, not a
+#: price.
+ERCOT_PRICE_CAP_USD_PER_MWH = 5_000.0
+ERCOT_PRICE_FLOOR_USD_PER_MWH = -250.0
+#: Products the bounds apply to: real-time SPP (NP6-905-CD) and day-ahead SPP (NP4-190-CD, not polled yet).
+ERCOT_ENERGY_PRICE_PRODUCTS = frozenset({"np6-905-cd", "np4-190-cd"})
+
+
+def split_out_of_bounds_prices(obs: list[FeedObs]) -> tuple[list[FeedObs], list[FeedObs]]:
+    """`(kept, rejected)`: `rejected` is every row outside [`ERCOT_PRICE_FLOOR_USD_PER_MWH`,
+    `ERCOT_PRICE_CAP_USD_PER_MWH`]. Rejected rows are dropped at ingest rather than flagged, because
+    `og.feed_obs.quality` has no BAD value (GOOD/ESTIMATED/STALE only, and ESTIMATED means a trusted
+    substitute): a reader then sees the last good value age into STALE (`feeds.staleness`) instead of
+    acting on an impossible price."""
+    kept: list[FeedObs] = []
+    rejected: list[FeedObs] = []
+    for row in obs:
+        in_bounds = ERCOT_PRICE_FLOOR_USD_PER_MWH <= row.value <= ERCOT_PRICE_CAP_USD_PER_MWH
+        (kept if in_bounds else rejected).append(row)
+    return kept, rejected
+
+
 class FeedDataError(Exception):
     """A payload could not be normalized (missing `fields`, wrong row arity, unparseable value)."""
 
