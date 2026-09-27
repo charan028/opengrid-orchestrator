@@ -450,6 +450,10 @@ the instruction; base-point following stays in the allocator.
   - `ALR-ERCOT-AS-REFUSED` (warning), one per refused instruction.
   - `ALR-ERCOT-AS-POLL-FAILED` (warning), after `failure_alert_after` (3) failed polls.
   - `ALR-ERCOT-AS-POLL-STALE` (critical), when no good poll for `stale_after_s` (60 s).
+  - `ALR-ERCOT-AS-PROCESSING-FAILED` (critical, r3.4.3), per instruction that raised while being applied.
+    Each instruction runs in its own guard: the failing one is traced (`AS_INSTRUCTION_PROCESSING_FAILED`)
+    and left unacknowledged (re-sent, retried each poll), the rest of the batch still runs, and the poll
+    counts as failed (POLL-FAILED, then STALE) without backing off. Cleared when the instruction succeeds.
   - The last two clear on the next good poll. A failed poll is retried after 5, 10, 20, 40 and then 60 s
     (`retry_cap_s`): the feeds' backoff shape at this cadence.
 - **Off by default.** `enabled = false` in `config/orchestrator.toml`. With it on and no instruction, the

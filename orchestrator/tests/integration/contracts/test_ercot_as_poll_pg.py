@@ -189,7 +189,7 @@ async def test_instructions_go_through_the_shared_core_and_are_answered(
 
     poller = _poller(pool, trace, http, seed)
     try:
-        assert await poller.poll_once(now=now) is True
+        assert await poller.poll_once(now=now) == (True, True)
 
         # Exactly one deployment, on the ERCOT_AS award, through the core (source ERCOT, origin ERCOT_POLL).
         deployments = _rows(

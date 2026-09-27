@@ -444,6 +444,7 @@ award's row as `deployed` and in the trace (stream `ercot_as_poll`, origin `ERCO
   REJECT with that reason. Check the award (Dispatch, AS table). If ERCOT really needs the deployment, use
   **Deploy** on the award and record the instruction id in the reason. Acknowledge the alert; it doesn't
   clear on its own.
+- **Instruction could not be processed** (`ALR-ERCOT-AS-PROCESSING-FAILED`, r3.4.3). An error while applying one instruction; it is retried every poll and the others still run. Check `journalctl -u og-feeds` and the database; tell the lead if it persists.
 - **Poll failing or stale** (`ALR-ERCOT-AS-POLL-FAILED`, `ALR-ERCOT-AS-POLL-STALE`). og-feeds cannot read
   instructions, so a deployment could be missed. Check og-feeds and the simulator (`systemctl status
   og-feeds og-sim-market`). Retries run every 5 to 60 s, and both alerts clear on the next good poll.
@@ -754,6 +755,7 @@ alert is raised or cleared and the degraded modes freeze.
 | `ALR-XFMR-UNMAPPED` | warning | og-guardian checked a batch with a hub that has no service-transformer mapping, so G-27 checks it as a group of one. Every hub today: expect one open row per bank the guardian commands, all with the same summary | No automatic clear |
 | `ALR-ERCOT-AS-REFUSED` | warning | Since r3.4.2 (D-35): og-feeds refused an ERCOT AS dispatch instruction (404/409/422 and a reason code) and answered ERCOT REJECT. One row per instruction; a re-delivered duplicate adds none (6.5) | No automatic clear |
 | `ALR-ERCOT-AS-POLL-FAILED` | warning | Three ERCOT AS instruction polls in a row failed | og-feeds clears it on the next good poll |
+| `ALR-ERCOT-AS-PROCESSING-FAILED` | critical | Since r3.4.3: one ERCOT AS instruction raised an error while being applied (for example a database error). It is not acknowledged, so ERCOT re-sends it and it is retried every poll; the other instructions in the batch still run. Also counts toward POLL-FAILED and STALE. One row per instruction | og-feeds clears it when that instruction is next processed successfully |
 | `ALR-ERCOT-AS-POLL-STALE` | critical | No ERCOT AS instruction poll has succeeded for 60 s: a deployment may be missed | og-feeds clears it on the next good poll |
 | `ALR-TRACE-VERDICT-WRITE-FAILED` | warning | A verdict's `GUARDIAN_VERDICT` trace row could not be written (the verdict stands; the audit row is missing) | No automatic clear |
 

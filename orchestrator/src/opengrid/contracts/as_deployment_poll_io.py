@@ -30,7 +30,13 @@ from opengrid.calls import (
     issue_call,
 )
 from opengrid.calls import CallOutcome as CallResult
-from opengrid.contracts.as_deployment_poll import R_MALFORMED, CallOutcome, ErcotAsPoller, settings_from
+from opengrid.contracts.as_deployment_poll import (
+    CRITICAL_ALERT_RULES,
+    R_MALFORMED,
+    CallOutcome,
+    ErcotAsPoller,
+    settings_from,
+)
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import clear_alert, raise_alert
 from opengrid.integrations.ercot_mms.client import ErcotMmsClient
@@ -82,7 +88,7 @@ class PgPollAlerts:
             return
         finding = AlertFinding(
             rule=rule,
-            severity="critical" if rule.endswith("STALE") else "warning",
+            severity="critical" if rule in CRITICAL_ALERT_RULES else "warning",
             summary=summary,
             condition_key=condition_key,
             detail={**detail, "condition_key": condition_key},
