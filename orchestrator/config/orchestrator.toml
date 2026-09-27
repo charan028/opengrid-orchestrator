@@ -180,11 +180,14 @@ stop_release_authorised_operators = ["og-op-a", "og-op-b"]
 # (thermal 10 MW x 0.95 = 9.5 MW, reverse 3 MW).
 unmapped_xfmr_kva_per_home = 25
 # 09 S2.6 fail closed on missing topology: a feeder with no og.feeder_limit row vetoes any G-28 increase
-# instead of taking the defaults above. false for R3 (the sim fleet has no topology rows yet); true at go-live.
+# instead of taking the defaults above, and a bank with no feeder_id (ALR-BANK-UNMAPPED-TOPOLOGY, always raised)
+# vetoes any batch that raises its net |setpoint|. false for R3 (the sim fleet has no topology rows yet); true at go-live.
 fail_closed_missing_topology = false
-# G-28/29/30 on unsigned SCADA kVA (no REAL_POWER_KW yet): |kW| >= pf * kVA once hub telemetry rules out
-# export. 0 = strict (no assumption).
+# G-28/29/30 use the signed REAL_POWER_KW (production stores it for every bank) whenever it is GOOD and fresh;
+# unsigned SCADA kVA is only the fallback. There, |kW| >= pf * kVA once hub telemetry rules out export
+# (0 = strict, no assumption), and a hub with no og.hub.pv_rated_kw counts as default_pv_rated_kw of PV (H3).
 scada_min_power_factor = 0.0
+default_pv_rated_kw = 10
 
 [guardian.feeder_ramp_ceiling_kw_per_min_by_feeder]
 # G-06 per-feeder ramp ceilings (kW/min); every other feeder keeps the 3 MW/min default. The Austin

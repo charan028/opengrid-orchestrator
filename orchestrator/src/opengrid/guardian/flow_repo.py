@@ -12,8 +12,10 @@ is ignored, and a reading older than `[guardian.flow].max_age_s` is missing. Per
 - otherwise `APPARENT_POWER_KVA` is only a magnitude m (kVA is unsigned), so the bank flow F is an interval.
   F <= m always. The export side is bounded by the bank's net hub power from the guardian's OWN telemetry
   (`BankMembersPort`): home load is >= 0, so F >= sum(hub p) - PV rated (a hub not online counts at full
-  discharge). With no hub read the export side is -m: an unknown direction is treated as export (09 S2.6
-  fail closed). `scada_min_power_factor` (|F| >= pf * m) excludes (-pf m, pf m) once the floor rules out
+  discharge; a hub with no og.hub.pv_rated_kw takes the conservative `default_pv_rated_kw`, never 0 -- H3).
+  With no hub read the export side is -m: an unknown direction is treated as export (09 S2.6 fail closed).
+  Production stores REAL_POWER_KW for every bank, so the kVA path is the fallback when it is bad or stale.
+  `scada_min_power_factor` (|F| >= pf * m) excludes (-pf m, pf m) once the floor rules out
   export.
 """
 

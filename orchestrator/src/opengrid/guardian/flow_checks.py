@@ -299,6 +299,17 @@ def check_aggregate_flow(
     return CheckOutcome.passed(rule_id, hub_id=ref)
 
 
+BANK_TOPOLOGY_UNMAPPED = "BANK_TOPOLOGY_UNMAPPED"
+
+
+def check_unmapped_bank(bank_id: str, prev_net_kw: float, new_net_kw: float) -> CheckOutcome:
+    """09 S2.6 fail closed for a bank with no feeder mapping (G-06/G-28/G-32 cannot be evaluated): a batch
+    that raises the bank's net |setpoint| is vetoed; one that moves it toward zero is relief and passes."""
+    if abs(new_net_kw) > abs(prev_net_kw) + 1e-9:
+        return CheckOutcome(G28, False, BANK_TOPOLOGY_UNMAPPED, bank_id)
+    return CheckOutcome.passed(G28, hub_id=bank_id)
+
+
 def check_g29_poi(poi: PoiLimit, batch_setpoint_kw: float) -> CheckOutcome:
     """G-29 POI: a substation asset's net setpoint within [-P_exp, P_imp] (import-positive)."""
     if batch_setpoint_kw < -poi.export_kw - 1e-9 or batch_setpoint_kw > poi.import_kw + 1e-9:

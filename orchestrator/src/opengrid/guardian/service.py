@@ -72,6 +72,8 @@ _ITEM_LEVEL_RULES = frozenset(
 )
 #: G-27: hubs checked as a group of one because they have no service-transformer mapping.
 XFMR_UNMAPPED_ALERT_RULE = "ALR-XFMR-UNMAPPED"
+#: A bank with no feeder mapping: G-06/G-28/G-32 are skipped for it (vetoed with fail_closed_missing_topology).
+BANK_UNMAPPED_ALERT_RULE = "ALR-BANK-UNMAPPED-TOPOLOGY"
 #: K11: a verdict's GUARDIAN_VERDICT trace row could not be written (the verdict itself stands).
 TRACE_VERDICT_ALERT_RULE = "ALR-TRACE-VERDICT-WRITE-FAILED"
 guardian_trace_verdict_failures_total = Counter(
@@ -444,11 +446,47 @@ class GuardianService:
                 if not g32.ok:
                     violations.append(CheckOutcome("G-32", False, g32.reason, bank.feeder_id))
 
+        if topology is not None and bank is not None and bank.feeder_id is None:
+            violations.extend(await self._check_unmapped_bank(proposal.bank_id, hub_items, snapshots))
+
         if topology is not None:
             violations.extend(
                 await self._check_flows(proposal, hub_items, bank, snapshots, sites, fleet_delta_kw, policy)
             )
         return violations
+
+    async def _check_unmapped_bank(
+        self, bank_id: str, hub_items: list[ProposedItem], snapshots: dict[str, HubSnapshot]
+    ) -> list[CheckOutcome]:
+        """A bank with no feeder mapping skips G-06/G-28/G-32: always ALR-BANK-UNMAPPED-TOPOLOGY (a warning,
+        deduped per bank by the alert port), and with `fail_closed_missing_topology` a batch that raises the
+        bank's net |setpoint| is vetoed (09 S2.6)."""
+        await self._alert_unmapped_bank(bank_id)
+        if not self.config.flow_fail_closed_missing_topology:
+            return []
+        seen = [item for item in hub_items if item.hub_id in snapshots]
+        prev = sum(snapshots[item.hub_id].prev_p_kw for item in seen)
+        new = sum(item.p_kw_setpoint for item in seen)
+        outcome = flow_checks.check_unmapped_bank(bank_id, prev, new)
+        return [] if outcome.ok else [outcome]
+
+    async def _alert_unmapped_bank(self, bank_id: str) -> None:
+        alerts = self.ports.alerts
+        if alerts is None:
+            return
+        try:
+            await alerts.raise_alert(
+                BANK_UNMAPPED_ALERT_RULE,
+                "warning",
+                "bank has no feeder mapping: G-06/G-28/G-32 are not evaluated for it (09 S2.6)",
+                bank_id,
+                {
+                    "bank_id": bank_id,
+                    "fail_closed_missing_topology": self.config.flow_fail_closed_missing_topology,
+                },
+            )
+        except Exception:
+            logger.exception("failed to raise %s", BANK_UNMAPPED_ALERT_RULE)
 
     def _flow_policy(self) -> flow_checks.FlowPolicy:
         c = self.config
