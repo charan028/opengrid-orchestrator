@@ -52,3 +52,11 @@ def test_profiles_multiplier_lookup_falls_back_to_identity_for_unknown_profile()
     multipliers = cfg.active_multipliers()
     assert multipliers.rate_multiplier == 1.0
     assert multipliers.duration_multiplier == 1.0
+
+
+def test_ercot_as_dispatch_instructions_never_fire_in_random_mode():
+    """D-35: a random ERCOT deployment would discharge a real committed award; scenario/manual only."""
+    cfg = load_random_config(CONFIG_PATH)
+    ercot = {t: c for t, c in cfg.types.items() if t.startswith("ercot_as_")}
+    assert len(ercot) == 7
+    assert all(not c.enabled and c.rate_per_hour == 0.0 for c in ercot.values())

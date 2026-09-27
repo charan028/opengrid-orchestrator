@@ -12,6 +12,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from ogsim.market.anomalies import AnomalyStore
+from ogsim.market.as_dispatch import AsDispatchScenarios, mms_state_from_env
 from ogsim.market.config import MarketConfig, load_config
 from ogsim.market.data import MarketData
 from ogsim.market.security import TokenStore
@@ -34,6 +35,9 @@ class MarketRuntime:
         self.tokens = TokenStore(self.cfg)
         self.data = MarketData(self.cfg, self.anomalies)
         self._clock = clock or (lambda: datetime.now(UTC))
+        # D-35: the MMS/EWS dispatch-instruction endpoint mounted at /mms, fed by AS dispatch anomalies.
+        self.mms = mms_state_from_env(self.cfg.seed, self.now)
+        self.as_dispatch = AsDispatchScenarios.from_env(self.mms.dispatch)
 
     def now(self) -> datetime:
         return self._clock()

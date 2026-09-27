@@ -365,12 +365,27 @@ characterization_interval_s = 300.0
 # og.owner_charge_window rows (migration 0038) win over these; these win over the built-in default.
 AUSTIN_ENERGY = ["22:00-06:00"]
 
-[market_sim]
-# og-feeds AS-deployment poller against the market simulator: off until the lead switches it on.
-as_deployment_poll = false
-base_url = "http://127.0.0.1:8090"
-as_deployment_poll_interval_s = 10
-as_deployment_lease_s = 60
+[feeds.ercot_as_poll]
+# D-35: og-feeds polls ERCOT AS deployment instructions (ECRS/RRS/Reg/Non-Spin DEPLOY_AS / RECALL_AS) over the
+# ercot_mms adapter and applies each through the same core as POST /og/api/dispatch/as-deployments.
+# OFF in the repo. The release manager enables it in production with the simulator URL (RUNBOOK, D-35).
+enabled = false
+interval_s = 5.0              # poll cadence while healthy
+retry_cap_s = 60.0            # failed poll: retry after 5, 10, 20, 40, 60, 60 ... s
+failure_alert_after = 3       # consecutive failed polls -> ALR-ERCOT-AS-POLL-FAILED
+stale_after_s = 60.0          # no good poll for this long -> ALR-ERCOT-AS-POLL-STALE
+lookback_s = 900.0            # instructions issued in the last 15 min are requested
+max_instruction_age_s = 300.0 # an instruction first seen later than this after issue is refused (late)
+recall_hold_s = 300.0         # a recall that beats its deployment waits this long for it
+
+# [feeds.ercot_as_poll.mms]     # ErcotMmsSettings; against ogsim.market:
+# endpoint = "http://127.0.0.1:8090/mms/ews/"
+# qse_code = "QOPENGRID"
+# user_id = "opengrid-sim"
+# signing = "none"
+#
+# [feeds.ercot_as_poll.awards]  # "<ERCOT resource>:<AS type>" = the ERCOT_AS contract carrying those awards
+# "OG_ESR_1:ECRS" = "00000000-0000-7000-8000-000000000d03"
 
 [firmware]
 # Firmware campaigns (docs/orchestrator/07-delivery/16-firmware-updates.md); defaults per firmware/config.py.

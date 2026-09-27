@@ -22,6 +22,8 @@ Market anomaly types implemented here:
                                                                       `data.active_as_deployment` and
                                                                       `routes_admin`'s
                                                                       `GET /admin/as_deployment`.
+  ercot_as_*           see `ogsim.market.as_dispatch`         -> ERCOT AS dispatch instructions on the
+                                                                      MMS/EWS endpoint (/mms/ews/, D-35)
 """
 
 from __future__ import annotations
@@ -46,6 +48,14 @@ MARKET_ANOMALY_TYPES = {
     "slow_response",
     "nws_extreme_weather",
     "as_deployment",
+    # D-35 ERCOT AS dispatch instructions (ogsim.market.as_dispatch); one-shot, published on injection.
+    "ercot_as_deploy",
+    "ercot_as_recall",
+    "ercot_as_duplicate",
+    "ercot_as_out_of_order",
+    "ercot_as_malformed",
+    "ercot_as_unknown_award",
+    "ercot_as_exceed_award",
 }
 
 

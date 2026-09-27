@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -32,6 +33,11 @@ from opengrid.platform.db import make_pool
 from opengrid.platform.heartbeat import write_heartbeat
 from opengrid.platform.process import run_forever
 from opengrid.trace.store import TraceStore
+
+if TYPE_CHECKING:  # the poller module imports contracts/integrations; keep feeds' import graph lean
+    from psycopg_pool import AsyncConnectionPool
+
+    from opengrid.contracts.as_deployment_poll import ErcotAsPoller
 
 logger = logging.getLogger(__name__)
 
@@ -190,15 +196,45 @@ async def run_feeds_process(cfg: Config, *, extra_tick: Callable[[], Awaitable[N
             "instead of writing to the trace table (degraded, visible in logs)"
         )
 
+    as_poller = _build_as_poller(cfg, pool, trace_store)
     try:
         async with _new_http_client() as http_client:
             scheduler = _build_scheduler(cfg, store, http_client, trace_store)
 
             async def _tick() -> None:
+                await _poll_as_instructions(as_poller)
                 await _tick_with_heartbeat(
                     scheduler.run_cycle, lambda: write_heartbeat(pool, PROCESS_NAME), extra_tick
                 )
 
             await run_forever(_tick, interval_s=SCHEDULER_TICK_INTERVAL_S, process_name=PROCESS_NAME)
     finally:
+        if as_poller is not None:
+            await as_poller.source.close()
         await pool.close()
+
+
+def _build_as_poller(
+    cfg: Config, pool: AsyncConnectionPool, trace: TraceStore | None
+) -> ErcotAsPoller | None:
+    """D-35: the ERCOT AS instruction poller (`[feeds.ercot_as_poll]`, off by default). It refuses to run
+    untraced: with no trace backend it stays off and says so."""
+    from opengrid.contracts.as_deployment_poll_io import build_as_deployment_poller  # contracts-owned
+
+    if trace is None:
+        if bool(cfg.get("feeds.ercot_as_poll", {}).get("enabled", False)):
+            logger.error("ERCOT AS instruction poller NOT started: no trace backend (K10)")
+        return None
+    return build_as_deployment_poller(cfg, pool, trace=trace)
+
+
+async def _poll_as_instructions(poller: ErcotAsPoller | None) -> None:
+    """Runs first in every tick, apart from the ERCOT/EIA/NWS cycle: a slow or failing public-feed poll
+    must never delay an AS deployment instruction. Its own failures are alerted by the poller; this only
+    keeps an unexpected error from ending the tick."""
+    if poller is None:
+        return
+    try:
+        await poller.poll_if_due()
+    except Exception:
+        logger.exception("ERCOT AS instruction poll raised; retried next tick")

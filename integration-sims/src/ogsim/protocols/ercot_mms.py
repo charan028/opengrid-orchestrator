@@ -6,7 +6,10 @@ One SOAP 1.1 endpoint, `POST /ews/`, accepting EWS `RequestMessage` envelopes:
     cancel BidSet (mRID)                                             -> OK / ERROR
     get    AwardSet (Request: MarketType, TradingDate)               -> AwardedEnergyOffer / AwardedAS
     get    VDIs                                                      -> unacknowledged VDI list
-    change VDIs (VDI/mRID)                                           -> acknowledges
+    change VDIs (VDI/mRID [, response ACCEPT|REJECT, reason])        -> acknowledges
+
+Dispatch instructions (AS deployments and recalls, D-35) live in an `AsDispatchBook`
+(`ogsim.protocols.ercot_as_dispatch`), which models delivery latency, duplicates and out-of-order batches.
 
 Validation mirrors what MMS rejects synchronously: unknown QSE (Header/Source) or resource, a reused
 ReplayDetection nonce, non-monotonic curves, an empty BidSet, and -- with `require_signature` -- a missing
@@ -18,16 +21,17 @@ is awarded the largest cumulative MW whose price is <= SPP; an ESR bid/offer cur
 (negative MW) is awarded when its bid price is >= SPP; an AS curve is awarded the largest cumulative
 MW whose price is <= that service's MCPC.
 
-Admin (JSON): `PUT /admin/prices`, `POST /admin/vdis`, `GET /admin/submissions`.
+Admin (JSON): `PUT /admin/prices`, `POST /admin/vdis`, `GET /admin/vdis` (with acknowledgements),
+`GET /admin/submissions`.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from xml.sax.saxutils import escape
@@ -39,6 +43,8 @@ from defusedxml.ElementTree import fromstring
 from fastapi import FastAPI, Request, Response
 from lxml import etree
 from pydantic import BaseModel, ConfigDict
+
+from ogsim.protocols.ercot_as_dispatch import AsDispatchBook, DeliveryProfile
 
 __all__ = ["MmsSimState", "create_app"]
 
@@ -69,6 +75,8 @@ class VdiBody(BaseModel):
     mw: float | None = None
     startTime: str | None = None  # noqa: N815
     endTime: str | None = None  # noqa: N815
+    rampMinutes: int | None = None  # noqa: N815
+    recallOf: str | None = None  # noqa: N815
     text: str = ""
 
 
@@ -97,8 +105,13 @@ class MmsSimState:
     esr_curve_element: str = "EnergyBidOfferCurve"
     offers: list[_Offer] = field(default_factory=list)
     nonces: set[str] = field(default_factory=set)
-    vdis: dict[str, dict[str, Any]] = field(default_factory=dict)
     seq: int = 0
+    delivery: DeliveryProfile = field(default_factory=DeliveryProfile)
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    dispatch: AsDispatchBook = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.dispatch = AsDispatchBook(qse_code=self.qse_code, profile=self.delivery)
 
 
 def _text(el: Any, path: str) -> str | None:
@@ -239,13 +252,7 @@ def create_app(state: MmsSimState | None = None) -> FastAPI:
         if verb == "get" and noun == "VDIs":
             return _reply(vn, message_id, "OK", [], _vdis())
         if verb == "change" and noun == "VDIs":
-            mrid = (
-                _text(payload, f"{{{PAY}}}VDIs/{{{PAY}}}VDI/{{{PAY}}}mRID") if payload is not None else None
-            )
-            if mrid in sim.vdis:
-                sim.vdis[mrid]["acknowledged"] = True
-                return _reply(vn, message_id, "OK", [])
-            return _reply(vn, message_id, "ERROR", [f"no VDI {mrid!r}"])
+            return _acknowledge(vn, message_id, payload)
         return _reply(vn, message_id, "ERROR", [f"unsupported {verb} {noun}"])
 
     def _create(vn: tuple[str, str], message_id: str | None, payload: Any) -> Response:
@@ -347,21 +354,30 @@ def create_app(state: MmsSimState | None = None) -> FastAPI:
 
     def _vdis() -> str:
         items = []
-        for mrid, vdi in sim.vdis.items():
-            if vdi.get("acknowledged"):
-                continue
-            details = f"<instructionType>{escape(vdi['instructionType'])}</instructionType>"
-            for key in ("asType", "mw", "startTime", "endTime"):
-                if vdi.get(key) is not None:
-                    details += f"<{key}>{escape(str(vdi[key]))}</{key}>"
-            details += f"<instructionText>{escape(vdi.get('text', ''))}</instructionText>"
+        for vdi in sim.dispatch.pending(sim.clock()):
+            details = "".join(f"<{k}>{escape(v)}</{k}>" for k, v in vdi.fields().items())
+            details += f"<instructionText>{escape(vdi.text)}</instructionText>"
             details += "<ercotOperatorName>SIM OPERATOR</ercotOperatorName>"
+            notified = vdi.issued_at.isoformat(timespec="seconds")
             items.append(
-                f"<VDI><mRID>{escape(mrid)}</mRID><resource>{escape(vdi['resource'])}</resource>"
-                f"<vdiRefNum>{escape(mrid)}</vdiRefNum><notificationTime>{vdi['notificationTime']}</notificationTime>"
+                f"<VDI><mRID>{escape(vdi.mrid)}</mRID><resource>{escape(vdi.resource)}</resource>"
+                f"<vdiRefNum>{escape(vdi.mrid)}</vdiRefNum><notificationTime>{notified}</notificationTime>"
                 f"<Details>{details}</Details></VDI>"
             )
         return f'<VDIs xmlns="{PAY}">{"".join(items)}</VDIs>'
+
+    def _acknowledge(vn: tuple[str, str], message_id: str | None, payload: Any) -> Response:
+        """`change VDIs`: `VDI/mRID`, optional `VDI/response` (ACCEPT | REJECT, default ACCEPT) and
+        `VDI/reason` (UNCONFIRMED spellings, like the client's)."""
+        vdi = payload.find(f"{{{PAY}}}VDIs/{{{PAY}}}VDI") if payload is not None else None
+        mrid = _text(vdi, f"{{{PAY}}}mRID") if vdi is not None else None
+        response = ((_text(vdi, f"{{{PAY}}}response") if vdi is not None else None) or "ACCEPT").upper()
+        reason = _text(vdi, f"{{{PAY}}}reason") if vdi is not None else None
+        if response not in ("ACCEPT", "REJECT"):
+            return _reply(vn, message_id, "ERROR", [f"unknown response {response!r}"])
+        if mrid is None or not sim.dispatch.acknowledge(mrid, accepted=response == "ACCEPT", reason=reason):
+            return _reply(vn, message_id, "ERROR", [f"no VDI {mrid!r}"])
+        return _reply(vn, message_id, "OK", [])
 
     # -- admin --------------------------------------------------------------------------------------
 
@@ -375,13 +391,24 @@ def create_app(state: MmsSimState | None = None) -> FastAPI:
 
     @app.post("/admin/vdis")
     async def admin_vdi(body: VdiBody) -> dict[str, str]:
-        mrid = f"{sim.qse_code}.VDI.{uuid.uuid4().hex[:12]}"
-        record = body.model_dump()
-        record["notificationTime"] = body.startTime or datetime.now().astimezone().isoformat(
-            timespec="seconds"
+        start = datetime.fromisoformat(body.startTime) if body.startTime else None
+        instruction = sim.dispatch.publish(
+            resource=body.resource,
+            instruction_type=body.instructionType,
+            issued_at=sim.clock(),
+            as_type=body.asType,
+            mw=body.mw,
+            start=start,
+            end=datetime.fromisoformat(body.endTime) if body.endTime else None,
+            ramp_minutes=body.rampMinutes,
+            recall_of=body.recallOf,
+            text=body.text,
         )
-        sim.vdis[mrid] = record
-        return {"mrid": mrid}
+        return {"mrid": instruction.mrid}
+
+    @app.get("/admin/vdis")
+    async def admin_vdi_list() -> list[dict[str, object]]:
+        return sim.dispatch.responses()
 
     @app.get("/admin/submissions")
     async def admin_submissions() -> list[dict[str, Any]]:
