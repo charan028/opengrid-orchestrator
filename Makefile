@@ -54,3 +54,32 @@ schema-check:
 schema-snapshot:
 	bash deploy/scripts/create_schema.sh --fresh-db --snapshot orchestrator/schema/og_schema.sql \
 		--db-port $(BOOT_PORT) --db-name $(SCHEMA_DB) --db-role $(BOOT_ROLE) --etc $(BOOT_ETC)
+
+# --- performance and scalability (tests-perf/README.md, tests-perf/HANDOFF.md; report 07-delivery/17) --------
+# Default target: the Docker dev stack (compose project ogperf). The base target needs the production watchdog.
+PERF_PY ?= .venv-perf/bin/python
+PERF_TARGET ?= compose
+PERF_STEPS ?= 1000 2500 3500 5000 7500
+PERF_STEP_MIN ?= 15
+PERF_SOAK_MIN ?= 60
+PERF_RUN ?= tests-perf/.run
+PERF_ASSETS ?= docs/orchestrator/07-delivery/assets/perf
+.PHONY: perf-campaign perf-scale perf-analyze perf-clean perf-check
+
+perf-campaign:
+	$(PERF_PY) tests-perf/campaign.py --fresh --target $(PERF_TARGET) --guard on --steps "$(PERF_STEPS)" --step-min $(PERF_STEP_MIN) --soak-min $(PERF_SOAK_MIN)
+
+perf-scale:
+	$(PERF_PY) tests-perf/campaign.py --fresh --target $(PERF_TARGET) --guard on --steps "$(PERF_STEPS)" --step-min $(PERF_STEP_MIN) --soak-min 0 --no-stress
+
+perf-analyze:
+	$(PERF_PY) tests-perf/analyze.py --run $(PERF_RUN) --charts $(PERF_ASSETS) --md $(PERF_RUN)/data/steps.md
+
+perf-clean:
+	docker compose -p ogperf -f dev/docker-compose.yml -f tests-perf/compose/docker-compose.perf.yml --profile orchestrator down -v
+	rm -rf $(PERF_RUN) tests-perf/compose/generated
+
+perf-check:
+	cd tests-perf && ../$(PERF_PY) -m ruff check . && ../$(PERF_PY) -m ruff format --check .
+	cd tests-perf && ../$(PERF_PY) -m mypy --config-file mypy.ini perfenv.py targets.py sampler.py stress.py analyze.py campaign.py compose/seed_extra.py
+	cd tests-perf && ../$(PERF_PY) -m pytest -q -p no:cacheprovider test_perf_harness.py
