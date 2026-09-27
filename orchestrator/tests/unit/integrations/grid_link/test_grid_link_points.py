@@ -73,7 +73,7 @@ def test_status_encodes_onto_input_points() -> None:
         call_phase=CallPhase.ACTIVE,
         ems_call_id=42,
         call_reason=0,
-        call_delivered_kw=590.0,
+        call_granted_kw=590.0,
         soc_pct=61.5,
         heartbeat_count=12,
         link_healthy=True,

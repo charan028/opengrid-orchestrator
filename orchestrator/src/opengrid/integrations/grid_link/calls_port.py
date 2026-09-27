@@ -106,9 +106,9 @@ class CoreTollCallPort:
 
     async def _status_of(self, record: CallRecord) -> CallOutcome:
         status = await status_of(self._store, record, limits=self._limits, now=datetime.now(UTC))
-        delivered = status.delivered_kw
+        granted = status.granted_kw
         return CallOutcome(
             phase=_PHASE[status.state],
             reason_code=status.call.reason_code,
-            delivered_kw=round(max(0.0, -delivered), 3) if delivered is not None else None,
+            granted_kw=round(max(0.0, -granted), 3) if granted is not None else None,
         )

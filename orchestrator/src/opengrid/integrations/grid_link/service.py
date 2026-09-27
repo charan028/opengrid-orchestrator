@@ -205,7 +205,7 @@ class GridLinkService:
             call_phase=outcome.phase,
             ems_call_id=call.ems_call_id if call is not None else 0,
             call_reason=reason_number(outcome.reason_code),
-            call_delivered_kw=outcome.delivered_kw or 0.0,
+            call_granted_kw=outcome.granted_kw or 0.0,
             soc_pct=round(100.0 * sum(b.soc_kwh for b in banks) / capacity, 2) if capacity > 0 else None,
             heartbeat_count=self._heartbeats,
             link_healthy=self.link_healthy(),

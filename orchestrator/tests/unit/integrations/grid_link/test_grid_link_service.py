@@ -217,10 +217,10 @@ async def test_core_timeout_is_reported_then_corrected_by_status_refresh() -> No
     h.service.offer(TollCall(11, 100.0, 30), PEER)
     await h.service.drain()
     assert h.service.status().call_reason == reason_number("R-GL-CORE-TIMEOUT")
-    slow.calls[11] = CallOutcome(CallPhase.ACTIVE, delivered_kw=90.0)  # the core had created it after all
+    slow.calls[11] = CallOutcome(CallPhase.ACTIVE, granted_kw=90.0)  # the core had created it after all
     await h.service.tick()
     status = h.service.status()
-    assert status.call_phase is CallPhase.ACTIVE and status.call_delivered_kw == 90.0
+    assert status.call_phase is CallPhase.ACTIVE and status.call_granted_kw == 90.0
 
 
 def test_denies_are_rate_limited_per_peer_and_reason(harness: Harness) -> None:

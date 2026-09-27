@@ -74,7 +74,7 @@ def _status() -> LinkStatus:
         call_phase=CallPhase.IDLE,
         ems_call_id=0,
         call_reason=0,
-        call_delivered_kw=0.0,
+        call_granted_kw=0.0,
         soc_pct=None,
         heartbeat_count=3,
         link_healthy=True,
