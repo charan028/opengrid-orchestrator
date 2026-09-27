@@ -30,9 +30,9 @@ from opengrid.calls import (
     issue_call,
 )
 from opengrid.calls import CallOutcome as CallResult
-from opengrid.contracts.as_deployment_poll import CallOutcome, ErcotAsPoller, settings_from
+from opengrid.contracts.as_deployment_poll import R_MALFORMED, CallOutcome, ErcotAsPoller, settings_from
 from opengrid.health.model import AlertFinding
-from opengrid.health.queries import clear_alert, fetch_open_alerts, raise_alert
+from opengrid.health.queries import clear_alert, raise_alert
 from opengrid.integrations.ercot_mms.client import ErcotMmsClient
 from opengrid.integrations.interfaces import DispatchInstruction
 from opengrid.trace.store import TraceStore
@@ -45,6 +45,12 @@ _AWARDS_COVERING_SQL = """
       AND o.window_start <= %(at)s AND o.window_end > %(at)s
       AND o.state NOT IN ('REJECTED', 'EXPIRED')
     ORDER BY o.window_start, o.obligation_id
+"""
+
+
+_OPEN_ALERT_IDS_SQL = """
+    SELECT id FROM og.alert
+    WHERE rule = %(rule)s AND cleared_at IS NULL AND detail ->> 'condition_key' = %(condition_key)s
 """
 
 
@@ -64,11 +70,12 @@ class PgPollAlerts:
         self._pool = pool
 
     async def _open_ids(self, rule: str, condition_key: str) -> list[int]:
-        return [
-            a.id
-            for a in await fetch_open_alerts(self._pool)
-            if a.rule == rule and a.id is not None and (a.detail or {}).get("condition_key") == condition_key
-        ]
+        # A direct read of this rule's open rows (like guardian.repo), not health's fetch_open_alerts: that one
+        # parses every open alert and fails on severities its model does not accept (e.g. firmware's 'info').
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_OPEN_ALERT_IDS_SQL, {"rule": rule, "condition_key": condition_key})
+            rows = await cur.fetchall()
+        return [int(r[0]) for r in rows]
 
     async def raise_once(self, rule: str, condition_key: str, summary: str, detail: dict[str, Any]) -> None:
         if await self._open_ids(rule, condition_key):
@@ -127,6 +134,9 @@ class CoreCallGateway:
         if instruction.end_at is None:
             return CallOutcome(False, "R-ERCOT-AS-NO-END", 422, "instruction has no end time")
         mw = instruction.mw
+        if mw is None or mw <= 0:
+            # Defence in depth (the model already refuses it): requested_kw None would mean the full award.
+            return CallOutcome(False, R_MALFORMED, 422, "an AS deployment must carry a positive MW")
         request = CallRequest(
             origin=CallOrigin.ERCOT_POLL,
             principal=principal,
@@ -134,7 +144,7 @@ class CoreCallGateway:
             obligation_id=obligation_id,
             start_at=instruction.start_at,
             end_at=instruction.end_at,
-            requested_kw=-float(mw * 1000) if mw is not None and mw > 0 else None,
+            requested_kw=-float(mw * 1000),
             idempotency_key=instruction.instruction_id,
         )
         try:

@@ -409,7 +409,7 @@ ERCOT's public REST API (api.ercot.com) is public data only. Submissions remain 
 | `notificationTime` | When ERCOT issued it (issue order) |
 | `Details/instructionType` | `DEPLOY_AS` or `RECALL_AS` (mapped by `vdi_type_map`); anything else is a plain VDI |
 | `Details/asType` | `ECRS`, `RRS` (or `RRSPF`/`RRSFF`/`RRSUF`), `REGUP`, `REGDN`, `NSPIN` (`ONNS`/`OFFNS`) |
-| `Details/mw` | Deployed MW (never above the award) |
+| `Details/mw` | Deployed MW: required and > 0 (missing, 0 or negative is refused 422 malformed, never read as the full award); never above the award |
 | `Details/startTime`, `endTime` | Deployment window, CPT with offset; no end means the product's full duration |
 | `Details/rampMinutes` | Ramp to full deployment (ECRS 10 min; RRS 0 for a frequency event) |
 | `Details/recallOf` | On `RECALL_AS`: the deployment instruction it ends |
