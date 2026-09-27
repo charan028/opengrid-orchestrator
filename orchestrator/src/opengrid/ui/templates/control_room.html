@@ -67,6 +67,7 @@
   <div id="fleet-map" class="og-map og-map-tall"
        data-hubs='{{ map_hubs|tojson }}'
        data-customers='{{ customers|tojson }}'
+       data-stations='{{ depots|default([])|tojson }}'
        data-grid-urls='{{ [base_path ~ "/api/grid/layers?min_kv=200", base_path ~ "/static/grid-layers.json"]|tojson }}'></div>
   <p class="og-map-caption">
     <span class="og-swatch" style="background: var(--series-ercot-energy)"></span> zone load &middot;
@@ -106,6 +107,9 @@
     var handle = og.map.create(mapEl, { center: [31.0, -99.0], zoom: 6 });
 
     og.map.addHubLayer(handle, hubs, { colorBy: "activity" });
+    // Asset classes (owner R3.1): trucks as squares, substation BESS as diamonds sized by MW, and the
+    // D-31 depots with a line to each truck -- the same helpers as the Fleet map.
+    og.map.addDepotLayer(handle, JSON.parse(mapEl.dataset.stations || "[]"), hubs);
     og.map.addCustomerLayer(handle, customers);
 
     og.map.loadGrid(JSON.parse(mapEl.dataset.gridUrls || "[]")).then(function (grid) {
@@ -137,6 +141,9 @@
 
       og.map.addLayerToggles(handle, [
         { key: "hubs", label: "our homes" },
+        { key: "trucks", label: "trucks (mobile storage)" },
+        { key: "substations", label: "substation BESS" },
+        { key: "depots", label: "home stations (depots)" },
         { key: "customers", label: "customer sites" },
         { key: "demand", label: "demand, served vs not" },
         { key: "zoneLoad", label: "zone load" },
@@ -147,7 +154,7 @@
       ], "cr-layer");
       og.map.addLegend(
         handle,
-        [{ heading: "Our homes" }].concat(og.map.hubLegendItems("activity"), og.map.gridLegendItems()),
+        [{ heading: "Asset type" }].concat(og.map.assetLegendItems(), [{ heading: "Our homes" }], og.map.hubLegendItems("activity"), og.map.gridLegendItems()),
         og.map.derivedPositions(hubs)
           ? "Homes are placed inside their real load zone; exact coordinates arrive with /og/api/fleet/map."
           : null
@@ -155,7 +162,7 @@
     }).catch(function () {
       og.map.addLegend(
         handle,
-        [{ heading: "Our homes" }].concat(og.map.hubLegendItems("activity")),
+        [{ heading: "Asset type" }].concat(og.map.assetLegendItems(), [{ heading: "Our homes" }], og.map.hubLegendItems("activity")),
         "Reference grid layers unavailable."
       );
     });

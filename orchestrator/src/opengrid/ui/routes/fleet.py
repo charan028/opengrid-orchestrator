@@ -138,7 +138,7 @@ def map_hub(hub: dict[str, Any]) -> dict[str, Any]:
         "serving_obligations": hub.get("serving_obligations") or [],
         "can_serve_services": hub.get("can_serve_services") or [],
         "asset_class": hub.get("asset_class") or "HOME",
-        "rated_p_kw": hub.get("rated_p_kw"),
+        "rated_p_kw": hub.get("rated_p_kw", hub.get("rated_kw")),
     }
 
 
