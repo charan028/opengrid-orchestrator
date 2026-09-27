@@ -1087,7 +1087,7 @@ numbers 0019–0022 listed there were taken by other work, and the market model 
 
 | Object | Content |
 |---|---|
-| `og.utility` | `utility_id` (AUSTIN_ENERGY, CPS_ENERGY), name, `territory_zones` (text[]), `capacity_product`, `payment_basis` (USD_PER_KW_MONTH or USD_PER_KW_YEAR), `capacity_price_usd_per_kw`, `charging_tariff_kind` (TOU_OFF_PEAK or NIGHT_RATE), off-, mid- and on-peak rates, `charging_adder_usd_per_kwh`, `solar_cost_usd_per_kwh` (default 0.040), `solar_share_floor` (default 0.30), `free_access_granted` (default false, K15 b), `tariff_ref`, `source_note` |
+| `og.utility` | `utility_id` (AUSTIN_ENERGY, CPS_ENERGY; LCRA and RAYBURN added by migration 0046, D-37), name, `territory_zones` (text[]), `capacity_product`, `payment_basis` (USD_PER_KW_MONTH or USD_PER_KW_YEAR), `capacity_price_usd_per_kw`, `charging_tariff_kind` (TOU_OFF_PEAK or NIGHT_RATE), off-, mid- and on-peak rates, `charging_adder_usd_per_kwh`, `solar_cost_usd_per_kwh` (default 0.040), `solar_share_floor` (default 0.30), `free_access_granted` (default false, K15 b), `tariff_ref`, `source_note` |
 | `og.contract.market` | REGULATED or FREE, NOT NULL, default FREE. Every existing contract becomes FREE |
 | `og.contract.utility_id` | FK to `og.utility`. CHECK: set if and only if `market = 'REGULATED'` |
 | `og.contract.service_type` | 0025 owns the full CHECK list: HOME, ERCOT_ENERGY, ERCOT_AS, DIST_DEFERRAL, PARTNER_CAPACITY, DATA_CENTER, PIPELINE_AC, **REGULATED_CAPACITY**, **PJM_CAPACITY**, **MOBILE_STORAGE**, **LARGE_LOAD**. It mirrors `core.models.engine.ServiceType`. A second CHECK makes REGULATED_CAPACITY imply `market = 'REGULATED'` |
@@ -1216,7 +1216,7 @@ Market and fleet rows are `rollup`s of their contract scopes.
 ### 11.5 K15 invariant text (for the lead to copy into `00-invariants.md`)
 
 > **K15 — Territory.** Every contract belongs to exactly one market: REGULATED(u) for a regulated utility u
-> (Austin Energy, CPS Energy) or FREE (ERCOT). (a) A REGULATED(u) obligation is reserved, granted and delivered
+> (Austin Energy, CPS Energy, and since D-37 LCRA and Rayburn) or FREE (ERCOT). (a) A REGULATED(u) obligation is reserved, granted and delivered
 > only by assets inside u's service territory. (b) An asset inside a regulated territory takes FREE (ERCOT)
 > opportunities, including uncommitted headroom, only if u's contract grants wholesale access (default: no).
 > (c) Base's net injection at every boundary substation of u stays ≤ 0. (d) Charging is priced and settled under
@@ -1242,7 +1242,8 @@ territory, K15 c) is G-30, as built.
   asset); `[zone_territory]` via `market.config.load_zone_territory`; `og.utility.free_access_granted`. It never
   uses the allocator's eligibility list.
 - **Fail closed:** a missing obligation or contract, an inconsistent market (`MarketModelError`), an unknown bank
-  or zone, or a territory string that is not one of AUSTIN_ENERGY, CPS_ENERGY or ERCOT_COMPETITIVE all give
+  or zone, or a territory string that is not a known territory (AUSTIN_ENERGY, CPS_ENERGY, LCRA, RAYBURN,
+  ERCOT_COMPETITIVE or NOIE; `market.territory._KNOWN_TERRITORIES`) all give
   `R-TERRITORY-UNKNOWN` → veto.
 - **Veto:** item level (in `_ITEM_LEVEL_RULES`); the verdict is PARTLY_VETOED when other items remain. The
   vetoed item carries the reason code from `check_territory`.
@@ -1284,3 +1285,86 @@ simple, effective and discounted payback, `npv_5y_usd`, `npv_15y_usd`, `meets_ta
 of capex per year, both flagged in each row's `notes`. Revenue is split into capacity (REGULATED_CAPACITY,
 DIST_DEFERRAL, PARTNER_CAPACITY, ERCOT_AS, DATA_CENTER, PJM_CAPACITY) or energy by service type. FREE headroom
 P&L is not yet in the view (no `og.headroom_pnl`).
+
+### 11.9 Changes at r3.4.1 to r3.4.3
+
+What the selector, allocator, engine, guardian and settle do differently since r3.4. Decisions are in
+[11-decision-log.md](11-decision-log.md); open items in [13-known-limitations.md](13-known-limitations.md).
+
+**Zones (D-37 supersedes D-32; r3.4.2).** D-32 had made LZ_LCRA and LZ_RAYBN ERCOT free-market zones. They are
+now regulated: `[zone_territory]` maps them to LCRA and RAYBURN with `market = "REGULATED"` and
+`delivery_charge = "NONE"` (no M1), so K15 applies. With no real contract, their banks are
+`og.bank.availability = UNAVAILABLE` (`REGULATED_NO_CONTRACT`): the selector offers and plans nothing there (no
+candidate, no FREE headroom, 0 kW charge envelope), the allocator grants nothing
+(`R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT`), and G-33 vetoes any non-idle item, except a K13-grandfathered
+obligation (§11.2). Their sample toll contracts are SUSPENDED and never callable. The fleet simulator enables the
+LZ_LCRA and LZ_RAYBN blocks; LZ_AEN and LZ_CPS home blocks stay off in the simulator config (production enables
+AEN), and the 20 MW Austin substation set is enabled.
+
+**One call path (D-33, r3.4.1).** Every dispatch call, whatever its origin (OPERATOR, UTILITY, GRID_LINK,
+ERCOT_POLL, MARKET_SIM, SCENARIO), goes through `opengrid.calls.issue_call` with the same checks (product cap,
+no overlap, discharge only, within committed kW and the reservation window, idempotency, rate limits) and is
+recorded in `og.dispatch_call`. The engine caps a called obligation at the call's requested kW
+(`called_kw_scale`), so a partial deployment discharges only what was asked.
+
+**AS-POLL (D-35, r3.4.2).** og-feeds polls ERCOT DEPLOY_AS / RECALL_AS instructions every 5 s over the `ercot_mms`
+adapter (`[feeds.ercot_as_poll]`, **off in the repo**; the ogsim MMS simulator stands in for ERCOT). Each
+instruction is applied through the same core as the operator route (origin `ERCOT_POLL`); refusals are traced and
+alerted (`ALR-ERCOT-AS-REFUSED`), and failed or stale polls raise `ALR-ERCOT-AS-POLL-FAILED` / `-POLL-STALE`. With
+no instruction nothing is written, so a committed award keeps its 0 kW hold. It replaces the unwired
+`[market_sim]` lease poller.
+
+**K13 hold floor (r3.4.3).** The invariants checker's K13 dip test now uses the hold windows from
+`og.as_deployment` for ERCOT_AS and REGULATED_CAPACITY obligations: the floor is 0 kW outside every deployment
+window and the deployment's `|requested_kw|` (capped at the commitment) inside one. An undeployed AS hold at 0 kW is
+no longer a false K13 violation; a deployed hold that under-delivers still is. Current commitments are selected
+with NOT EXISTS (a superseding row), so replaced originals are no longer checked in place of their replacements.
+
+**Settlement of ERCOT AS capacity at the MCPC (r3.4.3).** Settle prices an ERCOT_AS award's capacity at the cleared
+DAM MCPC of its product (NP4-188-CD, series = the product code) for the delivery hour, flag `MCPC`. With no
+observation it falls back to the opportunity's stored value, flag `OPPORTUNITY_PRICE`, and logs it. The settlement
+trace records `price_per_kwh` and `price_flag`. Energy revenue is unchanged: delivered kWh × the zone SPP (D-10).
+
+**Feeder ramp ceilings (G-06, r3.4.2).** `[guardian.feeder_ramp_ceiling_kw_per_min_by_feeder]` sets per-feeder
+ceilings; every other feeder keeps the 3 MW/min default. `feeder-sub-LZ_AEN-00` (the 20 MW substation set, alone on
+its feeder) is 20 MW/min, so a firm toll call reaches full output within a minute; `feeder-LZ_AEN-00` and
+`feeder-LZ_AEN-01` (five toll home banks each, about 3.3 MW/min on the anchor) are 7 MW/min. Since r3.4.1 G-04
+anchors a toll step at the **signed setpoint** while the lease is live, and G-05, G-06 and G-32 use the same anchor,
+so a ramp between telemetry updates is not vetoed. A 1.5x over-step is still vetoed by G-04 (full-check-set test at
+20 MW, r3.4.3).
+
+**Topology (D-36, r3.4.1).** Every hub, bank and feeder is mapped: a home bank's service transformers sum to its
+kVA rating (12 × 50 kVA for a 600 kVA, 50-home bank); the substation set and each truck depot get one transformer at
+their bank rating, so trucks are behind G-27 like any bank. Dedicated-connection hubs get their premise limits at
+nameplate. G-29 now raises `ALR-SUBSTATION-UNMAPPED-TOPOLOGY` for a bank with no substation mapping or limit row,
+and the unmapped-bank relief rule rejects sign flips (only |new| ≤ |old| on the same side of zero, or zero).
+
+**Trucks: device-reported position and nameplate rating (r3.4.1).** G-35 and the selector read one query
+(`core.geo.DEVICE_POSITIONS_SQL`: `og.hub.device_lat`/`device_lon`/`device_info_at`) and keep a report only while
+it is fresher than `MOBILE_POSITION_MAX_AGE_S` (300 s). A missing, stale or future-stamped report means unknown,
+which counts as **away** (fail closed): no dispatch and no charging for that truck. `core.nameplate` is the one rule
+for which hubs are rated at nameplate `p_kw` (hubs of an `og.asset` of class SUBSTATION or MOBILE_STORAGE) for
+G-02, the fleet twin the selector and allocator plan with, the engine's utility-scale banks and the invariants.
+
+**Bounded propose (r3.4.3).** The whole propose phase is bounded (`[allocator].propose_timeout_s`, default 2 s):
+banks still pending are cancelled and reported as timed out, the rest still go out (K7), and hubs hold their last
+signed command. The guardian heartbeat read is bounded too (`[allocator].guardian_check_timeout_s`, default 0.5 s);
+after a propose timeout the guardian counts as unavailable until it writes a newer heartbeat, so the next cycles
+hold instead of stalling. The obligation lifecycle step runs in the background (single-flight, 30 s bound).
+
+**Firmware-updating hubs (r3.4.1, r3.4.3).** They are a device exclusion: substituted within the obligation, and a
+shortfall they cause carries `R-COMMIT-LOCK-OVERRIDE-L0`. G-19 drops them from the bank capability it checks, so the
+L0 claim corroborates (see [16-firmware-updates.md](16-firmware-updates.md)).
+
+**Delivery verification hooks (D-38, r3.4.3).** og-settle's delivery job (`opengrid.delivery`, observation only,
+K7) measures each discharge call against its commitment from telemetry aligned to the call window, and writes
+`og.delivery_record`. What it feeds back into dispatch:
+
+- a measured SHORTFALL or NONE sets the obligation **AT_RISK** (`contracts.set_obligation_at_risk`,
+  `R-DELIVERY-MEASURED-SHORTFALL`) and clears it on recovery; the allocator's best-effort rule (D-17) is unchanged;
+- the call status reports RAMPING / DELIVERING from **measured** kW (`[dispatch.calls].ramping_fraction` 0.9 of the
+  target), which the utility API and the grid link serve;
+- live alerts `ALR-DELIVERY-RAMP-LATE`, `-SHORTFALL`, `-NONE` and, at the end of a call on a metered bank,
+  `ALR-DELIVERY-METER-MISMATCH`.
+
+It never commands, vetoes or signs; the guardian and the allocator do not read it.

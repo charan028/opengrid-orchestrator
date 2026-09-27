@@ -500,7 +500,7 @@ def plan_view(plan: dict[str, Any] | None) -> dict[str, Any]:
         "has_plan": True,
         "plan_id": plan.get("plan_id"),
         "plan_mode": plan.get("plan_mode"),
-        "mode_label": "LP optimizer" if is_lp else "Rule-based fallback",
+        "mode_label": "MILP optimizer" if is_lp else "Rule-based fallback",
         "is_lp": is_lp,
         "gate_kind": plan.get("gate_kind"),
         "horizon_start": plan.get("horizon_start"),

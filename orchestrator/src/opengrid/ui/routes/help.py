@@ -52,6 +52,9 @@ TOC: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             ("hw-manual", "Manual targets"),
             ("hw-safestop", "Safe stop"),
             ("hw-market", "Market model"),
+            ("hw-delivery", "Measured delivery"),
+            ("hw-delivery-rules", "Delivery records and alerts"),
+            ("hw-utility-api", "Utility calls"),
         ),
     ),
     (
@@ -70,7 +73,15 @@ TOC: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             ("page-help", "Help"),
         ),
     ),
-    ("integrations", "Integrations", ()),
+    (
+        "integrations",
+        "Integrations",
+        (
+            ("in-utility-api", "Utility API"),
+            ("in-grid-link", "Grid link"),
+            ("in-as-poll", "AS-POLL"),
+        ),
+    ),
     ("apis", "APIs", ()),
     (
         "events",
@@ -84,6 +95,7 @@ TOC: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             ("ev-broker", "Broker reconnect"),
             ("ev-trace", "Trace journal"),
             ("ev-outbox", "Stop outbox"),
+            ("ev-delivery", "Delivery events"),
         ),
     ),
     (
@@ -96,7 +108,19 @@ TOC: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             ("mt-logs", "Logs"),
         ),
     ),
-    ("playbooks", "Playbooks", (("pb-personas", "Personas"),)),
+    (
+        "playbooks",
+        "Playbooks",
+        (
+            ("pb-personas", "Personas"),
+            ("pb-utility-call", "Utility call arrives"),
+            ("pb-delivery-alert", "Delivery alert"),
+            ("pb-regulated-unavailable", "LCRA/RAYBN unavailable"),
+            ("pb-trucks-away", "Trucks away or home"),
+            ("pb-as-poll-refusal", "AS poll refusal"),
+            ("pb-grid-link-heartbeat", "Grid-link heartbeat loss"),
+        ),
+    ),
     ("glossary", "Glossary", ()),
 )
 
@@ -111,7 +135,9 @@ FRAGMENTS_AFTER_APIS: tuple[str, ...] = ("events", "maintenance", "playbooks", "
 #: API reference names them.
 _ROLE_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("require_operator", "operator"),
+    ("require_utility_action", "utility key"),
     ("require_customer", "customer key"),
+    ("require_action", "policy (authz)"),
     ("require_viewer", "viewer"),
     ("require_loopback_health_probe", "local probe"),
     ("current_identity", "signed-in"),
@@ -126,6 +152,8 @@ def _dependency_names(dependant: Dependant) -> set[str]:
         call: Callable[..., Any] | None = sub.call
         if call is not None:
             names.add(getattr(call, "__name__", ""))
+            # dependency factories (`require_action("...")`) return a closure: name it by its factory
+            names.add(str(getattr(call, "__qualname__", "")).split(".<locals>", 1)[0])
         names |= _dependency_names(sub)
     return names
 

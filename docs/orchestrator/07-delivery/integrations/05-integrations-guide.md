@@ -4,8 +4,8 @@ As of 2026-09-25
 
 The orchestrator's first release (MVP-S) connects to three external data sources (ERCOT, EIA, NWS) and to the battery
 fleet over MQTT. This guide lists each integration and gives a configuration template with placeholders only. The
-template is also available as files: [api_keys.env.example](integrations/api_keys.env.example) and
-[orchestrator.integrations.toml.example](integrations/orchestrator.integrations.toml.example).
+template is also available as files: [api_keys.env.example](api_keys.env.example) and
+[orchestrator.integrations.toml.example](orchestrator.integrations.toml.example).
 
 ## Integrations at a glance
 

@@ -20,7 +20,7 @@
         "type": "object"
       },
       "AsDeploymentCreate": {
-        "description": "Operator-triggered ERCOT_AS deployment of ONE award (the demo's stand-in for an ERCOT deployment\ninstruction). A fleet-wide deployment is refused: it would discharge every held award at once, which\nneeds a two-person approval this route does not provide (review finding, 2026-09-26).",
+        "description": "Operator-triggered deployment of ONE held award: an ERCOT_AS award (the demo's stand-in for an\nERCOT deployment instruction) or, D-29, a utility's call on a tolling obligation. A fleet-wide\ndeployment is refused: it would discharge every held award at once, which needs a two-person approval\nthis route does not provide (review finding, 2026-09-26). `requested_kw` is signed (+charge/\n-discharge, so negative); omitted = the full committed kW. `start_at` omitted = now.",
         "properties": {
           "duration_minutes": {
             "default": 15,
@@ -28,6 +28,19 @@
             "minimum": 1.0,
             "title": "Duration Minutes",
             "type": "integer"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
           },
           "obligation_id": {
             "anyOf": [
@@ -47,6 +60,17 @@
             "title": "Reason",
             "type": "string"
           },
+          "requested_kw": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested Kw"
+          },
           "scope": {
             "anyOf": [
               {
@@ -57,6 +81,18 @@
               }
             ],
             "title": "Scope"
+          },
+          "start_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start At"
           }
         },
         "required": [
@@ -158,6 +194,17 @@
               }
             ],
             "title": "Refusal Reason"
+          },
+          "screened_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Screened By"
           },
           "text": {
             "title": "Text",
@@ -2407,8 +2454,289 @@
         ]
       }
     },
+    "/og/api/delivery/records": {
+      "get": {
+        "description": "Delivery records newest first (without their per-bucket series), filtered by service, contract,\ncall kind, result, utility, call ids and window-start date range.",
+        "operationId": "list_delivery_records_og_api_delivery_records_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "service_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "contract_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Contract Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "call_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Call Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "result",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Result"
+            }
+          },
+          {
+            "in": "query",
+            "name": "utility_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Utility Id"
+            }
+          },
+          {
+            "description": "comma-separated call ids",
+            "in": "query",
+            "name": "call_ids",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "comma-separated call ids",
+              "title": "Call Ids"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Until"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Delivery Records Og Api Delivery Records Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Delivery Records",
+        "tags": [
+          "delivery"
+        ]
+      }
+    },
+    "/og/api/delivery/records/{call_id}": {
+      "get": {
+        "description": "One call's delivery record with its per-bucket series (committed, commanded, delivered, meter).",
+        "operationId": "get_delivery_record_og_api_delivery_records__call_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Delivery Record Og Api Delivery Records  Call Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Delivery Record",
+        "tags": [
+          "delivery"
+        ]
+      }
+    },
+    "/og/api/delivery/summary": {
+      "get": {
+        "description": "Per contract per CT day over final records: calls, PASS/PARTIAL/FAIL, compliance % (PASS share),\nmean sustained compliance, meter mismatches, discharged vs committed kWh.",
+        "operationId": "delivery_summary_og_api_delivery_summary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 92,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Delivery Summary Og Api Delivery Summary Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delivery Summary",
+        "tags": [
+          "delivery"
+        ]
+      }
+    },
     "/og/api/dispatch/as-deployments": {
       "get": {
+        "description": "Active deployments with their origin (`source`: OPERATOR, UTILITY, GRID_LINK, ERCOT, MARKET_SIM,\nSCENARIO) and who asked (`requested_by`), for the Dispatch screen.",
         "operationId": "list_as_deployments_og_api_dispatch_as_deployments_get",
         "responses": {
           "200": {
@@ -2433,7 +2761,7 @@
         ]
       },
       "post": {
-        "description": "Deploy one held ERCOT_AS award now: while active, the allocator discharges it up to its committed\nkW (an AS award is otherwise a 0 kW capacity hold). The award must exist, be ERCOT_AS and be\ndeployable now (404/409 otherwise), the duration is capped by the obligation's own product rule (ECRS\n60 min, Non-Spin 240; 409 when it has none), and a second deployment while one is active is refused\n(409, no chaining). Traced before it takes effect (K10).\n\nD-29: the same route issues a utility's discharge call on a tolling obligation (REGULATED_CAPACITY,\ncontract variant TOLLING) -- same checks, capped by its product rule (TOLLING 90 min), recorded as\nsource OPERATOR with a reason starting \"utility call\".",
+        "description": "Deploy one held award now (or at `start_at`) through the one call path, `opengrid.calls.issue_call`\n(D-33): the same checks as a utility's own call -- deployable state, the obligation's own product\ncap (ECRS 60, Non-Spin 240, TOLLING 90 min; refused when it has none), no overlap, discharge only,\nwithin the committed kW and the reservation window, idempotency and rate limits. Traced before it\ntakes effect (K10), with origin OPERATOR.",
         "operationId": "create_as_deployment_og_api_dispatch_as_deployments_post",
         "requestBody": {
           "content": {
@@ -2477,7 +2805,7 @@
     },
     "/og/api/dispatch/as-deployments/{deployment_id}": {
       "delete": {
-        "description": "End a deployment early: the award(s) return to a 0 kW capacity hold on the next cycle.",
+        "description": "End a deployment early (any origin): the award returns to a 0 kW capacity hold on the next cycle.",
         "operationId": "end_as_deployment_og_api_dispatch_as_deployments__deployment_id__delete",
         "parameters": [
           {
@@ -2516,6 +2844,73 @@
           }
         },
         "summary": "End As Deployment",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/og/api/dispatch/calls": {
+      "get": {
+        "description": "The call ledger (every origin, refusals included), newest first.",
+        "operationId": "list_dispatch_calls_og_api_dispatch_calls_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "utility_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Utility Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Dispatch Calls Og Api Dispatch Calls Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Dispatch Calls",
         "tags": [
           "dispatch"
         ]
@@ -4196,7 +4591,7 @@
     },
     "/og/api/fleet/map": {
       "get": {
-        "description": "`{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,\nbank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,\nhome_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[],\nasset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`). `depots` are the D-31 home\nstations with their assigned units. `activity_counts` covers the filtered set.",
+        "description": "`{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,\nbank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,\nhome_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[],\nasset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`) and the D-37 availability\nfields (`opengrid.market.availability.availability_fields`). `depots` are the D-31 home\nstations with their assigned units. `activity_counts` covers the filtered set.",
         "operationId": "fleet_map_og_api_fleet_map_get",
         "parameters": [
           {
@@ -4594,6 +4989,112 @@
               ],
               "title": "Asset Class"
             }
+          },
+          {
+            "in": "query",
+            "name": "e_kwh_min",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "E Kwh Min"
+            }
+          },
+          {
+            "in": "query",
+            "name": "e_kwh_max",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "E Kwh Max"
+            }
+          },
+          {
+            "in": "query",
+            "name": "p_kw_min",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "P Kw Min"
+            }
+          },
+          {
+            "in": "query",
+            "name": "p_kw_max",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "P Kw Max"
+            }
+          },
+          {
+            "in": "query",
+            "name": "units",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Units"
+            }
+          },
+          {
+            "in": "query",
+            "name": "availability",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Availability"
+            }
           }
         ],
         "responses": {
@@ -4963,6 +5464,112 @@
                 }
               ],
               "title": "Asset Class"
+            }
+          },
+          {
+            "in": "query",
+            "name": "e_kwh_min",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "E Kwh Min"
+            }
+          },
+          {
+            "in": "query",
+            "name": "e_kwh_max",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "E Kwh Max"
+            }
+          },
+          {
+            "in": "query",
+            "name": "p_kw_min",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "P Kw Min"
+            }
+          },
+          {
+            "in": "query",
+            "name": "p_kw_max",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "P Kw Max"
+            }
+          },
+          {
+            "in": "query",
+            "name": "units",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Units"
+            }
+          },
+          {
+            "in": "query",
+            "name": "availability",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Availability"
             }
           }
         ],
@@ -6699,6 +7306,30 @@
         "summary": "Verify Trace",
         "tags": [
           "billing"
+        ]
+      }
+    },
+    "/og/api/views/availability": {
+      "get": {
+        "description": "D-37: bank availability per zone and the fleet capacity split -- available kW vs \"Regulated market -\nno contract\" kW -- for the Profitability capacity line and the Control room zone summary. Rated kW is\nthe bank's kVA rating (the bank's discharge ceiling). A database before 0046 reads all AVAILABLE.",
+        "operationId": "availability_view_og_api_views_availability_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Availability View Og Api Views Availability Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Availability View",
+        "tags": [
+          "views"
         ]
       }
     },
