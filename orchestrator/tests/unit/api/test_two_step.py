@@ -30,7 +30,7 @@ def _propose_command(client) -> str:
 
 def _manual_targets(fake_trace_store) -> list[dict]:
     records = []
-    for stream in ("operator_action:operator",):
+    for stream in ("manual_target:operator",):  # manual targets have their own DB-or-nothing stream
         records += asyncio.run(fake_trace_store._backend.fetch_range(stream, from_seq=0))
     return [r.payload for r in records if r.event_class == "MANUAL_TARGET"]
 
@@ -247,6 +247,81 @@ def test_a_stop_cancelled_target_is_listed_as_such_and_cannot_be_cancelled(
     assert item["status"] == "CANCELLED_BY_SAFE_STOP" and item["stop_event_id"] == "stop-1"
     resp = client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS)
     assert resp.status_code == 409 and resp.json()["detail"]["status"] == ["CANCELLED_BY_SAFE_STOP"]
+
+
+def test_a_target_the_trace_store_could_not_record_is_a_503_and_never_journaled(
+    client, fake_store, fake_trace_store, monkeypatch
+) -> None:
+    """r3.4.1 (workstation LOW/R5): the manual-target store is DB-or-nothing -- a failed write raises
+    TraceNotRecordedError (nothing journaled, so no replay or engine restart can bring the target back), and
+    the API answers 503 with no operator_action row."""
+    from opengrid.trace.pg_backend import TraceNotRecordedError
+
+    proposal_id = _propose_command(client)
+
+    async def _refuse(**kwargs):
+        raise TraceNotRecordedError(kwargs["stream_id"], kwargs["seq"], RuntimeError("db down"))
+
+    monkeypatch.setattr(fake_trace_store._backend, "insert_trace_row", _refuse)
+    resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 503 and "not recorded" in resp.json()["detail"]
+    assert fake_store.operator_actions == []
+    assert _manual_targets(fake_trace_store) == []
+
+
+def test_a_write_whose_ack_was_lost_but_committed_is_a_success(
+    client, fake_store, fake_trace_store, monkeypatch
+) -> None:
+    """The one ambiguous case: the insert committed, the acknowledgement was lost. The API finds the row by
+    its request_id and answers 202 (the engine will ramp it), never a false 503."""
+    from uuid import uuid4 as _uuid4
+
+    from opengrid.trace.pg_backend import TraceNotRecordedError
+
+    proposal_id = _propose_command(client)
+    committed_trace_id = _uuid4()
+
+    async def _lost_ack(**kwargs):
+        fake_store.committed_request_ids[kwargs["payload"]["request_id"]] = committed_trace_id
+        raise TraceNotRecordedError(kwargs["stream_id"], kwargs["seq"], RuntimeError("connection reset"))
+
+    monkeypatch.setattr(fake_trace_store._backend, "insert_trace_row", _lost_ack)
+    resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 202 and resp.json()["trace_id"] == str(committed_trace_id)
+
+
+def test_an_unverifiable_failure_is_outcome_unknown_not_not_recorded(
+    client, fake_store, fake_trace_store, monkeypatch
+) -> None:
+    from opengrid.trace.pg_backend import TraceNotRecordedError
+
+    proposal_id = _propose_command(client)
+
+    async def _refuse(**kwargs):
+        raise TraceNotRecordedError(kwargs["stream_id"], kwargs["seq"], RuntimeError("connection reset"))
+
+    async def _lookup_down(request_id):
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(fake_trace_store._backend, "insert_trace_row", _refuse)
+    monkeypatch.setattr(fake_store, "manual_target_trace_id", _lookup_down)
+    resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 503 and "outcome unknown" in resp.json()["detail"]
+
+
+def test_an_audit_row_failure_after_a_durable_target_is_202_with_a_warning(
+    client, fake_store, monkeypatch
+) -> None:
+    """R5: the target is live once traced; a failing og.operator_action insert must not become a 500."""
+    proposal_id = _propose_command(client)
+
+    async def _boom(**kwargs):
+        raise RuntimeError("operator_action insert failed")
+
+    monkeypatch.setattr(fake_store, "insert_operator_action", _boom)
+    resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 202 and resp.json()["status"] == "RAMPING"
+    assert resp.json()["warnings"] == ["operator_action audit row not written; the trace record stands"]
 
 
 def test_a_target_that_only_reached_the_journal_is_a_503_not_ramping(client, fake_store, monkeypatch) -> None:

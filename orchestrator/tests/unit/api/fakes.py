@@ -76,6 +76,8 @@ class FakeStore:
     stop_event_rows_data: list[tuple[Any, ...]] = field(default_factory=list)
     #: trace ids `trace_recorded` reports as NOT in og.trace (the backend journaled them).
     unrecorded_trace_ids: set[str] = field(default_factory=set)
+    #: request_id -> trace_id for writes that committed although the append raised (lost ack).
+    committed_request_ids: dict[str, UUID] = field(default_factory=dict)
     #: (scope_kind, scope_ref) -> og.owner_charge_window row (D-30).
     charge_windows: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     #: ("HUB", hub_id) / ("BANK", bank_id) -> {hub_id, bank_id, zone, feeder_id, substation_id}.
@@ -463,6 +465,9 @@ class FakeStore:
 
     async def trace_recorded(self, trace_id: UUID) -> bool:
         return str(trace_id) not in self.unrecorded_trace_ids
+
+    async def manual_target_trace_id(self, request_id: str) -> UUID | None:
+        return self.committed_request_ids.get(request_id)
 
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         """Test-set `manual_target_rows_data` (the SQL itself runs in the integration suite)."""
