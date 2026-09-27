@@ -151,6 +151,7 @@ async def _cycle(world: TollWorld, target_kw: float, *, firm: bool = True) -> tu
     proposal = _proposal(world, target_kw, firm=firm)
     verdict = await world.service.evaluate_and_sign(make_batch_row(proposal))
     if verdict.outcome == "PASS":
+        world.service.confirm_published(proposal.command_batch_id)  # published: the hub follows it
         world.fakes.prior_grants.prior[world.toll] = Decimal(str(round(target_kw, 3)))
         world.granted.append(target_kw)
     return verdict.outcome, list(verdict.vetoed_rule_ids)

@@ -191,6 +191,17 @@ class GuardianService:
     #: G-04 anchor: per hub, the last net setpoint this guardian SIGNED, when, and its lease expiry
     _last_signed: dict[str, tuple[float, datetime, datetime]] = field(default_factory=dict, init=False)
 
+    #: signed batches whose commands are not yet published: they become G-04 anchors only once they are
+    _signed_unpublished: OrderedDict[UUID, datetime] = field(default_factory=OrderedDict, init=False)
+
+    def confirm_published(self, command_batch_id: UUID) -> None:
+        """The signed batch reached the hubs (`guardian.main` after a successful publish): its per-hub net setpoints
+        become G-04's signed anchors. A batch signed but never published leaves the anchors where the hubs are
+        (r3.4.3 LOW: anchoring at signing put both sides a step ahead of the hub after a failed publish)."""
+        signed_at = self._signed_unpublished.pop(command_batch_id, None)
+        if signed_at is not None:
+            self._record_signed_setpoints(command_batch_id, signed_at)
+
     def _record_signed_setpoints(self, command_batch_id: UUID, signed_at: datetime) -> None:
         """Remember each hub's signed net setpoint (G-04's utility-scale anchor, `checks.g04_anchor_kw`)."""
         proposal = self._evaluated.get(command_batch_id)
@@ -1589,7 +1600,9 @@ class GuardianService:
                 "signed_at": _iso_z(signed_at),
             }
             signature = sign_payload(self.signing_seed, payload)
-            self._record_signed_setpoints(batch.command_batch_id, signed_at)
+            self._signed_unpublished[batch.command_batch_id] = signed_at  # anchored on `confirm_published`
+            while len(self._signed_unpublished) > _MAX_EVALUATED_PROPOSALS:
+                self._signed_unpublished.popitem(last=False)
         # A veto never ends a signed anchor (r3.4.3 HIGH, contract with DISPATCH): while that lease is live the
         # hub keeps following the last SIGNED setpoint, so that is where the next step starts. Re-anchoring on
         # telemetry up to ~10 s stale let a step of 4-5x the bound sign right after an item-level veto.

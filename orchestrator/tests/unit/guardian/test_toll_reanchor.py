@@ -106,6 +106,7 @@ class Sim:
         world.fakes.leases.last[BANK] = (1, world.seq - 1)
         verdict = await world.service.evaluate_and_sign(make_batch_row(proposal))
         if verdict.outcome == "PASS":
+            world.service.confirm_published(proposal.command_batch_id)
             # the guardian never signs more than one cycle's bound from where the hub physically is
             assert abs(target - self.phys_kw) <= STEP_KW + EPS, (self.cycle, target, self.phys_kw)
             self.phys_kw = target
@@ -283,3 +284,39 @@ async def test_a_hold_item_and_a_discharge_item_on_one_hub_are_checked_on_their_
     await sim.converge()
     assert sim.vetoes == 0
     assert sim.world.service._last_signed[HUB][0] == pytest.approx(-TOLL_KW)
+
+
+# --- r3.4.3 LOW: only a published batch moves the signed anchor ------------------------------------------------
+
+
+async def test_a_signed_batch_whose_publish_failed_never_becomes_the_anchor(fakes, signing_seed):
+    sim = _sim(fakes, signing_seed)
+    await sim.run(10)
+    service = sim.world.service
+    before = service._last_signed[HUB]
+    sim.tick()
+    sim.world.seq += 1
+    target = before[0] - ENGINE_STEP_KW
+    proposal = ProposedBatch(
+        command_batch_id=uuid4(),
+        bank_id=BANK,
+        cycle_id=f"cycle-{sim.world.seq}",
+        epoch=1,
+        seq=sim.world.seq,
+        issued_at=sim.now,
+        expires_at=sim.now + timedelta(seconds=LEASE_S),
+        ledger_version=sim.world.fakes.ledger.version,
+        items=[
+            ProposedItem(HUB, target, "R-GRANT-COMMITTED", sim.world.toll, Decimal(str(round(-target, 3))))
+        ],
+        is_firm_event=True,
+    )
+    sim.world.fakes.proposals.add(proposal)
+    sim.world.fakes.leases.last[BANK] = (1, sim.world.seq - 1)
+
+    verdict = await service.evaluate_and_sign(make_batch_row(proposal))
+
+    assert verdict.outcome == "PASS"
+    assert service._last_signed[HUB] == before  # signed, not published: the hub is still where it was
+    service.confirm_published(proposal.command_batch_id)
+    assert service._last_signed[HUB][0] == pytest.approx(target)

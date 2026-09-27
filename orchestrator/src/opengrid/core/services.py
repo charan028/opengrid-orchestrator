@@ -54,3 +54,43 @@ ALL_SERVICE_TYPES: Final[tuple[str, ...]] = (
 HOLD_SERVICE_TYPES: Final[frozenset[str]] = frozenset(
     {ERCOT_AS_SERVICE_TYPE, REGULATED_CAPACITY_SERVICE_TYPE}
 )
+
+# --- ERCOT AS / toll products (the contract's `variant`) ------------------------------------------------------
+#: The canonical product names (ERCOT's `ancillaryType` spelling, plus the D-29 toll). Every module that keys on
+#: a product (hold hours, deployment caps, the delivery ramp policy) normalises through `canonical_product`.
+ECRS_PRODUCT: Final = "ECRS"
+RRS_PRODUCT: Final = "RRS"
+REGUP_PRODUCT: Final = "REGUP"
+REGDN_PRODUCT: Final = "REGDN"
+NSPIN_PRODUCT: Final = "NSPIN"
+TOLLING_PRODUCT: Final = "TOLLING"
+
+#: Other spellings found in contracts, seeds and feeds -> the canonical name (Non-Spin is written NSPIN,
+#: NONSPIN and NON_SPIN across the codebase; ERCOT MMS uses ONNS/OFFNS for its on/off-line Non-Spin).
+_PRODUCT_ALIASES: Final[dict[str, str]] = {
+    "NONSPIN": NSPIN_PRODUCT,
+    "NON_SPIN": NSPIN_PRODUCT,
+    "NON-SPIN": NSPIN_PRODUCT,
+    "ONNS": NSPIN_PRODUCT,
+    "OFFNS": NSPIN_PRODUCT,
+    "REG_UP": REGUP_PRODUCT,
+    "REG-UP": REGUP_PRODUCT,
+    "REGDOWN": REGDN_PRODUCT,
+    "REG_DOWN": REGDN_PRODUCT,
+    "REG-DOWN": REGDN_PRODUCT,
+    "REG_DN": REGDN_PRODUCT,
+}
+
+#: NPRR1282 stored-energy duration per AS product (hours of full deployment the award must be able to hold).
+AS_HOLD_HOURS: Final[dict[str, int]] = {ECRS_PRODUCT: 1, NSPIN_PRODUCT: 4}
+#: Longest deployment the product rule allows, in minutes (ECRS 1 h, Non-Spin 4 h; tolling 90 min, D-29).
+AS_MAX_DEPLOY_MINUTES: Final[dict[str, int]] = {ECRS_PRODUCT: 60, NSPIN_PRODUCT: 240, TOLLING_PRODUCT: 90}
+
+
+def canonical_product(variant: str | None) -> str | None:
+    """The canonical product name of a contract variant (case and separator insensitive; NONSPIN and NON_SPIN
+    are NSPIN), or None for an empty variant. An unknown product is returned upper-cased, unchanged."""
+    if variant is None or not variant.strip():
+        return None
+    key = variant.strip().upper()
+    return _PRODUCT_ALIASES.get(key, key)
