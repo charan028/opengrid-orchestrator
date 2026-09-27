@@ -63,6 +63,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 SNAPSHOT_REF="$RELEASE/orchestrator/schema/og_schema.sql"
+# og_t_* workspace databases exist only on the test cluster (tests/integration/cluster_guard.py is the
+# same rule for the Python helpers). Checked before anything else, --dry-run included.
+case "$DB_NAME" in
+  og_t_*) [ "$DB_PORT" = 5433 ] || die "refusing to create workspace database $DB_NAME on port $DB_PORT: og_t_* databases live only on the test cluster (port 5433)" ;;
+esac
 
 pg_admin() {
   if [ -n "${OG_PG_ADMIN_PASSWORD:-}" ]; then

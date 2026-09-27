@@ -45,6 +45,13 @@ og_ws_env() {
     echo "warning: no $work/$ws/.mqtt.env -- this workspace has no MQTT user; MQTT clients will refuse to start" >&2
   fi
 
+  # og_t_* databases exist only on the test cluster: an override to any other port (5432 above all) is
+  # refused before OG_DB is exported, so no caller can create or migrate a workspace DB elsewhere.
+  if [ "${OG_DB_PORT_OVERRIDE:-5433}" != 5433 ]; then
+    echo "og_ws_env: refusing OG_DB_PORT_OVERRIDE=${OG_DB_PORT_OVERRIDE}: og_t_$ws lives only on the test cluster (port 5433)" >&2
+    return 1
+  fi
+
   # Workspace DBs live on the separate disposable test cluster (port 5433, fsync off, /srv/pgstandby),
   # never on the production cluster (5432): R2 incident 2026-09-26, test I/O starved production commits.
   export OG_WS="$ws" OG_DB="og_t_$ws" OG_DB_PORT="${OG_DB_PORT_OVERRIDE:-5433}" OG_MQTT_ROOT="ogtest/$ws" \

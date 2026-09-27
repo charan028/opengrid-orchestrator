@@ -65,3 +65,23 @@ def test_workspace_gets_its_own_user_and_no_production_mqtt_credential(tmp_path)
 def test_unprovisioned_workspace_gets_no_mqtt_credential_at_all(tmp_path):
     env = _env_after(tmp_path, mqtt_env=None)
     assert not [name for name in env if name.startswith("OG_MQTT_") and name != "OG_MQTT_ROOT"]
+
+
+@pytest.mark.parametrize("port", ["5432", "5434"])
+def test_workspace_db_on_any_port_but_the_test_cluster_is_refused(tmp_path, port):
+    (tmp_path / "secrets.env").write_text("OG_DB_PASSWORD=x\n", encoding="utf-8")
+    (tmp_path / "api_keys.env").write_text("", encoding="utf-8")
+    script = (
+        f'. "{WS_ENV.as_posix()}"; og_ws_env guard "{tmp_path}/secrets.env" "{tmp_path}/api_keys.env" '
+        f'"{tmp_path}/work"; rc=$?; echo "rc=$rc OG_DB=${{OG_DB:-unset}}"'
+    )
+    result = subprocess.run(  # noqa: S603 -- fixed repo script, test-controlled arguments
+        [_BASH or "bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin", "OG_DB_PORT_OVERRIDE": port},
+    )
+    assert "rc=1 OG_DB=unset" in result.stdout
+    assert f"refusing OG_DB_PORT_OVERRIDE={port}" in result.stderr
+    assert "port 5433" in result.stderr

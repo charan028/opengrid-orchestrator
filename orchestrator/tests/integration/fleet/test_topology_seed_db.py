@@ -70,6 +70,8 @@ def own_config(server_config) -> Iterator[Any]:
     from opengrid.platform.config import Config
     from opengrid.platform.db import build_dsn, migrate_sync
 
+    from ..cluster_guard import require_test_cluster_dsn
+
     name = f"{server_config.postgres_database}_topo"
     params = conninfo_to_dict(build_dsn(server_config))
     admin = make_conninfo(**{**params, "dbname": "postgres"})
@@ -78,6 +80,7 @@ def own_config(server_config) -> Iterator[Any]:
         with psycopg.connect(admin, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
+    require_test_cluster_dsn(make_conninfo(**{**params, "dbname": name}))
     _drop()
     with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{name}"')

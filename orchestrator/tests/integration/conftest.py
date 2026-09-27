@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from .cluster_guard import require_test_cluster
+
 _SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -42,6 +44,10 @@ def server_config():
         },
         "safestop": {"confirm_window_s": 30},
     }
+    # build_dsn's port: OG_DB_PORT first, then postgres.port. og_t_* only on 5433 (cluster_guard).
+    require_test_cluster(
+        data["postgres"]["database"], os.environ.get("OG_DB_PORT") or data["postgres"]["port"]
+    )
     return Config(data)
 
 
