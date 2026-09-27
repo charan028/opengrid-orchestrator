@@ -20,10 +20,11 @@ def test_guardian_ramp_ceiling_for_the_substation_feeder_only() -> None:
     config = load_guardian_config(load_config(ORCH / "config" / "orchestrator.toml"))
     ceiling = config.feeder_ramp_ceiling_kw_per_min[FEEDER]
     assert ceiling >= TOLL_KW  # full 20 MW within one minute
-    # The Austin home feeder carries the toll's 10 x 600 kW home-bank share: 7 MW/min covers its ~6.7 MW/min ramp.
+    # Both Austin home feeders carry 5 x 600 kW of the toll's home-bank share (~3.3 MW/min each): 7 MW/min.
     assert config.feeder_ramp_ceiling_kw_per_min["feeder-LZ_AEN-00"] == 7000
-    # every other home feeder keeps the 3 MW/min default
-    assert set(config.feeder_ramp_ceiling_kw_per_min) == {FEEDER, "feeder-LZ_AEN-00"}
+    assert config.feeder_ramp_ceiling_kw_per_min["feeder-LZ_AEN-01"] == 7000
+    # every other feeder keeps the 3 MW/min default
+    assert set(config.feeder_ramp_ceiling_kw_per_min) == {FEEDER, "feeder-LZ_AEN-00", "feeder-LZ_AEN-01"}
 
 
 def test_seed_limits_cover_a_20_mw_call_on_its_own_feeder() -> None:
