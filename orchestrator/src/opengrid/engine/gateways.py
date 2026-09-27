@@ -308,6 +308,12 @@ def called_kw_scale(call_rows: Sequence[Sequence[Any]]) -> dict[str, float]:
     }
 
 
+def is_partial_call(as_deployed: object, obligation_id: str, call_scale: Mapping[str, float]) -> bool:
+    """D-33: this obligation is called right now for less than its committed kW (`called_kw_scale` < 1):
+    its grants carry R-AS-PARTIAL-DEPLOYMENT, which the guardian's G-19 corroborates from og.as_deployment."""
+    return bool(as_deployed) and call_scale.get(obligation_id, 1.0) < 1.0
+
+
 def _bank_zone(bank_id: str) -> str | None:
     try:
         return fleet.bank_zone(bank_id)
@@ -836,6 +842,7 @@ class EngineLedgerGateway:
                     ),
                     market_ref=markets.get(str(obligation_id), FREE),
                     grandfathered=(str(obligation_id), str(bank_id)) in grandfathered,
+                    partial_call=is_partial_call(as_deployed, str(obligation_id), call_scale),
                 )
             )
         return LedgerView(calls=tuple(calls))

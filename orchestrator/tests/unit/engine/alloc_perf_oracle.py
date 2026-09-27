@@ -230,6 +230,8 @@ async def ledger_view(self, bank_ids: Sequence[str], interval_start: datetime) -
                 ),
                 market_ref=markets.get(str(obligation_id), FREE),
                 grandfathered=(str(obligation_id), str(bank_id)) in grandfathered,
+                # r3.4.4 (DISPATCH): the base gateway tags a D-33 partial call.
+                partial_call=gw.is_partial_call(as_deployed, str(obligation_id), call_scale),
             )
         )
     return LedgerView(calls=tuple(calls))

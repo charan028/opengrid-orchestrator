@@ -45,6 +45,7 @@ from opengrid.core.models.engine import CommandBatchRow, Grant
 from opengrid.core.physics import HubParams, apply_ramp_limit
 from opengrid.core.reasons import (
     COMMIT_LOCK_OVERRIDE_REASONS,
+    R_AS_PARTIAL_DEPLOYMENT,
     R_GRANT_AS_HOLD,
     R_GRANT_CLOSED_LOOP,
     R_HUB_VETO_EXCLUDED,
@@ -281,7 +282,11 @@ def _ramp_from(hub: Any, prev_kw: float | None, target_kw: float, cycle_interval
 #: closed-loop grant whose controller asks for nothing this cycle.
 _ZERO_KW_REASONS = frozenset({R_GRANT_AS_HOLD, R_GRANT_CLOSED_LOOP}) | TERRITORY_REASONS
 #: Reasons a committed grant below its commitment carries onto its hub items (G-19 judges them).
-_ITEM_REASONS = COMMIT_LOCK_OVERRIDE_REASONS | {R_GRANT_CLOSED_LOOP, R_OPERATOR_OVERRIDE}
+_ITEM_REASONS = COMMIT_LOCK_OVERRIDE_REASONS | {
+    R_GRANT_CLOSED_LOOP,
+    R_OPERATOR_OVERRIDE,
+    R_AS_PARTIAL_DEPLOYMENT,
+}
 
 
 def _as_hold_items(

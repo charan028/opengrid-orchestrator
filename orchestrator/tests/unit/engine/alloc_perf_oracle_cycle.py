@@ -231,7 +231,12 @@ def cycle(
         for call in sorted(calls, key=lambda c: (_pq_result(pq, c) is None, c.obligation_id)):
             oid = call.obligation_id
             tier_granted = tier_result.granted_kw.get(oid, 0.0)
-            reason_code = reasons.R_GRANT_COMMITTED
+            # r3.4.4 (DISPATCH, integ/fix-g19-deploy): the base behaviour now tags a D-33 partial call.
+            reason_code = (
+                reasons.R_AS_PARTIAL_DEPLOYMENT
+                if getattr(call, "partial_call", False)
+                else reasons.R_GRANT_COMMITTED
+            )
 
             # D-37: nothing is dispatched on an UNAVAILABLE bank (regulated, no contract) except a call
             # grandfathered under K13, which is also exempt from K15 (committed while the zone was ERCOT).
