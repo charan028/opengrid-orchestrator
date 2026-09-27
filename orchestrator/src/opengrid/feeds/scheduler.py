@@ -9,11 +9,18 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from opengrid.core.models.platform import FeedObs
 from opengrid.feeds.breaker import CircuitBreaker
 from opengrid.feeds.eia import EiaClient
 from opengrid.feeds.ercot import PRODUCT_PATHS, ErcotAuthError, ErcotClient
 from opengrid.feeds.http_client import FeedHttpError
-from opengrid.feeds.normalize import FeedDataError
+from opengrid.feeds.normalize import (
+    ERCOT_ENERGY_PRICE_PRODUCTS,
+    EXTREME_UNCORROBORATED,
+    PRICE_INTERVAL,
+    FeedDataError,
+    corroborates,
+)
 from opengrid.feeds.nws import NwsClient
 from opengrid.feeds.staleness import threshold_s_for_product
 from opengrid.feeds.store import FeedStore
@@ -158,6 +165,8 @@ class FeedsScheduler:
                     "reason": rotation.reason,
                 },
             )
+        if product in ERCOT_ENERGY_PRICE_PRODUCTS:
+            obs = await self._corroborate_against_store(obs)
         await self.store.upsert_obs(obs)
         last_value_at = max((row.ts for row in obs), default=None)
         await self.store.update_status(
@@ -174,6 +183,28 @@ class FeedsScheduler:
             await self._trace("EIA_FALLBACK_DISENGAGED", {"reason": "ercot_recovered"})
         await self._check_staleness_transition("ERCOT", product, last_value_at, now=now)
         return True
+
+    async def _corroborate_against_store(self, obs: list[FeedObs]) -> list[FeedObs]:
+        """FR-ING-117 across postings: an EXTREME_UNCORROBORATED row whose previous interval (already
+        stored from an earlier posting) carried the same extreme value is corroborated -- it and that
+        stored row are both written as GOOD. (`screen_prices` already did this within the batch.)"""
+        out: list[FeedObs] = []
+        promoted: list[FeedObs] = []
+        for row in obs:
+            if row.quality == EXTREME_UNCORROBORATED:
+                prev = await self.store.get_obs(
+                    source=row.source, product=row.product, series=row.series, ts=row.ts - PRICE_INTERVAL
+                )
+                if prev is not None and corroborates(prev, row):
+                    row = row.model_copy(update={"quality": "GOOD"})
+                    if prev.quality == EXTREME_UNCORROBORATED:
+                        promoted.append(prev.model_copy(update={"quality": "GOOD"}))
+                    logger.info(
+                        "extreme price corroborated by the previous posting",
+                        extra={"product": row.product, "series": row.series, "ts": row.ts.isoformat()},
+                    )
+            out.append(row)
+        return promoted + out
 
     async def _poll_eia_fallback(self, *, now: datetime) -> None:
         if not self._eia_breaker.allow_request(now=now):

@@ -21,7 +21,13 @@ VALUES (%(source)s, %(product)s, %(series)s, %(ts)s, %(value)s, %(unit)s, %(qual
 ON CONFLICT (source, product, series, ts) DO UPDATE SET
     value = EXCLUDED.value,
     unit = EXCLUDED.unit,
-    quality = EXCLUDED.quality,
+    -- FR-ING-117: once an extreme price is corroborated (GOOD), a re-posting of the same value does not
+    -- demote it back to EXTREME_UNCORROBORATED.
+    quality = CASE
+        WHEN EXCLUDED.quality = 'EXTREME_UNCORROBORATED' AND og.feed_obs.quality = 'GOOD'
+             AND og.feed_obs.value = EXCLUDED.value THEN 'GOOD'
+        ELSE EXCLUDED.quality
+    END,
     recorded_at = EXCLUDED.recorded_at
 """
 
@@ -32,6 +38,12 @@ ON CONFLICT (source, product, series, ts) DO NOTHING
 """
 
 _EARLIEST_SQL = "SELECT min(ts) FROM og.feed_obs WHERE source = %(source)s AND product = %(product)s"
+
+_GET_OBS_SQL = """
+SELECT source, product, series, ts, value, unit, quality, recorded_at
+FROM og.feed_obs
+WHERE source = %(source)s AND product = %(product)s AND series = %(series)s AND ts = %(ts)s
+"""
 
 _LATEST_SQL = """
 SELECT source, product, series, ts, value, unit, quality, recorded_at
@@ -127,6 +139,15 @@ class FeedStore:
                 )
                 inserted += max(cur.rowcount, 0)
         return inserted
+
+    async def get_obs(self, *, source: str, product: str, series: str, ts: datetime) -> FeedObs | None:
+        """The stored row for one natural key (stored quality, no staleness override), or None."""
+        async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _GET_OBS_SQL, {"source": source, "product": product, "series": series, "ts": ts}
+            )
+            row = await cur.fetchone()
+        return None if row is None else FeedObs.model_validate(row)
 
     async def earliest_ts(self, *, source: str, product: str) -> datetime | None:
         """Oldest `ts` stored for one source/product (None if none) -- the backfill's default end."""

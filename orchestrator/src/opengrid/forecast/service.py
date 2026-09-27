@@ -228,11 +228,16 @@ async def _compute_series(
     slot's quantile-persistence baseline for that interval's solar strength -- see `forecast.solar`.
     Left as plain persistence (untouched) for any interval neither signal covers."""
     stale = False
+    # FR-ING-117: while the series' latest price is an uncorroborated extreme, nothing firm is declared
+    # off it (NOT_FOR_FIRM without band widening -- the value is real data, just not yet corroborated).
+    uncorroborated = False
     for key in history_series_keys:
         try:
             latest_obs = await history.latest(key)
             if latest_obs.quality == "STALE":
                 stale = True
+            elif latest_obs.quality == "EXTREME_UNCORROBORATED":
+                uncorroborated = True
         except LookupError:
             # Never observed: no live-freshness signal exists yet. Treat conservatively as stale so
             # any slot that *can* be computed (via the diurnal fallback) is still flagged NOT_FOR_FIRM.
@@ -291,7 +296,7 @@ async def _compute_series(
                 p10=p10,
                 p50=p50,
                 p90=p90,
-                firm_fitness=slot.firm_fitness,
+                firm_fitness="NOT_FOR_FIRM" if uncorroborated else slot.firm_fitness,
             )
         )
     if basis_counts["POOLED"]:

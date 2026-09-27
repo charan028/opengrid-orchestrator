@@ -9,6 +9,7 @@ breaker failure.
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -45,28 +46,72 @@ def _chicago_local_to_utc(naive_local: datetime, *, dst_flag: bool) -> datetime:
 EIA_SYSTEM_LOAD_SERIES = "ERCOT_SYSTEM"
 
 
-#: ERCOT energy-price sanity bounds (issue #43 A12). The system-wide offer cap (SWCAP, $5,000/MWh) bounds
-#: day-ahead and real-time settlement point prices (the ORDC adder is capped so a price plus its adder
-#: cannot exceed it); the offer floor is -$250/MWh. A value outside [floor, cap] is a feed error, not a
-#: price.
+#: V-P1 (04-external-data-integration.md S5, FR-ING-117; thresholds assumption A-ING-05) for load-zone/hub
+#: real-time prices. NORMAL band: the offer floor (-$250) to the system-wide offer cap ($5,000) -> GOOD.
+#: Outside it but within the HARD bounds -> kept and flagged EXTREME_UNCORROBORATED until corroborated
+#: (a real scarcity or congestion interval can legitimately exceed SWCAP: ORDC/reliability adders and a
+#: positive congestion component sit on top of system lambda). Outside the hard bounds -> quarantined
+#: (a unit or sign error), never stored. Prices are never clipped, smoothed or averaged.
 ERCOT_PRICE_CAP_USD_PER_MWH = 5_000.0
 ERCOT_PRICE_FLOOR_USD_PER_MWH = -250.0
-#: Products the bounds apply to: real-time SPP (NP6-905-CD) and day-ahead SPP (NP4-190-CD, not polled yet).
+ERCOT_PRICE_HARD_MAX_USD_PER_MWH = 50_000.0
+ERCOT_PRICE_HARD_MIN_USD_PER_MWH = -10_000.0
+#: Products V-P1 applies to: real-time SPP (NP6-905-CD) and day-ahead SPP (NP4-190-CD, not polled yet).
 ERCOT_ENERGY_PRICE_PRODUCTS = frozenset({"np6-905-cd", "np4-190-cd"})
+#: V-P1 "the same value in two consecutive postings": equal to the cent.
+CORROBORATION_TOLERANCE_USD_PER_MWH = 0.01
+#: The posting cadence of the products above: one value per 15-minute interval.
+PRICE_INTERVAL = timedelta(minutes=15)
+
+EXTREME_UNCORROBORATED = "EXTREME_UNCORROBORATED"
 
 
-def split_out_of_bounds_prices(obs: list[FeedObs]) -> tuple[list[FeedObs], list[FeedObs]]:
-    """`(kept, rejected)`: `rejected` is every row outside [`ERCOT_PRICE_FLOOR_USD_PER_MWH`,
-    `ERCOT_PRICE_CAP_USD_PER_MWH`]. Rejected rows are dropped at ingest rather than flagged, because
-    `og.feed_obs.quality` has no BAD value (GOOD/ESTIMATED/STALE only, and ESTIMATED means a trusted
-    substitute): a reader then sees the last good value age into STALE (`feeds.staleness`) instead of
-    acting on an impossible price."""
+def is_extreme_price(value: float) -> bool:
+    """Outside the normal band (strictly), whatever the hard bounds say."""
+    return not ERCOT_PRICE_FLOOR_USD_PER_MWH <= value <= ERCOT_PRICE_CAP_USD_PER_MWH
+
+
+def is_quarantined_price(value: float) -> bool:
+    """Not a price at all: non-finite, or outside the hard bounds (unit or sign error)."""
+    return not (
+        math.isfinite(value) and ERCOT_PRICE_HARD_MIN_USD_PER_MWH <= value <= ERCOT_PRICE_HARD_MAX_USD_PER_MWH
+    )
+
+
+def corroborates(earlier: FeedObs, later: FeedObs) -> bool:
+    """V-P1's consecutive-postings rule: the same series' immediately preceding interval carried the
+    same extreme value. (V-P1's other corroborators -- system lambda near its cap, binding-constraint
+    shadow prices -- are not ingested yet; until they are, a one-interval spike stays flagged.)"""
+    return (
+        earlier.series == later.series
+        and later.ts - earlier.ts == PRICE_INTERVAL
+        and is_extreme_price(earlier.value)
+        and abs(earlier.value - later.value) <= CORROBORATION_TOLERANCE_USD_PER_MWH
+    )
+
+
+def screen_prices(obs: list[FeedObs]) -> tuple[list[FeedObs], list[FeedObs]]:
+    """V-P1 for one batch: `(kept, quarantined)`. Normal-band rows keep their quality; extreme rows are
+    kept as EXTREME_UNCORROBORATED unless another row in the batch corroborates them (both rows of a
+    corroborating pair are then GOOD); quarantined rows are returned separately and never stored."""
     kept: list[FeedObs] = []
-    rejected: list[FeedObs] = []
+    quarantined: list[FeedObs] = []
     for row in obs:
-        in_bounds = ERCOT_PRICE_FLOOR_USD_PER_MWH <= row.value <= ERCOT_PRICE_CAP_USD_PER_MWH
-        (kept if in_bounds else rejected).append(row)
-    return kept, rejected
+        if is_quarantined_price(row.value):
+            quarantined.append(row)
+        elif is_extreme_price(row.value):
+            kept.append(row.model_copy(update={"quality": EXTREME_UNCORROBORATED}))
+        else:
+            kept.append(row)
+    by_key = {(r.series, r.ts): r for r in kept}
+    corroborated: set[tuple[str, datetime]] = set()
+    for r in kept:
+        prev = by_key.get((r.series, r.ts - PRICE_INTERVAL))
+        if prev is not None and corroborates(prev, r):
+            corroborated.update({(r.series, r.ts), (prev.series, prev.ts)})
+    return [
+        r.model_copy(update={"quality": "GOOD"}) if (r.series, r.ts) in corroborated else r for r in kept
+    ], quarantined
 
 
 class FeedDataError(Exception):
@@ -174,13 +219,24 @@ def ercot_spp_to_feed_obs(
                 interval_of_hour=_ercot_int_field(r["interval"]),
                 dst_flag=bool(r["dst"]),
             ),
-            value=float(str(r["value"])),
+            value=_price_value(r["value"]),
             unit="usd_per_mwh",
             quality="GOOD",
             recorded_at=recorded_at,
         )
         for r in rows
     ]
+
+
+def _price_value(raw: object) -> float:
+    """A settlement point price, or NaN when the field is not a number (null, bool, text): one malformed
+    row must not fail the whole posting -- `screen_prices` quarantines the NaN and it is never stored."""
+    if raw is None or isinstance(raw, bool):
+        return math.nan
+    try:
+        return float(str(raw))
+    except ValueError:
+        return math.nan
 
 
 #: NP6-345-CD's real response is wide (one row per hour, one column per weather zone) rather than the

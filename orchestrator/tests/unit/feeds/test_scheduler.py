@@ -276,3 +276,59 @@ async def test_breaker_skipped_poll_counts_as_a_miss_and_retries_early() -> None
     await scheduler.run_cycle(now=T0)
     assert ercot.calls == []
     assert scheduler._product_state["np4-188-cd"].next_poll_at == T0 + timedelta(minutes=5)
+
+
+# --- FR-ING-117: an extreme price is corroborated by the previous posting's interval ------------------
+
+
+@dataclass
+class ExtremeErcot(FakeErcot):
+    value: float = 9_000.0
+
+    async def fetch_product(
+        self, product: str, *, now: datetime
+    ) -> tuple[list[FeedObs], list[KeyRotationEvent]]:
+        row = _obs("ERCOT", product, "LZ_WEST", T0).model_copy(
+            update={"value": self.value, "quality": "EXTREME_UNCORROBORATED", "unit": "usd_per_mwh"}
+        )
+        return [row], []
+
+
+@dataclass
+class KeyedStore(FakeStore):
+    stored: dict[tuple[str, str, str, datetime], FeedObs] = field(default_factory=dict)
+
+    async def get_obs(self, *, source: str, product: str, series: str, ts: datetime) -> FeedObs | None:
+        return self.stored.get((source, product, series, ts))
+
+
+def _price_scheduler(ercot: FakeErcot, store: FakeStore) -> FeedsScheduler:
+    return FeedsScheduler(
+        ercot=ercot,  # type: ignore[arg-type]
+        eia=FakeEia(),  # type: ignore[arg-type]
+        nws=FakeNws(),  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+        staleness_cfg=STALENESS_CFG,
+        nws_grid_point_pinned="EWX/156,91",
+        ercot_bucket=TokenBucket(capacity=100, refill_per_s=100),
+        trace=FakeTrace(),  # type: ignore[arg-type]
+        products=("np6-905-cd",),
+    )
+
+
+async def test_extreme_price_matching_the_previous_posting_is_written_good_with_it() -> None:
+    prev = _obs("ERCOT", "np6-905-cd", "LZ_WEST", T0 - timedelta(minutes=15)).model_copy(
+        update={"value": 9_000.0, "quality": "EXTREME_UNCORROBORATED", "unit": "usd_per_mwh"}
+    )
+    store = KeyedStore(stored={(prev.source, prev.product, prev.series, prev.ts): prev})
+    await _price_scheduler(ExtremeErcot(), store).run_cycle(now=T0)
+    assert sorted((o.ts, o.quality) for o in store.obs) == [(prev.ts, "GOOD"), (T0, "GOOD")]
+
+
+async def test_extreme_price_without_a_matching_previous_posting_stays_flagged() -> None:
+    prev = _obs("ERCOT", "np6-905-cd", "LZ_WEST", T0 - timedelta(minutes=15)).model_copy(
+        update={"value": 45.0, "unit": "usd_per_mwh"}
+    )
+    store = KeyedStore(stored={(prev.source, prev.product, prev.series, prev.ts): prev})
+    await _price_scheduler(ExtremeErcot(), store).run_cycle(now=T0)
+    assert [(o.value, o.quality) for o in store.obs] == [(9_000.0, "EXTREME_UNCORROBORATED")]
