@@ -42,6 +42,10 @@ DEFAULT_CONTROL_URL = "http://127.0.0.1:8091"
 # Loopback by default: the control plane has no authentication of its own; Apache (auth) fronts it.
 DEFAULT_BIND_HOST = "127.0.0.1"
 CONTROL_HOST_ENV_VAR = "OGSIM_CONTROL_HOST"
+# R3.4: app.py's `_require_csrf_header` rejects any state-changing (non-GET) request without this
+# header -- set as a default header on every REST client below (harmless on the GET-only ones too),
+# so this CLI keeps working against a control plane with the CSRF check enabled.
+CSRF_HEADERS = {"X-OGSim-Request": "1"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,7 +122,7 @@ async def _run_inject_rest(args: argparse.Namespace, params: dict[str, Any]) -> 
         "duration": args.duration,
         "id": args.id,
     }
-    async with httpx.AsyncClient(base_url=_control_url(), timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=_control_url(), timeout=10.0, headers=CSRF_HEADERS) as client:
         resp = await client.post("/api/inject", json=body)
     print(json.dumps(resp.json(), indent=2))
     return 0 if resp.is_success else 2
@@ -141,7 +145,7 @@ async def _run_cancel(args: argparse.Namespace) -> int:
         found = await injector.cancel(args.id)
         print(json.dumps({"ok": found}))
         return 0 if found else 1
-    async with httpx.AsyncClient(base_url=_control_url(), timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=_control_url(), timeout=10.0, headers=CSRF_HEADERS) as client:
         resp = await client.delete(f"/api/anomalies/{args.id}")
     body = resp.json()
     print(json.dumps(body, indent=2))
@@ -172,7 +176,7 @@ def _control_url() -> str:
 
 
 async def _run_random_cmd(args: argparse.Namespace) -> int:
-    async with httpx.AsyncClient(base_url=_control_url(), timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=_control_url(), timeout=10.0, headers=CSRF_HEADERS) as client:
         if args.random_command == "status":
             resp = await client.get("/api/random/status")
         elif args.random_command == "pause":

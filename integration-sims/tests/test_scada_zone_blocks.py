@@ -42,14 +42,24 @@ def base_config():
 
 
 def test_disabled_zone_blocks_do_not_change_the_base_bank_roster(base_config) -> None:
+    """A disabled block adds nothing to the roster; an enabled one appends after the base banks in
+    `zone_blocks:` list order. Expected counts are computed from `base_config.zone_blocks` itself (not
+    hardcoded), so this test doesn't need updating every time the shipped defaults change which blocks
+    are on (OWNER DECISION D-32, 2026-09-26, enables LZ_LCRA/LZ_RAYBN by default)."""
     engine = ScadaEngine(base_config, seed=1)
-    assert engine.bank_ids == [f"bank-{i:03d}" for i in range(40)]
+    assert engine.bank_ids[: base_config.bank_count] == [
+        f"bank-{i:03d}" for i in range(base_config.bank_count)
+    ]
+    expected_total = base_config.bank_count + sum(b.banks for b in base_config.zone_blocks if b.enabled)
+    assert len(engine.bank_ids) == expected_total
 
 
-def test_shipped_scada_config_ships_blocks_disabled() -> None:
+def test_shipped_scada_config_ships_aen_cps_disabled_lcra_raybn_enabled() -> None:
+    """OWNER DECISION D-32, 2026-09-26: the free-market zones LZ_LCRA/LZ_RAYBN are live in the shipped
+    default; the regulated zones LZ_AEN/LZ_CPS stay off (production enables AEN via its own override)."""
     config = load_scada_config()
-    assert all(not block.enabled for block in config.zone_blocks)
-    assert {block.zone for block in config.zone_blocks} == {"LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"}
+    enabled_by_zone = {block.zone: block.enabled for block in config.zone_blocks}
+    assert enabled_by_zone == {"LZ_AEN": False, "LZ_CPS": False, "LZ_LCRA": True, "LZ_RAYBN": True}
 
 
 # ---------------------------------------------------------------------------
@@ -148,8 +158,13 @@ def test_background_load_per_bank_share_matches_base_fleet_semantics(base_config
         == aen_engine.background.base_kw
         == pytest.approx(aen_config.base_load_kw_default)
     )
-    assert aen_engine.background.per_bank_multiplier.shape[0] == 50
-    assert base_engine.background.per_bank_multiplier.shape[0] == 40
+    # aen_config REPLACES zone_blocks entirely with its own (AEN_BLOCK, CPS_BLOCK_DISABLED), so its
+    # expected total is self-contained; base_config's is computed from its own zone_blocks (not
+    # hardcoded), since OWNER DECISION D-32 (2026-09-26) may enable some of the shipped defaults it
+    # otherwise inherits.
+    assert aen_engine.background.per_bank_multiplier.shape[0] == base_config.bank_count + AEN_BLOCK.banks
+    base_extra = sum(b.banks for b in base_config.zone_blocks if b.enabled)
+    assert base_engine.background.per_bank_multiplier.shape[0] == base_config.bank_count + base_extra
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ogsim.scada.aggregation import ASSUMED_POWER_FACTOR
+
 logger = logging.getLogger(__name__)
 
 
@@ -251,12 +253,16 @@ class ScadaAnomalyManager:
                 m.pending_instruction = _utility_instruction_payload(bank_id, anomaly.params, lift=True)
 
     def apply_reading(
-        self, bank_id: str, real_power_kw: float, quality: str, now: float
+        self, bank_id: str, real_power_kw: float, quality: str, now: float, rating_kva: float | None = None
     ) -> tuple[float, str]:
         """Applies this bank's active modifiers to a computed reading,
         returning `(possibly overridden value, possibly overridden quality)`.
         Overrides operate on the real-power kW value before kVA conversion;
-        callers compute kVA from the returned kW."""
+        callers compute kVA from the returned kW.
+
+        `rating_kva` (the bank's own `ScadaEngine.kva_rating` entry) is optional only for backward
+        compatibility with a caller that doesn't have it handy; every real caller (`ScadaEngine.tick`)
+        passes it, since `bank_overload`'s effect needs it (see below)."""
         m = self.modifiers[bank_id]
         value = real_power_kw
         if m.out_of_range_value is not None:
@@ -266,7 +272,21 @@ class ScadaAnomalyManager:
                 m.frozen_value = value
             return m.frozen_value, quality
         value *= m.load_multiplier
-        value *= 1.0 + m.overload_pct / 100.0
+        if m.overload_pct > 0.0:
+            if rating_kva is not None:
+                # B1 (#43), 2026-09-26: "kva_over_rating_pct" must be relative to the bank's own kVA
+                # RATING, not to whatever the ambient reading happens to be. The old `value *= 1 +
+                # pct/100` multiplied the CURRENT reading -- against Base's ~200 kW default background
+                # (well under a 600 kVA rating), even a large, realistic injection (e.g. 60%) often
+                # never actually pushed the reported kVA above the rating, so ALR-SCADA-OVERLOAD never
+                # fired; only an artificially huge percentage (300%+) reliably did. This instead
+                # computes the absolute real-power value that maps (via `aggregation.kw_to_kva`'s same
+                # assumed power factor) to `rating_kva * (1 + pct/100)`, so ANY positive
+                # kva_over_rating_pct guarantees the reported reading exceeds the rating, independent
+                # of the ambient background/battery load.
+                value = rating_kva * ASSUMED_POWER_FACTOR * (1.0 + m.overload_pct / 100.0)
+            else:
+                value *= 1.0 + m.overload_pct / 100.0
         if m.oscillation:
             amp = m.oscillation["amplitude_pct"] / 100.0
             period = max(m.oscillation["period_s"], 1e-6)

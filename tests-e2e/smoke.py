@@ -74,7 +74,10 @@ def _post(
     url: str, payload: dict, *, auth: tuple[str, str] | None = None, timeout: float = 10.0
 ) -> tuple[int, bytes]:
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    # R3.4: ogsim.control's app.py rejects a state-changing (non-GET) request with no X-OGSim-Request
+    # header (CSRF fix). Harmless on /trace/verify (the orchestrator's own endpoint, which ignores it).
+    headers = {"Content-Type": "application/json", "X-OGSim-Request": "1"}
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     if auth is not None:
         import base64
 

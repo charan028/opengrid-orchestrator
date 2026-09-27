@@ -138,13 +138,21 @@ class Dnp3OutstationSim:
         point.value, point.flags = value, flags
 
     def set_bank_kva(self, bank_id: str, kva: float, *, quality: str = "good") -> None:
-        """Bank apparent power, plus derived kW/V/I/Hz/THD when `derive_electricals`."""
+        """Bank apparent power, plus derived V/I/Hz/THD when `derive_electricals`.
+
+        R3.4 fix: REAL_POWER_KW is deliberately NOT derived here (it used to be guessed as
+        `kva * _POWER_FACTOR`, always positive, since `kva` itself is an unsigned magnitude --
+        `aggregation.kw_to_kva` is `abs(real_power_kw) / power_factor`). That threw away the sign the
+        real REAL_POWER_KW signal carries (+ = import from the feeder, - = export -- pinned in
+        `interfaces/mqtt/scada_bank_signal.schema.json`'s `value` description) and the guardian relies
+        on for flow-direction checks (G-30). `apply_scada_tick` always writes the REAL point from the
+        SCADA sim's own signed `REAL_POWER_KW` message via `set_signal` -- this method must never
+        overwrite it with an unsigned guess afterward."""
         self.set_signal(bank_id, "APPARENT_POWER_KVA", kva, quality=quality)
         if not self.derive_electricals:
             return
         current_a = kva * 1000.0 / (math.sqrt(3) * _NOMINAL_LL_VOLTAGE_V)
         derived = {
-            "REAL_POWER_KW": kva * _POWER_FACTOR,
             "VOLTAGE_PU": 1.0,
             "CURRENT_A": current_a,
             "VOLTAGE_A_PU": 1.0,

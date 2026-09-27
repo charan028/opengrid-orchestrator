@@ -18,7 +18,10 @@
         "FREQUENCY_HZ", "THD_V_PCT", "THD_I_PCT"
       ]
     },
-    "value": { "type": "number" },
+    "value": {
+      "type": "number",
+      "description": "For REAL_POWER_KW specifically (R3.4, pinned 2026-09-26): signed, + = the bank imports real power from the feeder (net consumption/charging), - = the bank exports to the feeder (net discharge). Every other signal in the enum above is an unsigned magnitude (e.g. APPARENT_POWER_KVA, CURRENT_A)."
+    },
     "unit": { "type": "string", "enum": ["kVA", "kW", "pu", "A", "Hz", "%"] },
     "quality": {
       "type": "string",

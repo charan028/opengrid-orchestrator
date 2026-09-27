@@ -114,6 +114,55 @@ def test_bank_overload_via_a_placeholder_ref_raises_kva_above_rating_for_its_dur
     assert engine.anomalies.modifiers[bank_id].overload_pct == 0.0
 
 
+def test_bank_overload_pct_is_relative_to_rating_not_the_ambient_reading(engine: ScadaEngine) -> None:
+    """B1 (#43), 2026-09-26: "kva_over_rating_pct" must be relative to the bank's own kVA RATING, not
+    to whatever the ambient (background + battery) reading happens to be. Previously `apply_reading`
+    did `value *= 1 + pct/100` on the CURRENT reading -- against Base's ~200 kW default background
+    (well under a 600 kVA rating), a realistic, modest percentage like 60% never actually pushed the
+    reported kVA above the rating, so ALR-SCADA-OVERLOAD never fired for it; only an artificially huge
+    percentage (300%+, as the test above uses) reliably did. A 60% injection must now reliably push the
+    reported kVA to ~1.6x rating, regardless of the ambient reading."""
+    bank_id = engine.bank_ids[0]
+    rating = engine.kva_rating[bank_id]
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 60.0}, 0.0, 10.0)
+    signals, _ = engine.tick(1.0)
+    kva = _kva_message(signals, bank_id)["value"]
+    assert kva > rating
+    assert kva == pytest.approx(rating * 1.6, rel=0.01)
+
+
+def test_overload_auto_lift_never_overwrites_a_scenario_block_on_the_same_bank(engine: ScadaEngine) -> None:
+    """R3.4 fix: the SCADA overload auto-LIFT must only ever end an auto-LIMIT it itself issued, never
+    a scenario-driven BLOCK/ESTOP on the same bank. Previously, once this rule's own auto-LIMIT had
+    been issued for a bank, a LATER scenario BLOCK on that same bank did not clear the rule's own
+    bookkeeping -- once the overload cleared, `check_lift` would still fire and publish an expired
+    LIMIT that (per the orchestrator's "latest instruction per bank wins" semantics,
+    opengrid.fleet.ingest_utility_instruction) would silently end the scenario's BLOCK."""
+    bank_id = engine.bank_ids[0]
+    assert engine.overload_rule.threshold_samples == 2  # fixture's overload_consecutive_samples
+
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 0.0, 10.0)
+    engine.tick(1.0)
+    _, issue = engine.tick(2.0)  # 2nd consecutive overloaded sample -> auto LIMIT
+    assert dict(issue)[f"scada/instruction/{bank_id}"]["issued_by"] == "SCADA_AUTO_RULE"
+    assert bank_id in engine.overload_rule._active_since
+
+    # A scenario now BLOCKs this same bank directly.
+    _inject(engine, "utility_instruction", bank_id, {"mode": "block"}, 3.0, 100.0)
+    _, block_tick = engine.tick(3.0)
+    block_msg = dict(block_tick)[f"scada/instruction/{bank_id}"]
+    assert block_msg["kind"] == "BLOCK"
+    # The rule must have forgotten its own auto-LIMIT bookkeeping for this bank -- otherwise a later
+    # clear streak would still fire `check_lift` and clobber the scenario's BLOCK.
+    assert bank_id not in engine.overload_rule._active_since
+
+    # The bank_overload anomaly ends (duration elapsed at t=10) and the overload clears; give the rule
+    # several further ticks -- it must publish NOTHING for this bank (no bookkeeping left to lift).
+    for t in (11.0, 12.0, 13.0, 14.0):
+        _, tick_result = engine.tick(t)
+        assert f"scada/instruction/{bank_id}" not in dict(tick_result)
+
+
 def test_load_spike_multiplies_and_reverts(engine: ScadaEngine) -> None:
     bank_id = engine.bank_ids[0]
     _inject(engine, "load_spike", bank_id, {"multiplier": 3.0}, 0.0, 10.0)
