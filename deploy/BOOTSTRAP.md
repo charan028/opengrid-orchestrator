@@ -7,6 +7,10 @@ only the first build.
 
 Time: about 45 minutes, most of it the Postgres initialisation and the first fleet seed.
 
+To install on a new **Kubernetes** cluster instead, use `deploy/k8s/install.sh`; see
+[k8s/README.md](k8s/README.md) (prerequisites, sizing, step by step, troubleshooting). It reuses this page's
+scripts for the schema, migrations, seeds, sim configs, ACL, keys and checks.
+
 ## 0. Automated: `deploy/scripts/bootstrap_from_scratch.sh`
 
 Steps 3 to 10 are automated by one idempotent script. Do step 1 (storage) and step 2 (packages and the two venvs)

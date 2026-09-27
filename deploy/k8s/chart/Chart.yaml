@@ -1,0 +1,16 @@
+apiVersion: v2
+name: opengrid
+description: >-
+  OpenGrid orchestrator (og-* services, HTMX UI and API behind an Apache basic-auth gateway), its Postgres 17
+  database, the Mosquitto broker with the production ACL, the migrations/seed Jobs, the data-lifecycle CronJob and
+  the ogsim integration simulators. Driven by deploy/k8s/install.sh; see deploy/k8s/README.md.
+type: application
+# Chart version (bump on any template change) and the OpenGrid release it was cut for.
+version: 0.1.0
+appVersion: "r3.4.1"
+kubeVersion: ">=1.30.0-0"
+home: https://git.tocy-net.net/Tocy-Net/opengrid-orchestrator
+keywords:
+  - opengrid
+  - battery
+  - dispatch

@@ -1,0 +1,147 @@
+{{- /* og-engine, og-guardian, og-safestop, og-feeds, og-settle: the systemd units of deploy/systemd as singleton
+Deployments. og-api (with the gateway) is in api.yaml. */ -}}
+{{- $fn := include "og.fullname" . -}}
+{{- range $name := list "engine" "guardian" "safestop" "feeds" "settle" }}
+{{- $svc := index $.Values.services $name }}
+{{- if $svc.metricsPort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-{{ $name }}
+  labels:
+    {{- include "og.labels" (dict "root" $ "component" $name) | nindent 4 }}
+spec:
+  selector:
+    {{- include "og.selector" (dict "root" $ "component" $name) | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ $svc.metricsPort }}
+      targetPort: metrics
+{{- end }}
+{{- if $svc.persistence }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fn }}-{{ $name }}-data
+  labels:
+    {{- include "og.labels" (dict "root" $ "component" $name) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $svc.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $svc.persistence.size }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fn }}-{{ $name }}
+  labels:
+    {{- include "og.labels" (dict "root" $ "component" $name) | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" $ "component" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "og.labels" (dict "root" $ "component" $name) | nindent 8 }}
+        opengrid.io/db-client: "true"
+        opengrid.io/mqtt-client: "true"
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") $ | sha256sum | trunc 12 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      {{- include "og.imagePullSecrets" $ | nindent 6 }}
+      securityContext:
+        {{- include "og.podSecurityContext" $ | nindent 8 }}
+      initContainers:
+        {{- include "og.waitSchema" $ | nindent 8 }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "og.image" (dict "root" $ "which" "orchestrator") }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args: [{{ $name | quote }}]
+          env:
+            {{- include "og.dbEnv" $ | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: {{ $.Values.secrets.mqtt }}
+            - secretRef:
+                name: {{ $.Values.secrets.ownerKeys }}
+          {{- if $svc.metricsPort }}
+          ports:
+            - name: metrics
+              containerPort: {{ $svc.metricsPort }}
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          {{- end }}
+          # readiness: a fresh og.heartbeat row (02b S6.4) -- the same signal og-settle's health evaluator uses
+          readinessProbe:
+            exec:
+              command: ["og-entrypoint", "probe-heartbeat", {{ $svc.heartbeat | quote }}]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            {{- include "og.containerSecurityContext" $ | nindent 12 }}
+          resources:
+            {{- toYaml $svc.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "og.runVolumeMounts" $ | nindent 12 }}
+            {{- if $svc.persistence }}
+            - name: data
+              mountPath: /var/lib/opengrid
+              subPath: var
+            - name: data
+              mountPath: /srv/ogbackup/anchors
+              subPath: anchors
+            {{- else }}
+            - name: varlib
+              mountPath: /var/lib/opengrid
+            {{- end }}
+            {{- with $svc.signingKey }}
+            - name: signing-key
+              mountPath: /etc/opengrid/{{ . }}
+              subPath: {{ . }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- include "og.runVolumes" $ | nindent 8 }}
+        {{- if $svc.persistence }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $fn }}-{{ $name }}-data
+        {{- else }}
+        - name: varlib
+          emptyDir:
+            sizeLimit: 1Gi
+        {{- end }}
+        {{- with $svc.signingKey }}
+        - name: signing-key
+          secret:
+            secretName: {{ $.Values.secrets.signingKeys }}
+            defaultMode: 0440  # root:fsGroup; the opengrid group reads it
+            items:
+              - key: {{ . }}
+                path: {{ . }}
+        {{- end }}
+{{- end }}

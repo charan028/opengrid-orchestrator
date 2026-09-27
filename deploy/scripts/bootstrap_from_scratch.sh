@@ -29,6 +29,9 @@
 #   --release DIR       release/repo root (default: this script's repo)
 #   --etc DIR           secrets/config dir (default /etc/opengrid)
 #   --db-port N --db-name NAME --db-role ROLE   (default 5432 / og / opengrid)
+#   --db-host HOST      database host of the DB phases (default 127.0.0.1)
+#   --config FILE       orchestrator.toml of the DB phases (default: the release's; its [postgres].host must be
+#                       --db-host -- deploy/k8s renders one per pod)
 #   --fresh-db          drop the database first (refused on port 5432)
 #   --zones LIST        zone blocks to enable (default LZ_AEN, the owner-approved production set)
 #   --d32               also enable LZ_LCRA and LZ_RAYBN (decision D-32)
@@ -50,6 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ETC=/etc/opengrid
 DB_HOST=127.0.0.1
+CONFIG=""
 DB_PORT=5432
 DB_NAME=og
 DB_ROLE=opengrid
@@ -77,6 +81,8 @@ while [ $# -gt 0 ]; do
     --db-port) DB_PORT="$2"; shift 2 ;;
     --db-name) DB_NAME="$2"; shift 2 ;;
     --db-role) DB_ROLE="$2"; shift 2 ;;
+    --db-host) DB_HOST="$2"; shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
     --fresh-db) FRESH_DB=1; shift ;;
     --zones) ZONES="$2"; shift 2 ;;
     --d32) ZONES="$ZONES,LZ_LCRA,LZ_RAYBN"; shift ;;
@@ -120,7 +126,7 @@ with_db() {
     OG_DB_PASSWORD="$(env_get "$ETC/secrets.env" OG_DB_PASSWORD)"
     [ -n "$OG_DB_PASSWORD" ] || die "OG_DB_PASSWORD missing in $ETC/secrets.env (run phase c)"
     export OG_DB_PASSWORD PGPASSWORD="$OG_DB_PASSWORD"
-    export OG_CONFIG="$RELEASE/orchestrator/config/orchestrator.toml" PYTHONPATH="$RELEASE/orchestrator/src"
+    export OG_CONFIG="${CONFIG:-$RELEASE/orchestrator/config/orchestrator.toml}" PYTHONPATH="$RELEASE/orchestrator/src"
     export OG_DB="$DB_NAME" OG_DB_PORT="$DB_PORT" OG_DB_USER="$DB_ROLE"
     export PGHOST="$DB_HOST" PGPORT="$DB_PORT" PGUSER="$DB_ROLE" PGDATABASE="$DB_NAME"
     export OG_FLEET_SIM_CONFIG="$SIM_DIR/fleet.yaml"
@@ -179,7 +185,9 @@ phase_b() {
 
 # Phases c and d are deploy/scripts/create_schema.sh (role, database, extensions, schema; then the migrations).
 schema_args() {
-  local a=(--release "$RELEASE" --etc "$ETC" --db-port "$DB_PORT" --db-name "$DB_NAME" --db-role "$DB_ROLE")
+  local a=(--release "$RELEASE" --etc "$ETC" --db-port "$DB_PORT" --db-name "$DB_NAME" --db-role "$DB_ROLE"
+    --db-host "$DB_HOST")
+  [ -z "$CONFIG" ] || a+=(--config "$CONFIG")
   [ "$DRY" -eq 1 ] && a+=(--dry-run)
   printf '%s\n' "${a[@]}"
 }
@@ -263,10 +271,8 @@ phase_g() {
 
   if [ ! -f "$MQ_DIR/opengrid.acl" ]; then
     tmp="$(mktemp)"
-    "$OG_PY" "$RELEASE/dev/scripts/gen_mosquitto_acl.py" --topic-root og/v1 --out "$tmp" --secrets-file "$f" >/dev/null
-    # Grants production carries beyond the six core users of gen_mosquitto_acl.py (wiring note: fold them in there).
-    sed -i '/^user og_api$/a topic write og/v1/scada/wave/+/+/+/request' "$tmp"
-    printf '\nuser og_sim_customer\ntopic write og/v1/site/#\ntopic write og/v1/corridor/#\n' >> "$tmp"
+    # the six core users of gen_mosquitto_acl.py plus production's two extra grants (shared with deploy/k8s)
+    OG_PY="$OG_PY" bash "$SCRIPT_DIR/render_mosquitto_acl.sh" "$tmp" "$f"
     install -o root -g mosquitto -m 640 "$tmp" "$MQ_DIR/opengrid.acl"; rm -f "$tmp"
     echo "  ACL: written ($MQ_DIR/opengrid.acl)"; changed=1
   else

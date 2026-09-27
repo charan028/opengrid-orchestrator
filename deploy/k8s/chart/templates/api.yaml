@@ -1,0 +1,167 @@
+{{- /* og-api (HTMX UI + REST/SSE API, the health model) with the Apache basic-auth gateway as a sidecar: og-api
+keeps its loopback bind and trusts X-Remote-User only with the proxy secret, as behind production's Apache. */ -}}
+{{- $fn := include "og.fullname" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-api
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "api") | nindent 4 }}
+spec:
+  selector:
+    {{- include "og.selector" (dict "root" . "component" "api") | nindent 4 }}
+  ports:
+    - name: gateway
+      port: {{ .Values.gateway.port }}
+      targetPort: gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fn }}-api
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "api") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "og.selector" (dict "root" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "og.labels" (dict "root" . "component" "api") | nindent 8 }}
+        opengrid.io/db-client: "true"
+        opengrid.io/mqtt-client: "true"
+        opengrid.io/gateway: "true"
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum | trunc 12 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      {{- include "og.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "og.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        {{- include "og.waitSchema" . | nindent 8 }}
+        - name: htpasswd
+          image: {{ .Values.thirdParty.httpd }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/usr/local/apache2/conf-og/build-htpasswd.sh"]
+          securityContext:
+            {{- include "og.containerSecurityContext" . | nindent 12 }}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - name: gateway-conf
+              mountPath: /usr/local/apache2/conf-og
+              readOnly: true
+            - name: ui-users
+              mountPath: /run/og-ui-users
+              readOnly: true
+            - name: htpasswd
+              mountPath: /etc/opengrid
+      containers:
+        - name: api
+          image: {{ include "og.image" (dict "root" . "which" "orchestrator") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["api"]
+          env:
+            {{- include "og.dbEnv" . | nindent 12 }}
+            - name: OG_API_PROXY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.apiProxy }}
+                  key: OG_API_PROXY_SECRET
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.mqtt }}
+            - secretRef:
+                name: {{ .Values.secrets.ownerKeys }}
+            {{- if .Values.api.aiAgent }}
+            - secretRef:
+                name: {{ .Values.secrets.aiAgent }}
+                optional: true
+            {{- end }}
+          # /og/api/health answers loopback callers only: probe it from inside the container.
+          startupProbe:
+            exec:
+              command: ["og-entrypoint", "probe-http", "http://127.0.0.1:8080/og/api/health"]
+            periodSeconds: 10
+            timeoutSeconds: 8
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["og-entrypoint", "probe-http", "http://127.0.0.1:8080/og/api/health"]
+            periodSeconds: 20
+            timeoutSeconds: 8
+          livenessProbe:
+            exec:
+              command: ["og-entrypoint", "probe-http", "http://127.0.0.1:8080/og/api/health"]
+            periodSeconds: 30
+            timeoutSeconds: 8
+            failureThreshold: 6
+          securityContext:
+            {{- include "og.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "og.runVolumeMounts" . | nindent 12 }}
+            - name: varlib
+              mountPath: /var/lib/opengrid
+        - name: gateway
+          image: {{ .Values.thirdParty.httpd }}
+          imagePullPolicy: IfNotPresent
+          command: ["httpd", "-DFOREGROUND", "-f", "/usr/local/apache2/conf-og/httpd.conf"]
+          env:
+            - name: OG_API_PROXY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.apiProxy }}
+                  key: OG_API_PROXY_SECRET
+          ports:
+            - name: gateway
+              containerPort: {{ .Values.gateway.port }}
+          readinessProbe:
+            tcpSocket:
+              port: gateway
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: gateway
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            {{- include "og.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: gateway-conf
+              mountPath: /usr/local/apache2/conf-og
+              readOnly: true
+            - name: htpasswd
+              mountPath: /etc/opengrid
+              readOnly: true
+            - name: gateway-tmp
+              mountPath: /tmp
+      volumes:
+        {{- include "og.runVolumes" . | nindent 8 }}
+        - name: varlib
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: gateway-conf
+          configMap:
+            name: {{ $fn }}-gateway
+        - name: ui-users
+          secret:
+            secretName: {{ .Values.secrets.uiUsers }}
+            defaultMode: 0440
+        - name: htpasswd
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: gateway-tmp
+          emptyDir:
+            sizeLimit: 16Mi
