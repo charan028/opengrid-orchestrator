@@ -27,7 +27,7 @@ bash deploy/scripts/bootstrap_from_scratch.sh --phase c-e        # only the data
 | e | all seeds in order (see `dev/seed/README.md`), then `deploy/scripts/bootstrap_check.py` asserts the counts | 7, 8 |
 | f | `/etc/opengrid/sim/{fleet,scada}.yaml` with the approved zone blocks on (`deploy/scripts/gen_sim_overrides.py`) | 8 |
 | g | the MQTT users (`og_engine`, `og_guardian`, `og_safestop`, `og_api`, `og_sim`, `og_simctl`, `og_sim_customer`): passwords generated into `secrets.env`/`customer_sim.env`, hashed with `mosquitto_passwd -U`; the ACL from `dev/scripts/gen_mosquitto_acl.py` plus production's two extra grants; `conf.d/opengrid.conf` | 4, 5 |
-| h | the guardian, safestop and trace-anchor Ed25519 seeds (the orchestrator's own keygen CLIs) | 5 |
+| h | the guardian, safestop and trace-anchor Ed25519 seeds (the orchestrator's own keygen CLIs), each `root:<key group>` 0640 and readable only by its signing unit (section 5) | 5 |
 | i | the proxy secret (`api_proxy.env` and the Apache `Define`), then `install.sh` (Apache conf, htpasswd operator/viewer/tester/og-op-a/og-op-b, cron, logrotate, units), then the eight `og-cust-*` accounts with matching `customer_sim.env` entries | 4, 5 |
 | j | unit files and timers from the release, the sim drop-ins (`og-sim-{fleet,scada}.service.d/austin.conf`), `opengrid.target`/`ogsim.target` enabled; `og-lifecycle.timer` stays disabled | 6, 9 |
 | k | optional ERCOT backfill (`orchestrator/tools/ercot_backfill.py --days 14`), only when `api_keys.env` holds the ERCOT keys | 10 |
@@ -151,13 +151,28 @@ customer accounts and the proxy secret are done by `bootstrap_from_scratch.sh` p
 | `/etc/opengrid/api_proxy.env` | 640 root:opengrid | the Apache-to-API proxy secret |
 | `/etc/opengrid/ai_agent.env` | 640 root:opengrid | the owner's Anthropic key (installed by the owner) |
 | `/etc/opengrid/customer_sim.env` | 640 root:opengrid | customer-simulator MQTT user and account names |
-| `/etc/opengrid/guardian_ed25519.key` | 600 opengrid | raw 32-byte Ed25519 seed |
-| `/etc/opengrid/safestop_ed25519.key` | 600 opengrid | raw 32-byte Ed25519 seed |
-| `/etc/opengrid/trace_anchor_ed25519.key` | 600 opengrid | raw 32-byte Ed25519 seed (K11 anchors) |
+| `/etc/opengrid/guardian_ed25519.key` | 640 root:og-guardian-key | raw 32-byte Ed25519 seed; read by og-guardian only |
+| `/etc/opengrid/safestop_ed25519.key` | 640 root:og-safestop-key | raw 32-byte Ed25519 seed; read by og-safestop only |
+| `/etc/opengrid/trace_anchor_ed25519.key` | 640 root:og-anchor-key | raw 32-byte Ed25519 seed (K11 anchors); read by og-settle only |
 
 A seed is 32 random bytes:
 `/opt/opengrid/venv/bin/python -c "import os,sys; sys.stdout.buffer.write(os.urandom(32))" > <file>`, then
-`chown opengrid:opengrid <file>; chmod 600 <file>`. Check a file only by counting (`grep -c`), never by
+`chown root:<key group> <file>; chmod 640 <file>`.
+
+**Key access.** Every og-* unit and every simulator runs as `opengrid`, so a key owned by `opengrid` is
+readable by og-api and the simulators too. Each private seed therefore belongs to its own group
+(`og-guardian-key`, `og-safestop-key`, `og-anchor-key`; the `opengrid` user is a member of none), and only its
+signing unit gets that group through a drop-in, `/etc/systemd/system/<unit>.service.d/keys.conf` with
+`SupplementaryGroups=<key group>` (og-guardian, og-safestop, og-settle). `bootstrap_from_scratch.sh` phase h
+sets this up. The safe-stop CLI runs as root and is unaffected; the `.pub` files stay 644.
+
+*Production today (checked 2026-09-26, read-only):* the three keys are `opengrid:opengrid 0600` and no unit has
+a supplementary group. **r3.4.1 deploy step (proposal for the release manager, not applied):** only outside
+any FIRM/AS delivery window (`deploy.sh`'s DELIVERING preflight query must return no rows), run `bash deploy/scripts/bootstrap_from_scratch.sh --phase h
+--migrate-key-perms` from the release (it creates the groups, writes the three drop-ins, re-owns the keys and
+reloads systemd), then restart og-guardian, og-safestop and og-settle one at a time and check each is active.
+Without the flag, phase h leaves legacy-layout keys untouched. Folding `SupplementaryGroups=` into the three unit
+files would make the drop-ins unnecessary. Check a file only by counting (`grep -c`), never by
 printing it.
 
 ## 6. First release
