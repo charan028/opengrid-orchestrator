@@ -8,6 +8,9 @@
   {% set ac = detail.asset_class or 'HOME' %}
   <p class="fl-type-badge fl-type-{{ ac|lower }}" id="drawer-asset-type"><span class="fl-asset-icon fl-asset-{{ ac|lower }}" aria-hidden="true"></span> {{ (asset_labels or {}).get(ac, ac) }}</p>
   <h2>Hub {{ detail.hub_id }}</h2>
+  {% if detail.availability and detail.availability.availability == 'UNAVAILABLE' %}
+  <p class="fl-unavail-line" id="drawer-availability"><span class="fl-unavail">{{ detail.availability.availability_badge }}</span> {{ detail.availability.availability_text }}</p>
+  {% endif %}
   {% if detail.mobile %}{% set m = detail.mobile %}
   <section class="fl-dsec" aria-label="Truck" id="drawer-truck">
     <h3>Truck</h3>

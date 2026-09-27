@@ -306,3 +306,20 @@ def test_fleet_map_carries_asset_class_and_depots(ui19_client, monkeypatch: pyte
     assert classes[first] == "MOBILE" and classes[second] == "UTILITY_SCALE"
     assert set(classes.values()) == {"HOME", "MOBILE", "UTILITY_SCALE"}
     assert body["depots"] == [depot]
+
+
+def test_fleet_map_marks_unavailable_banks(ui19_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    import opengrid.api.routers.fleet_map as fleet_map
+    from opengrid.market.availability import availability_fields
+
+    hubs = ui19_client.get("/og/api/fleet/map", headers=VIEWER_HEADERS).json()["hubs"]
+    bank = hubs[0]["bank_id"]
+
+    async def unavailable(_store: Any) -> dict[str, Any]:
+        return {bank: availability_fields("UNAVAILABLE", "REGULATED_NO_CONTRACT")}
+
+    monkeypatch.setattr(fleet_map, "bank_availability", unavailable)
+    rows = ui19_client.get("/og/api/fleet/map", headers=VIEWER_HEADERS).json()["hubs"]
+    marked = {h["availability"] for h in rows if h["bank_id"] == bank}
+    assert marked == {"UNAVAILABLE"}
+    assert {h["availability"] for h in rows if h["bank_id"] != bank} <= {"AVAILABLE"}

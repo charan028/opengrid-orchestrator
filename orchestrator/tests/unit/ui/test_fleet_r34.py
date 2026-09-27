@@ -192,3 +192,27 @@ def test_control_room_tiles_age_from_the_data() -> None:
     text = (Path(__file__).resolve().parents[3] / "src/opengrid/ui/templates/control_room.html").read_text()
     assert "health.invariants_checked_at or health.as_of" in text
     assert 'setSince("kpi-fleet-mw", data.as_of)' in text
+
+
+def test_unavailable_hub_badge_filter_and_chip(monkeypatch: Any) -> None:
+    """D-37: the owner's badge (with the tooltip text) on the row, an Availability filter and its chip."""
+    import opengrid.ui.routes.fleet as fleet_route
+    from opengrid.market.availability import availability_fields
+
+    row = {
+        "hub_id": "hub-9",
+        "last_seen_at": "2026-09-26T12:00:00+00:00",
+        **availability_fields("UNAVAILABLE", "REGULATED_NO_CONTRACT"),
+    }
+
+    async def fake_get_json(path: str, *, params: Any = None) -> Any:
+        if path == "/og/api/fleet/table":
+            return {"items": [row]}
+        raise fleet_route.ApiUnavailable(path)
+
+    client = _client(monkeypatch, Config({"api": {"roles": {}}}))
+    monkeypatch.setattr(fleet_route, "get_json", fake_get_json)
+    page = client.get("/og/fleet?availability=UNAVAILABLE").text
+    assert 'class="fl-unavail" title="Unavailable: regulated (NOIE) territory' in page
+    assert "Regulated market" in page and 'name="availability" value="UNAVAILABLE" checked' in page
+    assert "Availability: Regulated market" in page

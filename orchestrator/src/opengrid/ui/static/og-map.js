@@ -505,7 +505,10 @@
   map.assetLegendItems = function assetLegendItems() {
     return map.ASSET_CLASSES.map(function (a) {
       return { label: a.label, color: og.token("--muted"), shape: a.shape };
-    });
+    }).concat([
+      // D-37: hollow, dashed = the hub's bank is unavailable (regulated market, no contract)
+      { label: "Regulated market \u2013 no contract (unavailable)", color: og.token("--muted"), hollow: true },
+    ]);
   };
 
   /** Depots (D-31 home stations), each with a dashed line to every assigned truck that is away. */
@@ -548,15 +551,23 @@
       const meta = opts.colorBy === "health" ? healthMeta(hub.health) : activityMeta(activity);
       const color = og.token(meta.token);
       const special = groups[hub.asset_class];
+      // D-37: a hub whose bank is UNAVAILABLE (regulated, no contract) is drawn hollow and dashed
+      // (the canvas equivalent of the og-unavail style), so it reads as "cannot be used" at a glance.
+      const unavail = hub.availability === "UNAVAILABLE";
       const marker = special ? assetMarker(at, hub, color) : L.circleMarker(at, {
         renderer: handle.canvas,
         pane: "ogHubs",
         radius: 5,
         color: color,
-        fillColor: meta.hollow ? "transparent" : color,
-        fillOpacity: meta.hollow ? 0 : 0.75,
-        weight: meta.hollow ? 1.5 : 1,
+        fillColor: meta.hollow || unavail ? "transparent" : color,
+        fillOpacity: meta.hollow || unavail ? 0 : 0.75,
+        weight: meta.hollow || unavail ? 1.5 : 1,
+        dashArray: unavail ? "2 2" : null,
+        className: unavail ? "og-unavail" : "",
       });
+      if (unavail && special && marker.getElement) {
+        marker.on("add", function () { const el = marker.getElement(); if (el) { el.classList.add("og-unavail"); } });
+      }
       marker.ogHub = hub;
       marker.ogBaseColor = color;
       const serving = (hub.serving_obligations || []).length;
@@ -570,7 +581,8 @@
           : "SoC " + (hub.soc_kwh != null ? hub.soc_kwh + " kWh" : "n/a")) +
         "<br>Power " + Number(hub.kw != null ? hub.kw : hub.p_kw || 0).toFixed(2) + " kW" +
         (serving ? "<br>Serving " + serving + " obligation" + (serving === 1 ? "" : "s") : "") +
-        (canServe ? "<br>Can serve: " + canServe : "")
+        (canServe ? "<br>Can serve: " + canServe : "") +
+        (unavail ? "<br><em>" + (hub.availability_badge || "Unavailable") + "</em>" : "")
       );
       byId[hub.hub_id] = marker;
       marker.addTo(special || group);

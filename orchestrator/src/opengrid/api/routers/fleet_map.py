@@ -15,7 +15,13 @@ from fastapi.responses import JSONResponse
 
 from opengrid.api.auth import Identity, require_viewer
 from opengrid.api.deps import get_config, get_store
-from opengrid.api.routers.fleet_search import classify_asset, home_stations, mobile_units, substation_keys
+from opengrid.api.routers.fleet_search import (
+    bank_availability,
+    classify_asset,
+    home_stations,
+    mobile_units,
+    substation_keys,
+)
 from opengrid.api.views_ext import (
     ACTIVITIES,
     CUSTOMER_SITES_FILE,
@@ -29,6 +35,7 @@ from opengrid.api.views_ext import (
     grid_config_dir,
     load_customer_sites,
 )
+from opengrid.market.availability import availability_fields
 from opengrid.platform.config import Config
 
 router = APIRouter(prefix="/og/api", tags=["maps"])
@@ -48,7 +55,8 @@ async def fleet_map(
     """`{generated_at, count, activity_counts, coord_sources, warnings, hubs[]}`. Each hub: `hub_id,
     bank_id, zone, lat, lon, coord_source, health, activity, kw, soc_kwh, soc_pct, reserve_kwh, rated_kw,
     home_load_kw, meter_kw, pv_kw, fault_code, last_seen_at, serving_obligations[], can_serve_services[],
-    asset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`). `depots` are the D-31 home
+    asset_class` (HOME|MOBILE|UTILITY_SCALE, `fleet_search.classify_asset`) and the D-37 availability
+    fields (`opengrid.market.availability.availability_fields`). `depots` are the D-31 home
     stations with their assigned units. `activity_counts` covers the filtered set."""
     if activity is not None and activity not in ACTIVITIES:
         raise HTTPException(
@@ -57,12 +65,15 @@ async def fleet_map(
     snapshot = await service.snapshot()
     mobile = set(mobile_units())
     substations = await substation_keys(store)
+    unavailable = await bank_availability(store)
+    available = availability_fields(None, None)
     hubs = [
         {
             **h,
             "asset_class": classify_asset(
                 h["hub_id"], h.get("bank_id"), mobile=mobile, substations=substations
             ),
+            **unavailable.get(str(h.get("bank_id")), available),
         }
         for h in snapshot.hubs
         if (zone is None or h["zone"] == zone)
