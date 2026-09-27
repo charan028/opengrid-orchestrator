@@ -167,6 +167,62 @@ def test_overload_auto_lift_never_overwrites_a_scenario_block_on_the_same_bank(e
         assert f"scada/instruction/{bank_id}" not in dict(tick_result)
 
 
+def test_r7_auto_limit_never_replaces_an_active_scenario_block_and_requires_a_fresh_trigger_after(
+    engine: ScadaEngine,
+) -> None:
+    """R7 review fix, 2026-09-26: two layers.
+
+    (1) Absolute: while a scenario BLOCK/ESTOP is ACTIVE on a bank, the auto rule must never touch
+    that bank's instruction slot at all -- even if the overload condition persists uninterrupted, well
+    past `threshold_samples` more overloaded readings (`ScadaAnomalyManager.has_active_utility_
+    instruction` gates `observe`/`check_lift` out entirely for the scenario's whole duration).
+
+    (2) After the scenario instruction ends: a `cancel()` (or the scenario's own natural end) must NOT
+    let the rule immediately re-arm while the SAME overload condition is still ongoing -- only a fresh
+    rising edge (clear, then overloaded again) is a genuine new trigger (`OverloadRule._held`)."""
+    bank_id = engine.bank_ids[0]
+    assert engine.overload_rule.threshold_samples == 2
+
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 0.0, 1000.0)  # persists
+    engine.tick(1.0)
+    _, issue = engine.tick(2.0)
+    assert dict(issue)[f"scada/instruction/{bank_id}"]["issued_by"] == "SCADA_AUTO_RULE"
+
+    _inject(engine, "utility_instruction", bank_id, {"mode": "block"}, 3.0, 5.0)  # BLOCK, ends at t=8
+    _, block_tick = engine.tick(3.0)
+    assert dict(block_tick)[f"scada/instruction/{bank_id}"]["kind"] == "BLOCK"
+
+    # (1) While the BLOCK is still active, even though the overload persists uninterrupted and well
+    # past threshold_samples, the rule must publish NOTHING for this bank -- the absolute gate.
+    for t in (4.0, 5.0, 6.0, 7.0):
+        _, tick_result = engine.tick(t)
+        assert f"scada/instruction/{bank_id}" not in dict(tick_result)
+
+    # The BLOCK naturally ends at t=8 -- its own lift publishes (SCENARIO_ANOMALY, not the auto rule).
+    _, end_tick = engine.tick(8.0)
+    end_msg = dict(end_tick)[f"scada/instruction/{bank_id}"]
+    assert end_msg["issued_by"] == "SCENARIO_ANOMALY"
+
+    # (2) The overload STILL persists uninterrupted after the BLOCK ends -- the rule must NOT
+    # immediately re-arm here either; several more overloaded ticks past threshold_samples must still
+    # publish nothing (a fresh trigger, not a continuation, is required).
+    for t in (9.0, 10.0, 11.0, 12.0):
+        _, tick_result = engine.tick(t)
+        assert f"scada/instruction/{bank_id}" not in dict(tick_result)
+
+    # Only once the condition actually clears and then recurs is that a genuine fresh trigger.
+    _inject(engine, "bank_overload", bank_id, {}, 13.0, 0.0)  # explicit cancel/clear
+    engine.tick(13.0)
+    assert engine.anomalies.modifiers[bank_id].overload_pct == 0.0
+
+    _inject(engine, "bank_overload", bank_id, {"kva_over_rating_pct": 700.0}, 14.0, 10.0)
+    engine.tick(14.0)
+    _, fresh_issue = engine.tick(15.0)
+    fresh_msg = dict(fresh_issue)[f"scada/instruction/{bank_id}"]
+    assert fresh_msg["issued_by"] == "SCADA_AUTO_RULE"
+    assert fresh_msg["kind"] == "LIMIT"
+
+
 def test_load_spike_multiplies_and_reverts(engine: ScadaEngine) -> None:
     bank_id = engine.bank_ids[0]
     _inject(engine, "load_spike", bank_id, {"multiplier": 3.0}, 0.0, 10.0)

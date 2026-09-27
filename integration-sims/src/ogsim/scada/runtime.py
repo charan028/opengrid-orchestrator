@@ -167,6 +167,14 @@ class ScadaEngine:
                 # instruction per bank regardless of kind, so the auto-lift must only ever end an
                 # auto-LIMIT it itself issued).
                 self.overload_rule.cancel(bank_id)
+            elif self.anomalies.has_active_utility_instruction(bank_id, now):
+                # R7 fix, 2026-09-26: a scenario-driven BLOCK/ESTOP/LIMIT is still in force for this
+                # bank -- the auto rule must not touch it (neither issue nor lift) for as long as that
+                # lasts, absolutely, regardless of whether the overload condition clears and recurs in
+                # the meantime. Nothing published here; the scenario's own instruction already covers
+                # this bank until it ends (naturally, or a manual cancel republishes it via `pending`
+                # above).
+                pass
             elif self.overload_rule.observe(bank_id, kva, self.kva_rating[bank_id], now):
                 msg = limit_instruction(
                     str(uuid.uuid4()), bank_id, self.kva_rating[bank_id] * 0.9, utc_timestamp(now)
