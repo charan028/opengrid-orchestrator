@@ -20,8 +20,8 @@ Mapping onto the link:
   locally with R-GL-SHORTEN-UNSUPPORTED.
 - `status`: one integrity poll. The link reports only the utility's latest call; any other call reads
   UNKNOWN.
-- `granted_kw`: CALL_DELIVERED_KW when the outstation marks it good (it does not until measured delivery
-  lands), signed (- discharge); else None.
+- `granted_kw` (the base type's field name): CALL_DELIVERED_KW, the call's MEASURED delivery (D-38), when the
+  outstation marks it good, signed (- discharge); None while unmeasured or stale (COMM_LOST).
 
 The EMS heartbeat (CROB 2) runs as a background task from the first use until `aclose()`: without it the
 link refuses new calls (fail safe on the OpenGrid side).

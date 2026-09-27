@@ -4,6 +4,7 @@ roles and status values map onto the right indices."""
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from opengrid.integrations.grid_link import points as p
@@ -73,7 +74,7 @@ def test_status_encodes_onto_input_points() -> None:
         call_phase=CallPhase.ACTIVE,
         ems_call_id=42,
         call_reason=0,
-        call_granted_kw=590.0,
+        call_delivered_kw=590.0,
         soc_pct=61.5,
         heartbeat_count=12,
         link_healthy=True,
@@ -87,7 +88,9 @@ def test_status_encodes_onto_input_points() -> None:
     assert analogs[16] == p.NO_L2_CEILING and analogs[17] == 250.0
     assert [analogs[100 + k] for k in range(4)] == [60.0, 900.0, 300.0, 250.0]
     assert 104 not in analogs  # no telemetry for bank-041: served as COMM_LOST, never invented
-    assert 5 not in analogs  # CALL_DELIVERED_KW: granted, not measured, until r3.4.2 -> COMM_LOST
+    assert analogs[5] == 590.0  # CALL_DELIVERED_KW: measured (D-38)
+    unmeasured = points.analog_inputs(replace(status, call_delivered_kw=None))
+    assert 5 not in unmeasured  # unmeasured or stale -> COMM_LOST, never invented
     binaries = points.binary_inputs(status)
     assert binaries[0] and binaries[1] and not binaries[2] and binaries[4] and binaries[5]
     assert binaries[16] is False and binaries[17] is True and binaries[18] is True and binaries[19] is False

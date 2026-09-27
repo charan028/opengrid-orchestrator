@@ -14,7 +14,8 @@ and get a `ControlVerdict` back at once. Accepted commands are queued and applie
 Fail safe (S5.3): the link is healthy only while heartbeats arrive within `heartbeat_timeout_s`. When it
 is not, NEW toll calls are refused (INHIBITED); cancels are still accepted; a call already running
 continues to its own end (bounded by its product rule, D-29); L2 levels stay exactly as last received.
-Across an og-engine restart the L2 levels are rebuilt from the link's own trace (estore_l2, pg_history).
+Across an og-engine restart the L2 levels are rebuilt from the link's own trace (
+estore_l2, pg_history).
 """
 
 from __future__ import annotations
@@ -206,7 +207,7 @@ class GridLinkService:
             call_phase=outcome.phase,
             ems_call_id=call.ems_call_id if call is not None else 0,
             call_reason=reason_number(outcome.reason_code),
-            call_granted_kw=outcome.granted_kw or 0.0,
+            call_delivered_kw=outcome.delivered_kw,
             soc_pct=round(100.0 * sum(b.soc_kwh for b in banks) / capacity, 2) if capacity > 0 else None,
             heartbeat_count=self._heartbeats,
             link_healthy=self.link_healthy(),
