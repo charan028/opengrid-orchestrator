@@ -148,6 +148,17 @@ def _stop_rows(stops: Iterable[tuple[Any, ...]]) -> list[tuple[str, str, str, st
     return rows
 
 
+def stop_covers(kind: str, ref: str, *, bank: str | None, zone: str | None) -> bool:
+    """Whether a stop scope `(kind, ref)` covers a hub of `bank` in `zone`: FLEET, its BANK or its ZONE."""
+    return kind == "FLEET" or (kind == "BANK" and ref == bank) or (kind == "ZONE" and ref == zone)
+
+
+def latest_stop_by_scope(stops: Iterable[tuple[Any, ...]]) -> dict[tuple[str, str], tuple[str, datetime]]:
+    """Each stop scope's latest `(action, created_at)` from `STOP_EVENT_ROWS_SQL` rows (oldest first): a
+    scope whose latest action is ENGAGE is engaged now."""
+    return {(kind, ref): (action, at) for _id, kind, ref, action, at in _stop_rows(stops)}
+
+
 def _covering_stop(
     target: ManualTarget,
     stops: list[tuple[str, str, str, str, datetime]],
@@ -157,18 +168,18 @@ def _covering_stop(
 ) -> str | None:
     """The id of the safe stop that cancels `target`: the first covering ENGAGE at or after it was issued,
     else a covering stop still engaged (its scope's latest action is ENGAGE). `None`: no stop applies."""
-
-    def covers(kind: str, ref: str) -> bool:
-        return kind == "FLEET" or (kind == "BANK" and ref == bank) or (kind == "ZONE" and ref == zone)
-
     for stop_id, kind, ref, action, at in stops:
-        if action == "ENGAGE" and covers(kind, ref) and to_utc(at) >= to_utc(target.issued_at):
+        if (
+            action == "ENGAGE"
+            and stop_covers(kind, ref, bank=bank, zone=zone)
+            and to_utc(at) >= to_utc(target.issued_at)
+        ):
             return stop_id or "unknown"
     latest: dict[tuple[str, str], tuple[str, str]] = {}
     for stop_id, kind, ref, action, _at in stops:
         latest[(kind, ref)] = (action, stop_id)
     for (kind, ref), (action, stop_id) in latest.items():
-        if action == "ENGAGE" and covers(kind, ref):
+        if action == "ENGAGE" and stop_covers(kind, ref, bank=bank, zone=zone):
             return stop_id or "unknown"
     return None
 

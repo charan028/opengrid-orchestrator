@@ -82,6 +82,8 @@ from opengrid.engine.mqtt_supervisor import (
     IngestHealth,
     supervise_ingest,
 )
+from opengrid.engine.propose_guard import GuardianGate, propose_banks
+from opengrid.engine.ramp_anchor import RampAnchors, stopped_banks
 from opengrid.engine.settings import dispatch_settings
 from opengrid.engine.veto import (
     DEFAULT_VERDICT_WAIT_S,
@@ -235,29 +237,27 @@ def build_command_batch_row(
 RAMP_SAFETY_FACTOR = 0.9
 
 
-#: Last commanded setpoint per utility-scale hub: `hub_id -> (kW, monotonic time)`.
-_last_commanded_kw: dict[str, tuple[float, float]] = {}
+#: Utility-scale ramp anchors (`engine.ramp_anchor`): last SIGNED setpoint per hub, pending batches, stops.
+_ramp_anchors = RampAnchors()
 
 
-def _ramped_setpoint_kw(hub: Any, target_kw: float, cycle_interval_s: float | None) -> float:
+def _ramped_setpoint_kw(
+    hub: Any, target_kw: float, cycle_interval_s: float | None, *, now: datetime | None = None
+) -> float:
     """K4/G-04: move from the hub's measured power toward `target_kw` by at most one cycle's ramp. The
     obligation's grant is unchanged (G-19 compares the grant); only the per-hub command ramps.
 
-    A utility-scale asset (the D-29 20 MW toll set) steps from its last COMMANDED setpoint while that
-    command is younger than the lease: its telemetry lags ~10 s, and stepping from it every 2 s cycle held
-    a 20 MW call to a fraction of its G-04 rate."""
-    prev_kw = getattr(hub, "p_kw", None)
+    A utility-scale asset (the D-29 20 MW toll set) steps from its last SIGNED setpoint while that
+    signature's lease is live, else from telemetry (or 0 kW after a safe stop until fresh telemetry) --
+    `engine.ramp_anchor`, the same anchor as the guardian's G-04. Never from its own last proposal: an
+    unsigned proposal is not where the hub is (HIGH-A)."""
     utility_scale = bool(getattr(hub, "utility_scale", False)) or is_utility_scale_bank(
         str(getattr(hub, "bank_id", ""))
     )
     if utility_scale:
-        last = _last_commanded_kw.get(str(hub.hub_id))
-        if last is not None and time.monotonic() - last[1] <= DEFAULT_LEASE_TTL_S:
-            prev_kw = last[0]
-        stepped = _ramp_from(hub, prev_kw, target_kw, cycle_interval_s)
-        _last_commanded_kw[str(hub.hub_id)] = (stepped, time.monotonic())
-        return stepped
-    return _ramp_from(hub, prev_kw, target_kw, cycle_interval_s)
+        anchor = _ramp_anchors.anchor_kw(hub, now if now is not None else datetime.now(UTC))
+        return _ramp_from(hub, anchor, target_kw, cycle_interval_s)
+    return _ramp_from(hub, getattr(hub, "p_kw", None), target_kw, cycle_interval_s)
 
 
 def _ramp_from(hub: Any, prev_kw: float | None, target_kw: float, cycle_interval_s: float | None) -> float:
@@ -488,20 +488,30 @@ async def propose_batch_to_guardian(
         attempt=attempt,
     )
     await backend.insert_command_batch(row)
+    # Utility-scale setpoints become ramp anchors only once the guardian signs this batch (HIGH-A).
+    _ramp_anchors.record_proposal(row.command_batch_id, items, expires_at)
     await backend.notify_guardian(row.command_batch_id)
     return row.command_batch_id
 
 
 async def guardian_is_available(
-    backend: EngineBackend, *, now: datetime | None = None, miss_threshold_s: float
+    backend: EngineBackend,
+    *,
+    now: datetime | None = None,
+    miss_threshold_s: float,
+    gate: GuardianGate | None = None,
 ) -> bool:
     """Degraded mode (02b S6.5): "guardian process down / verdict timeout -> hold". Engine skips
     proposing new batches when the guardian's heartbeat is missing or older than the configured
-    miss threshold, rather than piling up unread `command_batch` rows no one will ever sign."""
-    age_s = await backend.process_heartbeat_age_s(GUARDIAN_PROCESS_NAME, now=now)
-    if age_s is None:
-        return False
-    return age_s <= miss_threshold_s
+    miss threshold, rather than piling up unread `command_batch` rows no one will ever sign. `gate`
+    (`engine.propose_guard`) bounds the heartbeat read and holds after a propose timeout until the
+    guardian beats again."""
+    at = now if now is not None else datetime.now(UTC)
+    return await (gate or GuardianGate()).available(
+        lambda: backend.process_heartbeat_age_s(GUARDIAN_PROCESS_NAME, now=at),
+        now=at,
+        miss_threshold_s=miss_threshold_s,
+    )
 
 
 @dataclass(slots=True)
@@ -547,6 +557,10 @@ class _EngineState:
     veto_exclusions: HubVetoExclusions = field(default_factory=HubVetoExclusions)
     verdict_wait_s: float = DEFAULT_VERDICT_WAIT_S
     pending_verdicts: dict[UUID, str] = field(default_factory=dict)
+    #: Verdicts of the engine's utility-scale batches -> signed ramp anchors (`engine.ramp_anchor`).
+    anchor_verdicts: VerdictReader | None = None
+    #: Bounded guardian hand-off (`engine.propose_guard`): propose/heartbeat-read timeouts, stall hold.
+    guardian_gate: GuardianGate = field(default_factory=GuardianGate)
     #: Operator setpoints ramped by the engine (`engine.manual`); None = off.
     manual_source: ManualTargetSource | None = None
     manual_targets: dict[str, ManualTarget] = field(default_factory=dict)
@@ -766,27 +780,18 @@ async def propose_all_banks[G](
     propose: Callable[[str, list[G]], Coroutine[Any, Any, None]],
     *,
     concurrency: int,
+    timeout_s: float | None = None,
+    gate: GuardianGate | None = None,
 ) -> list[str]:
     """Propose every bank's batch, up to `concurrency` banks at once. Each bank is its own trace stream,
     so batches are independent; within a bank `propose_batch_to_guardian` keeps K10's order (pre-image,
     then batch row, then NOTIFY). A bank whose proposal fails is logged and returned; the others still go
-    out this cycle (K7)."""
-    gate = asyncio.Semaphore(concurrency)
-
-    async def _one(bank_id: str, bank_grants: list[G]) -> None:
-        async with gate:
-            await propose(bank_id, bank_grants)
-
-    bank_ids = list(grants_by_bank)
-    results = await asyncio.gather(*(_one(b, grants_by_bank[b]) for b in bank_ids), return_exceptions=True)
-    failed: list[str] = []
-    for bank_id, result in zip(bank_ids, results, strict=True):
-        if isinstance(result, BaseException):
-            if isinstance(result, asyncio.CancelledError):
-                raise result
-            logger.error("command batch proposal failed", exc_info=result, extra={"bank_id": bank_id})
-            failed.append(bank_id)
-    return failed
+    out this cycle (K7). `timeout_s` bounds the whole phase (`engine.propose_guard.propose_banks`); a
+    timeout is noted on `gate` so the next cycles hold until the guardian beats again."""
+    result = await propose_banks(grants_by_bank, propose, concurrency=concurrency, timeout_s=timeout_s)
+    if result.timed_out and gate is not None:
+        gate.note_stall()
+    return list(result.failed)
 
 
 async def characterize_hubs() -> int:
@@ -924,6 +929,42 @@ def hub_bank_id(fleet_module: Any, hub_id: str) -> str | None:
     return None
 
 
+def _safe_bank_zone(fleet_module: Any, bank_id: str) -> str | None:
+    try:
+        return str(fleet_module.bank_zone(bank_id))
+    except Exception:
+        return None
+
+
+async def refresh_ramp_anchors(state: Any, now: datetime, fleet_module: Any) -> None:
+    """HIGH-A (`engine.ramp_anchor`): learn which of last cycle's utility-scale batches the guardian signed
+    or vetoed, and which hubs a safe stop covers, before this cycle's setpoints are stepped."""
+    source = getattr(state, "manual_source", None)
+    if source is not None:
+        _ramp_anchors.apply_stops(
+            source.stop_scopes(), zone_of_bank=lambda bank_id: _safe_bank_zone(fleet_module, bank_id)
+        )
+    reader = getattr(state, "anchor_verdicts", None)
+    if reader is not None:
+        await _ramp_anchors.refresh(reader.outcomes, now)
+
+
+def drop_stopped_banks(state: Any, grants_by_bank: dict[str, list[Grant]], fleet_module: Any) -> None:
+    """No proposals for a bank under an engaged safe stop (FLEET, its BANK or its ZONE)."""
+    source = getattr(state, "manual_source", None)
+    if source is None:
+        return
+    stopped = stopped_banks(
+        list(grants_by_bank),
+        source.stop_scopes(),
+        zone_of_bank=lambda bank_id: _safe_bank_zone(fleet_module, bank_id),
+    )
+    for bank_id in stopped:
+        del grants_by_bank[bank_id]
+    if stopped:
+        logger.info("safe stop engaged: no proposals for %d bank(s)", len(stopped))
+
+
 async def trace_new_manual_targets(state: Any, cycle_id: str) -> None:
     """Record once per target that the engine adopted it and ramps it (R-MANUAL-RAMP)."""
     current = {t.trace_id for t in state.manual_targets.values()}
@@ -1024,6 +1065,7 @@ async def repropose_banks(
     for bank_id in bank_ids:
         if bank_id in manual_bank_ids(state.manual_targets, fleet_module):
             grants_by_bank.setdefault(bank_id, [])
+    drop_stopped_banks(state, grants_by_bank, fleet_module)
     cycle_ledger_version = await ledger_version_for_cycle(state, grants)
 
     async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
@@ -1046,7 +1088,14 @@ async def repropose_banks(
             manual_targets=state.manual_targets,
         )
 
-    await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+    guard = getattr(state, "guardian_gate", None) or GuardianGate()
+    await propose_all_banks(
+        grants_by_bank,
+        _propose,
+        concurrency=PROPOSE_CONCURRENCY,
+        timeout_s=guard.propose_timeout_s,
+        gate=guard,
+    )
 
 
 async def _engine_tick(state: _EngineState) -> None:
@@ -1096,6 +1145,9 @@ async def _engine_tick(state: _EngineState) -> None:
             state.manual_targets = await state.manual_source.targets(now)
             await trace_new_manual_targets(state, cycle_id)
 
+    with phase("ramp_anchors"):
+        await refresh_ramp_anchors(state, now, fleet)
+
     with phase("allocator"):
         grants = await allocator.run_cycle(
             cycle_id,
@@ -1114,6 +1166,7 @@ async def _engine_tick(state: _EngineState) -> None:
             state.backend,
             now=now,
             miss_threshold_s=state.heartbeat_interval_s * state.heartbeat_miss_threshold,
+            gate=state.guardian_gate,
         )
     if available:
         grants_by_bank: dict[str, list[Grant]] = {}
@@ -1121,6 +1174,7 @@ async def _engine_tick(state: _EngineState) -> None:
             grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
         for bank_id in manual_bank_ids(state.manual_targets, fleet):
             grants_by_bank.setdefault(bank_id, [])
+        drop_stopped_banks(state, grants_by_bank, fleet)
 
         proposed: dict[UUID, str] = {}
         cycle_ledger_version = await ledger_version_for_cycle(state, grants)
@@ -1147,7 +1201,13 @@ async def _engine_tick(state: _EngineState) -> None:
                 proposed[batch_id] = bank_id
 
         with phase("propose"):
-            await propose_all_banks(grants_by_bank, _propose, concurrency=PROPOSE_CONCURRENCY)
+            await propose_all_banks(
+                grants_by_bank,
+                _propose,
+                concurrency=PROPOSE_CONCURRENCY,
+                timeout_s=state.guardian_gate.propose_timeout_s,
+                gate=state.guardian_gate,
+            )
         if state.verdict_reader is not None and proposed:
             with phase("veto_retry"):
                 retry_banks = await handle_vetoes(
@@ -1415,8 +1475,13 @@ async def main(cfg: Config) -> None:
             schedule_gateway=schedule_gateway,
             extras_gateway=extras_gateway,
             verdict_reader=PgVerdictReader(pool) if settings.veto_retry_enabled else None,
+            anchor_verdicts=PgVerdictReader(pool),
             veto_exclusions=veto_exclusions,
             verdict_wait_s=settings.verdict_wait_s,
+            guardian_gate=GuardianGate(
+                propose_timeout_s=settings.propose_timeout_s,
+                check_timeout_s=settings.guardian_check_timeout_s,
+            ),
             manual_source=manual_source,
             firmware=firmware,
             energy_sufficiency_gateway=EnergySufficiencyGateway(
