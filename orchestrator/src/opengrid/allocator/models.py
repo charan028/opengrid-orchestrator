@@ -366,3 +366,7 @@ class CycleExtras:
     excluded_hub_ids: frozenset[str] = frozenset()
     #: The subset held by a live operator target (R-OPERATOR-OVERRIDE on shortfalls there).
     operator_hub_ids: frozenset[str] = frozenset()
+    #: Hubs out for device work (a firmware update in progress): unavailable like a FAULT hub, so a
+    #: shortfall they cause carries the L0 device exclusion the guardian's G-19 corroborates, never an
+    #: uncorroborated INFEASIBLE that vetoes the whole bank batch.
+    device_excluded_hub_ids: frozenset[str] = frozenset()

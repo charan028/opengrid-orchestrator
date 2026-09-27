@@ -992,12 +992,11 @@ async def repropose_banks(
     other hubs of the same obligation, K13). A fresh `seq` and cycle id keep G-13 and grant ids distinct."""
     from opengrid import allocator
 
-    # Grant rows (og.grant ids) of the retry get their own cycle id; the batch keeps the ORIGINAL cycle
-    # id, so the guardian's per-cycle accumulators (fleet/feeder ramp, G-05/G-06) count both attempts.
-    retry_cycle_id = f"{cycle_id}-r1"
+    # The retry keeps the ORIGINAL cycle id everywhere: on its grant rows (K13 accounting sees one cycle;
+    # only the grant ids carry ":r1") and on the batch (the guardian's per-cycle accumulators, G-05/G-06).
     state.cycle_seq += 1
     grants = await allocator.run_cycle(
-        retry_cycle_id,
+        cycle_id,
         fleet=state.fleet_gateway,
         ledger=state.ledger_gateway,
         scada_gateway=state.scada_gateway,
@@ -1007,6 +1006,7 @@ async def repropose_banks(
         lease_ttl_s=state.lease_ttl_s,
         only_bank_ids=bank_ids,
         retry_excluded_hub_ids=state.veto_exclusions.active(),
+        attempt=1,
     )
     hub_allocations = allocator.hub_allocations()
     grants_by_bank: dict[str, list[Grant]] = {}
@@ -1381,7 +1381,8 @@ async def main(cfg: Config) -> None:
             settings,
             asset_service=asset_service,
             set_at_risk=contracts_mod.set_obligation_at_risk,
-            excluded_hub_ids=lambda: veto_exclusions.active() | firmware.updating_hub_ids(),
+            excluded_hub_ids=veto_exclusions.active,
+            device_excluded_hub_ids=firmware.updating_hub_ids,
             operator_hub_ids=manual_source.active_hub_ids,
         )
         flush_lag = engine_metrics.FlushLag()

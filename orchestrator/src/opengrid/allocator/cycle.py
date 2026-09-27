@@ -90,6 +90,7 @@ def cycle(
     flow_limits: FlowLimits = _NO_FLOW_LIMITS,
     excluded_hub_ids: frozenset[str] = frozenset(),
     operator_hub_ids: frozenset[str] = frozenset(),
+    device_excluded_hub_ids: frozenset[str] = frozenset(),
 ) -> CycleResult:
     """Run one S1-S7 cycle across every bank in `fleet_state`.
 
@@ -128,6 +129,12 @@ def cycle(
     # its bank's capability, so the tiers never allocate kW the hubs cannot deliver.
     flow_cut_by_bank: dict[str, float] = {}
     for hub in fleet_state.hubs:
+        if hub.hub_id in device_excluded_hub_ids and hub.is_healthy:
+            # Device work (firmware update): out like a FAULT hub -- L0 attribution (`classify_hub_loss`).
+            flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + max(
+                hub.free_discharge_kw, 0.0
+            )
+            hub = hub.evolve(health="FAULT", free_discharge_kw=0.0)
         if hub.hub_id in excluded_hub_ids and hub.is_healthy:
             flow_cut_by_bank[hub.bank_id] = flow_cut_by_bank.get(hub.bank_id, 0.0) + max(
                 hub.free_discharge_kw, 0.0
