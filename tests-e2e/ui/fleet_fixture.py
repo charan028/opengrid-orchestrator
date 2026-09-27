@@ -220,12 +220,13 @@ def table(params: Any) -> dict[str, Any]:
 
 
 def selection(params: Any) -> dict[str, Any]:
+    cap = min(SELECTION_CAP, int(_one(params, "max") or SELECTION_CAP))
     ids = [h["hub_id"] for h in _matching(params)]
     return {
-        "hub_ids": ids[:SELECTION_CAP],
-        "count": min(len(ids), SELECTION_CAP),
-        "capped": len(ids) > SELECTION_CAP,
-        "max": SELECTION_CAP,
+        "hub_ids": ids[:cap],
+        "count": min(len(ids), cap),
+        "capped": len(ids) > cap,
+        "max": cap,
     }
 
 

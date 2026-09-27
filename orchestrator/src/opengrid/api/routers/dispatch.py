@@ -319,6 +319,8 @@ async def stream_control_room(
             "reserve_breach_count": invariants.reserve_breaches,
             "double_sold_kwh": invariants.double_sold_kwh,
             "invariants_checked_at": invariants.as_of.isoformat() if invariants.as_of else None,
+            # when these counts/sums were read: the tiles' age counts from here, not from page load
+            "as_of": datetime.now(UTC).isoformat(),
         }
 
     return sse_response(request, interval_s=2.0, heartbeat_s=cfg.get("api.sse_heartbeat_s", 15), fetch=fetch)

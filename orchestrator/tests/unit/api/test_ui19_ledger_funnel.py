@@ -227,13 +227,14 @@ def test_current_settlement_month_is_chicago_midnight() -> None:
     assert (start, end) == (datetime(2026, 12, 1, 6, tzinfo=UTC), datetime(2027, 1, 1, 6, tzinfo=UTC))
 
 
-def test_per_kw_rejects_end_before_start_and_viewers(client) -> None:
+def test_per_kw_rejects_end_before_start_and_is_viewer_readable(client) -> None:
     resp = client.get(
         "/og/api/profitability/per-kw?start=2026-10-01T00:00:00Z&end=2026-09-01T00:00:00Z",
         headers=OPERATOR_HEADERS,
     )
     assert resp.status_code == 400
-    assert client.get("/og/api/profitability/per-kw", headers=VIEWER_HEADERS).status_code == 403
+    # r3.4: the $/kW view is read-only, so a viewer may read it
+    assert client.get("/og/api/profitability/per-kw", headers=VIEWER_HEADERS).status_code == 200
 
 
 # -- authz for the read endpoints in this file --------------------------------------------------------

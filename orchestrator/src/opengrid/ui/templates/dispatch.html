@@ -60,7 +60,7 @@
     </div>
     <span class="status-badge status-info">held energy protected</span>
   </div>
-  <p class="og-panel-lead">Awards stay at 0 kW until an operator deploys them. Deployment draws only against the held energy reserve; ECRS requires 1 hour and Non-Spin requires 4 hours.</p>
+  <p class="og-panel-lead">Awards stay at 0 kW until an operator deploys them. Deployment draws only against the held energy reserve; ECRS requires 1 hour and Non-Spin requires 4 hours. A tolling obligation (D-29) is deployed by the utility's call, up to 90 minutes, never overlapping an active one.</p>
   {% if as_awards %}
   <div class="data-table-wrap">
     <table class="data-table" aria-label="ERCOT ancillary service awards">
@@ -81,7 +81,7 @@
             </form>
             {% elif is_operator %}
             <button class="btn btn-primary as-row-deploy" type="button" data-obligation="{{ award.obligation_id }}"
-                    aria-controls="as-deployment-form">Deploy&hellip;</button>
+                    aria-controls="as-deployment-form">{{ 'Utility call&hellip;'|safe if award.utility_call else 'Deploy&hellip;'|safe }}</button>
             {% else %}--{% endif %}
           </td>
         </tr>
@@ -99,7 +99,7 @@
     <label class="as-field as-field-award">
       <span class="as-field-label">Deploy</span>
       <select name="obligation_id" id="as-award-select" required>
-        {% for award in held_awards %}<option value="{{ award.obligation_id }}" data-product="{{ award.product }}" data-max="{{ award.max_minutes or 240 }}">{{ award.obligation_id[:8] }} · {{ award.product }}</option>{% endfor %}
+        {% for award in held_awards %}<option value="{{ award.obligation_id }}" data-product="{{ award.product }}" data-max="{{ award.max_minutes or 240 }}">{{ award.obligation_id[:8] }} · {{ 'TOLLING (utility call)' if award.utility_call else award.product }}</option>{% endfor %}
       </select>
     </label>
     <label class="as-field as-field-duration">

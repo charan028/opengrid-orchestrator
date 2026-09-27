@@ -133,7 +133,7 @@
     <span class="fl-table-bar-right">
       {% if is_operator and table_rows %}
       <button type="button" class="btn btn-sm" id="fleet-select-page">Select this page</button>
-      <button type="button" class="btn btn-sm" id="fleet-select-matching" data-approx="{{ approx_total if approx_total is not none else '' }}">Select all {{ approx_text }} matching</button>
+      <button type="button" class="btn btn-sm" id="fleet-select-matching" data-approx="{{ approx_total if approx_total is not none else '' }}">Select all matching (up to {{ '{:,}'.format(selection_max) }})</button>
       {% endif %}
       <label class="fl-inline" for="fleet-page-size">Rows
         <select id="fleet-page-size" onchange="window.location = this.value">
@@ -401,6 +401,7 @@
       basePath: "{{ base_path }}",
       query: {{ request.url.query|tojson }},
       selectionMax: {{ selection_max }},
+      livePowerEveryMs: 10000,
       isOperator: {{ 'true' if is_operator else 'false' }},
     });
 

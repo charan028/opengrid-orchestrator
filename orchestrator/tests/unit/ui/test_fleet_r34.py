@@ -103,3 +103,92 @@ def test_confirm_not_recorded_is_a_retryable_failure(monkeypatch: Any) -> None:
         .text
     )
     assert "NOT RECORDED" in body and "nothing is ramping" in body
+
+
+def test_safestop_confirm_after_the_window_reads_expired(monkeypatch: Any) -> None:
+    from opengrid.ui.api_client import ApiUnavailable
+
+    body = (
+        _post_client(monkeypatch, ApiUnavailable("409", status_code=409))
+        .post("/og/fleet/safestop/11111111-1111-1111-1111-111111111111/confirm")
+        .text
+    )
+    assert "EXPIRED" in body and "FAILED" not in body
+
+
+def test_bulk_propose_over_the_cap_is_refused_clearly(monkeypatch: Any) -> None:
+    import opengrid.ui.routes.fleet as fleet_route
+
+    async def fake_get_json(path: str, *, params: Any = None) -> Any:
+        return {"items": []}
+
+    monkeypatch.setattr(fleet_route, "get_json", fake_get_json)
+    client = _post_client(monkeypatch, AssertionError("must not post"))
+    client.app.state.config = Config(
+        {"api": {"roles": {"operator": ["alice"]}, "bulk_commands": {"max_hubs": 3}}}
+    )
+    body = client.post(
+        "/og/fleet/command/bulk/propose",
+        data={"hub_ids": "h1,h2,h3,h4", "p_kw_setpoint": "1", "reason": "x"},
+    ).text
+    assert "at most 3" in body
+
+
+def test_live_power_reads_the_map_snapshot(monkeypatch: Any) -> None:
+    import opengrid.ui.routes.fleet as fleet_route
+
+    async def fake_get_json(path: str, *, params: Any = None) -> Any:
+        assert path == "/og/api/fleet/map"
+        return {"hubs": [{"hub_id": "h1", "kw": -2.5, "last_seen_at": "t"}, {"hub_id": "h9", "kw": 1}]}
+
+    client = _client(monkeypatch, Config({"api": {"roles": {}}}))
+    monkeypatch.setattr(fleet_route, "get_json", fake_get_json)
+    body = client.get("/og/fleet/live-power?ids=h1,h2").json()
+    assert body == {"hubs": {"h1": {"p_kw": -2.5, "last_seen_at": "t"}}}
+
+
+def test_feed_quality_is_stale_by_age() -> None:
+    from opengrid.ui.routes.health import feed_quality
+
+    old = {
+        "source": "ERCOT",
+        "product": "np6-905-cd",
+        "quality": "GOOD",
+        "last_value_at": "2020-01-01T00:00:00+00:00",
+    }
+    assert feed_quality(old, {}) == "STALE"
+    assert feed_quality(old, {"ercot_price_fresh_s": 10**10}) == "GOOD"
+    assert feed_quality({**old, "last_value_at": None}, {}) == "GOOD"
+
+
+def test_tolling_obligations_are_utility_calls_capped_at_90() -> None:
+    from datetime import UTC, datetime
+
+    from opengrid.ui.routes.dispatch import as_awards_view
+
+    rows = as_awards_view(
+        [
+            {
+                "obligation_id": "t1",
+                "contract_id": "c1",
+                "service_type": "REGULATED_CAPACITY",
+                "state": "COMMITTED",
+            },
+            {
+                "obligation_id": "r1",
+                "contract_id": "c2",
+                "service_type": "REGULATED_CAPACITY",
+                "state": "COMMITTED",
+            },
+        ],
+        [],
+        now=datetime.now(UTC),
+        product_by_contract={"c1": "TOLLING", "c2": "CAPACITY"},
+    )
+    assert [(r["obligation_id"], r["utility_call"], r["max_minutes"]) for r in rows] == [("t1", True, 90)]
+
+
+def test_control_room_tiles_age_from_the_data() -> None:
+    text = (Path(__file__).resolve().parents[3] / "src/opengrid/ui/templates/control_room.html").read_text()
+    assert "health.invariants_checked_at or health.as_of" in text
+    assert 'setSince("kpi-fleet-mw", data.as_of)' in text

@@ -24,19 +24,19 @@
   <p>The three invariants the orchestrator enforces every 2-second cycle. Each must read 0; every value is backed by the trace chain on Billing &amp; audit.</p>
   <div class="og-kpis">
     <div>
-      {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-reserve-breaches', live_region=true %}
+      {% with label='Reserve breaches', value=health.reserve_breaches|default(0), severity=('critical' if health.reserve_breaches else 'good'), since_iso=(health.invariants_checked_at or health.as_of)|default(none), stale_after_s=10, tile_id='kpi-reserve-breaches', live_region=true %}
         {% include "_partials/kpi_tile.html" %}
       {% endwith %}
       <p class="og-promise-why">No home was ever pulled below the reserve kept for its own outage.</p>
     </div>
     <div>
-      {% with label='kWh sold twice', value=health.double_sold_kwh|default(0), severity=('critical' if health.double_sold_kwh else 'good'), since_iso=health.as_of|default(none), stale_after_s=10, tile_id='kpi-double-sold', live_region=true %}
+      {% with label='kWh sold twice', value=health.double_sold_kwh|default(0), severity=('critical' if health.double_sold_kwh else 'good'), since_iso=(health.invariants_checked_at or health.as_of)|default(none), stale_after_s=10, tile_id='kpi-double-sold', live_region=true %}
         {% include "_partials/kpi_tile.html" %}
       {% endwith %}
       <p class="og-promise-why">Every kWh has exactly one buyer; the ledger refuses a second reservation.</p>
     </div>
     <div>
-      {% with label='Commitment switches', value=health.commitment_switches|default(0), severity=('critical' if health.commitment_switches else 'good'), since_iso=health.as_of|default(none), stale_after_s=10 %}
+      {% with label='Commitment switches', value=health.commitment_switches|default(0), severity=('critical' if health.commitment_switches else 'good'), since_iso=(health.invariants_checked_at or health.as_of)|default(none), stale_after_s=10, tile_id='kpi-commitment-switches' %}
         {% include "_partials/kpi_tile.html" %}
       {% endwith %}
       <p class="og-promise-why">No committed customer was dropped when a better price appeared.</p>
@@ -186,6 +186,17 @@
       document.getElementById("control-room-updated").dataset.stale = "false";
       if (!data) { return; }
       og.noteDegradedModes(data.degraded_modes);
+      // Age comes from the data's own timestamp (the read behind this frame, or the last invariant
+      // check), never from page load: a live tile must not turn amber while frames keep arriving.
+      function setSince(tileId, iso) {
+        var badge = iso && document.querySelector("#" + tileId + " [data-since]");
+        if (badge) { badge.setAttribute("data-since", iso); }
+      }
+      setSince("kpi-fleet-mw", data.as_of);
+      setSince("kpi-active-commitments", data.as_of);
+      ["kpi-reserve-breaches", "kpi-double-sold", "kpi-commitment-switches"].forEach(function (id) {
+        setSince(id, data.invariants_checked_at || data.as_of);
+      });
       if (typeof data.fleet_mw === "number") { setKpiValue("kpi-fleet-mw", data.fleet_mw.toFixed(2)); }
       if (typeof data.active_commitment_count === "number") {
         setKpiValue("kpi-active-commitments", data.active_commitment_count);

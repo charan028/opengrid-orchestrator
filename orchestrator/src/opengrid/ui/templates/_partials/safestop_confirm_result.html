@@ -1,6 +1,7 @@
 {# safestop_confirm_result.html -- step-2 safe-stop confirm HTMX fragment. Params:
      result: dict|None (SafestopConfirmResult: proposal_id/scope/scope_id/engaged/trace_id) on success
-     status_code: int|None (the API's status code on failure: 503 timeout, 410/404 expired/unknown)
+     status_code: int|None (the API's status code on failure: 503 timeout; 409 confirmed after the 30 s
+       window, 410/404 expired/unknown)
      message: str|None (failure detail) #}
 <div id="safestop-confirm-result" role="{{ 'status' if (result and result.engaged) else 'alert' }}">
   {% if result and result.engaged %}
@@ -10,7 +11,7 @@
   {% elif status_code == 503 %}
   <p>{% with status='warning', label='TIMEOUT' %}{% include "_partials/status_badge.html" %}{% endwith %}
     No confirmation from og-safestop within the poll window. {{ message }}</p>
-  {% elif status_code in (410, 404) %}
+  {% elif status_code in (409, 410, 404) %}
   <p>{% with status='caution', label='EXPIRED' %}{% include "_partials/status_badge.html" %}{% endwith %}
     The proposal expired or is unknown -- propose again. {{ message }}</p>
   {% else %}

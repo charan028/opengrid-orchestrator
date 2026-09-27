@@ -424,7 +424,7 @@
             setSelection(body.hub_ids, false);
             if (noteEl) {
               noteEl.textContent = body.capped
-                ? "Capped at " + body.max.toLocaleString() + ": more hubs match this filter."
+                ? "Capped at " + body.max.toLocaleString() + ", the most one bulk command takes: more hubs match this filter."
                 : "All " + plural(body.count, "matching hub") + ".";
             }
           })
@@ -465,6 +465,29 @@
       bulkForm.addEventListener("input", bulkReady);
     }
     renderSelection();
+
+    // ---- live power: refresh the P cell and age of the rows on screen (every telemetry interval) ------
+    function refreshPower() {
+      var rows = Array.prototype.slice.call(document.querySelectorAll("tr.clickable-row[data-row-id]"));
+      if (!rows.length) { return; }
+      var ids = rows.map(function (r) { return r.dataset.rowId; }).join(",");
+      fetch(basePath + "/fleet/live-power?ids=" + encodeURIComponent(ids), { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (body) {
+          if (!body || !body.hubs) { return; }
+          rows.forEach(function (row) {
+            var hub = body.hubs[row.dataset.rowId];
+            if (!hub) { return; }
+            var cell = row.querySelector("td[data-col=kw]");
+            if (cell && hub.p_kw !== null && hub.p_kw !== undefined) { cell.textContent = hub.p_kw; }
+            var badge = row.querySelector("[data-since]");
+            if (badge && hub.last_seen_at) { badge.setAttribute("data-since", hub.last_seen_at); }
+          });
+        })
+        .catch(function () { /* the next interval tries again */ });
+    }
+    if (opts.livePowerEveryMs) { window.setInterval(refreshPower, opts.livePowerEveryMs); }
+    ogFleetRefreshPower = refreshPower;
 
     // ---- drawer ------------------------------------------------------------------------------
     var drawer = document.getElementById("hub-drawer");
@@ -539,5 +562,6 @@
     }
   }
 
-  window.ogFleet = { init: init };
+  var ogFleetRefreshPower = null;
+  window.ogFleet = { init: init, refreshPower: function () { if (ogFleetRefreshPower) { ogFleetRefreshPower(); } } };
 })();

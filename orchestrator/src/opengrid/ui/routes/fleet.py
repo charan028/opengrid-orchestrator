@@ -69,8 +69,11 @@ MAX_WINDOWS = 4
 #: Owner r3.4: 25 rows by default, 50 on request; keyset pages beyond (the API also allows 100).
 PAGE_SIZES = (25, 50)
 DEFAULT_PAGE_SIZE = 25
-#: "Select all N matching" cap; the API applies its own `[api].fleet_selection_max` on top.
+#: "Select all N matching" ceiling; the page clamps it to the bulk-command cap (`bulk_hub_cap`), since a
+#: selection is only ever made to command it. The API applies its own `[api].fleet_selection_max` on top.
 SELECTION_MAX = 5000
+#: `[api].bulk_commands.max_hubs` default (api `routers.fleet_bulk._DEFAULT_MAX_HUBS`).
+BULK_MAX_HUBS_DEFAULT = 500
 HEALTH_CHOICES = ("OK", "WATCH", "DEGRADED", "QUARANTINED", "FAULT", "OFFLINE")
 ACTIVITY_LABELS: dict[str, str] = {
     "delivering": "Delivering",
@@ -432,6 +435,16 @@ def _approx(n: int | None) -> str:
     return f"~{n:,}"
 
 
+def bulk_hub_cap(request: Request) -> int:
+    """The most hubs one bulk command takes: `[api].bulk_commands.max_hubs` (the API refuses more), so
+    "select all matching" never builds a selection the command cannot send."""
+    try:
+        configured = int(get_config(request).get("api.bulk_commands.max_hubs", BULK_MAX_HUBS_DEFAULT))
+    except AttributeError:
+        configured = BULK_MAX_HUBS_DEFAULT
+    return max(1, min(configured, SELECTION_MAX))
+
+
 def hub_age_thresholds(request: Request) -> tuple[float, float]:
     """(stale_after_s, offline_after_s) for the telemetry-age badges: `[health].hub_stale_s` and
     `hub_offline_s` through the health module's own reader (`HealthThresholds.from_config`), so a hub
@@ -571,7 +584,7 @@ async def fleet_screen(
             "activity_labels": ACTIVITY_LABELS,
             "zone_options": zone_options,
             "summary": summary if isinstance(summary, dict) and summary.keys() >= _SUMMARY_KEYS else None,
-            "selection_max": SELECTION_MAX,
+            "selection_max": bulk_hub_cap(request),
             "releases": releases,
             "map_hubs": map_hubs,
             "safestop_prefill": safestop_prefill(safestop_scope, safestop_scope_id),
@@ -605,7 +618,7 @@ async def fleet_selection(request: Request) -> JSONResponse:
     state = table_state(request)
     try:
         body = await get_json(
-            _SELECTION_PATH, params=_as_params([*state.filter_params(), ("max", str(SELECTION_MAX))])
+            _SELECTION_PATH, params=_as_params([*state.filter_params(), ("max", str(bulk_hub_cap(request)))])
         )
     except ApiUnavailable as exc:
         return JSONResponse({"error": str(exc)}, status_code=status.HTTP_502_BAD_GATEWAY)
@@ -851,6 +864,15 @@ async def propose_bulk_command(
             "_partials/propose_error.html",
             {"message": "select at least one hub on the map or in the table first"},
         )
+    cap = bulk_hub_cap(request)
+    if len(selected) > cap:
+        return templates.TemplateResponse(
+            request,
+            "_partials/propose_error.html",
+            {
+                "message": f"{len(selected)} hubs selected; one bulk command takes at most {cap}. Narrow the selection."
+            },
+        )
     hubs: list[dict[str, Any]] = []
     try:
         raw = await get_json("/og/api/fleet/hubs")
@@ -980,6 +1002,24 @@ async def target_status(trace_id: str) -> JSONResponse:
             "status": str(found.get("status") or TARGET_ACTIVE),
             "stop_event_id": found.get("stop_event_id"),
             "cancelled_by": found.get("cancelled_by"),
+        }
+    )
+
+
+@router.get("/live-power")
+async def live_power(ids: str = Query(default="", max_length=4000)) -> JSONResponse:
+    """`{hubs: {hub_id: {p_kw, last_seen_at}}}` for the rows on screen, from the map snapshot (one cached
+    read of every hub, `GET /og/api/fleet/map`), so the table's P and age refresh without a page load."""
+    wanted = set(parse_hub_ids(ids)[:100])
+    body = await _optional_json(_MAP_PATH)
+    hubs = body.get("hubs", []) if isinstance(body, dict) else []
+    return JSONResponse(
+        {
+            "hubs": {
+                str(h["hub_id"]): {"p_kw": h.get("kw", h.get("p_kw")), "last_seen_at": h.get("last_seen_at")}
+                for h in hubs
+                if isinstance(h, dict) and h.get("hub_id") in wanted
+            }
         }
     )
 

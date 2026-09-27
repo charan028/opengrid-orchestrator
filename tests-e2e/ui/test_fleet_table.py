@@ -405,3 +405,36 @@ def test_layout_order_map_hubs_charging_then_the_rest(operator_page: Page) -> No
         )
         assert overflow <= 0, (width, overflow)
         _shot(operator_page, f"fleet_layout_{width}.png")
+
+
+def test_power_column_refreshes_live(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    cell = operator_page.locator('tr[data-row-id="hub-0001"] td[data-col=kw]')
+    original = cell.inner_text()
+    operator_page.evaluate(
+        "document.querySelector('tr[data-row-id=\\'hub-0001\\'] td[data-col=kw]').textContent = 'x'"
+    )
+    expect(cell).to_have_text("x")
+    operator_page.evaluate("ogFleet.refreshPower()")
+    expect(cell).to_have_text(original)
+
+
+def test_select_matching_is_clamped_to_the_bulk_cap(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    button = operator_page.locator("#fleet-select-matching")
+    expect(button).to_contain_text("up to 500")
+    button.click()
+    expect(operator_page.locator("#fleet-selection-note")).to_contain_text("the most one bulk command takes")
+
+
+def test_tolling_obligation_gets_a_utility_call(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/dispatch")
+    call = operator_page.locator('.as-row-deploy[data-obligation="7011aaaa-0000-0000-0000-0000000070aa"]')
+    expect(call).to_have_text("Utility call\u2026")
+    call.click()
+    expect(operator_page.locator("#as-duration")).to_have_attribute("max", "90")
+    expect(operator_page.locator("#as-duration-hint")).to_have_text("Up to 90 min for TOLLING.")
+    operator_page.locator("#as-deployment-form").get_by_role("button", name="Propose deployment").click()
+    expect(operator_page.locator("#as-action-result")).to_contain_text(
+        "utility's call on tolling obligation 7011aaaa"
+    )
