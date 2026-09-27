@@ -145,6 +145,9 @@ class ObligationCall:
     #: reservation there (`opengrid.market.availability.GRANDFATHERED_SQL`): it completes untouched, exempt
     #: from the availability block and from the K15 territory check.
     grandfathered: bool = False
+    #: D-33: called for less than the committed kW (`og.as_deployment.requested_kw`); `committed_kw` is then
+    #: already this bank's pro-rata share of the requested kW, and its grant carries R-AS-PARTIAL-DEPLOYMENT.
+    partial_call: bool = False
 
     @property
     def is_capacity_hold(self) -> bool:

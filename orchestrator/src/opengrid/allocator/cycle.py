@@ -246,7 +246,9 @@ def cycle(
         for call in sorted(calls, key=lambda c: (_pq_result(pq, c) is None, c.obligation_id)):
             oid = call.obligation_id
             tier_granted = tier_result.granted_kw.get(oid, 0.0)
-            reason_code = reasons.R_GRANT_COMMITTED
+            # D-33: a partial call's grant is below the commitment by the call's own terms (G-19 corroborates
+            # it from og.as_deployment); a K13 shortfall below that share still overrides it (below).
+            reason_code = reasons.R_AS_PARTIAL_DEPLOYMENT if call.partial_call else reasons.R_GRANT_COMMITTED
 
             # D-37: nothing is dispatched on an UNAVAILABLE bank (regulated, no contract) except a call
             # grandfathered under K13, which is also exempt from K15 (committed while the zone was ERCOT).
