@@ -14,8 +14,9 @@ zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
 # zone_blocks: entry for entry (same manual-duplication pattern bank_count/zones already use
 # across the two config files) so ogsim.scada covers exactly the banks ogsim.fleet seeds.
 #
-# ENABLED (OWNER DECISION D-32, 2026-09-26): LZ_LCRA/LZ_RAYBN go live (mirrors fleet.yaml's own
-# zone_blocks -- ogsim.scada must measure exactly the banks ogsim.fleet now simulates for them).
+# ENABLED (D-32, 2026-09-26; kept by D-37): LZ_LCRA/LZ_RAYBN are simulated and measured (mirrors
+# fleet.yaml's own zone_blocks). D-37: they are REGULATED (NOIE) territory with UNAVAILABLE banks
+# (REGULATED_NO_CONTRACT) -- still monitored, never dispatched.
 # LZ_AEN/LZ_CPS stay off here; production enables AEN via its own override.
 zone_blocks:
   - zone: LZ_AEN

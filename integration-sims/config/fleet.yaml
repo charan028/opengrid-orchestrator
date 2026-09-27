@@ -52,17 +52,16 @@ p_kw_dual_unit: 20.0  # Dual-unit home inverter kW (confirmed by Base, 2026-09-2
 # (tdsp_tariffs.toml) must also be updated when a block is enabled -- see those files' own comments.
 #
 # LZ_LCRA (Lower Colorado River Authority) and LZ_RAYBN (Rayburn Country Electric Cooperative) are
-# FREE-market ERCOT zones (unlike LZ_AEN/LZ_CPS above, which are REGULATED-utility zones) -- confirmed
-# present in live ERCOT NP6-905-CD settlement-point-price results (2026-09-26 probe, FLEET-SIM build
-# report: 8 LZ points returned, including these two).
+# REGULATED (NOIE) territory like LZ_AEN (D-37, 2026-09-26, supersedes D-32's "free market"): utilities
+# LCRA / RAYBURN in tdsp_tariffs.toml [zone_territory], no M1, and -- with no real contract -- their
+# banks are og.bank.availability = UNAVAILABLE (REGULATED_NO_CONTRACT): simulated and monitored, never
+# dispatched. (Both settlement points do exist in ERCOT NP6-905-CD, 2026-09-26 probe.)
 #
-# ENABLED (OWNER DECISION D-32, 2026-09-26): both free-market zones go live -- this adds 500 hubs/10
+# ENABLED (D-32, 2026-09-26; kept by D-37): both zone blocks are simulated -- this adds 500 hubs/10
 # banks each (bank-060..069 LZ_LCRA, bank-070..079 LZ_RAYBN) on top of the base fleet + AEN/CPS,
 # 4,000 hubs / 80 banks total. LZ_AEN/LZ_CPS stay OFF here (`enabled: false`): production enables AEN
 # via its own override (the release manager regenerates it separately), not this shipped default. See
-# tdsp_tariffs.toml's `[zone_territory]` for LCRA/RAYBN's TDSP/delivery-charge treatment (LCRA is
-# itself a transmission/distribution utility -- no separate competitive TDSP charge; RAYBN is a
-# member-owned cooperative, outside retail competition -- no filed competitive TDSP tariff).
+# tdsp_tariffs.toml's `[zone_territory]` (D-37: REGULATED, no M1) and migration 0046 (availability).
 zone_blocks:
   - zone: LZ_AEN
     banks: 10

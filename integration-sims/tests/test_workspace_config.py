@@ -170,7 +170,7 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
 
     `zone_blocks` is the one documented exception (build phase, 2026-09-26): `fleet.yaml` ships the
     Austin Energy/CPS Energy blocks pre-declared but `enabled: false` (LZ_LCRA/LZ_RAYBN are `enabled:
-    true` -- OWNER DECISION D-32, 2026-09-26 -- asserted separately below), which is asserted below
+    true` -- regulated/unavailable per D-37 -- asserted separately below), which is asserted below
     to have zero effect on the simulated base fleet from the DISABLED blocks specifically
     (`ZoneBlockConfig`'s docstring: a disabled block reserves no ids and changes nothing) -- it is
     excluded from the raw dict-equality check
@@ -197,8 +197,9 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     assert (fleet.e_kwh_default, fleet.p_kw_default, fleet.dual_unit_share) == (39.2, 11.0, 0.2)
     assert (fleet.e_kwh_dual_unit, fleet.p_kw_dual_unit, fleet.bank_kva_rating_default) == (78.4, 20.0, 600.0)
     assert (fleet.hub_count, fleet.bank_count) == (2000, 40)
-    # OWNER DECISION D-32, 2026-09-26: the free-market zones LZ_LCRA/LZ_RAYBN are live; the regulated
-    # zones LZ_AEN/LZ_CPS stay off here (production enables AEN via its own override).
+    # D-37 (supersedes D-32): LZ_LCRA/LZ_RAYBN stay simulated, as REGULATED (NOIE) territory with
+    # UNAVAILABLE banks (no contract), not free market; LZ_AEN/LZ_CPS stay off here (production enables
+    # AEN via its own override). The territory itself is asserted in test_scada_zone_blocks.py.
     enabled_by_zone = {block.zone: block.enabled for block in fleet.zone_blocks}
     assert enabled_by_zone == {"LZ_AEN": False, "LZ_CPS": False, "LZ_LCRA": True, "LZ_RAYBN": True}
     assert [a.asset_id for a in fleet.substation_assets] == ["sub-LZ_AEN-00"]

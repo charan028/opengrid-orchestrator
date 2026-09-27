@@ -25,6 +25,8 @@ from opengrid.core.manual_targets import (
     TargetStatus,
     effective_targets,
 )
+from opengrid.core.reasons import R_BANK_UNAVAILABLE
+from opengrid.market.availability import availability_fields, with_availability
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
@@ -46,7 +48,7 @@ async def list_hubs(
     """`{"items": [...]}`, matching `opengrid.ui.routes.fleet`/`control_room`'s own parsing
     (`raw.get("items", [])`)."""
     hubs = await store.list_hubs(zone=zone, bank_id=bank, health=health, limit=limit, offset=offset)
-    return {"items": hubs}
+    return {"items": [with_availability(h) for h in hubs]}  # D-37 availability fields
 
 
 @router.get("/summary")
@@ -74,7 +76,7 @@ async def get_hub(
     if hub is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="hub not found")
     sparkline = await store.hub_telemetry_sparkline(hub_id, minutes=15)
-    return {**hub, "telemetry_sparkline": sparkline}
+    return {**with_availability(hub), "telemetry_sparkline": sparkline}
 
 
 @router.get("/banks/{bank_id}")
@@ -94,6 +96,7 @@ async def get_bank(
         "feeder_id": bank.feeder_id,
         "member_hub_count": bank.member_hub_count,
         "load_kva_estimate": bank.load_kva_estimate,
+        **availability_fields(bank.availability, bank.availability_reason),
     }
 
 
@@ -352,13 +355,39 @@ async def cancel_manual_target(
 async def _resolve_hub_ids(store: StoreProtocol, body: CommandProposalRequest) -> list[str]:
     """The hubs a proposal targets: the one hub (must exist), or every hub of the bank (at least one)."""
     if body.hub_id:
-        if await store.get_hub(body.hub_id) is None:
+        hub = await store.get_hub(body.hub_id)
+        if hub is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="hub not found")
+        _refuse_if_unavailable([hub], body.p_kw_setpoint)
         return [body.hub_id]
     hubs = await store.list_hubs(zone=None, bank_id=body.bank_id, health=None, limit=_MAX_BANK_HUBS, offset=0)
     if not hubs:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="bank not found or has no hubs")
+    _refuse_if_unavailable(hubs, body.p_kw_setpoint)
     return [str(h["hub_id"]) for h in hubs]
+
+
+def _refuse_if_unavailable(hubs: list[dict[str, Any]], p_kw_setpoint: float) -> None:
+    """D-37: a non-zero manual target on an UNAVAILABLE hub/bank (regulated market, no contract) is refused
+    up front with the owner's reason (409); the guardian would veto every step anyway (G-33,
+    R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT). A 0 kW hold is allowed; safe stop is a separate path."""
+    if abs(p_kw_setpoint) <= 1e-9:
+        return
+    for hub in hubs:
+        fields = with_availability(hub)
+        if fields["availability"] != "AVAILABLE":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "reason_code": R_BANK_UNAVAILABLE,
+                    "hub_id": str(hub.get("hub_id")),
+                    "availability": fields["availability"],
+                    "availability_reason": fields["availability_reason"],
+                    "availability_badge": fields["availability_badge"],
+                    "availability_text": fields["availability_text"],
+                    "message": f"Refused: {fields['availability_badge']}. {fields['availability_text']}",
+                },
+            )
 
 
 def _pop_or_404(proposals: ProposalStore, proposal_id: UUID, *, kind: str) -> Any:

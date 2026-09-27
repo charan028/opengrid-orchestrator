@@ -58,6 +58,9 @@ class BankAggregate:
     feeder_id: str | None
     member_hub_count: int
     load_kva_estimate: float
+    #: D-37 (migration 0046); defaults keep older rows/fakes AVAILABLE.
+    availability: str | None = None
+    availability_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,8 +387,12 @@ class PgStore:
         # other list_*/*_events method below, each with its own lint suppression on the literal).
         sql = f"""
             SELECT h.hub_id, h.bank_id, h.zone, s.soc_kwh, s.p_kw, s.health, s.lease_epoch,
-                   s.lease_expires_at, s.last_command_id, s.last_seen_at, s.fault_code
+                   s.lease_expires_at, s.last_command_id, s.last_seen_at, s.fault_code,
+                   -- D-37 (migration 0046): the hub's bank availability; to_jsonb keeps a pre-0046 DB working
+                   to_jsonb(b) ->> 'availability' AS availability,
+                   to_jsonb(b) ->> 'availability_reason' AS availability_reason
             FROM og.hub_state s JOIN og.hub h ON h.hub_id = s.hub_id
+            LEFT JOIN og.bank b ON b.bank_id = h.bank_id
             WHERE {" AND ".join(clauses)}
             ORDER BY s.hub_id LIMIT %s OFFSET %s
         """  # noqa: S608
@@ -400,8 +407,12 @@ class PgStore:
                    -- hub detail drawer (migrations 0032/0036): asset dates and device-reported identity
                    h.units, h.installed_at, h.last_serviced_at, h.serial_number, h.manufacturer, h.model,
                    h.firmware_version, h.hardware_revision, h.commissioned_at, h.inverter_model,
-                   h.device_info_at
-            FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id WHERE h.hub_id = %s
+                   h.device_info_at,
+                   to_jsonb(b) ->> 'availability' AS availability,
+                   to_jsonb(b) ->> 'availability_reason' AS availability_reason
+            FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id
+            LEFT JOIN og.bank b ON b.bank_id = h.bank_id
+            WHERE h.hub_id = %s
             """,
             (hub_id,),
         )
@@ -422,12 +433,14 @@ class PgStore:
             """
             SELECT b.bank_id, b.zone, b.kva_rating, b.reserve_kva, b.feeder_id,
                    count(h.hub_id) AS member_hub_count,
-                   coalesce(sum(abs(s.p_kw)), 0) AS load_kva_estimate
+                   coalesce(sum(abs(s.p_kw)), 0) AS load_kva_estimate,
+                   to_jsonb(b) ->> 'availability' AS availability,
+                   to_jsonb(b) ->> 'availability_reason' AS availability_reason
             FROM og.bank b
             LEFT JOIN og.hub h ON h.bank_id = b.bank_id
             LEFT JOIN og.hub_state s ON s.hub_id = h.hub_id
             WHERE b.bank_id = %s
-            GROUP BY b.bank_id, b.zone, b.kva_rating, b.reserve_kva, b.feeder_id
+            GROUP BY b.bank_id
             """,
             (bank_id,),
         )

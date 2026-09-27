@@ -33,11 +33,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from opengrid.core.models.engine import Contract
 from opengrid.core.models.market import (
     AVAILABILITY_BADGE,
     AVAILABILITY_TEXT,
     AVAILABLE,
     REGULATED_NO_CONTRACT,
+    SAMPLE_INACTIVE_LABEL,
     UNAVAILABLE,
     Availability,
     AvailabilityReason,
@@ -89,6 +91,45 @@ def parse_availability(
         REGULATED_NO_CONTRACT if reason == REGULATED_NO_CONTRACT else None
     )
     return BankAvailability(bank_id, UNAVAILABLE, known_reason, since)
+
+
+def availability_fields(availability: str | None, reason: str | None) -> dict[str, str | None]:
+    """The operator/customer API fields (D-37), one shape everywhere: `availability`,
+    `availability_reason`, `availability_text` (the owner's tooltip text) and `availability_badge` (the
+    short badge). A row without the columns (a database before 0046, a test fake) reads AVAILABLE."""
+    bank = parse_availability("", availability, reason, None)
+    return {
+        "availability": bank.availability,
+        "availability_reason": bank.reason if not bank.available else None,
+        "availability_text": bank.text,
+        "availability_badge": bank.badge,
+    }
+
+
+def with_availability(row: Mapping[str, object]) -> dict[str, object]:
+    """`row` (a hub or bank read-model dict carrying the raw `availability`/`availability_reason` columns,
+    or not) with the four API fields of `availability_fields`."""
+    out = dict(row)
+    raw_availability = out.pop("availability", None)
+    raw_reason = out.pop("availability_reason", None)
+    out.update(
+        availability_fields(
+            raw_availability if isinstance(raw_availability, str) else None,
+            raw_reason if isinstance(raw_reason, str) else None,
+        )
+    )
+    return out
+
+
+def contract_labels(contract: Contract) -> dict[str, object]:
+    """A contract as the operator/customer APIs list it (D-37): its fields plus `label` ("SAMPLE -
+    INACTIVE" for a sample contract, else None). A sample contract means there is no real contract for its
+    utility, so it also carries the REGULATED_NO_CONTRACT availability fields."""
+    out: dict[str, object] = contract.model_dump(mode="json")
+    out["label"] = SAMPLE_INACTIVE_LABEL if contract.is_sample else None
+    if contract.is_sample:
+        out.update(availability_fields(UNAVAILABLE, REGULATED_NO_CONTRACT))
+    return out
 
 
 def unavailable_bank_ids(banks: Iterable[BankAvailability]) -> frozenset[str]:
@@ -143,10 +184,13 @@ __all__ = [
     "R_BANK_UNAVAILABLE",
     "BankAvailability",
     "availability_badge",
+    "availability_fields",
     "availability_text",
     "available_kw",
+    "contract_labels",
     "grandfathered_banks_by_obligation",
     "is_grandfathered",
     "parse_availability",
     "unavailable_bank_ids",
+    "with_availability",
 ]
