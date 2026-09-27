@@ -110,12 +110,23 @@ runuser -u opengrid -- bash -c '
   exec "'"$VENV"'" -m opengrid.platform.db migrate
 '
 
-echo "$(ts) seeding fleet topology (idempotent)" | tee -a "$LOG"
+# The seed upserts (ON CONFLICT DO UPDATE) and bank/hub ids follow the ENABLED zone blocks in order, so it
+# must read the same fleet config the production simulators run. When /etc/opengrid/sim/fleet.yaml (the
+# generated production override, deploy/README.md) exists it wins over the repo yaml: seeding from the repo
+# yaml would re-key existing zone banks (e.g. LZ_AEN bank-040..049 rewritten as another zone).
+SIM_FLEET_OVERRIDE=/etc/opengrid/sim/fleet.yaml
+if [ -f "$SIM_FLEET_OVERRIDE" ]; then
+  echo "$(ts) seeding fleet topology (idempotent) from $SIM_FLEET_OVERRIDE" | tee -a "$LOG"
+else
+  SIM_FLEET_OVERRIDE=""
+  echo "$(ts) seeding fleet topology (idempotent) from the release's integration-sims/config/fleet.yaml" | tee -a "$LOG"
+fi
 runuser -u opengrid -- bash -c '
   set -a
   . /etc/opengrid/secrets.env
   . /etc/opengrid/api_keys.env
   set +a
+  if [ -n "'"$SIM_FLEET_OVERRIDE"'" ]; then export OG_FLEET_SIM_CONFIG="'"$SIM_FLEET_OVERRIDE"'"; fi
   export OG_CONFIG="'"$NEW_RELEASE"'/orchestrator/config/orchestrator.toml"
   export PYTHONPATH="'"$NEW_RELEASE"'/orchestrator/src"
   exec "'"$VENV"'" -m opengrid.fleet.seed
