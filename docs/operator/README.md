@@ -30,7 +30,8 @@ Accounts (Apache Basic Auth; passwords are in the lead's credentials file, never
 | `operator` | operator | Everything on the console, except completing a safe-stop release (the guardian signs a release only for the named operators below) |
 | `og-op-a`, `og-op-b` | operator | Everything, including the two-person release: one requests, the other approves |
 | `viewer` | viewer | Read every screen; no write panel is shown, and every write is refused (403) |
-| `og-cust-*` (`dc`, `pipe`, `ercot`, `dist`, `partner`, `pjm`, `mobile`, `largeld`) | customer | The customer API only (`/og/api/customer/`); not the console. **Switched off in this release:** og-api serves the customer API only when `[api.customer_api] enabled = true`, and the shipped config sets `false` |
+| `og-cust-*` (`dc`, `pipe`, `ercot`, `dist`, `partner`, `pjm`, `mobile`, `largeld`) | customer | The customer API only (`/og/api/customer/`); not the console. og-api serves the customer API only when `[api.customer_api] enabled = true`; the shipped config sets it from r3.4.1 (D-33) |
+| `og-util-aen` | utility | The utility API only (`/og/api/customer/v1/utility/`, section 6.11): Austin Energy's own toll calls. Not the console |
 | `tester` | control plane | The simulator control plane at `/ogsim/` |
 
 How identity works: Apache authenticates you and forwards your account name to og-api together with a
@@ -560,6 +561,86 @@ Available once a contract is signed.*
 3. Nothing to restart: og-engine re-reads availability with the market model, the selector every gate, the
    guardian on its topology refresh. Confirm on the Fleet page (badge gone) and at the next gate (the toll is
    reserved in the utility's window). Record it in the decision log.
+
+### 6.11 Utility API (Austin Energy toll calls, r3.4.1, D-33)
+
+Austin Energy issues its own toll calls through og-api's utility API, `/og/api/customer/v1/utility/`. The full
+reference is `docs/api/utility-api.md`. It signs in as `og-util-aen`: `[api.roles.utility]` maps that account to
+`AUSTIN_ENERGY`, and `[api.utility_api] enabled_utilities` lists that utility. The simulator `ogsim.utility_aen`
+can stand in for Austin Energy's system.
+
+**What the utility can see and do**
+
+- It sees its own tolling obligations (by default today's and tomorrow's 16:30-18:00 CT windows) and each one's
+  active call.
+- It can issue a call, now or later in the window:
+  - discharge only: negative kW, at most the committed kW;
+  - at most 90 minutes, starting and ending inside the obligation's window;
+  - never overlapping another call on the same obligation.
+- Every call carries an idempotency key. Resending the same request with the same key returns the original call
+  and deploys nothing new; the same key with a different request is refused (409).
+- It can read the state of its calls and cancel or shorten them. It can never extend a call.
+- It reaches nothing else:
+  - another utility's obligations and calls answer 404 (never 403, so their existence is not revealed);
+  - Apache admits the account only under `/og/api/customer/`;
+  - og-api refuses it (403) on every operator and viewer endpoint.
+- The scope is the utility, not the account. A call you raise on the toll from Dispatch is recorded against
+  `AUSTIN_ENERGY`. It appears in the utility's call history, and the utility can cancel it.
+
+**How a call appears to you**
+
+- **ALR-UTILITY-CALL** (info) for each accepted call, for example "UTILITY call from og-util-aen: -20000 kW for
+  60 min from 2026-09-27T21:30+00:00". It fires again when the utility cancels or shortens the call.
+- **ALR-UTILITY-CALL-REFUSED** (warning) with the reason code, for example `R-CALL-OUTSIDE-WINDOW`. While one is
+  open and unacknowledged, further refusals from the same account add no new alert. Acknowledge it to see the next.
+- **Dispatch, AS awards & deployment:** the toll's row reads `deployed`, "by UTILITY · og-util-aen · -N kW". This
+  starts when the call is accepted (also for a call scheduled later in the window) and lasts until the call ends.
+  **Stop deploy** ends it early, as for any deployment.
+- **From a shell:**
+  - the call ledger, refusals included: `GET /og/api/dispatch/calls?utility_id=AUSTIN_ENERGY`;
+  - the active deployments: `GET /og/api/dispatch/as-deployments` (`source` `UTILITY`, `requested_by`
+    `og-util-aen`).
+- **Audit:**
+  - trace stream `dispatch_call:og-util-aen` (`DISPATCH_CALL`, `DISPATCH_CALL_REFUSED`, `DISPATCH_CALL_END`);
+  - an operator-action row per accepted call (`UTILITY_CALL:<obligation>`, by `og-util-aen`);
+  - `AUTHZ_DENY` on `authz_deny:og-util-aen` when the account reaches for another utility's data.
+
+**States the utility sees** (r3.4.3; measured delivery, D-38)
+
+| State | Meaning |
+|---|---|
+| `ACCEPTED` | Accepted, not started yet |
+| `ACTIVE` | Running; its delivery is not measured yet, or the latest measurement had no telemetry |
+| `RAMPING` | Running; measured discharge below `ramping_fraction` (0.9) of the call's kW |
+| `DELIVERING` | Running; measured discharge at or above that share |
+| `COMPLETED` | Ended, or cancelled |
+| `REFUSED` | Never deployed; the reason code says why |
+
+og-settle's delivery job measures each call from telemetry in 30 s buckets. The first measurement comes about a
+minute into the call, so a call starts `ACTIVE`. The status carries the measured `delivered_kw`/`delivered_kwh`
+and the verification (`delivery_state` `IN_PROGRESS`, then `PASS`, `PARTIAL` or `FAIL`, with reasons). Its
+`granted_kw`/`granted_kwh` are planned/granted values, never metered: they are deprecated and removed in r3.5.
+
+- **Operator view (r3.4.3):** the same measurement is at `GET /og/api/delivery/records/{deployment_id}`. A slow
+  or short delivery raises `ALR-DELIVERY-RAMP-LATE`, `ALR-DELIVERY-SHORTFALL` or `ALR-DELIVERY-NONE`.
+- **In r3.4.2** nothing is measured. A running call is always `ACTIVE`, with `delivery_measured: false` and
+  `delivery_state: "UNMEASURED"`; only the granted fields exist; `ramping_fraction` is unused. If the utility
+  questions a delivery there, compare Dispatch's "Real-time grants & substitutions" with the trace; don't rely on
+  the call's state.
+
+**Limits** (`[dispatch.calls]`)
+
+- The limits are per account and apply to every origin, operators included: `max_calls_per_hour = 30` and
+  `max_calls_per_day = 200`, over rolling windows.
+- Accepted and refused calls count; a resend of the same idempotency key does not.
+- Over the limit the call is refused with 429 `R-CALL-RATE-LIMIT`, and **ALR-UTILITY-CALL-REFUSED** is raised.
+- The utility's calls never use up an operator's budget.
+
+**Switching it off** (release manager):
+
+- Remove `AUSTIN_ENERGY` from `[api.utility_api] enabled_utilities`: every utility request then answers 403.
+- Or set `[api.customer_api] enabled = false`: every customer and utility route answers 404.
+- Then restart og-api. Calls already accepted run to their end, and Stop deploy still works.
 
 ## 7. Degraded modes and guardian escalation
 

@@ -438,6 +438,7 @@ calls it, and a call is the same route with the toll's obligation:
 
 A call discharges up to the committed kW for its duration. It is capped at the toll's 90-minute product (`409` above
 it), and a second call that overlaps an active one is `409`. A fleet-wide ERCOT AS deployment never touches the toll.
+The utility issues the same calls itself through [the utility customer API](utility-api.md) (D-33).
 
 ## Alerts
 
