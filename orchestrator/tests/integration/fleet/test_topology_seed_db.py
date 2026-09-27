@@ -94,7 +94,11 @@ def seeded(dsn: str, server_config, configs: tuple[Path, Path]) -> str:
 
     asyncio.run(_fleet())
     with psycopg.connect(dsn, autocommit=True) as conn:
-        for name in ("market_model_seed.sql", "mobile_trucks_seed.sql"):
+        for name in (
+            "market_model_seed.sql",
+            "noie_switch_seed.sql",
+            "mobile_trucks_seed.sql",
+        ):  # phase e order
             conn.execute((SEED_DIR / name).read_text(encoding="utf-8").encode("utf-8"))
     return dsn
 
@@ -139,7 +143,7 @@ def test_fresh_bootstrap_has_zero_unmapped_and_a_clean_guardian_topology(
     assert {v for k, v in dedicated.items() if k.startswith("truck-")} == {600.0}
     assert truck_feeders == (TRUCKS,)
     assert sub_feeder == (24000.0, 20000.0)  # market_model_seed.sql's row kept
-    assert lcra == [("LZ_LCRA", None)]
+    assert lcra == [("LZ_LCRA", "LCRA")]  # D-37: regulated territory, not the ERCOT competitive area
     assert off_rating == (0,)  # D-36: every bank's transformers sum to its og.bank.kva_rating
 
     # The guardian's own read: the conditions under which it raises ALR-XFMR-UNMAPPED /

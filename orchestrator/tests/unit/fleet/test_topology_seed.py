@@ -31,7 +31,12 @@ ts = importlib.util.module_from_spec(_spec)
 sys.modules["topology_seed"] = ts
 _spec.loader.exec_module(ts)
 
-TERRITORY = {"LZ_AEN": "AUSTIN_ENERGY", "LZ_CPS": "CPS_ENERGY", "LZ_LCRA": "LCRA", "LZ_RAYBN": "RAYBURN"}  # D-37
+TERRITORY = {
+    "LZ_AEN": "AUSTIN_ENERGY",
+    "LZ_CPS": "CPS_ENERGY",
+    "LZ_LCRA": "LCRA",
+    "LZ_RAYBN": "RAYBURN",
+}  # D-37
 DEV_FLEET = REPO / "dev" / "config" / "fleet.dev.yaml"
 DEV_SCADA = REPO / "dev" / "config" / "scada.dev.yaml"
 

@@ -734,7 +734,10 @@ class EngineLedgerGateway:
             await cur.execute(_PRIOR_GRANTS_SQL, {"bank_ids": list(bank_ids)})
             prior_rows = await cur.fetchall()
         markets = await self._markets([str(row[0]) for row in call_rows])
-        grandfathered = await self._grandfathered() if call_rows else set()
+        # D-37/K13: grandfathering only matters on an UNAVAILABLE bank (the switched zones), so the read
+        # runs only when a call sits on one.
+        on_unavailable = any(is_unavailable_bank(str(row[1])) for row in call_rows)
+        grandfathered = await self._grandfathered() if on_unavailable else set()
 
         prior_by_obligation = {str(obligation_id): float(kw) for obligation_id, kw in prior_rows}
         self._committed_kw = {}
