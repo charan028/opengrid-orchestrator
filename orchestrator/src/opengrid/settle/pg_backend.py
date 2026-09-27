@@ -132,6 +132,36 @@ LEFT JOIN LATERAL (
 ) f ON true
 """  # noqa: S608 -- _ZONE_FOR_OBLIGATION_CTE is a fixed module-level literal, never interpolated input
 
+#: ERCOT_AS capacity revenue prices the award at the CLEARED DAM MCPC for its product in the delivery hour
+#: (NP4-188-CD, `og.feed_obs` series = the product rule's `product_code`, e.g. ECRS / NSPIN / RRS) -- the same
+#: rule as D-10's zone SPP for energy: the market's settled price, never the opportunity's stored figure
+#: (live r3.4 spot-check: 0.5 MW ECRS settled at the opportunity's 1.00 $/MW-h, not the day's 0.28 MCPC).
+#: DAM MCPCs are hourly, stamped at the hour start: the latest price at or before the interval, within 1 h.
+_FETCH_AS_MCPC_SQL = """
+SELECT pr.product_code, f.ts, f.value
+FROM og.obligation o
+JOIN og.opportunity opp ON opp.opportunity_id = o.opportunity_id
+JOIN og.product_rule pr ON pr.product_rule_id = opp.product_rule_id
+LEFT JOIN LATERAL (
+    SELECT ts, value FROM og.feed_obs
+    WHERE source = 'ERCOT' AND product = 'np4-188-cd' AND series = pr.product_code
+      AND ts <= %(interval_start)s AND ts > %(interval_start)s - interval '1 hour'
+    ORDER BY ts DESC, recorded_at DESC
+    LIMIT 1
+) f ON true
+WHERE o.obligation_id = %(obligation_id)s
+"""
+
+
+def as_price_from_mcpc(row: Mapping[str, Any] | None, fallback_per_kwh: Decimal) -> tuple[Decimal, str]:
+    """`(capacity price $/kW-h == $/MW-h / 1000, flag)` for an ERCOT_AS award: "MCPC" from the cleared DAM
+    price of the award's product in the delivery hour, else the opportunity's own figure flagged
+    "OPPORTUNITY_PRICE" (no MCPC observation for that product/hour)."""
+    if row is None or row.get("value") is None:
+        return fallback_per_kwh, "OPPORTUNITY_PRICE"
+    return Decimal(str(row["value"])) / _KWH_PER_MWH, "MCPC"
+
+
 #: Documented proxy for "what was paid to charge" (09-optimizer-dispatcher-update.md S0.2 finding G4,
 #: settle/profitability.py's module docstring): the trailing 24h off-peak average ERCOT real-time SPP
 #: for the obligation's bank zone. MVP-S has no per-obligation charging-interval attribution yet (the
@@ -477,6 +507,7 @@ class PgSettleBackend:
     ) -> ObligationSettlementContext:
         spp: dict[str, Any] | None = None
         charging_proxy: dict[str, Any] | None = None
+        mcpc: dict[str, Any] | None = None
         async with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(_FETCH_CONTEXT_SQL, {"obligation_id": obligation_id})
             row = await cur.fetchone()
@@ -495,6 +526,12 @@ class PgSettleBackend:
                     },
                 )
                 charging_proxy = await cur.fetchone()
+                if row["service_type"] == "ERCOT_AS":
+                    await cur.execute(
+                        _FETCH_AS_MCPC_SQL,
+                        {"obligation_id": obligation_id, "interval_start": interval_start},
+                    )
+                    mcpc = await cur.fetchone()
         if row is None:
             raise LookupError(f"obligation not found: {obligation_id}")
         if row["value_per_mwh"] is None and row["service_type"] != HOME_SERVICE_TYPE:
@@ -511,6 +548,18 @@ class PgSettleBackend:
                 theta=row["penalty_theta"] or Decimal("0"),
             )
         price_per_kwh = (row["value_per_mwh"] or Decimal("0")) / Decimal("1000")
+        price_flag = "CONTRACT"
+        if row["service_type"] == "ERCOT_AS" and interval_start is not None:
+            price_per_kwh, price_flag = as_price_from_mcpc(mcpc, price_per_kwh)
+            if price_flag != "MCPC":
+                _logger.warning(
+                    "no cleared MCPC for the AS award's product in this hour: priced at the opportunity (flagged)",
+                    extra={
+                        "obligation_id": str(obligation_id),
+                        "interval_start": interval_start.isoformat(),
+                        "product_code": mcpc["product_code"] if mcpc else None,
+                    },
+                )
         # Informational only: the bank zone's real-time SPP AT the discharge interval (kept for the
         # settlement trace/audit trail). It no longer prices energy_cost -- see charging_cost below
         # (09-optimizer-dispatcher-update.md S0.2 finding G4).
@@ -545,6 +594,7 @@ class PgSettleBackend:
             service_type=row["service_type"],
             committed_kw=row["committed_qty_kw"],
             price_per_kwh=price_per_kwh,
+            price_flag=price_flag,
             charging_cost_per_kwh=charging_cost_per_kwh,
             eta_d=Decimal("0.9487"),
             degradation_cost_per_kwh=row["degradation_cost"],

@@ -450,6 +450,8 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
                 "quality_flag": metering.quality_flag,
                 "charging_cost_per_kwh": str(ctx.charging_cost_per_kwh),
                 "charging_cost_flag": ctx.charging_cost_flag,
+                "price_per_kwh": str(ctx.price_per_kwh),
+                "price_flag": ctx.price_flag,
                 "wholesale_price_per_kwh": str(ctx.wholesale_price_per_kwh),
                 "wholesale_price_flag": ctx.wholesale_price_flag,
                 "need_basis_compliant": need_basis_compliant,
