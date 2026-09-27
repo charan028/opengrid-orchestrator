@@ -68,12 +68,15 @@ def classify_hub_health(
     *, last_seen_at: datetime | None, fault_code: str | None, now: datetime, thresholds: HealthThresholds
 ) -> HubHealthState:
     """02b S6.4: `fault` wins outright (hub-reported, independent of timing); otherwise online/stale/
-    offline from `hub_state.last_seen_at` age."""
+    offline from `hub_state.last_seen_at` age, using the configured `hub_stale_s`/`hub_offline_s`
+    thresholds directly -- consistent with the fleet twin's own classification (R3 review fix: this used
+    to compare against `thresholds.hub_online_s`, a `telemetry_interval_s * 2` formula, so the actually
+    configured `health.hub_stale_s` was loaded into `HealthThresholds` but never read anywhere)."""
     if fault_code:
         return "fault"
     if is_stale(last_seen_at, thresholds.hub_offline_s, now=now):
         return "offline"
-    if is_stale(last_seen_at, thresholds.hub_online_s, now=now):
+    if is_stale(last_seen_at, thresholds.hub_stale_s, now=now):
         return "stale"
     return "online"
 

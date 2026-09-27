@@ -121,6 +121,11 @@ class HealthThresholds:
     heartbeat_interval_s: float = 5.0
     heartbeat_miss_threshold: int = 3
     telemetry_interval_s: float = 2.0
+    # `classify_hub_health` (rules.py) compares a hub's telemetry age directly against these two --
+    # R3 review fix: `hub_stale_s` used to be loaded from `[health].hub_stale_s` here but never actually
+    # read anywhere (the classifier instead used a `telemetry_interval_s * 2` formula), so the configured
+    # value had no effect. Now consistent with the fleet twin, which classifies off the exact same
+    # `HealthThresholds` (`opengrid.fleet.configure`).
     hub_stale_s: float = 6.0
     hub_offline_s: float = 30.0
     cycle_p99_budget_s: float = 0.5
@@ -177,11 +182,6 @@ class HealthThresholds:
     def heartbeat_down_after_s(self) -> float:
         """A process is DOWN after `heartbeat_miss_threshold` missed `heartbeat_interval_s` beats."""
         return self.heartbeat_interval_s * self.heartbeat_miss_threshold
-
-    @property
-    def hub_online_s(self) -> float:
-        """02b S6.4: online <= fleet.telemetry_interval_s * 2."""
-        return self.telemetry_interval_s * 2
 
     @classmethod
     def from_config(cls, cfg: Config) -> HealthThresholds:
