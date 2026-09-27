@@ -19,15 +19,36 @@ from opengrid.core.crypto import verify_payload
 from opengrid.core.models.mqtt import StopEvent
 from opengrid.safestop.backend import (
     InitiatorKind,
+    OutboxEntry,
     ReleaseHousekeepingBackend,
     StopEventBackend,
+    StopEventRow,
     StopOutboxBackend,
     StopPublisher,
 )
 from opengrid.safestop.events import Scope, build_engage_event, stop_topic_suffix, wire_stop_topic_suffix
 from opengrid.safestop.keys import StopSigningKey
+from opengrid.safestop.mqtt_publish import StopPublishError
 
 logger = logging.getLogger(__name__)
+
+#: Permanent publish failures before a stop outbox entry is dead-lettered.
+DEFAULT_OUTBOX_MAX_ATTEMPTS = 5
+
+
+def _row_kwargs(row: StopEventRow) -> dict[str, Any]:
+    return {
+        "stop_event_id": row.stop_event_id,
+        "scope_kind": row.scope_kind,
+        "scope_ref": row.scope_ref,
+        "action": row.action,
+        "initiator_kind": row.initiator_kind,
+        "initiator_ref": row.initiator_ref,
+        "reason": row.reason,
+        "approver_ref": row.approver_ref,
+        "signature": row.signature,
+    }
+
 
 _SCOPE_TO_KIND: dict[Scope, str] = {"FLEET": "FLEET", "ZONE": "ZONE", "BANK": "BANK"}
 _WIRE_TO_KIND: dict[str, Literal["FLEET", "ZONE", "BANK"]] = {
@@ -69,6 +90,9 @@ class SafestopService:
     #: accepted ENGAGE/RELEASE is queued and (re)published until the broker acknowledges it, in acceptance
     #: order, including after a broker reconnect. None: publish directly (a failed publish raises).
     outbox: StopOutboxBackend | None = None
+    #: Permanent publish failures before an outbox entry is dead-lettered (skipped and alerted) -- a poison
+    #: entry must never block later stops. Broker outages never count toward it.
+    outbox_max_attempts: int = DEFAULT_OUTBOX_MAX_ATTEMPTS
     _drain_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     async def engage(
@@ -111,7 +135,7 @@ class SafestopService:
                 reason_codes=["SAFE_STOP_ENGAGE"],
             )
 
-        await self.backend.insert_stop_event(
+        row = StopEventRow(
             stop_event_id=stop_id,
             scope_kind=_SCOPE_TO_KIND[scope],  # type: ignore[arg-type]
             scope_ref=scope_ref or "FLEET",
@@ -122,9 +146,8 @@ class SafestopService:
             approver_ref=None,
             signature=event.signature,
         )
-
         topic_suffix = stop_topic_suffix(scope, scope_ref, stop_id)
-        await self._publish(stop_id, "ENGAGE", topic_suffix, event.model_dump(mode="json"))
+        await self._record_and_publish(row, stop_id, topic_suffix, event.model_dump(mode="json"))
         logger.info(
             "safe stop engaged",
             extra={"scope": scope, "scope_ref": scope_ref, "stop_id": str(stop_id)},
@@ -149,17 +172,22 @@ class SafestopService:
             return False
         parsed = StopEvent.model_validate(event)
         signature = parsed.signature
+        topic_suffix = wire_stop_topic_suffix(parsed.scope, parsed.scope_id, parsed.stop_id)
         if await self.backend.has_signature(signature):
+            if self.outbox is not None:
+                # H5 repair: recorded but (from before the atomic write) never queued -- queue it now. A no-op
+                # when it is already queued (once per stop_id and action).
+                await self.outbox.enqueue_publication(
+                    stop_id=parsed.stop_id, action="RELEASE", topic_suffix=topic_suffix, payload=dict(event)
+                )
+                await self.drain_outbox()
             return True
         if self.trace is not None:
             await self.trace.append(
                 "safestop", "SAFE_STOP", "SAFE_STOP", dict(event), reason_codes=["SAFE_STOP_RELEASE"]
             )
-        topic_suffix = wire_stop_topic_suffix(parsed.scope, parsed.scope_id, parsed.stop_id)
-        if self.outbox is None:
-            await self.publisher.publish_retained(topic_suffix, dict(event))
         scope_kind = _WIRE_TO_KIND[parsed.scope]
-        await self.backend.insert_stop_event(
+        row = StopEventRow(
             stop_event_id=uuid4(),
             scope_kind=scope_kind,
             scope_ref=parsed.scope_id or "FLEET",
@@ -170,51 +198,128 @@ class SafestopService:
             approver_ref=parsed.approver_ref,
             signature=signature,
         )
-        if self.outbox is not None:
-            # Recorded first, then queued: the outbox (not the guardian's re-hand-off) now owns delivery.
-            await self._publish(parsed.stop_id, "RELEASE", topic_suffix, dict(event))
+        await self._record_and_publish(row, parsed.stop_id, topic_suffix, dict(event))
         logger.info(
             "guardian-signed stop RELEASE published",
             extra={"scope": scope_kind, "scope_ref": parsed.scope_id, "stop_id": str(parsed.stop_id)},
         )
         return True
 
-    async def _publish(
-        self, stop_id: UUID, action: Literal["ENGAGE", "RELEASE"], topic_suffix: str, payload: dict[str, Any]
+    async def _record_and_publish(
+        self, row: StopEventRow, stop_id: UUID, topic_suffix: str, payload: dict[str, Any]
     ) -> None:
-        """Without an outbox: publish now (a failure raises). With one: queue durably, then drain -- a
-        publish that cannot happen now (broker down) is NOT an error for the caller: the stop is accepted
-        and recorded, and is published, in order, as soon as the broker is back (`drain_outbox`)."""
+        """Without an outbox: record, then publish now (a failure raises; the RELEASE keeps its old
+        publish-then-record order so the guardian re-hands an unpublished one). With one (production): the
+        `og.stop_event` row and its outbox entry in ONE transaction (H5 -- a stop is never recorded without
+        being queued), then drain. A publish that cannot happen now (broker down) is NOT an error for the
+        caller: the stop is accepted, recorded and published in order as soon as the broker is back."""
         if self.outbox is None:
-            await self.publisher.publish_retained(topic_suffix, payload)
+            if row.action == "RELEASE":
+                await self.publisher.publish_retained(topic_suffix, payload)
+                await self.backend.insert_stop_event(**_row_kwargs(row))
+            else:
+                await self.backend.insert_stop_event(**_row_kwargs(row))
+                await self.publisher.publish_retained(topic_suffix, payload)
             return
-        await self.outbox.enqueue_publication(
-            stop_id=stop_id, action=action, topic_suffix=topic_suffix, payload=payload
-        )
+        await self.outbox.record_and_enqueue(row, stop_id=stop_id, topic_suffix=topic_suffix, payload=payload)
         await self.drain_outbox()
 
+    async def ensure_l2_engage_published(self, instruction_id: UUID, bank_id: str) -> bool:
+        """H5 repair on a redelivered utility L2 instruction the intake reports ALREADY_ACTED: if its ENGAGE
+        is recorded but was never queued to publish (a failure between the old separate writes), sign it again
+        under the SAME stop_id (hubs dedupe by stop_id) and queue it -- unless that bank was released since
+        (never re-stop a released bank on an old instruction). Returns True when it queued a publication."""
+        if self.outbox is None:
+            return False
+        record = await self.outbox.l2_engage_record(instruction_id, bank_id)
+        if record is None or record.has_publication or record.released:
+            return False
+        event = build_engage_event(
+            scope="BANK",
+            scope_ref=bank_id,
+            reason=record.reason,
+            initiator_ref=record.initiator_ref,
+            key_id=self.stop_key.key_id,
+            seed=self.stop_key.seed,
+            stop_id=record.stop_id,
+        )
+        if self.trace is not None:
+            await self.trace.append(
+                "safestop",
+                "SAFE_STOP",
+                "SAFE_STOP",
+                event.model_dump(mode="json"),
+                reason_codes=["SAFE_STOP_ENGAGE", "SAFE_STOP_REPUBLISH"],
+            )
+        await self.outbox.enqueue_publication(
+            stop_id=record.stop_id,
+            action="ENGAGE",
+            topic_suffix=stop_topic_suffix("BANK", bank_id, record.stop_id),
+            payload=event.model_dump(mode="json"),
+        )
+        logger.warning(
+            "recorded utility ENGAGE had no publication: re-signed and queued",
+            extra={"stop_id": str(record.stop_id), "bank_id": bank_id},
+        )
+        await self.drain_outbox()
+        return True
+
     async def drain_outbox(self, *, batch: int = 100) -> int:
-        """K8: publish every queued stop event the broker has not acknowledged, oldest first, marking each
-        once its QoS 1 publish returned (the broker's PUBACK). Stops at the first failure so order is never
-        broken; the rest go on the next drain (after a reconnect, or the next tick). Serialised, so
-        concurrent callers never interleave. Returns how many were published."""
+        """K8: publish every queued stop event the broker has not acknowledged -- every ENGAGE first (a stop
+        is never delayed behind a release), then the RELEASEs, each oldest first -- marking each once its
+        QoS 1 publish returned (the broker's PUBACK). A broker/connection failure stops the drain (the rest
+        go on the next drain: after a reconnect, or the next tick) and never counts against an entry. A
+        PERMANENT failure (a payload that can never be published) counts; at `outbox_max_attempts` the entry
+        is dead-lettered (skipped from then on, ALR-STOP-PUBLISH-DEAD-LETTER raised) and the drain moves on,
+        so a poison entry never blocks later stops. Serialised. Returns how many were published."""
         if self.outbox is None:
             return 0
         published = 0
         async with self._drain_lock:
-            for entry in await self.outbox.pending_publications(limit=batch):
+            pending = await self.outbox.pending_publications(
+                limit=batch, max_attempts=self.outbox_max_attempts
+            )
+            for entry in pending:
                 try:
                     await self.publisher.publish_retained(entry.topic_suffix, entry.payload)
                 except Exception as exc:
-                    await self.outbox.record_publish_failure(entry.seq, str(exc))
-                    logger.warning(
-                        "stop publication queued until the broker is back",
-                        extra={"stop_id": str(entry.stop_id), "action": entry.action, "error": str(exc)},
+                    permanent = isinstance(exc, StopPublishError) and not exc.transient
+                    attempts = await self.outbox.record_publish_failure(
+                        entry.seq, str(exc), permanent=permanent
                     )
-                    break
+                    if not permanent:
+                        logger.warning(
+                            "stop publication queued until the broker is back",
+                            extra={"stop_id": str(entry.stop_id), "action": entry.action, "error": str(exc)},
+                        )
+                        break
+                    if attempts >= self.outbox_max_attempts:
+                        await self._dead_letter(entry, str(exc))
+                    continue
                 await self.outbox.mark_published(entry.seq)
                 published += 1
         return published
+
+    async def _dead_letter(self, entry: OutboxEntry, error: str) -> None:
+        logger.error(
+            "stop publication dead-lettered: it can never be published",
+            extra={"stop_id": str(entry.stop_id), "action": entry.action, "error": error},
+        )
+        if self.outbox is not None:
+            await self.outbox.raise_dead_letter_alert(entry, error)
+        if self.trace is not None:
+            await self.trace.append(
+                "safestop",
+                "SAFE_STOP",
+                "SAFE_STOP",
+                {
+                    "outbox": "DEAD_LETTER",
+                    "stop_id": str(entry.stop_id),
+                    "action": entry.action,
+                    "error": error[:500],
+                },
+                reason_codes=["SAFE_STOP_DEAD_LETTER"],
+            )
 
     async def clear_released_retained(
         self, housekeeping: ReleaseHousekeepingBackend, *, retain_s: float

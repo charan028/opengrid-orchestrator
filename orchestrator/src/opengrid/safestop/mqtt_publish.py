@@ -19,7 +19,13 @@ STOP_QOS = 1
 
 
 class StopPublishError(Exception):
-    """Raised when a stop payload fails schema validation or the MQTT publish itself fails."""
+    """Raised when a stop payload fails schema validation or the MQTT publish itself fails. `transient`:
+    a broker/connection failure (retry after reconnect), versus a permanent one -- a payload that can never
+    be published (the outbox dead-letters it after its attempt cap instead of blocking later stops)."""
+
+    def __init__(self, message: str, *, transient: bool = True) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass
@@ -31,7 +37,9 @@ class AiomqttStopPublisher:
         try:
             validate_payload("stop", payload)
         except SchemaValidationError as exc:
-            raise StopPublishError(f"refusing to publish invalid stop payload: {exc}") from exc
+            raise StopPublishError(
+                f"refusing to publish invalid stop payload: {exc}", transient=False
+            ) from exc
 
         full_topic = topic(self.config, topic_suffix)
         try:
