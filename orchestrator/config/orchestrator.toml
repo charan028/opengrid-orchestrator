@@ -194,8 +194,8 @@ default_pv_rated_kw = 10
 # substation battery set (D-29 utility toll, dev/seed/market_model_seed.sql) sits alone on its own
 # feeder: 20 MW/min lets a 20 MW firm toll call reach full output within one minute.
 "feeder-sub-LZ_AEN-00" = 20000
-# The toll also reserves 600 kW on each of the 10 Austin home banks (bank-040..049, feeder-LZ_AEN-00): their
-# 6 MW ramps at about 6.7 MW/min on the signed-setpoint anchor (G-04/G-06, r3.4.0.1), above the 3 MW/min default.
+# The toll also reserves 600 kW on each Austin home bank; the ones on feeder-LZ_AEN-00 ramp above the 3 MW/min
+# default on the signed-setpoint anchor (G-04/G-06), so that feeder gets 7 MW/min (owner/lead directive, r3.4.2).
 "feeder-LZ_AEN-00" = 7000
 
 [trace]
