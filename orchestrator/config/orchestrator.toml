@@ -265,6 +265,36 @@ hub_offline_s = 60
 # ALR-SIM-OFFLINE: no hub telemetry and no SCADA reading for this long (>= 6 telemetry intervals).
 sim_offline_s = 90
 
+[delivery]
+# D-38 measured delivery verification (og-settle job, opengrid.delivery). Observation only (K7).
+enabled = true
+interval_s = 15
+# Buckets of 30 s: at least 3 hub reports (telemetry every 10 s) per bucket.
+bucket_s = 30
+# Wait for late telemetry/SCADA flushes before evaluating a bucket.
+telemetry_lag_s = 30
+# A call is verified until it has a final record, up to this long after it ended.
+lookback_s = 3600
+baseline_s = 120
+target_frac = 0.95
+sustain_pass_pct = 95.0
+shortfall_alert_s = 60
+none_alert_s = 60
+meter_tolerance_frac = 0.10
+meter_floor_kw = 25.0
+# Extra independently metered banks (SUBSTATION asset banks are always metered).
+meter_bank_ids = []
+
+[delivery.ramp_time_s]
+# Time to reach target_frac of committed, per product (contract variant). Unlisted: 600 s.
+ECRS = 600
+RRS = 600
+REGUP = 300
+REGDN = 300
+NSPIN = 1800
+TOLLING = 600
+MANUAL = 120
+
 [retention]
 "trace.selection".days = 90
 "trace.commitment".days = 400

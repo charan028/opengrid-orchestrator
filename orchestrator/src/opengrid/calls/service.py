@@ -434,27 +434,47 @@ async def call_status(
     limits: CallLimits | None = None,
     now: datetime | None = None,
 ) -> CallStatus:
-    """State and grants of a call (see `CallState`; planned/granted, NOT measured delivery). What the allocator granted the
-    obligation per cycle over the call (`og.grant`), signed per the convention (< 0 = discharge)."""
+    """State and MEASURED delivery of a call (see `CallState`): delivered kW (signed, < 0 = discharge) and
+    kWh from the call's `og.delivery_record` (`opengrid.delivery`, D-38), never the allocator's grants."""
     now = now or datetime.now(UTC)
     record = await _own_call(store, trace, call_id, principal, utility_id)
     return await status_of(store, record, limits=limits or CallLimits(), now=now)
 
 
+def running_state(
+    target_kw: float | None, delivered_kw: float | None, *, ramping_fraction: float
+) -> CallState:
+    """A running call's state from measured delivery: DELIVERING at or above `ramping_fraction` of the
+    target (both signed, discharge < 0), RAMPING below it, ACTIVE when unmeasured or without a target."""
+    if delivered_kw is None or target_kw is None or target_kw >= 0.0:
+        return CallState.ACTIVE
+    return CallState.DELIVERING if -delivered_kw >= ramping_fraction * -target_kw else CallState.RAMPING
+
+
 async def status_of(store: CallStore, record: CallRecord, *, limits: CallLimits, now: datetime) -> CallStatus:
-    """Status of a record. `limits` (the RAMPING threshold) is kept in the signature for r3.4.2's measured
-    RAMPING/DELIVERING; in r3.4.1 a running call is ACTIVE with delivery UNMEASURED."""
+    """Status of a record, from its measured delivery (`CallStore.delivery`)."""
     if record.outcome is CallOutcome.REFUSED or record.obligation_id is None:
-        return CallStatus(call=record, state=CallState.REFUSED, granted_kw=None, granted_kwh=None, as_of=now)
+        return CallStatus(
+            call=record, state=CallState.REFUSED, delivered_kw=None, delivered_kwh=None, as_of=now
+        )
     effective_end = min(record.end_at, record.cancelled_at or record.end_at)
     if now < record.start_at:
         state = CallState.COMPLETED if record.cancelled_at is not None else CallState.ACCEPTED
-        return CallStatus(call=record, state=state, granted_kw=None, granted_kwh=0.0, as_of=now)
-    granted = await store.granted(record.obligation_id, record.start_at, min(now, effective_end))
-    granted_kw = -granted.last_kw if granted.last_kw is not None else None
-    # Nothing is measured yet (r3.4.1): never claim RAMPING/DELIVERING from grants.
-    state = CallState.COMPLETED if now >= effective_end else CallState.ACTIVE
-    return CallStatus(call=record, state=state, granted_kw=granted_kw, granted_kwh=granted.kwh, as_of=now)
+        return CallStatus(call=record, state=state, delivered_kw=None, delivered_kwh=0.0, as_of=now)
+    measured = await store.delivery(record.deployment_id) if record.deployment_id is not None else None
+    delivered_kw = measured.delivered_kw if measured is not None else None
+    if now >= effective_end:
+        state = CallState.COMPLETED
+    else:
+        state = running_state(record.target_kw, delivered_kw, ramping_fraction=limits.ramping_fraction)
+    return CallStatus(
+        call=record,
+        state=state,
+        delivered_kw=delivered_kw,
+        delivered_kwh=measured.discharged_kwh if measured is not None else 0.0,
+        as_of=now,
+        delivery=measured,
+    )
 
 
 async def list_calls(

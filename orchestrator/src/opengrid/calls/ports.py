@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from opengrid.calls.models import AwardView, CallRecord, Granted
+from opengrid.calls.models import AwardView, CallRecord, MeasuredDelivery
 from opengrid.health.model import AlertSeverity
 
 
@@ -71,8 +71,8 @@ class CallStore(Protocol):
         an uncancelled deployment that has not ended yet. False when there is none."""
         ...
 
-    async def granted(self, obligation_id: UUID, start: datetime, end: datetime) -> Granted:
-        """Granted discharge for the obligation over `[start, end)` (`og.grant`, per allocator cycle)."""
+    async def delivery(self, deployment_id: UUID) -> MeasuredDelivery | None:
+        """The call's MEASURED delivery (`opengrid.delivery`, D-38), None until it has been evaluated."""
         ...
 
     async def raise_alert(
