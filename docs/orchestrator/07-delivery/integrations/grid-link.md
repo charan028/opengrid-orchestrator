@@ -287,6 +287,35 @@ To enable a utility:
 5. Set `[grid_link].enabled = true` and the utility's `enabled = true`.
 6. Restart og-engine.
 
+**Loopback enablement (r3.4.3, owner request).** The owner asked for the link to be operational after
+deploy, so `deploy/scripts/grid_link_enable_loopback.sh` (run as root by the release manager) enables
+AUSTIN_ENERGY on **127.0.0.1:20001 only**. No firewall change is made and nothing listens off-host. It runs
+as a dry run by default; `--apply` makes the changes.
+
+What `--apply` does:
+
+1. It generates a test PKI in `/etc/opengrid/certs`:
+   - CA `gridlink-test-ca`, whose key is 0600 root:root;
+   - server `og-gridlink` with SAN IP:127.0.0.1;
+   - client `aen-ems-loopback`.
+
+   The other keys and certificates are 0640 root:opengrid. Keys are never printed.
+2. It creates `OG_MQTT_GRIDLINK_PASSWORD` in `secrets.env` when it is absent.
+3. It creates MQTT user `og_gridlink`, publish-only on `og/v1/scada/instruction/#`, through
+   `deploy/mosquitto/provision_grid_link_user.py`. That tool backs up the broker files, reloads mosquitto,
+   and restores the backups if mosquitto is not active afterwards.
+4. It writes the host override `/etc/opengrid/grid_link.toml`. og-engine reads it through
+   `OG_GRID_LINK_CONFIG`, set by the drop-in `og-engine.service.d/grid-link.conf`. The override replaces
+   the release `[grid_link]` table, so the release config is never edited and the enablement survives
+   deploys.
+5. It restarts og-engine and waits for the listener.
+
+`--test-call` issues one 5-minute AUSTIN_ENERGY call through the Austin Energy sim's `grid_link` channel and
+cancels it straight away. Outside the tolling window the core refuses the call (for example
+R-CALL-OUTSIDE-WINDOW). That refusal still proves the TLS link, the outstation and the core call function end
+to end.
+
+`--disable --apply` switches the link off again by removing the drop-in and the override.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | false | Master switch. |
