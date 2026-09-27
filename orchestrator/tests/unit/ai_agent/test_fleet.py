@@ -218,7 +218,7 @@ async def test_the_routing_models_filters_answer_what_the_parser_cannot() -> Non
     tool = FakeFleetTool({"total": _total(4), "groups": [], "group_by": "none", "rows": []})
 
     answer = await _service(claude).ask(
-        "which batteries out west stopped talking to us?", CONTEXT, trace=RecordingTrace(), fleet_tool=tool
+        "what went quiet out west?", CONTEXT, trace=RecordingTrace(), fleet_tool=tool
     )
 
     assert tool.queries == [FleetQuery(zones=("LZ_WEST",), health=("offline",))]
@@ -248,10 +248,12 @@ async def test_a_failed_fleet_read_is_cant_verify_never_zero() -> None:
     assert answer.refusal_reason == "fleet_unavailable"
 
 
-async def test_without_the_tool_fleet_words_fall_back_to_the_snapshot() -> None:
-    answer = await _service().ask("how many hubs are online?", CONTEXT, trace=RecordingTrace())
-
+async def test_without_the_tool_only_an_unfiltered_question_falls_back_to_the_snapshot() -> None:
+    answer = await _service().ask("how many hubs are there?", CONTEXT, trace=RecordingTrace())
     assert answer.text == "200 hubs are reporting: online 198, stale 2."
+
+    filtered = await _service().ask("how many hubs are online?", CONTEXT, trace=RecordingTrace())
+    assert filtered.text == "Can't verify right now: fleet data unavailable."
 
 
 # --- explanations over fleet evidence -------------------------------------------------------------------

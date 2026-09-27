@@ -217,3 +217,16 @@ def test_ask_wires_the_fleet_tool(client: TestClient) -> None:
     assert body["text"] == "700 hubs rated 78.4 kWh."
     assert body["citations"][0]["source"] == "/og/api/fleet/summary"
     assert rows.calls, "the tool ran through the fleet read helper"
+
+
+async def test_a_filter_lost_before_sql_is_refused_not_answered_unfiltered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Belt and braces for "never the unfiltered total when the question names a filter"."""
+    monkeypatch.setattr(ai_routes, "hub_filter", lambda _q: HubFilter())
+    with pytest.raises(ValueError, match="filter was lost"):
+        await _run(FleetQuery(zones=("LZ_NORTH",)))
+
+
+def test_at_home_alone_implies_the_truck_class() -> None:
+    assert ai_routes.hub_filter(FleetQuery(at_home=True)).asset_class == ("MOBILE",)

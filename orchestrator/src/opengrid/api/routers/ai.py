@@ -124,7 +124,10 @@ def hub_filter(query: ai_agent.FleetQuery) -> fleet_search.HubFilter:
         soc_max=query.soc_max_pct,
         hw=(query.hw,) if query.hw else (),
         fw=(query.fw,) if query.fw else (),
-        asset_class=_ASSET_CLASSES.get(query.asset_class or "", ()),
+        # "at home" is a truck-only condition, so it implies the truck class
+        asset_class=_ASSET_CLASSES.get(
+            query.asset_class or ("truck" if query.at_home is not None else ""), ()
+        ),
         e_kwh_min=e_min,
         e_kwh_max=e_max,
         p_kw_min=p_min,
@@ -141,6 +144,10 @@ async def run_fleet_query(
     (lowest charge first when the question is about charge), and for trucks the at-home verdicts. Only
     the fields in `_ROW_KEYS` leave here -- no position, no telemetry series, no customer field."""
     flt = hub_filter(query)
+    if query.has_filter and flt.empty:
+        # A filter named in the question that did not reach SQL would answer with the whole fleet: refuse
+        # (the copilot then says "can't verify") rather than return an unfiltered total.
+        raise ValueError("fleet query filter was lost before SQL")
     by_soc = query.soc_min_pct is not None or query.soc_max_pct is not None
     summary = await fleet_search.fleet_summary(
         rows,
