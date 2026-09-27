@@ -148,7 +148,7 @@ def test_0033_reapplies_cleanly(dsn: str) -> None:
         protected = {
             row[0] for row in conn.execute("SELECT table_name FROM og.data_retention WHERE protected")
         }
-        assert PROTECTED_BY_0033 <= protected
+        assert protected >= PROTECTED_BY_0033
         assert {"dispatch_call", "as_deployment"} <= protected  # 0052, still protected after a 0033 re-run
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute("UPDATE og.data_retention SET keep_days = 30 WHERE table_name = 'invoice_line'")
