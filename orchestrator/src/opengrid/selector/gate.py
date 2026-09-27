@@ -16,7 +16,7 @@ import multiprocessing
 import os
 import time
 import tomllib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
@@ -27,6 +27,7 @@ from typing import Any, Literal, get_args
 from uuid import UUID, uuid4
 
 from opengrid import forecast, ledger
+from opengrid.core import geo
 from opengrid.core.charge_windows import Topology, in_windows, resolve
 from opengrid.core.models.engine import Plan
 from opengrid.core.models.market import ERCOT_COMPETITIVE, Utility, UtilityId
@@ -529,15 +530,59 @@ async def load_bank_zones(bank_ids: Sequence[str]) -> dict[str, str]:
     return {bank_id: mobile.get(bank_id, zone) for bank_id, zone in zones.items()}
 
 
-def mark_mobile_units(banks: tuple[BankSnapshot, ...], mobile: Mapping[str, str]) -> tuple[BankSnapshot, ...]:
-    """Flag the mobile units (D-31). Their home-station schedule has no source yet, so
-    `home_station_intervals` is None: they never charge until one exists (fail closed)."""
+def mark_mobile_units(
+    banks: tuple[BankSnapshot, ...],
+    mobile: Mapping[str, str],
+    at_home: Mapping[str, bool] | None = None,
+    n_intervals: int = 0,
+) -> tuple[BankSnapshot, ...]:
+    """Flag the mobile units (D-31) and set where each may charge. A unit parked at its home station now
+    (`at_home[bank_id] is True`, `mobile_units_at_home`) may charge in every horizon interval: there is no
+    deployment schedule yet (the requested `og.mobile_deployment`), so "at home now" is taken to hold for
+    the horizon, and the guardian's G-35 re-checks the position on every dispatch (a truck that leaves is
+    never charged away from home). Any other unit -- away, or position unknown -- gets None: no charging at
+    all (fail closed). Grid charging is further limited to the owner charge window (`bank_market_terms`)."""
+    homes = at_home or {}
+    everywhere = frozenset(range(n_intervals))
     return tuple(
-        dataclasses.replace(bank, is_mobile=True, home_station_intervals=None)
+        dataclasses.replace(
+            bank,
+            is_mobile=True,
+            home_station_intervals=everywhere if homes.get(bank.bank_id) is True else None,
+        )
         if bank.bank_id in mobile
         else bank
         for bank in banks
     )
+
+
+def mobile_units_at_home(
+    mobile_bank_ids: Sequence[str],
+    sites: Mapping[str, tuple[float, float]],
+    positions: Mapping[str, tuple[float, float]],
+) -> dict[str, bool]:
+    """Pure: which mobile units are at their home station now, by the one D-31 rule G-35 also uses
+    (`core.geo.at_home_station`, 250 m): the unit's recorded position vs its station's coordinates. Only
+    units known to be at home are True; away or unknown is False (fail closed)."""
+    return {
+        bank_id: geo.at_home_station(positions.get(bank_id), sites.get(bank_id)) is True
+        for bank_id in mobile_bank_ids
+    }
+
+
+async def load_mobile_units_at_home(mobile_bank_ids: Sequence[str]) -> dict[str, bool]:
+    """`mobile_units_at_home` over the registry's station coordinates and each unit's `og.hub` position. A
+    failed position read plans no mobile charging this gate (fail closed), never a crash."""
+    if not mobile_bank_ids:
+        return {}
+    try:
+        positions = await db.load_hub_positions(list(mobile_bank_ids))
+    except Exception:
+        logger.warning(
+            "selector: mobile unit positions unreadable; no mobile charging this gate", exc_info=True
+        )
+        return dict.fromkeys(mobile_bank_ids, False)
+    return mobile_units_at_home(mobile_bank_ids, load_mobile_home_station_sites(), positions)
 
 
 async def load_market(bank_ids: tuple[str, ...]) -> tuple[MarketModel, dict[str, str]]:
@@ -549,6 +594,24 @@ async def load_market(bank_ids: tuple[str, ...]) -> tuple[MarketModel, dict[str,
     return load_market_model(banks=list(zone_by_bank.items())), zone_by_bank
 
 
+def _owner_grid_intervals(
+    windows: ScopedWindows,
+    bank_id: str,
+    feeder_by_bank: Mapping[str, str | None] | None,
+    zone: str,
+    provider: str | None,
+    horizon_start: datetime,
+    n_intervals: int,
+) -> frozenset[int]:
+    """The bank's owner charge-window intervals (D-29 c / D-30): its resolved schedule, else the default."""
+    schedule = resolve_owner_charge_windows(
+        windows, bank_id=bank_id, feeder=(feeder_by_bank or {}).get(bank_id), zone=zone, provider=provider
+    )
+    return owner_charge_intervals(
+        schedule if schedule is not None else DEFAULT_OWNER_CHARGE_WINDOWS, horizon_start, n_intervals
+    )
+
+
 def bank_market_terms(
     market: MarketModel,
     zone_by_bank: Mapping[str, str],
@@ -558,6 +621,7 @@ def bank_market_terms(
     solar_shares: Mapping[str, Mapping[int, SolarShare]] | None = None,
     owner_charge_windows: ScopedWindows | None = None,
     feeder_by_bank: Mapping[str, str | None] | None = None,
+    mobile: Collection[str] = frozenset(),
 ) -> dict[str, BankMarketTerms]:
     """Pure: each bank's territory, M1 and charging terms from the `MarketModel` (the single owner of
     the territory predicate and the charging-cost model; M1 resolves through `settle.tariffs`).
@@ -571,6 +635,12 @@ def bank_market_terms(
       headroom unless the utility granted wholesale access (K15 b).
     - Unknown zone or territory: no FREE headroom and (`prepare_obligations`) no obligation: K15 fails
       closed.
+
+    - Mobile units (`mobile`, D-31 trucks; their zone is the HOME STATION's, `load_bank_zones`): priced as
+      above at the station's zone/tariff, grid charging only in the owner charge window (D-30) in either
+      market, and no behind-the-meter solar in a competitive zone (a depot has no PV). Where they may
+      charge at all (only at the home station) is `BankSnapshot.home_station_intervals`
+      (`mark_mobile_units`); they are never charged from fleet assets (D-31, `validate.check_mobile_storage`).
 
     `solar_shares` is each bank's D-28 measured share per interval (`solar_history.planned_shares`)."""
     shares = solar_shares or {}
@@ -598,6 +668,12 @@ def bank_market_terms(
             if cost.tariff_ref.endswith("M1-NONE"):
                 logger.warning("selector: no TDSP tariff for zone; M1 priced at 0", extra={"zone": zone})
             delivery = float(cost.delivery_usd_per_kwh)
+            if bank_id in mobile:
+                # D-30/D-31: a truck grid-charges at its depot only in the owner charge window, also in a
+                # competitive zone (priced at the station's zone + its TDSP's M1, as any competitive bank).
+                grid_intervals = _owner_grid_intervals(
+                    windows, bank_id, feeder_by_bank, zone, None, horizon_start, n_intervals
+                )
         else:
             for t in range(n_intervals):
                 cost = market.charging_cost(
@@ -605,16 +681,18 @@ def bank_market_terms(
                 )
                 charge_price[t] = float(cost.grid_energy_usd_per_kwh)
                 solar_cost = float(cost.solar_usd_per_kwh)
-            schedule = resolve_owner_charge_windows(
+            grid_intervals = _owner_grid_intervals(
                 windows,
-                bank_id=bank_id,
-                feeder=(feeder_by_bank or {}).get(bank_id),
-                zone=zone,
-                provider=utility_of_territory(territory),
+                bank_id,
+                feeder_by_bank,
+                zone,
+                utility_of_territory(territory),
+                horizon_start,
+                n_intervals,
             )
-            grid_intervals = owner_charge_intervals(
-                schedule if schedule is not None else DEFAULT_OWNER_CHARGE_WINDOWS, horizon_start, n_intervals
-            )
+        # A truck's depot has no behind-the-meter PV: in a competitive zone it charges from the grid only.
+        # In a regulated territory the utility's contract solar (priced at its solar rate) still applies.
+        no_btm_pv = bank_id in mobile and territory == ERCOT_COMPETITIVE
         out[bank_id] = BankMarketTerms(
             zone=zone,
             territory=territory,
@@ -624,7 +702,7 @@ def bank_market_terms(
             free_market_access=market.free_access(territory),
             solar_cost_usd_per_kwh=solar_cost,
             grid_charge_intervals=grid_intervals,
-            solar_shares=shares.get(bank_id, {}),
+            solar_shares={} if no_btm_pv else shares.get(bank_id, {}),
         )
     return out
 
@@ -1172,7 +1250,9 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         await load_market(bank_ids),
     )
     shares = await load_solar_shares(zone_by_bank, horizon_start, n_intervals, now)
-    banks = mark_mobile_units(banks, load_mobile_units())
+    mobile = load_mobile_units()
+    mobile_in_gate = [bank_id for bank_id in bank_ids if bank_id in mobile]
+    banks = mark_mobile_units(banks, mobile, await load_mobile_units_at_home(mobile_in_gate), n_intervals)
     banks = apply_market_terms(
         banks,
         bank_market_terms(
@@ -1184,6 +1264,7 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
             shares,
             await load_owner_charge_windows(),
             {bank_id: _bank_feeder(bank_id) for bank_id in bank_ids},
+            frozenset(mobile_in_gate),
         ),
     )
     candidates, committed = prepare_obligations(candidates, committed, market)
