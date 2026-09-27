@@ -957,7 +957,12 @@ async def load_candidates(
 
 
 def _plan_mode_for(gate_kind: GateKind, horizon_start: datetime) -> str:
-    if gate_kind == "SCHEDULED_15MIN" and horizon_start.hour == 0 and horizon_start.minute < INTERVAL_MINUTES:
+    """02a S3.1: `L-DA` labels the one daily scheduled solve whose 24 h horizon is exactly an ERCOT
+    operating day, i.e. starts at 00:00 America/Chicago (issue #43 A11: it fired at 00:00 UTC, 7 PM
+    CT). It seeds the operating day; it is not a DAM run -- MVP-S submits no DAM offers, and ERCOT's
+    DAM for that day closed at 10:00 CT the day before."""
+    local_start = to_market_tz(horizon_start)
+    if gate_kind == "SCHEDULED_15MIN" and local_start.hour == 0 and local_start.minute < INTERVAL_MINUTES:
         return "L-DA"
     return "L-ID"
 

@@ -418,12 +418,18 @@ async def test_compute_horizon_is_aligned_to_the_15_minute_interval():
     assert (end - start).total_seconds() == 24 * 3600
 
 
-def test_plan_mode_is_l_da_only_at_midnight_scheduled_gate():
-    midnight = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)
-    noon = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
-    assert gate._plan_mode_for("SCHEDULED_15MIN", midnight) == "L-DA"
+def test_plan_mode_is_l_da_only_at_operating_day_start_scheduled_gate():
+    """Issue #43 A11: the ERCOT operating day starts at 00:00 America/Chicago (05:00 UTC in CDT,
+    06:00 UTC in CST), not at 00:00 UTC (7 PM CDT)."""
+    cdt_midnight = datetime(2026, 9, 26, 5, 0, tzinfo=UTC)
+    cst_midnight = datetime(2026, 12, 1, 6, 0, tzinfo=UTC)
+    utc_midnight = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)
+    noon = datetime(2026, 9, 26, 17, 0, tzinfo=UTC)
+    assert gate._plan_mode_for("SCHEDULED_15MIN", cdt_midnight) == "L-DA"
+    assert gate._plan_mode_for("SCHEDULED_15MIN", cst_midnight) == "L-DA"
+    assert gate._plan_mode_for("SCHEDULED_15MIN", utc_midnight) == "L-ID"
     assert gate._plan_mode_for("SCHEDULED_15MIN", noon) == "L-ID"
-    assert gate._plan_mode_for("ADMISSION", midnight) == "L-ID"
+    assert gate._plan_mode_for("ADMISSION", cdt_midnight) == "L-ID"
 
 
 async def test_opportunity_records_the_gate_decision(monkeypatch, _wired):
