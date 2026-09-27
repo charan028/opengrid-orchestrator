@@ -39,16 +39,32 @@ def stop_key():
     return StopSigningKey(key_id="safestop-it-test", seed=seed)
 
 
-async def _make_mqtt_client(server_config, client_id: str):
-    import aiomqtt
+async def _make_mqtt_client(server_config, process: str):
+    """Through `opengrid.platform.mqtt.build_client`, like og-safestop itself: in a workspace the workspace
+    user (`OG_MQTT_WS_USER`/`OG_MQTT_WS_PASSWORD`, D-13) always wins and a production role user is never used;
+    the client id is composed from `process` under the workspace's own id namespace."""
+    from opengrid.platform.config import Config
+    from opengrid.platform.mqtt import build_client
 
-    return aiomqtt.Client(
-        hostname=server_config.get("mqtt.host"),
-        port=server_config.get("mqtt.port"),
+    # A test client is never a production identity: the shared `server_config` carries no client-id prefix
+    # (production "og" would be refused outside production), so it gets the test prefix here.
+    mqtt_config = Config(
+        {
+            "general": {"env": "test"},
+            "mqtt": {
+                "host": server_config.get("mqtt.host"),
+                "port": server_config.get("mqtt.port"),
+                "topic_root": server_config.get("mqtt.topic_root"),
+                "keepalive_s": server_config.get("mqtt.keepalive_s", 20),
+                "client_id_prefix": "og-test",
+            },
+        }
+    )
+    return build_client(
+        mqtt_config,
         username=os.environ.get("OG_MQTT_SAFESTOP_USER", "og_safestop"),
         password=os.environ.get("OG_MQTT_SAFESTOP_PASSWORD", ""),
-        identifier=client_id,
-        keepalive=20,
+        process=process,
     )
 
 
@@ -61,14 +77,14 @@ async def test_engage_publishes_a_retained_stop_message(server_config, pool, sto
     scope, scope_ref = "BANK", "bank-it-01"
     backend = PgStopEventBackend(pool)
 
-    async with await _make_mqtt_client(server_config, "og-safestop-it-publisher") as publish_client:
+    async with await _make_mqtt_client(server_config, "safestop-it-publisher") as publish_client:
         publisher = AiomqttStopPublisher(client=publish_client, config=server_config)
         svc = SafestopService(stop_key, backend, publisher, trace=None)
         await svc.engage(scope, scope_ref, "TS-06-15 integration drill", "operator:it-test")
 
     # A fresh subscriber connecting *after* the publish must still see the retained message.
     full_topic_filter = topic(server_config, f"stop/{scope.lower()}/{scope_ref}/+")
-    async with await _make_mqtt_client(server_config, "og-safestop-it-subscriber") as sub_client:
+    async with await _make_mqtt_client(server_config, "safestop-it-subscriber") as sub_client:
         await sub_client.subscribe(full_topic_filter)
         message = await asyncio.wait_for(anext(sub_client.messages), timeout=10)
 
@@ -112,7 +128,7 @@ async def test_k8_topology_stop_works_with_no_engine_or_guardian_process(server_
     from opengrid.safestop.service import SafestopService
 
     backend = PgStopEventBackend(pool)
-    async with await _make_mqtt_client(server_config, "og-safestop-it-k8") as client:
+    async with await _make_mqtt_client(server_config, "safestop-it-k8") as client:
         publisher = AiomqttStopPublisher(client=client, config=server_config)
         svc = SafestopService(stop_key, backend, publisher, trace=None)
         await svc.engage("FLEET", "", "TS-06-23 K8 topology proof", "operator:it-test")
