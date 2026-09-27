@@ -275,3 +275,32 @@ async def test_fetch_open_alerts_does_not_raise_on_an_open_info_alert() -> None:
 
     assert len(alerts) == 1
     assert alerts[0].severity == "info"
+
+
+async def test_fetch_test_database_names_returns_matching_names() -> None:
+    cursor = ReturningFakeCursor(fetchone_row=None)
+
+    async def fetchall():
+        return [("og_t_alice_20260925",), ("og_t_bob_20260925",)]
+
+    cursor.fetchall = fetchall
+    pool = FakePool(cursor)
+
+    names = await queries.fetch_test_database_names(pool)
+
+    assert names == ["og_t_alice_20260925", "og_t_bob_20260925"]
+    statement, _params = cursor.executed[0]
+    assert "pg_database" in statement
+    assert "og\\_t\\_%" in statement  # literal underscores escaped, not the LIKE wildcard
+
+
+async def test_fetch_test_database_names_empty_when_none_match() -> None:
+    cursor = ReturningFakeCursor(fetchone_row=None)
+
+    async def fetchall():
+        return []
+
+    cursor.fetchall = fetchall
+    pool = FakePool(cursor)
+
+    assert await queries.fetch_test_database_names(pool) == []

@@ -52,6 +52,7 @@ from opengrid.health.rules import (
     evaluate_scada_overload_alert,
     evaluate_scada_silent_alert,
     evaluate_sim_offline_alert,
+    evaluate_test_db_on_prod_alert,
     is_fallback_feed_needed,
     is_firm_blocking_feed,
     is_scada_silent,
@@ -325,6 +326,10 @@ async def evaluate_alerts() -> None:
         )
         if bank_silent_finding:
             findings.append(bank_silent_finding)
+    test_db_names = await queries.fetch_test_database_names(pool)
+    test_db_finding = evaluate_test_db_on_prod_alert(test_db_names)
+    if test_db_finding:
+        findings.append(test_db_finding)
     for bank_id, hub_ids, rejected_count, latest_at in bad_signature_acks:
         bad_signature_finding = evaluate_command_bad_signature_alert(
             bank_id, hub_ids, rejected_count, latest_at
