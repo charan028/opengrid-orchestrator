@@ -64,8 +64,8 @@ def _result(call_ref: str, http: HttpResult) -> CallResult:
         state=state if state in CALL_STATES else "UNKNOWN",
         reason_code=body.get("reason_code"),
         detail=body.get("detail"),
-        delivered_kw=body.get("delivered_kw"),
-        delivered_kwh=body.get("delivered_kwh"),
+        granted_kw=body.get("granted_kw"),
+        granted_kwh=body.get("granted_kwh"),
         remote_id=body.get("call_id"),
     )
 
@@ -108,7 +108,9 @@ class CustomerApiChannel:
         return result
 
     def _unknown(self, call_ref: str) -> CallResult:
-        return CallResult(call_ref=call_ref, accepted=False, state="UNKNOWN", detail="call not issued by this EMS")
+        return CallResult(
+            call_ref=call_ref, accepted=False, state="UNKNOWN", detail="call not issued by this EMS"
+        )
 
     async def cancel(self, call_ref: str, *, end_at: datetime | None = None) -> CallResult:
         remote = self._remote.get(call_ref)

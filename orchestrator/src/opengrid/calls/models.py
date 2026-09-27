@@ -19,8 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 #: rule is the real cap (TOLLING 90 min, ECRS 60 min).
 MAX_CALL_MINUTES = 240
 MAX_TEXT_LEN = 200
-#: What `CallStatus.delivered_kw/_kwh` measure today: allocator grants, not metered delivery.
-DELIVERY_BASIS = "GRANTED_NOT_MEASURED"
+#: `CallStatus.granted_kw/_kwh` are the allocator's grants over the call (planned/granted), never metered
+#: delivery: a grant the guardian vetoes still counts. Measured delivery arrives in r3.4.2 (DELIVERY-VERIFY).
+GRANTED_DESCRIPTION = "planned/granted, not measured; measured delivery arrives in r3.4.2"
 
 
 class CallOrigin(StrEnum):
@@ -166,26 +167,26 @@ class CallRecord(BaseModel):
 
 
 class CallStatus(BaseModel):
-    """`call_status`: the record, its state and what has been delivered. `delivered_kw` is signed
-    (< 0 = discharge, None before the start); `delivered_kwh` is the discharged energy magnitude."""
+    """`call_status`: the record, its state and what the allocator granted over it (planned/granted, NOT measured:
+    see `GRANTED_DESCRIPTION`). `granted_kw` is signed
+    (< 0 = discharge, None before the start); `granted_kwh` is the discharged energy magnitude."""
 
     model_config = ConfigDict(frozen=True)
 
     call: CallRecord
     state: CallState
-    delivered_kw: float | None
-    delivered_kwh: float | None
+    granted_kw: float | None
+    granted_kwh: float | None
     as_of: datetime
 
     def public(self) -> dict[str, Any]:
         return {
             **self.call.public(),
             "state": self.state.value,
-            "delivered_kw": self.delivered_kw,
-            "delivered_kwh": self.delivered_kwh,
-            # r3.4.1: delivered_kw/kWh are the allocator's GRANTS, not metered delivery (a vetoed grant
-            # still counts). Measured delivery (DELIVERY-VERIFY) replaces this in r3.4.2.
-            "delivery_basis": DELIVERY_BASIS,
+            "granted_kw": self.granted_kw,
+            "granted_kwh": self.granted_kwh,
+            "delivery_measured": False,
+            "granted_description": GRANTED_DESCRIPTION,
             "as_of": self.as_of.isoformat(),
         }
 
@@ -207,8 +208,8 @@ class AwardView:
 
 
 @dataclass(frozen=True, slots=True)
-class Delivered:
-    """Delivery of a called obligation over the call so far: the latest cycle's discharge (kW magnitude,
+class Granted:
+    """Grants to a called obligation over the call so far (not metered delivery): the latest cycle's granted discharge (kW magnitude,
     None when no cycle yet) and the energy discharged (kWh)."""
 
     last_kw: float | None

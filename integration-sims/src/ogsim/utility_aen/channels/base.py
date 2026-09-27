@@ -52,8 +52,8 @@ class CallResult:
     state: str
     reason_code: str | None = None
     detail: str | None = None
-    delivered_kw: float | None = None
-    delivered_kwh: float | None = None
+    granted_kw: float | None = None
+    granted_kwh: float | None = None
     remote_id: str | None = None
 
 

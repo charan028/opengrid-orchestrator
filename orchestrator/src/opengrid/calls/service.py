@@ -434,7 +434,7 @@ async def call_status(
     limits: CallLimits | None = None,
     now: datetime | None = None,
 ) -> CallStatus:
-    """State and delivery of a call (see `CallState`). Delivery is what the allocator granted the
+    """State and grants of a call (see `CallState`; planned/granted, NOT measured delivery). What the allocator granted the
     obligation per cycle over the call (`og.grant`), signed per the convention (< 0 = discharge)."""
     now = now or datetime.now(UTC)
     record = await _own_call(store, trace, call_id, principal, utility_id)
@@ -443,28 +443,24 @@ async def call_status(
 
 async def status_of(store: CallStore, record: CallRecord, *, limits: CallLimits, now: datetime) -> CallStatus:
     if record.outcome is CallOutcome.REFUSED or record.obligation_id is None:
-        return CallStatus(
-            call=record, state=CallState.REFUSED, delivered_kw=None, delivered_kwh=None, as_of=now
-        )
+        return CallStatus(call=record, state=CallState.REFUSED, granted_kw=None, granted_kwh=None, as_of=now)
     effective_end = min(record.end_at, record.cancelled_at or record.end_at)
     if now < record.start_at:
         state = CallState.COMPLETED if record.cancelled_at is not None else CallState.ACCEPTED
-        return CallStatus(call=record, state=state, delivered_kw=None, delivered_kwh=0.0, as_of=now)
-    delivered = await store.delivered(record.obligation_id, record.start_at, min(now, effective_end))
-    delivered_kw = -delivered.last_kw if delivered.last_kw is not None else None
+        return CallStatus(call=record, state=state, granted_kw=None, granted_kwh=0.0, as_of=now)
+    granted = await store.granted(record.obligation_id, record.start_at, min(now, effective_end))
+    granted_kw = -granted.last_kw if granted.last_kw is not None else None
     if now >= effective_end:
         state = CallState.COMPLETED
     else:
         target = abs(record.target_kw) if record.target_kw is not None else None
         at_target = (
             target is not None
-            and delivered.last_kw is not None
-            and delivered.last_kw >= limits.ramping_fraction * target
+            and granted.last_kw is not None
+            and granted.last_kw >= limits.ramping_fraction * target
         )
         state = CallState.DELIVERING if at_target else CallState.RAMPING
-    return CallStatus(
-        call=record, state=state, delivered_kw=delivered_kw, delivered_kwh=delivered.kwh, as_of=now
-    )
+    return CallStatus(call=record, state=state, granted_kw=granted_kw, granted_kwh=granted.kwh, as_of=now)
 
 
 async def list_calls(

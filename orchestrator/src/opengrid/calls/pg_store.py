@@ -14,7 +14,7 @@ from psycopg import errors
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.calls.models import AwardView, CallKind, CallRecord, Delivered
+from opengrid.calls.models import AwardView, CallKind, CallRecord, Granted
 from opengrid.calls.ports import IdempotencyKeyTakenError, OverlapError
 from opengrid.calls.rules import DEPLOYABLE_STATES, TOLLING_SERVICE_TYPE, TOLLING_VARIANT
 from opengrid.health.model import AlertFinding, AlertSeverity
@@ -305,14 +305,14 @@ class PgCallStore:
             )
             return cur.rowcount > 0
 
-    async def delivered(self, obligation_id: UUID, start: datetime, end: datetime) -> Delivered:
+    async def granted(self, obligation_id: UUID, start: datetime, end: datetime) -> Granted:
         row = await self._one(
             _DELIVERED_SQL,
             {"obligation_id": obligation_id, "start_at": start, "end_at": end, "gap_s": MAX_CYCLE_GAP_S},
         )
         if row is None:
-            return Delivered(last_kw=None, kwh=0.0)
-        return Delivered(last_kw=_f(row["last_kw"]), kwh=float(row["kwh"] or 0.0))
+            return Granted(last_kw=None, kwh=0.0)
+        return Granted(last_kw=_f(row["last_kw"]), kwh=float(row["kwh"] or 0.0))
 
     async def raise_alert(
         self, rule: str, severity: AlertSeverity, summary: str, detail: dict[str, Any]

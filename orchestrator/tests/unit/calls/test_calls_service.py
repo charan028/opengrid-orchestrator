@@ -24,7 +24,7 @@ from opengrid.calls import (
     list_calls,
 )
 from opengrid.calls import rules as r
-from opengrid.calls.models import Delivered
+from opengrid.calls.models import Granted
 
 from .fakes import FakeDeployment, make_award
 
@@ -369,11 +369,11 @@ async def test_ts_d33_24_status_states_follow_start_delivery_and_end(store, trac
         )
 
     assert (await state_at(NOW)).state is CallState.ACCEPTED
-    store.delivery[oid] = Delivered(last_kw=5_000.0, kwh=100.0)
+    store.delivery[oid] = Granted(last_kw=5_000.0, kwh=100.0)
     ramping = await state_at(start + timedelta(minutes=1))
     assert ramping.state is CallState.RAMPING
-    assert ramping.delivered_kw == -5_000.0 and ramping.delivered_kwh == 100.0  # signed: discharge < 0
-    store.delivery[oid] = Delivered(last_kw=19_500.0, kwh=900.0)
+    assert ramping.granted_kw == -5_000.0 and ramping.granted_kwh == 100.0  # signed: discharge < 0
+    store.delivery[oid] = Granted(last_kw=19_500.0, kwh=900.0)
     assert (await state_at(start + timedelta(minutes=5))).state is CallState.DELIVERING
     assert (await state_at(start + timedelta(minutes=31))).state is CallState.COMPLETED
 
