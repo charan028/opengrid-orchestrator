@@ -17,6 +17,7 @@ from opengrid.forecast.backend import ForecastBackend, HistoryProvider
 from opengrid.forecast.models import ForecastKind, ForecastRow, ScenarioPoint
 from opengrid.forecast.quantiles import (
     DEFAULT_LOOKBACK_DAYS,
+    DEFAULT_POOLED_MAX_REL_SPREAD,
     DEFAULT_RESOLUTION_MIN,
     FIRM_POOLED,
     MIN_SLOT_SAMPLES,
@@ -117,7 +118,9 @@ async def compute_and_persist(
     firm_rule = FirmRule(
         min_samples=int(cfg.get("forecast.min_samples_firm", MIN_SLOT_SAMPLES)),
         pool_day_types_when_short=bool(cfg.get("forecast.pool_day_types_when_short", True)),
-        pooled_max_spread=_optional_float(cfg.get("forecast.pooled_max_spread")),
+        pooled_max_rel_spread=_float_setting(
+            cfg.get("forecast.pooled_max_rel_spread", DEFAULT_POOLED_MAX_REL_SPREAD), "pooled_max_rel_spread"
+        ),
     )
 
     price_series: list[str] = list(
@@ -255,7 +258,7 @@ async def _compute_series(
                 resolution_min=resolution_min,
                 min_slot_samples=rule.min_samples,
                 pool_day_types_when_short=rule.pool_day_types_when_short,
-                pooled_max_spread=rule.pooled_max_spread,
+                pooled_max_rel_spread=rule.pooled_max_rel_spread,
             )
         except InsufficientHistoryError:
             # No silent fallback (BUILD.md S5a): a slot forecast has to be skipped, log it so it is
@@ -287,8 +290,8 @@ async def _compute_series(
             )
         )
     if basis_counts["POOLED"]:
-        # Audit trail for the short-history relaxation: these slots are FIRM_OK in `og.forecast` on
-        # weekday+weekend pooled samples, not the strict same-day-type rule.
+        # Per-series summary of the short-history relaxation; each such slot is also stored as
+        # FIRM_POOLED in `og.forecast` (migration 0040).
         logger.warning(
             "forecast: slots firm on pooled day types (short history)",
             extra={
@@ -307,21 +310,19 @@ async def _compute_series(
 @dataclass(frozen=True, slots=True)
 class FirmRule:
     """`[forecast]` firm-fitness knobs: `min_samples_firm` (default 3, 02b S3), the short-history
-    `pool_day_types_when_short` relaxation (default on) and its optional `pooled_max_spread` cap on a
-    pooled slot's P90-P10 spread (series units; unset = no cap -- 02b S3 defines no dispersion
-    threshold for the strict rule either)."""
+    `pool_day_types_when_short` relaxation (default on) and its guard `pooled_max_rel_spread` (default
+    0.5): a pooled slot with no sample of its own day type is firm only if its (P90-P10)/|P50| is at
+    most this (see `quantiles.compute_slot_quantiles`)."""
 
     min_samples: int = MIN_SLOT_SAMPLES
     pool_day_types_when_short: bool = True
-    pooled_max_spread: float | None = None
+    pooled_max_rel_spread: float | None = DEFAULT_POOLED_MAX_REL_SPREAD
 
 
-def _optional_float(value: object) -> float | None:
-    if value is None:
-        return None
+def _float_setting(value: object, name: str) -> float:
     if isinstance(value, int | float) and not isinstance(value, bool):
         return float(value)
-    raise ValueError(f"[forecast].pooled_max_spread must be a number, got {value!r}")
+    raise ValueError(f"[forecast].{name} must be a number, got {value!r}")
 
 
 _SCENARIO_NAMES: tuple[Literal["P10", "P50", "P90"], ...] = ("P10", "P50", "P90")

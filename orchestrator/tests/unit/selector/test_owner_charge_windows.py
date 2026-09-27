@@ -37,6 +37,27 @@ def test_most_specific_scope_wins():
     assert gate.resolve_owner_charge_windows({}, bank_id="b", feeder=None, zone=None, provider=None) is None
 
 
+def test_substation_and_hub_scopes_follow_the_shared_resolver():
+    """`core.charge_windows` precedence: HUB > BANK > FEEDER > SUBSTATION > ZONE, and an empty list is a
+    valid "no grid charging" override (not a missing row)."""
+    scoped = {
+        ("ZONE", "LZ_AEN"): ["22:00-04:00"],
+        ("SUBSTATION", "sub-9"): ["23:00-05:00"],
+        ("HUB", "trailer-mb-01"): [],
+    }
+    common = {"feeder": None, "zone": "LZ_AEN", "provider": "AUSTIN_ENERGY"}
+    assert gate.resolve_owner_charge_windows(scoped, bank_id="b-1", substation="sub-9", **common) == [
+        "23:00-05:00"
+    ]
+    assert gate.resolve_owner_charge_windows(scoped, bank_id="b-1", **common) == ["22:00-04:00"]
+    assert (
+        gate.resolve_owner_charge_windows(
+            scoped, bank_id="trailer-mb-01", hub_id="trailer-mb-01", substation="sub-9", **common
+        )
+        == []
+    )
+
+
 async def test_db_rows_override_config_and_are_cached(monkeypatch):
     calls: list[int] = []
 

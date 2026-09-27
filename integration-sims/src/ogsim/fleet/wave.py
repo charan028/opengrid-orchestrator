@@ -22,37 +22,6 @@ are already folded into the `InverterSnapshot` this module receives -- it only
 synthesizes the wire payload from already-anomalous state, never re-derives PQ
 state itself (BUILD.md S1: one owner per function).
 
-Summary physics (WP-K part 1, #16 follow-ups). Per leg, the summary combines every unit
-wired to that leg as phasors: the fundamental `i_rms_<leg>` is |sum I_u e^(j phi_u)| (phi_u =
-the unit's `phase_angle_error_deg`, which also gives `pf_<leg>`/`phase_angle_deg_<leg>`), and
-each harmonic order is the vector sum sum I_u (m_u,k/100) e^(j theta_u,k) (S3.2b). THD_I is the
-RSS of those harmonic phasors over the leg's fundamental. The hub-level `harmonics_i` block is
-the vector sum over all of the hub's units, expressed as % of the hub's summed per-leg
-fundamental, so a consumer that multiplies `mag_pct` by sum(i_rms_<leg>) recovers each
-unit's harmonic phasor sum exactly (dual-unit homes included).
-
-Voltage distortion is modelled independently of THD_I through a documented source
-(service-drop plus distribution-transformer) impedance, purely inductive at harmonic
-frequencies: V_k = j k X_source I_k, with X_source = V_nom / (SCR x I_rated) for a stated
-short-circuit ratio SCR against one unit's rated current (`WaveConfig.source_short_circuit_ratio`,
-`WaveConfig.unit_rated_kw`). So `harmonics_v` has order-k angle theta_k + 90 deg and a magnitude
-that grows with order and with dispatched current, and THD_V is the RSS of V_k over the leg's
-`v_rms`. Simplifications (sim only): background grid voltage distortion and neighbouring hubs'
-harmonic currents through the shared transformer are not modelled.
-
-S6.4a scaled-int16 harmonic encoding: DEFERRED. The summary still carries harmonics as the
-schema's JSON objects (float `mag_pct`/`angle_deg`). Reasons: (1) the bandwidth win S6.4a is
-after needs the binary/CBOR summary encoding, not int16 values inside JSON; the S6.4b
-harmonic-detail cadence split (`HarmonicDetailScheduler`) already carries the main reduction;
-(2) `opengrid.pq_ingest._row_fields` drops fields it does not know, so a packed field sent
-before the orchestrator decodes it would silently lose every hub's harmonics (BUILD.md S5a
-"no silent fallbacks"). Wiring when it is picked up: add an optional `harmonics_packed`
-property to `interfaces/mqtt/pq_waveform_summary.schema.json` (`orders` int array plus
-`v_mag`/`v_ang`/`i_mag`/`i_ang` int16 arrays; magnitude LSB 0.01 %, angle LSB 0.1 deg --
-additive, so old publishers stay valid); make `pq_ingest.ingest_summary` expand it into
-`harmonics_v`/`harmonics_i` before `PqWaveformSummaryRow.model_validate`, accepting either
-shape during the transition; only then emit it here behind a `wave:` config switch.
-
 Pure functions plus two small stateful schedulers (`HarmonicDetailScheduler`,
 `RotatingAuditSampler`) that hold only cadence/rate-limit bookkeeping. No MQTT
 here -- `ogsim.fleet.runtime`/`ogsim.fleet.__main__` own the wire glue, exactly
@@ -61,10 +30,8 @@ like `ogsim.fleet.calibration`.
 
 from __future__ import annotations
 
-import cmath
 import hashlib
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -90,8 +57,6 @@ NOMINAL_VOLTAGE_V = 240.0
 # waveform capture is not degenerate (FFT analysis needs a nonzero fundamental) -- models
 # residual/ripple current, not a real idle-current spec.
 IDLE_CURRENT_A_FLOOR = 1.0
-
-_FULL_CIRCLE_DEG = 360.0
 
 _PHASE_LETTERS = ("A", "B", "C")
 
@@ -159,17 +124,6 @@ class WaveConfig:
     sync_quality_ns: float = 50.0
     summary_interval_s: float = 10.0
     summary_delta_pct: float = 1.0
-    # Source-impedance THD_V model (this module's docstring): short-circuit ratio of the
-    # service point against one unit's rated current. 20 is a moderately stiff residential
-    # service (IEEE 519-2014 Table 2's lowest band is ISC/IL < 20).
-    source_short_circuit_ratio: float = 20.0
-    unit_rated_kw: float = 11.0
-
-    @property
-    def source_reactance_ohm(self) -> float:
-        """X_source at the fundamental: V_nom / (SCR x I_rated), I_rated = unit_rated_kw / V_nom."""
-        rated_current_a = self.unit_rated_kw * 1000.0 / NOMINAL_VOLTAGE_V
-        return NOMINAL_VOLTAGE_V / (self.source_short_circuit_ratio * rated_current_a)
 
 
 # ---------------------------------------------------------------------------
@@ -217,55 +171,14 @@ class SummaryScheduler(HarmonicDetailScheduler):
     due."""
 
 
-@dataclass
-class _LegSum:
-    """Phasor sums (A) of the units wired to one leg: fundamental and each harmonic order."""
-
-    fundamental: complex = 0j
-    harmonics: dict[int, complex] = field(default_factory=dict)
-    voltage_offsets_pct: list[float] = field(default_factory=list)
-
-    def add(self, snapshot: InverterSnapshot, current_a: float) -> None:
-        self.fundamental += cmath.rect(current_a, math.radians(snapshot.phase_angle_error_deg))
-        self.voltage_offsets_pct.append(snapshot.voltage_offset_pct)
-        for order, component in snapshot.dominant_harmonics.items():
-            phasor = cmath.rect(
-                current_a * component["mag_pct"] / 100.0, math.radians(component["angle_deg"])
-            )
-            self.harmonics[order] = self.harmonics.get(order, 0j) + phasor
-
-
-def _leg_sums(snapshots: Sequence[InverterSnapshot], unit_currents_a: Sequence[float]) -> dict[str, _LegSum]:
-    """Groups a hub's units by leg (a unit wired to a leg pair contributes to each leg)."""
-    legs: dict[str, _LegSum] = {}
-    for snapshot, current_a in zip(snapshots, unit_currents_a, strict=True):
-        for leg in _leg_suffixes(snapshot.phase_connection):
-            legs.setdefault(leg, _LegSum()).add(snapshot, current_a)
-    return legs
-
-
-def _voltage_harmonics(current_harmonics: dict[int, complex], reactance_ohm: float) -> dict[int, complex]:
-    """V_k = j k X_source I_k (V): the source-impedance THD_V model of this module's docstring."""
-    return {order: 1j * order * reactance_ohm * phasor for order, phasor in current_harmonics.items()}
-
-
-def _rss(phasors: dict[int, complex]) -> float:
-    return math.sqrt(sum(abs(phasor) ** 2 for phasor in phasors.values()))
-
-
-def _harmonics_block(phasors: dict[int, complex], fundamental: float) -> dict[str, dict[str, float]]:
-    """Order -> {mag_pct of `fundamental`, angle_deg in [0, 360)} for the schema's harmonics block."""
-    return {
-        str(order): {
-            "mag_pct": 100.0 * abs(phasor) / fundamental,
-            "angle_deg": math.degrees(cmath.phase(phasor)) % _FULL_CIRCLE_DEG,
-        }
-        for order, phasor in sorted(phasors.items())
-    }
-
-
-def _mean(values: Sequence[float]) -> float:
-    return sum(values) / len(values)
+def _harmonics_block(snapshots: list[InverterSnapshot]) -> dict[str, dict[str, float]]:
+    """Merges every unit's `dominant_harmonics` on a hub into one order->{mag,angle}
+    block (a dual-unit home's two inverters report independently seeded harmonics;
+    the hub-level summary reports the first unit's -- representative, matching
+    `ogsim.fleet.calibration`'s "one unit's offsets are representative" convention)."""
+    if not snapshots:
+        return {}
+    return {str(order): dict(values) for order, values in snapshots[0].dominant_harmonics.items()}
 
 
 def build_summary_message(
@@ -275,15 +188,13 @@ def build_summary_message(
     snapshots: list[InverterSnapshot],
     ts: str,
     *,
-    unit_currents_a: Sequence[float],
     include_harmonics: bool,
     config: WaveConfig,
 ) -> dict[str, Any]:
-    """S6.4(a): one `pq_waveform_summary.schema.json` message per hub. `unit_currents_a` is each
-    unit's dispatched fundamental RMS current (A), parallel to `snapshots`. Units sharing a leg
-    are combined as phasors (this module's docstring), so a dual-unit home with both units on
-    one leg reports the leg's full current and the vector-summed spectrum of both units.
-    `include_harmonics` gates the harmonic-detail sub-block (`HarmonicDetailScheduler.due()`)."""
+    """S6.4(a): one `pq_waveform_summary.schema.json` message per hub, merging every
+    connected leg across `snapshots` (a dual-unit home's two inverters may sit on
+    different legs, S3.1). `include_harmonics` gates the harmonic-detail sub-block
+    (`HarmonicDetailScheduler.due()`)."""
     msg: dict[str, Any] = {
         "hub_id": hub_id,
         "bank_id": bank_id,
@@ -292,34 +203,40 @@ def build_summary_message(
         "sync_source": config.sync_source,
         "sync_quality_ns": config.sync_quality_ns,
     }
-    reactance_ohm = config.source_reactance_ohm
-    hub_fundamental_a = 0.0
-    hub_harmonics: dict[int, complex] = {}
-    v_rms_values: list[float] = []
-    for leg, leg_sum in _leg_sums(snapshots, unit_currents_a).items():
-        suffix = leg.lower()
-        i_rms = abs(leg_sum.fundamental)
-        v_rms = NOMINAL_VOLTAGE_V * (1.0 + _mean(leg_sum.voltage_offsets_pct) / 100.0)
-        angle_deg = math.degrees(cmath.phase(leg_sum.fundamental))
-        msg[f"v_rms_{suffix}"] = v_rms
-        msg[f"i_rms_{suffix}"] = i_rms
-        msg[f"pf_{suffix}"] = math.cos(math.radians(angle_deg))
-        msg[f"phase_angle_deg_{suffix}"] = angle_deg
-        msg[f"thd_i_pct_{suffix}"] = 100.0 * _rss(leg_sum.harmonics) / i_rms if i_rms > 0.0 else 0.0
-        msg[f"thd_v_pct_{suffix}"] = (
-            100.0 * _rss(_voltage_harmonics(leg_sum.harmonics, reactance_ohm)) / v_rms
-        )
-        hub_fundamental_a += i_rms
-        v_rms_values.append(v_rms)
-        for order, phasor in leg_sum.harmonics.items():
-            hub_harmonics[order] = hub_harmonics.get(order, 0j) + phasor
-    msg["freq_hz"] = _mean([s.freq_hz for s in snapshots]) if snapshots else NOMINAL_FREQ_HZ
-    if include_harmonics and hub_fundamental_a > 0.0:
-        msg["harmonics_i"] = _harmonics_block(hub_harmonics, hub_fundamental_a)
-        msg["harmonics_v"] = _harmonics_block(
-            _voltage_harmonics(hub_harmonics, reactance_ohm), _mean(v_rms_values)
-        )
+    freq_values = []
+    for snapshot in snapshots:
+        freq_values.append(snapshot.freq_hz)
+        pf = math.cos(math.radians(snapshot.phase_angle_error_deg))
+        for leg in _leg_suffixes(snapshot.phase_connection):
+            suffix = leg.lower()
+            msg[f"v_rms_{suffix}"] = NOMINAL_VOLTAGE_V * (1.0 + snapshot.voltage_offset_pct / 100.0)
+            msg[f"i_rms_{suffix}"] = None  # populated by caller with dispatched current, see runtime.py
+            msg[f"pf_{suffix}"] = pf
+            # Voltage THD is not independently modeled (S3.1 characterizes current THD);
+            # a fixed coupling fraction via source impedance is a simulator simplification,
+            # not a claim about a specific device's actual voltage-THD behavior.
+            msg[f"thd_v_pct_{suffix}"] = snapshot.thd_current_pct * 0.3
+            msg[f"thd_i_pct_{suffix}"] = snapshot.thd_current_pct
+            msg[f"phase_angle_deg_{suffix}"] = snapshot.phase_angle_error_deg
+    msg["freq_hz"] = sum(freq_values) / len(freq_values) if freq_values else NOMINAL_FREQ_HZ
+    if include_harmonics:
+        harmonics = _harmonics_block(snapshots)
+        msg["harmonics_v"] = harmonics
+        msg["harmonics_i"] = harmonics
+    # `i_rms_<leg>` is left as an explicit None placeholder above (this function only sees
+    # PQ characterization, not live dispatch) -- `set_current_rms` fills it in; drop the
+    # placeholder key entirely for now so an unfilled message still validates (the schema
+    # allows `["number", "null"]` for every v_rms/i_rms/pf/thd/phase_angle field).
     return msg
+
+
+def set_current_rms(msg: dict[str, Any], phase_connection: str, i_rms_a: float) -> None:
+    """Fills in `i_rms_<leg>` for every leg `phase_connection` covers, given the hub's
+    actual dispatched RMS current (from `FleetState.p_kw_applied`/voltage) -- kept as a
+    separate step from `build_summary_message` so that function stays pure/pq-state-only
+    and the caller (holding `FleetState`) supplies the one live-dispatch number."""
+    for leg in _leg_suffixes(phase_connection):
+        msg[f"i_rms_{leg.lower()}"] = i_rms_a
 
 
 def current_rms_a(output_kw: float, nominal_voltage_v: float = NOMINAL_VOLTAGE_V) -> float:

@@ -205,9 +205,7 @@ def test_hub_asset_dates_columns_and_service_triggers(dsn: str) -> None:
             conn.execute("DELETE FROM og.bank WHERE bank_id = 'fups-bank2'")
 
 
-async def test_live_manual_target_hubs_follows_newest_target_per_hub(
-    dsn: str, pool: AsyncConnectionPool
-) -> None:
+async def test_manual_target_rows_feed_the_shared_parser(dsn: str, pool: AsyncConnectionPool) -> None:
     """The cancel route's read: a hub belongs to a MANUAL_TARGET only while that event is its newest,
     unexpired target (engine/manual.py's rule)."""
     from opengrid.api.store import PgStore
@@ -224,7 +222,8 @@ async def test_live_manual_target_hubs_follows_newest_target_per_hub(
             Jsonb(
                 {
                     "hub_ids": hubs,
-                    "p_kw_target": -5.0,
+                    "p_kw_command": -5.0,
+                    "sign_convention": "+charge/-discharge",
                     "issued_at": issued.isoformat(),
                     "expires_at": expires.isoformat(),
                 }
@@ -244,9 +243,14 @@ async def test_live_manual_target_hubs_follows_newest_target_per_hub(
                 r,
             )
     try:
-        store = PgStore(pool)
-        assert await store.live_manual_target_hubs(first) == {"fups-a": -5.0}  # fups-b taken over by `newer`
-        assert await store.live_manual_target_hubs(newer) == {"fups-b": -5.0}
+        from opengrid.core.manual_targets import parse_targets
+
+        rows = [r for r in await PgStore(pool).manual_target_rows() if str(r[0]) in (str(first), str(newer))]
+        live = parse_targets(rows, datetime.now(UTC))
+        assert {h: (t.trace_id, t.p_kw_target) for h, t in live.items()} == {
+            "fups-a": (str(first), -5.0),
+            "fups-b": (str(newer), -5.0),  # taken over by the newer target
+        }
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DELETE FROM og.trace WHERE stream_id = %s", (stream,))

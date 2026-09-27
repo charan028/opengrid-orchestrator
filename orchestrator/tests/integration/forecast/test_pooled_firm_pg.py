@@ -23,10 +23,12 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.core.models.platform import FeedObs
 from opengrid.core.timeutil import floor_to_interval
 from opengrid.feeds.store import FeedStore
+from opengrid.forecast.models import ForecastRow
 from opengrid.forecast.pg_backend import PgForecastBackend
 from opengrid.forecast.service import compute_and_persist
 from opengrid.platform.config import Config, load_config
 from opengrid.platform.db import build_dsn, migrate_sync
+from opengrid.selector.db import _UNFIT_PRICE_SERIES_SQL
 
 pytestmark = pytest.mark.asyncio
 
@@ -103,8 +105,9 @@ async def test_pooled_relaxation_round_trip(pool: AsyncConnectionPool) -> None:
     strict_rows = await compute_and_persist(_cfg(pool_day_types=False), store, backend, now=now)
     pooled_rows = await compute_and_persist(_cfg(pool_day_types=True), store, backend, now=now)
 
-    strict_firm = sum(r.firm_fitness == "FIRM_OK" for r in strict_rows)
-    pooled_firm = sum(r.firm_fitness == "FIRM_OK" for r in pooled_rows)
+    firm = ("FIRM_OK", "FIRM_POOLED")
+    strict_firm = sum(r.firm_fitness in firm for r in strict_rows)
+    pooled_firm = sum(r.firm_fitness in firm for r in pooled_rows)
     assert len(pooled_rows) == 96
     assert pooled_firm >= strict_firm
     assert pooled_firm > 0  # ~12 h of slots have 3 daily samples across any day-type mix
@@ -113,11 +116,47 @@ async def test_pooled_relaxation_round_trip(pool: AsyncConnectionPool) -> None:
     persisted = await backend.fetch_range(
         pooled_rows[0].interval_start_utc, pooled_rows[-1].interval_start_utc
     )
-    persisted = [r for r in persisted if r.series_key == _SERIES]
-    assert sum(r.firm_fitness == "FIRM_OK" for r in persisted) == sum(
-        r.firm_fitness == "FIRM_OK" for r in pooled_rows[:-1]
-    )
+    by_ts = {r.interval_start_utc: r.firm_fitness for r in persisted if r.series_key == _SERIES}
+    assert by_ts == {r.interval_start_utc: r.firm_fitness for r in pooled_rows[:-1]}  # basis stored as-is
     async with pool.connection() as conn:
         cur = await conn.execute("SELECT count(*) FROM og.feed_obs WHERE series = %s", (_SERIES,))
         row = await cur.fetchone()
     assert row is not None and row[0] == len(seed)
+
+
+async def test_firm_pooled_is_stored_and_is_not_unfit_for_the_selector(pool: AsyncConnectionPool) -> None:
+    """Migration 0040: FIRM_POOLED passes the CHECK, and the selector's unfit-series query (which
+    withholds only NOT_FOR_FIRM) does not list a series whose slots are FIRM_POOLED."""
+    base = floor_to_interval(datetime.now(UTC), 15) + timedelta(hours=1)
+    rows = [
+        ForecastRow(
+            series_key=_SERIES,
+            kind="price",
+            interval_start_utc=base + timedelta(minutes=15 * i),
+            horizon_step=i,
+            p10=1.0,
+            p50=2.0,
+            p90=3.0,
+            firm_fitness="FIRM_POOLED" if i % 2 else "FIRM_OK",
+        )
+        for i in range(4)
+    ]
+    backend = PgForecastBackend(pool)
+    await backend.upsert_rows(rows)
+    fetched = await backend.fetch_range(base, base + timedelta(hours=1))
+    assert sorted(r.firm_fitness for r in fetched if r.series_key == _SERIES) == [
+        "FIRM_OK",
+        "FIRM_OK",
+        "FIRM_POOLED",
+        "FIRM_POOLED",
+    ]
+    params = {"horizon_start": base, "horizon_end": base + timedelta(hours=1)}
+    async with pool.connection() as conn:
+        cur = await conn.execute(_UNFIT_PRICE_SERIES_SQL, params)
+        unfit = {r[0] for r in await cur.fetchall()}
+        assert _SERIES not in unfit
+        with pytest.raises(psycopg.errors.CheckViolation):
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE og.forecast SET firm_fitness = 'MAYBE' WHERE series_key = %s", (_SERIES,)
+                )

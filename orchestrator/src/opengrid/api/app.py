@@ -15,7 +15,6 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid import ai_agent
 from opengrid.api.csrf import CSRFMiddleware
 from opengrid.api.proposals import ProposalStore
 from opengrid.api.store import PgStore
@@ -45,14 +44,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.store = PgStore(pool)
     app.state.trace_store = trace_store
     app.state.proposals = ProposalStore()
-    # The advisory copilot (issue #26). Configuring it cannot fail the process: a missing key or a
-    # switched-off budget is a normal state the panel renders, never a start-up error.
-    ai_agent.configure(cfg)
     # `opengrid.contracts` has no signing key or safety-critical state (unlike guardian/safestop) --
     # its writes are ordinary CRUD/business-rule checks against `og.contract`/`og.opportunity`, so
     # `api` configuring its own repo/trace pair here is the intended reuse (single owner of the
     # write logic, BUILD.md S1 "no duplicated functions"), not a second, independent write path.
     configure_contracts(PgContractsRepo(pool), trace_store)
+    try:  # AI copilot: model tier when ai_agent.env provides a key, its no-model tier otherwise
+        from opengrid import ai_agent
+
+        ai_agent.configure(cfg)
+    except Exception:
+        logger.exception("ai_agent.configure failed; copilot routes answer 503 until fixed")
     heartbeat_task = asyncio.create_task(
         heartbeat_loop(pool, interval_s=float(cfg.get("health.heartbeat_interval_s", DEFAULT_HEARTBEAT_S)))
     )
@@ -138,11 +140,14 @@ def _include_routers(app: FastAPI) -> None:
         contracts,
         dispatch,
         dispatch_ledger,
+        firmware,
         fleet,
         fleet_bulk,
         fleet_map,
+        fleet_search,
         grid_layers,
         health,
+        lp_value,
         markets,
         markets_funnel,
         pq,
@@ -153,16 +158,21 @@ def _include_routers(app: FastAPI) -> None:
         scenario,
     )
 
+    # Static-path routers go before the routers whose paths take parameters under the same prefix
+    # (fleet_search before fleet, lp_value before profitability).
     for router_module in (
         health,
+        fleet_search,
         fleet,
         fleet_map,
         fleet_bulk,
+        firmware,
         grid_layers,
         markets,
         markets_funnel,
         dispatch,
         dispatch_ledger,
+        lp_value,
         profitability,
         pq,
         profitability_kw,

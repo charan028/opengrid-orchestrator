@@ -6,7 +6,7 @@ router.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -70,8 +70,8 @@ class FakeStore:
     as_deployments: dict[UUID, dict[str, Any]] = field(default_factory=dict)
     #: obligation_id -> {service_type, state, duration_minutes} for `get_as_award`.
     as_awards: dict[UUID, dict[str, Any]] = field(default_factory=dict)
-    #: trace_id -> {hub_id: p_kw_target}: which hubs a MANUAL_TARGET still controls (live_manual_target_hubs).
-    manual_target_hubs: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: MANUAL_TARGET trace rows `(trace_id, payload, created_at)` served by `manual_target_rows`.
+    manual_target_rows_data: list[tuple[Any, dict[str, Any], datetime]] = field(default_factory=list)
     #: (scope_kind, scope_ref) -> og.owner_charge_window row (D-30).
     charge_windows: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     #: ("HUB", hub_id) / ("BANK", bank_id) -> {hub_id, bank_id, zone, feeder_id, substation_id}.
@@ -451,25 +451,9 @@ class FakeStore:
         key = ("HUB", hub_id) if hub_id is not None else ("BANK", bank_id)
         return self.topology.get(key)
 
-    async def live_manual_targets(self) -> list[dict[str, Any]]:
-        now = datetime.now(UTC)
-        return [
-            {
-                "hub_id": hub_id,
-                "p_kw_target": kw,
-                "issued_at": now,
-                "expires_at": now + timedelta(minutes=15),
-                "trace_id": UUID(trace_id),
-                "proposer": "operator",
-                "reason": "demo",
-            }
-            for trace_id, hubs in self.manual_target_hubs.items()
-            for hub_id, kw in hubs.items()
-        ]
-
-    async def live_manual_target_hubs(self, trace_id: UUID) -> dict[str, float]:
-        """Test-set manual_target_hubs[trace_id] (the SQL itself runs in the integration suite)."""
-        return dict(self.manual_target_hubs.get(str(trace_id), {}))
+    async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
+        """Test-set `manual_target_rows_data` (the SQL itself runs in the integration suite)."""
+        return list(self.manual_target_rows_data)
 
     async def alert_ack_states(self, alert_ids: list[int]) -> dict[int, str | None]:
         return {a.id: a.acked_by for a in self.alerts if a.id is not None and a.id in alert_ids}

@@ -135,3 +135,18 @@ wave:
   sync_quality_ns: 50.0
   summary_interval_s: 30.0
   summary_delta_pct: 1.0
+
+# Firmware updates (OWNER DECISION, 2026-09-26, R3.1: ships in the final release). Merged onto
+# `ogsim.fleet.firmware.FirmwareSimConfig`'s own defaults by `ogsim.common.config._firmware_from_raw`
+# (FleetEngine passes this whole block straight through as `FirmwareSimConfig(**config.firmware)`).
+# duration_min_s/duration_max_s: an accepted update's simulated DOWNLOADING->INSTALLING->REBOOTING->
+# DONE timeline is drawn uniformly from this range. failure_rate: 0.0 here (no simulated failures in
+# the shipped default); the demo can set this to 0.1 in its own config override to show a FAILED/
+# rollback path. images: {} means the hub trusts the command's sha256 with no catalogue to check it
+# against (no HASH_MISMATCH/DOWNLOAD_ERROR possible) -- set per-version sha256 entries here once a real
+# firmware image catalogue exists.
+firmware:
+  duration_min_s: 30.0
+  duration_max_s: 90.0
+  failure_rate: 0.0
+  images: {}

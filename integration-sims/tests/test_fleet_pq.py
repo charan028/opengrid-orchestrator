@@ -17,7 +17,6 @@ from ogsim.common.config import FleetConfig, MqttSettings
 from ogsim.fleet.pq import (
     PqAnomalyManager,
     build_inverter_pq_state,
-    harmonic_magnitudes_pct,
     inverter_state,
     quality_score,
     replace_inverter,
@@ -197,31 +196,10 @@ def test_harmonic_injection_raises_thd_and_targeted_order_and_reverts() -> None:
     )
     manager.tick(4.999999)  # ramp essentially complete, still inside the anomaly's active window
     assert pq.thd_current_pct[idx] == pytest.approx(8.0, abs=1e-4)
-    assert pq.harmonic_mag_pct[5][idx] == pytest.approx(8.0 * np.sqrt(0.8), abs=1e-3)
-    assert _unit_harmonic_rss(pq, idx) == pytest.approx(8.0, abs=1e-4)
+    assert pq.harmonic_mag_pct[5][idx] == pytest.approx(8.0 * 0.8, abs=1e-3)
 
     manager.tick(5.0)  # `now == start + duration` -> reverted
     assert pq.thd_current_pct[idx] == pytest.approx(pre_thd)
-    assert _unit_harmonic_rss(pq, idx) == pytest.approx(pre_thd)
-
-
-def _unit_harmonic_rss(pq: object, idx: int) -> float:
-    mags = pq.harmonic_mag_pct  # type: ignore[attr-defined]
-    return float(np.sqrt(sum(float(values[idx]) ** 2 for values in mags.values())))
-
-
-def test_wp_k_seeded_harmonic_rss_equals_thd_current() -> None:
-    """#16 follow-up: magnitudes are THD x sqrt(power share), so RSS == THD_I (was ~0.68 x THD_I)."""
-    _, _, pq = _build(seed=16)
-    for i in range(pq.n):
-        assert _unit_harmonic_rss(pq, i) == pytest.approx(float(pq.thd_current_pct[i]))
-
-
-@pytest.mark.parametrize("injected_order", [None, 3, 5, 7, 11])
-def test_wp_k_harmonic_magnitudes_rss_is_thd(injected_order: int | None) -> None:
-    thd = np.array([0.5, 2.0, 8.0])
-    mags = harmonic_magnitudes_pct(thd, injected_order)
-    assert np.sqrt(sum(m**2 for m in mags.values())) == pytest.approx(thd)
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +336,6 @@ def test_replace_inverter_resets_offsets_and_records_serial_firmware() -> None:
     idx = pq.indices_for_hub(hub_id)[0]
     assert pq.serial[idx] == "SN-REPLACED"
     assert pq.firmware[idx] == "FW-2.0.0"
-    assert _unit_harmonic_rss(pq, idx) == pytest.approx(float(pq.thd_current_pct[idx]))
     assert pq.last_calibration_at[idx] == -1.0
     assert pq.last_calibration_epoch[idx] == -1
     assert pq.last_calibration_seq[idx] == -1

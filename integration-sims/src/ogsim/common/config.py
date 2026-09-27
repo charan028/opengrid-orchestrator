@@ -18,7 +18,7 @@ Precedence and production safety (mirrors the orchestrator's platform/config.py)
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -298,6 +298,22 @@ class FleetConfig:
     # cadence reduction) so the built-in default and shipped YAML agree.
     wave_summary_interval_s: float = 30.0
     wave_summary_delta_pct: float = 1.0
+    # OWNER DECISION, 2026-09-26 (R3.1): firmware updates ship in the final release. This is a plain
+    # dict, not individual FleetConfig fields, handed straight to `ogsim.fleet.firmware.
+    # FirmwareSimConfig(**config.firmware)` by `FleetEngine.__init__` -- that dataclass (built by the
+    # FIRMWARE lane) owns its own field shape/defaults, so this loader only merges YAML values onto
+    # them rather than re-declaring each one here. The literal defaults below mirror
+    # `FirmwareSimConfig`'s own (duration 30-90 s, failure_rate 0.0, no image catalogue) and match
+    # shipped fleet.yaml's `firmware:` block exactly, so `test_shipped_yaml_matches_the_built_in_
+    # defaults` holds without this being a documented exception like zone_blocks/substation_assets.
+    firmware: dict[str, Any] = field(
+        default_factory=lambda: {
+            "duration_min_s": 30.0,
+            "duration_max_s": 90.0,
+            "failure_rate": 0.0,
+            "images": {},
+        }
+    )
 
     def public_key_path(self) -> str:
         """Guardian public key path; dev override wins when set, so local
@@ -367,6 +383,7 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         ),
         **_inverter_pq_fields(raw, defaults),
         **_wave_fields(raw, defaults),
+        firmware=_firmware_from_raw(raw.get("firmware", {}), defaults.firmware),
     )
 
 
@@ -412,6 +429,36 @@ def _substation_assets_from_raw(raw_assets: Any) -> tuple[SubstationAssetConfig,
             )
         )
     return tuple(assets)
+
+
+#: Known `ogsim.fleet.firmware.FirmwareSimConfig` scalar/dict field names this loader will pass
+#: through from YAML -- `failure_kinds` (a tuple field) is handled separately below since it needs a
+#: list->tuple cast, and any UNKNOWN key in the YAML block is dropped rather than passed through
+#: (`FirmwareSimConfig(**config.firmware)` would otherwise raise `TypeError` on a typo'd key).
+_FIRMWARE_FIELD_CASTERS: dict[str, Any] = {
+    "duration_min_s": float,
+    "duration_max_s": float,
+    "failure_rate": float,
+    "images": dict,
+    "default_version": str,
+    "default_hardware_revision": str,
+}
+
+
+def _firmware_from_raw(raw_firmware: Any, default: dict[str, Any]) -> dict[str, Any]:
+    """Reads the optional `firmware:` YAML block into a plain dict merged onto `default` (this
+    `FleetConfig`'s own built-in `firmware` default) -- a missing key, a non-dict value, or an unknown
+    field name is treated permissively (same policy as `_zone_blocks_from_raw`/`_wave_fields`: a
+    fleet.yaml without this key, or with only some of its fields set, still loads)."""
+    merged = dict(default)
+    if not isinstance(raw_firmware, dict):
+        return merged
+    for key, caster in _FIRMWARE_FIELD_CASTERS.items():
+        if key in raw_firmware:
+            merged[key] = caster(raw_firmware[key])
+    if isinstance(raw_firmware.get("failure_kinds"), list):
+        merged["failure_kinds"] = tuple(str(k) for k in raw_firmware["failure_kinds"])
+    return merged
 
 
 def _inverter_pq_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:

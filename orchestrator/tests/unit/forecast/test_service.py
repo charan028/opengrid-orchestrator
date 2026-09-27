@@ -141,14 +141,15 @@ async def test_compute_and_persist_flags_not_for_firm_on_short_history():
 @pytest.mark.asyncio
 async def test_compute_and_persist_pools_day_types_on_short_history(caplog: pytest.LogCaptureFixture):
     """Short history, pooling on (the default): slots with >= 3 samples across Sat/Sun/Mon at that
-    time-of-day are FIRM_OK (audited as FIRM_POOLED); slots below that stay NOT_FOR_FIRM."""
+    time-of-day are stored FIRM_POOLED (and logged as such); slots below that stay NOT_FOR_FIRM."""
     horizon_start = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
     history = FakeHistory({"HB_TEST": _short_history("HB_TEST", horizon_start)}, quality="GOOD")
     with caplog.at_level("WARNING", logger="opengrid.forecast.service"):
         rows = await compute_and_persist(_cfg(load_series=[]), history, FakeBackend(), now=_NOW)
 
-    firm = [r for r in rows if r.firm_fitness == "FIRM_OK"]
+    firm = [r for r in rows if r.firm_fitness == "FIRM_POOLED"]
     assert firm and len(firm) < len(rows)
+    assert not any(r.firm_fitness == "FIRM_OK" for r in rows)  # no slot meets the strict rule here
     pooled_logs = [r for r in caplog.records if getattr(r, "reason_code", None) == "FIRM_POOLED"]
     assert len(pooled_logs) == 1
     assert pooled_logs[0].pooled_slots == len(firm)  # type: ignore[attr-defined]
@@ -162,6 +163,14 @@ async def test_compute_and_persist_min_samples_firm_is_config_driven():
         _cfg(load_series=[], min_samples_firm=4), history, FakeBackend(), now=_NOW
     )
     assert all(r.firm_fitness == "NOT_FOR_FIRM" for r in rows)  # only 3 days exist: never 4 samples
+
+
+@pytest.mark.asyncio
+async def test_pooled_max_rel_spread_must_be_numeric():
+    with pytest.raises(ValueError, match="pooled_max_rel_spread"):
+        await compute_and_persist(
+            _cfg(load_series=[], pooled_max_rel_spread="wide"), FakeHistory({}), FakeBackend(), now=_NOW
+        )
 
 
 @pytest.mark.asyncio

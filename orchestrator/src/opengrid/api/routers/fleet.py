@@ -18,6 +18,7 @@ from opengrid.api.routers import charge_windows as _charge_windows
 from opengrid.api.schemas import CommandProposalRequest, ProposalAccepted
 from opengrid.api.sse import sse_response
 from opengrid.api.store import StoreProtocol
+from opengrid.core.manual_targets import MANUAL_TARGET_EVENT, SIGN_CONVENTION, parse_targets
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
@@ -115,7 +116,6 @@ async def stream_fleet(
 #: How long a confirmed manual target holds when the operator gives no duration, and the longest allowed.
 DEFAULT_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 240
-MANUAL_TARGET_EVENT = "MANUAL_TARGET"
 _MAX_BANK_HUBS = 2000
 
 
@@ -178,7 +178,8 @@ async def issue_manual_target(
     approver: str | None = None,
 ) -> dict[str, Any]:
     """The ONE write path for an operator's manual target (single and bulk confirm): the MANUAL_TARGET
-    trace event first (K10), then the `og.operator_action` row. `p_kw_target` is +charge / -discharge."""
+    trace event first (K10), then the `og.operator_action` row. `p_kw_target` is +charge / -discharge and
+    is written as `p_kw_command` with an explicit `sign_convention` (engine/manual.py's contract)."""
     minutes = duration_minutes or DEFAULT_TARGET_MINUTES
     if not 1 <= minutes <= MAX_TARGET_MINUTES:
         raise HTTPException(
@@ -192,7 +193,8 @@ async def issue_manual_target(
         event_class=MANUAL_TARGET_EVENT,
         payload={
             "hub_ids": hub_ids,
-            "p_kw_target": float(p_kw_target),
+            "p_kw_command": float(p_kw_target),
+            "sign_convention": SIGN_CONVENTION,
             "issued_at": now.isoformat(),
             "expires_at": expires_at.isoformat(),
             "proposer": operator,
@@ -227,16 +229,21 @@ async def list_manual_targets(
 ) -> dict[str, Any]:
     """Hubs under a live manual target (newest per hub, not expired): `{"items": [{hub_id, p_kw_target,
     issued_at, expires_at, trace_id, proposer, reason}]}`. The ramp rate is the engine's, not listed."""
-    rows = await store.live_manual_targets()
+    rows = await store.manual_target_rows()
+    reasons = {str(trace_id): str(payload.get("reason", "")) for trace_id, payload, _at in rows}
+    live = parse_targets(rows, datetime.now(UTC))
     return {
         "items": [
             {
-                **row,
-                "trace_id": str(row["trace_id"]),
-                "issued_at": row["issued_at"].isoformat(),
-                "expires_at": row["expires_at"].isoformat(),
+                "hub_id": t.hub_id,
+                "p_kw_target": t.p_kw_target,
+                "issued_at": t.issued_at.isoformat(),
+                "expires_at": t.expires_at.isoformat(),
+                "trace_id": t.trace_id,
+                "proposer": t.proposer,
+                "reason": reasons.get(t.trace_id, ""),
             }
-            for row in rows
+            for t in sorted(live.values(), key=lambda t: t.hub_id)
         ]
     }
 
@@ -249,12 +256,12 @@ async def cancel_manual_target(
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
     """End a manual target now: appends a MANUAL_TARGET for the hubs it still controls with
-    `expires_at = now` (newest target per hub wins in `engine.manual.parse_targets`, so they return to
+    `expires_at = now` (`core.manual_targets.parse_targets`, shared with the engine: they return to
     the allocator next cycle). Hubs a NEWER target has since taken over are left alone. 404 when the
     target is unknown or no longer controls any hub."""
     now = datetime.now(UTC)
-    live = await store.live_manual_target_hubs(trace_id)
-    hub_ids = sorted(live)
+    live = parse_targets(await store.manual_target_rows(), now)
+    hub_ids = sorted(h for h, t in live.items() if t.trace_id == str(trace_id))
     if not hub_ids:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no live manual target with that trace id")
     trace_ref = await trace_store.append(
@@ -263,7 +270,8 @@ async def cancel_manual_target(
         event_class=MANUAL_TARGET_EVENT,
         payload={
             "hub_ids": hub_ids,
-            "p_kw_target": live[hub_ids[0]],
+            "p_kw_command": live[hub_ids[0]].p_kw_target,
+            "sign_convention": SIGN_CONVENTION,
             "issued_at": now.isoformat(),
             "expires_at": now.isoformat(),
             "proposer": identity.user,

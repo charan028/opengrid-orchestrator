@@ -20,6 +20,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.manual_targets import MANUAL_TARGET_ROWS_SQL
 from opengrid.core.models.engine import (
     CommandBatchRow,
     Commitment,
@@ -228,14 +229,10 @@ class StoreProtocol(Protocol):
         `opengrid.core.charge_windows.resolve`."""
         ...
 
-    async def live_manual_targets(self) -> list[dict[str, Any]]:
-        """Every hub under a live manual target: `hub_id, p_kw_target, issued_at, expires_at, trace_id,
-        proposer, reason` (same rule as `live_manual_target_hubs`)."""
-        ...
-
-    async def live_manual_target_hubs(self, trace_id: UUID) -> dict[str, float]:
-        """`{hub_id: p_kw_target}` for the hubs whose CURRENT manual target (newest MANUAL_TARGET per hub
-        by `issued_at`, not yet expired -- `opengrid.engine.manual`'s rule) is the event `trace_id`."""
+    async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
+        """The recent MANUAL_TARGET trace rows `(trace_id, payload, created_at)` in `created_at` order
+        (`opengrid.core.manual_targets.MANUAL_TARGET_ROWS_SQL`); `core.manual_targets.parse_targets` turns
+        them into the live target per hub -- the one parser the engine uses too."""
         ...
 
     async def alert_ack_states(self, alert_ids: list[int]) -> dict[int, str | None]:
@@ -324,28 +321,6 @@ class StoreProtocol(Protocol):
         ...
 
 
-#: The live manual target per hub. Mirrors `opengrid.engine.manual.parse_targets` (newest `issued_at` per
-#: hub wins, expired ignored) in SQL, because og-api must not import the engine package (it pulls the
-#: allocator and guardian modules). `{extra}` is one fixed filter fragment, never caller input.
-_LIVE_MANUAL_TARGETS_SQL = """
-    SELECT hub_id, p_kw_target, issued_at, expires_at, trace_id, proposer, reason FROM (
-        SELECT h.hub_id, t.trace_id, (t.payload ->> 'p_kw_target')::float8 AS p_kw_target,
-               COALESCE((t.payload ->> 'issued_at')::timestamptz, t.created_at) AS issued_at,
-               (t.payload ->> 'expires_at')::timestamptz AS expires_at,
-               t.payload ->> 'proposer' AS proposer, t.payload ->> 'reason' AS reason,
-               row_number() OVER (
-                   PARTITION BY h.hub_id
-                   ORDER BY COALESCE((t.payload ->> 'issued_at')::timestamptz, t.created_at) DESC
-               ) AS rn
-        FROM og.trace t
-        CROSS JOIN LATERAL jsonb_array_elements_text(t.payload -> 'hub_ids') AS h(hub_id)
-        WHERE t.event_class = 'MANUAL_TARGET' AND t.created_at > now() - interval '24 hours'
-    ) latest
-    WHERE rn = 1 AND expires_at > now() {extra}
-    ORDER BY hub_id
-"""
-
-
 def _row_or_none(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
@@ -369,12 +344,6 @@ class PgStore:
             return cur.rowcount
 
     # -- fleet ------------------------------------------------------------------------------------
-
-    async def fleet_rows(self, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
-        """Read-only SELECT/EXPLAIN statements built by `opengrid.api.routers.fleet_search` (the Fleet
-        table at scale: keyset pages, typeahead, select-all-matching, hub detail). Every statement is
-        assembled there from hard-coded fragments with values bound as `%s` parameters."""
-        return await self._fetch(sql, params)
 
     async def list_hubs(
         self, *, zone: str | None, bank_id: str | None, health: str | None, limit: int, offset: int
@@ -747,12 +716,9 @@ class PgStore:
         )
         return _row_or_none(rows)
 
-    async def live_manual_targets(self) -> list[dict[str, Any]]:
-        return await self._fetch(_LIVE_MANUAL_TARGETS_SQL.format(extra=""))
-
-    async def live_manual_target_hubs(self, trace_id: UUID) -> dict[str, float]:
-        rows = await self._fetch(_LIVE_MANUAL_TARGETS_SQL.format(extra="AND trace_id = %s"), (trace_id,))
-        return {str(r["hub_id"]): float(r["p_kw_target"]) for r in rows}
+    async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
+        rows = await self._fetch(MANUAL_TARGET_ROWS_SQL)
+        return [(r["trace_id"], dict(r["payload"]), r["created_at"]) for r in rows]
 
     async def alert_ack_states(self, alert_ids: list[int]) -> dict[int, str | None]:
         if not alert_ids:

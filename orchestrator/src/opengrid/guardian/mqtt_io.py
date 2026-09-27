@@ -25,6 +25,7 @@ from typing import Any
 
 from opengrid.core.models.mqtt import CommandBatch, Lease, ScadaUtilityInstruction, Telemetry
 from opengrid.core.models.pq import CalibrationCommand
+from opengrid.firmware.model import FirmwareCommand
 from opengrid.guardian.ports import HubFlowTelemetry, HubSnapshot, L2Instruction, Reading
 from opengrid.platform.config import Config
 from opengrid.platform.mqtt import topic, validate_payload
@@ -224,4 +225,17 @@ async def publish_lease(client: MqttPublisher, cfg: Config, lease: Lease) -> Non
         payload=lease.model_dump_json().encode("utf-8"),
         qos=1,
         retain=True,
+    )
+
+
+async def publish_firmware_command(client: MqttPublisher, cfg: Config, command: FirmwareCommand) -> None:
+    """Publish a guardian-signed firmware command to `<root>/cmd/fw/<hub_id>` (QoS 1, not retained; R3.1,
+    G-36). The published JSON is exactly the model the signature was computed over; it is validated against
+    `firmware_command.schema.json` first, so a malformed envelope never leaves the guardian."""
+    validate_payload("firmware_command", command.model_dump(mode="json"))
+    await client.publish(
+        topic(cfg, f"cmd/fw/{command.hub_id}"),
+        payload=command.model_dump_json().encode("utf-8"),
+        qos=1,
+        retain=False,
     )

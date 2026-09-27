@@ -2,8 +2,6 @@
 
 Invariants: see 00-invariants.md (canonical). Status: draft for owner approval (gate G1).
 
-**Code references.** A `file:line` marked R2 (or given in a "Status at main `6470cfa`" block) is at `main` `6470cfa`. Every other `file:line` was verified at `434d230` and may have moved since.
-
 Status: build-ready · Companion: `02b-mvp-s-spec-platform.md` (feeds, fleet, health, ui, MQTT/API contracts) ·
 Sources: `01-saturday-delivery-plan.md`, `06-reviews/06-first-principles-review.md`,
 `02-architecture/03-decision-engine.md` (§2.3–2.7, §6, §8.1–8.16, §9, §10), `02-architecture/02-domain-model-and-interfaces.md`.
@@ -594,38 +592,6 @@ def load_frozen_commitments(plan_horizon: Interval) -> dict[ObligationId, dict[I
     return frozen
 ```
 
-### 2.3 Mid-window shortfall escalation (D-17)
-
-Until this decision, `SHORTFALL` (§2.1's table) was reached only at `window_end`, from settle's per-interval
-`performance.passed_threshold`. The owner's 2026-09-26 decision (`00-invariants.md` K13 addition) makes a
-*mid-window* SHORTFALL a lifecycle edge too, with best-effort continuation rather than a stop:
-
-- **Escalation trigger — built.** `opengrid.engine.escalation.ShortfallEscalator`
-  (`orchestrator/src/opengrid/engine/escalation.py:53-76`) counts consecutive cycles an obligation carries an
-  unresolved K13 exception signal — an allocator `ShortfallReport` (L2 instruction, or no substitute/no bank
-  capacity, §5.1) or the continuous energy-sufficiency check's AT_RISK-with-negative-margin result
-  (`opengrid.allocator.energy_sufficiency`). A signal must persist for `sustain_cycles` (default 30 = 60 s at 2 s,
-  `escalation.py:12,32`) before it escalates, so a transient dip never ends a delivery; one clean cycle resets the
-  count (`escalation.py:64-66`). `lock_reason_for_shortfall` (`escalation.py:44-50`) maps the allocator's detail
-  code onto the K13 reason it stands for.
-- **What escalation does NOT do — built.** It never turns `DELIVERING → SHORTFALL` into a stop: the obligation's
-  `commitment` row is untouched (K13), and the allocator keeps dispatching it at the maximum feasible kW every
-  cycle regardless of lifecycle state (§5.6). The engine traces the escalation and flags the obligation `AT_RISK`
-  (`orchestrator/src/opengrid/contracts/__init__.py:220-239` `set_obligation_at_risk`, traces `AT_RISK`); it clears
-  the flag the first cycle the signal disappears
-  (`orchestrator/src/opengrid/engine/gateways.py:623-627,654-664`).
-- **Recovery — built.** As soon as the constraint clears, the next cycle's water-fill/substitution restores the
-  full committed kW (nothing to "re-enable": the commitment row was never reduced); `AT_RISK` clears the same cycle
-  (`gateways.py:623-627`). The continuation query itself never excludes a `SHORTFALL` obligation from dispatch
-  (`orchestrator/src/opengrid/engine/gateways.py:111-117,213-231`: `o.state IN ('COMMITTED','DELIVERING',
-  'SHORTFALL')`).
-- **Window-end close and settlement — built, unchanged.** `window_end` still closes the obligation via
-  `opengrid.engine.lifecycle.close_target` (`orchestrator/src/opengrid/engine/lifecycle.py:70-74`), `FULFILLED` or
-  `SHORTFALL` by whether any interval's `performance.passed_threshold` failed. Settlement always bills the
-  obligation's *actual* metered `delivered_kwh` for every interval, including shortfall ones, never a planned
-  figure (`orchestrator/src/opengrid/settle/__init__.py:125-132`).
-- See §5.6 for the allocator-side best-effort continuation (`best_effort_reason`) this escalation pairs with.
-
 ---
 
 ## 3. Selector (`selector`)
@@ -682,29 +648,6 @@ Decision variables (per scenario $\omega$ unless first-stage):
 For committed obligations, $x_o \equiv 1$ and $\bar y_{o,b,t} := $ `commitment.committed_kw` (read from
 `load_frozen_commitments`, §2.2) — **not** a decision the solver can move.
 
-**Two markets (D-20; partly built in R2).** The owner's 2026-09-26 direction adds a market dimension
-$m(o)\in\{\mathrm{REG}(u):u\in\mathcal U\}\cup\{\mathrm{FREE}\}$ to every obligation and a territory to every asset
-(`00-invariants.md` K15; `08-market-model-two-markets.md`; `09-optimizer-dispatcher-update.md` §1.1/§1.4 C25).
-**Status at main `6470cfa` (R2):**
-- The contract carries `market` (REGULATED | FREE, default FREE) and `utility_id`
-  (`orchestrator/migrations/0025_market_model.sql`; model `orchestrator/src/opengrid/core/models/market.py`).
-- The selector applies C25 as bank eligibility, not as LP rows (`orchestrator/src/opengrid/selector/gate.py:489-529`).
-  FREE headroom comes from a regulated-territory bank only with wholesale access (`selector/model.py:226-227`), and a
-  regulated-first stage R solves first (`selector/solve.py:140-144`).
-- Contract admission has no market or territory check yet.
-
-The per-stage K15 status is in `00-invariants.md`; the target formulation is `09-optimizer-dispatcher-update.md`
-§1-§2 (not edited here).
-
-**Solar-driven intraday shape (D-24).** Base's guidance that growing solar widens (not shrinks) the intraday price
-swing calls for forecasting a solar-driven price shape per load zone and charging at midday as well as overnight
-(`08-market-model-two-markets.md` §3c; `09-optimizer-dispatcher-update.md` §1.2, §1.8). This document does not own
-forecasting (that is `opengrid.forecast`/`02b`); $v^E_{b,t,\omega}$ above is read as an opaque scenario price from
-`forecast.scenarios()` (§3.8). **Specified, not built:** the forecast module's own README documents the gap —
-ERCOT system-wide solar (no zonal breakdown) is "not modeled yet (gap)" and NWS `sky_cover` is "not modeled (weather,
-not price/load)" (`orchestrator/src/opengrid/forecast/README.md:31,34,54`); there is no duck-curve/solar-driven
-scenario path into `forecast.scenarios()` yet.
-
 ### 3.3 Constraints (MVP-S subset of `03` §6.5)
 
 Only the constraint families the 5 MVP-S services touch are implemented; each is the exact formula from the source
@@ -733,21 +676,6 @@ tolled sub-ledger, `C22` ERCOT-visible capability) are kept because `ERCOT_ENERG
 | C18 | Cycle (throughput) budget | **Deferred to R2** — see Open points |
 | **C24 (new)** | **Commitment lock**: $y_{o,b,t,\omega} \ge \hat y_{o,b,t}$, $x_o$ fixed, for $o \in \mathcal O^c$, $t \in [s_o, f_o]$ | **Yes — the review's K13 fix, implemented exactly as an equality/lower-bound parameter, not a `setSolution` hint** |
 
-**C3's ERCOT_AS hold is a capacity hold, not a delivery schedule (commit `d43da06`).** An `ERCOT_AS` award holds
-capacity — it is granted **0 kW discharge until ERCOT deploys it**, and while held (or deployed) its energy must
-stay above the reserve floor for a **full deployment** of the product's own duration (Non-Spin 4 h, ECRS 1 h,
-NPRR1282), never merely the instant of the award. **Built:**
-
-- the hold-duration lookup, keyed on the service's AS category so it generalizes to any future AS product —
-  `orchestrator/src/opengrid/selector/gate.py:68-79` (`as_energy_hold_h`, `DEFAULT_AS_HOLD_MINUTES = 60.0`);
-- the LP's energy-hold row (`e_{t-1},e_t \ge \sum_k H_k r/\eta_d`, a slack bounded to the committed hold's own
-  capacity so a candidate-only row at $q=0$ never binds) — `orchestrator/src/opengrid/selector/model.py:192-256`;
-- `energy_hold_h`/`energy_hold_hours` carrying the parameter through `CommittedObligation`/`CandidateOpportunity` —
-  `orchestrator/src/opengrid/selector/types.py:87-89,121-123,148-153`;
-- the independent validator re-deriving the same hold — `orchestrator/src/opengrid/selector/validate.py:88`.
-
-The **0 kW until deployed** rule and the operator's deployment endpoint are allocator/API-side; see §5.6 and §6.6.
-
 ### 3.4 Objective
 
 Same structure as `03` §6.6, trimmed to MVP-S's terms (no pipeline band, no PJM, no mobile units):
@@ -756,35 +684,6 @@ $$\max\;\sum_\omega\pi_\omega\sum_{t,b}\Delta_t\Big[\big(\tfrac{v^E_{b,t,\omega}
 
 with $\mathrm{Pen}_o$ convex piecewise-linear (slope $\alpha_o$ inside tolerance, $\beta_o \gg \alpha_o$ beyond), and
 penalty hierarchy $\beta$(T1) > $\beta$(T2) > T3 value scale, matching the tier order L0>L1>L2>T1>T2>T3>T4.
-
-**M1 TDSP delivery charge, $w_b$ (D-19).** The owner's 2026-09-26 decision: assume the FULL TDSP delivery charge
-applies to grid-drawn battery-charging energy in the ERCOT competitive area — a flat per-kWh rate, per TDSP, no
-WSL/ADER exemption for behind-the-meter batteries on a shared retail meter; never inside a regulated utility's own
-territory (its delivery cost is already inside the contract's charging terms), and never on behind-the-meter solar
-(it never crosses the meter). Rates are the PUCT 2026-09-01 "Residential TDU Delivery Charges" schedule, cross-
-checked against each TDSP's own retail tariff, in `orchestrator/config/tdsp_tariffs.toml` (versioned by
-`effective_from`; the file's own header: "Rates update about every March 1 and September 1. Add a new `[[tariff]]`
-block per change; never edit old blocks."). Note for readers of `11-decision-log.md`'s D-19 row: that row names the
-path `config/tdsp_tariffs.toml`; the actual path in this repo is `orchestrator/config/tdsp_tariffs.toml`, resolved
-relative to `OG_CONFIG`'s own directory (`orchestrator/src/opengrid/settle/tariffs.py:44-57`
-`resolve_tdsp_tariffs_path`).
-
-- **Built in settlement:** `m1_delivery_charge(grid_charged_kwh, tariff)` — pure multiplication, zero when no
-  tariff resolves (an unmapped zone or a regulated territory never guesses a rate) —
-  `orchestrator/src/opengrid/settle/tariffs.py:101-110`; resolution by bank load zone via `[zone_default_tdsp]` and
-  `resolve_tariff`'s effective-dated lookup — `settle/tariffs.py:60-98`; wired into every settlement cycle as the
-  fifth P&L term (`og.pnl.delivery_charge`, migration `orchestrator/migrations/0023_pnl_delivery_charge.sql:7`) at
-  `orchestrator/src/opengrid/settle/__init__.py:196-204,217`, feeding `compute_pnl`
-  (`orchestrator/src/opengrid/settle/profitability.py`).
-- **Specified, not built in the selector's objective.** The $w_b$ term shown in this section's own formula above is
-  **not yet a modeled parameter in the LP**: `orchestrator/src/opengrid/selector/model.py:318-322` states this of
-  itself in a code comment ("$w_b$, a per-bank wheeling tariff, is not yet a modeled parameter anywhere in this
-  codebase"). The selector charges grid charging at the bare scenario price only
-  (`selector/model.py:311-322`) — planning therefore under-costs FREE grid charging relative to what settle will
-  actually bill, matching `09-optimizer-dispatcher-update.md` finding G5.
-- **Territory data (build phase, data only):** `orchestrator/config/tdsp_tariffs.toml:65-103` (`[zone_territory]`)
-  records which ERCOT settlement zones (LZ_AEN, LZ_CPS, LZ_LCRA, LZ_RAYBN) carry no separate M1 line and why; see
-  K15 (`00-invariants.md`) for its build status.
 
 ### 3.5 Non-anticipativity
 
@@ -1042,60 +941,6 @@ solved by sorting $A_i / w_i$ (O(n log n)). Free-headroom price response (S6) ap
 switch inside 5 minutes of the last one) and **\$5/MWh hysteresis** (the threshold to switch modes is offset by
 ±\$5/MWh depending on current mode), exactly as `03` §8.6.5's `θ=$0.005`/kWh rule.
 
-### 5.6 Best-effort continuation and need-basis/AS-hold dispatch (D-17, D-18)
-
-`opengrid.allocator.cycle.cycle()` (§5.1's S1-S7 pure function) dispatches every committed obligation the same way
-regardless of lifecycle state — a `SHORTFALL` obligation is never excluded, only annotated:
-
-- **Best-effort continuation (D-17) — built.** `ObligationCall.in_shortfall` (already escalated mid-window, §2.3)
-  changes only the grant's *reason code*, never the amount offered: `best_effort_reason` picks the K13 code the
-  partial grant stands for (an L2 instruction, no substitute, or bank capacity) —
-  `orchestrator/src/opengrid/allocator/cycle.py:185-192,248-257`. The obligation still goes through the same
-  lexicographic tiers and water-fill as every other committed call (S3/S4, §5.1); there is no separate "shortfall"
-  code path that dispatches less than the cycle would otherwise offer.
-- **Need-basis dispatch (D-18) — built.** A need-basis (`MEASURED_FEEDBACK`) obligation's grant is not modeled
-  differently in `cycle()` itself (it is a normal `ObligationCall`); the need-basis *floor* is enforced upstream by
-  the reserved-maximum commitment (§2.2) and independently corroborated by the guardian at signing time (§6.6) —
-  the allocator only ever proposes a grant, real delivery below the reserved kW is a customer-measured fact, not an
-  allocator decision.
-- **ERCOT_AS capacity hold (D-17/D8, commit `d43da06`) — built.** `ObligationCall.as_deployed`/`is_as_hold`
-  (`orchestrator/src/opengrid/allocator/models.py:103-111`) makes an undeployed AS award's tier allocation bypass
-  `remaining_headroom` entirely: it is granted an explicit **0 kW** with reason `R-GRANT-AS-HOLD`
-  (`orchestrator/src/opengrid/allocator/cycle.py:142-165`) rather than omitted (an omission would read to the
-  guardian's G-19 as an unexplained cut). A bank holding an AS award, or one under a K7 `CONSERVATIVE` scope
-  posture (`Schedule.conservative_bank_ids`, `og.scope_posture`), takes **no new uncommitted/market dispatch**
-  either — spot-exporting the bank's headroom would spend exactly the energy the hold must keep above the reserve
-  floor (`allocator/cycle.py:211-215`). The RT price-response threshold is the *replacement cost* of that energy —
-  the cheapest recharge price ahead (else the live price) plus the M1 delivery charge, grossed up for round-trip
-  losses, replacing the fixed \$30/MWh — `orchestrator/src/opengrid/engine/gateways.py:168-192`
-  (`headroom_threshold_usd_per_mwh`), consumed via `PriceSignal.threshold_usd_per_mwh`
-  (`orchestrator/src/opengrid/allocator/models.py:140-146`).
-
-### 5.7 Flow-limit hierarchy at the dispatcher (D-26, D-27)
-
-The owner's 2026-09-26 requirement (`09-optimizer-dispatcher-update.md` §1.9, quoted): **"The dispatcher models max
-discharge flow at every level: P_max(SoC, T), the home export limit net of home load, service transformer, feeder,
-substation, and sustained vs peak"** (D-26), each **"re-checked by the guardian on its own reads"** (D-27, §6.7
-below). Status at main `6470cfa` (R2); line numbers are R2's:
-
-| Limit | Status | Where |
-|---|---|---|
-| Hub rated power, per-unit cap | **Built** | `orchestrator/src/opengrid/core/limits.py:93` `check_hub_power`; unit rating `:77-90` (`og.hub.units`, migration 0032) |
-| Energy sustainable over the lease | **Built** | `orchestrator/src/opengrid/allocator/cycle.py:529-554` `_cap_sustainable_discharge`, `core/physics.py:63-104` |
-| Stale SoC → zero discharge | **Built** | `allocator/cycle.py:529-554` |
-| Hub/fleet/feeder ramp | **Built** in the guardian (G-04/G-05/G-06, and G-32 for non-firm steps, `core/limits.py:314-367`); the engine ramps each hub (`orchestrator/src/opengrid/engine/__init__.py:195-207`) | no fleet or feeder ramp shaping in the dispatcher |
-| Bank kVA, both directions | **Built** | `core/limits.py:295` `check_bank_kva`, `core/physics.py:180` `recharge_headroom` |
-| L2 LIMIT/BLOCK | **Built** | `allocator/cycle.py:585` `_apply_instructions` |
-| SoC/temperature derating $P_{max}(SoC,T)$ (F1) | **Built**, always on; not in the selector | `orchestrator/src/opengrid/allocator/flow_limits.py:49-68`, `cap_hub` `:94-105`, applied at `allocator/cycle.py:123-135`; curve `core/limits.py:175-207` |
-| Home load first, then meter export (F2) | **Built, export side only**, behind `[allocator.flow_limits].enabled = true` | `allocator/flow_limits.py:78-88`; no repo seed sets `og.hub.export_limit_kw` (migration 0029), so nothing binds yet |
-| Service transformer (F3) | **Built**, discharge direction | `allocator/flow_limits.py:108-156`; needs `og.service_transformer` rows and `og.hub.transformer_id`, which no repo seed writes |
-| Feeder/substation thermal + reverse flow (F3) | **Built** as per-cycle discharge budgets | `allocator/flow_limits.py:158-182`, applied at `allocator/cycle.py:116-117`; budgets come from `og.feeder_limit`/`og.substation_limit` `reverse_kw` only, which no repo seed writes |
-| Substation asset POI/transformer | **Not built** in the dispatcher | `og.asset` exists (migration 0025) and the guardian checks a POI (G-29), but no code dispatches a substation asset |
-| Sustained vs peak ($P^{pk}$, $\tau^{pk}$) | **Not planned** by the dispatcher | the allocator's base is continuous power (`core/limits.py:86-90`); the guardian's G-31 vetoes any above-continuous setpoint today (§6.7) |
-
-Full family-by-family detail (F1-F7), the selector/SCED/RT/PI split, and the proposed guardian checks are in
-`09-optimizer-dispatcher-update.md` §1.9 and §2.1-§2.4 (not edited here). See §6.7 for the guardian side.
-
 ---
 
 ## 6. Guardian (`guardian`)
@@ -1139,31 +984,6 @@ collision — none of these gate G1 approval or block the demo if simplified fur
 | G-29 | Emergency posture (EEA) | Simulated EEA injection via the scenario panel | Yes (simulated) |
 | G-30 | Cross-principal cumulative windows | Simplified to per-bank sum across the 5 MVP-S services (no true multi-principal SCADA) | Partial |
 | G-31 | Counterparty-supplied dynamic limits | Not applicable — MVP-S has no external counterparty SCADA feed (bank SCADA is `sim`'s, trusted) | Deferred |
-
-**Guardian numbering collision with this supplemental table — superseded, not deleted (D-26, D-27).**
-`09-optimizer-dispatcher-update.md` §10 notes that this table's own G-21…G-31 numbers were never built under these
-names, and by the time K14 (power-quality) shipped, G-21…G-25 were assigned for real to the PQ checks
-(`00-invariants.md`'s "Guardian check numbering"; built at `orchestrator/src/opengrid/guardian/pq_checks.py:1-2`).
-`orchestrator/src/opengrid/guardian/checks.py:1-2` confirms the actually-built guardian set stops at G-01…G-20.
-This table's own G-21 ("service-transformer
-loading") and G-29/G-30 ("emergency posture", "cross-principal cumulative windows") therefore collide with the K14
-numbers and must not be built under these labels. `09` §2.5 canonically reassigns the flow-limit and territory
-checks this table's G-21/G-27/G-30 items were gesturing at to **G-26…G-33**, with the final numbering in
-`00-invariants.md` ("Flow limits and territory") and §6.7 below. This table is kept for its content and history;
-do not delete it. Treat every G-number in it as **retired**.
-
-**Per-bank load-zone pricing (D-10).** Frank's review finding, quoted in the decision log: "The delivery-rate
-economics use per-bank load-zone pricing. Hub prices are reference only (the Houston Hub bug is fixed)." This is a
-planning/RT-pricing fix, not a guardian check (no G-number here reads price; G-03 reads bank *load*, not price),
-but is recorded in this section per the decision log's own pointer. **Built:**
-
-- selector: `load_scenarios`/`scenarios_from_points` group forecast points by `kind == "price"` only and key each
-  bank to its own load zone's path (previously every bank was priced at whichever zone's row was inserted last,
-  the "Houston Hub bug") — `orchestrator/src/opengrid/selector/gate.py:272-314`;
-- RT: `bank_price` resolves a bank's own zone SPP, falling back to the mean of observed zones, never an arbitrary
-  single zone — `orchestrator/src/opengrid/engine/gateways.py:195-208`;
-- the RT headroom-discharge threshold is likewise computed per zone (`M1_USD_PER_MWH_BY_ZONE`,
-  `headroom_threshold_usd_per_mwh`) — `orchestrator/src/opengrid/engine/gateways.py:168-192` (see §5.6).
 
 ### 6.2 G-19 formula and pseudo-code
 
@@ -1253,105 +1073,6 @@ itself mid-restart.
 - Every `stop_event` row is one signed broadcast per scope; a `stop_event` with `action='ENGAGE'` suppresses all
   `command_batch` output for its scope until a matching `action='RELEASE'` row exists (checked by the allocator at
   S3 before it even builds an allocation, and independently by the guardian before signing).
-
-### 6.6 G-19 need-basis and AS-hold corroboration (D-18); the AS deployment endpoint
-
-G-19 (§6.2) treats a need-basis grant and an AS-hold grant as claims requiring their own corroboration, not as an
-ordinary reduction below the commitment floor — **built**, wired into the same signing path as §6.2's
-`check_g19_commitment_lock`:
-
-- **Need basis (D-18).** `check_g19_need_basis` (`orchestrator/src/opengrid/guardian/checks.py:292-305`,
-  `NEED_BASIS_SETPOINT_SOURCE = "MEASURED_FEEDBACK"` at `:276`) signs an `R-GRANT-CLOSED-LOOP` reduction only when
-  the guardian's own read of the obligation's *current* service profile is `MEASURED_FEEDBACK`
-  (`og.service_profile.setpoint_source`, `orchestrator/migrations/0010_service_profile.sql:55-56`) **and** no other
-  obligation on the bank is granted beyond its own commitment this cycle (the unused reservation is not being
-  reassigned) — `g19_obligations_over_commitment`, `guardian/checks.py:279-289`. Called from
-  `orchestrator/src/opengrid/guardian/service.py:731-746`, reading the profile via its own port
-  (`guardian/service.py:777-779` `_setpoint_source` → `guardian/ports.py:235-236` → `guardian/repo.py:259-275`).
-- **AS capacity hold (D-17/D8, commit `d43da06`).** `check_g19_as_hold`
-  (`orchestrator/src/opengrid/guardian/checks.py:312-327`) signs an `R-GRANT-AS-HOLD` 0 kW grant only when the
-  guardian's own reads show the obligation is `ERCOT_AS`, **no** deployment covering now is active for it (a
-  `None`/unreadable deployment status is a VETO, never an assumed hold), and no other obligation on the bank is
-  borrowing the held reservation. Called from `guardian/service.py:712-730`, reading `og.as_deployment` via its own
-  port (`guardian/ports.py:225-231`, `guardian/repo.py:286-309`).
-- **The AS energy hold itself is not a guardian check.** The selector's C3′ floor
-  (`orchestrator/src/opengrid/selector/model.py:345` at R2 `6470cfa`) and the engine's S6 hold floor
-  (`orchestrator/src/opengrid/engine/gateways.py:139` at R2) enforce it, and both are built. The invariants check
-  `CHECK_AS_HOLD` measures it (built in R2: `orchestrator/src/opengrid/invariants/__init__.py:489-508`,
-  `invariants/checks.py:527-561`, `invariants/queries.py:444-477`), with a narrower scope than the spec: it runs only
-  while an `og.as_deployment` window is active (`queries.py:471`), never for a held award that is not deployed; it
-  requires the product's full duration even part-way through a deployment (`checks.py:547`); and it sums every hub
-  on the reserved banks without netting out other obligations (`queries.py:460`). Reported to the lead.
-  Settlement does not yet check hold availability: settle's AS performance defaults to "available/compliant"
-  (`orchestrator/src/opengrid/settle/__init__.py:148-161`).
-- **The AS deployment endpoint (d43da06; one award, product-capped in R2) — built.** `POST
-  /og/api/dispatch/as-deployments` creates an `og.as_deployment` row (the demo's stand-in for an ERCOT deployment
-  instruction), traced before it takes effect (K10). Since R2 it deploys ONE award: `obligation_id` is required, a
-  fleet-wide request is refused (409, it would need two-person approval), the award must be an ERCOT_AS obligation
-  in COMMITTED, DELIVERING or SHORTFALL, and the duration is capped (409 above it) —
-  `orchestrator/src/opengrid/api/routers/dispatch.py:62-112` at R2 (`dispatch.py:74-119` at `434d230`). The cap is
-  the longest product duration among the award's **contract's** product rules, not the award's own product rule
-  (`orchestrator/src/opengrid/api/store.py:729-740`), and 240 min when none is found: a contract carrying both an
-  ECRS (60 min) and a Non-Spin (240 min) rule lets an ECRS award run 240 min. `GET .../as-deployments` lists active
-  ones (`dispatch.py:152-158`); `DELETE .../as-deployments/{deployment_id}` ends one early (`dispatch.py:161-177`).
-  Backing store: `api/store.py:224-246` (protocol), `:707-760` (implementation); schema
-  `orchestrator/migrations/0020_as_capacity_hold.sql:1-28`.
-
-### 6.7 Flow-limit and territory guardian checks (D-26, D-27; K4 extended, K15)
-
-The owner's 2026-09-26 requirement, quoted from `09-optimizer-dispatcher-update.md` §1.9: the dispatcher's flow
-limits are **"each enforced independently by the guardian"** (D-27), on **"its own reads: its hub-state port
-(telemetry), its SCADA port, and static rows from the DB... It never uses the allocator's claimed capability"**
-(09 §2.6). This is the K3/K4 "one formula, two data paths" pattern already used for G-01…G-06 (§6.1), extended to
-the new limit families and to territory (K15, `00-invariants.md`).
-
-**Final numbering (lead, 2026-09-26; matches `09` §2.5/§2.6 as renumbered):**
-
-| Check | Limit |
-|---|---|
-| G-02 (changed) | Derating |
-| G-26 | Home meter export/import |
-| G-27 | Service transformer |
-| G-28 | Feeder thermal / reverse flow |
-| G-29 | Substation POI / transformer |
-| G-30 | Territory export (K15c) |
-| G-31 | Sustained vs peak |
-| G-32 | Feeder ramp for non-firm steps |
-| G-33 | K15 market segregation |
-
-**Status at main `6470cfa` (R2): built.** Each check reads the guardian's own ports (topology, territory,
-telemetry; `guardian/main.py:349`), never the allocator's claimed capability:
-
-| Check | Implementation (R2) | Wired in `guardian/service.py` (R2) |
-|---|---|---|
-| G-26 home meter | `orchestrator/src/opengrid/guardian/flow_checks.py:164` `check_g26_home_meter` | `:328`, per item |
-| G-27 service transformer | `flow_checks.py:219` `check_g27_transformer` | `:539-541`, over all members |
-| G-28 feeder thermal / reverse | `flow_checks.py:261` `check_aggregate_flow` | `:452-457`, `:477` |
-| G-29 substation POI / transformer | `flow_checks.py:261`; `flow_checks.py:296` `check_g29_poi` | `:458-463`, `:489-493` |
-| G-30 territory export | `flow_checks.py:261` on the territory boundary flow | `:464-469` |
-| G-31 sustained vs peak | `flow_checks.py:88` `check_g31_peak` | `:427`, per item |
-| G-32 feeder ramp, non-firm | `orchestrator/src/opengrid/core/limits.py:360` `check_feeder_ramp` | `:383-390` |
-| G-33 K15 market segregation | `flow_checks.py:317` `check_g33_territory` → `market/territory.py:131` | `:584`, per item |
-
-- `_ITEM_LEVEL_RULES` (`guardian/service.py:66`) now includes G-26, G-27, G-31 and G-33. Tests:
-  `orchestrator/tests/unit/guardian/test_flow_checks.py` (29), `test_service_flow.py` (14). No feature flag gates
-  these checks.
-- Caveats at R2 (details under K4 in `00-invariants.md`):
-  - G-31's peak path is dead: the guardian reads the peak budget as `peak_budget_kws` (`guardian/mqtt_io.py:36`),
-    while hubs send `peak_power_budget_kws`, so every above-continuous setpoint is vetoed.
-  - G-29 and G-30 evaluate nothing without substation assets tied to a bank or regulated-zone banks, and neither
-    is seeded.
-  - The aggregate flows sum unsigned SCADA apparent power as import (`guardian/flow_repo.py:40-48`), so reverse
-    flow is seen only through the batch's own change.
-  - `[guardian.flow].telemetry_required` is false: a flow field a hub has never reported falls back to the static
-    premise limits.
-- The ERCOT_AS energy hold is not among these checks: the selector and engine enforce it and `CHECK_AS_HOLD`
-  measures it (§6.6).
-- §6.1 above records why G-26…G-33, and not the old supplemental table's G-21…G-31, are canonical.
-
-Full per-check inequalities, data sources, fail-closed rules and negative tests (G-02 changed, G-26…G-33) are in
-`09-optimizer-dispatcher-update.md` §2.6 (not edited here). See §5.7 for the matching dispatcher-side status and
-`00-invariants.md`'s K4/K15 additions for the invariant-level summary.
 
 ---
 

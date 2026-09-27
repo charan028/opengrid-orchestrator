@@ -24,6 +24,9 @@ from opengrid.core.models.engine import CommandBatchRow, Verdict
 from opengrid.core.models.mqtt import CommandBatch, CommandItem, Lease
 from opengrid.core.models.pq import CalibrationCommand, CalibrationReference
 from opengrid.core.pq import CalibrationBounds
+from opengrid.firmware.config import load_firmware_config
+from opengrid.firmware.guardian_flow import PgFirmwareGuardianPort, process_pending_firmware
+from opengrid.firmware.model import FirmwareCommand
 from opengrid.guardian.config import CalibrationSyncSource, GuardianConfig, load_guardian_config
 from opengrid.guardian.escalation import (
     CONSERVATIVE_ALERT_RULE,
@@ -40,6 +43,7 @@ from opengrid.guardian.mqtt_io import (
     build_input_session,
     publish_calibration_command,
     publish_command_batch,
+    publish_firmware_command,
     publish_lease,
 )
 from opengrid.guardian.ports import AlertPort, ProposedBatch, ScopePosturePort
@@ -434,6 +438,13 @@ async def main() -> None:
     async def publish_calibration(command: CalibrationCommand) -> None:
         await publish_calibration_command(mqtt_client, cfg, command)
 
+    # R3.1 firmware updates (G-36): REQUESTED og.firmware_command rows, evaluated, signed and published here.
+    fw_cfg = load_firmware_config(cfg)
+    fw_port = PgFirmwareGuardianPort(pool)
+
+    async def publish_fw(command: FirmwareCommand) -> None:
+        await publish_firmware_command(mqtt_client, cfg, command)
+
     async def tick() -> None:
         if not mqtt_inputs_ready(input_session, mqtt_client, exit_after_s=mqtt_down_exit_s):
             return  # fail closed: no heartbeat, nothing evaluated or signed while MQTT is down
@@ -472,6 +483,18 @@ async def main() -> None:
                 )
             except Exception:
                 logger.exception("calibration hand-off pass failed; batch signing unaffected")
+        # Isolated the same way: a firmware-path failure never stops batch signing (K7).
+        try:
+            await process_pending_firmware(
+                fw_port,
+                sign=service.sign_firmware_payload,
+                publish=publish_fw,
+                trace=lambda s, c, p: trace_store.append(s, "GUARDIAN_VERDICT", c, p),
+                cfg=fw_cfg,
+                key_id=guardian_cfg.key_id,
+            )
+        except Exception:
+            logger.exception("firmware hand-off pass failed; batch signing unaffected")
         # ES06-S04 escalation, isolated: publishing posture/alerts never touches the signing decisions.
         try:
             await apply_escalation(

@@ -15,6 +15,7 @@ from opengrid.forecast.quantiles import (
     InsufficientHistoryError,
     compute_slot_quantiles,
     diurnal_fallback_quantiles,
+    relative_spread,
     same_slot_pool,
     sample_quantiles,
     widen,
@@ -130,12 +131,12 @@ def _every_15_min(start: datetime, end: datetime, value: float = 30.0) -> list[t
 
 def test_saturday_on_history_since_sep_24_is_firm_pooled():
     """Target Sun 10:00 CT: no Sunday samples and one Saturday (weekend) sample, but Thu/Fri/Sat pooled
-    give 3 -- firm, via the pooled relaxation, not the strict rule."""
+    give 3 -- firm via the pooled relaxation, recorded as FIRM_POOLED (not FIRM_OK)."""
     history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
     target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)  # Sun 10:00 CDT
     slot = compute_slot_quantiles(history, target, stale=False)
     assert slot.basis == "POOLED"
-    assert slot.firm_fitness == "FIRM_OK"
+    assert slot.firm_fitness == "FIRM_POOLED"
     assert slot.sample_count == 3
 
 
@@ -169,15 +170,50 @@ def test_strict_data_uses_strict_path_even_with_pooling_on():
     assert slot.p90 < 999.0
 
 
-def test_pooled_spread_cap_rejects_wide_pool():
+# Weekend-only history (Sep 19/20 and 26/27) and a Monday target: 4 pooled samples, none of its day type.
+_MON_TARGET = datetime(2026, 9, 28, 15, 0, tzinfo=UTC)  # Mon 10:00 CDT
+
+
+def _weekend_only_history(values: tuple[float, float, float, float]) -> list[tuple[datetime, float]]:
+    days = (19, 20, 26, 27)
+    return [(datetime(2026, 9, d, 15, 0, tzinfo=UTC), v) for d, v in zip(days, values, strict=True)]
+
+
+def test_pooled_guard_own_day_type_sample_admits_even_wide_pool():
+    """Sun target with one Saturday sample of its own day type: firm on the pooled path however wide."""
     history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
     history = [(ts, v * (1 + 10 * (ts.day % 2))) for ts, v in history]  # alternate days wildly apart
     target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
-    capped = compute_slot_quantiles(history, target, stale=False, pooled_max_spread=1.0)
-    assert capped.basis == "FALLBACK"
-    assert capped.firm_fitness == "NOT_FOR_FIRM"
-    uncapped = compute_slot_quantiles(history, target, stale=False)
-    assert uncapped.basis == "POOLED"
+    slot = compute_slot_quantiles(history, target, stale=False)
+    assert slot.basis == "POOLED"
+    assert slot.firm_fitness == "FIRM_POOLED"
+
+
+def test_pooled_guard_no_own_day_type_and_wide_spread_is_not_for_firm():
+    slot = compute_slot_quantiles(_weekend_only_history((10.0, 100.0, 10.0, 100.0)), _MON_TARGET, stale=False)
+    assert slot.basis == "FALLBACK"
+    assert slot.firm_fitness == "NOT_FOR_FIRM"
+
+
+def test_pooled_guard_no_own_day_type_but_tight_spread_is_firm_pooled():
+    slot = compute_slot_quantiles(_weekend_only_history((30.0, 31.0, 32.0, 33.0)), _MON_TARGET, stale=False)
+    assert slot.basis == "POOLED"
+    assert slot.firm_fitness == "FIRM_POOLED"
+    assert slot.sample_count == 4
+
+
+def test_pooled_guard_threshold_is_configurable():
+    history = _weekend_only_history((30.0, 31.0, 32.0, 33.0))  # relative spread ~0.08
+    strict = compute_slot_quantiles(history, _MON_TARGET, stale=False, pooled_max_rel_spread=0.05)
+    assert strict.firm_fitness == "NOT_FOR_FIRM"
+    off = compute_slot_quantiles(history, _MON_TARGET, stale=False, pooled_max_rel_spread=None)
+    assert off.firm_fitness == "NOT_FOR_FIRM"  # spread path disabled: needs an own-day-type sample
+
+
+def test_relative_spread_zero_median():
+    assert relative_spread((0.0, 0.0, 0.0)) == 0.0
+    assert relative_spread((-1.0, 0.0, 1.0)) == float("inf")
+    assert relative_spread((-60.0, -40.0, -20.0)) == pytest.approx(1.0)
 
 
 def test_pooled_slot_still_not_for_firm_when_stale():

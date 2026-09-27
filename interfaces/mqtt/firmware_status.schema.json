@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/firmware_status.schema.json",
+  "title": "FirmwareStatus",
+  "description": "Hub -> orchestrator, published on <root>/ack/fw/<hub_id>, QoS 1, not retained: the hub's timestamped progress for one FirmwareCommand (firmware_command.schema.json). ACCEPTED is the ack; REJECTED means the command was never acted on (reason says why). A hub publishes DOWNLOADING, INSTALLING, REBOOTING and then DONE or FAILED; on FAILED the hub is back on its previous version (A/B partition), reported in firmware_version. After a reboot the hub also republishes device_info with the running firmware_version. New 2026-09-26 (R3.1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hub_id", "command_id", "state", "firmware_version", "target_version", "ts"],
+  "properties": {
+    "hub_id": { "type": "string", "minLength": 1 },
+    "command_id": { "type": "string", "format": "uuid" },
+    "epoch": { "type": "integer", "minimum": 0 },
+    "seq": { "type": "integer", "minimum": 0 },
+    "state": {
+      "type": "string",
+      "enum": ["ACCEPTED", "REJECTED", "DOWNLOADING", "INSTALLING", "REBOOTING", "DONE", "FAILED"]
+    },
+    "reason": {
+      "type": ["string", "null"],
+      "enum": [null, "BAD_SIGNATURE", "STALE_SEQ", "EXPIRED", "UNKNOWN_HUB", "ALREADY_UPDATING",
+               "HARDWARE_INCOMPATIBLE", "HASH_MISMATCH", "DOWNLOAD_ERROR", "VERIFY_ERROR", "INSTALL_ERROR",
+               "BOOT_FAILED"]
+    },
+    "progress_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "firmware_version": { "type": "string", "minLength": 1, "description": "The version the hub is running at ts." },
+    "target_version": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time" }
+  }
+}

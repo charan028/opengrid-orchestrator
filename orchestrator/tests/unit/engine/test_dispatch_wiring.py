@@ -1026,3 +1026,111 @@ async def test_device_info_handler_calls_upsert_or_drops_until_the_module_exists
 
     monkeypatch.setattr(importlib, "import_module", missing)
     await engine.make_device_info_handler("pool")({"topic": "t", "payload": {}})  # logged, dropped, no raise
+
+
+# --- firmware campaigns (owner decision: final release) -----------------------------------------------------
+
+
+class _FakeFirmware:
+    def __init__(self, updating: frozenset[str] = frozenset(), *, fail: bool = False) -> None:
+        self._updating = updating
+        self._fail = fail
+        self.steps = 0
+
+    async def step(self, now):
+        self.steps += 1
+        if self._fail:
+            raise RuntimeError("firmware repo down")
+
+    def updating_hub_ids(self) -> frozenset[str]:
+        return self._updating
+
+
+@pytest.mark.asyncio
+async def test_firmware_steps_before_allocation_and_its_failure_never_costs_the_cycle() -> None:
+    from types import SimpleNamespace
+
+    ok = SimpleNamespace(firmware=_FakeFirmware())
+    await engine.step_firmware(ok, NOW)
+    assert ok.firmware.steps == 1
+    broken = SimpleNamespace(firmware=_FakeFirmware(fail=True))
+    await engine.step_firmware(broken, NOW)  # logged, no raise
+    await engine.step_firmware(SimpleNamespace(firmware=None), NOW)
+
+
+def test_updating_hubs_are_excluded_from_dispatch_with_the_vetoed_ones() -> None:
+    from types import SimpleNamespace
+
+    from opengrid.engine.veto import HubVetoExclusions
+
+    vetoes = HubVetoExclusions()
+    vetoes.exclude({"h1"})
+    state = SimpleNamespace(veto_exclusions=vetoes, firmware=_FakeFirmware(frozenset({"h2"})))
+    assert engine.excluded_now(state) == frozenset({"h1", "h2"})
+    assert engine.excluded_now(SimpleNamespace(veto_exclusions=vetoes, firmware=None)) == frozenset({"h1"})
+    fleet = _Fleet([_HubCap("h1", "b1", 10.0), _HubCap("h2", "b1", 10.0), _HubCap("h3", "b1", 10.0)])
+    items = engine._distribute_hub_items(
+        "b1", [_g("9", obligation=uuid4())], fleet_module=fleet, excluded_hub_ids=engine.excluded_now(state)
+    )
+    assert {i["hub_id"] for i in items} == {"h3"}
+
+
+@pytest.mark.asyncio
+async def test_firmware_status_is_routed_off_the_ingest_path_and_not_to_the_ack_parser(monkeypatch) -> None:
+    from opengrid import fleet
+    from opengrid.engine.background import BackgroundIngest
+
+    acks: list[dict] = []
+
+    async def ingest_ack(payload):
+        acks.append(payload)
+
+    monkeypatch.setattr(fleet, "ingest_ack", ingest_ack)
+    queued: list[dict] = []
+
+    async def handler(item):
+        queued.append(item)
+
+    worker = BackgroundIngest("firmware-status", handler)
+    cfg = Config({"mqtt": {"topic_root": "og/v1"}})
+    status = {
+        "hub_id": "hub-1",
+        "command_id": "c1",
+        "state": "UPDATING",
+        "firmware_version": "2.1.0",
+        "ts": NOW.isoformat(),
+    }
+    client = _FakeMqtt([("og/v1/ack/fw/hub-1", status)])
+    await engine._mqtt_ingest_loop(client, cfg, raw_worker=None, firmware_status_worker=worker)  # type: ignore[arg-type]
+    assert "og/v1/ack/fw/+" in client.subscribed
+    import asyncio
+
+    task = asyncio.create_task(worker.run())
+    await worker.drain()
+    task.cancel()
+    assert queued == [status] and acks == []
+
+
+@pytest.mark.asyncio
+async def test_firmware_status_handler_validates_then_records(monkeypatch) -> None:
+    from opengrid.firmware import ingest
+    from opengrid.platform import mqtt
+
+    recorded: list[dict] = []
+
+    async def record(pool, payload):
+        recorded.append(payload)
+        return True
+
+    monkeypatch.setattr(ingest, "record_firmware_status", record)
+
+    def invalid(kind, payload):
+        raise mqtt.SchemaValidationError("firmware_status: bad")
+
+    monkeypatch.setattr(mqtt, "validate_payload", invalid)
+    handler = engine.make_firmware_status_handler("pool")
+    await handler({"hub_id": "h1"})
+    assert recorded == []  # invalid: dropped
+    monkeypatch.setattr(mqtt, "validate_payload", lambda kind, payload: None)
+    await handler({"hub_id": "h1"})
+    assert recorded == [{"hub_id": "h1"}]

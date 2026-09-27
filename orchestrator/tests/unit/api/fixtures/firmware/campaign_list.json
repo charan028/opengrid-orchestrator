@@ -1,0 +1,41 @@
+{
+  "campaigns": [
+    {
+      "allow_downgrade": false,
+      "approved_by": "op-a",
+      "bank_max_concurrent_pct": 10.0,
+      "campaign_id": "d09f27ca-d46b-468a-ae9a-0989b55b3574",
+      "confirmed_by": "op-a",
+      "created_at": "2026-09-26T23:27:52.284270+00:00",
+      "feeder_max_concurrent_pct": 10.0,
+      "finished_at": null,
+      "halt_reason": null,
+      "hub_count": 20,
+      "max_failure_pct": 5.0,
+      "max_failures": 2,
+      "name": "R3.1 ramp fix",
+      "override_committed": false,
+      "proposed_by": "op-a",
+      "reason": "ramp fix",
+      "requires_second_operator": false,
+      "second_operator_reasons": [],
+      "selection": {
+        "bank_ids": [
+          "bank-00",
+          "bank-01"
+        ]
+      },
+      "started_at": null,
+      "state": "APPROVED",
+      "target_version": "1.5.0",
+      "trace_id": "ce1d8649-6a0d-45b1-be46-a0dafa9399b8",
+      "waves": [
+        2,
+        10,
+        8
+      ],
+      "window_end": null,
+      "window_start": null
+    }
+  ]
+}

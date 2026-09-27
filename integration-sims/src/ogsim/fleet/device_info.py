@@ -72,11 +72,51 @@ class DeviceIdentity:
     units: int  # 1 or 2 (always 1 for a substation asset)
 
 
+def initial_firmware_version(hub_id: str) -> str:
+    """The firmware_version a hub's device_info reports before any `FirmwareManager` update -- the
+    same deterministic-by-index formula `build_device_info_message` always used. `ogsim.fleet.runtime.
+    FleetEngine` seeds `FirmwareManager`'s per-hub `versions` from this (via `initial_firmware_
+    versions` below), so a hub's initially-published device_info and its FirmwareManager-tracked
+    version always agree -- otherwise the very first firmware command's `from_version` bookkeeping
+    would disagree with what was already published."""
+    return f"1.{_stable_index(hub_id) % 20}.0"
+
+
+def initial_hardware_revision(hub_id: str) -> str:
+    """The hardware_revision a hub's device_info reports -- fixed for the hub's lifetime (firmware
+    updates change `version`, never the physical hardware revision). Same formula/consistency
+    rationale as `initial_firmware_version`."""
+    return f"Rev{chr(ord('A') + _stable_index(hub_id) % 4)}"
+
+
+def initial_firmware_versions(state: FleetState) -> dict[str, str]:
+    """`{hub_id: firmware_version}` for every hub in `state` -- seeds `FirmwareManager(versions=...)`."""
+    return {hub_id: initial_firmware_version(hub_id) for hub_id in state.hub_ids}
+
+
+def initial_hardware_revisions(state: FleetState) -> dict[str, str]:
+    """`{hub_id: hardware_revision}` for every hub in `state` -- seeds `FirmwareManager
+    (hardware_revisions=...)`."""
+    return {hub_id: initial_hardware_revision(hub_id) for hub_id in state.hub_ids}
+
+
 def build_device_info_message(
-    identity: DeviceIdentity, reserve_frac_default: float, now: float
+    identity: DeviceIdentity,
+    reserve_frac_default: float,
+    now: float,
+    *,
+    firmware_version: str | None = None,
+    hardware_revision: str | None = None,
 ) -> dict[str, Any]:
     """Builds one `device_info.schema.json`-conformant message. Pure (no I/O); the caller publishes
-    it RETAINED, QoS 1, on `<root>/hub/<hub_id>/info`."""
+    it RETAINED, QoS 1, on `<root>/hub/<hub_id>/info`.
+
+    `firmware_version`/`hardware_revision` default to the same deterministic-by-index values this
+    function always computed (`initial_firmware_version`/`initial_hardware_revision`); a caller that
+    has a live `ogsim.fleet.firmware.FirmwareManager` (the runtime does, after R3.1) passes its
+    current `FirmwareManager.device_info_fields(hub_id)` values instead, so a republish after an
+    applied firmware update reports the version the hub is ACTUALLY running, not its build-time one.
+    """
     index = _stable_index(identity.hub_id)
     install_date, commissioning_date = _install_dates(index)
     if identity.asset_class == "SUBSTATION_BESS":
@@ -93,8 +133,12 @@ def build_device_info_message(
         "serial_number": f"BP-{identity.zone}-{index:05d}",
         "manufacturer": MANUFACTURER,
         "model": model,
-        "firmware_version": f"1.{index % 20}.0",
-        "hardware_revision": f"Rev{chr(ord('A') + index % 4)}",
+        "firmware_version": firmware_version
+        if firmware_version is not None
+        else initial_firmware_version(identity.hub_id),
+        "hardware_revision": hardware_revision
+        if hardware_revision is not None
+        else initial_hardware_revision(identity.hub_id),
         "install_date": install_date.isoformat(),
         "commissioning_date": commissioning_date.isoformat(),
         "asset_class": identity.asset_class,
@@ -134,12 +178,41 @@ def fleet_device_identities(state: FleetState, config: FleetConfig) -> list[Devi
     return identities
 
 
+def device_identity_for_hub(state: FleetState, config: FleetConfig, hub_id: str) -> DeviceIdentity | None:
+    """One hub's `DeviceIdentity`, or `None` if it isn't in `state` -- used to republish a single
+    hub's device_info (e.g. after a firmware update) without rebuilding the whole fleet's identities."""
+    idx = state.hub_index.get(hub_id)
+    if idx is None:
+        return None
+    return next((i for i in fleet_device_identities(state, config) if i.hub_id == hub_id), None)
+
+
 def build_device_info_messages(
-    state: FleetState, config: FleetConfig, now: float
+    state: FleetState, config: FleetConfig, now: float, *, firmware: Any = None
 ) -> list[tuple[str, dict[str, Any]]]:
     """`(topic_suffix, message)` pairs for every hub in `state` -- the whole fleet's DeviceInfo,
-    built once (at connect) and re-callable unchanged if a future change-trigger needs to republish."""
-    return [
-        (f"hub/{identity.hub_id}/info", build_device_info_message(identity, config.reserve_frac_default, now))
-        for identity in fleet_device_identities(state, config)
-    ]
+    built once (at connect) and re-callable unchanged if a future change-trigger needs to republish.
+
+    `firmware`, if given, is an `ogsim.fleet.firmware.FirmwareManager` (duck-typed here, not imported,
+    to keep this module's own dependency surface unchanged) -- its `device_info_fields(hub_id)` wins
+    over the deterministic-by-index default for `firmware_version`/`hardware_revision`, so a fleet
+    that has already applied updates republishes the version each hub is ACTUALLY running."""
+    messages = []
+    for identity in fleet_device_identities(state, config):
+        fw_version = hw_revision = None
+        if firmware is not None:
+            fields = firmware.device_info_fields(identity.hub_id)
+            fw_version, hw_revision = fields.get("firmware_version"), fields.get("hardware_revision")
+        messages.append(
+            (
+                f"hub/{identity.hub_id}/info",
+                build_device_info_message(
+                    identity,
+                    config.reserve_frac_default,
+                    now,
+                    firmware_version=fw_version,
+                    hardware_revision=hw_revision,
+                ),
+            )
+        )
+    return messages

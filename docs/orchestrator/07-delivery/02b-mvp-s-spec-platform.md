@@ -89,18 +89,6 @@ pydantic models in `opengrid.contracts` (wire/DB shapes) plus Postgres tables an
 | 6 | `og-settle` | `settle` | `python -m opengrid.settle.main` | `settle`, `health` (heartbeats, alert rules, degraded-mode switch), `trace.retention` (pruning) | `/metrics` :9105 |
 | 7 | `og-api` | `api` | `python -m opengrid.api.main` (uvicorn) | `api`, `ui` | :8080 (loopback only) |
 
-**Build reality (main @ 434d230, audited 2026-09-26): 10 systemd units in two codebases, not 7 in one.** Row 5
-above (`og-sim`, one process) describes the *original* MVP-S plan only. `BUILD.md` §1 splits the actual build into
-two codebases that share no code: `orchestrator` (package `opengrid`, the six rows above other than `og-sim`) and
-`integration-sims` (package `ogsim`), and `ogsim` runs as **four** separate units instead of row 5's single
-`og-sim` — one per subpackage: `og-sim-market`, `og-sim-fleet`, `og-sim-scada`, `og-sim-control`
-(`deploy/systemd/og-sim-market.service`, `og-sim-fleet.service`, `og-sim-scada.service`, `og-sim-control.service`).
-Total on `basepower` today: **10 units** — `deploy/RUNBOOK.md`: "Status (2026-09-26): all ten units are enabled and
-running from `/opt/opengrid/current`"; grouped by `opengrid.target` (the 6 orchestrator units) and `ogsim.target`
-(the 4 sim units), per `deploy/systemd/opengrid.target` and `ogsim.target`. A fifth sim unit, `og-sim-customer`,
-is named in `deploy/RUNBOOK.md`'s units table ("installed but not enabled until the customer services go live")
-but has **no unit file under `deploy/systemd/` at this commit** — see Open point 9 (D-11).
-
 `health` (heartbeats, feed/hub freshness, alert rules, degraded-mode switch, `/metrics` aggregation for the UI) runs
 inside the `og-settle` process for MVP-S — health is a batch-cadence read-and-alert job like settlement, and neither
 the engine nor the guardian may depend on it, so colocating it with `settle` (rather than with `guardian`, as an
@@ -472,41 +460,12 @@ reserve floor $R_i$ (kWh, default 20% of $E_i$, homeowner-configurable), power l
 Power inverter unit, confirmed by Base), round-trip split $\eta_c=\eta_d=\sqrt{0.90}$ (≈0.949 each way, giving 0.90
 round-trip), self-discharge $\ell_i$ negligible (0.0005 kWh/h) but modeled for completeness.
 
-**(D-25 confirmation, 2026-09-26.)** The 20% reserve floor is confirmed by Base, and is already built, not just
-configured: it is enforced at signing time by guardian checks `G-01` (instantaneous) and `G-01-ENERGY` (projected
-over the command's lease) — `orchestrator/src/opengrid/guardian/checks.py:41-43` ("K1: the hub's reported SoC must
-clear reserve + margin under the proposed setpoint") and `:49-57` ("G-01-ENERGY/K1: ... project the hub's OWN
-guardian-read SoC across the command's full lease duration ... veto if the projected SoC would breach reserve") —
-and independently re-checked after the fact by invariant `K1` — `orchestrator/src/opengrid/invariants/checks.py:35`
-("K1: a hub whose reported SoC is below its reserve floor while it is discharging"). The 20% default itself is
-`reserve_frac_default = 0.20` in `orchestrator/src/opengrid/fleet/seed.py:91` and
-`integration-sims/config/fleet.yaml:20`.
-
-**Dual-unit homes (D-9).** A configurable share of homes (`fleet.dual_unit_share`, default 20%) have **two** battery
-units instead of one: $E_i = 78.4$ kWh, $P_i = 20$ kW (confirmed by Base).
-
-*Original selection rule (2026-09-25), superseded below — kept for the record:* "hub index $i$ (hub-{i:05d}) is
-dual-unit iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share), ... deterministically and evenly spread
-across i in range(hub_count)." This rule indexed by $i$, the hub's **fleet-wide** position. Because `bank_count`
-(40) is a multiple of the period this produces at `dual_unit_share=0.2` (5), it always selected the same 8-of-40
-banks' hubs and never the other 32 — not "10 per bank" (`orchestrator/src/opengrid/fleet/seed.py`'s `_is_dual_unit`
-docstring, lines 191-208: "This replaces indexing directly by `i` ... instead of selecting hubs whose *fleet-wide*
-index was congruent to 4 mod 5, which ... always landed on the same 8 of 40 banks ... and never on the other 32").
-
-**Current rule, owner-approved (D-9): 10 dual-unit homes in *every* bank, spread across all 40 banks.** Built and
-identical between `opengrid.fleet.seed` and `ogsim.fleet.state` (so hub ids line up): indexed by $k$, the hub's
-**rank within its own bank** ($k = i \mathbin{//} \text{bank\_count}$), not by $i$ — hub $i$ is dual-unit iff
-`floor((k + 1) * dual_unit_share) > floor(k * dual_unit_share)` —
-`orchestrator/src/opengrid/fleet/seed.py:191-208` (`_is_dual_unit`), applied fleet-wide by `build_topology`,
-`seed.py:211-223` (docstring: "selects 10 of each bank's 50 hubs ... spread across *all* 40 banks instead of
-clustering in 1-in-5 of them"). At the MVP-S scale (2,000 hubs, 40 banks, 20% share) this is exactly 10 dual-unit
-hubs per bank, 400 fleet-wide — matching D-9. Mirrored in `integration-sims/src/ogsim/fleet/state.py` and
-`integration-sims/config/fleet.yaml:28-33`.
-
-**Banks stay single-zone (D-9).** Hub $i$'s `bank_id` is `bank-{i % bank_count:03d}` (round robin) and its `zone` is
-`zones[i % len(zones)]` (`seed.py:230-231`); because `zones` has 4 entries and `bank_count` (40) is a multiple of 4,
-`i % 4` is fully determined by `i % 40` (the bank number), so every hub sharing a `bank_id` always shares the same
-`zone` — built, `seed.py`'s `build_topology` docstring line 218: "keeps every bank single-zone".
+**Dual-unit homes.** A configurable share of homes (`fleet.dual_unit_share`, default 20%) have **two** battery units
+instead of one: $E_i = 78.4$ kWh, $P_i = 20$ kW (confirmed by Base). Which hubs get the dual-unit parameters is
+deterministic and identical between `opengrid.fleet.seed` and `ogsim.fleet.state` (so hub ids line up): hub index $i$
+(hub-{i:05d}) is dual-unit iff floor((i + 1) * dual_unit_share) > floor(i * dual_unit_share), which selects exactly
+floor(hub_count * dual_unit_share) hubs, deterministically and evenly spread across i in range(hub_count). At the
+MVP-S scale (2,000 hubs, 20% share) this selects exactly 400 dual-unit hubs.
 
 A bank $b$ aggregates its member hubs' $P$ and has its own **kVA bank rating** (default 600 kVA per ~50-home feeder
 segment, not a single distribution transformer, config per bank) and **reserve**, both enforced as hard constraints
@@ -571,28 +530,6 @@ reserve only, no market participation) until a fresh, validly signed, correctly 
 is the fleet-level expression of guardian's `TIMEOUT → hold` rule; `sim` implements it identically to how a real hub
 must, per the security architecture's "implemented in `agent-sim` exactly as a real hub must" (§7.4 of
 `02-security-architecture.md`).
-
-### 4.5 Asset ownership and the substation-battery asset model (D-21)
-
-**Specified, not built.** Owner decision D-21 (2026-09-26): Base owns every battery in the fleet — both the home
-units in this section **and** new **substation-sited battery assets of about 20 MW per substation**, one larger
-asset per substation bank, modelled as a hub with its own rating, SoC and PQ characterisation, sited alongside home
-banks; home batteries are explicitly **in scope for regulated-utility contracts** (they serve the utility's
-capacity commitments, not only arbitrage). Full statement:
-`docs/orchestrator/07-delivery/08-market-model-two-markets.md` (rows "Asset ownership", "Data centers", "Home
-batteries", "Substation assets"; §3b point 3 "Assets").
-
-No code implements this ownership/substation-asset model at this commit. What exists is adjacent, not this model:
-
-- `orchestrator/src/opengrid/assets/` is a **different** "asset" concept entirely — inverter/asset-*health*
-  (drift detection, remote recalibration, quarantine), not ownership or substation sizing —
-  `orchestrator/src/opengrid/assets/README.md:1-8` ("Asset-health state machine and remote-calibration workflow").
-- `og.hub`/`og.bank` (§4.2 above) have no `owner` column and no "substation" hub/bank kind; every seeded hub is a
-  home unit, single or dual — `orchestrator/src/opengrid/fleet/seed.py:80-107` (`SimFleetTopologyConfig`).
-- The only built scaffolding toward D-21/D-20's regulated side is the `LZ_AEN`/`LZ_CPS` zone territory config —
-  `enabled: false` `zone_blocks` in `integration-sims/config/fleet.yaml:47-55` and `[zone_territory]` in
-  `orchestrator/config/tdsp_tariffs.toml:81-83` — and that describes regulated-utility **home** banks, not a
-  distinct substation-battery asset type. See the delivery plan §0a (D-20) for that scaffolding's own build status.
 
 ---
 
@@ -668,17 +605,6 @@ this is a deliberate MVP-S simplification from the production mTLS device bounda
 MQTT users, one per process that touches the broker — `og_engine`, `og_guardian`, `og_safestop`, `og_sim`, `og_api`
 (`feeds` and `settle` never touch MQTT) — each with its own password (`OG_MQTT_*_PASSWORD`, §1.5), ACL-restricted
 (§6.2) to the `og/v1/` topic root already configured on the broker. No anonymous access.
-
-**Per-workspace test users (D-13), built.** Besides the production users above, every agent workspace used for
-on-server testing (`tools/remote.ps1`, BUILD.md §5) gets its own broker user **`ogw_<ws>`**, ACL-scoped to
-**`ogtest/<ws>/#` only** — never the production `og/v1/` root. Built: `deploy/mosquitto/provision_ws_users.py`
-(`USER_PREFIX = "ogw_"`, line 59; one managed ACL block per workspace, `topic readwrite ogtest/<ws>/#`, lines
-20-21) and its wrapper `deploy/mosquitto/provision_ws_users.sh`. Provisioning also **removes** the old shared
-`pattern readwrite ogtest/#` grant (line 68, `SHARED_PATTERN_RE`) so no workspace can reach another workspace's
-topics or fall back to a blanket grant; a workspace's MQTT clients refuse to start if their own `.mqtt.env` is
-missing (BUILD.md §5). `deploy/README.md`'s "MQTT ACL" section records that this test root is **not** currently
-reachable by the production ACL by default (`qa/security-review.md` F-04) and documents the temporary manual
-toggle used until a dedicated always-on test user exists.
 
 ### 6.2 Topic tree
 
@@ -798,23 +724,11 @@ CREATE TABLE alert (
 
 | Trigger | Degraded mode | Effect |
 |---|---|---|
-| A feed (ERCOT price/load) crosses `STALE` | **No new commitments** (`NO_NEW_COMMITMENTS`) | `selector` gate refuses to admit or re-select using that series; existing commitments continue to deliver (the lock is unaffected by feed staleness — only *new* selection is frozen); UI banner "prices stale, Ns" |
-| `engine` process down (heartbeat miss) | **Hold, then local autonomy** (`HOLD_LOCAL_AUTONOMY`) | `guardian` stops issuing new batches (nothing to sign); hubs' leases expire after `fleet.lease_ttl_s` (30 s) and each falls to its local schedule (§4.4); no reserve or one-buyer violation is possible in this mode because no new commands are issued at all |
-| `guardian` process down / verdict timeout | **Hold** (`HOLD`) | `engine` still proposes batches but none are ever signed; same lease-expiry → local-autonomy path as above, on the same 30 s timer |
+| A feed (ERCOT price/load) crosses `STALE` | **No new commitments** | `selector` gate refuses to admit or re-select using that series; existing commitments continue to deliver (the lock is unaffected by feed staleness — only *new* selection is frozen); UI banner "prices stale, Ns" |
+| `engine` process down (heartbeat miss) | **Hold, then local autonomy** | `guardian` stops issuing new batches (nothing to sign); hubs' leases expire after `fleet.lease_ttl_s` (30 s) and each falls to its local schedule (§4.4); no reserve or one-buyer violation is possible in this mode because no new commands are issued at all |
+| `guardian` process down / verdict timeout | **Hold** | `engine` still proposes batches but none are ever signed; same lease-expiry → local-autonomy path as above, on the same 30 s timer |
 | A hub goes `stale`/`offline` | Excluded from `fleet.capability()` | Selector/allocator simply do not plan on that hub's capacity; on return, no probation logic in MVP-S (kept simple; `R2` adds trust scoring) |
-| `sim`'s simulated SCADA for a bank goes silent | `DIST_DEFERRAL` open-loop fallback (`DIST_DEFERRAL_OPEN_LOOP`) | The PI loop (02a) holds its last output and switches to the day-ahead schedule rather than integrating on stale feedback (mirrors the A3 "hold, then schedule" rule) |
-| >5% of a guardian tick's commands vetoed in a scope (bank, or its zone) | **`SCOPE-CONSERVATIVE`** (`ALR-SCOPE-CONSERVATIVE`) | The scope's posture flips `NORMAL` → `CONSERVATIVE` in `og.scope_posture`; the engine honours it with reduced/zero new dispatch there. Clears on a tick back at/under the ratio, or after `idle_clear_ticks` (30) idle ticks |
-| A scope stays `CONSERVATIVE` for `stop_request_after` (3) consecutive guardian ticks | **`SAFE-STOP-REQUESTED`** (`ALR-SAFE-STOP-REQUESTED`) | An unconfirmed operator-action proposal is raised; nothing here ever engages a stop — an operator still runs the normal two-step safe-stop flow (K8, §7.3) |
-
-**Built (commit `7983342`), two distinct mechanisms.** `NO_NEW_COMMITMENTS`/`HOLD_LOCAL_AUTONOMY`/`HOLD`/
-`DIST_DEFERRAL_OPEN_LOOP` are `opengrid.health.model.DegradedMode` literals (`orchestrator/src/opengrid/health/
-model.py:22-27`) evaluated every cycle by `opengrid.health.rules.derive_degraded_modes`
-(`orchestrator/src/opengrid/health/rules.py:92-109`), which runs inside `og-settle` per §6.4. `SCOPE-CONSERVATIVE`/
-`SAFE-STOP-REQUESTED` are a **separate**, guardian-owned K7 escalation ladder, not a `health`-evaluated
-`DegradedMode`: module `orchestrator/src/opengrid/guardian/escalation.py` (ES06-S04, docstring lines 1-21);
-`CONSERVATIVE_ALERT_RULE`/`STOP_REQUEST_ALERT_RULE` constants at lines 142-143; the ratio/consecutive-tick state
-machine in `EscalationTracker._step`, lines 116-139. `health/model.py:36-38` explicitly keeps these two rules out
-of `health`'s own auto-clear set because guardian raises and clears them itself.
+| `sim`'s simulated SCADA for a bank goes silent | `DIST_DEFERRAL` open-loop fallback | The PI loop (02a) holds its last output and switches to the day-ahead schedule rather than integrating on stale feedback (mirrors the A3 "hold, then schedule" rule) |
 
 ### 6.6 Prometheus `/metrics`
 
@@ -844,36 +758,11 @@ costs nothing to do correctly from day one).
 ## 7. API
 
 FastAPI app (`opengrid.api.app`), bound to `127.0.0.1:8080`, reached only through the Apache reverse proxy (§9.4).
-
-**(D-12, 2026-09-26 — built.)** Loopback is *not* a trust boundary on `basepower`: the simulators, workspace test
-runs and any other local process can reach `127.0.0.1:8080` directly, so `api` never trusts a bare
-`X-Remote-User`/`Authorization` header on its own. Apache authenticates the caller (Basic Auth, `AuthUserFile
-/etc/opengrid/htpasswd`) and, only after stripping any client-supplied identity/proxy headers
-(`RequestHeader unset X-OG-Proxy-Auth early` / `X-Remote-User early`, `deploy/apache/opengrid.conf:16-17`),
-re-asserts `X-Remote-User` **and** a shared secret header, `X-OG-Proxy-Auth: ${OG_API_PROXY_SECRET}`
-(`opengrid.conf:24-27`). `api` believes `X-Remote-User` only when `X-OG-Proxy-Auth` matches `OG_API_PROXY_SECRET`
-exactly (constant-time compare; an unset secret or a mismatch fails closed) —
-`orchestrator/src/opengrid/api/auth.py:81-91` (`proxy_authenticated`), `:94-100` (`verified_remote_user`),
-`:103-116` (`current_identity`: 401 with no header or a bad proxy secret, 403 if the identity maps to no role).
-The secret is loaded only by `og-api` — `deploy/systemd/og-api.service:17`,
-`EnvironmentFile=/etc/opengrid/api_proxy.env` — no other unit reads it.
-
-Three roles, not two: `operator`, `viewer`, `customer` (`auth.py:42-47`). `operator`/`viewer` map by config
-(`[api.roles]`, `orchestrator/config/orchestrator.toml:130-133`) with a same-named fallback, so Apache's own
-`operator`/`viewer` accounts work with no extra config; the named test operators **`og-op-a`/`og-op-b`** (D-12)
-are configured explicitly (`operator = ["operator", "og-op-a", "og-op-b"]`) and are also the two-person safe-stop
-release allow-list (`[guardian].stop_release_authorised_operators`, `orchestrator.toml:95`; RUNBOOK "Safe stop").
-`viewer` can read every GET/SSE endpoint; only `operator` can call a mutating endpoint (`require_operator`,
-`auth.py:127-131`), and safe-stop / manual command require a second explicit confirmation step (§7.3). `customer`
-is refused by both `require_viewer` and `require_operator` (`auth.py:119-131`) — no `og-cust-*` identity can
-authenticate as one yet (see Open point 9, D-11), and `htpasswd` itself has no `og-op-a`/`og-op-b`/`og-cust-*`
-entries until an administrator runs `htpasswd` by hand: `deploy/scripts/install.sh:61-82` auto-creates only
-`operator`, `viewer`, `tester`.
-
-*Original text (2026-09-25), superseded by the above:* "Two roles, `operator` and `viewer`, carried as an HTTP
-Basic Auth identity mapped to a role by Apache (`AuthUserFile` groups, §9.4) and re-asserted in FastAPI via a
-dependency that reads the `Authorization` header Apache forwards unchanged (loopback trust boundary — Apache is
-the only thing that can reach `api`)."
+Two roles, `operator` and `viewer`, carried as an HTTP Basic Auth identity mapped to a role by Apache
+(`AuthUserFile` groups, §9.4) and re-asserted in FastAPI via a dependency that reads the `Authorization` header
+Apache forwards unchanged (loopback trust boundary — Apache is the only thing that can reach `api`). `viewer` can
+read every GET/SSE endpoint; only `operator` can call a mutating endpoint, and safe-stop / manual command require a
+second explicit confirmation step (§7.3).
 
 ### 7.1 REST endpoints
 
@@ -957,10 +846,7 @@ from the full UI spec's §8.3, because it is nearly free and directly affects op
 
 ### 9.1 Target, existing provisioning and packages
 
-Debian 13, `basepower` (192.168.5.35). **(D-16, 2026-09-26): `basepower` is confirmed the permanent host** for the
-orchestrator — not a temporary box for this one delivery — so no migration or decommission of it is planned; every
-hard-coded path in this section (`/opt/opengrid`, `/etc/opengrid`, `/var/lib/opengrid`) is written on that basis,
-and `deploy/RUNBOOK.md` already treats it that way throughout. The host is already provisioned for this project: venv at
+Debian 13, `basepower` (192.168.5.35). The host is already provisioned for this project: venv at
 `/opt/opengrid/venv` (Python 3.13), application directory `/opt/opengrid`, runtime/data directory
 `/var/lib/opengrid`, logs at `/var/log/opengrid`, secrets at `/etc/opengrid` (§1.5). **There is no `sudo` on this
 host**; anything that needs elevated rights (installing packages, writing `/etc/systemd/system/*`, changing file
@@ -994,7 +880,7 @@ rendering).
   and subscribes to nothing — it never needs `og/v1/cmd/#` or telemetry to do its job, keeping its blast radius on
   the broker as small as its process boundary.
 
-### 9.3 systemd units (10 total on `basepower` — see the build-reality note below)
+### 9.3 systemd units (one per process, 7 total)
 
 ```ini
 # /etc/systemd/system/og-engine.service (pattern repeated for og-feeds, og-guardian, og-safestop, og-sim, og-settle, og-api)
@@ -1024,22 +910,9 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-**Build reality (main @ 434d230): 10 units, not 7** — the `ini` block above is the original MVP-S template (its
-hardening flags, `NoNewPrivileges`/`ProtectSystem=strict`/`PrivateTmp`/`Restart=always`, still match every real
-unit file). `og-sim` was split into two codebases that share no code (`BUILD.md` §1: `orchestrator` = package
-`opengrid`, `integration-sims` = package `ogsim`), and `ogsim` runs as **four** units, not one:
-`og-sim-market`/`og-sim-fleet`/`og-sim-scada`/`og-sim-control`. Actual 10: `og-feeds`, `og-engine`, `og-guardian`,
-`og-safestop`, `og-settle`, `og-api` (`opengrid.target`) + `og-sim-market`, `og-sim-fleet`, `og-sim-scada`,
-`og-sim-control` (`ogsim.target`) — unit files under `deploy/systemd/`; accurate per-unit detail in
-`deploy/RUNBOOK.md`'s "Processes" table. `deploy/systemd/og-safestop.service`'s `Description=` line states K8
-directly: "independent stop authority, no dependency on og-engine or og-guardian".
-
 Per-process `MemoryMax` (sums to comfortably under the 16 GB shared budget, §10): `feeds` 512M, `engine` 2G,
 `guardian` 512M, `safestop` 256M (a small, dependency-free process by design — the smallest footprint of the seven,
-per K8), `settle` 512M, `api` 1G — plus the 4 sim units, which together replace the single "`sim` 4G" placeholder
-this paragraph originally carried: `og-sim-market` 384M, `og-sim-fleet` 3G (2,000 asyncio hub tasks + MQTT client),
-`og-sim-scada` 384M, `og-sim-control` 256M (deploy/RUNBOOK.md: "orchestrator total MemoryMax ≈ 4.75 GB; sims total
-≈ 4.0 GB ... same envelope as the spec's single `og-sim` process, split four ways"). `Restart=always` on every unit is
+per K8), `sim` 4G (2,000 asyncio hub tasks + MQTT client), `settle` 512M, `api` 1G. `Restart=always` on every unit is
 the availability mechanism the chaos scenario (§5.5 "process kill") exercises. Only `og-feeds.service`
 loads `/etc/opengrid/api_keys.env` (the ERCOT/EIA/NWS credentials); the other six units load only
 `/etc/opengrid/secrets.env` (DB, MQTT, guardian signing, basic-auth hashes) — least privilege at the
@@ -1077,14 +950,6 @@ by whoever holds root on the box (the same administrator who deploys), not by th
 ```
 
 New `htpasswd` and group files only; existing Apache vhosts, TLS certs and every other `<Location>` are untouched.
-
-**(D-12, 2026-09-26.) This snippet is superseded by the real, deployed config**, `deploy/apache/opengrid.conf`
-(installed as `/etc/apache2/conf-available/opengrid.conf` by `deploy/scripts/install.sh:58`, not the
-`og-orchestrator.conf`/path named above). Differences from the snippet: individual `Require user operator viewer
-og-op-a og-op-b` — no `AuthGroupFile`/groups (`opengrid.conf:19-22`); the trust header actually built is
-`X-OG-Proxy-Auth` plus `X-Remote-User` (§7 above), not `X-OG-Role` — the `X-OG-Role`/`AuthGroupFile` design shown
-here was never built. The real file also has a second, still-dark `<Location /og/api/customer/>` block
-(`opengrid.conf:39-42`) — see Open point 9 (D-11).
 
 ### 9.5 Backups
 
@@ -1211,41 +1076,11 @@ result.
    the expected recovery sequence; a human runs `systemctl kill` over SSH as root). Automating this within the
    demo's constraints would need either a narrow root-owned helper the API can invoke, or a systemd user-unit
    delegation — neither exists today and both are out of scope to build by Saturday.
-7. **(Superseded by D-12, 2026-09-26 — kept for the record.)** *Originally:* "UI role separation is Apache-enforced
-   only (§7, §9.4); `api` trusts the `X-OG-Role` header from loopback Apache. This is safe only as long as nothing
-   but Apache can reach `127.0.0.1:8080` ...; a startup self-check that refuses to bind to a non-loopback address
-   would close this gap cheaply and is recommended for the Phase 1 foundation work." This gap is closed: `api` no
-   longer trusts identity from loopback alone. It requires `X-OG-Proxy-Auth` to equal a shared secret
-   (`OG_API_PROXY_SECRET`, provisioned only to `og-api`, §9.3) before it will believe `X-Remote-User` at all —
-   fail-closed, constant-time compare (§7, `orchestrator/src/opengrid/api/auth.py:81-91`). The narrower residual
-   gap this point also named — a startup self-check that refuses a non-loopback bind — is still not built; no such
-   check exists in `orchestrator/src/opengrid/api/` at this commit.
+7. **UI role separation is Apache-enforced only** (§7, §9.4); `api` trusts the `X-OG-Role` header from loopback
+   Apache. This is safe only as long as nothing but Apache can reach `127.0.0.1:8080`, which the systemd
+   `ReadWritePaths`/bind-address configuration (§9.3, `api.bind_host = "127.0.0.1"`) enforces but does not
+   independently verify at runtime; a startup self-check that refuses to bind to a non-loopback address would close
+   this gap cheaply and is recommended for the Phase 1 foundation work.
 8. **`settle`'s read models** (§7.1 profitability/billing endpoints) assume 02a's table shapes (`meter_interval`,
    `performance`, `invoice_line`, `pnl`) are frozen before WS7 (UI) starts on screens 6–7; any late change to those
    shapes is a cross-document risk this spec cannot resolve unilaterally.
-9. **Customer-facing services ship dark (D-11).** Four pieces the owner named exist only as inert scaffolding at
-   this commit:
-   - **Customer-operator simulators (`ogsim.customer`).** No such package exists: `integration-sims/src/ogsim/`
-     has `common/`, `control/`, `fleet/`, `market/`, `scada/` only. `deploy/RUNBOOK.md`'s units table lists
-     `og-sim-customer` as "installed but not enabled until the customer services go live", but `deploy/systemd/`
-     has no `og-sim-customer.service` file at this commit — the unit does not exist in this repo either (§1.2).
-   - **Customer API.** `orchestrator/src/opengrid/api/auth.py:16-18` already documents a `customer` role that "may
-     only use the customer API (`opengrid.customer_api`)", but no `opengrid.customer_api` module exists anywhere
-     under `orchestrator/src/`, `app.py`'s `_include_routers` (`orchestrator/src/opengrid/api/app.py:129-157`)
-     registers no customer router, and `orchestrator/config/orchestrator.toml` has no `[api.roles.customer]` or
-     `[api.customer_api]` table — an `og-cust-*` identity authenticates through Apache but maps to no role (403).
-     `deploy/apache/opengrid.conf:39-42` reserves the route with its own `Require user og-cust-dc og-cust-pipe
-     og-cust-ercot og-cust-dist og-cust-partner` and its own comment: **"ships dark; `[api.customer_api].enabled`"**.
-   - **Site ingest.** `opengrid.site_ingest` is imported defensively and does not exist in this repository:
-     `orchestrator/src/opengrid/invariants/queries.py:344-350` — `try: from opengrid.site_ingest.latest import
-     (FeedbackRefError, parse_feedback_ref) except ImportError: return None`, commented "ships with the
-     customer-services package; absent, there is no need basis". Tests skip it the same way
-     (`orchestrator/tests/unit/invariants/test_queries.py:260,280`, `pytest.importorskip("opengrid.site_ingest")`).
-   - **Closed-loop controllers.** Gated off by config, not built: `[contracts.activation].data_center = false`
-     (`orchestrator/config/orchestrator.toml:57-60`) keeps `DATA_CENTER`/`PIPELINE_AC` admission closed; the
-     refusal is spelled out in code — `orchestrator/src/opengrid/contracts/admission.py:169-183`
-     (`R-ADMIT-REJECT`, "DATA_CENTER/PIPELINE_AC admission is disabled until the closed-loop controllers ... are
-     confirmed live"). `PIPELINE_AC` itself is further along than "not built" even so: it is admitted today as a
-     `variant` of an existing service type (no `service_type` of its own yet, `admission.py:59-63`) with real
-     settlement/PQ logic behind the same gate (`orchestrator/src/opengrid/settle/performance.py:44-51`,
-     `orchestrator/src/opengrid/guardian/pq_checks.py:108`, `orchestrator/src/opengrid/assets/repo.py:567`).

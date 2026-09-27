@@ -8,7 +8,8 @@ target within G-04's rate (the same `_ramped_setpoint_kw` the dispatch items use
 item carries R-MANUAL-RAMP. While a hub has a live target it is operator-owned: the allocator treats it as
 unavailable (its committed kW moves to other hubs of the same obligation, K13 substitution).
 
-Payload contract (`og.trace.payload` of a MANUAL_TARGET event, written by the API on confirm):
+The payload contract, the sign convention and the parser live in `opengrid.core.manual_targets` (one
+implementation, shared with og-api). Summary (`og.trace.payload` of a MANUAL_TARGET event):
 
     {"hub_ids": ["hub-00012", ...], "p_kw_command": -5.0, "sign_convention": "+charge/-discharge",
      "expires_at": "<ISO-8601>", "issued_at": "<ISO-8601>", "proposer": "og-op-a", "reason": "..."}
@@ -29,71 +30,29 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from opengrid.core.manual_targets import (
+    MANUAL_TARGET_EVENT,
+    MANUAL_TARGET_ROWS_SQL,
+    SIGN_CONVENTION,
+    ManualTarget,
+    parse_targets,
+)
 from opengrid.core.reasons import R_MANUAL_RAMP
 from opengrid.core.timeutil import to_utc
 
 logger = logging.getLogger(__name__)
 
-MANUAL_TARGET_EVENT = "MANUAL_TARGET"
-#: The one sign convention of manual targets, command items, telemetry `p_kw` and `core.physics`.
-SIGN_CONVENTION = "+charge/-discharge"
 DEFAULT_REFRESH_S = 2.0
 
-_TARGETS_SQL = """
-SELECT trace_id, payload, created_at FROM og.trace
-WHERE event_class = 'MANUAL_TARGET' AND created_at > now() - interval '24 hours'
-ORDER BY created_at
-"""
+_TARGETS_SQL = MANUAL_TARGET_ROWS_SQL
 _STOPS_SQL = """
 SELECT scope_kind, scope_ref, action, created_at FROM og.stop_event
 WHERE created_at > now() - interval '24 hours'
 ORDER BY created_at
 """
-
-
-@dataclass(frozen=True, slots=True)
-class ManualTarget:
-    hub_id: str
-    p_kw_target: float
-    issued_at: datetime
-    expires_at: datetime
-    trace_id: str
-    proposer: str = ""
-
-
-def parse_targets(
-    rows: Iterable[tuple[Any, Mapping[str, Any], datetime]], now: datetime
-) -> dict[str, ManualTarget]:
-    """The live target per hub: newest wins, expired or malformed rows are ignored."""
-    targets: dict[str, ManualTarget] = {}
-    for trace_id, payload, created_at in rows:
-        convention = payload.get("sign_convention", SIGN_CONVENTION)
-        if convention != SIGN_CONVENTION:
-            logger.error(
-                "MANUAL_TARGET with an unsupported sign convention refused",
-                extra={"trace_id": str(trace_id), "sign_convention": convention},
-            )
-            continue
-        try:
-            raw = payload["p_kw_command"] if "p_kw_command" in payload else payload["p_kw_target"]
-            target = float(raw)
-            expires = datetime.fromisoformat(str(payload["expires_at"]))
-            issued = datetime.fromisoformat(str(payload.get("issued_at") or created_at.isoformat()))
-            hub_ids = [str(h) for h in payload["hub_ids"]]
-        except (KeyError, TypeError, ValueError):
-            logger.warning("malformed MANUAL_TARGET ignored", extra={"trace_id": str(trace_id)})
-            continue
-        for hub_id in hub_ids:
-            held = targets.get(hub_id)
-            if held is None or to_utc(issued) >= to_utc(held.issued_at):
-                targets[hub_id] = ManualTarget(
-                    hub_id, target, issued, expires, str(trace_id), str(payload.get("proposer", ""))
-                )
-    return {h: t for h, t in targets.items() if to_utc(t.expires_at) > to_utc(now)}
 
 
 def apply_stops(
@@ -194,3 +153,14 @@ def manual_items(
             }
         )
     return items
+
+
+__all__ = [
+    "MANUAL_TARGET_EVENT",
+    "SIGN_CONVENTION",
+    "ManualTarget",
+    "ManualTargetSource",
+    "apply_stops",
+    "manual_items",
+    "parse_targets",
+]

@@ -1,0 +1,24 @@
+{
+  "entries": [
+    {
+      "hardware_revision": "revB",
+      "release_note": "Baseline",
+      "released_at": null,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "source": "config",
+      "version": "1.4.2"
+    },
+    {
+      "hardware_revision": "revB",
+      "release_note": "Faster ramp; fixes",
+      "released_at": null,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "source": "config",
+      "version": "1.5.0"
+    }
+  ],
+  "versions": [
+    "1.4.2",
+    "1.5.0"
+  ]
+}

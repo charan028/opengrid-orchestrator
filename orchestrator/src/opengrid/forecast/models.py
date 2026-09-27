@@ -12,7 +12,10 @@ from typing import Literal, NamedTuple
 from pydantic import BaseModel, ConfigDict
 
 ForecastKind = Literal["price", "load"]
-FirmFitness = Literal["FIRM_OK", "NOT_FOR_FIRM"]
+#: `FIRM_POOLED` (migration 0040) is firm, admitted by the short-history day-type pooling relaxation
+#: (`quantiles.compute_slot_quantiles`); readers must treat it as firm, like `FIRM_OK`.
+FirmFitness = Literal["FIRM_OK", "FIRM_POOLED", "NOT_FOR_FIRM"]
+FIRM_VALUES: frozenset[str] = frozenset({"FIRM_OK", "FIRM_POOLED"})
 
 
 class ForecastRow(BaseModel):

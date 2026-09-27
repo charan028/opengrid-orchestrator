@@ -940,6 +940,11 @@ class GuardianService:
         except Exception:
             logger.exception("failed to trace refused stop RELEASE")
 
+    def sign_firmware_payload(self, payload: dict[str, Any]) -> str:
+        """K3: Ed25519 over FirmwareCommand.signing_payload(), exactly what the hub verifies (R3.1). Called only
+        by irmware.guardian_flow.process_pending_firmware, after G-36 has passed on the guardian's own reads."""
+        return sign_payload(self.signing_seed, payload)
+
     def sign_calibration_command(self, command: CalibrationCommand) -> CalibrationCommand:
         """Sign a `CalibrationCommand` envelope over `signing_payload()` (every field but key_id/signature),
         exactly what the hub verifies -- mirrors `sign_command_batch` (interfaces/crypto.md S2.1)."""

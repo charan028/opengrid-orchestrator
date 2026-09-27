@@ -10,7 +10,7 @@ from opengrid.platform.config import Config
 
 ProcessStatus = Literal["ok", "down"]
 HubHealthState = Literal["online", "stale", "offline", "fault"]
-AlertSeverity = Literal["warning", "critical"]
+AlertSeverity = Literal["info", "warning", "critical"]  # "info": firmware campaign progress (R3)
 
 #: 02b S6.4 names 7 processes including "sim", but `ogsim` (the integration simulators) is an external
 #: system that shares no code with `opengrid` (BUILD.md S1) and never writes an `og.heartbeat` row --

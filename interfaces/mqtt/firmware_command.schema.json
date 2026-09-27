@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengrid.example/interfaces/mqtt/firmware_command.schema.json",
+  "title": "FirmwareCommand",
+  "description": "Guardian -> hub, published on <root>/cmd/fw/<hub_id>, QoS 1, not retained, guardian-signed (K3). Follows the signed-command pattern of calibration_command.schema.json: the Ed25519 signature covers the JCS form of every field except signature/key_id (interfaces/crypto.md). The guardian signs only after check_firmware_eligibility (opengrid.guardian.firmware_check) passes. (epoch, seq) is strictly increasing per hub (K6); a hub rejects a pair that does not exceed the last one it accepted, and any command outside [issued_at, expires_at). The hub reports progress on <root>/ack/fw/<hub_id> (firmware_status.schema.json). New 2026-09-26 (R3.1, owner decision: firmware updates from the console).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command_id", "campaign_id", "job_id", "hub_id", "action", "target_version", "sha256",
+               "hardware_revision", "attempt", "epoch", "seq", "issued_at", "expires_at", "key_id", "signature"],
+  "properties": {
+    "command_id": { "type": "string", "format": "uuid", "description": "One per attempt; a retry is a new command_id with a fresh (epoch, seq)." },
+    "campaign_id": { "type": "string", "format": "uuid" },
+    "job_id": { "type": "string", "format": "uuid" },
+    "hub_id": { "type": "string", "minLength": 1 },
+    "action": { "type": "string", "enum": ["UPDATE", "ROLLBACK"], "description": "ROLLBACK installs target_version, the hub's previous catalogued version, on operator request." },
+    "target_version": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?$" },
+    "from_version": { "type": ["string", "null"], "description": "The version the orchestrator believed the hub was running when the command was issued (informational)." },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the firmware image from the catalogue. The hub refuses to install an image whose hash differs (HASH_MISMATCH, terminal)." },
+    "hardware_revision": { "type": "string", "minLength": 1, "description": "The hardware revision the catalogue entry was validated for; a hub of another revision refuses (HARDWARE_INCOMPATIBLE, terminal)." },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "epoch": { "type": "integer", "minimum": 0 },
+    "seq": { "type": "integer", "minimum": 0 },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time", "description": "Lease: the hub must accept the command before this instant, else it is EXPIRED and the orchestrator retries with a fresh command." },
+    "key_id": { "type": "string" },
+    "signature": { "type": "string" }
+  }
+}

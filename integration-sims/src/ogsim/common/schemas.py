@@ -33,6 +33,8 @@ _SCHEMA_NAMES = {
     "pipeline_corridor_current": "pipeline_corridor_current.schema.json",
     # DeviceInfo (R3, OWNER DECISION, 2026-09-26): retained device-identity message, <root>/hub/<hub_id>/info.
     "device_info": "device_info.schema.json",
+    # Firmware updates (R3.1, OWNER DECISION, 2026-09-26): <root>/ack/fw/<hub_id> status message.
+    "firmware_status": "firmware_status.schema.json",
 }
 
 

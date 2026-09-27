@@ -1,0 +1,181 @@
+{
+  "events": [
+    {
+      "attempt": null,
+      "detail": {
+        "by": "op-a",
+        "hubs": 20,
+        "skipped": 0
+      },
+      "event": "CAMPAIGN_CREATED",
+      "event_id": 1,
+      "from_state": null,
+      "hub_id": null,
+      "job_id": null,
+      "reason": null,
+      "to_state": "DRAFT",
+      "ts": "2026-09-26T23:27:52.844997+00:00"
+    },
+    {
+      "attempt": null,
+      "detail": {
+        "by": "op-a"
+      },
+      "event": "CAMPAIGN_APPROVED",
+      "event_id": 2,
+      "from_state": "DRAFT",
+      "hub_id": null,
+      "job_id": null,
+      "reason": null,
+      "to_state": "APPROVED",
+      "ts": "2026-09-26T23:27:52.928990+00:00"
+    },
+    {
+      "attempt": null,
+      "detail": null,
+      "event": "CAMPAIGN_STARTED",
+      "event_id": 3,
+      "from_state": "APPROVED",
+      "hub_id": null,
+      "job_id": null,
+      "reason": null,
+      "to_state": "RUNNING",
+      "ts": "2026-09-26T23:27:52.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "REQUESTED",
+      "event_id": 4,
+      "from_state": "PENDING",
+      "hub_id": "hub-00000",
+      "job_id": "b1493548-f45c-4b72-b559-386194db8550",
+      "reason": null,
+      "to_state": "PENDING",
+      "ts": "2026-09-26T23:27:52.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "REQUESTED",
+      "event_id": 5,
+      "from_state": "PENDING",
+      "hub_id": "hub-01000",
+      "job_id": "56d7e09c-f454-486f-ab88-0ee90f4e5502",
+      "reason": null,
+      "to_state": "PENDING",
+      "ts": "2026-09-26T23:27:52.933547+00:00"
+    },
+    {
+      "attempt": null,
+      "detail": null,
+      "event": "CAMPAIGN_HALTED",
+      "event_id": 6,
+      "from_state": "RUNNING",
+      "hub_id": null,
+      "job_id": null,
+      "reason": "FAILURE_THRESHOLD_REACHED",
+      "to_state": "HALTED",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "SENT",
+      "event_id": 7,
+      "from_state": "PENDING",
+      "hub_id": "hub-00000",
+      "job_id": "b1493548-f45c-4b72-b559-386194db8550",
+      "reason": null,
+      "to_state": "SENT",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "ACKED",
+      "event_id": 8,
+      "from_state": "SENT",
+      "hub_id": "hub-00000",
+      "job_id": "b1493548-f45c-4b72-b559-386194db8550",
+      "reason": null,
+      "to_state": "UPDATING",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "UPDATING",
+      "event_id": 9,
+      "from_state": "SENT",
+      "hub_id": "hub-00000",
+      "job_id": "b1493548-f45c-4b72-b559-386194db8550",
+      "reason": null,
+      "to_state": "UPDATING",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": {
+        "max_attempts_reached": false
+      },
+      "event": "FAILED",
+      "event_id": 10,
+      "from_state": "UPDATING",
+      "hub_id": "hub-00000",
+      "job_id": "b1493548-f45c-4b72-b559-386194db8550",
+      "reason": "INSTALL_ERROR",
+      "to_state": "FAILED",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "SENT",
+      "event_id": 11,
+      "from_state": "PENDING",
+      "hub_id": "hub-01000",
+      "job_id": "56d7e09c-f454-486f-ab88-0ee90f4e5502",
+      "reason": null,
+      "to_state": "SENT",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "ACKED",
+      "event_id": 12,
+      "from_state": "SENT",
+      "hub_id": "hub-01000",
+      "job_id": "56d7e09c-f454-486f-ab88-0ee90f4e5502",
+      "reason": null,
+      "to_state": "UPDATING",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "UPDATING",
+      "event_id": 13,
+      "from_state": "SENT",
+      "hub_id": "hub-01000",
+      "job_id": "56d7e09c-f454-486f-ab88-0ee90f4e5502",
+      "reason": null,
+      "to_state": "UPDATING",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    },
+    {
+      "attempt": 1,
+      "detail": null,
+      "event": "SUCCEEDED",
+      "event_id": 14,
+      "from_state": "UPDATING",
+      "hub_id": "hub-01000",
+      "job_id": "56d7e09c-f454-486f-ab88-0ee90f4e5502",
+      "reason": null,
+      "to_state": "SUCCEEDED",
+      "ts": "2026-09-26T23:27:57.933547+00:00"
+    }
+  ],
+  "next_after": 14
+}

@@ -85,6 +85,7 @@ from opengrid.engine.veto import (
     vetoed_banks,
     wait_for_verdicts,
 )
+from opengrid.firmware.executor import FirmwareExecutor
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.market.territory import TERRITORY_REASONS
@@ -518,6 +519,8 @@ class _EngineState:
     manual_source: ManualTargetSource | None = None
     manual_targets: dict[str, ManualTarget] = field(default_factory=dict)
     manual_traced: set[str] = field(default_factory=set)
+    #: Firmware campaigns (`opengrid.firmware`): stepped each tick; its updating hubs are never dispatched.
+    firmware: FirmwareExecutor | None = None
     gate_task: asyncio.Task[int] | None = None
     gate_backlog: list[GateTrigger] = field(
         default_factory=list
@@ -798,6 +801,53 @@ async def persist_fleet_state(state: Any) -> None:
     await _flush_pq_summaries(state)
 
 
+def excluded_now(state: Any) -> frozenset[str]:
+    """Hubs no dispatch item may use this cycle: vetoed hubs (K4 fail-safe) and hubs a firmware campaign is
+    updating. (Operator-held hubs are handled separately: they get their own manual item.)"""
+    firmware = getattr(state, "firmware", None)
+    updating: frozenset[str] = firmware.updating_hub_ids() if firmware is not None else frozenset()
+    vetoed: frozenset[str] = state.veto_exclusions.active()
+    return vetoed | updating
+
+
+async def step_firmware(state: Any, now: datetime) -> None:
+    """One firmware-campaign step before allocation; a failure is logged and never costs the cycle (K7)."""
+    if state.firmware is None:
+        return
+    try:
+        await state.firmware.step(now)
+    except Exception:
+        logger.exception("firmware campaign step failed this cycle")
+
+
+def make_firmware_status_handler(pool: Any) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+    """Background handler for `ack/fw/<hub_id>`: validate against firmware_status.schema.json, then
+    `opengrid.firmware.ingest.record_firmware_status`. Off the ingest path; an invalid status is dropped."""
+    warned: list[bool] = []
+
+    async def _handle(payload: dict[str, Any]) -> None:
+        from opengrid.firmware.ingest import record_firmware_status
+        from opengrid.platform.mqtt import SchemaValidationError, validate_payload
+
+        try:
+            validate_payload("firmware_status", payload)
+        except SchemaValidationError:
+            logger.warning("dropped invalid firmware status", extra={"hub_id": payload.get("hub_id")})
+            return
+        except KeyError:
+            # The kind is not registered in platform.mqtt yet: record_firmware_status's own strict parse
+            # (required fields, types) still applies.
+            if not warned:
+                logger.warning("firmware_status schema kind not registered; relying on parse_status")
+                warned.append(True)
+        try:
+            await record_firmware_status(pool, payload)
+        except (KeyError, ValueError, TypeError):
+            logger.warning("dropped malformed firmware status", extra={"hub_id": payload.get("hub_id")})
+
+    return _handle
+
+
 def manual_bank_ids(targets: Mapping[str, ManualTarget], fleet_module: Any) -> list[str]:
     """Banks with at least one hub under a live manual target (each gets a batch even with no grant)."""
     banks: set[str] = set()
@@ -922,7 +972,7 @@ async def repropose_banks(
             lease_ttl_s=state.lease_ttl_s,
             cycle_interval_s=state.cycle_interval_s,
             hub_allocations=hub_allocations,
-            excluded_hub_ids=state.veto_exclusions.active(),
+            excluded_hub_ids=excluded_now(state),
             manual_targets=state.manual_targets,
         )
 
@@ -966,6 +1016,10 @@ async def _engine_tick(state: _EngineState) -> None:
         # Verdicts that arrived after last cycle's wait: exclude their vetoed hubs from this cycle.
         with phase("late_verdicts"):
             await handle_vetoes(state, dict(state.pending_verdicts), wait_s=0.0, cycle_id=cycle_id)
+
+    if state.firmware is not None:
+        with phase("firmware"):
+            await step_firmware(state, datetime.now(UTC))
 
     if state.manual_source is not None:
         with phase("manual_targets"):
@@ -1015,7 +1069,7 @@ async def _engine_tick(state: _EngineState) -> None:
                 lease_ttl_s=state.lease_ttl_s,
                 cycle_interval_s=state.cycle_interval_s,
                 hub_allocations=hub_allocations,
-                excluded_hub_ids=state.veto_exclusions.active(),
+                excluded_hub_ids=excluded_now(state),
                 manual_targets=state.manual_targets,
             )
             if batch_id is not None:
@@ -1238,13 +1292,33 @@ async def main(cfg: Config) -> None:
         if banks_at_start is not None:
             set_utility_scale_banks(banks_at_start)
         veto_exclusions = HubVetoExclusions(exclude_cycles=settings.veto_exclude_cycles)
+        from opengrid.firmware.catalogue import Catalogue
+        from opengrid.firmware.config import load_firmware_config
+        from opengrid.firmware.executor import pg_alert_sink
+        from opengrid.firmware.repo import PgFirmwareRepo
+
+        fw_repo = PgFirmwareRepo(pool)
+        fw_cfg = load_firmware_config(cfg)
+
+        async def fw_catalogue() -> Catalogue:
+            return Catalogue.build(fw_cfg.catalogue, await fw_repo.catalogue_rows())
+
+        firmware = FirmwareExecutor(
+            fw_repo,
+            fw_cfg,
+            fw_catalogue,
+            alerts=pg_alert_sink(pool),
+            trace=lambda stream, event_class, payload: trace_store.append(
+                stream, "OPERATOR_ACTION", event_class, payload
+            ),
+        )
         extras_gateway = build_cycle_extras(
             pool,
             trace_store,
             settings,
             asset_service=asset_service,
             set_at_risk=contracts_mod.set_obligation_at_risk,
-            excluded_hub_ids=veto_exclusions.active,
+            excluded_hub_ids=lambda: veto_exclusions.active() | firmware.updating_hub_ids(),
             operator_hub_ids=manual_source.active_hub_ids,
         )
         flush_lag = engine_metrics.FlushLag()
@@ -1268,6 +1342,7 @@ async def main(cfg: Config) -> None:
             veto_exclusions=veto_exclusions,
             verdict_wait_s=settings.verdict_wait_s,
             manual_source=manual_source,
+            firmware=firmware,
             energy_sufficiency_gateway=EnergySufficiencyGateway(
                 pool,
                 trace_store,
@@ -1309,6 +1384,8 @@ async def main(cfg: Config) -> None:
         summary_worker = BackgroundIngest("pq-summary", ingest_summary_off_loop, queue_max=SUMMARY_QUEUE_MAX)
         summary_task = asyncio.create_task(summary_worker.run())
         device_info_worker = BackgroundIngest("device-info", make_device_info_handler(pool))
+        firmware_status_worker = BackgroundIngest("firmware-status", make_firmware_status_handler(pool))
+        firmware_status_task = asyncio.create_task(firmware_status_worker.run())
         device_info_task = asyncio.create_task(device_info_worker.run())
         # One client at a time, rebuilt with the same client id after every disconnect (reconnect
         # with backoff; the loop resubscribes on each connection).
@@ -1323,6 +1400,7 @@ async def main(cfg: Config) -> None:
                     summary_worker,
                     site_ingest_on=settings.site_ingest_enabled,
                     device_info_worker=device_info_worker,
+                    firmware_status_worker=firmware_status_worker,
                 ),
                 ingest_health,
                 on_give_up=_give_up,
@@ -1390,6 +1468,7 @@ async def main(cfg: Config) -> None:
                 site_flush_task,
                 market_task,
                 device_info_task,
+                firmware_status_task,
             )
             for task in {ingest_task, *background}:
                 task.cancel()
@@ -1502,6 +1581,7 @@ async def _mqtt_ingest_loop(
     *,
     site_ingest_on: bool = False,
     device_info_worker: BackgroundIngest | None = None,
+    firmware_status_worker: BackgroundIngest | None = None,
 ) -> None:
     """Subscribe to `<root>/tel/#`, `<root>/scada/#`, `<root>/scada/instruction/#` (topics.md) and route
     validated payloads into the fleet twin. Split out of `main` so it runs concurrently with the 2 s
@@ -1536,12 +1616,18 @@ async def _mqtt_ingest_loop(
     device_info_topic = topic(cfg, str(cfg.get("mqtt.device_info_topic", DEFAULT_DEVICE_INFO_TOPIC)))
     if device_info_worker is not None:
         await client.subscribe(device_info_topic)
+    # Firmware update status per hub (`ack/fw/<hub_id>`): its own schema, never the command-ack parser.
+    firmware_status_topic = topic(cfg, "ack/fw/+")
+    if firmware_status_worker is not None:
+        await client.subscribe(firmware_status_topic)
 
     async for message in client.messages:
         msg_topic = str(message.topic)
         try:
             payload = json.loads(message.payload)
-            if device_info_worker is not None and message.topic.matches(device_info_topic):
+            if firmware_status_worker is not None and message.topic.matches(firmware_status_topic):
+                firmware_status_worker.submit(payload)
+            elif device_info_worker is not None and message.topic.matches(device_info_topic):
                 device_info_worker.submit({"topic": msg_topic, "payload": payload})
             elif site_ingest_on and message.topic.matches(site_topic):
                 site_ingest.ingest_site_meter(payload, topic=msg_topic, root=cfg.mqtt_topic_root)

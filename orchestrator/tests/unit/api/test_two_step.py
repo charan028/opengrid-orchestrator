@@ -11,7 +11,7 @@ the real poll timeouts, and can be toggled off to exercise the 503 "not running"
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from .conftest import OPERATOR_HEADERS, VIEWER_HEADERS
@@ -47,7 +47,11 @@ def test_command_confirm_records_a_manual_target_for_the_engine_to_ramp(
     assert body["status"] == "RAMPING" and body["trace_id"] and body["expires_at"]
     assert body["hub_ids"] == [SAMPLE_HUB_ID]  # the bank selection resolved to its hubs
     (target,) = _manual_targets(fake_trace_store)
-    assert target["hub_ids"] == [SAMPLE_HUB_ID] and target["p_kw_target"] == 3.5
+    assert (
+        target["hub_ids"] == [SAMPLE_HUB_ID]
+        and target["p_kw_command"] == 3.5
+        and target["sign_convention"] == "+charge/-discharge"
+    )
     issued, expires = (datetime.fromisoformat(target[k]) for k in ("issued_at", "expires_at"))
     assert expires - issued == timedelta(minutes=15)  # the default hold
     assert target["proposer"] == "operator" and target["reason"] == "demo"
@@ -68,7 +72,7 @@ def test_command_duration_override_is_bounded(client, fake_trace_store) -> None:
     )
     (target,) = _manual_targets(fake_trace_store)
     issued, expires = (datetime.fromisoformat(target[k]) for k in ("issued_at", "expires_at"))
-    assert expires - issued == timedelta(minutes=90) and target["p_kw_target"] == -5.0
+    assert expires - issued == timedelta(minutes=90) and target["p_kw_command"] == -5.0
     too_long = client.post(
         "/og/api/fleet/command",
         headers=OPERATOR_HEADERS,
@@ -94,18 +98,25 @@ def test_a_manual_target_can_be_cancelled(client, fake_store, fake_trace_store) 
     trace_id = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS).json()[
         "trace_id"
     ]
-    fake_store.manual_target_hubs[trace_id] = {SAMPLE_HUB_ID: 3.5}
+    # The DB would now hold the confirmed MANUAL_TARGET row; the fake serves the trace's own payload.
+    (written,) = _manual_targets(fake_trace_store)
+    fake_store.manual_target_rows_data = [(trace_id, written, datetime.now(UTC))]
     listed = client.get("/og/api/fleet/manual-targets", headers=VIEWER_HEADERS).json()["items"]
-    assert [(i["hub_id"], i["trace_id"]) for i in listed] == [(SAMPLE_HUB_ID, trace_id)]
+    assert [(i["hub_id"], i["trace_id"], i["p_kw_target"], i["reason"]) for i in listed] == [
+        (SAMPLE_HUB_ID, trace_id, 3.5, "demo")
+    ]
 
     resp = client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS)
     assert resp.status_code == 200
     assert resp.json()["status"] == "CANCELLED" and resp.json()["hub_ids"] == [SAMPLE_HUB_ID]
     cancel = _manual_targets(fake_trace_store)[-1]
     assert cancel["hub_ids"] == [SAMPLE_HUB_ID] and cancel["cancels"] == trace_id
-    assert cancel["expires_at"] == cancel["issued_at"]  # expires now: newest target wins, and it is over
+    assert cancel["expires_at"] == cancel["issued_at"]  # expires now
+    assert cancel["sign_convention"] == "+charge/-discharge"
 
-    fake_store.manual_target_hubs.clear()  # no longer controls any hub
+    # With the cancel row stored too, the shared parser no longer sees a live target: nothing to cancel.
+    fake_store.manual_target_rows_data.append((resp.json()["trace_id"], cancel, datetime.now(UTC)))
+    assert client.get("/og/api/fleet/manual-targets", headers=VIEWER_HEADERS).json()["items"] == []
     assert (
         client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS).status_code
         == 404

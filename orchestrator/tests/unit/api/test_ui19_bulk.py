@@ -80,7 +80,7 @@ def test_single_confirm_executes_through_the_single_hub_path(client, store, fake
     assert store.command_batches == []
     records = asyncio.run(fake_trace_store._backend.fetch_range(STREAM, from_seq=0))
     (target,) = [r for r in records if r.event_class == "MANUAL_TARGET"]
-    assert target.payload["hub_ids"] == hubs and target.payload["p_kw_target"] == 0.0
+    assert target.payload["hub_ids"] == hubs and target.payload["p_kw_command"] == 0.0
     assert body["manual_target_trace_id"]
     assert [a["target_ref"] for a in store.operator_actions] == [f"bulk:{proposal['proposal_id']}"]
     assert _steps(fake_trace_store) == ["PROPOSE", "CONFIRM", "RESULT"]

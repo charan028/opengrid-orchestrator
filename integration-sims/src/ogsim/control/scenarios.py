@@ -12,7 +12,7 @@ Scenario file shape:
         duration: 300
       - at_s: 30
         type: bank_overload
-        target: bank-007
+        target: BANK_07
         params: {kva_over_rating_pct: 25}
         duration: 120
 """

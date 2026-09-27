@@ -37,6 +37,9 @@ _SCHEMA_BY_KIND = {
     # S6.7 remote calibration: guardian-signed command out, hub ack in.
     "calibration_command": "calibration_command.schema.json",
     "calibration_ack": "calibration_ack.schema.json",
+    # R3.1 firmware updates: guardian-signed command out (G-36), hub status in.
+    "firmware_command": "firmware_command.schema.json",
+    "firmware_status": "firmware_status.schema.json",
 }
 
 

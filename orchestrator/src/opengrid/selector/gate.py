@@ -27,6 +27,7 @@ from typing import Any, Literal, get_args
 from uuid import UUID, uuid4
 
 from opengrid import forecast, ledger
+from opengrid.core.charge_windows import Topology, in_windows, resolve
 from opengrid.core.models.engine import Plan
 from opengrid.core.models.market import ERCOT_COMPETITIVE, Utility, UtilityId
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
@@ -357,34 +358,17 @@ DEFAULT_OWNER_CHARGE_WINDOWS: tuple[str, ...] = ("22:00-06:00",)
 OWNER_CHARGE_WINDOWS_CACHE_S = 60.0
 
 
-def _minutes(clock: str) -> int:
-    hours, minutes = clock.strip().split(":")
-    return int(hours) * 60 + int(minutes)
-
-
 def owner_charge_intervals(
     windows: Sequence[str], horizon_start: datetime, n_intervals: int
 ) -> frozenset[int]:
-    """The horizon intervals whose local start falls in any owner window ("22:00-07:00" wraps midnight).
-    A malformed window raises ValueError (config error: never silently allow or bar charging)."""
-    spans = []
-    for window in windows:
-        start, end = window.split("-")
-        spans.append((_minutes(start), _minutes(end)))
-    allowed = set()
-    for t in range(n_intervals):
-        local = to_market_tz(horizon_start + timedelta(minutes=INTERVAL_MINUTES * t))
-        now_min = local.hour * 60 + local.minute
-        for start_min, end_min in spans:
-            inside = (
-                start_min <= now_min < end_min
-                if start_min < end_min
-                else (now_min >= start_min or now_min < end_min)
-            )
-            if inside:
-                allowed.add(t)
-                break
-    return frozenset(allowed)
+    """The horizon intervals whose local (America/Chicago) start falls in any owner window, by the one
+    D-30 definition (`core.charge_windows.in_windows`). A malformed window raises `ChargeWindowError`
+    (a ValueError: never silently allow or bar charging); an empty list means no grid charging."""
+    return frozenset(
+        t
+        for t in range(n_intervals)
+        if in_windows(windows, to_market_tz(horizon_start + timedelta(minutes=INTERVAL_MINUTES * t)).time())
+    )
 
 
 def config_owner_charge_windows() -> dict[str, list[str]]:
@@ -416,20 +400,25 @@ def resolve_owner_charge_windows(
     feeder: str | None,
     zone: str | None,
     provider: str | None,
+    substation: str | None = None,
+    hub_id: str | None = None,
 ) -> Sequence[str] | None:
-    """D-30: the most specific scope with windows wins, BANK > FEEDER > ZONE > PROVIDER > FLEET (any FLEET
-    row). None: no window at any scope (the caller applies the built-in default). HUB (the plan is per
-    bank) and SUBSTATION (no bank -> substation map here yet) are not consulted.
-
-    Interim: to be replaced by FOLLOWUPS' shared resolver (`opengrid.core.charge_windows`) once it lands;
-    callers go through this one function."""
-    for scope in (("BANK", bank_id), ("FEEDER", feeder), ("ZONE", zone), ("PROVIDER", provider)):
-        if scope[1] is not None and (scope[0], scope[1]) in scoped:
-            return scoped[scope[0], scope[1]]
-    for (kind, _ref), windows in scoped.items():
-        if kind == "FLEET":
-            return windows
-    return None
+    """D-30: the windows of the most specific scope with a row (`core.charge_windows.resolve`, the ONE
+    resolver the API uses too): HUB > BANK > FEEDER > SUBSTATION > ZONE > PROVIDER > FLEET. None: no row
+    at any scope (the caller applies the built-in default). The plan is per bank, so HUB applies only
+    where the caller names the bank's single hub; SUBSTATION only where the bank's substation is known."""
+    effective = resolve(
+        scoped,
+        Topology(
+            hub_id=hub_id,
+            bank_id=bank_id,
+            feeder_id=feeder,
+            substation_id=substation,
+            zone=zone,
+            provider=provider,
+        ),
+    )
+    return None if effective is None else list(effective.windows)
 
 
 _owner_windows_cache: tuple[float, dict[tuple[str, str], list[str]]] | None = None

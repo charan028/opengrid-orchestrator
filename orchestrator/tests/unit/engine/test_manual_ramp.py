@@ -300,3 +300,29 @@ def test_an_unknown_sign_convention_is_refused_and_the_old_field_name_still_read
         NOW,
     )
     assert legacy["h1"].p_kw_target == -3.0
+
+
+def test_a_cancel_ends_only_the_named_target_even_without_a_command_value() -> None:
+    """FOLLOWUPS' cancel row: same hubs, expires_at == issued_at, "cancels": <original trace id>."""
+    original = uuid4()
+    later = NOW + timedelta(seconds=30)
+    first = {
+        "hub_ids": ["h1", "h2"],
+        "p_kw_command": -5.0,
+        "sign_convention": "+charge/-discharge",
+        "issued_at": NOW.isoformat(),
+        "expires_at": (NOW + timedelta(minutes=10)).isoformat(),
+    }
+    cancel = {
+        "hub_ids": ["h1", "h2"],
+        "cancels": str(original),
+        "issued_at": later.isoformat(),
+        "expires_at": later.isoformat(),
+    }
+    rows = [
+        (original, first, NOW),
+        _row(["h2"], -2.0, issued=NOW + timedelta(seconds=10)),  # a newer target on h2 survives the cancel
+        (uuid4(), cancel, later),
+    ]
+    targets = parse_targets(rows, later)
+    assert set(targets) == {"h2"} and targets["h2"].p_kw_target == -2.0

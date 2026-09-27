@@ -28,7 +28,14 @@ from ogsim.fleet.calibration import (
     current_offsets,
 )
 from ogsim.fleet.commands import CommandVerdict, build_ack, evaluate_batch, utc_now_from_epoch
-from ogsim.fleet.device_info import build_device_info_messages
+from ogsim.fleet.device_info import (
+    build_device_info_message,
+    build_device_info_messages,
+    device_identity_for_hub,
+    initial_firmware_versions,
+    initial_hardware_revisions,
+)
+from ogsim.fleet.firmware import FirmwareManager, FirmwareSimConfig
 from ogsim.fleet.lease import HoldTracker, lease_expiry_from_message
 from ogsim.fleet.pq import (
     PQ_ANOMALY_TYPES,
@@ -51,6 +58,7 @@ from ogsim.fleet.wave import (
     capture_request_expired,
     current_rms_a,
     hub_phase_connection,
+    set_current_rms,
     synthesize_raw_capture,
 )
 
@@ -86,6 +94,17 @@ class FleetEngine:
         self.stop_ramps = StopRampTracker()
         self.holds = HoldTracker(config.lease_hold_after_expiry_s)
         self._last_tick_at: float | None = None
+        # Firmware updates (OWNER DECISION, 2026-09-26, R3.1): seeded from the SAME deterministic-by-
+        # index formula `ogsim.fleet.device_info` uses for its own default firmware_version/
+        # hardware_revision, so a hub's initially-published device_info and FirmwareManager's tracked
+        # state always agree (see `initial_firmware_versions`'s docstring).
+        self.firmware = FirmwareManager(
+            list(self.state.hub_ids),
+            FirmwareSimConfig(**config.firmware),
+            rng=self.rng,
+            versions=initial_firmware_versions(self.state),
+            hardware_revisions=initial_hardware_revisions(self.state),
+        )
 
     def handle_scenario_cmd(
         self, raw: dict[str, Any], guardian_public_key: Ed25519PublicKey | None = None
@@ -155,6 +174,33 @@ class FleetEngine:
             fallback_offsets=current_offsets(self.pq, str(command.get("hub_id", ""))),
         )
 
+    def handle_firmware_command(
+        self, command: dict[str, Any], public_key: Ed25519PublicKey, now: float
+    ) -> dict[str, Any]:
+        """OWNER DECISION, 2026-09-26 (R3.1): verifies and (maybe) starts a `FirmwareCommand` against
+        `self.firmware` (`ogsim.fleet.firmware.FirmwareManager`, entirely delegated -- this method is
+        just the same thin per-engine wrapper `handle_calibration_command` is for `ogsim.fleet.pq`).
+        Returns the `FirmwareStatus`-shaped message to publish (ACCEPTED, REJECTED, or FAILED)."""
+        return self.firmware.handle_command(command, public_key, now)
+
+    def device_info_message(self, hub_id: str, now: float) -> tuple[str, dict[str, Any]] | None:
+        """Rebuilds one hub's device_info message with its CURRENT firmware fields (`self.firmware.
+        device_info_fields`) -- used to republish after `self.firmware.take_device_info_changes()`
+        reports a version change (an applied update, or a FAILED-and-reverted one). `None` if `hub_id`
+        isn't a known hub."""
+        identity = device_identity_for_hub(self.state, self.config, hub_id)
+        if identity is None:
+            return None
+        fields = self.firmware.device_info_fields(hub_id)
+        message = build_device_info_message(
+            identity,
+            self.config.reserve_frac_default,
+            now,
+            firmware_version=fields["firmware_version"],
+            hardware_revision=fields["hardware_revision"],
+        )
+        return f"hub/{hub_id}/info", message
+
     def inverter_state(self, hub_id: str) -> list[InverterSnapshot]:
         """Clean, WP-H-facing accessor (§7.4): the per-unit parameters needed
         to synthesize a waveform for `hub_id`. This engine never generates
@@ -180,17 +226,18 @@ class FleetEngine:
             if not self._summary_gate.due(hub_id, now, avg_thd):
                 continue
             include_harmonics = self._harmonic_detail.due(hub_id, now, avg_thd)
-            per_unit_current_a = current_rms_a(float(state.p_kw_applied[i]) / len(snapshots))
             msg = build_summary_message(
                 hub_id,
                 state.bank_ids[i],
                 state.zones[i],
                 snapshots,
                 utc_timestamp(now),
-                unit_currents_a=[per_unit_current_a] * len(snapshots),
                 include_harmonics=include_harmonics,
                 config=self.wave_config,
             )
+            per_unit_kw = float(state.p_kw_applied[i]) / len(snapshots)
+            for snapshot in snapshots:
+                set_current_rms(msg, snapshot.phase_connection, current_rms_a(per_unit_kw))
             messages.append((f"scada/wave/{state.zones[i]}/{state.bank_ids[i]}/{hub_id}/summary", msg))
         return messages
 
@@ -426,6 +473,11 @@ class FleetEngine:
         for i in range(len(state.hub_ids)):
             if m.telemetry_suppressed[i]:
                 continue
+            # OWNER DECISION, 2026-09-26 (R3.1): a hub mid-firmware-update publishes no telemetry
+            # (DOWNLOADING/INSTALLING/REBOOTING progress is reported on its own ack/fw/<hub_id> topic
+            # instead) -- it isn't actually serving load/dispatch during that window.
+            if self.firmware.is_updating(state.hub_ids[i]):
+                continue
             ts = utc_timestamp(now + float(m.clock_skew_s[i]))
             messages.append(
                 (
@@ -575,11 +627,16 @@ async def run_fleet(
     # calibration commands, handled by `FleetEngine.handle_calibration_command` (already
     # implemented, this file's own docstring above -- only the subscribe was missing).
     await client.subscribe("cmd/cal/+", qos=1)
-    # DeviceInfo (R3, OWNER DECISION, 2026-09-26): retained, QoS 1, once per connect -- every field is
-    # a pure function of the hub's own static build-time data (see device_info.py's module
-    # docstring), so nothing at runtime currently re-triggers this; a future change-trigger can call
-    # `build_device_info_messages` again unchanged.
-    for suffix, message in build_device_info_messages(engine.state, engine.config, clock.now()):
+    # Firmware updates (OWNER DECISION, 2026-09-26, R3.1): guardian-signed FirmwareCommands, handled by
+    # `FleetEngine.handle_firmware_command` (delegates to `self.firmware`, a `FirmwareManager`).
+    await client.subscribe("cmd/fw/+", qos=1)
+    # DeviceInfo (R3, OWNER DECISION, 2026-09-26): retained, QoS 1, once per connect. Most fields are a
+    # pure function of the hub's own static build-time data (see device_info.py's module docstring);
+    # firmware_version/hardware_revision come from `engine.firmware` (R3.1) so a process that starts
+    # with a hub already mid-update, or restarts after one applied, still publishes its true version.
+    for suffix, message in build_device_info_messages(
+        engine.state, engine.config, clock.now(), firmware=engine.firmware
+    ):
         await client.publish_validated("device_info", suffix, message, qos=1, retain=True)
     last_telemetry_publish_at: float | None = None
     last_health_snapshot: tuple[str, ...] | None = None
@@ -612,6 +669,18 @@ async def run_fleet(
             # correct -- they simply produce nothing on a tick that isn't due.
             await client.publish_batch("pq_waveform_summary", engine.wave_summary_messages(now), qos=0)
             await client.publish_batch("pq_waveform_raw", engine.wave_rotating_audit_captures(now), qos=1)
+            # Firmware updates (OWNER DECISION, 2026-09-26, R3.1): advance every in-progress update's
+            # timeline and publish its phase-change status on ack/fw/<hub_id>; then republish
+            # device_info (with the new firmware_version) for any hub whose running version just
+            # changed (an applied update, or a FAILED-and-reverted one -- see `take_device_info_
+            # changes`'s docstring).
+            for status in engine.firmware.tick(now):
+                await client.publish_validated("firmware_status", f"ack/fw/{status['hub_id']}", status, qos=1)
+            for hub_id in engine.firmware.take_device_info_changes():
+                result = engine.device_info_message(hub_id, now)
+                if result is not None:
+                    suffix, message = result
+                    await client.publish_validated("device_info", suffix, message, qos=1, retain=True)
         except Exception:
             logger.exception("fleet tick failed; continuing telemetry loop")
         await clock.sleep(engine.config.physics_tick_interval_s)

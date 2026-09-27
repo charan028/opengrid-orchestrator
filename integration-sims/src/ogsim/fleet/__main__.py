@@ -151,6 +151,12 @@ async def _dispatch_message(
         # command` (unmodified) -- this branch only routes the message in and the ack
         # back out.
         await _handle_calibration_command(engine, client, data, public_key)
+    elif "/cmd/fw/" in topic:
+        # OWNER DECISION, 2026-09-26 (R3.1): guardian-signed firmware update command. `data` is a
+        # firmware_command.schema.json object; verification/application is entirely `ogsim.fleet.
+        # firmware.FirmwareManager.handle_command` via `engine.handle_firmware_command` (unmodified)
+        # -- this branch only routes the message in and the ack (firmware_status.schema.json) back out.
+        await _handle_firmware_command(engine, client, data, public_key)
     elif "/stop/" in topic:
         handle_stop_message(engine, topic, data, safestop_public_key, public_key)
     elif "/lease/" in topic and data:
@@ -233,6 +239,20 @@ async def _handle_calibration_command(
         return
     payload = json.dumps(wire_ack).encode("utf-8")
     await client._transport.publish(client.topic(f"ack/cal/{hub_id}"), payload=payload, qos=1)  # noqa: SLF001
+
+
+async def _handle_firmware_command(
+    engine: FleetEngine, client: SimMqttClient, command: dict[str, Any], public_key: Any
+) -> None:
+    """OWNER DECISION, 2026-09-26 (R3.1): verifies+applies `command` (`FleetEngine.handle_firmware_
+    command`, delegating entirely to the unmodified `ogsim.fleet.firmware.FirmwareManager`) and
+    publishes the resulting FirmwareStatus (ACCEPTED/REJECTED/FAILED) on `<root>/ack/fw/<hub_id>`
+    (firmware_status.schema.json), QoS 1. Unlike `_handle_calibration_command`, `FirmwareManager`'s
+    message dict already matches the wire schema field-for-field (no internal-only fields to narrow),
+    so this goes straight through `client.publish_validated` like `_handle_command_batch` does."""
+    hub_id = str(command.get("hub_id", ""))
+    status = engine.handle_firmware_command(command, public_key, time.time())
+    await client.publish_validated("firmware_status", f"ack/fw/{hub_id}", status, qos=1)
 
 
 def main() -> None:

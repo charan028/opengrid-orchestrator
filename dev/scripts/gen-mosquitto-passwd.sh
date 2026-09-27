@@ -32,10 +32,5 @@ mosquitto_passwd -b "$OUT" og_guardian "$OG_MQTT_GUARDIAN_PASSWORD"
 mosquitto_passwd -b "$OUT" og_safestop "$OG_MQTT_SAFESTOP_PASSWORD"
 mosquitto_passwd -b "$OUT" og_api "$OG_MQTT_API_PASSWORD"
 
-# This container runs as root (no `user:` override), but the `mosquitto` service's own
-# docker-entrypoint.sh drops privileges to the image's unprivileged `mosquitto` user (uid/gid
-# 1883) before it opens password_file -- a root-owned mode-600 file is unreadable to it
-# ("Unable to open pwfile", silent crash-loop). Chown to that user so mode 600 still works.
-chown mosquitto:mosquitto "$OUT"
 chmod 600 "$OUT"
 echo "gen-mosquitto-passwd.sh: wrote $OUT for 6 users"

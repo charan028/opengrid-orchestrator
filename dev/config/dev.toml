@@ -33,19 +33,12 @@ keepalive_s = 20
 
 [feeds.ercot]
 base_url = "http://127.0.0.1:8090/ercot"
-# See dev/config/docker.toml's identical setting -- points the ROPC token flow at sim-market's
-# stand-in instead of the real ercotb2c.b2clogin.com.
-token_url = "http://127.0.0.1:8090/token"
 subscription_key_env = "ERCOT_PUBLIC_API_KEY_PRIMARY"
 subscription_key_secondary_env = "ERCOT_PUBLIC_API_KEY_SECONDARY"
 username_env = "ERCOT_API_USER"
 password_env = "ERCOT_API_PASSWORD"
 budget_requests_per_min = 24
 products = ["np6-905-cd", "np6-345-cd", "np4-732-cd", "np4-737-cd", "np4-188-cd"]
-# D-28 regional solar (NP4-745-CD) is polled unless switched off, whatever `products` lists. The market
-# simulator has no such endpoint (404), and a product that never gets a value leaves a stale og.feed_status
-# row, which sets NO_NEW_COMMITMENTS fleet-wide. Off on the sim-fed stack.
-solar_by_region_enabled = false
 
 [feeds.eia]
 base_url = "http://127.0.0.1:8090/eia"
@@ -58,13 +51,9 @@ user_agent = "OpenGrid-Orchestrator-Dev (dev@localhost)"
 grid_point = "EWX/156,91"
 
 [feeds.staleness]
-# Base's R2 hotfix values. Since R2 a stale feed sets NO_NEW_COMMITMENTS and the engine and selector enforce
-# it, and the market simulator stamps observations like ERCOT does: prices at the 15-min interval start, load
-# hourly. With 600 s / 1800 s the stack would drop into NO_NEW_COMMITMENTS for about 5 min of every 15 (price)
-# and half of every hour (load). Live ERCOT posts later still (prices ~30 min, load ~1 day behind).
-ercot_price_fresh_s = 2700
+ercot_price_fresh_s = 600
 ercot_price_lgv_s = 900
-ercot_load_fresh_s = 172800
+ercot_load_fresh_s = 1800
 wind_solar_fresh_s = 10800
 nws_fresh_s = 10800
 eia_fresh_s = 10800
@@ -94,16 +83,12 @@ hysteresis_usd_per_mwh = 5
 key_path = "dev/keys/guardian-dev.key"
 verdict_timeout_ms = 300
 clock_offset_max_ms = 200
-# D-12 test operators (og-op-a/og-op-b) -- see dev/config/docker.toml's identical setting.
-stop_release_authorised_operators = ["og-op-a", "og-op-b"]
 
 [safestop]
 key_path = "dev/keys/safestop-dev.key"
 ramp_bank_s = 30
 ramp_zone_s = 60
 ramp_fleet_s = 120
-# See dev/config/docker.toml's identical setting (host-relative path here).
-guardian_public_key_path = "dev/keys/guardian-dev.pub"
 
 [health]
 heartbeat_interval_s = 5
@@ -129,11 +114,6 @@ bind_host = "127.0.0.1"
 bind_port = 8080
 sse_heartbeat_s = 15
 csrf_allowed_hosts = ["localhost:8080", "127.0.0.1:8080"]
-
-[api.roles]
-# D-12 test operators (og-op-a/og-op-b) -- see dev/config/docker.toml's identical setting.
-operator = ["operator", "og-op-a", "og-op-b"]
-viewer = ["viewer"]
 
 [ui]
 base_path = "/og"

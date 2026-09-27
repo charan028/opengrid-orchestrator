@@ -14,15 +14,12 @@ telemetry publishing just read these arrays uniformly.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from ogsim.fleet.state import HEALTH_FAULT, HEALTH_ONLINE, FleetState
-
-logger = logging.getLogger(__name__)
 
 FLEET_ANOMALY_TYPES = frozenset(
     {
@@ -110,15 +107,6 @@ class FleetAnomalyManager:
         duration_s: float | None,
     ) -> ActiveAnomaly:
         indices = self._resolve_targets(target_kind, target_ref)
-        if not indices:
-            # Not an error (behaviour unchanged), but an unknown target silently does nothing.
-            logger.warning(
-                "anomaly %s (%s) target kind=%s ref=%r matched 0 hubs; it has no effect",
-                anomaly_id,
-                anomaly_type,
-                target_kind,
-                target_ref,
-            )
         anomaly = ActiveAnomaly(anomaly_id, anomaly_type, indices, params, start, duration_s)
         self._active[anomaly_id] = anomaly
         self._apply(anomaly)
