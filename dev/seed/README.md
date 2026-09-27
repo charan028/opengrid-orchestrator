@@ -14,8 +14,8 @@ telemetry (`og.hub_state` rows are insert-only) or a committed obligation.
 | 2 | `market_model_seed.sql` | `og.utility` AUSTIN_ENERGY ($102/kW-yr) and CPS_ENERGY; the Austin tolling contract (REGULATED_CAPACITY/TOLLING, 24 MW, 90 min); the 20 MW / 2 h substation set `sub-LZ_AEN-00` (its bank, hub, feeder and substation limits, `og.asset` ACTIVE) | 1 with LZ_AEN enabled |
 | 3 | `customer_services_seed.sql` | the DATA_CENTER and PIPELINE_AC customers and contracts (`og-cust-dc`, `og-cust-pipe`) | 0 (0025, 0026) |
 | 4 | `services_seed.sql` | the PJM_CAPACITY, MOBILE_STORAGE and LARGE_LOAD customers and contracts (`og-cust-pjm`, `-mobile`, `-largeld`) | 0 (0025) |
-| 5 | `topology_seed.py --fleet-config /etc/opengrid/sim/fleet.yaml --scada-config /etc/opengrid/sim/scada.yaml --dsn ...` | service transformers (every hub mapped), feeder limits, substation limits, HOME_BANK asset rows. Rows for blocks not in `og.bank` are skipped; the substation set from 2 is kept | 1, 2 |
-| 6 | `mobile_trucks_seed.sql` (TRUCKS lane; applied when present in the release) | the mobile truck units | 0 |
+| 5 | `mobile_trucks_seed.sql` (TRUCKS lane; applied when present in the release) | the mobile truck units | 0 (0044) |
+| 6 | `topology_seed.py --fleet-config /etc/opengrid/sim/fleet.yaml --scada-config /etc/opengrid/sim/scada.yaml --dsn ...` | service transformers (every hub mapped: each home bank's units sum to its kVA rating, 12 x 50 kVA for a 600 kVA bank (D-36), homes dealt round-robin; the substation set and each truck on its own transformer at its bank's kVA rating), feeder limits (the trucks' depot feeders included), substation limits, HOME_BANK asset rows. Uses fleet.yaml's enabled zone blocks, exactly as step 1; the substation set's rows from 2 are kept | 1, 2, 5 |
 
 The firmware catalogue needs no seed: `[[firmware.catalogue]]` in `orchestrator/config/orchestrator.toml` (4 entries)
 is merged with `og.firmware_catalogue` (0037, empty on a fresh database).
@@ -31,6 +31,13 @@ Seeds 2 to 4 are plain SQL: `psql -h 127.0.0.1 -U opengrid -d og -v ON_ERROR_STO
 - `orchestrator/tools/ercot_backfill.py --days 14` (phase k): 14 days of ERCOT prices and load into `og.feed_obs`,
   so the forecast is FIRM on a fresh database instead of the pooled rule. It needs the owner's ERCOT keys in
   `/etc/opengrid/api_keys.env` and is capped at 6 requests per minute.
+
+## Existing databases: topology backfill
+
+A database seeded before step 6 existed (or before it covered the substation set and the trucks) raises
+ALR-XFMR-UNMAPPED for every bank the guardian checks. `deploy/scripts/topology_backfill.sh` runs step 6 with
+`--only-missing`: insert-only, verified in one transaction (no existing og.bank/og.hub/limit/asset row changes),
+dry run by default (`--apply` commits). `deploy/scripts/bootstrap_check.py` lists the unmapped counts.
 
 ## Not part of a fresh build
 

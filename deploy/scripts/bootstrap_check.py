@@ -22,6 +22,7 @@ from typing import Any
 import psycopg
 
 from opengrid.fleet.seed import build_topology, load_sim_fleet_topology_config
+from opengrid.fleet.topology_audit import count_unmapped
 from opengrid.platform.config import load_config
 from opengrid.platform.db import MIGRATIONS_DIR, build_dsn
 
@@ -134,11 +135,10 @@ def check_seeded(c: Checker, cfg: Any, trucks_expected: bool) -> None:
     n_contracts = c.scalar("SELECT count(*) FROM og.contract")
     print(f"  [info] contracts total: {n_contracts}")
 
-    c.check(
-        "hubs without a service transformer",
-        c.scalar("SELECT count(*) FROM og.hub WHERE hub_id LIKE 'hub-%%' AND transformer_id IS NULL"),
-        0,
-    )
+    # Complete topology (dev/seed/topology_seed.py): no ALR-XFMR-UNMAPPED / ALR-BANK-UNMAPPED-TOPOLOGY source
+    # anywhere -- home hubs, the substation set and the trucks alike.
+    for label, n in count_unmapped(c.conn).items():
+        c.check(f"unmapped: {label}", n, 0)
     feeders = {b.feeder_id for b in topo.banks if b.feeder_id}
     n_limits = c.scalar("SELECT count(*) FROM og.feeder_limit")
     c.check("feeder limits", n_limits, f">= {len(feeders)}", ok=n_limits >= len(feeders))
