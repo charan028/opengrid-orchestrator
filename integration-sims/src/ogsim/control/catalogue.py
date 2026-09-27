@@ -24,7 +24,7 @@ from typing import Any
 @dataclass(frozen=True)
 class AnomalyType:
     id: str
-    owner: str  # "market" | "scada" | "fleet"
+    owner: str  # "market" | "scada" | "fleet" | "customer" | "utility"
     target_kind: str  # what `target` identifies, e.g. "product", "bank", "hub", "zone"
     params: dict[str, Any] = field(default_factory=dict)
     description: str = ""
@@ -680,6 +680,63 @@ CATALOGUE: list[AnomalyType] = [
         description="Stops publishing a DATA_CENTER site's meter readings (stale telemetry).",
         wire_type="CUSTOMER_SITE_METER_STALE",
         wire_target_kind="site",
+    ),
+    # ---- Utility EMS (owner: utility, applied by ogsim.utility_aen over its Channel; D-29/D-33). The
+    # target is the utility_id the sim speaks for (AUSTIN_ENERGY), or * for every running utility sim.
+    AnomalyType(
+        id="utility_call_normal",
+        owner="utility",
+        target_kind="sim (utility_id, e.g. AUSTIN_ENERGY, or *)",
+        params={
+            "kw": {"type": "number", "default": 5000.0},
+            "duration_min": {"type": "integer", "default": 15},
+        },
+        description="The utility issues a discharge toll call now (expected: ACCEPTED).",
+        wire_type="UTILITY_CALL_NORMAL",
+        wire_target_kind="sim",
+    ),
+    AnomalyType(
+        id="utility_call_overlap",
+        owner="utility",
+        target_kind="sim (utility_id, e.g. AUSTIN_ENERGY, or *)",
+        params={
+            "kw": {"type": "number", "default": 5000.0},
+            "duration_min": {"type": "integer", "default": 15},
+        },
+        description="Two overlapping toll calls (expected: the second REFUSED R-CALL-OVERLAP, 409).",
+        wire_type="UTILITY_CALL_OVERLAP",
+        wire_target_kind="sim",
+    ),
+    AnomalyType(
+        id="utility_call_over_cap",
+        owner="utility",
+        target_kind="sim (utility_id, e.g. AUSTIN_ENERGY, or *)",
+        params={"kw": {"type": "number", "default": 5000.0}},
+        description="A 91-minute toll call (expected: REFUSED R-CALL-DURATION-CAP, 90 min product).",
+        wire_type="UTILITY_CALL_OVER_CAP",
+        wire_target_kind="sim",
+    ),
+    AnomalyType(
+        id="utility_call_charge",
+        owner="utility",
+        target_kind="sim (utility_id, e.g. AUSTIN_ENERGY, or *)",
+        params={"kw": {"type": "number", "default": 5000.0}},
+        description="A charge instruction (+kW) on the toll (expected: REFUSED R-CALL-CHARGE-REFUSED).",
+        wire_type="UTILITY_CALL_CHARGE",
+        wire_target_kind="sim",
+    ),
+    AnomalyType(
+        id="utility_call_cancel_mid",
+        owner="utility",
+        target_kind="sim (utility_id, e.g. AUSTIN_ENERGY, or *)",
+        params={
+            "kw": {"type": "number", "default": 5000.0},
+            "duration_min": {"type": "integer", "default": 15},
+            "cancel_after_s": {"type": "number", "default": 60.0},
+        },
+        description="A toll call cancelled mid-call (expected: ACCEPTED, then COMPLETED).",
+        wire_type="UTILITY_CALL_CANCEL_MID",
+        wire_target_kind="sim",
     ),
 ]
 

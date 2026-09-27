@@ -1,0 +1,51 @@
+# ogsim.utility_aen -- simulated utility EMS for the D-29 tolling contract (unit og-sim-utility).
+# `OGSIM_UTILITY_CONFIG` overrides this path; `OGSIM_UTILITY` overrides `utility`.
+
+utility: AUSTIN_ENERGY
+
+# env_code: suffix of the credential env vars (OGSIM_UTILITY_<env_code>_USER/_PASSWORD).
+# enabled: false keeps the utility idle (no calls, no credentials read). LCRA and RAYBURN have only
+# SUSPENDED sample contracts (D-37): leave them disabled until a real contract is ACTIVE.
+utilities:
+  AUSTIN_ENERGY: {env_code: AEN, enabled: true}
+  LCRA: {env_code: LCRA, enabled: false}
+  RAYBURN: {env_code: RAYBURN, enabled: false}
+
+# Which Channel carries the calls: customer_api (HTTPS via Apache, D-33) or grid_link (DNP3, D-34).
+channel: customer_api
+channels:
+  customer_api:
+    # base_url comes from OGSIM_UTILITY_API_BASE (/etc/opengrid/utility_sim.env); never the loopback port.
+    timeout_s: 10
+  # grid_link:                       # GRID-LINK lane (ogsim/utility_aen/channels/grid_link.py)
+  #   host: 127.0.0.1
+  #   port: 20000
+  #   master_address: 1
+  #   outstation_address: 10
+  #   heartbeat_s: 10
+  #   sbo: true
+  #   tls: {ca_file: ..., cert_file: ..., key_file: ..., server_hostname: ...}
+
+# The daily evening-peak call on hot days (America/Chicago), inside the toll's reservation window.
+schedule:
+  enabled: true
+  window_start: "16:30"
+  window_end: "18:00"
+  call_kw: 20000        # magnitude; sent as discharge (negative kW)
+  duration_min: 60      # capped at the 90 min product
+
+# random: a reproducible daily high per (seed, date); hot / mild force every day.
+weather:
+  mode: random
+  seed: 26
+  min_f: 88
+  max_f: 108
+  hot_threshold_f: 100
+
+tick_s: 5
+status_poll_s: 30
+
+mqtt:
+  enabled: true          # /ogsim/ scenario triggers (<root>/scenario/cmd), user og_sim_utility
+  host: 127.0.0.1
+  port: 1883
