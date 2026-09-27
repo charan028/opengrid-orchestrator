@@ -19,9 +19,17 @@ from uuid import UUID
 import httpx
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.calls import CallLimits, CallOrigin, CallRefused, CallRequest, PgCallStore, cancel_call
+from opengrid.calls import (
+    CallLimits,
+    CallOrigin,
+    CallRefused,
+    CallRequest,
+    PgCallStore,
+    cancel_call,
+    find_call_by_key,
+    issue_call,
+)
 from opengrid.calls import CallOutcome as CallResult
-from opengrid.calls import find_call_by_key, issue_call
 from opengrid.contracts.as_deployment_poll import CallOutcome, ErcotAsPoller, settings_from
 from opengrid.health.model import AlertFinding
 from opengrid.health.queries import clear_alert, fetch_open_alerts, raise_alert
