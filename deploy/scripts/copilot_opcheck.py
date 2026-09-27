@@ -27,9 +27,10 @@ import re
 import ssl
 import subprocess
 import sys
-import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
+
+import tomllib
 
 CREDENTIALS = Path(os.environ.get("OG_UI_CREDENTIALS", "/root/opengrid-ui-credentials.txt"))
 ACCOUNT = os.environ.get("OG_CHECK_ACCOUNT", "viewer")
@@ -38,10 +39,12 @@ CONFIG = Path(os.environ.get("OG_CONFIG", "/opt/opengrid/current/orchestrator/co
 REGISTRY = CONFIG.parent / "service_profiles" / "mobile_storage_home_stations.toml"
 DATABASE = os.environ.get("OG_DB", "og")
 
-#: The D-31 rule as core.geo states it (HOME_STATION_RADIUS_KM, MOBILE_POSITION_MAX_AGE_S): restated here
-#: on purpose, so this check is independent of the code it checks.
+#: The D-31 rule as core.geo states it in r3.4.3 (HOME_STATION_RADIUS_KM, MOBILE_POSITION_MAX_AGE_S, the
+#: stationary rule on [health].hub_stale_s, 5 s future skew): restated here on purpose, so this check is
+#: independent of the code it checks.
 RADIUS_KM = 0.25
 MAX_AGE_S = 300.0
+SKEW_S = 5.0
 
 results: list[tuple[str, bool, str]] = []
 
@@ -82,7 +85,7 @@ def sql(query: str) -> list[list[str]]:
     """A read-only query as the postgres OS user; rows of text fields."""
     env = {**os.environ, "PGOPTIONS": "-c default_transaction_read_only=on"}
     out = subprocess.run(  # noqa: S603 -- fixed argv
-        ["runuser", "-u", "postgres", "--", "psql", "-d", DATABASE, "-X", "-At", "-F", "\t", "-c", query],
+        ["/usr/sbin/runuser", "-u", "postgres", "--", "psql", "-d", DATABASE, "-X", "-At", "-F", "\t", "-c", query],
         capture_output=True,
         text=True,
         check=True,
@@ -123,8 +126,7 @@ def km(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 _JOIN = "FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id"
 _UNAVAILABLE = (
-    "coalesce((SELECT to_jsonb(b.*) ->> 'availability' FROM og.bank b WHERE b.bank_id = h.bank_id),"
-    " 'AVAILABLE') <> 'AVAILABLE'"
+    "coalesce((SELECT to_jsonb(b.*) ->> 'availability' FROM og.bank b WHERE b.bank_id = h.bank_id), 'AVAILABLE') <> 'AVAILABLE'"
 )
 
 
@@ -170,14 +172,19 @@ def check_trucks(auth: str) -> None:
     ids = ",".join("'" + m.replace("'", "''") + "'" for m in mobile) or "''"
     rows = sql(
         "SELECT h.hub_id, h.bank_id, h.device_lat, h.device_lon,"  # noqa: S608 -- ids from the registry
-        f" extract(epoch FROM now() - h.device_info_at) {_JOIN}"
-        f" WHERE h.bank_id IN ({ids}) OR h.hub_id IN ({ids})"
+        " extract(epoch FROM now() - h.device_info_at), extract(epoch FROM now() - s.last_seen_at)"
+        f" {_JOIN} WHERE h.bank_id IN ({ids}) OR h.hub_id IN ({ids})"
     )
+    stale_s, _offline_s = health_thresholds()
     home = 0
-    for hub_id, bank_id, lat, lon, age in rows:
+    for hub_id, bank_id, lat, lon, report_age, telemetry_age in rows:
         site = sites.get(hub_id) or sites.get(bank_id)
-        fresh = lat and lon and age and -5.0 <= float(age) <= MAX_AGE_S
-        if site and fresh and km((float(lat), float(lon)), site) <= RADIUS_KM:
+        if not (site and lat and lon and report_age) or float(report_age) < -SKEW_S:
+            continue  # no report, or one stamped in the future: unknown = away
+        # Trusted while the report is younger than the heartbeat, or -- the STATIONARY rule -- while the
+        # unit's telemetry is fresh ([health].hub_stale_s): a unit that moves publishes a new report.
+        stationary = bool(telemetry_age) and -SKEW_S <= float(telemetry_age) <= stale_s
+        if (float(report_age) <= MAX_AGE_S or stationary) and km((float(lat), float(lon)), site) <= RADIUS_KM:
             home += 1
     got = numbers(text)[:2]
     record(
@@ -205,7 +212,10 @@ def main() -> int:
     check_count("hubs in LZ_NORTH", "how many hubs in LZ_NORTH", "h.zone = 'LZ_NORTH'", auth)
     check_count("hubs rated 78.4 kWh", "how many units have capacity 78.4 kWh", "h.e_kwh BETWEEN 78.35 AND 78.45", auth)
     check_count("hubs on UNAVAILABLE banks", "how many hubs are unavailable", _UNAVAILABLE, auth)
-    banks = int(sql("SELECT count(*) FROM og.bank b WHERE coalesce(to_jsonb(b.*) ->> 'availability', 'AVAILABLE') <> 'AVAILABLE'")[0][0])
+    unavailable_banks = (
+        "SELECT count(*) FROM og.bank b WHERE coalesce(to_jsonb(b.*) ->> 'availability', 'AVAILABLE') <> 'AVAILABLE'"
+    )
+    banks = int(sql(unavailable_banks)[0][0])
     record("UNAVAILABLE banks (SQL only, D-37 expects 20)", banks == 20, f"{banks} banks")
     check_available_kw(auth)
     check_trucks(auth)
