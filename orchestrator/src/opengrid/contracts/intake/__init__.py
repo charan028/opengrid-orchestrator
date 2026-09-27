@@ -391,7 +391,7 @@ async def _intake_energy(
             rationale={
                 "charge_price_usd_per_mwh": charge_price,
                 "discharge_price_usd_per_mwh": p50_by_interval.get(candidate.window_start),
-                "spread_usd_per_mwh": str(candidate.value_per_mwh),
+                "spread_usd_per_mwh": str(candidate.spread_usd_per_mwh),
             },
         )
         if opportunity is not None:

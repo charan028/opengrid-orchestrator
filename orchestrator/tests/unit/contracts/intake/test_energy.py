@@ -33,8 +33,9 @@ def test_positive_spread_is_offered_at_hand_computed_value() -> None:
     assert candidate.window_start == _slot(0)
     assert candidate.window_end == _slot(0) + timedelta(minutes=15)
     expected = Decimal("50") - (Decimal("10") / Decimal("0.90")) - Decimal("30")
-    assert abs(candidate.value_per_mwh - expected) < Decimal("0.0001")
-    assert candidate.value_per_mwh > 0
+    assert abs(candidate.spread_usd_per_mwh - expected) < Decimal("0.0001")
+    # #43 A6: the offered value is the gross discharge price; the selector nets wear and recharge.
+    assert candidate.value_per_mwh == Decimal("50")
 
 
 def test_negative_spread_is_not_offered() -> None:

@@ -8,6 +8,11 @@ interval's forecast P50 price; the interval is worth offering only if
 
 `degradation_usd_per_mwh` is the contract's `degradation_cost` ($/kWh, 02a S1.2) converted to $/MWh
 (x1000) so it is comparable to the $/MWh price series.
+
+The spread is the admission FILTER only. The candidate's `value_per_mwh` is the GROSS discharge price
+(issue #43 A6): the selector's objective already charges wear on every discharged kWh (09 D8) and the
+recharge at the zone price + M1 through its charge variables (09 C27/D5), so a value net of both was
+counted twice and the selector declined arbitrage the spread says pays.
 """
 
 from __future__ import annotations
@@ -41,6 +46,9 @@ class EnergyCandidate:
     window_start: datetime
     window_end: datetime
     value_per_mwh: Decimal
+    """Gross: the forecast P50 discharge price (see the module docstring)."""
+    spread_usd_per_mwh: Decimal
+    """Net of charge cost / eta_rt and degradation: why the interval was offered."""
 
 
 def compute_energy_candidates(
@@ -65,17 +73,17 @@ def compute_energy_candidates(
         discharge_price = discharge_p50_by_interval.get(window_start)
         if discharge_price is None:
             continue
+        gross = Decimal(str(discharge_price))
         spread = (
-            Decimal(str(discharge_price))
-            - (Decimal(str(charge_price_usd_per_mwh)) / Decimal(str(eta_rt)))
-            - degradation_usd_per_mwh
+            gross - (Decimal(str(charge_price_usd_per_mwh)) / Decimal(str(eta_rt))) - degradation_usd_per_mwh
         )
         if spread > 0:
             candidates.append(
                 EnergyCandidate(
                     window_start=window_start,
                     window_end=window_start + timedelta(minutes=INTERVAL_MINUTES),
-                    value_per_mwh=spread,
+                    value_per_mwh=gross,
+                    spread_usd_per_mwh=spread,
                 )
             )
     return candidates
