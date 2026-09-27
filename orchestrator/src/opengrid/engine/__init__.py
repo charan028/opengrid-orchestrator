@@ -1551,15 +1551,21 @@ def build_device_info_worker(pool: Any, cfg: Config) -> BackgroundIngest:
     (re)connect, so the queue holds a whole fleet (live r3 19:03: 2,000 of 2,501 dropped at the default 500)."""
     return BackgroundIngest(
         "device-info",
-        make_device_info_handler(pool),
+        make_device_info_handler(pool, cfg),
         queue_max=int(cfg.get("mqtt.device_info_queue_max", DEVICE_INFO_QUEUE_MAX)),
     )
 
 
-def make_device_info_handler(pool: Any) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
-    """Background handler for a DEVICE-INFO message: `opengrid.fleet.device_info.upsert_device_info(pool,
-    msg)` (FOLLOWUPS). Until that module lands, messages are logged once and dropped."""
+def make_device_info_handler(pool: Any, cfg: Config) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+    """Background handler for a DEVICE-INFO message: `opengrid.fleet.device_info.upsert_device_info`
+    (FOLLOWUPS) with the message's TOPIC (the hub is the topic's, never the payload's -- H4) and a trace
+    store of its own (every report is traced). Until that module lands, messages are logged once and
+    dropped."""
     warned: list[bool] = []
+    from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
+    from opengrid.trace.store import TraceStore
+
+    trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
 
     async def _handle(item: dict[str, Any]) -> None:
         try:
@@ -1570,7 +1576,9 @@ def make_device_info_handler(pool: Any) -> Callable[[dict[str, Any]], Coroutine[
                 logger.warning("opengrid.fleet.device_info not available; DEVICE-INFO messages dropped")
                 warned.append(True)
             return
-        await device_info.upsert_device_info(pool, item["payload"])
+        await device_info.upsert_device_info(
+            pool, item["payload"], topic=str(item["topic"]), trace=trace_store
+        )
 
     return _handle
 

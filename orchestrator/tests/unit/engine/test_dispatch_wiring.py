@@ -1006,8 +1006,9 @@ async def test_device_info_handler_calls_upsert_or_drops_until_the_module_exists
 
     calls: list[tuple] = []
 
-    async def upsert(pool, msg):
-        calls.append((pool, msg))
+    async def upsert(pool, msg, *, topic, trace):
+        calls.append((pool, msg, topic))
+        assert trace is not None  # H4: every device report is traced
 
     fake = types.ModuleType("opengrid.fleet.device_info")
     fake.upsert_device_info = upsert  # type: ignore[attr-defined]
@@ -1017,15 +1018,16 @@ async def test_device_info_handler_calls_upsert_or_drops_until_the_module_exists
         "import_module",
         lambda name, *a: fake if name == "opengrid.fleet.device_info" else real_import(name, *a),
     )
-    handler = engine.make_device_info_handler("pool")
-    await handler({"topic": "t", "payload": {"hub_id": "h1"}})
-    assert calls == [("pool", {"hub_id": "h1"})]
+    handler = engine.make_device_info_handler("pool", Config({}))
+    await handler({"topic": "og/v1/hub/h1/info", "payload": {"hub_id": "h1"}})
+    # H4: the topic travels with the payload -- the hub is the topic's, never the payload's
+    assert calls == [("pool", {"hub_id": "h1"}, "og/v1/hub/h1/info")]
 
     def missing(name, *a):
         raise ImportError(name)
 
     monkeypatch.setattr(importlib, "import_module", missing)
-    await engine.make_device_info_handler("pool")({"topic": "t", "payload": {}})  # logged, dropped, no raise
+    await engine.make_device_info_handler("pool", Config({}))({"topic": "t", "payload": {}})  # dropped
 
 
 # --- firmware campaigns (owner decision: final release) -----------------------------------------------------
@@ -1145,7 +1147,7 @@ async def test_a_retained_device_info_burst_of_2501_hubs_is_ingested_without_dro
 
     upserted: list[str] = []
 
-    async def upsert(pool, msg):
+    async def upsert(pool, msg, *, topic, trace):
         upserted.append(msg["hub_id"])
 
     fake = types.ModuleType("opengrid.fleet.device_info")
