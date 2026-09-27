@@ -12,7 +12,11 @@ baseline section is already written and must stay in.
 
 - **Scalability:** steady state at 1,000 / 2,500 / 3,500 / 5,000 / 7,500 homes (1,009 to 7,509 hubs, production
   shape: 50 homes per bank, 20 % dual-unit, AEN/LCRA/RAYBN zone blocks, substation asset, 8 trucks). Each size
-  gets a fresh database, a 5 min warm-up and a 15 min measured window.
+  gets a fresh database with 14 days of ERCOT history (`--history`, so the forecast is FIRM), a 5 min warm-up and
+  two 15 min measured windows, one per regime:
+  - **IDLE:** as production between delivery windows.
+  - **DELIVERING:** `dispatch.py` commits obligations through og-api until about half the home banks carry grants,
+    as production does in its ECRS and toll windows.
 - **Soak:** the 7,500 size runs for 60 min in total (its 15 min window plus 45 min more) to check memory growth.
 - **Stress at 7,500:** `price` (10 min price spike on every zone), `bulk` (500-hub manual command, at the cap),
   `alerts` (storm, then bulk ack), `burst` (broker restart, every client reconnects at once), `outage`
@@ -23,16 +27,16 @@ baseline section is already written and must stay in.
   msgs/s; Postgres commits, rows, WAL, growth and disk; CPU and RSS per container; API p95 for the fleet
   table, map, alerts and health, and the `/og/fleet` page.
 
-**Expected duration:** about 3 h 45 min unattended.
+**Expected duration:** about 5 h 30 min unattended (two regimes per size).
 
 | Part | Time |
 |---|---|
-| Sizes | 5 × (about 3–5 min build/seed + 5 warm-up + 15 measured) ≈ 2 h |
+| Sizes | 5 × (about 5 min build/seed/history + 5 warm-up + 15 IDLE + up to 20 dispatch/window wait + 15 DELIVERING) ≈ 4 h 30 min |
 | Soak | 45 min extra |
 | Stress | about 40 min |
 | First image build | 5–10 min extra |
 
-A smoke run (section 3) takes about 12 min.
+A smoke run (section 3) takes about 25–35 min: it waits for the next quarter hour to start its delivery window.
 
 ## 1. Prerequisites (once)
 
@@ -52,6 +56,13 @@ A smoke run (section 3) takes about 12 min.
   python -m venv .venv-perf
   .venv-perf/bin/pip install -r tests-perf/requirements-perf.txt -r tests-perf/requirements-charts.txt
   # Windows: .venv-perf\Scripts\pip ...   and use .venv-perf\Scripts\python below
+  ```
+- The ERCOT history file `tests-perf/.cache/ercot_history.csv` (git-ignored). Export it from a dev database that ran
+  `orchestrator/tools/ercot_backfill.py --days 14`; the campaign itself makes no live ERCOT call:
+  ```bash
+  docker compose -f dev/docker-compose.yml exec -T postgres psql -U opengrid -d og -At -c "\copy (select source,
+    product, series, ts, value, unit, quality, recorded_at from og.feed_obs where source = 'ERCOT' and product in
+    ('np6-905-cd','np6-345-cd') order by product, series, ts) to stdout with (format csv)" > tests-perf/.cache/ercot_history.csv
   ```
 - Stop your normal dev stack. The perf project `ogperf` publishes the same host ports (5432, 1883, 8080, 8090):
   `docker compose -f dev/docker-compose.yml --profile orchestrator stop`.
@@ -75,12 +86,17 @@ cd ..
 ## 3. Smoke run (about 12 min)
 
 ```bash
-.venv-perf/bin/python tests-perf/campaign.py --fresh --steps "1000" --warmup-min 2 --step-min 3 --soak-min 0 --no-stress
+.venv-perf/bin/python tests-perf/campaign.py --fresh --steps "1000" --warmup-min 2 --step-min 3 --deliver-min 3 --soak-min 0 --no-stress
 .venv-perf/bin/python tests-perf/analyze.py --run tests-perf/.run --md tests-perf/.run/data/steps.md
 ```
 
-Expect `seeded: og.hub = 1009` in `tests-perf/.run/logs/campaign.log`, a `step-1000` column in `steps.md` with
-cycle, verdict, telemetry and API values, and no `n/a` in the engine rows. `tests-perf/.run/logs/compose.log`
+Expect in `tests-perf/.run/logs/campaign.log`:
+- `seeded: og.hub = 1009`;
+- `history: ... og.feed_obs rows` and `forecast: N/M price rows firm`;
+- a `dispatch:` line with the reserved banks.
+
+In `steps.md`, expect two tables (IDLE and DELIVERING) with cycle, verdict, telemetry and API values, no `n/a`
+in the engine rows, and grants and verdicts per minute above 0 in the DELIVERING table. `tests-perf/.run/logs/compose.log`
 holds the build and compose output. If the `engine` rows are `n/a`, check that `docker exec` works for the
 og-engine container; the sampler scrapes its loopback-only `/metrics` that way.
 
@@ -113,8 +129,8 @@ report:
    this is not the base server, and that all simulators and the database share the machine with the
    orchestrator.
 2. **Versions:** the commit you ran and the r3.4 / r3.4.1 SHAs.
-3. **Results per step:** paste `steps.md`.
-4. **Knee:** `results.json` → `knee`. That's the quadratic fit of p99 against hubs: the budget crossing and the
+3. **Results per step:** paste `steps.md` (both tables, IDLE and DELIVERING) and `results.json` → `dispatch` (banks reached per size).
+4. **Knee:** `results.json` → `knee` (fitted on `knee_regime`, DELIVERING when measured; `knee_idle` is the IDLE fit). That's the quadratic fit of p99 against hubs: the budget crossing and the
    10k projection. Also name the first saturating resource: engine CPU close to 100 % of one core, the sim-fleet
    core, DB disk util, or MemAvailable.
 5. **Stress:** each `results.json` → `stress.<name>`, with its PASS/FAIL checks as recorded. Report a FAIL as a

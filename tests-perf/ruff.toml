@@ -12,4 +12,6 @@ ignore = ["E501"]
 "campaign.py" = ["S603", "S607"]
 "targets.py" = ["S603", "S607"]
 "stress.py" = ["S603", "S607"]
+# dispatch runs dev/scripts/seed_demo_customers.py with sys.executable and fixed argv
+"dispatch.py" = ["S603"]
 "compose/seed_extra.py" = ["S603"]

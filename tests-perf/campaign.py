@@ -5,10 +5,16 @@
     python tests-perf/campaign.py --target compose --steps "7500" --soak-min 0 --no-stress
     python tests-perf/campaign.py --target base --guard on               # beside production (root, Linux)
 
-For every fleet size (home hubs; hubs = homes + 9): perfenv.py -> fresh database -> stack up -> warm-up ->
-measured window (stage `step-<homes>`). At the largest size the measured window is followed by the soak
-(stage `soak-<homes>`, lasting soak-min minus step-min) and the stress scenarios (stages `stress-<name>`).
-sampler.py runs as a child process for the whole campaign and tags every sample with <run>/STAGE.
+For every fleet size (home hubs; hubs = homes + 9), each size is measured in two regimes, as production runs:
+1. Setup: perfenv.py -> fresh database -> stack up -> `--history` (14 days of ERCOT prices/load, so the forecast
+   is FIRM) -> og-feeds restart (forecast recompute).
+2. IDLE: warm-up, then the measured window (stage `step-<homes>`). This is production between delivery windows.
+3. DELIVERING: dispatch.py commits obligations until about `--deliver-frac` of the home banks carry grants for a
+   window, then the measured window (stage `deliver-<homes>`). Skip it with `--no-deliver`.
+
+At the largest size the soak follows in the delivering regime (stage `soak-<homes>`, soak-min minus deliver-min),
+then the stress scenarios (stages `stress-<name>`). sampler.py runs as a child process for the whole campaign and
+tags every sample with <run>/STAGE.
 
 Guardrail (`--guard auto|on|off`, auto = on for `base`, off for `compose`):
 - base: tests-perf/watchdog.sh as unit ogperf-watchdog watches PRODUCTION (cycle p99, pgdata util, fresh hubs,
@@ -26,11 +32,12 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
 
+import dispatch
 import perfenv
 from sampler import dsn_from
 from targets import ComposeTarget, Target, load_target, read_env
@@ -38,6 +45,13 @@ from targets import ComposeTarget, Target, load_target, read_env
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 STRESS_DEFAULT = "price bulk alerts burst outage dbslow safestop"
+#: og.feed_obs history exported from a dev database that ran orchestrator/tools/ercot_backfill.py (HANDOFF 1).
+HISTORY_DEFAULT = HERE / ".cache" / "ercot_history.csv"
+HISTORY_COPY = (
+    "copy hist (source, product, series, ts, value, unit, quality, recorded_at) from stdin with (format csv)"
+)
+#: The stress scenarios take about 40 min; the delivery window must still be open while they run.
+STRESS_ALLOWANCE_MIN = 45.0
 
 
 class AbortedError(Exception):
@@ -103,6 +117,11 @@ class Campaign:
             time.sleep(min(15.0, max(0.0, end - time.time())))
 
     def wait_guard_clear(self, timeout_s: float = 1800) -> bool:
+        if self.guard and self.a.target == "compose" and self.target is None:
+            # Before the first perf stack exists there is nothing to guard, and local_guard() cannot sample (it
+            # reads the Docker VM through the stack). Waiting for 8 samples here never ended. After an abort the
+            # target exists and the loop below samples as usual.
+            return True
         guard = self.run / "data" / "guard.jsonl"
         deadline = time.time() + timeout_s
         while time.time() < deadline:
@@ -147,6 +166,77 @@ class Campaign:
             for cmd in ("keys", "db", "up"):
                 self.stack_sh(cmd)
         self.wait_seeded()
+        if self.a.target == "compose" and self.a.history:
+            self.load_history()
+            self.refresh_forecast()
+
+    def _dsn(self, app: str) -> str:
+        return dsn_from(read_env(self.run / "ports.env"), read_env(self.run / "etc" / "secrets.env"), app)
+
+    def load_history(self) -> None:
+        """--history: og.feed_obs rows into the fresh database, so the forecast is FIRM and the selector can
+        commit (a fresh database is NOT_FOR_FIRM everywhere). Real ERCOT data copied from a dev database; no live
+        ERCOT call is made here."""
+        path: Path = self.a.history
+        with psycopg.connect(self._dsn("ogperf-history")) as conn, conn.cursor() as cur:
+            cur.execute("create temp table hist (like og.feed_obs including defaults) on commit drop")
+            with cur.copy(HISTORY_COPY) as copy, path.open("rb") as fh:
+                while chunk := fh.read(1 << 16):
+                    copy.write(chunk)
+            cur.execute("insert into og.feed_obs select * from hist on conflict do nothing")
+            loaded = cur.rowcount
+            conn.commit()
+        self.log(f"history: {loaded} og.feed_obs rows from {path.name}")
+
+    def refresh_forecast(self, timeout_s: float = 300) -> None:
+        """Restart og-feeds (it recomputes the forecast at start) and wait for FIRM price rows."""
+        if not isinstance(self.target, ComposeTarget):
+            return
+        since = datetime.now(UTC)
+        self.sh([*self.target.compose, "restart", "og-feeds"], "compose.log")
+        deadline = time.time() + timeout_s
+        firm = total = 0
+        while time.time() < deadline:
+            with psycopg.connect(self._dsn("ogperf-campaign"), autocommit=True) as conn:
+                row = conn.execute(
+                    "select count(*) filter (where firm_fitness <> 'NOT_FOR_FIRM'), count(*) from og.forecast "
+                    "where kind = 'price' and computed_at > %s",
+                    (since,),
+                ).fetchone()
+            firm, total = (int(row[0]), int(row[1])) if row else (0, 0)
+            if firm:
+                break
+            time.sleep(10)
+        self.log(f"forecast: {firm}/{total} price rows firm after the history load")
+
+    def start_delivery(self, homes: int, last: bool) -> datetime:
+        """DELIVERING regime: commit obligations for a window that covers the measured window (and, at the
+        largest size, the soak and the stress scenarios). Returns the window start."""
+        length = 2.0 + self.a.deliver_min + 10.0
+        if last:
+            length += max(0.0, self.a.soak_min - self.a.deliver_min)
+            length += STRESS_ALLOWANCE_MIN if self.a.stress else 0.0
+        window = dispatch.window_for(datetime.now(UTC), lead_min=4.0, length_min=length)
+        ports, secrets = read_env(self.run / "ports.env"), read_env(self.run / "etc" / "secrets.env")
+        api = dispatch.Api(f"http://127.0.0.1:{ports['API_PORT']}/og/api", secrets["OG_API_PROXY_SECRET"])
+        result = dispatch.drive(
+            REPO,
+            api,
+            self._dsn("ogperf-dispatch"),
+            window,
+            self.a.deliver_frac,
+            self.log,
+            kw_per_offer=self.a.deliver_kw,
+        )
+        (self.run / "data" / f"dispatch-{homes}.json").write_text(json.dumps(result, indent=2))
+        self.log(
+            f"dispatch: window {window[0]:%H:%M}-{window[1]:%H:%M} UTC, reserved banks {result['reserved_banks']}/"
+            f"{result['home_banks']} (target {result['target_banks']}), offers {result['offers']}"
+        )
+        return window[0]
+
+    def sleep_until(self, when: datetime) -> None:
+        self.sleep(max(0.0, (when - datetime.now(UTC)).total_seconds()))
 
     def wait_seeded(self, timeout_s: float = 900) -> None:
         ports, secrets = read_env(self.run / "ports.env"), read_env(self.run / "etc" / "secrets.env")
@@ -213,10 +303,18 @@ class Campaign:
         self.sleep(self.a.warmup_min * 60)
         self.stage(f"step-{homes}")
         self.sleep(self.a.step_min * 60)
+        measured_min = self.a.step_min
+        if self.a.deliver_frac > 0:
+            self.stage(f"dispatch-{homes}")
+            start = self.start_delivery(homes, last)
+            self.sleep_until(start + timedelta(minutes=2))  # DELIVERING, and past the first ramp
+            self.stage(f"deliver-{homes}")
+            self.sleep(self.a.deliver_min * 60)
+            measured_min = self.a.deliver_min
         if last:
-            if self.a.soak_min > self.a.step_min:
+            if self.a.soak_min > measured_min:
                 self.stage(f"soak-{homes}")
-                self.sleep((self.a.soak_min - self.a.step_min) * 60)
+                self.sleep((self.a.soak_min - measured_min) * 60)
             for sc in self.a.stress.split():
                 self.stage(f"stress-{sc}")
                 with (self.run / "logs" / f"stress-{sc}.log").open("w") as out:
@@ -249,7 +347,9 @@ class Campaign:
             perfenv.fleet_shape(n)  # validate every size before starting anything
         self.log(
             f"campaign: target {self.a.target}, guard {'on' if self.guard else 'off'}, steps {steps}, warm-up "
-            f"{self.a.warmup_min} min, step {self.a.step_min} min, soak {self.a.soak_min} min, stress [{self.a.stress}]"
+            f"{self.a.warmup_min} min, step {self.a.step_min} min, soak {self.a.soak_min} min, stress [{self.a.stress}], "
+            f"history {self.a.history.name if self.a.history else None}, deliver {self.a.deliver_frac} x "
+            f"{self.a.deliver_min} min"
         )
         self.start_watchdog()
         if not self.wait_guard_clear():
@@ -296,7 +396,33 @@ def main() -> int:
     p.add_argument("--guard", choices=("auto", "on", "off"), default="auto")
     p.add_argument("--min-mem-mb", type=float, default=2000)
     p.add_argument("--fresh", action="store_true", help="delete <run>/ first (a new campaign)")
+    p.add_argument(
+        "--history",
+        type=Path,
+        default=HISTORY_DEFAULT if HISTORY_DEFAULT.exists() else None,
+        help="og.feed_obs CSV loaded into each fresh database (default: tests-perf/.cache/ercot_history.csv if present)",
+    )
+    p.add_argument("--no-history", action="store_const", const=None, dest="history")
+    p.add_argument(
+        "--deliver-frac", type=float, default=0.5, help="share of home banks with grants (DELIVERING)"
+    )
+    p.add_argument(
+        "--deliver-min", type=float, default=None, help="DELIVERING measured window (default: --step-min)"
+    )
+    p.add_argument("--no-deliver", action="store_const", const=0.0, dest="deliver_frac")
+    p.add_argument(
+        "--deliver-kw",
+        type=float,
+        default=300.0,
+        help="kW per DELIVERING offer (fits banks the AS holds use in part)",
+    )
     args = p.parse_args()
+    if args.deliver_min is None:
+        args.deliver_min = args.step_min
+    if args.deliver_frac > 0 and args.history is None and args.target == "compose":
+        p.error(
+            "the DELIVERING regime needs --history (a fresh database has no FIRM forecast); or --no-deliver"
+        )
     if args.fresh and args.run.exists():
         shutil.rmtree(args.run)
     args.run.mkdir(parents=True, exist_ok=True)
