@@ -45,6 +45,11 @@ LE_RE = re.compile(r'le="([^"]+)"')
 # --- pure helpers (unit-tested) ----------------------------------------------------------------------------
 
 
+def _p95_or_nan(value: Any) -> float:
+    """A chart value: a missing measurement plots as a gap (NaN), never as 0."""
+    return math.nan if value is None else float(value)
+
+
 def pct(values: list[float], q: float) -> float | None:
     """Nearest-rank percentile (q in 0..100)."""
     if not values:
@@ -550,7 +555,7 @@ def charts(res: dict[str, Any], out: Path) -> list[str]:
     for i, name in enumerate(API_NAMES):
         ax.plot(
             hubs,
-            [((steps[c].get("api") or {}).get(name) or {}).get("p95_ms") for c in steps],
+            [_p95_or_nan(((steps[c].get("api") or {}).get(name) or {}).get("p95_ms")) for c in steps],
             marker="o",
             color=series_c[i % len(series_c)],
             label=name,

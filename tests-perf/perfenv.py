@@ -263,10 +263,20 @@ def render_acl(root: str, *, monitor: str) -> str:
                 ("write", "scada/#"),
                 ("read", "scada/ctl/#"),
                 ("readwrite", "scenario/#"),
+                ("write", "hub/#"),  # R3 DEVICE-INFO (<root>/hub/<id>/info), as production (lead, 2026-09-26)
             ],
         ),
         ("og_simctl", [("readwrite", "scenario/#"), ("write", "scada/#"), ("read", "#")]),
-        ("og_engine", [("read", "tel/#"), ("read", "ack/#"), ("read", "scada/#"), ("read", "stop/#")]),
+        (
+            "og_engine",
+            [
+                ("read", "tel/#"),
+                ("read", "ack/#"),
+                ("read", "scada/#"),
+                ("read", "stop/#"),
+                ("read", "hub/#"),
+            ],
+        ),
         ("og_guardian", [("write", "cmd/#"), ("write", "lease/#"), ("read", "ack/#"), ("read", "tel/#")]),
         ("og_safestop", [("write", "stop/#"), ("read", "ack/#")]),
         ("og_api", [("read", "#"), ("write", "scada/wave/+/+/+/request")]),

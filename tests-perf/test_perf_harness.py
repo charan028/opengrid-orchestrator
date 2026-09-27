@@ -116,6 +116,10 @@ def test_acl_monitor_variants() -> None:
     assert "user og_perfmon" not in compose
     simctl = compose.split("user og_simctl")[1].split("user ")[0]
     assert "topic read $SYS/#" in simctl
+    # Production's DEVICE-INFO grants: every hub's retained device report reaches og-engine (3,509/3,509 on base).
+    sim = compose.split("user og_sim\n")[1].split("user ")[0]
+    engine = compose.split("user og_engine")[1].split("user ")[0]
+    assert "topic write og/v1/hub/#" in sim and "topic read og/v1/hub/#" in engine
 
 
 def test_secrets_generated_once_and_kept(tmp_path: Path) -> None:

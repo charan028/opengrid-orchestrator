@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -148,6 +149,8 @@ class BaseTarget(Target):
         return int(out) if out.isdigit() else 0
 
     def procs(self) -> dict[str, dict[str, Any] | None]:
+        if sys.platform == "win32":  # the base target reads /proc and systemd: Linux only
+            raise RuntimeError("--target base needs Linux (/proc, systemd)")
         clk = os.sysconf("SC_CLK_TCK")
         out: dict[str, dict[str, Any] | None] = {}
         for p in COMPOSE_SERVICES:
