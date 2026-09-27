@@ -8,6 +8,8 @@ import base64
 import json
 from typing import Any
 
+from opengrid.market.availability import availability_fields
+
 ZONES = ("LZ_SOUTH", "LZ_NORTH", "LZ_HOUSTON", "LZ_WEST")
 HEALTH = ("online", "stale", "online", "fault", "online", "offline")
 LABEL = {"online": "OK", "stale": "WATCH", "fault": "FAULT", "offline": "OFFLINE"}
@@ -129,9 +131,19 @@ HOME_STATIONS = {
         }
     ]
 }
+#: D-37: an LCRA (regulated, no contract) home battery -- its fields come from the one shared helper.
+LCRA_HUB = {
+    **_with_device(_hub(50), 50),
+    "hub_id": "hub-lcra-050",
+    "bank_id": "bank-050",
+    "zone": "LZ_LCRA",
+    "asset_class": "HOME",
+    **availability_fields("UNAVAILABLE", "REGULATED_NO_CONTRACT"),
+}
 HUBS = [{**_with_device(_hub(i), i), "asset_class": "HOME"} for i in range(1, N_HUBS + 1)] + [
     TRUCK,
     SUBSTATION,
+    LCRA_HUB,
 ]
 _SORT = {
     "hw": "hardware_revision",
@@ -164,6 +176,7 @@ def _matching(params: Any) -> list[dict[str, Any]]:
     bank, q = _one(params, "bank"), _one(params, "q")
     hw, fw, fw_not = _multi(params, "hw"), _multi(params, "fw"), _one(params, "fw_not")
     classes = _multi(params, "asset_class")
+    availability = _multi(params, "availability")
     lo, hi = _one(params, "soc_min"), _one(params, "soc_max")
     out = []
     for hub in HUBS:
@@ -186,6 +199,8 @@ def _matching(params: Any) -> list[dict[str, Any]]:
         if fw_not and hub["firmware_version"] == fw_not:
             continue
         if classes and hub["asset_class"] not in classes:
+            continue
+        if availability and hub.get("availability", "AVAILABLE") not in availability:
             continue
         out.append(hub)
     return out
@@ -304,6 +319,7 @@ def detail(hub_id: str) -> dict[str, Any]:
     return {
         "hub_id": hub_id,
         "asset_class": hub["asset_class"],
+        "availability": availability_fields(hub.get("availability"), hub.get("availability_reason")),
         "mobile": mobile,
         "utility_scale": utility,
         "status": {
@@ -390,7 +406,7 @@ def responses() -> dict[str, Any]:
     }
     for hub in HUBS[2:3]:
         out[f"/og/api/fleet/hubs/{hub['hub_id']}"] = hub
-    for hub_id in ("hub-0001", "hub-0002", "hub-0003", "trailer-mb-01", "sub-LZ_AEN-00"):
+    for hub_id in ("hub-0001", "hub-0002", "hub-0003", "trailer-mb-01", "sub-LZ_AEN-00", "hub-lcra-050"):
         out[f"/og/api/fleet/hubs/{hub_id}/detail"] = detail(hub_id)
     return out
 
