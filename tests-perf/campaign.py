@@ -117,6 +117,11 @@ class Campaign:
             time.sleep(min(15.0, max(0.0, end - time.time())))
 
     def wait_guard_clear(self, timeout_s: float = 1800) -> bool:
+        if self.guard and self.a.target == "compose" and self.target is None:
+            # Before the first perf stack exists there is nothing to guard, and local_guard() cannot sample (it
+            # reads the Docker VM through the stack). Waiting for 8 samples here never ended. After an abort the
+            # target exists and the loop below samples as usual.
+            return True
         guard = self.run / "data" / "guard.jsonl"
         deadline = time.time() + timeout_s
         while time.time() < deadline:
