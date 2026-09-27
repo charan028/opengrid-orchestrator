@@ -313,7 +313,18 @@ The simulators:
   `targets {bank: t}`, `tls`, and `also_mqtt`. It makes `ogsim.scada` send its L2 LIMIT/BLOCK over the
   link. ESTOP stays on MQTT: it is not a grid-link point.
 - **`utility_aen.yaml` `channel: grid_link`**, with `channels.grid_link: {...}`, makes the Austin Energy
-  simulator issue its toll calls over the link instead of the customer API.
+  simulator issue its toll calls over the link instead of the customer API (r3.4.3,
+  `ogsim.utility_aen.channels.grid_link`). The sub-table keys are `host`, `port`, `master_address` (1),
+  `outstation_address` (10), `heartbeat_s` (5), `sbo` (true), `tls {ca_file, cert_file, key_file,
+  server_hostname}`, `timeout_s` (5) and `status_wait_s` (5). How the channel behaves:
+  - it heartbeats from first use until the runtime calls `aclose()`;
+  - the EMS call id is the numeric `call_ref`, or a stable CRC-32 of it;
+  - a call starts on receipt, because the link has no scheduled start;
+  - a charge call (kW > 0) is sent as-is and refused by the outstation as R-CALL-CHARGE-REFUSED;
+  - shortening a call to a later `end_at` is refused locally as R-GL-SHORTEN-UNSUPPORTED;
+  - `status` of any call other than the link's latest reads UNKNOWN.
+
+  The call points always show the latest call event, a cancel included.
 
 ## 8. Adding ICCP (TASE.2) later
 

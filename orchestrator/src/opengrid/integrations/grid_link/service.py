@@ -316,8 +316,9 @@ class GridLinkService:
         except Exception:
             logger.exception("grid link cancel failed", extra={"utility_id": self.utility_id})
             return
-        if self._call is None or self._call.ems_call_id == target:
-            self._call = _CallView(target, outcome)
+        # the call points always show the latest call event, so a cancel is visible even after a newer
+        # call was refused
+        self._call = _CallView(target, outcome)
 
     async def _refresh_call(self) -> None:
         call = self._call
