@@ -29,7 +29,7 @@ from typing import Any
 
 from opengrid.ai_agent import deterministic, fleet
 from opengrid.ai_agent.budgets import Budget, BudgetLimits, Pricing
-from opengrid.ai_agent.gateway import ModelGateway
+from opengrid.ai_agent.gateway import ModelGateway, ScreeningHealth
 from opengrid.ai_agent.grounding import ungrounded_numbers
 from opengrid.ai_agent.providers import ModelProvider, ModelRequest
 from opengrid.ai_agent.redaction import contains_personal_data, redact_text
@@ -91,6 +91,11 @@ class CopilotService:
     @property
     def budget(self) -> Budget:
         return self._gateway.budget
+
+    @property
+    def screening(self) -> ScreeningHealth:
+        """Screening outcomes in a row (drives ALR-COPILOT-SCREENING, raised by the API router)."""
+        return self._gateway.screening
 
     def status(self) -> dict[str, Any]:
         """What System Health renders (UI-DAT-05): what works, and how much budget is left."""
@@ -164,7 +169,9 @@ class CopilotService:
             fleet_answer = await _fleet_answer(parsed, fleet_tool)
             return fleet_answer or early or _unavailable("no model provider is configured")
 
-        request = ModelRequest.build(question, context)
+        # Screening is sent the operator's question only (r3.4.5): classifying intent and injection risk
+        # needs the words, not the console snapshot, which was ~9.4k of its ~9.5k input tokens.
+        request = ModelRequest.build(question, {})
         screened = await self._gateway.screen(request)
         calls: list[ModelCall] = list(screened.calls)
         verdict = screened.value
@@ -213,7 +220,7 @@ class CopilotService:
             return _with_calls(early, calls, request)
 
         if explaining:
-            return await self._explain(question, context, verdict, query, fleet_tool, calls, request)
+            return await self._explain(question, context, verdict, query, fleet_tool, calls)
 
         routed = CopilotAnswer(text=_NO_ANSWER, tier="routed", intent=verdict.intent)
         return _with_calls(routed, calls, request)
@@ -226,17 +233,16 @@ class CopilotService:
         query: FleetQuery | None,
         fleet_tool: FleetTool | None,
         calls: list[ModelCall],
-        request: ModelRequest,
     ) -> CopilotAnswer:
         """Prose over the evidence. A fleet result, when the question names fleet conditions, is added to
         the evidence as query output only; the prose is then checked so that every number it cites is in
         that evidence (`grounding`). Ungrounded prose is withheld in favour of the console's own answer."""
         result = await _run_fleet(query, fleet_tool)
         fleet_answer: CopilotAnswer | None = None
-        if query is not None and isinstance(result, dict):
-            context = {**context, "fleet": result}
-            request = ModelRequest.build(question, context)
-            fleet_answer = fleet.render(query, result)
+        fleet_result = result if query is not None and isinstance(result, dict) else None
+        if query is not None and fleet_result is not None:
+            fleet_answer = fleet.render(query, fleet_result)
+        request = ModelRequest.build(question, explain_evidence(context, fleet_result))
         explained = await self._gateway.explain(request)
         calls.extend(explained.calls)
         if explained.value is not None:
@@ -268,6 +274,38 @@ class CopilotService:
             return _with_calls(fleet_answer, calls, request)
         routed = CopilotAnswer(text=_NO_ANSWER, tier="routed", intent=verdict.intent)
         return _with_calls(routed, calls, request)
+
+
+#: How much of the board an explanation may carry (the snapshot itself holds up to 60 obligations).
+EXPLAIN_OBLIGATIONS = 20
+EXPLAIN_ALERTS = 10
+
+
+def explain_evidence(context: dict[str, Any], fleet_result: dict[str, Any] | None) -> dict[str, Any]:
+    """The explanation's evidence, trimmed to the sections an `explain_decision` answer can use.
+
+    * A question about fleet conditions (a fleet query ran): the fleet tool's result and the hub health
+      counts only -- obligations and alerts would be noise the model might cite.
+    * Otherwise ("why was this offer declined?"): the health counters and at most `EXPLAIN_ALERTS`
+      alerts, the hub counts, and at most `EXPLAIN_OBLIGATIONS` obligations, the ones a "why" is usually
+      about first (at risk, then open offers, then the rest).
+
+    `unavailable` always travels, so the model can say what it could not see. Everything still goes
+    through `ModelRequest.build`, i.e. redaction."""
+    evidence: dict[str, Any] = {"unavailable": list(context.get("unavailable") or [])}
+    evidence["hubs"] = dict(context.get("hubs") or {})
+    if fleet_result is not None:
+        evidence["fleet"] = fleet_result
+        return evidence
+    health = dict(context.get("health") or {})
+    if "alerts" in health:
+        health["alerts"] = list(health.get("alerts") or [])[:EXPLAIN_ALERTS]
+    evidence["health"] = health
+    if "obligations" in context:
+        obligations = list(context.get("obligations") or [])
+        ranked = sorted(obligations, key=lambda o: (not o.get("at_risk"), o.get("state") != "OFFERED"))
+        evidence["obligations"] = ranked[:EXPLAIN_OBLIGATIONS]
+    return evidence
 
 
 async def _run_fleet(query: FleetQuery | None, tool: FleetTool | None) -> dict[str, Any] | Exception | None:
@@ -422,6 +460,7 @@ __all__ = [
     "build_service",
     "confidence_label",
     "configure",
+    "explain_evidence",
     "service",
     "set_service",
 ]

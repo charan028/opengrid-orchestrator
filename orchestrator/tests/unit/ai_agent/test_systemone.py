@@ -90,7 +90,8 @@ async def test_the_fallback_screens_over_the_same_redacted_request() -> None:
 
     verdict, usage = await TypeSafeProvider(client).screen(request, timeout_s=5.0)
 
-    assert client.states[0] == {"evidence": request.evidence, "operator_question": request.question}
+    # screening is sent the question only, never the console snapshot (r3.4.5)
+    assert client.states[0] == {"operator_question": request.question}
     assert "555" not in client.states[0]["operator_question"]
     assert verdict.provider == "typesafe" and verdict.model == "jev-latest"
     assert verdict.injection_risk == 0.05
