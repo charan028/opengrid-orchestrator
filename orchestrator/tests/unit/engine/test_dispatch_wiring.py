@@ -1006,8 +1006,9 @@ async def test_device_info_handler_calls_upsert_or_drops_until_the_module_exists
 
     calls: list[tuple] = []
 
-    async def upsert(pool, msg):
-        calls.append((pool, msg))
+    async def upsert(pool, msg, *, topic, trace):
+        calls.append((pool, msg, topic))
+        assert trace is not None  # H4: every device report is traced
 
     fake = types.ModuleType("opengrid.fleet.device_info")
     fake.upsert_device_info = upsert  # type: ignore[attr-defined]
@@ -1017,15 +1018,16 @@ async def test_device_info_handler_calls_upsert_or_drops_until_the_module_exists
         "import_module",
         lambda name, *a: fake if name == "opengrid.fleet.device_info" else real_import(name, *a),
     )
-    handler = engine.make_device_info_handler("pool")
-    await handler({"topic": "t", "payload": {"hub_id": "h1"}})
-    assert calls == [("pool", {"hub_id": "h1"})]
+    handler = engine.make_device_info_handler("pool", Config({}))
+    await handler({"topic": "og/v1/hub/h1/info", "payload": {"hub_id": "h1"}})
+    # H4: the topic travels with the payload -- the hub is the topic's, never the payload's
+    assert calls == [("pool", {"hub_id": "h1"}, "og/v1/hub/h1/info")]
 
     def missing(name, *a):
         raise ImportError(name)
 
     monkeypatch.setattr(importlib, "import_module", missing)
-    await engine.make_device_info_handler("pool")({"topic": "t", "payload": {}})  # logged, dropped, no raise
+    await engine.make_device_info_handler("pool", Config({}))({"topic": "t", "payload": {}})  # dropped
 
 
 # --- firmware campaigns (owner decision: final release) -----------------------------------------------------
@@ -1145,7 +1147,7 @@ async def test_a_retained_device_info_burst_of_2501_hubs_is_ingested_without_dro
 
     upserted: list[str] = []
 
-    async def upsert(pool, msg):
+    async def upsert(pool, msg, *, topic, trace):
         upserted.append(msg["hub_id"])
 
     fake = types.ModuleType("opengrid.fleet.device_info")
@@ -1370,3 +1372,92 @@ async def test_intake_skipped_trace_is_json_safe_with_a_uuid_scope() -> None:
     (payload,) = captured
     json.dumps(payload)  # no UUID objects left
     assert payload["contract_scope"] == str(scope)
+
+
+# --- manual target on an idle bank: G-09 must pass (review HIGH r3.4) -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_manual_only_bank_is_proposed_on_the_current_ledger_version_and_passes_g09() -> None:
+    from types import SimpleNamespace
+
+    from opengrid.guardian.checks import check_g09_ledger_version
+
+    class _Ledger:
+        async def ledger_version(self):
+            return 42
+
+    state = SimpleNamespace(ledger_gateway=_Ledger())
+    # No grant anywhere this cycle (idle fleet, one manual target): the version is read, never 0.
+    version = await engine.ledger_version_for_cycle(state, [])
+    assert version == 42
+    assert engine.bank_ledger_version([], version) == 42
+    assert check_g09_ledger_version(engine.bank_ledger_version([], version), 42).ok
+    # With grants this cycle, the manual-only bank takes their version.
+    grant = _g("5", obligation=uuid4())
+    assert await engine.ledger_version_for_cycle(state, [grant]) == grant.ledger_version
+    assert engine.bank_ledger_version([], grant.ledger_version) == grant.ledger_version
+
+
+@pytest.mark.asyncio
+async def test_a_manual_target_on_an_idle_bank_ramps_in_a_batch_on_the_current_ledger_version() -> None:
+    from datetime import timedelta as _td
+
+    from opengrid.core.manual_targets import ManualTarget
+    from opengrid.guardian.checks import check_g09_ledger_version
+
+    @dataclass
+    class _IdleHub:
+        hub_id: str
+        bank_id: str
+        free_discharge_kw: float = 10.0
+        health: str = "online"
+        p_kw: float = 0.0
+        ramp_kw_per_s: float = 0.0611
+
+    class _Fl:
+        def hub_capabilities(self, bank_id):
+            return [_IdleHub("hub-00000", "bank-000")]
+
+    class _Backend:
+        def __init__(self):
+            self.rows = []
+
+        async def insert_command_batch(self, row):
+            self.rows.append(row)
+
+        async def notify_guardian(self, batch_id):
+            return None
+
+    class _RefTrace:
+        def __init__(self):
+            self.appended = []
+
+        async def append(self, stream_id, decision_type, event_class, payload, reason_codes=None):
+            from opengrid.trace.store import TraceRecordRef
+
+            self.appended.append((stream_id, decision_type, event_class, payload))
+            return TraceRecordRef(trace_id=uuid4(), stream_id=stream_id, seq=1, hash="h")
+
+    trace = _RefTrace()
+    backend = _Backend()
+    targets = {"hub-00000": ManualTarget("hub-00000", 0.1, NOW, NOW + _td(minutes=2), "t1")}
+    batch_id = await engine.propose_batch_to_guardian(
+        backend=backend,
+        trace=trace,
+        fleet_module=_Fl(),
+        cycle_id="c",
+        bank_id="bank-000",
+        grants=[],
+        ledger_version=engine.bank_ledger_version([], 42),
+        epoch=1,
+        seq=1,
+        now=NOW,
+        cycle_interval_s=2.0,
+        manual_targets=targets,
+    )
+    assert batch_id is not None
+    (row,) = backend.rows
+    assert row.ledger_version == 42 and check_g09_ledger_version(row.ledger_version, 42).ok
+    (item,) = trace.appended[0][3]["items"]
+    assert item["reason_code"] == "R-MANUAL-RAMP" and 0 < item["p_kw_setpoint"] <= 0.1
