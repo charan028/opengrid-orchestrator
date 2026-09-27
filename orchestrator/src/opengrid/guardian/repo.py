@@ -399,6 +399,31 @@ class ConfigMobileUnitPort:
         return geo.at_home_station(await self._position(hub_id), site, radius_km=self._radius_km)
 
 
+#: Hubs out of service for firmware: the job states the engine's executor excludes (IN_FLIGHT_JOB_STATES plus a
+#: PENDING job whose command was already requested), in a campaign that was not aborted -- as
+#: `firmware.repo._IN_FLIGHT_SQL` counts them, per hub.
+_FIRMWARE_UPDATING_SQL = """
+SELECT DISTINCT j.hub_id
+FROM og.firmware_job j JOIN og.firmware_campaign c ON c.campaign_id = j.campaign_id
+WHERE j.bank_id::text = %(bank_id)s
+  AND (j.state IN ('SENT', 'UPDATING') OR (j.state = 'PENDING' AND j.command_id IS NOT NULL))
+  AND c.state <> 'ABORTED'
+"""
+
+
+class PgFirmwareUpdatingPort:
+    """G-19 capability evidence (r3.4.3, with DISPATCH's M1): the guardian's own read of hubs a firmware campaign
+    has taken out of service, so an R-COMMIT-LOCK-OVERRIDE-L0 for them corroborates."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def updating_hub_ids(self, bank_id: str) -> set[str]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_FIRMWARE_UPDATING_SQL, {"bank_id": bank_id})
+            return {str(r[0]) for r in await cur.fetchall()}
+
+
 class PgManualTargetPort:
     """G-19 R-OPERATOR-OVERRIDE: the guardian's own read of the operator targets, through the ONE status rule
     (`core.manual_targets.effective_targets`, shared with the engine and the API): only an ACTIVE target counts
@@ -1133,6 +1158,7 @@ def build_pg_ports(
         topology=topology,
         territory=territory,
         manual_targets=PgManualTargetPort(pool),
+        firmware_updating=PgFirmwareUpdatingPort(pool),
         pq=PqPorts(
             envelopes=PgPqEnvelopeStatePort(pool),
             measurements=PgPqMeasurementPort(pool),

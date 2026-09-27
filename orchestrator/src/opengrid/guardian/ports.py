@@ -382,6 +382,16 @@ class MobileUnitPort(Protocol):
         ...
 
 
+class FirmwareUpdatingPort(Protocol):
+    """The guardian's own read of hubs a firmware campaign has taken out of service (`og.firmware_job`)."""
+
+    async def updating_hub_ids(self, bank_id: str) -> set[str]:
+        """Hubs on `bank_id` with a firmware job in flight -- SENT or UPDATING, or PENDING with its command
+        already requested -- in a campaign that is not ABORTED: the same hubs the engine's firmware executor
+        excludes from dispatch (`firmware.executor.updating_hub_ids`)."""
+        ...
+
+
 class ManualTargetPort(Protocol):
     """The guardian's own read of live operator targets (`og.trace` MANUAL_TARGET events, not expired)."""
 
@@ -504,3 +514,6 @@ class GuardianPorts:
     # None: no mobile-unit registry wired, so G-35 has nothing to check (no hub is known to be mobile).
     # Production always wires it (`guardian.main`).
     mobile_units: MobileUnitPort | None = None
+    # None: no firmware read, so G-19's capability evidence counts firmware-updating hubs as available (an
+    # R-COMMIT-LOCK-OVERRIDE-L0 for them is then not corroborated: VETO). Production wires it (`repo`).
+    firmware_updating: FirmwareUpdatingPort | None = None

@@ -1327,6 +1327,15 @@ class GuardianService:
         members_port = self.ports.bank_members
         bank = await self.ports.banks.snapshot(proposal.bank_id)
         members = await members_port.member_snapshots(proposal.bank_id) if members_port is not None else []
+        updating = await self._firmware_updating_hubs(proposal.bank_id)
+        if updating and members_port is not None:
+            # A hub a firmware campaign has taken out of service cannot deliver (the engine excludes it, and a
+            # commitment it served becomes R-COMMIT-LOCK-OVERRIDE-L0): unavailable here, seen or not.
+            members = [
+                snap
+                for hub_id in await members_port.member_hub_ids(proposal.bank_id)
+                if hub_id not in updating and (snap := await self.ports.hubs.snapshot(hub_id)) is not None
+            ]
         if bank is None or not members:
             return _OverrideEvidence(
                 instruction is not None, bank_capability_kw=None, bank_capability_upper_kw=None
@@ -1354,6 +1363,21 @@ class GuardianService:
             manual_target_hubs=manual_hubs,
             capability_without_manual_upper_kw=without_manual_kw,
         )
+
+    async def _firmware_updating_hubs(self, bank_id: str) -> frozenset[str]:
+        """Hubs on `bank_id` a firmware job has in flight (the guardian's own `og.firmware_job` read). A failed or
+        missing read is empty: the hubs then count as available, which can only make an override claim look
+        LESS true (never corroborates one)."""
+        port = self.ports.firmware_updating
+        if port is None:
+            return frozenset()
+        try:
+            return frozenset(await port.updating_hub_ids(bank_id))
+        except Exception:
+            logger.exception(
+                "firmware-updating read failed: counted as available", extra={"bank_id": bank_id}
+            )
+            return frozenset()
 
     async def _manual_target_evidence(
         self, bank_id: str, bank: BankSnapshot, policy: flow_checks.FlowPolicy, lease_h: float
