@@ -393,7 +393,8 @@ class Stack:
     def metric(self, service: str, port: int, name: str) -> float | None:
         """Sum of a Prometheus counter/gauge `name` scraped from a dev-stack container's loopback-only
         `/metrics` (via `docker compose exec`, since the endpoint never binds a published port). `None` when
-        the endpoint or the series is absent."""
+        the endpoint or the series is absent. A declared counter with no sample yet counts as 0: a labelled
+        counter (e.g. `og_mqtt_reconnects_total{client}`) shows no series until its first increment."""
         docker = shutil.which("docker")
         if docker is None:
             pytest.skip("docker CLI not available to scrape a loopback metrics endpoint")
@@ -416,6 +417,8 @@ class Stack:
             for line in done.stdout.splitlines()
             if line.startswith(name) and not line.startswith("#")
         ]
+        if not values and f"# TYPE {name} counter" in done.stdout:
+            return 0.0
         return sum(values) if values else None
 
     def restart_count(self, service: str) -> int:
