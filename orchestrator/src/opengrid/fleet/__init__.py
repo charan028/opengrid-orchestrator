@@ -185,6 +185,7 @@ class _BankRuntime:
     hub_ids: set[str] = field(default_factory=set)
 
 
+_HUB_STALE_S_DEFAULT = 25.0  # [health].hub_stale_s at the 10 s telemetry cadence
 _HUB_OFFLINE_S_DEFAULT = 30.0
 _TELEMETRY_INTERVAL_S_DEFAULT = 2.0
 
@@ -194,7 +195,9 @@ _telemetry_interval_s: float = _TELEMETRY_INTERVAL_S_DEFAULT
 #: The ONE hub-health classifier's thresholds (`opengrid.health.rules.classify_hub_health`): online
 #: <= 2 x telemetry interval, offline after `hub_offline_s`. Cached once per `configure()`.
 _thresholds: HealthThresholds = HealthThresholds(
-    hub_offline_s=_HUB_OFFLINE_S_DEFAULT, telemetry_interval_s=_TELEMETRY_INTERVAL_S_DEFAULT
+    hub_stale_s=_HUB_STALE_S_DEFAULT,
+    hub_offline_s=_HUB_OFFLINE_S_DEFAULT,
+    telemetry_interval_s=_TELEMETRY_INTERVAL_S_DEFAULT,
 )
 
 _hubs: dict[str, _HubRuntime] = {}
@@ -216,7 +219,12 @@ def configure(backend: FleetBackend, cfg: Config) -> None:
     _backend = backend
     _hub_offline_s = float(cfg.get("health.hub_offline_s", _HUB_OFFLINE_S_DEFAULT))
     _telemetry_interval_s = float(cfg.get("fleet.telemetry_interval_s", _TELEMETRY_INTERVAL_S_DEFAULT))
-    _thresholds = HealthThresholds(hub_offline_s=_hub_offline_s, telemetry_interval_s=_telemetry_interval_s)
+    # hub_stale_s was never loaded here, so the twin classified stale at the dataclass default (6 s)
+    # whatever the config said (R3 review, HEALTH).
+    hub_stale_s = float(cfg.get("health.hub_stale_s", _HUB_STALE_S_DEFAULT))
+    _thresholds = HealthThresholds(
+        hub_stale_s=hub_stale_s, hub_offline_s=_hub_offline_s, telemetry_interval_s=_telemetry_interval_s
+    )
     _hubs.clear()
     _banks.clear()
     _pending_telemetry.clear()
