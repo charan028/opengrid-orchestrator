@@ -33,7 +33,7 @@ def _config(**overrides):
 def _expected_home_bank_count(config) -> int:
     """`config.bank_count` plus every ENABLED zone block's banks -- computed from the config itself
     (not hardcoded), so this stays correct regardless of which zone blocks the shipped default enables
-    (OWNER DECISION D-32, 2026-09-26, enables LZ_LCRA/LZ_RAYBN by default; `_config()` here doesn't
+    (LZ_LCRA/LZ_RAYBN are enabled by default: D-32, regulated/unavailable per D-37; `_config()` here doesn't
     override `zone_blocks`, so it inherits whatever the shipped scada.yaml currently declares)."""
     return config.bank_count + sum(b.banks for b in config.zone_blocks if b.enabled)
 

@@ -783,7 +783,7 @@ relative to `OG_CONFIG`'s own directory (`orchestrator/src/opengrid/settle/tarif
   (`selector/model.py:311-322`) — planning therefore under-costs FREE grid charging relative to what settle will
   actually bill, matching `09-optimizer-dispatcher-update.md` finding G5.
 - **Territory data (build phase, data only):** `orchestrator/config/tdsp_tariffs.toml:65-103` (`[zone_territory]`)
-  records which ERCOT settlement zones (LZ_AEN, LZ_CPS, LZ_LCRA, LZ_RAYBN) carry no separate M1 line and why; see
+  records which ERCOT settlement zones (LZ_AEN, LZ_CPS, and since D-37 the regulated LZ_LCRA/LZ_RAYBN) carry no separate M1 line and why; see
   K15 (`00-invariants.md`) for its build status.
 
 ### 3.5 Non-anticipativity

@@ -14,6 +14,7 @@ from ogsim.market.routes_ercot import router as ercot_router
 from ogsim.market.routes_ercot import token_router as ercot_token_router
 from ogsim.market.routes_nws import router as nws_router
 from ogsim.market.runtime import MarketRuntime
+from ogsim.protocols.ercot_mms import create_app as create_mms_app
 
 
 def create_app(cfg: MarketConfig | None = None, clock: Callable[[], datetime] | None = None) -> FastAPI:
@@ -30,6 +31,8 @@ def create_app(cfg: MarketConfig | None = None, clock: Callable[[], datetime] | 
     app.include_router(eia_router, tags=["eia"])
     app.include_router(nws_router, tags=["nws"])
     app.include_router(admin_router, tags=["admin"])
+    # D-35: ERCOT MMS/EWS (AS deployment dispatch instructions) at /mms/ews/, admin at /mms/admin/vdis.
+    app.mount("/mms", create_mms_app(app.state.runtime.mms))
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool]:

@@ -26,7 +26,7 @@ def test_pages_by_cursor_and_shows_the_approximate_total(operator_page: Page) ->
     goto_ok(operator_page, f"{BASE_PATH}/fleet")
     rows = operator_page.locator("#fleet-table tbody tr.clickable-row")
     expect(rows).to_have_count(25)
-    expect(operator_page.locator("#fleet-page-info")).to_contain_text("~132 hubs")
+    expect(operator_page.locator("#fleet-page-info")).to_contain_text("~133 hubs")
     expect(operator_page.locator("#fleet-prev")).to_have_count(0)
     _shot(operator_page, "fleet_operator_1400.png")
 
@@ -438,3 +438,30 @@ def test_tolling_obligation_gets_a_utility_call(operator_page: Page) -> None:
     expect(operator_page.locator("#as-action-result")).to_contain_text(
         "utility's call on tolling obligation 7011aaaa"
     )
+
+
+def test_lcra_hub_shows_the_regulated_no_contract_badge_and_tooltip(operator_page: Page) -> None:
+    """D-37 (owner): an LCRA hub in the table and in the drawer carries the owner's badge, with the
+    owner's tooltip text, and the Availability filter lists it."""
+    from opengrid.core.models.market import AVAILABILITY_BADGE, AVAILABILITY_TEXT
+
+    badge_text = AVAILABILITY_BADGE["REGULATED_NO_CONTRACT"]
+    tooltip = AVAILABILITY_TEXT["REGULATED_NO_CONTRACT"]
+    operator_page.set_viewport_size({"width": 1400, "height": 1000})
+    goto_ok(operator_page, f"{BASE_PATH}/fleet?availability=UNAVAILABLE")
+    rows = operator_page.locator("#fleet-table tbody tr.clickable-row")
+    expect(rows).to_have_count(1)
+    expect(rows.first).to_have_attribute("data-row-id", "hub-lcra-050")
+    expect(rows.first.locator("td").nth(3)).to_have_text("LZ_LCRA")
+    badge = rows.first.locator(".fl-unavail")
+    expect(badge).to_have_text(badge_text)
+    expect(badge).to_have_attribute("title", tooltip)
+    expect(operator_page.locator("#fleet-chips .fl-chip")).to_contain_text(f"Availability: {badge_text}")
+    # the map legend explains the hollow, dashed marker in the same words
+    expect(operator_page.locator(".og-map-legend")).to_contain_text(f"{badge_text} (unavailable)")
+
+    rows.first.click()
+    line = operator_page.locator("#hub-drawer #drawer-availability")
+    expect(line.locator(".fl-unavail")).to_have_text(badge_text)
+    expect(line).to_contain_text(tooltip)
+    _shot(operator_page, "fleet_lcra_unavailable.png")

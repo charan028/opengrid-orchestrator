@@ -43,8 +43,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from opengrid.api.auth import Identity, require_viewer
 from opengrid.api.deps import get_config, get_proposals, get_store
 from opengrid.api.proposals import ProposalStore
+from opengrid.core import geo
 from opengrid.health.model import HealthThresholds
 from opengrid.health.rules import classify_hub_health
+from opengrid.market.availability import BANK_AVAILABILITY_SQL, availability_fields, with_availability
 from opengrid.platform.config import Config
 
 router = APIRouter(prefix="/og/api/fleet", tags=["fleet-search"])
@@ -107,12 +109,18 @@ _ACTIVITY_CASE = (
     f" WHEN {_ACTIVITY_SQL['serving_home']} THEN 'serving_home'"
     f" WHEN {_ACTIVITY_SQL['charging']} THEN 'charging' ELSE 'idle' END)"
 )
-_FROM = "FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id"
+_FROM = (
+    "FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id LEFT JOIN og.bank b ON b.bank_id = h.bank_id"
+)
+#: D-37 (migration 0046) bank availability, read guarded: NULL before 0046 reads AVAILABLE (the default).
+_AVAILABILITY_SQL = "coalesce(to_jsonb(b.*) ->> 'availability', 'AVAILABLE')"
+AVAILABILITY_STATES = ("AVAILABLE", "UNAVAILABLE")
 _ROW_COLUMNS = (
     "h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw AS rated_p_kw, s.soc_kwh, s.p_kw,"
     " s.health AS stored_health, s.fault_code, s.last_seen_at, s.lease_epoch, s.lease_expires_at,"
     f" s.last_command_id, {_ACTIVITY_CASE} AS activity,"
-    f" {_HW_SQL} AS hardware_revision, {_FW_SQL} AS firmware_version"
+    f" {_HW_SQL} AS hardware_revision, {_FW_SQL} AS firmware_version,"
+    f" {_AVAILABILITY_SQL} AS availability, (to_jsonb(b.*) ->> 'availability_reason') AS availability_reason"
 )
 
 
@@ -131,12 +139,24 @@ class HubFilter:
     fw: tuple[str, ...] = ()  # firmware versions
     fw_not: str | None = None  # "FW != version": finds out-of-date hubs
     asset_class: tuple[str, ...] = ()  # HOME / MOBILE / UTILITY_SCALE
+    e_kwh_min: float | None = None  # rated energy per hub (og.hub.e_kwh), inclusive bounds
+    e_kwh_max: float | None = None
+    p_kw_min: float | None = None  # rated power per hub (og.hub.p_kw), inclusive bounds
+    p_kw_max: float | None = None
+    units: tuple[int, ...] = ()  # battery units per hub (og.hub.units): 2 = a dual-unit home
+    availability: tuple[str, ...] = ()  # the hub's bank availability (D-37): AVAILABLE / UNAVAILABLE
 
     @property
     def empty(self) -> bool:
         return not (
             self.hw
             or self.asset_class
+            or self.e_kwh_min is not None
+            or self.e_kwh_max is not None
+            or self.p_kw_min is not None
+            or self.p_kw_max is not None
+            or self.units
+            or self.availability
             or self.fw
             or self.fw_not
             or self.zones
@@ -191,6 +211,14 @@ _ASSET_SQL = (
     " WHEN EXISTS (SELECT 1 FROM og.asset a WHERE a.asset_class = 'SUBSTATION'"
     " AND (a.asset_id = h.hub_id OR a.bank_id = h.bank_id)) THEN 'UTILITY_SCALE' ELSE 'HOME' END)"
 )
+
+
+#: D-37 bank availability, a hub inheriting its bank's: one expression for the table, the filters and the
+#: summary (`_FROM` joins og.bank b; guarded, NULL before 0046 reads AVAILABLE).
+AVAILABILITIES = AVAILABILITY_STATES
+AVAILABILITY_SQL = _AVAILABILITY_SQL
+#: Battery units per hub (og.hub.units, 1 or 2), guarded like the HW/FW columns; NULL reads as one unit.
+_UNITS_SQL = "coalesce((to_jsonb(h.*) ->> 'units')::int, 1)"
 
 
 def asset_sql(th: Thresholds) -> Sql:
@@ -248,6 +276,19 @@ def home_stations() -> list[dict[str, Any]]:
 
 
 _SUBSTATION_KEYS = "SELECT asset_id, bank_id FROM og.asset WHERE asset_class = 'SUBSTATION'"
+
+
+async def bank_availability(store: Any) -> dict[str, dict[str, str | None]]:
+    """`bank_id -> availability fields` for the UNAVAILABLE banks (D-37, `BANK_AVAILABILITY_SQL`); empty
+    on a store without the fleet read helper or a database before 0046 (guarded)."""
+    if not isinstance(store, FleetRowsStore):
+        return {}
+    rows = await _optional_rows(store, BANK_AVAILABILITY_SQL, ())
+    return {
+        str(r["bank_id"]): availability_fields(r.get("availability"), r.get("availability_reason"))
+        for r in rows
+        if r.get("availability") not in (None, "AVAILABLE")
+    }
 
 
 async def substation_keys(store: Any) -> set[str]:
@@ -312,6 +353,20 @@ def where_clause(flt: HubFilter, th: Thresholds) -> Sql:
         a = asset_sql(th)
         parts.append(f"{a.text} = ANY(%s)")
         out.params.extend([*a.params, list(flt.asset_class)])
+    rated = (("h.e_kwh", flt.e_kwh_min, flt.e_kwh_max), ("h.p_kw", flt.p_kw_min, flt.p_kw_max))
+    for column, low, high in rated:
+        if low is not None:
+            parts.append(f"{column} >= %s")
+            out.params.append(low)
+        if high is not None:
+            parts.append(f"{column} <= %s")
+            out.params.append(high)
+    if flt.units:
+        parts.append(f"{_UNITS_SQL} = ANY(%s)")
+        out.params.append(list(flt.units))
+    if flt.availability:
+        parts.append(f"{AVAILABILITY_SQL} = ANY(%s)")
+        out.params.append(list(flt.availability))
     out.text = " AND ".join(parts)
     return out
 
@@ -367,6 +422,154 @@ def estimate_query(flt: HubFilter, th: Thresholds) -> Sql:
         return Sql("SELECT greatest(reltuples, 0)::bigint AS n FROM pg_class WHERE oid = 'og.hub'::regclass")
     where = where_clause(flt, th)
     return Sql(f"EXPLAIN (FORMAT JSON) SELECT 1 {_FROM} WHERE {where.text}", where.params)
+
+
+#: What a fleet summary can be broken down by, and the SQL key over `summary_query`'s filtered rows.
+#: SoC buckets are 20 % wide; a hub with no SoC reading is `unknown`, never counted as empty.
+_GROUP_SQL: dict[str, str] = {
+    "none": "'all'",
+    "zone": "zone",
+    "availability": "availability",
+    "health": "health",
+    "asset_class": "asset_class",
+    "soc_bucket": (
+        "(CASE WHEN soc_pct IS NULL THEN 'unknown' WHEN soc_pct < 20 THEN '0-20'"
+        " WHEN soc_pct < 40 THEN '20-40' WHEN soc_pct < 60 THEN '40-60' WHEN soc_pct < 80 THEN '60-80'"
+        " ELSE '80-100' END)"
+    ),
+}
+SUMMARY_GROUPS: tuple[str, ...] = tuple(_GROUP_SQL)
+SummaryGroup = Literal["none", "zone", "availability", "health", "asset_class", "soc_bucket"]
+#: Every group key above has a small closed domain (zones, states, buckets); this is a backstop only.
+SUMMARY_GROUPS_MAX = 50
+SUMMARY_TOP_MAX = 25
+#: A hub counts toward "available" kW/kWh when it can be dispatched now: live health online or stale
+#: (02b S6.4: WATCH still takes commands) and its bank AVAILABLE (D-37). Available kWh is the energy
+#: above the hub's reserve floor (`og.hub.r_kwh`), never the reserve itself.
+_DISPATCHABLE = "(health IN ('online', 'stale') AND availability = 'AVAILABLE')"
+SUMMARY_METRICS = (
+    "hubs",
+    "rated_kwh",
+    "rated_kw",
+    "soc_kwh",
+    "available_hubs",
+    "available_kw",
+    "available_kwh",
+)
+
+
+def summary_query(flt: HubFilter, th: Thresholds, *, group_by: str, limit: int) -> Sql:
+    """Exact aggregates over the hubs matching `flt`, grouped by `group_by` (one row for "none").
+
+    Unlike the table's `approx_total` this is a real count: it scans the filtered set once (bounded
+    memory, one row per group). Health and availability are the same live expressions the filters use.
+    """
+    where = where_clause(flt, th)
+    health = health_sql(th)
+    asset = asset_sql(th)
+    rows = (
+        "SELECT h.zone, h.e_kwh, h.r_kwh, h.p_kw, s.soc_kwh,"
+        " s.soc_kwh::float8 * 100 / nullif(h.e_kwh::float8, 0) AS soc_pct,"
+        f" {health.text} AS health, {AVAILABILITY_SQL} AS availability, {asset.text} AS asset_class"
+        f" {_FROM} WHERE {where.text}"
+    )
+    metrics = (
+        "count(*) AS hubs, coalesce(sum(e_kwh), 0) AS rated_kwh,"
+        " coalesce(sum(p_kw), 0) AS rated_kw, coalesce(sum(soc_kwh), 0) AS soc_kwh,"
+        f" count(*) FILTER (WHERE {_DISPATCHABLE}) AS available_hubs,"
+        f" coalesce(sum(p_kw) FILTER (WHERE {_DISPATCHABLE}), 0) AS available_kw,"
+        " coalesce(sum(greatest(coalesce(soc_kwh, 0) - coalesce(r_kwh, 0), 0))"
+        f" FILTER (WHERE {_DISPATCHABLE}), 0) AS available_kwh"
+    )
+    key = _GROUP_SQL[group_by]
+    # every fragment is one of this module's fixed strings; every caller value is a bound %s
+    sql = f"SELECT {key} AS grp, {metrics} FROM ({rows}) f GROUP BY 1 ORDER BY 1 LIMIT %s"  # noqa: S608
+    return Sql(sql, [*health.params, *asset.params, *where.params, limit])
+
+
+def _shape_group(row: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {"key": str(row.get("grp"))}
+    for metric in SUMMARY_METRICS:
+        value = _num(row.get(metric)) or 0.0
+        out[metric] = int(value) if metric.endswith("hubs") else round(value, 1)
+    return out
+
+
+async def fleet_summary(
+    store: FleetRowsStore,
+    flt: HubFilter,
+    th: Thresholds,
+    *,
+    group_by: str = "none",
+    top: int = 5,
+    sort: str = "hub",
+    descending: bool = False,
+) -> dict[str, Any]:
+    """Counts and totals for the hubs matching `flt`, an optional breakdown, and the first `top` rows.
+
+    `{total: {hubs, rated_kwh, rated_kw, soc_kwh, available_hubs, available_kw, available_kwh},
+    groups: [{key, ...same}], group_by, rows: [table rows], rows_sort}`. Read-only and bounded: two
+    aggregate SELECTs (one row per group) and one keyset page of at most `SUMMARY_TOP_MAX` rows."""
+    total_q = summary_query(flt, th, group_by="none", limit=1)
+    totals = await store.fleet_rows(total_q.text, tuple(total_q.params))
+    empty_total = {"grp": "all", **dict.fromkeys(SUMMARY_METRICS, 0)}
+    total = _shape_group(totals[0] if totals else empty_total)
+    total.pop("key", None)
+    groups: list[dict[str, Any]] = []
+    if group_by != "none":
+        grouped_q = summary_query(flt, th, group_by=group_by, limit=SUMMARY_GROUPS_MAX)
+        groups = [_shape_group(g) for g in await store.fleet_rows(grouped_q.text, tuple(grouped_q.params))]
+    rows: list[dict[str, Any]] = []
+    top = max(0, min(top, SUMMARY_TOP_MAX))
+    if top:
+        page = page_query(flt, th, sort=sort, descending=descending, cursor=None, limit=top)
+        now = datetime.now(UTC)
+        rows = [
+            shape_hub(r, th, now=now) for r in (await store.fleet_rows(page.text, tuple(page.params)))[:top]
+        ]
+    return {"total": total, "groups": groups, "group_by": group_by, "rows": rows, "rows_sort": sort}
+
+
+def home_station_sites() -> dict[str, tuple[float, float]]:
+    """`unit id -> (lat, lon)` of its D-31 home station (`selector.gate.load_mobile_home_station_sites`)."""
+    loader = _gate_attr("load_mobile_home_station_sites")
+    return dict(loader()) if loader is not None else {}
+
+
+def unit_at_home(
+    hub_id: str, bank_id: str | None, lat: Any, lon: Any, sites: dict[str, tuple[float, float]]
+) -> bool | None:
+    """The ONE D-31 at-home rule (`core.geo.at_home_station`, as G-35 and the selector apply it): True at
+    the station, False away, None when the position or the station is unknown."""
+    site = sites.get(hub_id) or sites.get(bank_id or "")
+    la, lo = _num(lat), _num(lon)
+    return geo.at_home_station((la, lo) if la is not None and lo is not None else None, site)
+
+
+_MOBILE_POSITIONS = "SELECT h.hub_id, h.bank_id, h.lat, h.lon {from_} WHERE {where} AND {asset} = 'MOBILE'"
+
+
+async def mobile_positions_at_home(
+    store: FleetRowsStore, flt: HubFilter, th: Thresholds
+) -> list[dict[str, Any]]:
+    """Every mobile unit matching `flt`, each with `at_home` (True/False/None). Bounded by the D-31
+    registry (a few trucks). The positions stay here: callers get the verdict, never the coordinates."""
+    if not th.mobile:
+        return []
+    where = where_clause(flt, th)
+    asset = asset_sql(th)
+    sql = _MOBILE_POSITIONS.format(from_=_FROM, where=where.text, asset=asset.text)
+    sql += " ORDER BY h.hub_id LIMIT %s"
+    rows = await store.fleet_rows(sql, (*where.params, *asset.params, 2 * len(th.mobile)))
+    sites = home_station_sites()
+    return [
+        {
+            "hub_id": str(r["hub_id"]),
+            "bank_id": r.get("bank_id"),
+            "at_home": unit_at_home(str(r["hub_id"]), r.get("bank_id"), r.get("lat"), r.get("lon"), sites),
+        }
+        for r in rows
+    ]
 
 
 def search_query(kind: str, q: str, *, limit: int) -> Sql:
@@ -447,7 +650,18 @@ def _filter(
     fw: Annotated[list[str] | None, Query()] = None,
     fw_not: Annotated[str | None, Query(max_length=64)] = None,
     asset_class: Annotated[list[str] | None, Query()] = None,
+    e_kwh_min: Annotated[float | None, Query(ge=0)] = None,
+    e_kwh_max: Annotated[float | None, Query(ge=0)] = None,
+    p_kw_min: Annotated[float | None, Query(ge=0)] = None,
+    p_kw_max: Annotated[float | None, Query(ge=0)] = None,
+    units: Annotated[list[int] | None, Query()] = None,
+    availability: Annotated[list[str] | None, Query()] = None,
 ) -> HubFilter:
+    avail = tuple(dict.fromkeys(v.upper() for v in availability or [] if v))
+    if any(v not in AVAILABILITIES for v in avail):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"availability must be one of {AVAILABILITIES}"
+        )
     states: list[str] = []
     for value in health or []:
         state = HEALTH_STATES.get(value.upper(), value.lower())
@@ -471,6 +685,12 @@ def _filter(
         fw=tuple(v for v in fw or [] if v),
         fw_not=(fw_not or "").strip() or None,
         asset_class=_asset_classes(asset_class),
+        e_kwh_min=e_kwh_min,
+        e_kwh_max=e_kwh_max,
+        p_kw_min=p_kw_min,
+        p_kw_max=p_kw_max,
+        units=tuple(sorted({u for u in units or [] if u > 0})),
+        availability=avail,
     )
 
 
@@ -497,7 +717,10 @@ def shape_hub(row: dict[str, Any], th: Thresholds, *, now: datetime) -> dict[str
         health = stored
     e_kwh = _num(row.get("e_kwh"))
     soc_kwh = _num(row.get("soc_kwh"))
-    out = {k: v for k, v in row.items() if k not in ("sort_value", "stored_health")}
+    # D-37: the four availability fields, one shape everywhere (`opengrid.market.availability`)
+    out: dict[str, Any] = with_availability(
+        {k: v for k, v in row.items() if k not in ("sort_value", "stored_health")}
+    )
     out.update(
         health=health,
         health_label=HEALTH_LABELS.get(health, health.upper()),
@@ -581,6 +804,25 @@ async def hub_table(
         "sort": sort,
         "dir": dir,
     }
+
+
+@router.get("/summary")
+async def summary(
+    store: Annotated[FleetRowsStore, Depends(_rows_store)],
+    th: Annotated[Thresholds, Depends(_thresholds)],
+    flt: Annotated[HubFilter, Depends(_filter)],
+    _identity: Annotated[Identity, Depends(require_viewer)],
+    group_by: SummaryGroup = "none",
+    top: Annotated[int, Query(ge=0, le=SUMMARY_TOP_MAX)] = 5,
+    sort: SortKey = "hub",
+    dir: Literal["asc", "desc"] = "asc",
+) -> dict[str, Any]:
+    """Exact counts and totals for the hubs matching the Fleet filters (`fleet_summary`): how many, rated
+    kWh/kW, SoC kWh, and what is dispatchable now (available kW / kWh above reserve), optionally by zone,
+    availability, health, asset class or SoC bucket, plus the first `top` rows."""
+    return await fleet_summary(
+        store, flt, th, group_by=group_by, top=top, sort=sort, descending=dir == "desc"
+    )
 
 
 @router.get("/selection")
@@ -687,8 +929,6 @@ _DETAIL_SUBSTATION = (
     "SELECT to_jsonb(a.*) AS row FROM og.asset a WHERE a.asset_class = 'SUBSTATION'"
     " AND (a.asset_id = %s OR a.bank_id = %s) LIMIT 1"
 )
-#: A truck within this many degrees (~1 km) of its depot is "at home station".
-AT_HOME_DEG = 0.01
 
 
 async def _asset_detail(
@@ -700,14 +940,10 @@ async def _asset_detail(
     if hub_id in th.mobile or bank_id in th.mobile:
         station = next((s for s in home_stations() if hub_id in s["units"] or bank_id in s["units"]), None)
         lat, lon = _num(hub.get("lat")), _num(hub.get("lon"))
-        at_home = (
-            station is not None
-            and lat is not None
-            and lon is not None
-            and station.get("lat") is not None
-            and abs(lat - float(station["lat"])) <= AT_HOME_DEG
-            and abs(lon - float(station["lon"])) <= AT_HOME_DEG
-        )
+        site: dict[str, tuple[float, float]] = {}
+        if station is not None and station.get("lat") is not None and station.get("lon") is not None:
+            site[hub_id] = (float(station["lat"]), float(station["lon"]))
+        at_home = unit_at_home(hub_id, bank_id, lat, lon, site) is True
         return (
             "MOBILE",
             {
@@ -828,10 +1064,15 @@ async def hub_detail(
         verdict = dict(found[0]["verdict"]) if found else None
     e_kwh, r_kwh, soc_kwh = _num(hub.get("e_kwh")), _num(hub.get("r_kwh")), _num(state.get("soc_kwh"))
     merged = {**bank, **hub}
+    availability = availability_fields(
+        str(bank["availability"]) if bank.get("availability") else None,
+        str(bank["availability_reason"]) if bank.get("availability_reason") else None,
+    )
     asset_class, mobile, utility = await _asset_detail(store, th, hub_id, hub)
     return {
         "hub_id": hub_id,
         "asset_class": asset_class,
+        "availability": availability,
         "mobile": mobile,
         "utility_scale": utility,
         "status": {

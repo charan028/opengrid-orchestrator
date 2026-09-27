@@ -9,6 +9,7 @@ can be substituted later without touching any `opengrid.pq_ingest` ingest/analys
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
@@ -25,8 +26,14 @@ class BlobStore(Protocol):
 
 class FileBlobStore:
     """Local-disk `BlobStore`: one file per capture, under `root_dir/<date>/<hub_id>/`.
-    Synchronous file I/O wrapped as async methods -- S6.4a's captures are small (~1.3-5 KB
-    compressed), so a thread-pool offload is not warranted at this size."""
+
+    R3.4.1 PROD-IO fix: `put`'s `mkdir`/`write_bytes` used to run directly on the calling
+    coroutine -- individually small (~1.3-5 KB compressed) as this module's docstring says, but
+    `ingest_raw_capture` (the MQTT ingest path) calls this inline on the event loop, so it still
+    adds a real synchronous disk-write stall per capture on a busy/contended disk (the same class
+    of loop-blocking bug PROD-IO found in `pq_ingest.run_characterization_pass`). `to_thread` costs
+    a thread hop either way, so there is no meaningful downside to always paying it here.
+    """
 
     def __init__(self, root_dir: str) -> None:
         self._root = Path(root_dir)
@@ -38,10 +45,14 @@ class FileBlobStore:
     async def put(self, data: bytes, *, hub_id: str, ts: datetime) -> str:
         ref = f"{int(ts.timestamp() * 1000)}-{os.urandom(4).hex()}"
         path = self._path_for(hub_id, ts, ref)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+
+        def _write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+        await asyncio.to_thread(_write)
         return str(path.relative_to(self._root).as_posix())
 
     async def get(self, blob_ref: str) -> bytes:
         path = self._root / blob_ref
-        return path.read_bytes()
+        return await asyncio.to_thread(path.read_bytes)

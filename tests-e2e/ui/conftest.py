@@ -176,6 +176,8 @@ def _get_responses() -> dict[str, Any]:
         "/og/api/forecast": _load("markets_forecast.json"),
         "/og/api/profitability/summary": _load("profitability_summary.json"),
         "/og/api/views/settlement": _load("views_settlement.json"),
+        # D-37: LZ_LCRA/LZ_RAYBN banks UNAVAILABLE ("Regulated market \u2013 no contract")
+        "/og/api/views/availability": _load("views_availability.json"),
         "/og/api/contracts": [
             {
                 "contract_id": "00000000-0000-7000-8000-000000000d03",

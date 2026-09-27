@@ -104,6 +104,9 @@ class BankSnapshot:
     territory: Territory | None = None
     #: K15(b): the territory's utility grants wholesale (FREE) access. Ignored for competitive-area banks.
     free_access: bool = False
+    #: D-37 (`og.bank.availability`, migration 0046): False = UNAVAILABLE (regulated, no contract). The
+    #: allocator dispatches nothing on it (no headroom, no obligation) except K13-grandfathered calls.
+    available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +141,10 @@ class ObligationCall:
     #: K15: the obligation's market (its contract's `market`/`utility_id`). `None` = unknown or
     #: inconsistent market data: never served while territory is enforced (fail closed).
     market_ref: MarketRef | None = FREE
+    #: D-37 / K13: committed before its (now UNAVAILABLE, regulated) bank switched, and still holding its
+    #: reservation there (`opengrid.market.availability.GRANDFATHERED_SQL`): it completes untouched, exempt
+    #: from the availability block and from the K15 territory check.
+    grandfathered: bool = False
 
     @property
     def is_capacity_hold(self) -> bool:

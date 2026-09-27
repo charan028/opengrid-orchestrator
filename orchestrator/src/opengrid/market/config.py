@@ -1,7 +1,8 @@
 """Market-model configuration: the regulated utilities' planning terms and the zone -> territory table.
 
 - `DEFAULT_UTILITIES`: the planning values for Austin Energy and CPS Energy, sourced in
-  `docs/orchestrator/07-delivery/integrations/regulated-utilities-austin-cps-2026-09.md`. They are the
+  `docs/orchestrator/07-delivery/integrations/regulated-utilities-austin-cps-2026-09.md`, plus the D-37
+  PLACEHOLDER terms for LCRA and Rayburn (cloned from Austin's; no contract exists). They are the
   same values `dev/seed/market_model_seed.sql` writes to `og.utility`; a loaded `og.utility` row (or an
   executed contract) overrides them.
 - `load_zone_territory`: reads `[zone_territory]` from `orchestrator/config/tdsp_tariffs.toml` (the
@@ -74,7 +75,57 @@ CPS_ENERGY = Utility(
     ),
 )
 
-DEFAULT_UTILITIES: dict[UtilityId, Utility] = {u.utility_id: u for u in (AUSTIN_ENERGY, CPS_ENERGY)}
+#: D-37 (supersedes D-32): LCRA and Rayburn Country EC are regulated (NOIE) utilities. NO real contract
+#: exists: every planning value below is a PLACEHOLDER cloned from Austin Energy's toll terms (D-29), and
+#: their banks stay UNAVAILABLE (REGULATED_NO_CONTRACT) until a real contract is activated. The real
+#: counterparties may be their member cities and distribution co-ops, not LCRA / Rayburn themselves.
+_PLACEHOLDER_NOTE = (
+    "PLACEHOLDER (D-37): no contract exists. Terms cloned from Austin Energy's toll (D-29: 90 min, $102/kW-yr, "
+    "discharge calls only) and AE's TOU off-peak charging rates until the real tariff and contract are known. "
+    "The real counterparty may be a member city or distribution co-op."
+)
+
+LCRA = Utility(
+    utility_id="LCRA",
+    name="LCRA (Lower Colorado River Authority)",
+    territory_zones=["LZ_LCRA"],
+    capacity_product="UTILITY_TOLLING",
+    payment_basis="USD_PER_KW_YEAR",
+    capacity_price_usd_per_kw=Decimal("102"),
+    charging_tariff_kind="TOU_OFF_PEAK",
+    off_peak_rate_usd_per_kwh=Decimal("0.02677"),
+    mid_peak_rate_usd_per_kwh=Decimal("0.04118"),
+    on_peak_rate_usd_per_kwh=Decimal("0.08442"),
+    charging_adder_usd_per_kwh=Decimal("0"),
+    solar_cost_usd_per_kwh=DEFAULT_SOLAR_COST_USD_PER_KWH,
+    solar_share_floor=Decimal("0.30"),
+    free_access_granted=False,
+    tariff_ref="LCRA-PLACEHOLDER-D37",
+    source_note=_PLACEHOLDER_NOTE,
+)
+
+RAYBURN = Utility(
+    utility_id="RAYBURN",
+    name="Rayburn Country Electric Cooperative",
+    territory_zones=["LZ_RAYBN"],
+    capacity_product="UTILITY_TOLLING",
+    payment_basis="USD_PER_KW_YEAR",
+    capacity_price_usd_per_kw=Decimal("102"),
+    charging_tariff_kind="TOU_OFF_PEAK",
+    off_peak_rate_usd_per_kwh=Decimal("0.02677"),
+    mid_peak_rate_usd_per_kwh=Decimal("0.04118"),
+    on_peak_rate_usd_per_kwh=Decimal("0.08442"),
+    charging_adder_usd_per_kwh=Decimal("0"),
+    solar_cost_usd_per_kwh=DEFAULT_SOLAR_COST_USD_PER_KWH,
+    solar_share_floor=Decimal("0.30"),
+    free_access_granted=False,
+    tariff_ref="RAYBURN-PLACEHOLDER-D37",
+    source_note=_PLACEHOLDER_NOTE,
+)
+
+DEFAULT_UTILITIES: dict[UtilityId, Utility] = {
+    u.utility_id: u for u in (AUSTIN_ENERGY, CPS_ENERGY, LCRA, RAYBURN)
+}
 
 
 #: `[zone_territory]` market labels. FREE entries document a competitive zone's delivery-charge reason only.

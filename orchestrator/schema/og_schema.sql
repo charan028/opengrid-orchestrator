@@ -318,7 +318,12 @@ CREATE TABLE og.bank (
     zone text NOT NULL,
     kva_rating double precision NOT NULL,
     reserve_kva double precision DEFAULT 0 NOT NULL,
-    feeder_id text
+    feeder_id text,
+    availability text DEFAULT 'AVAILABLE'::text NOT NULL,
+    availability_reason text,
+    availability_since timestamp with time zone,
+    CONSTRAINT bank_availability_check CHECK ((availability = ANY (ARRAY['AVAILABLE'::text, 'UNAVAILABLE'::text]))),
+    CONSTRAINT bank_availability_reason_check CHECK ((((availability = 'AVAILABLE'::text) AND (availability_reason IS NULL)) OR ((availability = 'UNAVAILABLE'::text) AND (availability_reason = 'REGULATED_NO_CONTRACT'::text) AND (availability_since IS NOT NULL))))
 );
 
 --
@@ -437,9 +442,13 @@ CREATE TABLE og.contract (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     market text DEFAULT 'FREE'::text NOT NULL,
     utility_id text,
+    name text,
+    is_sample boolean DEFAULT false NOT NULL,
     CONSTRAINT contract_market_check CHECK ((market = ANY (ARRAY['REGULATED'::text, 'FREE'::text]))),
     CONSTRAINT contract_market_utility_check CHECK (((market = 'REGULATED'::text) = (utility_id IS NOT NULL))),
     CONSTRAINT contract_regulated_capacity_market_check CHECK (((service_type <> 'REGULATED_CAPACITY'::text) OR (market = 'REGULATED'::text))),
+    CONSTRAINT contract_sample_inactive_check CHECK (((NOT is_sample) OR (status <> 'ACTIVE'::text))),
+    CONSTRAINT contract_sample_name_check CHECK (((NOT is_sample) OR ((name IS NOT NULL) AND (name ~~ 'Sample Contract%'::text)))),
     CONSTRAINT contract_service_type_check CHECK ((service_type = ANY (ARRAY['HOME'::text, 'ERCOT_ENERGY'::text, 'ERCOT_AS'::text, 'DIST_DEFERRAL'::text, 'PARTNER_CAPACITY'::text, 'DATA_CENTER'::text, 'PIPELINE_AC'::text, 'REGULATED_CAPACITY'::text, 'PJM_CAPACITY'::text, 'MOBILE_STORAGE'::text, 'LARGE_LOAD'::text]))),
     CONSTRAINT contract_status_check CHECK ((status = ANY (ARRAY['ACTIVE'::text, 'SUSPENDED'::text, 'ENDED'::text]))),
     CONSTRAINT contract_tier_check CHECK ((tier = ANY (ARRAY['L0'::text, 'L1'::text, 'L2'::text, 'T1'::text, 'T2'::text, 'T3'::text, 'T4'::text])))
@@ -1827,8 +1836,7 @@ CREATE TABLE og.utility (
     CONSTRAINT utility_on_peak_rate_usd_per_kwh_check CHECK ((on_peak_rate_usd_per_kwh >= (0)::numeric)),
     CONSTRAINT utility_payment_basis_check CHECK ((payment_basis = ANY (ARRAY['USD_PER_KW_MONTH'::text, 'USD_PER_KW_YEAR'::text]))),
     CONSTRAINT utility_solar_cost_usd_per_kwh_check CHECK ((solar_cost_usd_per_kwh >= (0)::numeric)),
-    CONSTRAINT utility_solar_share_floor_check CHECK (((solar_share_floor >= (0)::numeric) AND (solar_share_floor <= (1)::numeric))),
-    CONSTRAINT utility_utility_id_check CHECK ((utility_id = ANY (ARRAY['AUSTIN_ENERGY'::text, 'CPS_ENERGY'::text])))
+    CONSTRAINT utility_solar_share_floor_check CHECK (((solar_share_floor >= (0)::numeric) AND (solar_share_floor <= (1)::numeric)))
 );
 
 --
@@ -2493,6 +2501,13 @@ ALTER TABLE ONLY og.utility
     ADD CONSTRAINT utility_pkey PRIMARY KEY (utility_id);
 
 --
+-- Name: utility utility_utility_id_check; Type: CHECK CONSTRAINT; Schema: og; Owner: -
+--
+
+ALTER TABLE og.utility
+    ADD CONSTRAINT utility_utility_id_check CHECK ((utility_id = ANY (ARRAY['AUSTIN_ENERGY'::text, 'CPS_ENERGY'::text, 'LCRA'::text, 'RAYBURN'::text]))) NOT VALID;
+
+--
 -- Name: verdict verdict_pkey; Type: CONSTRAINT; Schema: og; Owner: -
 --
 
@@ -2564,6 +2579,12 @@ CREATE INDEX ix_asset_territory ON og.asset USING btree (utility_id, asset_class
 --
 
 CREATE INDEX ix_asset_zone ON og.asset USING btree (zone);
+
+--
+-- Name: ix_bank_unavailable; Type: INDEX; Schema: og; Owner: -
+--
+
+CREATE INDEX ix_bank_unavailable ON og.bank USING btree (bank_id) WHERE (availability = 'UNAVAILABLE'::text);
 
 --
 -- Name: ix_calibration_attempt_hub; Type: INDEX; Schema: og; Owner: -

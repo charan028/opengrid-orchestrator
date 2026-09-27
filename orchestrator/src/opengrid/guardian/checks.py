@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from opengrid.core import limits as core_limits
 from opengrid.core import reasons
@@ -126,6 +127,56 @@ def check_g04_hub_ramp(
     """K4: per-hub ramp bound."""
     result = core_limits.check_hub_ramp(prev_p_kw, item.p_kw_setpoint, dt_s, ramp_kw_per_s)
     return CheckOutcome("G-04", result.ok, result.reason, item.hub_id)
+
+
+@dataclass(frozen=True, slots=True)
+class G04Anchor:
+    """Where G-04 measures a hub's step from, and over how long."""
+
+    kw: float
+    dt_s: float
+    source: Literal["TELEMETRY", "SIGNED"]
+
+
+def g04_anchor_kw(
+    *,
+    prev_telemetry_kw: float,
+    telemetry_ts: datetime | None,
+    last_signed_kw: float | None,
+    last_signed_at: datetime | None,
+    lease_expires_at: datetime | None,
+    now: datetime,
+    utility_scale: bool,
+    cycle_interval_s: float,
+) -> G04Anchor:
+    """G-04's anchor (agreed with DISPATCH, r3.4.1). A utility-scale hub (og.asset SUBSTATION / MOBILE_STORAGE)
+    reports telemetry only every ~10 s while the engine steps it every 2 s cycle from its last command; measured
+    against the stale telemetry, every step after the first looked like several and was vetoed, so the 20 MW
+    toll never delivered. For a utility-scale hub G-04 anchors at the last setpoint the GUARDIAN ITSELF SIGNED
+    for it whenever that signed lease is still live -- while it is, the hub is following that setpoint, so that
+    is where its physical step starts (lead's decision with DISPATCH; a "signed newer than the telemetry sample"
+    condition dropped to the stale telemetry on a timestamp tie and vetoed every following step). dt = the time
+    since that signature (at least one cycle). Otherwise -- homes always, or no live signed lease -- the telemetry
+    `prev_p_kw` over one cycle, as before. The bound itself is unchanged: `hub_ramp_kw_per_s(params) x dt`.
+    `telemetry_ts` is accepted for the caller's record and future use; it does not change the anchor."""
+    del telemetry_ts  # the live signed lease alone decides (see above)
+    if (
+        utility_scale
+        and last_signed_kw is not None
+        and last_signed_at is not None
+        and lease_expires_at is not None
+        and lease_expires_at > now
+    ):
+        elapsed_s = max((now - last_signed_at).total_seconds(), 0.0)
+        return G04Anchor(last_signed_kw, max(elapsed_s, cycle_interval_s), "SIGNED")
+    return G04Anchor(prev_telemetry_kw, cycle_interval_s, "TELEMETRY")
+
+
+def ramp_step_per_cycle_kw(setpoint_kw: float, anchor: G04Anchor, cycle_interval_s: float) -> float:
+    """The step a hub takes this cycle for the RATE checks (G-05 fleet ramp and stagger, G-06/G-32 feeder ramp):
+    from the same anchor as G-04, scaled to one cycle when the anchor is older than one (a utility-scale hub whose
+    last signed step was two cycles ago spreads that change over both). Homes: setpoint - telemetry, as before."""
+    return (setpoint_kw - anchor.kw) * (cycle_interval_s / anchor.dt_s) if anchor.dt_s > 0 else 0.0
 
 
 def check_g05_fleet_ramp(
@@ -297,7 +348,9 @@ def check_g19_override_evidence(
 
 #: K15 territory blocks an allocator may carry on a 0 kW grant for an obligation it must not serve from this
 #: bank (`market.territory.check_territory`'s codes, plus the guardian's own G-33 code).
-TERRITORY_BLOCK_REASONS = TERRITORY_REASONS | {reasons.R_TERRITORY_INELIGIBLE}
+#: D-37: plus R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT (an UNAVAILABLE bank), corroborated the same way by the
+#: guardian's own availability read (`GuardianService._territory_block`).
+TERRITORY_BLOCK_REASONS = TERRITORY_REASONS | {reasons.R_TERRITORY_INELIGIBLE, reasons.R_BANK_UNAVAILABLE}
 
 
 def check_g19_territory_block(obligation_id: str, *, guardian_block: str | None) -> CheckOutcome:

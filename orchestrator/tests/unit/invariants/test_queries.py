@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.invariants import queries
 from opengrid.invariants.models import CheckState, Violation
 
@@ -336,6 +337,8 @@ async def test_fetch_bank_capability_inputs_selects_hub_units_when_column_exists
     assert rows == [(*_CAP_ROW, 2, True)]
     assert "information_schema.columns" in cursor.executed[0][0]
     assert "h.units" in cursor.executed[1][0]
+    # utility_scale: the one nameplate rule the guardian's G-02 reads too (core.nameplate: SUBSTATION, MOBILE_STORAGE)
+    assert NAMEPLATE_HUB_EXISTS_SQL in cursor.executed[1][0]
 
 
 async def test_fetch_bank_capability_inputs_units_none_when_column_missing() -> None:
@@ -360,3 +363,15 @@ async def test_read_summary_all_zero_and_as_of_none_when_never_run() -> None:
     assert summary.reserve_breaches == 0
     assert summary.double_sold_kwh == 0.0
     assert summary.as_of is None
+
+
+def test_every_k13_exception_the_engine_traces_is_accepted_by_the_lock_check() -> None:
+    """R6: the engine traces R-OPERATOR-OVERRIDE shortfalls (G-19 signs them); the invariants lock check must
+    accept them -- one shared list (`core.reasons.K13_SHORTFALL_REASONS`), never a copy."""
+    from opengrid.core.reasons import K13_SHORTFALL_REASONS, R_AS_RELEASE, R_OPERATOR_OVERRIDE, R_SUBSTITUTION
+    from opengrid.engine.gateways import _K13_SHORTFALL_REASONS
+    from opengrid.invariants.queries import ALLOWED_K13_TRACE_REASONS
+
+    assert R_OPERATOR_OVERRIDE in ALLOWED_K13_TRACE_REASONS
+    assert _K13_SHORTFALL_REASONS is K13_SHORTFALL_REASONS
+    assert K13_SHORTFALL_REASONS | {R_AS_RELEASE, R_SUBSTITUTION} == ALLOWED_K13_TRACE_REASONS

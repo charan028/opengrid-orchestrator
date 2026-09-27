@@ -10,7 +10,7 @@ exercised in tests only through `_get_pool`, which callers/tests may monkeypatch
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -18,6 +18,7 @@ from uuid import UUID
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core import geo
 from opengrid.core.solar_share import (
     ERCOT_SOLAR_ACTUAL_SERIES,
     ERCOT_SOLAR_FORECAST_SERIES,
@@ -28,6 +29,7 @@ from opengrid.core.solar_share import (
 )
 from opengrid.core.timeutil import to_utc
 from opengrid.health.queries import fetch_degraded_modes
+from opengrid.market.availability import BANK_AVAILABILITY_SQL, GRANDFATHERED_SQL
 from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 
@@ -142,25 +144,41 @@ async def load_bank_zones(bank_ids: list[str]) -> dict[str, str]:
         return {str(row[0]): str(row[1]) async for row in cur}
 
 
+async def load_bank_availability() -> list[tuple[str, str | None, str | None, Any]]:
+    """Read-only (D-37, migration 0046): `(bank_id, availability, availability_reason, availability_since)`
+    per bank, `opengrid.market.availability.BANK_AVAILABILITY_SQL`."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(BANK_AVAILABILITY_SQL)
+        return [(str(r[0]), r[1], r[2], r[3]) async for r in cur]
+
+
+async def load_grandfathered_pairs() -> list[tuple[str, str]]:
+    """Read-only (D-37, K13): `(obligation_id, bank_id)` pairs grandfathered on an unavailable bank,
+    `opengrid.market.availability.GRANDFATHERED_SQL` (the one rule)."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(GRANDFATHERED_SQL)
+        return [(str(r[0]), str(r[1])) async for r in cur]
+
+
 #: A mobile unit is a single-hub bank; its hub's recorded position (device-reported, `og.hub.lat/lon`).
-_HUB_POSITIONS_SQL = """
-SELECT bank_id, hub_id, lat, lon FROM og.hub
-WHERE (bank_id = ANY(%(ids)s) OR hub_id = ANY(%(ids)s)) AND lat IS NOT NULL AND lon IS NOT NULL
-"""
-
-
-async def load_hub_positions(unit_ids: list[str]) -> dict[str, tuple[float, float]]:
-    """Read-only: `id -> (lat, lon)` for the hubs whose bank id or hub id is in `unit_ids`, keyed by both
-    (D-31 mobile units: the selector's at-home test). A hub without a recorded position is absent."""
+#: Since H4 that is `og.hub.device_lat/device_lon` (a report writes only those; `og.hub.lat/lon` stays the
+#: seeded home station), read through `core.geo.DEVICE_POSITIONS_SQL` and accepted only while fresh.
+async def load_hub_positions(
+    unit_ids: list[str], now: datetime | None = None
+) -> dict[str, tuple[float, float]]:
+    """Read-only: `id -> (lat, lon)` of the FRESH device-reported position of the hubs whose bank id or hub
+    id is in `unit_ids`, keyed by both (D-31 mobile units: the selector's at-home test). The one query and
+    freshness rule G-35 uses (`core.geo.DEVICE_POSITIONS_SQL` / `fresh_positions`); a hub with no report,
+    or only a stale one, is absent (unknown: away)."""
     if not unit_ids:
         return {}
     pool = await get_pool()
-    out: dict[str, tuple[float, float]] = {}
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_HUB_POSITIONS_SQL, {"ids": unit_ids})
-        async for bank_id, hub_id, lat, lon in cur:
-            out[str(bank_id)] = out[str(hub_id)] = (float(lat), float(lon))
-    return out
+        await cur.execute(geo.DEVICE_POSITIONS_SQL, {"ids": unit_ids})
+        rows = await cur.fetchall()
+    return geo.fresh_positions(rows, now or datetime.now(UTC))
 
 
 async def load_degraded_modes() -> frozenset[str]:

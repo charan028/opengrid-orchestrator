@@ -465,13 +465,22 @@ class PgTraceBackend:
 
     async def _append_journal(self, entry: _JournalEntry) -> None:
         """Append one line under the exclusive journal lock, and fsync it: this is the only durable copy
-        of the row until Postgres is back."""
+        of the row until Postgres is back. R3.4.1 PROD-IO fix (latent, same class of bug as
+        `pq_ingest.run_characterization_pass`): the write+fsync is synchronous disk I/O, so it ran
+        directly on the event loop thread; on a contended disk (the base server's WAL fsync has been
+        observed at ~0.5s) that stalls the whole tick, not just this trace append. Moved to a thread --
+        small and safe: the lock is still held for the whole `to_thread` call, so ordering/exclusivity
+        with `_rewrite_journal_locked`/`_read_journal_locked` is unchanged."""
         async with _journal_lock(self._journal_path, exclusive=True):
-            self._journal_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._journal_path.open("a", encoding="utf-8") as fh:
-                fh.write(_journal_entry_to_line(entry) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
+
+            def _write() -> None:
+                self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._journal_path.open("a", encoding="utf-8") as fh:
+                    fh.write(_journal_entry_to_line(entry) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+
+            await asyncio.to_thread(_write)
 
     def _read_journal_locked(self) -> list[_JournalEntry]:
         """Parse the journal. The caller must hold the journal lock (shared or exclusive)."""
@@ -563,7 +572,10 @@ class PgTraceBackend:
         async with _journal_lock(self._journal_path, exclusive=True):
             current = self._read_journal_locked()
             remaining = [entry for entry in current if entry.trace_id not in removed]
-            self._rewrite_journal_locked(remaining)
+            # R3.4.1 PROD-IO fix (latent): same synchronous-fsync-on-the-loop issue as
+            # `_append_journal`, moved off the loop the same way; the exclusive lock is still held
+            # across the whole `to_thread` call.
+            await asyncio.to_thread(self._rewrite_journal_locked, remaining)
         if quarantined:
             await self._quarantine(quarantined)
         logger.info(
@@ -574,16 +586,23 @@ class PgTraceBackend:
     async def _quarantine(self, entries: list[tuple[_JournalEntry, BaseException]]) -> None:
         """Keep each refused row in `<journal>.quarantine.jsonl` (with the error), then report it ONCE: a
         `TRACE_QUARANTINED` trace row (identifiers only, never the refused payload) and a critical
-        `ALR-TRACE-QUARANTINED` alert. Reporting is best-effort; the quarantine file is the evidence."""
+        `ALR-TRACE-QUARANTINED` alert. Reporting is best-effort; the quarantine file is the evidence.
+        R3.4.1: the file write is the same synchronous-fsync-on-the-loop shape as `_append_journal`,
+        moved off the loop for the same reason -- the exclusive lock is still held across the
+        `to_thread` call."""
         qpath = quarantine_path_for(self._journal_path)
         async with _journal_lock(self._journal_path, exclusive=True):
-            qpath.parent.mkdir(parents=True, exist_ok=True)
-            with qpath.open("a", encoding="utf-8") as fh:
-                for entry, exc in entries:
-                    record = {**asdict(entry), "error": f"{type(exc).__name__}: {exc}"[:500]}
-                    fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
+
+            def _write() -> None:
+                qpath.parent.mkdir(parents=True, exist_ok=True)
+                with qpath.open("a", encoding="utf-8") as fh:
+                    for entry, exc in entries:
+                        record = {**asdict(entry), "error": f"{type(exc).__name__}: {exc}"[:500]}
+                        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+
+            await asyncio.to_thread(_write)
         for entry, exc in entries:
             logger.error(
                 "trace row quarantined: Postgres refused its content",

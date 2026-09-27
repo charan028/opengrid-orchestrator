@@ -71,6 +71,11 @@ def _wired(monkeypatch):
     monkeypatch.setattr(gate, "load_market", _fake_load_market)
     monkeypatch.setattr(gate, "_configured_bank_ids", _fake_configured_bank_ids)
 
+    async def _all_available():  # D-37: no UNAVAILABLE bank in these tests
+        return gate.GateAvailability()
+
+    monkeypatch.setattr(gate, "load_availability", _all_available)
+
     persisted = {}
 
     async def _fake_insert_plan_analytics(value_row, shadow_rows, energy_rows):

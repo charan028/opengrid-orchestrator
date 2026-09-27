@@ -115,6 +115,7 @@ async def test_typesafe_never_writes_explanations() -> None:
 def test_the_screening_questions_share_the_intent_vocabulary() -> None:
     assert set(SCREEN_QUESTIONS["intent"]["criteria"]) == {
         "deterministic_query",
+        "fleet_query",
         "explain_decision",
         "draft_action",
         "out_of_scope",

@@ -125,3 +125,19 @@ For the selector and forecast, this means:
 3. Territory data: the service-territory boundaries, and the feeder and substation list for siting.
 4. Substation asset sizes (kW / kWh per site) and the interconnection limits.
 5. The exact "$/kW in vs out" formula Base uses internally, so the orchestrator's reports match their ROI model.
+
+## D-37: LCRA and Rayburn zones (2026-09-26, supersedes D-32)
+
+| Zone | Utility (`og.utility`) | Market | M1 | Banks (production) | Availability |
+|---|---|---|---|---|---|
+| LZ_AEN | AUSTIN_ENERGY | REGULATED | none | bank-040..049 + the 20 MW set | AVAILABLE (real toll) |
+| LZ_CPS | CPS_ENERGY | REGULATED | none | off | -- |
+| LZ_LCRA | LCRA ("LCRA (Lower Colorado River Authority)") | REGULATED (NOIE) | none | bank-050..059 | UNAVAILABLE, `REGULATED_NO_CONTRACT` |
+| LZ_RAYBN | RAYBURN ("Rayburn Country Electric Cooperative") | REGULATED (NOIE) | none | bank-060..069 | UNAVAILABLE, `REGULATED_NO_CONTRACT` |
+
+LCRA and Rayburn are modelled like Austin Energy: the utility is the customer and energy is territory-bound (K15).
+The real counterparties may be their member cities and distribution co-ops; `LCRA` and `RAYBURN` stand for them
+until contracts name them. No contract exists, so each utility has one **"Sample Contract: ... Tolling (placeholder
+terms)"** cloned from the Austin toll (REGULATED_CAPACITY / TOLLING, 90 min, $102/kW-yr placeholder, 6,000 kW), kept
+SUSPENDED with `is_sample = true` (shown as SAMPLE – INACTIVE; never called, reserved or billed, so it never
+enters revenue). Their banks show "Regulated market – no contract" and contribute nothing to available kW.

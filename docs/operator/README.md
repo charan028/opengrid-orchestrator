@@ -226,6 +226,42 @@ Filters: customer, contract, service, day (market-local, CT).
 - Since R3, **Run chain verify** also works from an unfiltered page: blank From/To are sent as "no filter".
   Every stream is verified whatever the filter.
 
+### 3.9 Copilot (launcher in the footer, every screen)
+
+The copilot is a question panel. It is **advisory only**: it reads what the console reads, cites its sources,
+and cannot command, approve or release anything. Viewers may use it.
+
+**Fleet counts and totals (r3.4.1).** The copilot answers these from the fleet data itself, through the same
+filters as the Fleet table (`GET /og/api/fleet/summary`, read-only). The numbers are exact counts, not
+estimates. For example:
+
+| Ask | What it counts |
+|---|---|
+| "how many units have capacity 78.4 kWh" | hubs rated 78.4 kWh (dual-unit homes) |
+| "how many hubs are below 30% charge in LZ_NORTH" | hubs in LZ_NORTH at or below 30% SoC, lowest charge listed first |
+| "how many trucks are at home" | D-31 trucks within 250 m of their home station (the same rule the guardian's G-35 check uses) |
+| "total available kW in LZ_AEN" | rated kW of LZ_AEN hubs that are online or stale on an available bank |
+| "how many hubs by zone" / "total available kWh by soc bucket" | a breakdown by zone, availability, health, asset class or 20% SoC band |
+| "which units have health issues?" | hubs that are stale, degraded, quarantined, in fault or offline |
+
+It understands rated capacity (kWh) and power (kW) per hub (exact, "over", "under", "between"), charge in
+percent, load zone (`LZ_...`), bank, availability (including regulated market with no contract), health,
+firmware and hardware version, and asset type (home, dual-unit, substation, truck). **Available kWh** is the
+energy above each hub's reserve floor, on hubs that could be dispatched now.
+
+**Reading the line under an answer:**
+
+- "answered from console data · question screened by `<model>`": a model checked the question for intent
+  and prompt injection; every number in the answer came from the console's own records.
+- "AI-assisted · `<model>`": a model wrote the explanation. Any figure it cites must be in the data it was
+  given; if one is not, the explanation is withheld and the console's own answer is shown.
+- "answered from console data · no model used": no model is configured or reachable. Fleet counts still work.
+
+**What reaches a model:** only query results (counts, totals, equipment ids, zones, ratings, SoC, health).
+Never configuration files, credentials, anything under `/etc/opengrid`, household data or positions. With a
+model configured, text that tries to instruct the assistant is refused before any fleet data is read. Model use is capped by the daily budget
+shown on System Health (`GET /og/api/ai/status`).
+
 ## 4. Commitments, in one page
 
 - A customer's opportunity is **Offered**, then **Selected** by the optimizer at a quarter-hour gate, then
@@ -395,6 +431,28 @@ curl -s -u og-op-b:... -X POST https://base.tocy-net.net/og/api/safestop/release
   og-api accepts a second deployment of an award that is already deployed, so never chain deployments past the
   product's window: the energy hold covers one product duration.
 
+**Automatic deployments from ERCOT (r3.4.1, D-35).** When `[feeds.ercot_as_poll]` is enabled, og-feeds reads
+ERCOT's AS dispatch instructions every 5 s (today from the ogsim MMS simulator) and applies each one exactly
+as the Deploy button would: the same checks, the same deployment row (source `ERCOT`), the same hold rules. An
+ERCOT recall ends the deployment it names. You don't act on an accepted instruction; it appears in the
+award's row as `deployed` and in the trace (stream `ercot_as_poll`, origin `ERCOT_POLL`).
+
+- **Refused instruction** (`ALR-ERCOT-AS-REFUSED`). The summary names the instruction and why: `404`
+  no award for that resource and service now; `409` not deployable, already deployed, longer than the
+  product, more MW than awarded, two awards match, or arrived too late; `422` unreadable. ERCOT has been told
+  REJECT with that reason. Check the award (Dispatch, AS table). If ERCOT really needs the deployment, use
+  **Deploy** on the award and record the instruction id in the reason. Acknowledge the alert; it doesn't
+  clear on its own.
+- **Poll failing or stale** (`ALR-ERCOT-AS-POLL-FAILED`, `ALR-ERCOT-AS-POLL-STALE`). og-feeds cannot read
+  instructions, so a deployment could be missed. Check og-feeds and the simulator (`systemctl status
+  og-feeds og-sim-market`). Retries run every 5 to 60 s, and both alerts clear on the next good poll.
+- **Simulating ERCOT.** On `/ogsim/`, run a scenario `ercot_as_01_ecrs_deploy` … `ercot_as_07_exceed_award`,
+  or inject an `ercot_as_*` type with the resource as target. The market sim lists every instruction and our
+  answer at `/mms/admin/vdis`. A deployment on a real committed award discharges it: run these only when you
+  intend to.
+- **Switching it off:** set `[feeds.ercot_as_poll].enabled = false` and restart og-feeds. Active deployments
+  run to their end; Stop deploy still works.
+
 ### 6.6 Bulk command (a selection of hubs)
 
 Build a selection on the Fleet map (**Select an area**) or with the table's checkboxes, then Setpoint (kW) and
@@ -477,6 +535,31 @@ journalctl -u og-engine --since -10min | grep -i 'grid link'   # listening, asso
 3. MQTT user `og_gridlink` with publish on `og/v1/scada/instruction/#`;
 4. a firewall opening for the utility's EMS addresses only;
 5. both `enabled` switches in `[grid_link]`, then a restart of og-engine.
+### 6.10 Regulated zones with no contract (LZ_LCRA, LZ_RAYBN; D-37)
+Hubs and banks in `LZ_LCRA` (bank-050..059) and `LZ_RAYBN` (bank-060..069) carry the badge **"Regulated market – no contract"**
+(`og.bank.availability = UNAVAILABLE`, reason `REGULATED_NO_CONTRACT`). The tooltip reads: *Unavailable: regulated
+(NOIE) territory, so energy can't be sold into ERCOT, and there is no utility capacity contract to reserve it.
+Available once a contract is signed.*
+- Nothing is offered, planned or dispatched there, and they are not charged (idle hold). A manual target other than
+  0 kW is refused (409) with that reason; the guardian vetoes any non-idle item there (G-33,
+  `R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT`).
+- They stay monitored: telemetry, alerts, health, safe stop (a 0 kW hold), firmware and the invariants all work.
+- Profitability and the Control room show their capacity on its own line ("Regulated market – no contract: N kW"), never in
+  available kW. The Fleet table filter `Availability` lists them.
+- ERCOT obligations that were already committed on those banks at the switch complete untouched (K13
+  grandfathering); only new commitments are affected. Check with `deploy/scripts/noie_switch_check.sql` (read-only).
+- Each utility has a "Sample Contract: ..." listed as **SAMPLE – INACTIVE**: a template, never active.
+**Making a zone AVAILABLE once a real contract is signed** (release manager / lead, with the owner's approval):
+1. Enter the real contract for the utility (`og.contract`, `market = 'REGULATED'`, `utility_id = 'LCRA'` or
+   `'RAYBURN'`, `is_sample = false`, its own name and product rule) and set it `ACTIVE`. Leave the sample SUSPENDED
+   (it can never be activated: a CHECK forbids it). Update the `og.utility` terms from the contract.
+2. In one transaction, flip that utility's banks:
+   `UPDATE og.bank b SET availability = 'AVAILABLE', availability_reason = NULL, availability_since = now()
+   FROM og.utility u WHERE u.utility_id = 'LCRA' AND b.zone = ANY (u.territory_zones);`
+   (`noie_switch_seed.sql` never marks a zone unavailable again while an ACTIVE non-sample contract exists.)
+3. Nothing to restart: og-engine re-reads availability with the market model, the selector every gate, the
+   guardian on its topology refresh. Confirm on the Fleet page (badge gone) and at the next gate (the toll is
+   reserved in the utility's window). Record it in the decision log.
 
 ## 7. Degraded modes and guardian escalation
 
@@ -557,7 +640,8 @@ Every alert is a row with an id, a rule, a severity (`warning` or `critical`), a
 times. System Health's "Alerts" list is live; the Control room's "Open alerts" reflects page load. The rule id is
 not a column: the summary text says which it is. **Acknowledging** records who looked (section 6.8); it never
 clears an alert. An alert clears when its condition ends, and only its owner clears it: the health evaluator
-(which runs inside og-settle every 5 s), og-engine, og-settle or og-guardian. If og-settle is down, no health
+(which runs inside og-settle every 5 s), og-engine, og-settle, og-guardian or (for the ERCOT AS poll alerts)
+og-feeds. If og-settle is down, no health
 alert is raised or cleared and the degraded modes freeze.
 
 | Rule | Severity | Raised when | Clears |
@@ -585,6 +669,9 @@ alert is raised or cleared and the degraded modes freeze.
 | `ALR-CALIBRATION-BUDGET` | warning | The guardian held a remote calibration (fleet budget, concurrency or suspected systemic drift, G-25). Dormant while `[assets] drift_enabled = false` | No automatic clear |
 | `ALR-CALIBRATION-PROTOCOL` | warning | A calibration acknowledgement did not match the issued command, or the hub rejected it. Dormant like the above | No automatic clear |
 | `ALR-XFMR-UNMAPPED` | warning | og-guardian checked a batch with a hub that has no service-transformer mapping, so G-27 checks it as a group of one. Every hub today: expect one open row per bank the guardian commands, all with the same summary | No automatic clear |
+| `ALR-ERCOT-AS-REFUSED` | warning | Since r3.4.1 (D-35): og-feeds refused an ERCOT AS dispatch instruction (404/409/422 and a reason code) and answered ERCOT REJECT. One row per instruction; a re-delivered duplicate adds none (6.5) | No automatic clear |
+| `ALR-ERCOT-AS-POLL-FAILED` | warning | Three ERCOT AS instruction polls in a row failed | og-feeds clears it on the next good poll |
+| `ALR-ERCOT-AS-POLL-STALE` | critical | No ERCOT AS instruction poll has succeeded for 60 s: a deployment may be missed | og-feeds clears it on the next good poll |
 | `ALR-TRACE-VERDICT-WRITE-FAILED` | warning | A verdict's `GUARDIAN_VERDICT` trace row could not be written (the verdict stands; the audit row is missing) | No automatic clear |
 
 An open alert keeps the severity it opened with: a zone that goes from 6% to 25% offline stays a warning until

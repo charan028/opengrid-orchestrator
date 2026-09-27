@@ -52,7 +52,9 @@ class FakeProvider:
         usage: TokenUsage | None = None,
         screen_model: str = "fake-screen-1",
         explain_model: str | None = "fake-explain-1",
+        fleet: dict[str, Any] | None = None,
     ) -> None:
+        self._fleet = fleet
         self._name: ProviderName = name
         self._intent = intent
         self._confidence = confidence
@@ -91,6 +93,7 @@ class FakeProvider:
             injection_risk=self._injection,
             provider=self._name,
             model=self._screen_model,
+            fleet=self._fleet,
         )
         return verdict, self._usage
 

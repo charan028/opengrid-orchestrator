@@ -153,6 +153,78 @@ CATALOGUE: list[AnomalyType] = [
         ),
         wire_type="MARKET_AS_DEPLOYMENT",
     ),
+    # ---- ERCOT AS dispatch instructions on the MMS/EWS endpoint (D-35, ogsim.market.as_dispatch) ----
+    # One-shot: each injection publishes the instruction(s) at once; `duration` only bounds the log
+    # entry. Never drawn by random mode (not listed in config/random.yaml).
+    AnomalyType(
+        id="ercot_as_deploy",
+        owner="market",
+        target_kind="ERCOT resource (e.g. OG_ESR_1, or * for the first award)",
+        params={
+            "service": {
+                "type": "string",
+                "default": "ECRS",
+                "enum": ["ECRS", "RRS", "REGUP", "REGDN", "NSPIN"],
+            },
+            "mw": {"type": "number", "default": 0.0, "description": "0 = the sim's award MW"},
+            "duration_min": {"type": "number", "default": 30.0},
+            "ramp_min": {"type": "integer", "default": 10},
+            "start_in_s": {"type": "number", "default": 0.0},
+        },
+        description="ERCOT deploys an awarded AS (DEPLOY_AS dispatch instruction on /mms/ews/).",
+        wire_type="MARKET_ERCOT_AS_DEPLOY",
+    ),
+    AnomalyType(
+        id="ercot_as_recall",
+        owner="market",
+        target_kind="ERCOT resource",
+        params={"service": {"type": "string", "default": "ECRS"}},
+        description="ERCOT recalls the newest deployment of that resource and service (RECALL_AS).",
+        wire_type="MARKET_ERCOT_AS_RECALL",
+    ),
+    AnomalyType(
+        id="ercot_as_duplicate",
+        owner="market",
+        target_kind="ERCOT resource",
+        params={"service": {"type": "string", "default": "ECRS"}, "mw": {"type": "number", "default": 0.0}},
+        description="A DEPLOY_AS delivered again after it was acknowledged (at-least-once transport).",
+        wire_type="MARKET_ERCOT_AS_DUPLICATE",
+    ),
+    AnomalyType(
+        id="ercot_as_out_of_order",
+        owner="market",
+        target_kind="ERCOT resource",
+        params={"service": {"type": "string", "default": "ECRS"}, "mw": {"type": "number", "default": 0.0}},
+        description="A DEPLOY_AS and its RECALL_AS, the recall delivered first (out-of-order delivery).",
+        wire_type="MARKET_ERCOT_AS_OUT_OF_ORDER",
+    ),
+    AnomalyType(
+        id="ercot_as_malformed",
+        owner="market",
+        target_kind="ERCOT resource",
+        params={"service": {"type": "string", "default": "ECRS"}},
+        description="A DEPLOY_AS whose MW and start time cannot be parsed (the QSE must reject it).",
+        wire_type="MARKET_ERCOT_AS_MALFORMED",
+    ),
+    AnomalyType(
+        id="ercot_as_unknown_award",
+        owner="market",
+        target_kind="ERCOT resource with no award (default OG_ESR_UNKNOWN)",
+        params={"service": {"type": "string", "default": "ECRS"}, "mw": {"type": "number", "default": 0.5}},
+        description="A DEPLOY_AS for a resource/service the QSE holds no award for.",
+        wire_type="MARKET_ERCOT_AS_UNKNOWN_AWARD",
+    ),
+    AnomalyType(
+        id="ercot_as_exceed_award",
+        owner="market",
+        target_kind="ERCOT resource",
+        params={
+            "service": {"type": "string", "default": "ECRS"},
+            "factor": {"type": "number", "default": 3.0},
+        },
+        description="A DEPLOY_AS for more MW than awarded (factor x the award).",
+        wire_type="MARKET_ERCOT_AS_EXCEED_AWARD",
+    ),
     AnomalyType(
         id="nws_extreme_weather",
         owner="market",
@@ -392,14 +464,18 @@ CATALOGUE: list[AnomalyType] = [
         target_kind="asset (mobile trailer, e.g. trailer-mb-01)",
         params={
             "site_id": {"type": "string", "default": ""},
+            "site_lat": {"type": "number", "default": None},
+            "site_lon": {"type": "number", "default": None},
             "committed_kw": {"type": "number", "default": 500.0},
             "arrival_soc_pct": {"type": "number", "default": 90.0},
         },
         description=(
             "Deploys a mobile battery/trailer asset to `site_id` for a MOBILE_STORAGE contract "
             "(config/service_profiles/mobile_storage.toml): delivered kW is metered from the moment of "
-            "arrival, with `arrival_soc_pct` as the deployment's starting condition. Registered "
-            "2026-09-26 for `svc-mobile-storage.yaml` (SERVICES agent)."
+            "arrival, with `arrival_soc_pct` as the deployment's starting condition. With `site_lat`/"
+            "`site_lon`, ogsim.fleet drives a simulated truck there (its device_info position follows; D-31: "
+            "it never charges away from its home station). Registered 2026-09-26 for "
+            "`svc-mobile-storage.yaml`."
         ),
         wire_type="FLEET_MOBILE_DEPLOYMENT_START",
         wire_target_kind="asset",
@@ -411,6 +487,8 @@ CATALOGUE: list[AnomalyType] = [
         params={
             "from_site_id": {"type": "string", "default": ""},
             "to_site_id": {"type": "string", "default": ""},
+            "to_site_lat": {"type": "number", "default": None},
+            "to_site_lon": {"type": "number", "default": None},
             "committed_kw": {"type": "number", "default": 500.0},
         },
         description=(

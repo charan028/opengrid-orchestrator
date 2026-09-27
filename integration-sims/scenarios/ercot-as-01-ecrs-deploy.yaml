@@ -1,0 +1,14 @@
+name: ercot_as_01_ecrs_deploy
+description: >
+  Normal ECRS deployment: ERCOT deploys the OG_ESR_1 ECRS award for 30 minutes (10-minute ramp).
+  Expected: the poller accepts it (one og.as_deployment row, source ERCOT), acknowledges ACCEPT and
+  traces it with origin ERCOT_POLL.
+  Publishes ERCOT AS dispatch instructions on ogsim.market's MMS/EWS endpoint (/mms/ews/, D-35). The
+  orchestrator sees them only when [feeds.ercot_as_poll] is enabled and points at this simulator; its
+  decision and acknowledgement are listed at GET /mms/admin/vdis on the market sim.
+steps:
+  - at_s: 0
+    type: ercot_as_deploy
+    target: OG_ESR_1
+    params: {service: ECRS, duration_min: 30, ramp_min: 10}
+    duration: 1800

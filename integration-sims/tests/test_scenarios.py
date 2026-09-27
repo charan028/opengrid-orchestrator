@@ -35,7 +35,11 @@ def test_all_shipped_scenarios_load_without_error():
     demo_files = sorted(SCENARIOS_DIR.glob("demo-*.yaml"))
     svc_files = sorted(SCENARIOS_DIR.glob("svc-*.yaml"))
     delivery_files = sorted(SCENARIOS_DIR.glob("delivery-*.yaml"))  # D-38 delivery corroboration
-    assert len(scenarios) == len(CORE_SCENARIOS) + len(demo_files) + len(svc_files) + len(delivery_files)
+    ercot_as_files = sorted(SCENARIOS_DIR.glob("ercot-as-*.yaml"))  # D-35 AS dispatch instructions
+    assert len(ercot_as_files) == 7
+    assert len(scenarios) == (
+        len(CORE_SCENARIOS) + len(demo_files) + len(svc_files) + len(ercot_as_files) + len(delivery_files)
+    )
 
 
 def test_missing_scenarios_dir_returns_empty_list(tmp_path: Path):

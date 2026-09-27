@@ -5,10 +5,11 @@ vetoed at item level (R-MOBILE-CHARGE-AWAY-FROM-HOME-STATION)."""
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from opengrid.core import reasons
+from opengrid.core import geo, reasons
 from opengrid.guardian import checks
 from opengrid.guardian.ports import ProposedItem
 from opengrid.guardian.repo import ConfigMobileUnitPort
@@ -118,7 +119,10 @@ async def test_the_config_registry_marks_assigned_units_mobile_with_an_unknown_l
     assert await port.at_home_station("trailer-mb-01") is None  # no location source: G-35 fails closed
 
 
-# --- Trucks (owner request 2026-09-26): the at-home read from og.hub lat/lon vs the home station ---------
+# --- Trucks: the at-home read is the FRESH DEVICE-REPORTED position (og.hub.device_lat/lon, device_info_at),
+# never og.hub.lat/lon (the seeded home station, which never moves) -- r3.4 review HIGH -------------------
+
+NOW = datetime(2026, 9, 27, 3, 0, tzinfo=UTC)
 
 _TRUCK_REGISTRY = {
     "home_station": [
@@ -129,10 +133,12 @@ _TRUCK_REGISTRY = {
     ],
 }
 
+Row = tuple[str, str, float | None, float | None, datetime | None]
+
 
 class _Cursor:
-    def __init__(self, positions: dict[str, tuple[float | None, float | None]]) -> None:
-        self._positions, self._row = positions, None
+    def __init__(self, rows: list[Row]) -> None:
+        self._rows, self._out = rows, []
 
     async def __aenter__(self):
         return self
@@ -140,17 +146,18 @@ class _Cursor:
     async def __aexit__(self, *exc):
         return False
 
-    async def execute(self, sql: str, params: dict[str, str]) -> None:
-        assert "FROM og.hub" in sql
-        self._row = self._positions.get(params["hub_id"])
+    async def execute(self, sql: str, params: dict[str, list[str]]) -> None:
+        assert sql == geo.DEVICE_POSITIONS_SQL  # the one shared query, never og.hub.lat/lon
+        ids = set(params["ids"])
+        self._out = [r for r in self._rows if r[0] in ids or r[1] in ids]
 
-    async def fetchone(self):
-        return self._row
+    async def fetchall(self):
+        return self._out
 
 
 class _Conn:
-    def __init__(self, positions) -> None:
-        self._positions = positions
+    def __init__(self, rows) -> None:
+        self._rows = rows
 
     async def __aenter__(self):
         return self
@@ -159,40 +166,48 @@ class _Conn:
         return False
 
     def cursor(self) -> _Cursor:
-        return _Cursor(self._positions)
+        return _Cursor(self._rows)
 
 
 class _Pool:
     """Just enough of `AsyncConnectionPool` for `ConfigMobileUnitPort._position`."""
 
-    def __init__(self, positions) -> None:
-        self._positions = positions
+    def __init__(self, rows) -> None:
+        self._rows = rows
 
     def connection(self) -> _Conn:
-        return _Conn(self._positions)
+        return _Conn(self._rows)
 
 
-def _truck_port(position: tuple[float | None, float | None] | None) -> ConfigMobileUnitPort:
+def _truck_port(
+    position: tuple[float | None, float | None] | None, *, age_s: float | None = 10.0
+) -> ConfigMobileUnitPort:
+    """A port whose truck last reported `position` `age_s` ago (None position: no og.hub row at all)."""
     from opengrid.selector.gate import parse_mobile_home_station_sites
 
-    positions = {} if position is None else {"truck-dfw-01": position}
+    reported_at = None if age_s is None else NOW - timedelta(seconds=age_s)
+    rows = [] if position is None else [("truck-dfw-01", "bank-truck-dfw-01", *position, reported_at)]
     return ConfigMobileUnitPort(
         parse_mobile_home_stations(_TRUCK_REGISTRY),
         parse_mobile_home_station_sites(_TRUCK_REGISTRY),
-        _Pool(positions),  # type: ignore[arg-type]
+        _Pool(rows),  # type: ignore[arg-type]
+        clock=lambda: NOW,
     )
 
 
-async def test_a_truck_parked_at_its_home_station_is_at_home():
-    port = _truck_port((32.8386, -96.9731))  # ~15 m from the depot
+async def test_a_truck_reporting_from_its_home_station_is_at_home():
+    port = _truck_port((32.8386, -96.9731))  # ~15 m from the depot, reported 10 s ago
     assert port.is_mobile("truck-dfw-01") and port.is_mobile("bank-truck-dfw-01")
     assert await port.at_home_station("truck-dfw-01") is True
 
 
-async def test_a_truck_away_from_home_or_without_a_position_is_not_at_home():
+async def test_a_truck_away_or_with_a_missing_or_stale_report_is_not_at_home():
     assert await _truck_port((32.7767, -96.7970)).at_home_station("truck-dfw-01") is False  # downtown Dallas
     assert await _truck_port(None).at_home_station("truck-dfw-01") is None  # no og.hub row
-    assert await _truck_port((None, None)).at_home_station("truck-dfw-01") is None  # no recorded position
+    assert await _truck_port((None, None)).at_home_station("truck-dfw-01") is None  # never reported
+    assert await _truck_port((32.8385, -96.9730), age_s=None).at_home_station("truck-dfw-01") is None
+    stale = _truck_port((32.8385, -96.9730), age_s=geo.MOBILE_POSITION_MAX_AGE_S + 1.0)
+    assert await stale.at_home_station("truck-dfw-01") is None  # a stale report at home is unknown: away
 
 
 async def test_g35_allows_a_truck_charging_at_home_and_blocks_it_away(fakes, guardian_config, signing_seed):
@@ -201,6 +216,9 @@ async def test_g35_allows_a_truck_charging_at_home_and_blocks_it_away(fakes, gua
     assert "G-35" not in home.vetoed_rule_ids
     away = await _verdict(fakes, guardian_config, signing_seed, _truck_port((29.4241, -98.4936)), item)  # type: ignore[arg-type]
     assert "G-35" in away.vetoed_rule_ids
+    stale_at_home = _truck_port((32.8385, -96.9730), age_s=3600.0)
+    stale = await _verdict(fakes, guardian_config, signing_seed, stale_at_home, item)  # type: ignore[arg-type]
+    assert "G-35" in stale.vetoed_rule_ids  # fail closed: a stale report never proves "at home"
     # Discharging away from home (serving a deployment) is not G-35's concern.
     serve = await _verdict(
         fakes,

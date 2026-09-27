@@ -424,3 +424,27 @@ def test_production_thresholds_10s_reports_25s_stale_60s_offline() -> None:
     assert label == {9: "OK", 15: "OK", 24: "OK", 30: "WATCH", 59: "WATCH", 70: "OFFLINE"}
     w = where_clause(HubFilter(health=("online",)), th)
     assert w.params[:2] == [60.0, 25.0] and ["online"] in w.params
+
+
+def test_availability_is_read_guarded_filterable_and_shaped() -> None:
+    """D-37: bank availability joins og.bank via to_jsonb (NULL before 0046 reads AVAILABLE), filters bind
+    the state, and every row carries the four owner-worded fields from opengrid.market.availability."""
+    w = where_clause(HubFilter(availability=("UNAVAILABLE",)), TH)
+    assert "coalesce(to_jsonb(b.*) ->> 'availability', 'AVAILABLE') = ANY(%s)" in w.text
+    assert ["UNAVAILABLE"] in w.params
+    q = page_query(HubFilter(), TH, sort="hub", descending=False, cursor=None, limit=25)
+    assert "LEFT JOIN og.bank b ON b.bank_id = h.bank_id" in q.text and "AS availability_reason" in q.text
+    shaped = shape_hub(
+        _row(1, availability="UNAVAILABLE", availability_reason="REGULATED_NO_CONTRACT"), TH, now=NOW
+    )
+    assert shaped["availability"] == "UNAVAILABLE"
+    assert shaped["availability_badge"].startswith("Regulated market")
+    assert "NOIE" in shaped["availability_text"]
+    plain = shape_hub(_row(2), TH, now=NOW)
+    assert plain["availability"] == "AVAILABLE" and plain["availability_badge"] is None
+
+
+def test_availability_filter_rejects_unknown_states(search_client: TestClient) -> None:
+    assert (
+        search_client.get("/og/api/fleet/table?availability=MAYBE", headers=VIEWER_HEADERS).status_code == 422
+    )

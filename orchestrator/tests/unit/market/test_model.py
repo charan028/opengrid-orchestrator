@@ -50,6 +50,8 @@ def test_zone_territory_loads_from_the_repo_config() -> None:
     assert load_zone_territory(CONFIG_DIR / "tdsp_tariffs.toml") == {
         "LZ_AEN": "AUSTIN_ENERGY",
         "LZ_CPS": "CPS_ENERGY",
+        "LZ_LCRA": "LCRA",  # D-37
+        "LZ_RAYBN": "RAYBURN",
     }
 
 
@@ -155,7 +157,8 @@ def test_zone_owners_reject_unknown_market_label() -> None:
 
 
 def test_repo_config_has_no_noie_zone_yet() -> None:
-    """LCRA/RAYBN stay FREE until the owner decides (issue #36 point 4): nothing changes today."""
+    """D-37: LCRA/RAYBN are REGULATED (their own utilities), not NOIE -- a NOIE owner could not carry the
+    utility's own contract. The repo config still has no NOIE zone."""
     owners = load_zone_owners(CONFIG_DIR / "tdsp_tariffs.toml")
     assert "NOIE" not in owners.values()
 

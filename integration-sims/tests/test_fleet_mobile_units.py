@@ -106,3 +106,73 @@ def test_shipped_fleet_yaml_simulates_eight_trucks():
     trucks = [u for u in config.mobile_units if u.simulate]
     assert len(trucks) == 8
     assert all(u.at_home and u.sim_bank_id == f"bank-{u.trailer_id}" for u in trucks)
+
+
+# --- Scenarios move a truck (r3.4 review HIGH): deploy to a site, then return to the depot -----------------
+
+SITE = (32.7767, -96.7970)
+
+
+def _cmd(wire_type: str, params: dict) -> dict:
+    return {
+        "id": f"t-{wire_type.lower()}",
+        "type": wire_type,
+        "target": {"kind": "asset", "ref": "truck-dfw-01"},
+        "params": params,
+        "start": 1_790_000_000.0,
+    }
+
+
+def test_a_deployment_moves_the_truck_blocks_charging_and_republishes_its_position():
+    engine = FleetEngine(_config(_truck()), seed=1)
+    idx = engine.state.hub_index["truck-dfw-01"]
+    assert engine.take_mobile_position_changes() == []
+
+    started = engine.handle_scenario_cmd(
+        _cmd("FLEET_MOBILE_DEPLOYMENT_START", {"site_id": "site-1", "site_lat": SITE[0], "site_lon": SITE[1]})
+    )
+    assert started is not None
+    assert (engine.state.lat_deg[idx], engine.state.lon_deg[idx]) == SITE
+    assert bool(engine.state.charge_blocked[idx])
+    assert engine.take_mobile_position_changes() == ["truck-dfw-01"]
+    _suffix, info = engine.device_info_message("truck-dfw-01", 1_790_000_000.0)
+    assert (info["lat"], info["lon"]) == SITE  # what the orchestrator's G-35/selector read
+    assert _charge(engine, 250.0) == 0.0  # the device itself never charges away from home either
+
+    relocated = engine.handle_scenario_cmd(
+        _cmd("FLEET_MOBILE_DEPLOYMENT_RELOCATE", {"to_site_lat": 32.9, "to_site_lon": -96.8})
+    )
+    assert relocated is not None and (engine.state.lat_deg[idx], engine.state.lon_deg[idx]) == (32.9, -96.8)
+
+    home = engine.handle_scenario_cmd(
+        _cmd("FLEET_MOBILE_HOME_STATION_CHARGE", {"home_station_id": "hs-dfw-irving-01"})
+    )
+    assert home is not None
+    assert (engine.state.lat_deg[idx], engine.state.lon_deg[idx]) == (32.8385, -96.9730)
+    assert not bool(engine.state.charge_blocked[idx])
+    assert engine.take_mobile_position_changes() == ["truck-dfw-01"]
+    assert _charge(engine, 250.0) == pytest.approx(250.0, rel=1e-3)
+
+
+def test_move_steps_without_a_site_or_for_a_non_truck_change_nothing():
+    engine = FleetEngine(_config(_truck()), seed=1)
+    assert engine.handle_scenario_cmd(_cmd("FLEET_MOBILE_DEPLOYMENT_START", {"site_id": "no-coords"})) is None
+    assert engine.move_mobile_unit("hub-00000", SITE) is False
+    assert engine.take_mobile_position_changes() == []
+
+
+def test_the_position_heartbeat_republishes_every_truck():
+    engine = FleetEngine(_config(_truck()), seed=1)
+    assert engine.take_mobile_position_changes(all_units=True) == ["truck-dfw-01"]
+    assert load_fleet_config(str(SHIPPED)).mobile_position_interval_s == 60.0
+
+
+def test_the_shipped_deploy_and_return_scenario_targets_a_simulated_truck():
+    import yaml
+
+    path = Path(__file__).resolve().parents[1] / "scenarios" / "svc-truck-deploy-return.yaml"
+    steps = yaml.safe_load(path.read_text(encoding="utf-8"))["steps"]
+    assert [s["type"] for s in steps] == ["mobile_deployment_start", "mobile_home_station_charge"]
+    trucks = {u.trailer_id for u in load_fleet_config(str(SHIPPED)).mobile_units if u.simulate}
+    assert {s["target"] for s in steps} <= trucks
+    assert {"site_lat", "site_lon"} <= set(steps[0]["params"])

@@ -2400,3 +2400,10 @@ label > select {
     display: none;
   }
 }
+
+/* D-37: banks UNAVAILABLE in regulated (NOIE) territory with no contract ("Regulated market - no contract"). */
+.og-badge.og-unavail, .og-unavail-line .og-unavail {
+  display: inline-block; padding: 0 .4em; border-radius: 3px; border: 1px dashed var(--muted);
+  color: var(--muted); font-weight: 600;
+}
+.og-unavail-zones { margin: .25em 0 0 1.2em; font-size: .9em; color: var(--muted); }

@@ -194,6 +194,11 @@ default_pv_rated_kw = 10
 # substation battery set (D-29 utility toll, dev/seed/market_model_seed.sql) sits alone on its own
 # feeder: 20 MW/min lets a 20 MW firm toll call reach full output within one minute.
 "feeder-sub-LZ_AEN-00" = 20000
+# The toll also reserves 600 kW on each of the 10 Austin home banks, 5 on each home feeder: each feeder ramps
+# about 3.3 MW/min on the signed-setpoint anchor (G-04/G-06), above the 3 MW/min default, so both Austin home
+# feeders get 7 MW/min (owner/lead directive, r3.4.2).
+"feeder-LZ_AEN-00" = 7000
+"feeder-LZ_AEN-01" = 7000
 
 [trace]
 # K11 journal: every process constructing a PgTraceBackend journals here (opengrid-writable).
@@ -363,6 +368,10 @@ base_path = "/og"
 bind_host = "127.0.0.1"
 # og-engine /metrics (loopback only): cycle latency, gate duration, flush lag, MQTT ingest lag.
 engine_port = 9101
+# og-guardian /metrics: verdicts, clock offset, og_mqtt_reconnects_total{client="guardian"|"guardian-tel"}.
+guardian_port = 9103
+# og-safestop /metrics (02b S1.2): og_mqtt_reconnects_total{client="safestop"|"safestop-l2"}, og_mqtt_connected.
+safestop_port = 9106
 
 [assets]
 # Asset-health drift sweep in og-settle (WATCH -> guardian-signed calibration, DEGRADED -> work order).
@@ -386,12 +395,27 @@ characterization_interval_s = 300.0
 # og.owner_charge_window rows (migration 0038) win over these; these win over the built-in default.
 AUSTIN_ENERGY = ["22:00-06:00"]
 
-[market_sim]
-# og-feeds AS-deployment poller against the market simulator: off until the lead switches it on.
-as_deployment_poll = false
-base_url = "http://127.0.0.1:8090"
-as_deployment_poll_interval_s = 10
-as_deployment_lease_s = 60
+[feeds.ercot_as_poll]
+# D-35: og-feeds polls ERCOT AS deployment instructions (ECRS/RRS/Reg/Non-Spin DEPLOY_AS / RECALL_AS) over the
+# ercot_mms adapter and applies each through the same core as POST /og/api/dispatch/as-deployments.
+# OFF in the repo. The release manager enables it in production with the simulator URL (RUNBOOK, D-35).
+enabled = false
+interval_s = 5.0              # poll cadence while healthy
+retry_cap_s = 60.0            # failed poll: retry after 5, 10, 20, 40, 60, 60 ... s
+failure_alert_after = 3       # consecutive failed polls -> ALR-ERCOT-AS-POLL-FAILED
+stale_after_s = 60.0          # no good poll for this long -> ALR-ERCOT-AS-POLL-STALE
+lookback_s = 900.0            # instructions issued in the last 15 min are requested
+max_instruction_age_s = 300.0 # an instruction first seen later than this after issue is refused (late)
+recall_hold_s = 300.0         # a recall that beats its deployment waits this long for it
+
+# [feeds.ercot_as_poll.mms]     # ErcotMmsSettings; against ogsim.market:
+# endpoint = "http://127.0.0.1:8090/mms/ews/"
+# qse_code = "QOPENGRID"
+# user_id = "opengrid-sim"
+# signing = "none"
+#
+# [feeds.ercot_as_poll.awards]  # "<ERCOT resource>:<AS type>" = the ERCOT_AS contract carrying those awards
+# "OG_ESR_1:ECRS" = "00000000-0000-7000-8000-000000000d03"
 
 [firmware]
 # Firmware campaigns (docs/orchestrator/07-delivery/16-firmware-updates.md); defaults per firmware/config.py.

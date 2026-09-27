@@ -48,6 +48,7 @@ from opengrid.integrations.ercot_mms.messages import (
     energy_offer_element,
     parse_awards,
     parse_reply,
+    parse_vdi_batch,
     parse_vdis,
     serialize,
     three_part_offer_element,
@@ -58,6 +59,7 @@ from opengrid.integrations.interfaces import (
     Award,
     DispatchInstruction,
     EnergyOffer,
+    InstructionBatch,
     SubmissionReceipt,
     ThreePartSupplyOffer,
 )
@@ -272,13 +274,33 @@ class ErcotMmsClient:
         instructions = parse_vdis(reply.payload, type_map=dict(self._settings.vdi_type_map))
         return [i for i in instructions if i.issued_at >= since]
 
-    async def acknowledge_vdi(self, instruction_id: str) -> SubmissionReceipt:
-        """`change VDIs` acknowledging one instruction (the acknowledgement element is UNCONFIRMED)."""
+    async def fetch_instruction_batch(self, since: datetime) -> InstructionBatch:
+        """`DispatchInstructionSource` (D-35): like `fetch_dispatch_instructions`, but a malformed
+        instruction is returned in `malformed` instead of failing the whole poll."""
+        reply = await self._get("VDIs", {"StartTime": to_market_tz(since).isoformat(timespec="seconds")})
+        batch = parse_vdi_batch(reply.payload, type_map=dict(self._settings.vdi_type_map))
+        return InstructionBatch(
+            instructions=[i for i in batch.instructions if i.issued_at >= since], malformed=batch.malformed
+        )
+
+    async def acknowledge_instruction(
+        self, instruction_id: str, *, accepted: bool, reason: str | None
+    ) -> SubmissionReceipt:
+        """`change VDIs` acknowledging one instruction with ACCEPT or REJECT and a reason. The `response`
+        and `reason` element spellings are UNCONFIRMED (agreed with ERCOT at onboarding, like
+        `vdi_type_map`). Sent once, never resent (`_transact`)."""
         payload = etree.Element(f"{{{PAYLOAD_NS}}}VDIs", nsmap={None: PAYLOAD_NS})
         vdi = etree.SubElement(payload, f"{{{PAYLOAD_NS}}}VDI")
         etree.SubElement(vdi, f"{{{PAYLOAD_NS}}}mRID").text = instruction_id
         etree.SubElement(vdi, f"{{{PAYLOAD_NS}}}acknowledged").text = "true"
+        etree.SubElement(vdi, f"{{{PAYLOAD_NS}}}response").text = "ACCEPT" if accepted else "REJECT"
+        if reason:
+            etree.SubElement(vdi, f"{{{PAYLOAD_NS}}}reason").text = reason[:200]
         return await self._transact(self._header("change", "VDIs"), payload)
+
+    async def acknowledge_vdi(self, instruction_id: str) -> SubmissionReceipt:
+        """`change VDIs` acknowledging (accepting) one instruction."""
+        return await self.acknowledge_instruction(instruction_id, accepted=True, reason=None)
 
     async def close(self) -> None:
         await self._client.aclose()
