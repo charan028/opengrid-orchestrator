@@ -29,7 +29,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -303,7 +303,9 @@ def _as_hold_items(
             items.append(
                 {
                     "hub_id": hub.hub_id,
-                    "p_kw_setpoint": _ramped_setpoint_kw(hub, 0.0, cycle_interval_s),
+                    "p_kw_setpoint": _ramped_setpoint_kw(hub, 0.0, cycle_interval_s)
+                    if cycle_interval_s is not None
+                    else 0.0,
                     "reason_code": grant.reason_code,
                     "obligation_id": str(grant.obligation_id),
                     "obligation_granted_kw": "0",
@@ -343,6 +345,7 @@ def _distribute_hub_items(
     cycle_interval_s: float | None = None,
     hub_allocations: Mapping[tuple[str, str], Mapping[str, float]] | None = None,
     excluded_hub_ids: frozenset[str] = frozenset(),
+    now: datetime | None = None,
 ) -> list[dict[str, object]]:
     """S8 command build (02a S1.10: "per-hub detail ... derivable from the command log referenced by
     command_batch_id"): distribute each bank-level `Grant`'s kW across the bank's currently-online hubs,
@@ -365,7 +368,7 @@ def _distribute_hub_items(
     if not hubs or sum(h.free_discharge_kw for h in hubs) <= 0:
         return items
     items.extend(
-        _as_hold_items(bank_id, grants, fleet_module=fleet_module, cycle_interval_s=cycle_interval_s)
+        _as_hold_items(bank_id, grants, fleet_module=fleet_module, cycle_interval_s=None)  # raw: 0 kW
     )
     allocations = hub_allocations or {}
     by_id = {h.hub_id: h for h in hubs}
@@ -402,7 +405,7 @@ def _distribute_hub_items(
             items.append(
                 {
                     "hub_id": hub.hub_id,
-                    "p_kw_setpoint": _ramped_setpoint_kw(hub, -share_kw, cycle_interval_s),
+                    "p_kw_setpoint": -share_kw,  # raw target; ramped per hub on the net below
                     "reason_code": reason_code,
                     "obligation_id": str(grant.obligation_id) if grant.obligation_id else None,
                     # This hub's share of the grant: guardian G-19 sums the shares per obligation.
@@ -410,6 +413,43 @@ def _distribute_hub_items(
                     "obligation_granted_kw": str(share_kw) if grant.obligation_id else None,
                 }
             )
+    return ramp_net_per_hub(items, fleet_module.hub_capabilities(bank_id), cycle_interval_s, now=now)
+
+
+def ramp_net_per_hub(
+    items: list[dict[str, object]],
+    hubs: Iterable[Any],
+    cycle_interval_s: float | None,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """A hub executes the SUM of its items in a batch (`guardian.checks.hub_setpoints`), so G-04's ramp
+    applies to that net, not to each item: with a 0 kW hold item plus a discharge item on one utility-scale
+    hub, stepping each from the same anchor asked for ~2x the bound (r3.4.3 MEDIUM, probe 56/60 vetoed).
+    `items` carry RAW targets; per hub the net target is stepped ONCE from the hub's anchor and the items
+    are scaled to sum to it (a 0 kW hold item stays 0 and only carries its reason); a hub whose items net
+    to 0 gets the whole step on its first item."""
+    if cycle_interval_s is None:
+        return items
+    by_id = {str(h.hub_id): h for h in hubs}
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for item in items:
+        grouped.setdefault(str(item["hub_id"]), []).append(item)
+    for hub_id, hub_items in grouped.items():
+        hub = by_id.get(hub_id)
+        if hub is None:
+            continue
+        targets = [float(str(i["p_kw_setpoint"])) for i in hub_items]
+        total = sum(targets)
+        net = _ramped_setpoint_kw(hub, total, cycle_interval_s, now=now)
+        if abs(total) > 1e-9:
+            factor = net / total
+            for item, target in zip(hub_items, targets, strict=True):
+                item["p_kw_setpoint"] = target * factor
+        else:
+            hub_items[0]["p_kw_setpoint"] = net
+            for item in hub_items[1:]:
+                item["p_kw_setpoint"] = 0.0
     return items
 
 
@@ -447,7 +487,7 @@ async def propose_batch_to_guardian(
         bank_id,
         manual_targets or {},
         fleet_module.hub_capabilities(bank_id) if manual_targets else [],
-        lambda hub, target_kw: _ramped_setpoint_kw(hub, target_kw, cycle_interval_s),
+        lambda hub, target_kw: target_kw,  # raw: ramped per hub on the net below
     )
     if not grants and not extra_items:
         return None
@@ -459,11 +499,12 @@ async def propose_batch_to_guardian(
         bank_id,
         grants,
         fleet_module=fleet_module,
-        cycle_interval_s=cycle_interval_s,
+        cycle_interval_s=None,  # raw targets: one ramp per hub over every item of the batch (below)
         hub_allocations=hub_allocations,
         excluded_hub_ids=excluded_hub_ids | frozenset(manual_targets or {}),
     )
     items.extend(extra_items)
+    items = ramp_net_per_hub(items, fleet_module.hub_capabilities(bank_id), cycle_interval_s, now=now)
     trace_payload = {
         "command_batch_id": str(command_batch_id),
         "bank_id": bank_id,

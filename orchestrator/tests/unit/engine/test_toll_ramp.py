@@ -85,6 +85,8 @@ class Result:
     vetoes: int
     vetoes_after_gap: int
     final_power_kw: float
+    #: worst signed step against where the set physically was, in units of one cycle's G-04 bound
+    max_step_ratio: float = 0.0
 
 
 def _simulate(
@@ -96,6 +98,8 @@ def _simulate(
     guardian_down_for_s: float = 0.0,
     clears_on_stop: bool = True,
     one_cycle_dt: bool = False,
+    guardian_reloads: bool = True,
+    spurious_veto_at_s: float | None = None,
 ) -> Result:
     anchors = RampAnchors()
     engine._ramp_anchors = anchors  # fresh engine state for this run
@@ -109,6 +113,7 @@ def _simulate(
     setpoints: list[float] = []
     vetoes = vetoes_after_gap = 0
     gap_end = None
+    max_step_ratio = 0.0
     for k in range(cycles):
         now = T0 + timedelta(seconds=CYCLE_S * k)
         t = CYCLE_S * k
@@ -121,8 +126,10 @@ def _simulate(
             gap_end = gap_end or now
         if guardian_down_at_s is not None and t >= guardian_down_at_s + guardian_down_for_s:
             gap_end = gap_end or now
-        if guardian_down:
-            guardian.signed = None  # a restart loses the in-memory signed record
+        if guardian_down and not guardian_reloads:
+            guardian.signed = (
+                None  # an old guardian lost its in-memory record (d19ad21 reloads it from og.verdict)
+            )
 
         # The asset: follows its signed setpoint while the lease is live; 0 on a stop or a lapsed lease.
         if stopped or signed_power is None or signed_power[1] <= now:
@@ -156,9 +163,14 @@ def _simulate(
         anchors.record_proposal(
             batch_id, [{"hub_id": HUB, "p_kw_setpoint": setpoint}], now + timedelta(seconds=LEASE_S)
         )
-        ok = guardian.check(setpoint, telemetry_kw, telemetry_ts, now)
+        if spurious_veto_at_s is not None and t == spurious_veto_at_s:
+            ok = False  # vetoed on another rule (e.g. G-09): nothing signed, the lease stays live
+            gap_end = gap_end or now
+        else:
+            ok = guardian.check(setpoint, telemetry_kw, telemetry_ts, now)
         pending_outcome[batch_id] = "PASS" if ok else "VETOED"
         if ok:
+            max_step_ratio = max(max_step_ratio, abs(setpoint - actual_kw) / (RAMP * CYCLE_S))
             signed_power = (setpoint, now + timedelta(seconds=LEASE_S))
         else:
             vetoes += 1
@@ -166,7 +178,7 @@ def _simulate(
                 vetoes_after_gap += 1
         setpoints.append(setpoint)
     final = signed_power[0] if signed_power and signed_power[1] > now else 0.0
-    return Result(setpoints, vetoes, vetoes_after_gap, final)
+    return Result(setpoints, vetoes, vetoes_after_gap, final, max_step_ratio)
 
 
 def _gap_start_s() -> float:
@@ -176,6 +188,7 @@ def _gap_start_s() -> float:
 def test_an_uninterrupted_20_mw_call_reaches_full_power_at_the_g04_rate_without_vetoes() -> None:
     result = _simulate(cycles=FULL_RAMP_CYCLES + 3)
     assert result.vetoes == 0
+    assert result.max_step_ratio <= 1.0
     assert result.setpoints == sorted(result.setpoints, reverse=True)
     assert result.final_power_kw == pytest.approx(TARGET), result.vetoes
     assert FULL_RAMP_CYCLES * CYCLE_S < 8 * 60
@@ -202,7 +215,29 @@ def test_a_guardian_restart_with_a_10_s_gap_converges_to_the_target() -> None:
         cycles=FULL_RAMP_CYCLES + 40, guardian_down_at_s=_gap_start_s(), guardian_down_for_s=10.0
     )
     assert result.final_power_kw == pytest.approx(TARGET), result.vetoes
-    assert result.vetoes_after_gap <= 2  # one G-04 veto re-anchors the engine to telemetry
+    assert result.vetoes_after_gap == 0  # the guardian reloads its signed anchors: both sides agree
+    assert result.max_step_ratio <= 1.0
+
+
+def test_an_old_guardian_that_forgot_its_anchors_still_converges() -> None:
+    result = _simulate(
+        cycles=2 * FULL_RAMP_CYCLES + 40,
+        guardian_down_at_s=_gap_start_s(),
+        guardian_down_for_s=10.0,
+        guardian_reloads=False,
+    )
+    assert result.final_power_kw == pytest.approx(TARGET), result.vetoes
+    assert result.vetoes_after_gap <= int(LEASE_S / CYCLE_S)  # until the engine's signed lease lapses
+
+
+def test_a_veto_mid_ramp_with_stale_telemetry_retries_from_the_signed_anchor() -> None:
+    """r3.4.3 HIGH: after a veto the engine re-anchored at stale telemetry while the set still held its signed
+    setpoint, and the guardian signed 4-5x the bound toward the stale reading. The retry must step from the
+    signature: one veto, then the ramp continues, every signed step within one cycle's bound."""
+    result = _simulate(cycles=FULL_RAMP_CYCLES + 10, spurious_veto_at_s=_gap_start_s() + 1 * CYCLE_S)
+    assert result.vetoes == 1
+    assert result.final_power_kw == pytest.approx(TARGET), result.vetoes
+    assert result.max_step_ratio <= 1.0
 
 
 @pytest.mark.parametrize("gap_s", [40.0, 10.0])

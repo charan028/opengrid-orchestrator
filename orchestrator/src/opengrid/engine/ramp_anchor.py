@@ -13,9 +13,13 @@ The contract with the guardian's G-04 (agreed with SAFETY):
   telemetry `p_kw`. The same rule as `g04_anchor_kw`.
 - **Step.** At most `RAMP_SAFETY_FACTOR` x ramp x ONE cycle from the anchor, however long since the
   signature (within the guardian's bound whether it uses one cycle or the elapsed time as dt).
-- **Veto.** A PARTLY_VETOED/VETOED batch drops the signed anchor of every hub in it: they re-anchor to
-  telemetry (after a guardian restart its in-memory signed record is gone, so both sides meet there).
+- **Veto.** A PARTLY_VETOED/VETOED batch does NOT move the anchor: the hub still holds its last signed
+  setpoint on a live lease, so the next proposal steps from that signature again. (Dropping it to stale
+  telemetry after a veto let the guardian sign up to 4-5x the bound toward the stale reading -- r3.4.3
+  HIGH, workstation on d456172 + d19ad21. The guardian reloads its signed anchors after a restart.)
 - **Lapsed lease.** Telemetry.
+- **Several items on one hub.** The hub executes their SUM (`guardian.checks.hub_setpoints`): the engine
+  steps that net once (`engine.ramp_net_per_hub`) and records the sum as the batch's setpoint for it.
 - **Safe stop.** While an `og.stop_event` ENGAGE covers a hub (FLEET, its BANK or ZONE --
   `core.manual_targets.stop_covers`), its bank gets no proposal at all and its signed anchor is dropped.
   After the RELEASE the hub anchors at 0 kW (where the stop left it) until a telemetry sample newer than
@@ -94,29 +98,27 @@ class RampAnchors:
     def record_proposal(
         self, batch_id: UUID, items: Iterable[Mapping[str, Any]], expires_at: datetime
     ) -> None:
-        """Remember what a batch asks of utility-scale hubs (a hub applies its LAST item in a batch)."""
+        """Remember what a batch asks of utility-scale hubs: per hub the SUM of its items (the hub executes
+        the sum, `guardian.checks.hub_setpoints`)."""
         setpoints: dict[str, float] = {}
         for item in items:
             hub_id = str(item.get("hub_id"))
             if hub_id in self.utility_hubs and item.get("p_kw_setpoint") is not None:
-                setpoints[hub_id] = float(item["p_kw_setpoint"])
+                setpoints[hub_id] = setpoints.get(hub_id, 0.0) + float(item["p_kw_setpoint"])
         if setpoints:
             self.pending[batch_id] = _PendingBatch(setpoints, expires_at)
 
     def apply_verdicts(self, outcomes: Mapping[UUID, str], now: datetime) -> None:
-        """PASS: each hub's setpoint in that batch is its signed anchor until the batch's lease ends. A veto:
-        every hub in the batch re-anchors to telemetry. A batch whose lease ended with no verdict is dropped."""
+        """PASS: each hub's setpoint in that batch is its signed anchor until the batch's lease ends. A veto
+        (VETO_OUTCOMES) leaves the anchor as it is: a live-lease signature is still where the hub is, so the
+        next proposal steps from it again. A batch whose lease ended with no verdict is dropped."""
         for batch_id, outcome in outcomes.items():
             batch = self.pending.pop(batch_id, None)
-            if batch is None:
+            if batch is None or outcome not in SIGNED_OUTCOMES:
                 continue
-            if outcome in SIGNED_OUTCOMES:
-                for hub_id, kw in batch.setpoints.items():
-                    if hub_id not in self.stopped:
-                        self.signed[hub_id] = SignedSetpoint(kw, now, batch.expires_at)
-            elif outcome in VETO_OUTCOMES:
-                for hub_id in batch.setpoints:
-                    self.signed.pop(hub_id, None)
+            for hub_id, kw in batch.setpoints.items():
+                if hub_id not in self.stopped:
+                    self.signed[hub_id] = SignedSetpoint(kw, now, batch.expires_at)
         for batch_id in [b for b, p in self.pending.items() if to_utc(p.expires_at) <= to_utc(now)]:
             del self.pending[batch_id]
 
