@@ -179,14 +179,38 @@ def _weekend_only_history(values: tuple[float, float, float, float]) -> list[tup
     return [(datetime(2026, 9, d, 15, 0, tzinfo=UTC), v) for d, v in zip(days, values, strict=True)]
 
 
-def test_pooled_guard_own_day_type_sample_admits_even_wide_pool():
-    """Sun target with one Saturday sample of its own day type: firm on the pooled path however wide."""
+def test_pooled_guard_single_own_day_sample_and_wide_spread_is_not_for_firm():
+    """R3.4: Sun target with only ONE Saturday sample of its own day type and a wide pooled spread --
+    one own-day sample no longer waives the spread guard."""
     history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)
     history = [(ts, v * (1 + 10 * (ts.day % 2))) for ts, v in history]  # alternate days wildly apart
     target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
     slot = compute_slot_quantiles(history, target, stale=False)
+    assert slot.basis == "FALLBACK"
+    assert slot.firm_fitness == "NOT_FOR_FIRM"
+
+
+def test_pooled_guard_single_own_day_sample_and_tight_spread_is_firm_pooled():
+    history = _every_15_min(_HISTORY_START_CT, _SAT_NOW)  # each slot's value is the same every day
+    target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)
+    slot = compute_slot_quantiles(history, target, stale=False)
     assert slot.basis == "POOLED"
     assert slot.firm_fitness == "FIRM_POOLED"
+
+
+def test_pooled_guard_two_own_day_samples_admit_wide_pool():
+    """Two weekend samples (Sat 19th, Sat 26th) of the target's day type plus two weekdays: 4 pooled,
+    short of 3 same-day-type, wide -- firm because 2 own-day samples meet the default minimum."""
+    history = [
+        (datetime(2026, 9, d, 15, 0, tzinfo=UTC), v)
+        for d, v in ((19, 10.0), (26, 100.0), (24, 10.0), (25, 100.0))
+    ]
+    target = datetime(2026, 9, 27, 15, 0, tzinfo=UTC)  # Sun 10:00 CDT
+    slot = compute_slot_quantiles(history, target, stale=False)
+    assert slot.basis == "POOLED"
+    assert slot.firm_fitness == "FIRM_POOLED"
+    raised = compute_slot_quantiles(history, target, stale=False, pooled_min_own_day_samples=3)
+    assert raised.firm_fitness == "NOT_FOR_FIRM"
 
 
 def test_pooled_guard_no_own_day_type_and_wide_spread_is_not_for_firm():

@@ -140,9 +140,10 @@ FirmBasis = Literal["STRICT", "POOLED", "FALLBACK"]
 #: `og.forecast.firm_fitness` value (and log reason code) for slots firm via the pooled relaxation.
 FIRM_POOLED: FirmFitness = "FIRM_POOLED"
 
-#: Pooled guard default (`[forecast].pooled_max_rel_spread`): a pooled slot with NO sample of its own
-#: day type is firm only if its (P90 - P10) / |P50| is at most this.
+#: Pooled guard defaults: a pooled slot with fewer than `[forecast].pooled_min_own_day_samples` samples
+#: of its own day type is firm only if its (P90 - P10) / |P50| is at most `pooled_max_rel_spread`.
 DEFAULT_POOLED_MAX_REL_SPREAD = 0.5
+DEFAULT_POOLED_MIN_OWN_DAY_SAMPLES = 2
 
 
 def relative_spread(quantiles: tuple[float, float, float]) -> float:
@@ -175,6 +176,7 @@ def compute_slot_quantiles(
     widen_factor: float = STALE_WIDEN_FACTOR,
     pool_day_types_when_short: bool = True,
     pooled_max_rel_spread: float | None = DEFAULT_POOLED_MAX_REL_SPREAD,
+    pooled_min_own_day_samples: int = DEFAULT_POOLED_MIN_OWN_DAY_SAMPLES,
 ) -> SlotQuantiles:
     """The full 02b S3 method for one (series, interval) slot: same-slot/day-type pool -> percentile,
     falling back to the diurnal profile below `min_slot_samples`, then widening x`widen_factor` and
@@ -185,9 +187,10 @@ def compute_slot_quantiles(
     Short-history relaxation (`[forecast].pool_day_types_when_short`): when the same-day-type pool is
     short, weekday and weekend samples for the same time-of-day slot are pooled. The slot is firm
     (`FIRM_POOLED`, `basis="POOLED"`) only if that pool reaches `min_slot_samples` AND the guard holds:
-    at least one sample of the slot's own day type, OR a pooled relative spread
-    (`relative_spread`) <= `pooled_max_rel_spread` (None disables the spread path, leaving only the
-    same-day-type-sample path). Otherwise the fallback applies (NOT_FOR_FIRM). The strict rule wins
+    at least `pooled_min_own_day_samples` (default 2) samples of the slot's own day type, OR a pooled
+    relative spread (`relative_spread`) <= `pooled_max_rel_spread` (None disables the spread path,
+    leaving only the own-day-type-sample path). A single own-day sample is not enough on its own: with
+    one, the spread guard must also pass. Otherwise the fallback applies (NOT_FOR_FIRM). The strict rule wins
     automatically as soon as the same-day-type pool alone is large enough."""
     pool = same_slot_pool(
         history, target_start_utc, lookback_days=lookback_days, resolution_min=resolution_min
@@ -202,12 +205,12 @@ def compute_slot_quantiles(
             any_day_type=True,
         )
         if len(pooled) >= min_slot_samples:
-            has_own_day_type = len(pool) >= 1
+            enough_own_day_type = len(pool) >= pooled_min_own_day_samples
             tight = (
                 pooled_max_rel_spread is not None
                 and relative_spread(sample_quantiles(pooled)) <= pooled_max_rel_spread
             )
-            if has_own_day_type or tight:
+            if enough_own_day_type or tight:
                 pool, basis = pooled, "POOLED"
 
     low_confidence = len(pool) < min_slot_samples

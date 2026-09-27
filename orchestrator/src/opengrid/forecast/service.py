@@ -18,6 +18,7 @@ from opengrid.forecast.models import ForecastKind, ForecastRow, ScenarioPoint
 from opengrid.forecast.quantiles import (
     DEFAULT_LOOKBACK_DAYS,
     DEFAULT_POOLED_MAX_REL_SPREAD,
+    DEFAULT_POOLED_MIN_OWN_DAY_SAMPLES,
     DEFAULT_RESOLUTION_MIN,
     FIRM_POOLED,
     MIN_SLOT_SAMPLES,
@@ -120,6 +121,9 @@ async def compute_and_persist(
         pool_day_types_when_short=bool(cfg.get("forecast.pool_day_types_when_short", True)),
         pooled_max_rel_spread=_float_setting(
             cfg.get("forecast.pooled_max_rel_spread", DEFAULT_POOLED_MAX_REL_SPREAD), "pooled_max_rel_spread"
+        ),
+        pooled_min_own_day_samples=int(
+            cfg.get("forecast.pooled_min_own_day_samples", DEFAULT_POOLED_MIN_OWN_DAY_SAMPLES)
         ),
     )
 
@@ -259,6 +263,7 @@ async def _compute_series(
                 min_slot_samples=rule.min_samples,
                 pool_day_types_when_short=rule.pool_day_types_when_short,
                 pooled_max_rel_spread=rule.pooled_max_rel_spread,
+                pooled_min_own_day_samples=rule.pooled_min_own_day_samples,
             )
         except InsufficientHistoryError:
             # No silent fallback (BUILD.md S5a): a slot forecast has to be skipped, log it so it is
@@ -310,13 +315,15 @@ async def _compute_series(
 @dataclass(frozen=True, slots=True)
 class FirmRule:
     """`[forecast]` firm-fitness knobs: `min_samples_firm` (default 3, 02b S3), the short-history
-    `pool_day_types_when_short` relaxation (default on) and its guard `pooled_max_rel_spread` (default
-    0.5): a pooled slot with no sample of its own day type is firm only if its (P90-P10)/|P50| is at
-    most this (see `quantiles.compute_slot_quantiles`)."""
+    `pool_day_types_when_short` relaxation (default on) and its guard: a pooled slot with fewer than
+    `pooled_min_own_day_samples` (default 2) samples of its own day type is firm only if its
+    (P90-P10)/|P50| is at most `pooled_max_rel_spread` (default 0.5) -- see
+    `quantiles.compute_slot_quantiles`."""
 
     min_samples: int = MIN_SLOT_SAMPLES
     pool_day_types_when_short: bool = True
     pooled_max_rel_spread: float | None = DEFAULT_POOLED_MAX_REL_SPREAD
+    pooled_min_own_day_samples: int = DEFAULT_POOLED_MIN_OWN_DAY_SAMPLES
 
 
 def _float_setting(value: object, name: str) -> float:
