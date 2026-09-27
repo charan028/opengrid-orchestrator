@@ -13,7 +13,7 @@ from playwright.sync_api import Page, expect
 
 from screens import BASE_PATH, SCREENS, goto_ok
 
-_AGE_TEXT = re.compile(r"^age: \d+[smh]$")
+_AGE_TEXT = re.compile(r"^age: \d+[smhd]$")  # og.formatAge: s, m, h, then d past 48 h
 _DATED_BADGE = '.stale-badge[data-since]:not([data-since=""])'
 
 

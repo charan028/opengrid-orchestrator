@@ -121,7 +121,7 @@ looking at is never ambiguous.
 | Market data on the dev stack | synthetic | seeded diurnal price, load, wind and solar curves with noise; `integration-sims/src/ogsim/market/synthetic.py` (`replay` mode can use a real history export) |
 | Battery telemetry, SCADA bank load, utility instructions, meter data | synthetic | `ogsim.fleet` and `ogsim.scada` physics over MQTT; `integration-sims/config/fleet.yaml` |
 | Contracts, banks, hubs, home reserve floors | seeded | `orchestrator/migrations/0002_seed_demo.sql` and `dev/seed/` |
-| Scenarios and anomalies (price spike, overload, comms loss, forged command, energy runs low) | synthetic, injected on demand | `integration-sims/scenarios/*.yaml` |
+| Scenarios and anomalies (price spike, overload, comms loss, forged command, energy runs low) | synthetic, injected on demand | `integration-sims/scenarios/` |
 
 No bid has been submitted to ERCOT and no ERCOT settlement statement has been reconciled; the market
 counterparty is simulated end to end.
