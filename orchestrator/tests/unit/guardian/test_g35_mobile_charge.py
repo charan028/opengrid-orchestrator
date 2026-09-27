@@ -133,7 +133,7 @@ _TRUCK_REGISTRY = {
     ],
 }
 
-Row = tuple[str, str, float | None, float | None, datetime | None]
+Row = tuple[str, str, float | None, float | None, datetime | None, datetime | None]
 
 
 class _Cursor:
@@ -180,19 +180,51 @@ class _Pool:
 
 
 def _truck_port(
-    position: tuple[float | None, float | None] | None, *, age_s: float | None = 10.0
+    position: tuple[float | None, float | None] | None,
+    *,
+    age_s: float | None = 10.0,
+    telemetry_age_s: float | None = None,
+    telemetry_max_age_s: float | None = None,
 ) -> ConfigMobileUnitPort:
-    """A port whose truck last reported `position` `age_s` ago (None position: no og.hub row at all)."""
+    """A port whose truck last reported `position` `age_s` ago and last sent telemetry `telemetry_age_s` ago
+    (None: never); None position: no og.hub row at all."""
     from opengrid.selector.gate import parse_mobile_home_station_sites
 
     reported_at = None if age_s is None else NOW - timedelta(seconds=age_s)
-    rows = [] if position is None else [("truck-dfw-01", "bank-truck-dfw-01", *position, reported_at)]
+    last_seen = None if telemetry_age_s is None else NOW - timedelta(seconds=telemetry_age_s)
+    rows = (
+        [] if position is None else [("truck-dfw-01", "bank-truck-dfw-01", *position, reported_at, last_seen)]
+    )
     return ConfigMobileUnitPort(
         parse_mobile_home_stations(_TRUCK_REGISTRY),
         parse_mobile_home_station_sites(_TRUCK_REGISTRY),
         _Pool(rows),  # type: ignore[arg-type]
+        telemetry_max_age_s=telemetry_max_age_s,
         clock=lambda: NOW,
     )
+
+
+async def test_stationary_rule_a_parked_truck_reporting_on_change_only_stays_at_home():
+    """r3.4.2 review MEDIUM: a real truck parked at its depot publishes device_info on connect/change only.
+    With fresh telemetry (hub_stale_s 25 s) its 20-minute-old position still holds: it may recharge."""
+    parked = _truck_port((32.8385, -96.9730), age_s=1200.0, telemetry_age_s=8.0, telemetry_max_age_s=25.0)
+    assert await parked.at_home_station("truck-dfw-01") is True
+    silent = _truck_port((32.8385, -96.9730), age_s=1200.0, telemetry_age_s=40.0, telemetry_max_age_s=25.0)
+    assert await silent.at_home_station("truck-dfw-01") is None  # stale telemetry: unknown, away
+    moved = _truck_port((32.7767, -96.7970), age_s=3.0, telemetry_age_s=2.0, telemetry_max_age_s=25.0)
+    assert await moved.at_home_station("truck-dfw-01") is False  # a move is a new report: away
+
+
+async def test_g35_stationary_rule_allows_the_parked_truck_and_vetoes_stale_telemetry(
+    fakes, guardian_config, signing_seed
+):
+    item = [ProposedItem("truck-dfw-01", 250.0, "SELECTOR")]
+    parked = _truck_port((32.8385, -96.9730), age_s=1200.0, telemetry_age_s=8.0, telemetry_max_age_s=25.0)
+    ok = await _verdict(fakes, guardian_config, signing_seed, parked, item)  # type: ignore[arg-type]
+    assert "G-35" not in ok.vetoed_rule_ids
+    silent = _truck_port((32.8385, -96.9730), age_s=1200.0, telemetry_age_s=40.0, telemetry_max_age_s=25.0)
+    vetoed = await _verdict(fakes, guardian_config, signing_seed, silent, item)  # type: ignore[arg-type]
+    assert "G-35" in vetoed.vetoed_rule_ids
 
 
 async def test_a_truck_reporting_from_its_home_station_is_at_home():
