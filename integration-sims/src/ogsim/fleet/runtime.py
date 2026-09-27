@@ -58,7 +58,6 @@ from ogsim.fleet.wave import (
     capture_request_expired,
     current_rms_a,
     hub_phase_connection,
-    set_current_rms,
     synthesize_raw_capture,
 )
 
@@ -226,18 +225,17 @@ class FleetEngine:
             if not self._summary_gate.due(hub_id, now, avg_thd):
                 continue
             include_harmonics = self._harmonic_detail.due(hub_id, now, avg_thd)
+            per_unit_current_a = current_rms_a(float(state.p_kw_applied[i]) / len(snapshots))
             msg = build_summary_message(
                 hub_id,
                 state.bank_ids[i],
                 state.zones[i],
                 snapshots,
                 utc_timestamp(now),
+                unit_currents_a=[per_unit_current_a] * len(snapshots),
                 include_harmonics=include_harmonics,
                 config=self.wave_config,
             )
-            per_unit_kw = float(state.p_kw_applied[i]) / len(snapshots)
-            for snapshot in snapshots:
-                set_current_rms(msg, snapshot.phase_connection, current_rms_a(per_unit_kw))
             messages.append((f"scada/wave/{state.zones[i]}/{state.bank_ids[i]}/{hub_id}/summary", msg))
         return messages
 

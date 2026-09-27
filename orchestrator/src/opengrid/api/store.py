@@ -345,6 +345,12 @@ class PgStore:
 
     # -- fleet ------------------------------------------------------------------------------------
 
+    async def fleet_rows(self, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+        """Read-only SELECT/EXPLAIN statements built by `opengrid.api.routers.fleet_search` (the Fleet
+        table at scale: keyset pages, typeahead, select-all-matching, hub detail). Every statement is
+        assembled there from hard-coded fragments with values bound as `%s` parameters."""
+        return await self._fetch(sql, params)
+
     async def list_hubs(
         self, *, zone: str | None, bank_id: str | None, health: str | None, limit: int, offset: int
     ) -> list[dict[str, Any]]:

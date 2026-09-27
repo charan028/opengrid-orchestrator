@@ -68,3 +68,27 @@ def test_panel_unavailable(client: TestClient, monkeypatch: pytest.MonkeyPatch, 
     _serve(monkeypatch, lp)
     html = client.get("/og/profitability", headers={"X-Remote-User": "alice"}).text
     assert 'id="lp-value-unavailable"' in html and text in html
+
+
+def test_breakdown_skips_non_numeric_values_such_as_the_plan_mode() -> None:
+    """Production 500 on /og/profitability (R3 451a2a2): the breakdown also carries `plan_mode: "L-ID"`."""
+    view = lp_value_view(
+        {
+            "available": True,
+            "rows": [
+                {
+                    "plan_id": "p1",
+                    "created_at": "2026-09-26T18:00:00+00:00",
+                    "value_added": "3.5",
+                    "breakdown": {
+                        "plan_mode": "L-ID",
+                        "energy": 12.5,
+                        "as": "4.25",
+                        "flag": True,
+                        "none": None,
+                    },
+                }
+            ],
+        }
+    )
+    assert view["latest"]["breakdown"] == [{"label": "energy", "value": 12.5}, {"label": "as", "value": 4.25}]

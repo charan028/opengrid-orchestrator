@@ -29,10 +29,16 @@ from ogsim.fleet.state import FleetState
 
 NOMINAL_FREQ_HZ = 60.0
 HARMONIC_ORDERS: tuple[int, ...] = (3, 5, 7)
-# Fraction of total THD_I attributed to each dominant odd harmonic order (§3.1
-# "typically dominated by odd, non-triplen orders -- 3rd, 5th, 7th"), fixed
-# shares that sum to 1.0.
-_HARMONIC_SHARE: dict[int, float] = {3: 0.6, 5: 0.3, 7: 0.1}
+# Share of total harmonic POWER (THD_I squared) carried by each dominant odd
+# order (§3.1 "typically dominated by odd, non-triplen orders -- 3rd, 5th,
+# 7th"); shares sum to 1.0. Magnitudes are THD_I x sqrt(share), so the
+# root-sum-square of a unit's harmonic magnitudes equals its THD_I exactly
+# (THD = sqrt(sum_k m_k^2)); linear shares would put that RSS at only ~0.68 x THD_I.
+_HARMONIC_POWER_SHARE: dict[int, float] = {3: 0.6, 5: 0.3, 7: 0.1}
+# `harmonic_injection` (§7.2): the injected order carries this share of the
+# unit's harmonic power; the remaining orders split the rest in proportion to
+# `_HARMONIC_POWER_SHARE`.
+_INJECTED_ORDER_POWER_SHARE = 0.8
 # Fixed shared angle per order used when a fleet batch is harmonic-phase-locked
 # (§3.2b stacking regime: identical PWM carrier phase across units).
 _LOCKED_ANGLE_DEG: dict[int, float] = {3: 0.0, 5: 0.0, 7: 0.0}
@@ -139,13 +145,31 @@ def _assign_phase_connection(
     return legs
 
 
+def harmonic_magnitudes_pct(
+    thd_current_pct: np.ndarray, injected_order: int | None = None
+) -> dict[int, np.ndarray]:
+    """Per-order magnitude (% of fundamental) for units with THD_I `thd_current_pct`,
+    such that sqrt(sum_k m_k^2) == THD_I for every unit (the IEEE 519 THD definition).
+    With `injected_order` (one of `HARMONIC_ORDERS`), that order carries
+    `_INJECTED_ORDER_POWER_SHARE` of the harmonic power (§7.2 `harmonic_injection`)."""
+    shares = dict(_HARMONIC_POWER_SHARE)
+    if injected_order in shares:
+        rest = 1.0 - shares[injected_order]
+        for order in shares:
+            shares[order] = (
+                _INJECTED_ORDER_POWER_SHARE
+                if order == injected_order
+                else (1.0 - _INJECTED_ORDER_POWER_SHARE) * shares[order] / rest
+            )
+    return {order: thd_current_pct * float(np.sqrt(share)) for order, share in shares.items()}
+
+
 def _draw_harmonics(
     n: int, thd_current_pct: np.ndarray, harmonic_phase_lock: bool, rng: np.random.Generator
 ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
-    mag_pct: dict[int, np.ndarray] = {}
+    mag_pct = harmonic_magnitudes_pct(thd_current_pct)
     angle_deg: dict[int, np.ndarray] = {}
-    for order, share in _HARMONIC_SHARE.items():
-        mag_pct[order] = thd_current_pct * share
+    for order in _HARMONIC_POWER_SHARE:
         if harmonic_phase_lock:
             angle_deg[order] = np.full(n, _LOCKED_ANGLE_DEG[order])
         else:
@@ -345,6 +369,13 @@ class ActivePqAnomaly:
         return float(np.clip((now - self.start) / self.duration, 0.0, 1.0))
 
 
+def _set_harmonic_magnitudes(pq: InverterPqState, idx: list[int]) -> None:
+    """Re-derives `idx`'s default-share harmonic magnitudes from their current THD_I, so
+    every THD_I change keeps the spectrum's RSS equal to THD_I."""
+    for order, values in harmonic_magnitudes_pct(pq.thd_current_pct[idx]).items():
+        pq.harmonic_mag_pct[order][idx] = values
+
+
 class PqAnomalyManager:
     """Applies/reverts the PQ-specific fleet anomalies (§7.2, §7.5) against an
     `InverterPqState`, mirroring `ogsim.fleet.anomalies.FleetAnomalyManager`'s
@@ -420,9 +451,9 @@ class PqAnomalyManager:
             pq.thd_current_pct[idx] = anomaly.start_thd_current_pct + fraction * (
                 target - anomaly.start_thd_current_pct
             )
-            order = int(anomaly.params.get("order", 5))
-            if order in pq.harmonic_mag_pct:
-                pq.harmonic_mag_pct[order][idx] = pq.thd_current_pct[idx] * 0.8
+            mags = harmonic_magnitudes_pct(pq.thd_current_pct[idx], int(anomaly.params.get("order", 5)))
+            for order, values in mags.items():
+                pq.harmonic_mag_pct[order][idx] = values
         elif anomaly.type in ("calibration_drift_correctable", "calibration_drift_hardware"):
             target_freq = float(anomaly.params.get("target_freq_offset_hz", 0.2))
             target_voltage = float(anomaly.params.get("target_voltage_offset_pct", 2.0))
@@ -461,6 +492,7 @@ class PqAnomalyManager:
             pq.freq_offset_hz[idx] = anomaly.start_freq_offset_hz
         elif anomaly.type == "harmonic_injection":
             pq.thd_current_pct[idx] = anomaly.start_thd_current_pct
+            _set_harmonic_magnitudes(pq, idx)
         elif anomaly.type == "phase_imbalance_injection":
             self.dispatch_bias_kw[idx] = 0.0
         elif anomaly.type in ("calibration_drift_correctable", "calibration_drift_hardware"):
@@ -523,4 +555,5 @@ def replace_inverter(
         pq.last_calibration_seq[i] = -1
         anomalies.drift_correctable[i] = None
 
+    _set_harmonic_magnitudes(pq, idx)
     anomalies.clear_anomalies_touching(idx)

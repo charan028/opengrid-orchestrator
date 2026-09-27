@@ -8,10 +8,14 @@ reading; `tick()` reverts anomalies whose duration has elapsed.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
 
 #: Live bug fix, 2026-09-26 (FLEET-SIM, e2e A11 regression: "a bank_overload injection from
 #: ogsim.control never changes the SCADA sim's readings"). Root cause: several shipped scenario files
@@ -147,6 +151,15 @@ class ScadaAnomalyManager:
             self._active.pop(anomaly_id, None)
             self._revert(anomaly)
             return anomaly
+        if not banks:
+            # Not an error (behaviour unchanged), but an unknown target silently does nothing.
+            logger.warning(
+                "anomaly %s (%s) target kind=%s ref=%r matched 0 banks; it has no effect",
+                anomaly_id,
+                anomaly_type,
+                target_kind,
+                target_ref,
+            )
         self._active[anomaly_id] = anomaly
         self._apply(anomaly, start)
         return anomaly

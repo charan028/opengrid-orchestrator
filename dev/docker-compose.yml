@@ -27,19 +27,19 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-opengrid}
       POSTGRES_DB: ${POSTGRES_DB:-og}
-    # POSTGRES_PASSWORD comes from dev/secrets (falling back to dev/secrets.example) via
-    # env_file below, NOT compose-level ${...} interpolation -- interpolation only sees the
-    # process environment and dev/.env, never our separate dev/secrets file, so a
-    # `POSTGRES_PASSWORD: ${OG_DB_PASSWORD:?...}` here would always resolve empty.
+    # POSTGRES_PASSWORD comes from dev/secrets via env_file below, NOT compose-level ${...}
+    # interpolation -- interpolation only sees the process environment and dev/.env, never our
+    # separate dev/secrets file, so a `POSTGRES_PASSWORD: ${OG_DB_PASSWORD:?...}` here would
+    # always resolve empty. dev/secrets.example is deliberately NOT also listed as an env_file
+    # (fix #2, 2026-09-26): its blank placeholder values would load after dev/secrets and blank
+    # out every real one, since compose's env_file merge lets a later file win per-key.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgres/init-og-test-db.sh:/docker-entrypoint-initdb.d/10-init-og-test-db.sh:ro
     env_file:
       - path: ./secrets
-        required: false
-      - path: ./secrets.example
         required: false
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opengrid} -d ${POSTGRES_DB:-og}"]
@@ -56,8 +56,6 @@ services:
     env_file:
       - path: ./secrets
         required: false
-      - path: ./secrets.example
-        required: false
     restart: "no"
 
   mosquitto:
@@ -67,7 +65,7 @@ services:
       mosquitto-init:
         condition: service_completed_successfully
     ports:
-      - "${MOSQUITTO_PORT:-1883}:1883"
+      - "127.0.0.1:${MOSQUITTO_PORT:-1883}:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/opengrid.acl:/mosquitto/config/opengrid.acl:ro
@@ -88,8 +86,6 @@ services:
     env_file:
       - path: ./secrets
         required: false
-      - path: ./secrets.example
-        required: false
     volumes:
       - ..:/app:ro
     working_dir: /app
@@ -100,7 +96,7 @@ services:
     build: *sims-build
     restart: unless-stopped
     ports:
-      - "${MARKET_SIM_PORT:-8090}:8090"
+      - "127.0.0.1:${MARKET_SIM_PORT:-8090}:8090"
     environment:
       OGSIM_MARKET_HOST: 0.0.0.0
       OGSIM_MARKET_PORT: "8090"
@@ -121,14 +117,16 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
+      # ogsim.common.config.is_production() must be true for a process to use the shared
+      # topic root "og/v1" (dev intentionally mirrors prod's topic root rather than scoping
+      # to a workspace) -- see integration-sims/src/ogsim/common/config.py resolve_topic_root().
+      OGSIM_ENV: "prod"
       OG_MQTT_HOST: mosquitto
       OG_MQTT_PORT: "1883"
       OG_MQTT_ROOT: og/v1
       OGSIM_FLEET_CONFIG: /app/dev/config/fleet.dev.yaml
     env_file:
       - path: ./secrets
-        required: false
-      - path: ./secrets.example
         required: false
     volumes:
       - ..:/app:ro
@@ -142,14 +140,13 @@ services:
       mosquitto:
         condition: service_started
     environment:
+      OGSIM_ENV: "prod"  # see sim-fleet's environment comment
       OG_MQTT_HOST: mosquitto
       OG_MQTT_PORT: "1883"
       OG_MQTT_ROOT: og/v1
       OGSIM_SCADA_CONFIG: /app/dev/config/scada.dev.yaml
     env_file:
       - path: ./secrets
-        required: false
-      - path: ./secrets.example
         required: false
     volumes:
       - ..:/app:ro
@@ -165,8 +162,9 @@ services:
       sim-market:
         condition: service_started
     ports:
-      - "${CONTROL_SIM_PORT:-8091}:8091"
+      - "127.0.0.1:${CONTROL_SIM_PORT:-8091}:8091"
     environment:
+      OGSIM_ENV: "prod"  # see sim-fleet's environment comment
       OGSIM_CONTROL_HOST: 0.0.0.0
       OG_MQTT_HOST: mosquitto
       OG_MQTT_PORT: "1883"
@@ -174,8 +172,6 @@ services:
       OGSIM_MARKET_ADMIN_URL: http://sim-market:8090
     env_file:
       - path: ./secrets
-        required: false
-      - path: ./secrets.example
         required: false
     volumes:
       - ..:/app:ro
@@ -195,7 +191,7 @@ services:
         condition: service_completed_successfully
     environment:
       OG_CONFIG: /app/dev/config/docker.toml
-    env_file: [{ path: ./secrets, required: false }, { path: ./secrets.example, required: false }]
+    env_file: [{ path: ./secrets, required: false }]
     volumes: ["..:/app:ro"]
     working_dir: /app
     command: ["python", "-m", "opengrid.feeds.main"]
@@ -211,7 +207,7 @@ services:
         condition: service_completed_successfully
     environment:
       OG_CONFIG: /app/dev/config/docker.toml
-    env_file: [{ path: ./secrets, required: false }, { path: ./secrets.example, required: false }]
+    env_file: [{ path: ./secrets, required: false }]
     volumes: ["..:/app:ro"]
     working_dir: /app
     command: ["python", "-m", "opengrid.engine.main"]
@@ -227,7 +223,7 @@ services:
         condition: service_completed_successfully
     environment:
       OG_CONFIG: /app/dev/config/docker.toml
-    env_file: [{ path: ./secrets, required: false }, { path: ./secrets.example, required: false }]
+    env_file: [{ path: ./secrets, required: false }]
     volumes: ["..:/app:ro"]
     working_dir: /app
     command: ["python", "-m", "opengrid.guardian.main"]
@@ -243,7 +239,7 @@ services:
         condition: service_completed_successfully
     environment:
       OG_CONFIG: /app/dev/config/docker.toml
-    env_file: [{ path: ./secrets, required: false }, { path: ./secrets.example, required: false }]
+    env_file: [{ path: ./secrets, required: false }]
     volumes: ["..:/app:ro"]
     working_dir: /app
     command: ["python", "-m", "opengrid.safestop.main"]
@@ -259,7 +255,7 @@ services:
         condition: service_completed_successfully
     environment:
       OG_CONFIG: /app/dev/config/docker.toml
-    env_file: [{ path: ./secrets, required: false }, { path: ./secrets.example, required: false }]
+    env_file: [{ path: ./secrets, required: false }]
     volumes: ["..:/app:ro"]
     working_dir: /app
     command: ["python", "-m", "opengrid.settle.main"]
@@ -274,10 +270,13 @@ services:
       migrate:
         condition: service_completed_successfully
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${API_PORT:-8080}:8080"
     environment:
       OG_CONFIG: /app/dev/config/docker.toml
-    env_file: [{ path: ./secrets, required: false }, { path: ./secrets.example, required: false }]
+      # R2 authz: the policy file otherwise resolves next to OG_CONFIG (dev/config/authz.toml, which does not
+      # exist), and a missing policy denies every request (403). Use the canonical policy instead.
+      OG_AUTHZ_POLICY: /app/orchestrator/config/authz.toml
+    env_file: [{ path: ./secrets, required: false }]
     volumes: ["..:/app:ro"]
     working_dir: /app
     command: ["python", "-m", "opengrid.api.main"]
