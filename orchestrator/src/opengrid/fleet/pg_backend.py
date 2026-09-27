@@ -12,6 +12,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.mqtt import FLOW_TELEMETRY_FIELDS, Ack, ScadaBankSignal
 from opengrid.core.models.platform import Bank, Hub, HubState
+from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.fleet import TelemetryRow
 
 _INSERT_SCADA_FEED_OBS_SQL = """
@@ -34,12 +35,13 @@ _SCADA_QUALITY_TO_FEED_OBS: dict[str, str] = {
     "comm_fail": "STALE",
 }
 
-# utility_scale mirrors guardian.repo._ALL_HUB_PARAMS_SQL: the hub's bank is an og.asset SUBSTATION.
-_LOAD_HUBS_SQL = """
+# utility_scale: the one nameplate rule the guardian's G-02 uses too (`core.nameplate`): the hub belongs to
+# an og.asset SUBSTATION or MOBILE_STORAGE (a D-31 truck), so the selector and allocator plan it at nameplate.
+_LOAD_HUBS_SQL = f"""
 SELECT h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, h.lat, h.lon, h.units,
-       EXISTS (SELECT 1 FROM og.asset a WHERE a.bank_id = h.bank_id AND a.asset_class = 'SUBSTATION')
+       {NAMEPLATE_HUB_EXISTS_SQL}
 FROM og.hub h
-"""
+"""  # noqa: S608 -- NAMEPLATE_HUB_EXISTS_SQL is a fixed module-level literal
 _LOAD_HUBS_COLUMNS = (
     "hub_id",
     "bank_id",

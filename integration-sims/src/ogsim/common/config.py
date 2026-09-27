@@ -121,9 +121,11 @@ class MobileUnitConfig:
     bank id `bank_id` (default `bank-<trailer_id>`), at `lat`/`lon` (its current position, the home
     station's coordinates while parked there), rated `p_kw`/`e_kwh` with a `reserve_frac` floor, no
     household load or PV. D-31 in the sim: a unit charges only while `at_home`; away from home any
-    charging request is held at 0 kW and `p_ch_max_kw` reports 0. The sim does not relocate a unit
-    yet (`mobile_deployment_start`/`mobile_home_station_charge` are not wired into
-    `ogsim.control.injector.Injector`), so a simulated truck stays parked at its home station."""
+    charging request is held at 0 kW and `p_ch_max_kw` reports 0. A scenario moves a unit
+    (`FleetEngine.move_mobile_unit`): `mobile_deployment_start` (params `site_lat`/`site_lon`) and
+    `mobile_deployment_relocate` drive it to a site, `mobile_home_station_charge` back to `home_position`;
+    each move republishes its device_info (the position the orchestrator's G-35/selector read), as does
+    a heartbeat every `FleetConfig.mobile_position_interval_s`."""
 
     trailer_id: str
     home_station_id: str
@@ -136,6 +138,17 @@ class MobileUnitConfig:
     e_kwh: float = MOBILE_E_KWH_DEFAULT
     reserve_frac: float = MOBILE_RESERVE_FRAC_DEFAULT
     at_home: bool = True
+    # The home station's position; None = `lat`/`lon` (a unit configured parked at home, as shipped).
+    home_lat: float | None = None
+    home_lon: float | None = None
+
+    @property
+    def home_position(self) -> tuple[float, float]:
+        """The depot a scenario's `mobile_home_station_charge` step drives the unit back to."""
+        return (
+            self.lat if self.home_lat is None else self.home_lat,
+            self.lon if self.home_lon is None else self.home_lon,
+        )
 
     @property
     def sim_bank_id(self) -> str:
@@ -317,6 +330,9 @@ class FleetConfig:
     # Mobile-unit (trailer) registry (#33 target-check, D-31, 2026-09-26); see `MobileUnitConfig`'s
     # docstring. Empty by default -- a workspace/deployment without any mobile units configures none.
     mobile_units: tuple[MobileUnitConfig, ...] = ()
+    # D-31: a simulated mobile unit re-publishes its device_info (its position) at least this often, well
+    # inside the orchestrator's 300 s position age limit (`opengrid.core.geo.MOBILE_POSITION_MAX_AGE_S`).
+    mobile_position_interval_s: float = 60.0
     guardian_public_key_path: str = "/etc/opengrid/guardian_ed25519.pub"
     guardian_public_key_path_dev: str = ""
     safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
@@ -422,6 +438,9 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
         ),
         substation_assets=_substation_assets_from_raw(raw.get("substation_assets", [])),
         mobile_units=_mobile_units_from_raw(raw.get("mobile_units", [])),
+        mobile_position_interval_s=float(
+            raw.get("mobile_position_interval_s", defaults.mobile_position_interval_s)
+        ),
         guardian_public_key_path=str(raw.get("guardian_public_key_path", defaults.guardian_public_key_path)),
         guardian_public_key_path_dev=str(
             os.environ.get("OGSIM_GUARDIAN_PUBLIC_KEY_PATH") or raw.get("guardian_public_key_path_dev", "")
@@ -533,6 +552,8 @@ def _mobile_units_from_raw(raw_units: Any) -> tuple[MobileUnitConfig, ...]:
                 e_kwh=float(unit.get("e_kwh", MOBILE_E_KWH_DEFAULT)),
                 reserve_frac=float(unit.get("reserve_frac", MOBILE_RESERVE_FRAC_DEFAULT)),
                 at_home=bool(unit.get("at_home", True)),
+                home_lat=None if unit.get("home_lat") is None else float(unit["home_lat"]),
+                home_lon=None if unit.get("home_lon") is None else float(unit["home_lon"]),
             )
         )
     return tuple(units)

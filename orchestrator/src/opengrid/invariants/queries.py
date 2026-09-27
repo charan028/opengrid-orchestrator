@@ -17,6 +17,7 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.allocator.models import HubSnapshot
+from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.core.reasons import K13_SHORTFALL_REASONS, R_AS_RELEASE, R_SUBSTITUTION
 from opengrid.invariants import checks
 from opengrid.invariants.models import CheckState, InvariantsSummary, Violation
@@ -140,9 +141,9 @@ async def fetch_bank_capability_inputs(
     rolling window; a fleet's hub count is its own separate, comparatively static scale.
 
     `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health, units,
-    utility_scale)` per hub. `utility_scale` is true when the hub's bank is an `og.asset` SUBSTATION (migration
-    0025; e.g. the D-29 Austin toll set): such a hub is rated at its nameplate `p_kw`, never the home unit cap
-    -- the same rule as `guardian.repo._ALL_HUB_PARAMS_SQL` (live defect 2026-09-26: an 18 MW reservation on
+    utility_scale)` per hub. `utility_scale` is true when the hub belongs to a nameplate-rated `og.asset`
+    (`core.nameplate`: SUBSTATION, e.g. the D-29 Austin toll set, or MOBILE_STORAGE, a D-31 truck): such a hub
+    is rated at its nameplate `p_kw`, never the home unit cap -- the same rule as the guardian's G-02 (live defect 2026-09-26: an 18 MW reservation on
     bank-sub-LZ_AEN-00 read as double-sold against a 20 kW home rating).
     `units` is `og.hub.units` (migration 0032) -- the unit count `hub_capability`'s G-02 per-unit cap needs.
     Schema-guarded: on a database without that column yet, `units` is `None` for every hub and the cap
@@ -155,8 +156,7 @@ async def fetch_bank_capability_inputs(
         sql = f"""
             SELECT h.bank_id, b.kva_rating, b.reserve_kva, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d,
                    COALESCE(hs.soc_kwh, 0), COALESCE(hs.health, 'unknown'), {units_expr},
-                   EXISTS (SELECT 1 FROM og.asset a WHERE a.bank_id = h.bank_id AND a.asset_class = 'SUBSTATION')
-                       AS utility_scale
+                   {NAMEPLATE_HUB_EXISTS_SQL} AS utility_scale
             FROM og.hub h
             JOIN og.bank b ON b.bank_id = h.bank_id
             LEFT JOIN og.hub_state hs ON hs.hub_id = h.hub_id
