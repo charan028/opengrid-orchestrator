@@ -16,7 +16,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 from opengrid.api.call_errors import call_refused_http
 from opengrid.api.deps import get_call_store, get_config, get_trace_store
@@ -68,7 +68,7 @@ class UtilityCallSubmission(BaseModel):
     kw: float
     duration_minutes: int = Field(ge=1, le=MAX_CALL_MINUTES)
     idempotency_key: str = Field(min_length=1, max_length=MAX_TEXT_LEN)
-    start_at: datetime | None = None
+    start_at: AwareDatetime | None = None
     obligation_id: UUID | None = None
     reason: str = Field(default="utility toll call", min_length=1, max_length=MAX_TEXT_LEN)
 
@@ -76,7 +76,7 @@ class UtilityCallSubmission(BaseModel):
 class UtilityCancelSubmission(BaseModel):
     """Omit `end_at` (or give one not after now) to cancel; a later `end_at` shortens the call."""
 
-    end_at: datetime | None = None
+    end_at: AwareDatetime | None = None
 
 
 def _today_bounds(now: datetime) -> tuple[datetime, datetime]:
@@ -164,7 +164,7 @@ async def issue_toll_call(
 async def my_calls(
     who: Reader,
     store: Store,
-    since: datetime | None = None,
+    since: AwareDatetime | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_HISTORY_ROWS)] = 100,
 ) -> dict[str, Any]:
     """My call history (accepted and refused), newest first; default the last 30 days."""

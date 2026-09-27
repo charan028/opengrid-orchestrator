@@ -99,6 +99,7 @@ audited = true
 [[rule]]
 role = "utility"
 action = "utility.read"
+audited = true
 
 [[rule]]
 role = "utility"
