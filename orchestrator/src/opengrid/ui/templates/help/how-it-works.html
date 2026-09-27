@@ -119,6 +119,56 @@
 <p class="hp-note">Not implemented at r3.4: a true contract-term toll reservation (planned after R3).</p>
 </section>
 
+<section class="hp-sub" id="hw-delivery">
+<h3>Measured delivery (D-38)</h3>
+<p>A grant is only what the allocator planned, and a guardian veto (for example G-04 on a ramp) means it never
+reaches a device. Every discharge call is therefore verified against what the batteries actually <b>delivered</b>,
+measured from telemetry. This covers utility toll calls, ERCOT AS deployments (each <code>og.as_deployment</code>)
+and operator manual discharge targets. og-settle's delivery job (<code>opengrid.delivery</code>, every
+<code>[delivery].interval_s</code> = 15 s) builds one <code>og.delivery_record</code> per call, in 30 s buckets
+aligned to the call start.</p>
+<ul>
+<li><b>Committed</b> is the call's requested kW, else the obligation's committed kW.</li>
+<li><b>Commanded</b> is the call's items in command batches the guardian signed. A vetoed batch commands 0 kW
+and is counted.</li>
+<li><b>Delivered</b> is the hubs' measured discharge. On a shared bank, only the obligation's share of the
+granted kW counts, the same rule settlement meters by.</li>
+<li><b>Meter</b>: where an independent meter exists (a substation asset's bank, such as
+<code>bank-sub-LZ_AEN-00</code>, or <code>[delivery].meter_bank_ids</code>), its <code>REAL_POWER_KW</code> change
+from a 120 s pre-call baseline is compared with the batteries' change.</li>
+</ul>
+<p>The result is <b>PASS</b>, <b>PARTIAL</b> or <b>FAIL</b> (<b>IN_PROGRESS</b> while the call runs), with reasons:</p>
+<ul>
+<li><code>RAMP_TOO_SLOW</code>: not at <code>target_frac</code> (95 %) of committed within the product's ramp
+time (<code>[delivery.ramp_time_s]</code>: TOLLING 600 s, ECRS 600 s, RRS 600 s, REGUP/REGDN 300 s, NSPIN 1800 s,
+manual 120 s);</li>
+<li><code>SUSTAIN_BELOW_TARGET</code>: under 95 % of the buckets after the ramp at target;</li>
+<li><code>NO_DELIVERY</code>, <code>ENERGY_SHORT</code> (under half the committed kWh) and all-stale data give
+FAIL;</li>
+<li><code>VETOED</code>: at least half the command cycles were vetoed;</li>
+<li><code>STOPPED</code>: the call ended early;</li>
+<li><code>DATA_STALE</code>: over 10 % of the buckets had no telemetry.</li>
+</ul>
+<p>The record also carries the time to target, the sustained compliance %, the lowest point and how long it
+lasted, and discharged against committed kWh.</p>
+<p>Live alerts while a call runs: <code>ALR-DELIVERY-RAMP-LATE</code> (not at target after the ramp time),
+<code>ALR-DELIVERY-SHORTFALL</code> (below target for over <code>shortfall_alert_s</code> = 60 s) and
+<code>ALR-DELIVERY-NONE</code> (commanded, nothing measurable, for over <code>none_alert_s</code> = 60 s).
+While a SHORTFALL or NONE alert is open, the obligation is flagged AT_RISK
+(<code>R-DELIVERY-MEASURED-SHORTFALL</code>) and dispatch continues at the maximum feasible kW (K7, D-17). At the end
+of a call, a meter that disagrees by more than 10 % raises <code>ALR-DELIVERY-METER-MISMATCH</code> and marks the
+record <b>UNCORROBORATED</b>.</p>
+<p>Where it shows:</p>
+<ul>
+<li>the Dispatch page's <b>Delivery</b> column and its detail drawer;</li>
+<li><code>GET /og/api/delivery/records</code>, <code>/records/{call_id}</code> and <code>/summary</code>;</li>
+<li>a utility's own calls under <code>/og/api/customer/v1/utility/delivery-records</code>;</li>
+<li>the utility call status (<code>delivered_kw</code>, RAMPING/DELIVERING);</li>
+<li>the grid link's delivered-kW point.</li>
+</ul>
+<p class="hp-note">Measured values trail real time by about 30-60 s (a 30 s telemetry lag plus the bucket).</p>
+</section>
+
 <section class="hp-sub" id="hw-manual">
 <h3>Manual targets and commands</h3>
 <p>An operator can take hubs out of automatic dispatch and hold them at a chosen power. A manual target is not a one-shot command: it is a recorded intent that the engine ramps toward every cycle, with every step signed by the guardian.</p>

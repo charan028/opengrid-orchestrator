@@ -48,6 +48,7 @@ TOC: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             ("hw-cycle", "Decision cycle"),
             ("hw-lock", "Commitments and the lock"),
             ("hw-holds", "Holds"),
+            ("hw-delivery", "Measured delivery"),
             ("hw-manual", "Manual targets"),
             ("hw-safestop", "Safe stop"),
             ("hw-market", "Market model"),

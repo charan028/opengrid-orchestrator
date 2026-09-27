@@ -257,6 +257,21 @@ CATALOGUE: list[AnomalyType] = [
         wire_target_kind="bank",
     ),
     AnomalyType(
+        id="meter_mismatch",
+        owner="scada",
+        target_kind="bank",
+        params={
+            "battery_scale": {"type": "number", "default": 0.5},
+            "offset_kw": {"type": "number", "default": 0.0},
+        },
+        description=(
+            "The bank meter (REAL_POWER_KW) sees only battery_scale x the batteries' power plus offset_kw: "
+            "an independent meter disagreeing with battery telemetry (D-38 delivery corroboration)."
+        ),
+        wire_type="SCADA_METER_MISMATCH",
+        wire_target_kind="bank",
+    ),
+    AnomalyType(
         id="frozen_value",
         owner="scada",
         target_kind="bank",

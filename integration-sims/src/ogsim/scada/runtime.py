@@ -118,7 +118,9 @@ class ScadaEngine:
             if modifiers.suppressed:
                 continue
             bg_kw = float(background_kw[i]) if i < self._home_bank_count else 0.0
-            real_kw = bank_load_kw(self.buffers[bank_id].net_battery_kw(), bg_kw)
+            # The meter sees the batteries as they are, unless a meter_mismatch anomaly distorts it (D-38).
+            battery_kw = self.buffers[bank_id].net_battery_kw() * modifiers.meter_battery_scale
+            real_kw = bank_load_kw(battery_kw + modifiers.meter_offset_kw, bg_kw)
             value_kw, quality = self.anomalies.apply_reading(
                 bank_id, real_kw, "good", now, kva_rating=self.kva_rating[bank_id]
             )

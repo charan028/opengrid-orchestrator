@@ -35,12 +35,13 @@ def test_all_shipped_scenarios_load_without_error():
     assert names >= CORE_SCENARIOS
     demo_files = sorted(SCENARIOS_DIR.glob("demo-*.yaml"))
     svc_files = sorted(SCENARIOS_DIR.glob("svc-*.yaml"))
+    delivery_files = sorted(SCENARIOS_DIR.glob("delivery-*.yaml"))  # D-38 delivery corroboration
     ercot_as_files = sorted(SCENARIOS_DIR.glob("ercot-as-*.yaml"))  # D-35 AS dispatch instructions
     assert len(ercot_as_files) == 7
     utility_files = sorted(SCENARIOS_DIR.glob("utility-aen-*.yaml"))  # ogsim.utility_aen (r3.4.3)
     assert len(utility_files) == 5
     assert len(scenarios) == (
-        len(CORE_SCENARIOS) + len(demo_files) + len(svc_files) + len(ercot_as_files) + len(utility_files)
+        len(CORE_SCENARIOS) + len(demo_files) + len(svc_files) + len(ercot_as_files) + len(utility_files) + len(delivery_files)
     )
 
 

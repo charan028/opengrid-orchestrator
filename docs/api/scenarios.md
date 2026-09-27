@@ -29,7 +29,9 @@ recorded as an operator action, so the audit trail shows who injected what.
 - **SCADA** (acted on by `ogsim.scada`, target a bank): `SCADA_BANK_OVERLOAD`, `SCADA_LOAD_SPIKE`,
   `SCADA_FROZEN_VALUE`, `SCADA_BAD_QUALITY`, `SCADA_STALE`, `SCADA_OUT_OF_RANGE`, `SCADA_OSCILLATION`,
   `SCADA_PHASE_IMBALANCE`, `SCADA_TOPOLOGY_CHANGE`, `SCADA_COMMS_LOSS`, `SCADA_UTILITY_INSTRUCTION`
-  (`params.mode` = `limit` / `block` / `estop`, `params.limit_kw`), `SCADA_TIME_SKEW`, `SCADA_SITE_SAG_SWELL`.
+  (`params.mode` = `limit` / `block` / `estop`, `params.limit_kw`), `SCADA_TIME_SKEW`, `SCADA_SITE_SAG_SWELL`,
+  `SCADA_METER_MISMATCH` (D-38: the bank meter sees only `params.battery_scale` x the battery power, plus
+  `params.offset_kw`, so the delivery check marks calls on that bank UNCORROBORATED).
 - **Fleet** (acted on by `ogsim.fleet`, target a hub or zone): `FLEET_HUB_OFFLINE`, `FLEET_ZONE_MASS_DISCONNECT`,
   `FLEET_NOT_FOLLOWING_COMMANDS`, `FLEET_INVERTER_TRIP`, `FLEET_SOC_SENSOR_DRIFT`, `FLEET_TELEMETRY_DELAY_BURST`,
   `FLEET_LEASE_LOSS`, `FLEET_CLOCK_SKEW`, `FLEET_TAMPERED_UNSIGNED_COMMAND`, `FLEET_RESERVE_FLOOR_PRESSURE`,

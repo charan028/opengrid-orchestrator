@@ -24,7 +24,7 @@ from opengrid.calls import (
     list_calls,
 )
 from opengrid.calls import rules as r
-from opengrid.calls.models import Granted
+from opengrid.calls.models import Granted, MeasuredDelivery
 
 from .fakes import FakeDeployment, make_award
 
@@ -369,13 +369,35 @@ async def test_ts_d33_24_status_states_follow_start_delivery_and_end(store, trac
         )
 
     assert (await state_at(NOW)).state is CallState.ACCEPTED
-    store.delivery[oid] = Granted(last_kw=5_000.0, kwh=100.0)
-    active = await state_at(start + timedelta(minutes=1))
-    assert active.state is CallState.ACTIVE  # r3.4.1: unmeasured, never RAMPING/DELIVERING from grants
-    assert active.granted_kw == -5_000.0 and active.granted_kwh == 100.0  # signed: discharge < 0
-    assert active.public()["delivery_state"] == "UNMEASURED" and active.public()["delivery_measured"] is False
-    store.delivery[oid] = Granted(last_kw=19_500.0, kwh=900.0)
-    assert (await state_at(start + timedelta(minutes=5))).state is CallState.ACTIVE  # even at target
+    # The delivery job has evaluated the call, but its first bucket had no telemetry yet: not measured.
+    store.measured[record.deployment_id] = MeasuredDelivery(None, 0.0, "IN_PROGRESS", (), "NO_METER", start)
+    unmeasured = await state_at(start + timedelta(seconds=10))
+    assert unmeasured.state is CallState.ACTIVE  # running, nothing measured yet: never RAMPING from grants
+    assert (
+        unmeasured.public()["delivery_state"] == "UNMEASURED"
+        and unmeasured.public()["delivery_measured"] is False
+    )
+
+    def measured(kw: float | None, kwh: float) -> MeasuredDelivery:
+        return MeasuredDelivery(kw, kwh, "IN_PROGRESS", (), "CORROBORATED", start + timedelta(minutes=1))
+
+    store.measured[record.deployment_id] = measured(-5_000.0, 100.0)
+    store.delivery[oid] = Granted(last_kw=20_000.0, kwh=300.0)  # planned: the full target, never delivered
+    ramping = await state_at(start + timedelta(minutes=1))
+    assert ramping.state is CallState.RAMPING  # measured 5 MW of the 20 MW target
+    assert ramping.delivered_kw == -5_000.0 and ramping.delivered_kwh == 100.0  # signed: discharge < 0
+    body = ramping.public()
+    assert body["delivery_measured"] is True and body["delivery_state"] == "IN_PROGRESS"
+    # Deprecated granted_* (planned) stay alongside the measured values until r3.5 (lead decision).
+    assert body["granted_kw"] == -20_000.0 and body["granted_kwh"] == 300.0
+    assert body["granted_description"] == "planned; removed in r3.5; use delivered_*"
+    assert body["delivered_kw"] == -5_000.0 and body["delivered_kwh"] == 100.0
+    store.measured[record.deployment_id] = measured(-19_500.0, 900.0)
+    assert (await state_at(start + timedelta(minutes=5))).state is CallState.DELIVERING  # measured at target
+    store.measured[record.deployment_id] = measured(None, 900.0)
+    stale = await state_at(start + timedelta(minutes=6))
+    assert stale.state is CallState.ACTIVE  # stale: not claimed
+    assert stale.public()["delivery_measured"] is False and stale.public()["delivery_state"] == "UNMEASURED"
     assert (await state_at(start + timedelta(minutes=31))).state is CallState.COMPLETED
 
 

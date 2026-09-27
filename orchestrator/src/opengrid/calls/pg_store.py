@@ -14,14 +14,12 @@ from psycopg import errors
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.calls.models import AwardView, CallKind, CallRecord, Granted
+from opengrid.calls.models import AwardView, CallKind, CallRecord, Granted, MeasuredDelivery
 from opengrid.calls.ports import IdempotencyKeyTakenError, OverlapError
 from opengrid.calls.rules import DEPLOYABLE_STATES, TOLLING_SERVICE_TYPE, TOLLING_VARIANT
+from opengrid.delivery.store import fetch_record
 from opengrid.health.model import AlertFinding, AlertSeverity
 from opengrid.health.queries import raise_alert as write_alert
-
-#: Allocator cycles are ~2 s apart; a longer gap (engine restart) is not counted as delivery.
-MAX_CYCLE_GAP_S = 10.0
 
 _AWARD_SQL = """
 SELECT o.obligation_id, o.service_type, c.variant, o.state, pr.duration_minutes, o.committed_qty_kw,
@@ -107,10 +105,13 @@ SET cancelled_at = CASE WHEN %(end_at)s <= %(now)s OR %(end_at)s <= start_at THE
 WHERE deployment_id = %(deployment_id)s AND cancelled_at IS NULL AND end_at > %(now)s
 """
 
-# Per allocator cycle: the obligation's granted discharge (kW, summed over its banks), integrated over
-# time to the next cycle (capped at MAX_CYCLE_GAP_S) for the kWh. The latest cycle is reported only if
-# it is recent (within the gap of the window's end): a stalled engine reports no current kW.
-_DELIVERED_SQL = """
+#: Allocator cycles are ~2 s apart; a longer gap (engine restart) is not counted as granted.
+MAX_CYCLE_GAP_S = 10.0
+
+# Deprecated (the `granted_*` status fields, removed in r3.5): per allocator cycle, the obligation's granted
+# (planned, NOT measured) discharge summed over its banks, integrated to the next cycle (capped at
+# MAX_CYCLE_GAP_S) for the kWh. Measured delivery is `measured_delivery` (opengrid.delivery, D-38).
+_GRANTED_SQL = """
 WITH cyc AS (
     SELECT g.cycle_id, min(g.created_at) AS t, sum(g.granted_kw) AS kw
     FROM og."grant" g
@@ -306,13 +307,28 @@ class PgCallStore:
             return cur.rowcount > 0
 
     async def granted(self, obligation_id: UUID, start: datetime, end: datetime) -> Granted:
+        """Deprecated (removed in r3.5): planned/granted discharge, NOT measured."""
         row = await self._one(
-            _DELIVERED_SQL,
+            _GRANTED_SQL,
             {"obligation_id": obligation_id, "start_at": start, "end_at": end, "gap_s": MAX_CYCLE_GAP_S},
         )
         if row is None:
             return Granted(last_kw=None, kwh=0.0)
         return Granted(last_kw=_f(row["last_kw"]), kwh=float(row["kwh"] or 0.0))
+
+    async def measured_delivery(self, deployment_id: UUID) -> MeasuredDelivery | None:
+        """Measured delivery from the call's `og.delivery_record` (the one delivery computation, D-38)."""
+        record = await fetch_record(self._pool, str(deployment_id))
+        if record is None:
+            return None
+        return MeasuredDelivery(
+            delivered_kw=record.delivered_kw_last,
+            discharged_kwh=record.discharged_kwh,
+            result=record.result,
+            reasons=tuple(record.reasons),
+            meter_status=record.meter_status,
+            evaluated_to=record.evaluated_to,
+        )
 
     async def raise_alert(
         self, rule: str, severity: AlertSeverity, summary: str, detail: dict[str, Any]
