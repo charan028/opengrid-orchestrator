@@ -209,8 +209,9 @@ class GuardianService:
                 self._last_signed[hub_id] = entry
 
     def _drop_signed_anchors(self, hub_ids: Iterable[str]) -> None:
-        """Contract with DISPATCH (r3.4.3): a veto naming a hub, or a stop engaged over it since the signature,
-        ends that hub's signed anchor on both sides -- both then anchor on telemetry."""
+        """Contract with DISPATCH (r3.4.3): only a stop engaged over a hub since the signature (or its lease
+        lapsing, `checks.g04_anchor_kw`) ends that hub's signed anchor -- never a veto -- and both sides then
+        anchor on telemetry."""
         for hub_id in hub_ids:
             self._last_signed.pop(hub_id, None)
 
@@ -1589,9 +1590,9 @@ class GuardianService:
             }
             signature = sign_payload(self.signing_seed, payload)
             self._record_signed_setpoints(batch.command_batch_id, signed_at)
-        else:
-            # contract with DISPATCH: a hub a veto names re-anchors on telemetry on both sides
-            self._drop_signed_anchors(vetoed_hub_ids(violations or []))
+        # A veto never ends a signed anchor (r3.4.3 HIGH, contract with DISPATCH): while that lease is live the
+        # hub keeps following the last SIGNED setpoint, so that is where the next step starts. Re-anchoring on
+        # telemetry up to ~10 s stale let a step of 4-5x the bound sign right after an item-level veto.
 
         verdict = Verdict(
             verdict_id=verdict_id,

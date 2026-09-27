@@ -3,8 +3,9 @@
 The real `GuardianService` (every check wired, sub-LZ_AEN-00's prod-like data from test_toll_ramp_all_checks)
 against an engine that follows the DISPATCH contract: it anchors on its last SIGNED setpoint while that lease is
 live, else on telemetry (and at 0 kW after a stop release until newer telemetry); it steps at most
-0.9 x ramp x one cycle; a veto naming the hub drops its signed anchor. The hub follows its signed setpoint while
-the lease is live and not stopped, else sits at 0 kW, and reports telemetry every 5 cycles.
+0.9 x ramp x one cycle; a veto never drops a live signed anchor (only a lapsed lease or a stop does). The hub follows
+its signed setpoint while the lease is live and not stopped, else sits at 0 kW, and reports telemetry every 5 cycles
+(or, with `lag_cycles`, every cycle but that many cycles old).
 
 Every scenario must converge to the full 20 MW with a bounded number of vetoes, and the guardian must NEVER sign
 a step larger than one cycle's bound from where the hub physically is.
@@ -12,10 +13,10 @@ a step larger than one cycle's bound from where the hub physically is.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -42,6 +43,11 @@ class Sim:
     cycle: int = 0
     vetoes: int = 0
     signed_steps: int = 0
+    lag_cycles: int | None = None  # telemetry every cycle, this many cycles old
+    engine_drops_on_veto: bool = False  # a misbehaving engine: re-anchors on telemetry after any veto
+    hold_item: bool = False  # each batch also carries a 0 kW hold item for the same hub
+    history: list[float] = field(default_factory=list)
+    hold_obligation: UUID = field(default_factory=uuid4)
 
     @property
     def now(self) -> datetime:
@@ -52,8 +58,13 @@ class Sim:
         self.world.clock[0] += timedelta(seconds=CYCLE_S)
         if self.stopped or self.lease_until is None or self.lease_until <= self.now:
             self.phys_kw = 0.0  # a stop, or a lapsed lease: the hub ramps itself to 0 kW
-        if self.cycle % TELEMETRY_EVERY == 0:
-            hubs = self.world.fakes.hubs.hubs
+        self.history.append(self.phys_kw)
+        hubs = self.world.fakes.hubs.hubs
+        if self.lag_cycles is not None and len(self.history) > self.lag_cycles:
+            lagged_at = self.now - timedelta(seconds=CYCLE_S * self.lag_cycles)
+            lagged = self.history[-1 - self.lag_cycles]
+            hubs[HUB] = replace(hubs[HUB], prev_p_kw=lagged, telemetry_at=lagged_at)
+        elif self.lag_cycles is None and self.cycle % TELEMETRY_EVERY == 0:
             hubs[HUB] = replace(hubs[HUB], prev_p_kw=self.phys_kw, telemetry_at=self.now)
 
     def engine_anchor(self) -> float:
@@ -82,7 +93,12 @@ class Sim:
             expires_at=self.now + timedelta(seconds=LEASE_S),
             ledger_version=world.fakes.ledger.version,
             items=[
-                ProposedItem(HUB, target, "R-GRANT-COMMITTED", world.toll, Decimal(str(round(-target, 3))))
+                *(
+                    [ProposedItem(HUB, 0.0, "R-GRANT-AS-HOLD", self.hold_obligation, Decimal(0))]
+                    if self.hold_item
+                    else []
+                ),
+                ProposedItem(HUB, target, "R-GRANT-COMMITTED", world.toll, Decimal(str(round(-target, 3)))),
             ],
             is_firm_event=True,
         )
@@ -97,9 +113,9 @@ class Sim:
             world.fakes.prior_grants.prior[world.toll] = Decimal(str(round(-target, 3)))
             self.signed_steps += 1
         else:
-            assert "G-04" in verdict.vetoed_rule_ids or verdict.outcome == "PARTLY_VETOED", verdict
             self.vetoes += 1
-            self.signed_kw = None  # contract: a veto naming the hub re-anchors it on telemetry
+            if self.engine_drops_on_veto:
+                self.signed_kw = None  # NOT the contract: the guardian must still hold the one-cycle bound
 
     async def run(self, cycles: int) -> None:
         for _ in range(cycles):
@@ -216,3 +232,54 @@ def test_seeding_never_replaces_a_newer_signature(fakes, signing_seed):
     service._last_signed[HUB] = (-400.0, t, t + timedelta(seconds=30))
     service.seed_signed_anchors({HUB: (-200.0, t - timedelta(seconds=2), t + timedelta(seconds=28))})
     assert service._last_signed[HUB][0] == -400.0
+
+
+# --- r3.4.3 HIGH: an item-level veto never drops a live signed anchor --------------------------------------------
+
+
+@pytest.mark.parametrize("lag_cycles", [2, 3])
+@pytest.mark.parametrize(
+    "engine_drops", [False, True], ids=["contract-engine", "engine-reanchors-on-telemetry"]
+)
+async def test_an_item_level_veto_mid_ramp_keeps_the_signed_anchor(
+    fakes, signing_seed, lag_cycles, engine_drops
+):
+    """A 20 MW ramp; one G-01 veto mid-ramp (the hub's SoC briefly not live); telemetry lagging 2-3 cycles. The
+    hub keeps following its last signed setpoint on its live lease, so G-04 keeps measuring from there: no
+    signed step ever exceeds one cycle's bound (the Sim asserts it on every PASS), even when the engine wrongly
+    re-anchors on the stale telemetry (then the guardian vetoes until telemetry catches up), and it converges."""
+    sim = _sim(fakes, signing_seed)
+    sim.lag_cycles, sim.engine_drops_on_veto = lag_cycles, engine_drops
+    await sim.run(30)
+    hubs = sim.world.fakes.hubs.hubs
+    hubs[HUB] = replace(hubs[HUB], health="stale")
+    sim.tick()
+    await sim.engine_cycle()
+    assert sim.vetoes == 1  # G-01: no discharge on a SoC that is not live
+    hubs[HUB] = replace(hubs[HUB], health="online")
+    await sim.converge()
+    assert sim.vetoes <= (1 if not engine_drops else 2 + lag_cycles)
+
+
+async def test_a_veto_does_not_forget_the_guardians_signed_anchor(fakes, signing_seed):
+    sim = _sim(fakes, signing_seed)
+    await sim.run(10)
+    signed = sim.world.service._last_signed[HUB]
+    hubs = sim.world.fakes.hubs.hubs
+    hubs[HUB] = replace(hubs[HUB], health="stale")
+    sim.tick()
+    await sim.engine_cycle()
+    assert sim.vetoes == 1 and sim.world.service._last_signed[HUB] == signed
+
+
+# --- MEDIUM: a single-hub utility-scale bank with a 0 kW hold item and the discharge item in one batch -------
+
+
+async def test_a_hold_item_and_a_discharge_item_on_one_hub_are_checked_on_their_sum(fakes, signing_seed):
+    """The anchor, G-04 and the rate checks use the hub's NET setpoint per batch (the sum of its items): a 0 kW
+    hold item listed first never becomes the hub's anchor or its step."""
+    sim = _sim(fakes, signing_seed)
+    sim.hold_item = True
+    await sim.converge()
+    assert sim.vetoes == 0
+    assert sim.world.service._last_signed[HUB][0] == pytest.approx(-TOLL_KW)
