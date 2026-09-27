@@ -41,7 +41,12 @@ def test_all_shipped_scenarios_load_without_error():
     utility_files = sorted(SCENARIOS_DIR.glob("utility-aen-*.yaml"))  # ogsim.utility_aen (r3.4.3)
     assert len(utility_files) == 5
     assert len(scenarios) == (
-        len(CORE_SCENARIOS) + len(demo_files) + len(svc_files) + len(ercot_as_files) + len(utility_files) + len(delivery_files)
+        len(CORE_SCENARIOS)
+        + len(demo_files)
+        + len(svc_files)
+        + len(ercot_as_files)
+        + len(utility_files)
+        + len(delivery_files)
     )
 
 
