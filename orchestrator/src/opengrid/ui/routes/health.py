@@ -25,7 +25,9 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 
+from opengrid.api.deps import get_config
 from opengrid.core.timeutil import to_utc
+from opengrid.feeds.staleness import effective_quality
 from opengrid.ui.api_client import ApiUnavailable, get_json, post_json
 from opengrid.ui.render import render_status_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
@@ -137,13 +139,39 @@ def guardian_attention(alerts: Iterable[Any]) -> list[dict[str, Any]]:
     return items
 
 
-def _feed_row(entry: dict[str, Any]) -> dict[str, Any]:
+def feed_quality(entry: dict[str, Any], staleness_cfg: dict[str, float]) -> str:
+    """The badge's quality: the API's (breaker-driven) one, overridden to STALE once the latest value is
+    older than the product's `[feeds.staleness]` threshold -- `opengrid.feeds.staleness.effective_quality`,
+    the same rule the feed readers apply (02b S2.6). A forecast timestamped ahead is never stale."""
+    base = str(entry.get("quality") or "unknown")
+    age_s = _age_s(entry.get("last_value_at"))
+    if age_s is None:
+        return base
+    return effective_quality(
+        base,
+        source=str(entry.get("source") or ""),
+        product=str(entry.get("product") or ""),
+        age_s=age_s,
+        staleness_cfg=staleness_cfg,
+    )
+
+
+def _feed_row(entry: dict[str, Any], staleness_cfg: dict[str, float] | None = None) -> dict[str, Any]:
     return {
         "source": entry.get("source", "-"),
         "product": entry.get("product", "-"),
-        "quality_badge": render_status_badge(entry.get("quality", "unknown")),
+        "quality_badge": render_status_badge(feed_quality(entry, staleness_cfg or {})),
         "age_display": format_age(_age_s(entry.get("last_value_at"))),
     }
+
+
+def _staleness_cfg(request: Request) -> dict[str, float]:
+    """`[feeds.staleness]` from the app config (the thresholds the feed readers use); empty = defaults."""
+    try:
+        raw = get_config(request).get("feeds.staleness", {})
+    except AttributeError:
+        return {}
+    return {str(k): float(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 
 
 def _alert_row(entry: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +209,7 @@ async def health_screen(request: Request) -> HTMLResponse:
             "is_operator": is_operator(request),
             "health": health,
             "process_rows": [_process_row(name, entry) for name, entry in processes.items()],
-            "feed_rows": [_feed_row(entry) for entry in feeds],
+            "feed_rows": [_feed_row(entry, _staleness_cfg(request)) for entry in feeds],
             "alert_rows": [_alert_row(entry) for entry in alerts],
             "hub_counts": health.get("hub_health_counts") or {},
             "degraded": degraded,

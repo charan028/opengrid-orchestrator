@@ -25,20 +25,21 @@ def test_pages_by_cursor_and_shows_the_approximate_total(operator_page: Page) ->
     operator_page.set_viewport_size({"width": 1400, "height": 1000})
     goto_ok(operator_page, f"{BASE_PATH}/fleet")
     rows = operator_page.locator("#fleet-table tbody tr.clickable-row")
-    expect(rows).to_have_count(50)
+    expect(rows).to_have_count(25)
     expect(operator_page.locator("#fleet-page-info")).to_contain_text("~132 hubs")
     expect(operator_page.locator("#fleet-prev")).to_have_count(0)
     _shot(operator_page, "fleet_operator_1400.png")
 
     operator_page.locator("#fleet-next").click()
-    expect(rows.first).to_have_attribute("data-row-id", "hub-0051")
+    expect(rows.first).to_have_attribute("data-row-id", "hub-0026")
     assert "cursor=" in operator_page.url
     operator_page.locator("#fleet-prev").click()
     expect(rows.first).to_have_attribute("data-row-id", "hub-0001")
 
-    operator_page.locator("#fleet-page-size").select_option(label="25")
-    expect(rows).to_have_count(25)
-    assert "size=25" in operator_page.url
+    operator_page.locator("#fleet-page-size").select_option(label="50")
+    expect(rows).to_have_count(50)
+    assert "size=50" in operator_page.url
+    expect(operator_page.locator("#fleet-page-size option")).to_have_count(2)
 
 
 def test_filters_become_chips_live_in_the_url_and_survive_refresh(operator_page: Page) -> None:
@@ -118,7 +119,7 @@ def test_select_page_and_all_matching_share_one_selection(operator_page: Page) -
     expect(bar).to_be_hidden()
 
     operator_page.locator("#fleet-select-all-page").check()
-    expect(count).to_have_text("50 hubs selected")
+    expect(count).to_have_text("25 hubs selected")
     expect(bar).to_be_visible()
     expect(operator_page.locator("#bulk-propose-button")).to_be_enabled()
 
@@ -199,7 +200,7 @@ def test_disabled_propose_says_why(operator_page: Page) -> None:
 
 def test_viewer_is_read_only(viewer_page: Page) -> None:
     goto_ok(viewer_page, f"{BASE_PATH}/fleet")
-    expect(viewer_page.locator("#fleet-table tbody tr.clickable-row")).to_have_count(50)
+    expect(viewer_page.locator("#fleet-table tbody tr.clickable-row")).to_have_count(25)
     for selector in (
         "input.og-row-select",
         "#fleet-select-all-page",
@@ -248,6 +249,7 @@ def test_operator_targets_are_marked_in_the_table_and_drawer(operator_page: Page
     row = operator_page.locator('tr[data-row-id="hub-0003"]')
     expect(row.locator(".fl-target")).to_contain_text("target 5.0 kW")
     expect(operator_page.locator("#fleet-page-info")).to_contain_text("1 under an operator target")
+    expect(operator_page.locator('tr[data-row-id="hub-0004"] .fl-target')).to_have_count(0)
     row.click()
     drawer = operator_page.locator("#hub-drawer")
     expect(drawer.locator("#drawer-target")).to_contain_text("5.0 kW")
@@ -376,3 +378,63 @@ def test_control_room_map_shapes_asset_classes(operator_page: Page) -> None:
     shots = os.environ.get("OG_UI_SCREENSHOT_DIR")
     if shots:
         grid_map.screenshot(path=os.path.join(shots, "control_room_assets.png"))
+
+
+def test_layout_order_map_hubs_charging_then_the_rest(operator_page: Page) -> None:
+    """Owner r3.4: map first, then the hubs table, then the charging schedule, then everything else."""
+    for width in (1400, 390):
+        operator_page.set_viewport_size({"width": width, "height": 900})
+        goto_ok(operator_page, f"{BASE_PATH}/fleet")
+        tops = [
+            operator_page.locator(sel).first.bounding_box()
+            for sel in (
+                ".og-map-panel",
+                'section[aria-labelledby="hubs-heading"]',
+                "#charge-schedule",
+                ".fl-summary",
+                "#fleet-actions",
+            )
+        ]
+        assert all(tops), tops
+        ys = [b["y"] for b in tops if b]
+        assert ys == sorted(ys), ys
+        lefts = {round(b["x"]) for b in tops if b}
+        assert len(lefts) == 1, lefts  # one left edge: the panels line up
+        overflow = operator_page.evaluate(
+            "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+        )
+        assert overflow <= 0, (width, overflow)
+        _shot(operator_page, f"fleet_layout_{width}.png")
+
+
+def test_power_column_refreshes_live(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    cell = operator_page.locator('tr[data-row-id="hub-0001"] td[data-col=kw]')
+    original = cell.inner_text()
+    operator_page.evaluate(
+        "document.querySelector('tr[data-row-id=\\'hub-0001\\'] td[data-col=kw]').textContent = 'x'"
+    )
+    expect(cell).to_have_text("x")
+    operator_page.evaluate("ogFleet.refreshPower()")
+    expect(cell).to_have_text(original)
+
+
+def test_select_matching_is_clamped_to_the_bulk_cap(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/fleet")
+    button = operator_page.locator("#fleet-select-matching")
+    expect(button).to_contain_text("up to 500")
+    button.click()
+    expect(operator_page.locator("#fleet-selection-note")).to_contain_text("the most one bulk command takes")
+
+
+def test_tolling_obligation_gets_a_utility_call(operator_page: Page) -> None:
+    goto_ok(operator_page, f"{BASE_PATH}/dispatch")
+    call = operator_page.locator('.as-row-deploy[data-obligation="7011aaaa-0000-0000-0000-0000000070aa"]')
+    expect(call).to_have_text("Utility call\u2026")
+    call.click()
+    expect(operator_page.locator("#as-duration")).to_have_attribute("max", "90")
+    expect(operator_page.locator("#as-duration-hint")).to_have_text("Up to 90 min for TOLLING.")
+    operator_page.locator("#as-deployment-form").get_by_role("button", name="Propose deployment").click()
+    expect(operator_page.locator("#as-action-result")).to_contain_text(
+        "utility's call on tolling obligation 7011aaaa"
+    )

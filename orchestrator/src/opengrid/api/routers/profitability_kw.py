@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from opengrid.api.auth import Identity, require_operator
+from opengrid.api.auth import Identity, require_viewer
 from opengrid.api.views_ext import ExtViewsProtocol, as_utc, get_ext_views
 from opengrid.core.timeutil import MARKET_TZ
 from opengrid.market.view import profitability_per_kw
@@ -37,7 +37,7 @@ def current_settlement_month(now: datetime) -> tuple[datetime, datetime]:
 @router.get("/per-kw")
 async def profitability_per_kw_route(
     views: Annotated[ExtViewsProtocol, Depends(get_ext_views)],
-    _identity: Annotated[Identity, Depends(require_operator)],
+    _identity: Annotated[Identity, Depends(require_viewer)],
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> dict[str, Any]:

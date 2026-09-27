@@ -581,6 +581,8 @@ AS_MAX_DEPLOY_MINUTES: dict[str, int] = {
     "TOLLING": 90,
 }
 #: Only an AWARDED AS obligation is a hold that can be deployed; an OFFERED one is just an offer.
+_TOLL_SERVICE_TYPE = "REGULATED_CAPACITY"
+_TOLL_VARIANT = "TOLLING"
 _AS_AWARDED_STATES = frozenset({"COMMITTED", "DELIVERING", "SHORTFALL"})
 
 
@@ -613,7 +615,18 @@ def as_awards_view(
     all_deployment = next((row for row in deployments if row.get("obligation_id") is None), None)
     rows: list[dict[str, Any]] = []
     for award in opportunities:
-        if award.get("service_type") != "ERCOT_AS" or award.get("state") not in _AS_AWARDED_STATES:
+        if award.get("state") not in _AS_AWARDED_STATES:
+            continue
+        product_hint = str(
+            award.get("product")
+            or award.get("variant")
+            or (product_by_contract or {}).get(str(award.get("contract_id") or ""))
+            or ""
+        ).upper()
+        # D-29: a tolling obligation (REGULATED_CAPACITY, contract variant TOLLING) is deployed by a
+        # utility's call through the same route; anything else that is not an ERCOT_AS award is skipped.
+        is_toll = award.get("service_type") == _TOLL_SERVICE_TYPE and product_hint == _TOLL_VARIANT
+        if award.get("service_type") != "ERCOT_AS" and not is_toll:
             continue
         obligation_id = str(award.get("obligation_id") or "")
         deployment = active_by_obligation.get(obligation_id) or all_deployment
@@ -653,6 +666,7 @@ def as_awards_view(
                 "state": state,
                 "deployment_id": str(deployment["deployment_id"]) if deployment else None,
                 "deployment_end": deployment.get("end_at") if deployment else None,
+                "utility_call": is_toll,
             }
         )
     return rows
@@ -698,8 +712,12 @@ async def propose_as_deployment(
             "reason": reason,
             "confirm_url": f"{BASE_PATH}/dispatch/as-deployments/confirm",
             "summary": (
-                f"Deploy award {obligation_id[:8]} ({product.strip().upper() or 'ERCOT_AS'}) for {duration_minutes} minutes "
-                f"({reason})"
+                (
+                    f"Issue the utility's call on tolling obligation {obligation_id[:8]} for {duration_minutes} minutes"
+                    if product.strip().upper() == _TOLL_VARIANT
+                    else f"Deploy award {obligation_id[:8]} ({product.strip().upper() or 'ERCOT_AS'}) for {duration_minutes} minutes"
+                )
+                + f" ({reason})"
             ),
         },
     )
@@ -725,6 +743,10 @@ async def confirm_as_deployment(
             remote_user=remote_user(request),
         )
     except ApiUnavailable as exc:
+        if exc.status_code == 409:
+            # overlap (an active deployment already covers it), over the product cap, or not deployable
+            detail = exc.detail.get("detail") if isinstance(exc.detail, dict) else exc.detail
+            return _action_result(request, message=f"Refused by the API: {detail or exc}")
         return _action_result(request, message=str(exc))
     return _action_result(
         request,

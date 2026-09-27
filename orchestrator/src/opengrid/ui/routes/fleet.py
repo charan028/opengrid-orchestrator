@@ -22,9 +22,11 @@ from urllib.parse import quote, urlencode
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from opengrid.api.deps import get_config
 from opengrid.core.timeutil import to_utc
+from opengrid.health.model import HealthThresholds
 from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json, put_json
-from opengrid.ui.render import render_stale_badge, render_status_badge
+from opengrid.ui.render import render_stale_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.templating import BASE_PATH, templates
 
@@ -46,6 +48,8 @@ _LEGACY_HUBS_PATH = "/og/api/fleet/hubs"
 _TARGETS_PATH = "/og/api/fleet/manual-targets"
 _CHARGE_WINDOWS_PATH = "/og/api/fleet/charge-windows"
 _HOME_STATIONS_PATH = "/og/api/fleet/home-stations"
+#: `GET /og/api/fleet/manual-targets` status meaning the engine is ramping the hub (r3.4).
+TARGET_ACTIVE = "ACTIVE"
 #: Owner asset classes (R3.1): shape + colour on the map, a column, a filter and a drawer badge.
 ASSET_LABELS: dict[str, str] = {"HOME": "Home battery", "MOBILE": "Truck", "UTILITY_SCALE": "Substation BESS"}
 DEFAULT_TARGET_MINUTES = 15
@@ -62,10 +66,14 @@ CHARGE_SCOPES: tuple[tuple[str, str], ...] = (
 )
 _WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 MAX_WINDOWS = 4
-PAGE_SIZES = (25, 50, 100)
-DEFAULT_PAGE_SIZE = 50
-#: "Select all N matching" cap; the API applies its own `[api].fleet_selection_max` on top.
+#: Owner r3.4: 25 rows by default, 50 on request; keyset pages beyond (the API also allows 100).
+PAGE_SIZES = (25, 50)
+DEFAULT_PAGE_SIZE = 25
+#: "Select all N matching" ceiling; the page clamps it to the bulk-command cap (`bulk_hub_cap`), since a
+#: selection is only ever made to command it. The API applies its own `[api].fleet_selection_max` on top.
 SELECTION_MAX = 5000
+#: `[api].bulk_commands.max_hubs` default (api `routers.fleet_bulk._DEFAULT_MAX_HUBS`).
+BULK_MAX_HUBS_DEFAULT = 500
 HEALTH_CHOICES = ("OK", "WATCH", "DEGRADED", "QUARANTINED", "FAULT", "OFFLINE")
 ACTIVITY_LABELS: dict[str, str] = {
     "delivering": "Delivering",
@@ -85,7 +93,6 @@ SORT_COLUMNS: dict[str, str] = {
     "hw": "HW rev",
     "fw": "FW version",
 }
-_HUB_STALE_AFTER_S = 10.0
 #: The API holds the approval open up to 10 s waiting for the guardian (api `routers.safestop`).
 _RELEASE_APPROVE_TIMEOUT_S = 15.0
 _SAFESTOP_SCOPES = ("fleet", "zone", "bank")
@@ -235,22 +242,6 @@ def parse_hub_ids(raw: str | None) -> list[str]:
         if hub_id:
             seen.setdefault(hub_id, None)
     return list(seen)
-
-
-def _to_table_row(hub: dict[str, Any]) -> dict[str, Any]:
-    health = hub.get("health", "unknown")
-    last_seen_at = hub.get("last_seen_at")
-    return {
-        "hub_id": hub.get("hub_id", "-"),
-        "bank_id": hub.get("bank_id", "-"),
-        "zone": hub.get("zone", "-"),
-        "health_badge": render_status_badge(health),
-        "soc_kwh": hub.get("soc_kwh", "-"),
-        "p_kw": hub.get("p_kw", "-"),
-        "age_badge": render_stale_badge(
-            _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=_HUB_STALE_AFTER_S
-        ),
-    }
 
 
 def _confirm_dialog_context(
@@ -444,7 +435,31 @@ def _approx(n: int | None) -> str:
     return f"~{n:,}"
 
 
-def _table_row(hub: dict[str, Any], targets: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def bulk_hub_cap(request: Request) -> int:
+    """The most hubs one bulk command takes: `[api].bulk_commands.max_hubs` (the API refuses more), so
+    "select all matching" never builds a selection the command cannot send."""
+    try:
+        configured = int(get_config(request).get("api.bulk_commands.max_hubs", BULK_MAX_HUBS_DEFAULT))
+    except AttributeError:
+        configured = BULK_MAX_HUBS_DEFAULT
+    return max(1, min(configured, SELECTION_MAX))
+
+
+def hub_age_thresholds(request: Request) -> tuple[float, float]:
+    """(stale_after_s, offline_after_s) for the telemetry-age badges: `[health].hub_stale_s` and
+    `hub_offline_s` through the health module's own reader (`HealthThresholds.from_config`), so a hub
+    reporting every 10 s never blinks stale between reports (r3.4). No config (a bare test app): the
+    reader's defaults."""
+    try:
+        thresholds = HealthThresholds.from_config(get_config(request))
+    except AttributeError:
+        thresholds = HealthThresholds()
+    return float(thresholds.hub_stale_s), float(thresholds.hub_offline_s)
+
+
+def _table_row(
+    hub: dict[str, Any], targets: dict[str, dict[str, Any]], *, stale_after_s: float
+) -> dict[str, Any]:
     last_seen_at = hub.get("last_seen_at")
     return {
         "asset_class": hub.get("asset_class") or "HOME",
@@ -462,7 +477,7 @@ def _table_row(hub: dict[str, Any], targets: dict[str, dict[str, Any]]) -> dict[
         "health_label": hub.get("health_label") or str(hub.get("health", "unknown")).upper(),
         "last_seen_at": last_seen_at,
         "age_badge": render_stale_badge(
-            _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=_HUB_STALE_AFTER_S
+            _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=stale_after_s
         ),
     }
 
@@ -482,6 +497,7 @@ async def fleet_screen(
     safestop_scope_id: str | None = Query(default=None),
 ) -> HTMLResponse:
     state = table_state(request)
+    stale_s, _offline_s = hub_age_thresholds(request)
     degraded: str | None = None
     page: dict[str, Any] = {}
     api_params: list[tuple[str, str]] = [
@@ -547,7 +563,8 @@ async def fleet_screen(
             "role": role_of(request),
             "is_operator": operator,
             "state": state,
-            "table_rows": [_table_row(h, targets) for h in hubs],
+            "table_rows": [_table_row(h, targets, stale_after_s=stale_s) for h in hubs],
+            "hub_stale_s": stale_s,
             "hw_options": hw_options,
             "asset_labels": ASSET_LABELS,
             "home_stations": (stations or {}).get("items", []) if isinstance(stations, dict) else [],
@@ -567,7 +584,7 @@ async def fleet_screen(
             "activity_labels": ACTIVITY_LABELS,
             "zone_options": zone_options,
             "summary": summary if isinstance(summary, dict) and summary.keys() >= _SUMMARY_KEYS else None,
-            "selection_max": SELECTION_MAX,
+            "selection_max": bulk_hub_cap(request),
             "releases": releases,
             "map_hubs": map_hubs,
             "safestop_prefill": safestop_prefill(safestop_scope, safestop_scope_id),
@@ -601,7 +618,7 @@ async def fleet_selection(request: Request) -> JSONResponse:
     state = table_state(request)
     try:
         body = await get_json(
-            _SELECTION_PATH, params=_as_params([*state.filter_params(), ("max", str(SELECTION_MAX))])
+            _SELECTION_PATH, params=_as_params([*state.filter_params(), ("max", str(bulk_hub_cap(request)))])
         )
     except ApiUnavailable as exc:
         return JSONResponse({"error": str(exc)}, status_code=status.HTTP_502_BAD_GATEWAY)
@@ -640,6 +657,7 @@ async def hub_drilldown(request: Request, hub_id: str) -> HTMLResponse:
             "hub": hub,
             "detail": detail,
             "target": (await active_targets()).get(hub_id),
+            "hub_stale_s": hub_age_thresholds(request)[0],
             "charge_window": await _optional_json(
                 f"{_CHARGE_WINDOWS_PATH}/effective", params={"hub_id": hub_id}
             ),
@@ -846,6 +864,15 @@ async def propose_bulk_command(
             "_partials/propose_error.html",
             {"message": "select at least one hub on the map or in the table first"},
         )
+    cap = bulk_hub_cap(request)
+    if len(selected) > cap:
+        return templates.TemplateResponse(
+            request,
+            "_partials/propose_error.html",
+            {
+                "message": f"{len(selected)} hubs selected; one bulk command takes at most {cap}. Narrow the selection."
+            },
+        )
     hubs: list[dict[str, Any]] = []
     try:
         raw = await get_json("/og/api/fleet/hubs")
@@ -945,11 +972,56 @@ async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
 
 
 async def active_targets() -> dict[str, dict[str, Any]]:
-    """hub_id -> the operator target currently controlling it (`GET /og/api/fleet/manual-targets`);
-    empty when the API does not serve it yet, so the table simply shows no markers."""
+    """hub_id -> the operator target currently controlling it (`GET /og/api/fleet/manual-targets`). Only
+    status ACTIVE means the engine is ramping the hub; cancelled ones (operator, safe stop, late record)
+    are not markers. An item without a status (older API) counts as active. Empty when the API does not
+    serve it, so the table simply shows no markers."""
     body = await _optional_json(_TARGETS_PATH)
     items = body.get("items", []) if isinstance(body, dict) else []
-    return {str(t["hub_id"]): t for t in items if isinstance(t, dict) and t.get("hub_id")}
+    return {
+        str(t["hub_id"]): t for t in items if isinstance(t, dict) and t.get("hub_id") and target_is_active(t)
+    }
+
+
+def target_is_active(target: dict[str, Any]) -> bool:
+    return str(target.get("status") or TARGET_ACTIVE) == TARGET_ACTIVE
+
+
+@router.get("/manual-targets/{trace_id}/status")
+async def target_status(trace_id: str) -> JSONResponse:
+    """`{trace_id, status, stop_event_id, cancelled_by}` for the ramp indicator: it stops showing progress
+    as soon as the target is no longer ACTIVE (cancelled, stopped by a safe stop, or expired)."""
+    body = await _optional_json(_TARGETS_PATH, params={"include_expired": "true"})
+    items = body.get("items", []) if isinstance(body, dict) else []
+    found = next((t for t in items if isinstance(t, dict) and str(t.get("trace_id")) == trace_id), None)
+    if found is None:
+        return JSONResponse({"trace_id": trace_id, "status": None})
+    return JSONResponse(
+        {
+            "trace_id": trace_id,
+            "status": str(found.get("status") or TARGET_ACTIVE),
+            "stop_event_id": found.get("stop_event_id"),
+            "cancelled_by": found.get("cancelled_by"),
+        }
+    )
+
+
+@router.get("/live-power")
+async def live_power(ids: str = Query(default="", max_length=4000)) -> JSONResponse:
+    """`{hubs: {hub_id: {p_kw, last_seen_at}}}` for the rows on screen, from the map snapshot (one cached
+    read of every hub, `GET /og/api/fleet/map`), so the table's P and age refresh without a page load."""
+    wanted = set(parse_hub_ids(ids)[:100])
+    body = await _optional_json(_MAP_PATH)
+    hubs = body.get("hubs", []) if isinstance(body, dict) else []
+    return JSONResponse(
+        {
+            "hubs": {
+                str(h["hub_id"]): {"p_kw": h.get("kw", h.get("p_kw")), "last_seen_at": h.get("last_seen_at")}
+                for h in hubs
+                if isinstance(h, dict) and h.get("hub_id") in wanted
+            }
+        }
+    )
 
 
 @router.get("/hubs/{hub_id}/live")
@@ -969,10 +1041,20 @@ async def cancel_target(request: Request, trace_id: str) -> HTMLResponse:
         result = await post_json(f"{_TARGETS_PATH}/{trace_id}/cancel", {}, remote_user=remote_user(request))
     except ApiUnavailable as exc:
         logger.warning("manual target cancel failed: %s", exc)
+        # 409: the target exists but is no longer active (`detail.status` lists why); 404: unknown trace;
+        # 503: not recorded (trace store down) -- nothing changed, the operator can retry.
+        detail = exc.detail.get("detail") if isinstance(exc.detail, dict) else None
+        statuses = detail.get("status") if isinstance(detail, dict) else None
         return templates.TemplateResponse(
             request,
             "_partials/fleet_target_cancel_result.html",
-            {"result": None, "status_code": exc.status_code, "message": str(exc)},
+            {
+                "result": None,
+                "status_code": exc.status_code,
+                "message": str(exc),
+                "statuses": statuses if isinstance(statuses, list) else [],
+                "trace_id": trace_id,
+            },
         )
     return templates.TemplateResponse(
         request,

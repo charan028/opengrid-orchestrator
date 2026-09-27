@@ -40,7 +40,7 @@
     </p>
     <dl class="fl-kv">
       <div><dt>Last communication</dt><dd>{{ dash(st.last_seen_at) }}
-        <span class="stale-badge" data-since="{{ st.last_seen_at }}" data-stale-after="6">age: unknown</span></dd></div>
+        <span class="stale-badge" data-since="{{ st.last_seen_at }}" data-stale-after="{{ hub_stale_s|default(25) }}">age: unknown</span></dd></div>
       <div><dt>Power</dt><dd>{{ dash(st.p_kw) }} kW <span class="og-card-meta" title="+ charging, &minus; discharging">(+ charge / &minus; discharge)</span></dd></div>
       <div><dt>SoC</dt><dd>{{ dash(st.soc_pct) }} % &middot; {{ dash(st.soc_kwh) }} kWh</dd></div>
       <div><dt>Above reserve</dt><dd>{{ dash(st.above_reserve_kwh) }} kWh</dd></div>
@@ -126,7 +126,7 @@
     <div><dt>Lease expires</dt><dd>{{ dash(hub.lease_expires_at) }}</dd></div>
     <div><dt>Last command</dt><dd>{{ dash(hub.last_command_id) }}</dd></div>
   </dl>
-  <div class="stale-badge" data-since="{{ hub.last_seen_at }}" data-stale-after="6">age: unknown</div>
+  <div class="stale-badge" data-since="{{ hub.last_seen_at }}" data-stale-after="{{ hub_stale_s|default(25) }}">age: unknown</div>
   <div id="telemetry-sparkline" class="og-map" style="height: 160px;" data-hub-id="{{ hub.hub_id }}"></div>
   {% endif %}
 {% endif %}
