@@ -169,9 +169,11 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     fleet (39.2 kWh / 11 kW units, 20% dual-unit homes at 78.4 kWh / 20 kW, 600 kVA banks).
 
     `zone_blocks` is the one documented exception (build phase, 2026-09-26): `fleet.yaml` ships the
-    Austin Energy/CPS Energy blocks pre-declared but `enabled: false`, which is asserted separately
-    below to have zero effect on the simulated base fleet (`ZoneBlockConfig`'s docstring: a disabled
-    block reserves no ids and changes nothing) -- it is excluded from the raw dict-equality check
+    Austin Energy/CPS Energy blocks pre-declared but `enabled: false` (LZ_LCRA/LZ_RAYBN are `enabled:
+    true` -- OWNER DECISION D-32, 2026-09-26 -- asserted separately below), which is asserted below
+    to have zero effect on the simulated base fleet from the DISABLED blocks specifically
+    (`ZoneBlockConfig`'s docstring: a disabled block reserves no ids and changes nothing) -- it is
+    excluded from the raw dict-equality check
     because it is the one field this shipped YAML deliberately does NOT match the bare
     "does-not-exist.yaml" built-in default (`()`, no blocks at all) on. `substation_assets` is
     excluded for the same reason (D-29(b) enables one by default in the shipped YAML). `mobile_units`
@@ -195,8 +197,10 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     assert (fleet.e_kwh_default, fleet.p_kw_default, fleet.dual_unit_share) == (39.2, 11.0, 0.2)
     assert (fleet.e_kwh_dual_unit, fleet.p_kw_dual_unit, fleet.bank_kva_rating_default) == (78.4, 20.0, 600.0)
     assert (fleet.hub_count, fleet.bank_count) == (2000, 40)
-    assert all(not block.enabled for block in fleet.zone_blocks)
-    assert {block.zone for block in fleet.zone_blocks} == {"LZ_AEN", "LZ_CPS", "LZ_LCRA", "LZ_RAYBN"}
+    # OWNER DECISION D-32, 2026-09-26: the free-market zones LZ_LCRA/LZ_RAYBN are live; the regulated
+    # zones LZ_AEN/LZ_CPS stay off here (production enables AEN via its own override).
+    enabled_by_zone = {block.zone: block.enabled for block in fleet.zone_blocks}
+    assert enabled_by_zone == {"LZ_AEN": False, "LZ_CPS": False, "LZ_LCRA": True, "LZ_RAYBN": True}
     assert [a.asset_id for a in fleet.substation_assets] == ["sub-LZ_AEN-00"]
     # OWNER DECISION D-29(b), 2026-09-26: the Austin substation asset is enabled for the utility toll
     # demo (its zone_blocks/LZ_AEN home-fleet block above stays disabled independently).

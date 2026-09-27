@@ -7,7 +7,7 @@ import asyncio
 import struct
 
 from ogsim.protocols import dnp3_wire as w
-from ogsim.protocols.dnp3_outstation import ANALOG_STRIDE, BINARY_STRIDE, Dnp3OutstationSim
+from ogsim.protocols.dnp3_outstation import _SIGNAL_OFFSET, ANALOG_STRIDE, BINARY_STRIDE, Dnp3OutstationSim
 
 INTEGRITY = bytes([0xC3, 0x01, 60, 2, 0x06, 60, 3, 0x06, 60, 4, 0x06, 60, 1, 0x06])
 EVENTS = bytes([0xC4, 0x01, 60, 2, 0x06, 60, 3, 0x06, 60, 4, 0x06])
@@ -118,6 +118,33 @@ def test_apply_scada_tick_uses_the_mqtt_message_shape() -> None:
         [], [("x", {"bank_id": "bank-001", "kind": "ESTOP", "issued_at": ts, "expires_at": ts})]
     )
     assert sim.binaries[BINARY_STRIDE + 3].value is False
+
+
+def test_apply_scada_tick_preserves_the_sign_of_real_power_kw() -> None:
+    """R3.4 fix: `set_bank_kva`'s `derive_electricals` guess used to silently overwrite the
+    REAL_POWER_KW point with an unsigned `kva * power_factor` value -- losing the +import/-export
+    sign the real SCADA signal carries (interfaces/mqtt/scada_bank_signal.schema.json's `value`
+    description). The tick's own REAL_POWER_KW message (which always follows APPARENT_POWER_KVA for
+    the same bank in one tick's signal list, `ogsim.scada.runtime.ScadaEngine.tick`) must be the one
+    that lands on the point, signed, with `derive_electricals` still deriving everything else."""
+    sim = Dnp3OutstationSim(["bank-000"])  # derive_electricals=True (default)
+    ts = "2026-09-26T18:00:00Z"
+    sim.apply_scada_tick(
+        [
+            ("scada/bank-000", {"bank_id": "bank-000", "signal": "APPARENT_POWER_KVA", "value": 300.0,
+                                "unit": "kVA", "quality": "good", "ts": ts}),
+            ("scada/bank-000", {"bank_id": "bank-000", "signal": "REAL_POWER_KW", "value": -294.0,
+                                "unit": "kW", "quality": "good", "ts": ts}),
+        ],
+        [],
+    )  # fmt: skip
+    index = ANALOG_STRIDE * 0 + _SIGNAL_OFFSET["REAL_POWER_KW"]
+    counts = sim.analogs[index].value
+    assert counts < 0  # export, negative -- not silently overwritten by the unsigned kva guess
+    assert counts == round(-294.0 / 0.1)  # 0.1 kW per count (_ANALOG_LAYOUT)
+    # Everything else derive_electricals computes is still there (unaffected by this fix).
+    voltage_index = ANALOG_STRIDE * 0 + _SIGNAL_OFFSET["VOLTAGE_PU"]
+    assert sim.analogs[voltage_index].value == 10000  # 1.0 pu at 0.0001 pu/count
 
 
 def test_large_databases_split_into_confirmable_fragments() -> None:

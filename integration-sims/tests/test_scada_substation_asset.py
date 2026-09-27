@@ -29,11 +29,19 @@ def _config(**overrides):
     return replace(load_scada_config(), **base)
 
 
+def _expected_home_bank_count(config) -> int:
+    """`config.bank_count` plus every ENABLED zone block's banks -- computed from the config itself
+    (not hardcoded), so this stays correct regardless of which zone blocks the shipped default enables
+    (OWNER DECISION D-32, 2026-09-26, enables LZ_LCRA/LZ_RAYBN by default; `_config()` here doesn't
+    override `zone_blocks`, so it inherits whatever the shipped scada.yaml currently declares)."""
+    return config.bank_count + sum(b.banks for b in config.zone_blocks if b.enabled)
+
+
 def test_disabled_substation_asset_adds_no_bank():
     config = _config(substation_assets=(replace(SUBSTATION, enabled=False),))
     engine = ScadaEngine(config, seed=1)
     assert "bank-sub-LZ_AEN-00" not in engine.bank_ids
-    assert len(engine.bank_ids) == 2
+    assert len(engine.bank_ids) == _expected_home_bank_count(config)
 
 
 def test_enabled_substation_asset_gets_its_own_bank_with_its_own_zone():
@@ -93,12 +101,14 @@ def test_substation_asset_does_not_shrink_the_home_background_model():
     """Regression: the background-load model must stay sized to the HOME bank count, not the full
     roster including the substation -- otherwise every home bank's background share would be diluted
     by a bank that never contributes any of its own residential load."""
-    engine = ScadaEngine(_config(), seed=1)
-    assert engine._home_bank_count == 2
+    config = _config()
+    engine = ScadaEngine(config, seed=1)
+    expected_home_banks = _expected_home_bank_count(config)
+    assert engine._home_bank_count == expected_home_banks
     signals, _instructions = engine.tick(0.0)
     home_values = [v for topic, v in signals if not topic.endswith("bank-sub-LZ_AEN-00")]
-    assert len(home_values) == 2 * 2  # 2 home banks x 2 signals each (KVA + KW)
-    assert all(_kva_message(signals, f"bank-{i:03d}")["value"] > 0.0 for i in range(2))
+    assert len(home_values) == expected_home_banks * 2  # 2 signals each (KVA + KW)
+    assert all(_kva_message(signals, f"bank-{i:03d}")["value"] > 0.0 for i in range(config.bank_count))
 
 
 def test_shipped_scada_config_has_the_austin_substation_enabled():

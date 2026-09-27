@@ -13,7 +13,10 @@ zones: [LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST]
 # Optional extra load-zone blocks (build phase, 2026-09-26): must mirror fleet.yaml's own
 # zone_blocks: entry for entry (same manual-duplication pattern bank_count/zones already use
 # across the two config files) so ogsim.scada covers exactly the banks ogsim.fleet seeds.
-# Disabled by default -- no behaviour change until a block is turned on in BOTH files.
+#
+# ENABLED (OWNER DECISION D-32, 2026-09-26): LZ_LCRA/LZ_RAYBN go live (mirrors fleet.yaml's own
+# zone_blocks -- ogsim.scada must measure exactly the banks ogsim.fleet now simulates for them).
+# LZ_AEN/LZ_CPS stay off here; production enables AEN via its own override.
 zone_blocks:
   - zone: LZ_AEN
     banks: 10
@@ -26,11 +29,11 @@ zone_blocks:
   - zone: LZ_LCRA
     banks: 10
     homes_per_bank: 50
-    enabled: false
+    enabled: true
   - zone: LZ_RAYBN
     banks: 10
     homes_per_bank: 50
-    enabled: false
+    enabled: true
 
 # Substation-sited battery-set assets: must mirror fleet.yaml's own substation_assets: entry for
 # entry (asset_id/zone/enabled), so ogsim.scada measures exactly the substation banks ogsim.fleet
