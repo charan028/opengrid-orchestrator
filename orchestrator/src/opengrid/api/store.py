@@ -20,7 +20,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.core.manual_targets import MANUAL_TARGET_ROWS_SQL
+from opengrid.core.manual_targets import MANUAL_TARGET_ROWS_SQL, STOP_EVENT_ROWS_SQL
 from opengrid.core.models.engine import (
     CommandBatchRow,
     Commitment,
@@ -227,6 +227,19 @@ class StoreProtocol(Protocol):
     ) -> dict[str, Any] | None:
         """`{hub_id, bank_id, zone, feeder_id, substation_id}` of a hub or a bank (None if unknown), for
         `opengrid.core.charge_windows.resolve`."""
+        ...
+
+    async def stop_event_rows(self) -> list[tuple[Any, ...]]:
+        """Recent `og.stop_event` rows `(stop_event_id, scope_kind, scope_ref, action, created_at)`, oldest
+        first (`core.manual_targets.STOP_EVENT_ROWS_SQL`), for `effective_targets`."""
+        ...
+
+    async def hub_banks_zones(self, hub_ids: list[str]) -> dict[str, tuple[str, str]]:
+        """`{hub_id: (bank_id, zone)}` for the given hubs (unknown hubs are absent)."""
+        ...
+
+    async def trace_recorded(self, trace_id: UUID) -> bool:
+        """Whether `trace_id` is durably in `og.trace` (not only in a process's local trace journal)."""
         ...
 
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
@@ -721,6 +734,26 @@ class PgStore:
             (hub_id, hub_id, hub_id, bank_id),
         )
         return _row_or_none(rows)
+
+    async def stop_event_rows(self) -> list[tuple[Any, ...]]:
+        rows = await self._fetch(STOP_EVENT_ROWS_SQL)
+        return [
+            (r["stop_event_id"], r["scope_kind"], r["scope_ref"], r["action"], r["created_at"]) for r in rows
+        ]
+
+    async def hub_banks_zones(self, hub_ids: list[str]) -> dict[str, tuple[str, str]]:
+        if not hub_ids:
+            return {}
+        rows = await self._fetch(
+            "SELECT h.hub_id, h.bank_id, b.zone FROM og.hub h JOIN og.bank b ON b.bank_id = h.bank_id "
+            "WHERE h.hub_id = ANY(%s)",
+            (hub_ids,),
+        )
+        return {str(r["hub_id"]): (str(r["bank_id"]), str(r["zone"])) for r in rows}
+
+    async def trace_recorded(self, trace_id: UUID) -> bool:
+        rows = await self._fetch("SELECT 1 AS ok FROM og.trace WHERE trace_id = %s LIMIT 1", (trace_id,))
+        return bool(rows)
 
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         rows = await self._fetch(MANUAL_TARGET_ROWS_SQL)
