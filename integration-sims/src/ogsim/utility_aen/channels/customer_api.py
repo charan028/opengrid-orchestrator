@@ -64,9 +64,10 @@ def _result(call_ref: str, http: HttpResult) -> CallResult:
         state=state if state in CALL_STATES else "UNKNOWN",
         reason_code=body.get("reason_code"),
         detail=body.get("detail"),
-        granted_kw=body.get("granted_kw"),
-        granted_kwh=body.get("granted_kwh"),
+        delivered_kw=body.get("delivered_kw"),
+        delivered_kwh=body.get("delivered_kwh"),
         remote_id=body.get("call_id"),
+        delivery_state=body.get("delivery_state"),
     )
 
 

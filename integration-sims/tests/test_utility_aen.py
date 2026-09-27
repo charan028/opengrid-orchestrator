@@ -70,7 +70,7 @@ class FakeChannel:
 
     async def status(self, call_ref: str) -> CallResult:
         state = "ACTIVE" if call_ref in self.active else "COMPLETED"
-        return CallResult(call_ref, True, state, granted_kw=-20_000.0, granted_kwh=10.0)
+        return CallResult(call_ref, True, state, delivered_kw=-20_000.0, delivered_kwh=10.0)
 
 
 def _config(*, enabled: bool = True, mode: str = "hot") -> UtilitySimConfig:
@@ -198,7 +198,7 @@ async def test_the_runtime_issues_the_peak_call_once_and_follows_it() -> None:
     assert len(channel.issued) == 1 and channel.issued[0].kw == -20_000.0
     clock.advance(31)
     await sim.tick()
-    assert sim.today is not None and sim.today.last is not None and sim.today.last.granted_kw == -20_000.0
+    assert sim.today is not None and sim.today.last is not None and sim.today.last.delivered_kw == -20_000.0
 
 
 async def test_the_runtime_skips_a_day_without_a_reservation() -> None:
@@ -291,8 +291,9 @@ async def test_customer_api_channel_maps_accept_status_and_cancel() -> None:
                     "call_id": "c1",
                     "outcome": "ACCEPTED",
                     "state": "ACTIVE",
-                    "granted_kw": -900.0,
-                    "granted_kwh": 3.0,
+                    "delivered_kw": -900.0,
+                    "delivered_kwh": 3.0,
+                    "delivery_state": "IN_PROGRESS",
                 },
             ),
             HttpResult(200, {"call_id": "c1", "outcome": "ACCEPTED", "state": "COMPLETED"}),
@@ -302,7 +303,8 @@ async def test_customer_api_channel_maps_accept_status_and_cancel() -> None:
     assert (await channel.issue_call(_spec())).accepted
     assert transport.calls[0][2]["idempotency_key"] == "aen-1"  # type: ignore[index]
     status = await channel.status("aen-1")
-    assert status.state == "ACTIVE" and status.granted_kw == -900.0
+    assert status.state == "ACTIVE" and status.delivered_kw == -900.0
+    assert status.delivery_state == "IN_PROGRESS"
     assert (await channel.cancel("aen-1")).state == "COMPLETED"
     assert [c[1] for c in transport.calls] == [
         f"{API_PREFIX}/calls",

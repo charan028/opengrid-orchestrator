@@ -7,7 +7,9 @@ It calls the orchestrator the way a real utility would. It shares no code with `
 
 - **Peak schedule:** on a hot day it issues one discharge call inside the evening window (16:30-18:00
   America/Chicago by default). The call is `call_kw` for `duration_min`, capped at the 90 min product.
-  It then reads the call's status every `status_poll_s` until the call completes. `weather.mode` selects
+  It then reads the call's status every `status_poll_s` until the call completes, logging the
+  orchestrator's MEASURED delivery (`delivered_kw` signed, `delivered_kwh`, `delivery_state`; None/UNMEASURED
+  until DELIVERY-VERIFY has evaluated it). `weather.mode` selects
   how hot days are chosen:
   - `random`: a reproducible daily high per seed and date; a day is hot at or above `hot_threshold_f`;
   - `hot` / `mild`: force every day hot, or every day not hot.

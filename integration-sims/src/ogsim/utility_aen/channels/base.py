@@ -53,9 +53,13 @@ class CallResult:
     state: str
     reason_code: str | None = None
     detail: str | None = None
-    granted_kw: float | None = None
-    granted_kwh: float | None = None
+    #: MEASURED delivery (DELIVERY-VERIFY): signed kW (< 0 = discharge) and discharged kWh; None while the
+    #: orchestrator has not measured the call yet (its `delivery_measured` false). Never planned/granted kW.
+    delivered_kw: float | None = None
+    delivered_kwh: float | None = None
     remote_id: str | None = None
+    #: The orchestrator's delivery verdict (IN_PROGRESS, PASS, PARTIAL, FAIL or UNMEASURED), if reported.
+    delivery_state: str | None = None
 
 
 class Channel(Protocol):
