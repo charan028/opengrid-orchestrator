@@ -47,7 +47,14 @@ def test_every_screen_and_playbook_section_is_documented(client: TestClient) -> 
     body = client.get("/og/help", headers=VIEWER).text
     for section in help_screen.TOC[4][2]:
         assert f'id="{section[0]}"' in body
-    for pb in ("pb-safe-stop", "pb-manual-target", "pb-price-spike", "pb-rebuild", "pb-customer-onboarding"):
+    for pb in (
+        "pb-safe-stop",
+        "pb-utility-stop-release",
+        "pb-manual-target",
+        "pb-price-spike",
+        "pb-rebuild",
+        "pb-customer-onboarding",
+    ):
         assert f'id="{pb}"' in body, pb
 
 

@@ -191,6 +191,7 @@ async def main(cfg: Config | None = None) -> None:
         engage_fn=_l2_engage,
         already_acted_fn=backend.has_l2_engage,
         ensure_published_fn=service.ensure_l2_engage_published,
+        record_lift_fn=service.record_utility_lift,
     )
     l2_task = asyncio.create_task(l2_session.run())
     try:

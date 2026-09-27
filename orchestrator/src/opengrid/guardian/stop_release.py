@@ -19,7 +19,7 @@ End-to-end path:
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime
 
 from opengrid.core.crypto import sign_payload
@@ -27,6 +27,7 @@ from opengrid.core.models.mqtt import StopEvent
 from opengrid.guardian.checks import CheckOutcome
 from opengrid.guardian.ports import EngagedStop, ReleaseRequest
 from opengrid.safestop.events import to_wire_scope
+from opengrid.safestop.l2_intake import instruction_id_from_reason
 
 RULE_ID = "K8-RELEASE"
 
@@ -49,6 +50,7 @@ def check_stop_release(
     approval_max_age_s: float,
     max_clock_skew_s: float,
     request_traced: bool,
+    utility_lifts: Mapping[str, datetime] | None = None,
 ) -> CheckOutcome:
     """Every precondition for signing a RELEASE, on the guardian's own reads. Fail closed throughout.
 
@@ -58,8 +60,10 @@ def check_stop_release(
       cannot release a stop engaged later);
     - K10: og-api's trace row for the request exists;
     - there is something to release, and every outstanding ENGAGE predates the approval;
-    - the stop's reason has cleared: it was not a utility stop, and no ESTOP/BLOCK instruction is active
-      on any bank in the scope."""
+    - the stop's reason has cleared: no ESTOP/BLOCK instruction is active on any bank in the scope, and every
+      UTILITY stop's own instruction was lifted by the utility (`utility_lifts`, a lift carrying that
+      instruction's id) before the operators approved (Q10: the utility initiates, the operators approve)."""
+    utility_lifts = utility_lifts or {}
     allowed = {op.strip().casefold() for op in authorised_operators if op.strip()}
 
     def refuse(reason: str) -> CheckOutcome:
@@ -88,8 +92,21 @@ def check_stop_release(
         return refuse("NOT_ENGAGED")
     if any(stop.engaged_at > approved_at for stop in engaged):
         return refuse("STOP_ENGAGED_AFTER_APPROVAL")
-    if any(stop.initiator_kind == "UTILITY" for stop in engaged):
-        return refuse("UTILITY_STOP_NOT_OPERATOR_RELEASABLE")
+    for stop in engaged:
+        if stop.initiator_kind != "UTILITY":
+            continue
+        # Q10 (lead, 2026-09-27; owner to confirm): only the utility initiates the release of its own stop --
+        # its lift of the EXACT instruction that engaged it -- and operators then approve the normal two-person
+        # release. Every outstanding UTILITY stop on the scope must be lifted, so another active BLOCK/ESTOP
+        # (which og-safestop engaged as its own stop) keeps the scope stopped.
+        instruction_id = instruction_id_from_reason(stop.reason)
+        if instruction_id is None:
+            return refuse("UTILITY_STOP_INSTRUCTION_UNKNOWN")
+        lifted_at = utility_lifts.get(instruction_id)
+        if lifted_at is None:
+            return refuse("UTILITY_STOP_NOT_LIFTED_BY_UTILITY")
+        if lifted_at > approved_at:
+            return refuse("UTILITY_LIFT_AFTER_APPROVAL")
     if any(kind in _BLOCKING_INSTRUCTION_KINDS for kind in active_instruction_kinds):
         return refuse("STOP_REASON_ACTIVE_L2_INSTRUCTION")
     return CheckOutcome.passed(RULE_ID)

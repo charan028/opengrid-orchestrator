@@ -171,6 +171,9 @@ class ScadaUtilityInstruction(_Wire):
     issued_at: datetime
     expires_at: datetime | None = None
     issued_by: str
+    #: On a lift (an already-expired instruction): the id of the instruction it ends. A utility stop can only be
+    #: released after the utility's lift names the instruction that engaged it (Q10).
+    lifts_instruction_id: UUID | None = None
 
 
 class ScenarioTarget(_Wire):

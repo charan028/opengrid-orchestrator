@@ -328,11 +328,31 @@
 <li>Operator 2 (different account): pick the request in "Release request id" (it lists id, scope, requester and age), press <b>Review and approve (operator 2)</b>, read "Approve safe-stop release", press <b>Approve release</b>.</li>
 <li>Results: <code>RELEASED</code> "Safe stop released for ..."; <code>PENDING</code> (approved, the guardian has not signed within og-api's 10 s wait); <code>REFUSED</code> "The requesting operator cannot approve their own release." (the request stays valid for another operator); <code>EXPIRED</code>; <code>FAILED</code>.</li>
 <li>API: <code>POST /og/api/safestop/{scope}/{scope_id}/release</code> (operator 1), <code>POST /og/api/safestop/release/{proposal_id}/approve</code> (operator 2: 200 released, 202 pending, 403 same person, 410 expired).</li>
+<li>A stop the utility engaged (initiator <code>UTILITY</code>, reason <code>L2 BLOCK/ESTOP &lt;id&gt; ...</code>) needs the utility's lift first: <a href="#pb-utility-stop-release">pb-utility-stop-release</a>.</li>
 </ol>
 <dl class="hp-dl">
 <dt>Confirmations required</dt><dd>Engage: two steps by one operator, confirm within 30 s (<code>[safestop].confirm_window_s</code>). Release: two different authorised operators; the approval must be fresh (at most 300 s).</dd>
 <dt>Verify recovery</dt><dd>After release the bank's hubs take commands again (drawer "Last command" changes; P follows the allocator). A utility-scale set (the 20 MW substation battery) first holds 0 kW until a telemetry report newer than the release arrives (about 10 s), then ramps from its measured power at one cycle's G-04 step; a toll call still running resumes without a run of G-04 vetoes (r3.4.3). The trace shows <code>SAFE_STOP_ENGAGE</code>, <code>SAFE_STOP_RELEASE</code> (on the approver's stream, with the requester in the payload) and the guardian's signed release (<code>GUARDIAN_VERDICT</code>).</dd>
 <dt>Escalate when</dt><dd>The guardian refuses the release (<code>GUARDIAN_VERDICT kind=STOP_RELEASE outcome=REFUSED</code>: unauthorised operator, same person twice, stale approval, no stop engaged, a stop engaged after the approval, a utility-initiated stop, or an active ESTOP/BLOCK in scope): the stop stays engaged; fix the cause and request again. <code>ALR-STOP-RELEASE-SUPERSEDED</code> is open ("release of &lt;scope&gt; superseded by a newer stop; re-issue the two-person release"): a newer ENGAGE on the same scope arrived before the signed release reached og-safestop, so the release was refused and the scope is still stopped. If the scope should be released, run the two-person release again; the guardian signs the new one after the ENGAGE and it is relayed normally. The alert does not clear itself; acknowledge it once the new release is through. If og-api is down no stop can be requested from the console or API; the admin restores og-api first (<code>systemctl restart og-api</code>). <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> is open: that stop message was never published, so the hubs did not receive it. Read the entry's <code>last_error</code> in <code>og.stop_outbox</code> and <code>journalctl -u og-safestop</code>, fix the cause, then engage the stop again from Fleet (it gets a new stop id; recommended practice, the system does not do this automatically) and tell the lead.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-utility-stop-release">
+<h3>Releasing a utility (L2) stop</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>A bank stop whose initiator is <code>UTILITY</code> and whose reason reads <code>L2 BLOCK &lt;instruction id&gt; from &lt;issuer&gt;</code> (or <code>L2 ESTOP ...</code>): og-safestop engaged it on the utility's own BLOCK/ESTOP. An operator release before the utility lifts it is refused with <code>UTILITY_STOP_NOT_LIFTED_BY_UTILITY</code>.</dd>
+<dt>Who acts</dt><dd>The utility first (only it can initiate the release of its own stop), then two operators (the normal two-person release).</dd>
+<dt>Rule (Q10, r3.4.5)</dt><dd>The guardian signs the release only when the utility's lift names the exact instruction in the stop's reason, every other utility stop on the bank is lifted too (another active BLOCK/ESTOP keeps it stopped), no BLOCK/ESTOP is active on the bank, and both operators approved after the lift. Without the lift the bank stays stopped: the safe side.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Read the instruction id from the stop's reason on <a href="/og/fleet">/og/fleet</a> (or the <code>SAFE_STOP</code> trace).</li>
+<li>The utility lifts it. A real utility ends the BLOCK/ESTOP on its side (the grid link sends the lift with the instruction id). In the simulator: cancel the <code>utility_instruction</code> anomaly on <code>/ogsim/</code> (the sim's lift names the instruction it issued); if the sim was restarted since, lift it by id instead: <code>POST /ogsim/api/inject</code> with header <code>X-OGSim-Request: 1</code> and body <code>{"type": "utility_instruction", "target": "&lt;bank&gt;", "params": {"mode": "block", "lifts_instruction_id": "&lt;instruction id&gt;"}, "duration": 0}</code> (<code>"estop"</code> for an ESTOP).</li>
+<li>Check the lift was recorded: a <code>SAFE_STOP</code> trace row with <code>"l2": "LIFT"</code> and that <code>lifted_instruction_id</code>.</li>
+<li>Then the normal two-person release (<a href="#pb-safe-stop">pb-safe-stop</a>), requested and approved AFTER the lift.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>The utility's lift, then two different authorised operators. There is no other path: no database edit and no guardian bypass.</dd>
 </dl>
 </section>
 

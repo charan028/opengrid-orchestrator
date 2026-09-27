@@ -25,8 +25,13 @@ from typing import Any, Literal
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from opengrid.core.services import ERCOT_AS_SERVICE_TYPE, REGULATED_CAPACITY_SERVICE_TYPE
-from opengrid.core.services import AS_HOLD_HOURS, AS_MAX_DEPLOY_MINUTES, canonical_product
+from opengrid.core.services import (
+    AS_HOLD_HOURS,
+    AS_MAX_DEPLOY_MINUTES,
+    ERCOT_AS_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+    canonical_product,
+)
 from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json
 from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.templating import BASE_PATH, templates

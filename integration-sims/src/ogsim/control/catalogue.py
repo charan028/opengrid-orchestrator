@@ -353,8 +353,14 @@ CATALOGUE: list[AnomalyType] = [
         params={
             "mode": {"type": "string", "default": "limit", "enum": ["limit", "block", "estop"]},
             "limit_kw": {"type": "number", "default": 0.0},
+            "lifts_instruction_id": {"type": "string", "default": ""},
         },
-        description="Injects a utility limit/block/ESTOP instruction.",
+        description=(
+            "Injects a utility limit/block/ESTOP instruction; ending it (duration elapsed or cancel) "
+            "sends the utility's lift naming the instruction. With duration 0 and lifts_instruction_id, "
+            "lifts that instruction directly (e.g. one issued before a sim restart -- the id is in the "
+            "stop's reason)."
+        ),
         wire_type="SCADA_UTILITY_INSTRUCTION",
         wire_target_kind="bank",
     ),

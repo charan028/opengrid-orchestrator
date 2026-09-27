@@ -88,7 +88,7 @@ def test_a_tier2_approved_release_of_a_cleared_stop_passes():
         ({}, {"request_traced": False}, "REQUEST_NOT_TRACED"),
         ({}, {"engaged": []}, "NOT_ENGAGED"),
         ({}, {"engaged": [_engaged(engaged_at=NOW - timedelta(seconds=10))]}, "STOP_ENGAGED_AFTER_APPROVAL"),
-        ({}, {"engaged": [_engaged(initiator_kind="UTILITY")]}, "UTILITY_STOP_NOT_OPERATOR_RELEASABLE"),
+        ({}, {"engaged": [_engaged(initiator_kind="UTILITY")]}, "UTILITY_STOP_INSTRUCTION_UNKNOWN"),
         ({}, {"active_instruction_kinds": ["ESTOP"]}, "STOP_REASON_ACTIVE_L2_INSTRUCTION"),
         ({}, {"active_instruction_kinds": ["LIMIT", "BLOCK"]}, "STOP_REASON_ACTIVE_L2_INSTRUCTION"),
     ],
@@ -144,6 +144,7 @@ class FakeStopRelease:
     def __init__(self, engaged: list[EngagedStop] | None = None, banks: list[str] | None = None) -> None:
         self.engaged = engaged if engaged is not None else [_engaged()]
         self.banks = banks if banks is not None else ["bank-001"]
+        self.lifts: dict[str, Any] = {}
 
     async def pending_requests(self, *, max_age_s: float) -> list[ReleaseRequest]:
         return []
@@ -153,6 +154,9 @@ class FakeStopRelease:
 
     async def banks_in_scope(self, scope_kind: str, scope_ref: str) -> list[str]:
         return list(self.banks)
+
+    async def utility_lifts(self, bank_ids: list[str]) -> dict[str, Any]:
+        return dict(self.lifts)
 
 
 def _service(fakes, signing_seed, *, port: FakeStopRelease | None = None, operators=OPERATORS):
@@ -265,7 +269,7 @@ async def test_outstanding_engages_banks_and_unpublished_events():
     engaged_at = NOW - timedelta(hours=1)
     event = {"stop_id": str(ENGAGE_ID), "action": "RELEASE", "signature": "s"}
     cursor = FakeCursor(
-        [[(ENGAGE_ID, "SAFESTOP_AUTHORITY", engaged_at)], [("bank-001",), ("bank-005",)], [(event,)]]
+        [[(ENGAGE_ID, "SAFESTOP_AUTHORITY", engaged_at, None)], [("bank-001",), ("bank-005",)], [(event,)]]
     )
     port = repo.PgStopReleasePort(FakePool(cursor))
 

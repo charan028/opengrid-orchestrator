@@ -133,13 +133,22 @@ def limit_instruction(
     }
 
 
-def lift_instruction(instruction_id: str, bank_id: str, limit_kw: float, issued_at: str) -> dict[str, object]:
+def lift_instruction(
+    instruction_id: str,
+    bank_id: str,
+    limit_kw: float,
+    issued_at: str,
+    *,
+    lifts_instruction_id: str | None = None,
+) -> dict[str, object]:
     """Lifts a previously auto-issued LIMIT (bug fix, 2026-09-26, R3): the wire schema
     (`scada_utility_instruction.schema.json`) has no separate "lift" kind, so this republishes the
     SAME `kind: LIMIT` (with the same `limit_kw` -- required and non-null whenever kind is LIMIT) but
     sets `expires_at` to its own `issued_at`, already elapsed the instant it arrives -- the identical
     mechanism `ogsim.scada.anomalies`'s `utility_instruction` lift and
-    `opengrid.fleet._active_utility_limit_kw` already rely on to end an instruction."""
+    `opengrid.fleet._active_utility_limit_kw` already rely on to end an instruction.
+    `lifts_instruction_id` names the LIMIT it ends (Q10, r3.4.5: every lift carries the id of the
+    instruction it ends)."""
     return {
         "instruction_id": instruction_id,
         "bank_id": bank_id,
@@ -148,4 +157,5 @@ def lift_instruction(instruction_id: str, bank_id: str, limit_kw: float, issued_
         "issued_at": issued_at,
         "expires_at": issued_at,
         "issued_by": "SCADA_AUTO_RULE",
+        "lifts_instruction_id": lifts_instruction_id,
     }
