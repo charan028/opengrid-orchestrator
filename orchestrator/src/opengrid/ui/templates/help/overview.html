@@ -1,0 +1,123 @@
+<section class="hp-sec" id="overview" aria-labelledby="overview-h">
+<h2 id="overview-h">Overview</h2>
+
+<section class="hp-sub" id="ov-what">
+<h3>What OpenGrid does</h3>
+<p>OpenGrid is the orchestrator that decides, every few seconds, what each battery in the Base Power fleet should do, and proves afterwards that it kept its promises. It sells the fleet's capacity and energy to customers, commits to deliveries, dispatches the batteries to meet those commitments, and settles and bills what was actually delivered. It never lets a commercial decision override safety, a homeowner's backup reserve or a grid operator's instruction.</p>
+
+<h4>The assets it controls</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Asset</th><th scope="col">What it is</th><th scope="col">Status at r3.4</th></tr></thead>
+<tbody>
+<tr><td>Home battery (hub)</td><td>A Base Power home battery: 39.2 kWh usable and 11 kW per unit. 20 % of homes have two units (78.4 kWh / 20 kW). The discharge floor is 20 % SoC (decision D-25). Hubs report telemetry every 10 s.</td><td>Simulated base fleet of 2,000 hubs in 40 banks (50 homes per bank, 600 kVA per bank) across <code>LZ_NORTH</code>, <code>LZ_SOUTH</code>, <code>LZ_HOUSTON</code> and <code>LZ_WEST</code> (<code>integration-sims/config/fleet.yaml</code>).</td></tr>
+<tr><td>Extra zone blocks</td><td>Blocks of 10 banks x 50 homes in <code>LZ_AEN</code> (Austin Energy, regulated), <code>LZ_CPS</code> (CPS Energy, regulated), <code>LZ_LCRA</code> and <code>LZ_RAYBN</code> (free-market ERCOT zones).</td><td>D-32 (2026-09-26): <code>LZ_LCRA</code> and <code>LZ_RAYBN</code> are enabled in the shipped <code>fleet.yaml</code>/<code>scada.yaml</code>. <code>LZ_AEN</code> and <code>LZ_CPS</code> stay off there; production enables <code>LZ_AEN</code> through its generated override <code>/etc/opengrid/sim/fleet.yaml</code>, which every fleet seed reads (<code>[fleet].sim_config_path</code>).</td></tr>
+<tr><td>Substation battery</td><td>A 20 MW / 2 h battery set at an Austin substation (<code>sub-LZ_AEN-00</code>, bank <code>bank-sub-LZ_AEN-00</code>), modelled as a one-hub bank with its own feeder. It serves the Austin Energy utility toll (D-29).</td><td>Enabled in the simulator; database rows come from <code>dev/seed/market_model_seed.sql</code>.</td></tr>
+<tr><td>Mobile unit (truck)</td><td>A battery on a trailer that charges only at its registered home station, never from the fleet (D-31).</td><td>One unit, <code>trailer-mb-01</code>, is registered in <code>config/service_profiles/mobile_storage_home_stations.toml</code>. The simulator does not model its physics, and it never charges yet because there is no home-station schedule (fail closed). The home stations are listed by <code>GET /og/api/fleet/home-stations</code>; no truck seed ships at r3.4.</td></tr>
+</tbody></table></div>
+
+<h4>The two markets</h4>
+<p>OpenGrid serves two kinds of market at once (decision D-20). In the <b>free market</b> (<code>FREE</code>, the ERCOT competitive area) it sells energy arbitrage and ERCOT ancillary services and pays the TDSP delivery charge (M1) on energy drawn from the grid to charge. In the <b>regulated market</b> (<code>REGULATED</code>) a vertically integrated utility such as Austin Energy or CPS Energy is the customer: it buys capacity (for example the D-29 toll), and energy stays inside that utility's territory (invariant K15). See <a href="#hw-market">Market model</a>.</p>
+
+<h4>The processes at a glance</h4>
+<figure class="hp-fig">
+<svg viewBox="0 0 1000 330" role="img" aria-labelledby="ov-proc-t">
+<title id="ov-proc-t">OpenGrid processes and how a decision reaches a battery</title>
+<rect class="hp-box" x="20" y="30" width="170" height="70" rx="6"/>
+<text class="hp-tb" x="105" y="58" text-anchor="middle" font-size="14">og-feeds</text>
+<text class="hp-tm" x="105" y="80" text-anchor="middle" font-size="12">ERCOT, NWS, EIA; forecast</text>
+<rect class="hp-box hp-box-accent" x="250" y="30" width="220" height="70" rx="6"/>
+<text class="hp-tb" x="360" y="58" text-anchor="middle" font-size="14">og-engine</text>
+<text class="hp-tm" x="360" y="80" text-anchor="middle" font-size="12">selector (15 min) + allocator (2 s)</text>
+<rect class="hp-box hp-box-warn" x="530" y="30" width="190" height="70" rx="6"/>
+<text class="hp-tb" x="625" y="58" text-anchor="middle" font-size="14">og-guardian</text>
+<text class="hp-tm" x="625" y="80" text-anchor="middle" font-size="12">checks and signs (G-codes)</text>
+<rect class="hp-box" x="780" y="30" width="200" height="70" rx="6"/>
+<text class="hp-tb" x="880" y="58" text-anchor="middle" font-size="14">Hubs (via MQTT)</text>
+<text class="hp-tm" x="880" y="80" text-anchor="middle" font-size="12">verify signature, apply lease</text>
+<rect class="hp-box hp-box-warn" x="530" y="170" width="190" height="70" rx="6"/>
+<text class="hp-tb" x="625" y="198" text-anchor="middle" font-size="14">og-safestop</text>
+<text class="hp-tm" x="625" y="220" text-anchor="middle" font-size="12">stop-only key (K8)</text>
+<rect class="hp-box" x="250" y="170" width="220" height="70" rx="6"/>
+<text class="hp-tb" x="360" y="198" text-anchor="middle" font-size="14">og-settle</text>
+<text class="hp-tm" x="360" y="220" text-anchor="middle" font-size="12">meter, bill, invariants, anchors</text>
+<rect class="hp-box" x="20" y="170" width="170" height="70" rx="6"/>
+<text class="hp-tb" x="105" y="198" text-anchor="middle" font-size="14">og-api + console</text>
+<text class="hp-tm" x="105" y="220" text-anchor="middle" font-size="12">/og, operator actions</text>
+<line class="hp-edge" x1="190" y1="65" x2="248" y2="65" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-accent" x1="470" y1="65" x2="528" y2="65" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-accent" x1="720" y1="65" x2="778" y2="65" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="720" y1="205" x2="880" y2="102" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="190" y1="205" x2="528" y2="205" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="105" y1="170" x2="300" y2="102" marker-end="url(#hp-arrow)"/>
+<text class="hp-tm" x="480" y="54" font-size="12">batch</text>
+<text class="hp-tm" x="728" y="54" font-size="12">signed</text>
+<text class="hp-tm" x="300" y="290" font-size="12">All processes share one PostgreSQL database and one Mosquitto broker; every decision is written to the trace first (K10).</text>
+</svg>
+<figcaption>og-api reaches og-engine and og-safestop only through the database (trace events, NOTIFY channels), never by direct calls.</figcaption>
+</figure>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Process</th><th scope="col">Job</th></tr></thead>
+<tbody>
+<tr><td><code>og-feeds</code></td><td>Polls ERCOT public reports (prices every 5 min, AS clearing prices daily, load hourly, wind and solar every 30 min), NWS weather and EIA (standby for system load). Recomputes the 24 h price/load forecast every 15 min.</td></tr>
+<tr><td><code>og-engine</code></td><td>One 2 s loop: fleet twin flush, the 15-minute selector gate, the allocator cycle, and the hand-off of one command batch per bank to the guardian. Also ingests hub telemetry and SCADA over MQTT.</td></tr>
+<tr><td><code>og-guardian</code></td><td>Independently re-checks every batch against the physical, commercial and territory rules (G-01 to G-36) on its own reads, signs what passes with its Ed25519 key, vetoes what does not, and signs two-person safe-stop releases.</td></tr>
+<tr><td><code>og-safestop</code></td><td>Independent stop authority with a stop-only key. Engages scoped stops even when the engine and guardian are down; relays guardian-signed releases.</td></tr>
+<tr><td><code>og-settle</code></td><td>Every 60 s: meters, settles and bills delivered intervals, computes P&amp;L. Also hosts the health/alert evaluation, the invariant checker, trace pruning and trace anchoring.</td></tr>
+<tr><td><code>og-api</code></td><td>The REST API under <code>/og/api</code> and this console under <code>/og</code>, behind Apache.</td></tr>
+</tbody></table></div>
+<p class="hp-note">The processes are described in more depth under <a href="#arch-system">Architecture</a>; the decision loop is under <a href="#hw-cycle">Decision cycle</a>.</p>
+</section>
+
+<section class="hp-sub" id="ov-guarantees">
+<h3>The guarantees (K1-K15)</h3>
+<p>These are the invariants from <code>docs/orchestrator/07-delivery/00-invariants.md</code>. Each is enforced by one primary module and re-checked independently, usually by the guardian. The "what you see" column is what surfaces in the console when a rule actually stops something.</p>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">ID</th><th scope="col">Guarantee</th><th scope="col">Enforced in code</th><th scope="col">What you see when it bites</th></tr></thead>
+<tbody>
+<tr><td><b>K1</b></td><td><b>Homeowner reserve.</b> No command drives a hub below its backup reserve, checked on power and on energy.</td><td>Selector and allocator constraints; allocator energy-sufficiency check; guardian <code>G-01</code> and <code>G-01-ENERGY</code> (projects SoC over the lease); hub firmware (simulated). Missing or stale SoC means zero discharge.</td><td>Vetoes with <code>RESERVE_FLOOR</code> or <code>RESERVE_FLOOR_LEASE</code>; <code>ALR-ENERGY-SHORTFALL-RISK</code> and an AT_RISK obligation when energy runs short. A breach that slipped through raises the critical <code>ALR-RESERVE-BREACH</code> and the Control Room tile <b>Reserve breaches</b> (must read 0).</td></tr>
+<tr><td><b>K2</b></td><td><b>One buyer.</b> Each kW/kWh of a hub or bank backs at most one obligation per interval.</td><td><code>opengrid.ledger</code> (single writer: the engine); guardian <code>G-09</code> (ledger version); checker <code>K2_DOUBLE_SOLD</code>.</td><td>The reservation is rejected (<code>ONE_BUYER_EXCEEDED</code>). Control Room tile <b>kWh sold twice</b> (must read 0).</td></tr>
+<tr><td><b>K3</b></td><td><b>Sole signer.</b> No command moves power unless the guardian signed it (Ed25519).</td><td><code>opengrid.guardian</code> signs; the hub verifies signature and key (in the simulator).</td><td>Nothing on the console: an unsigned or forged command is dropped by the hub, which keeps its current lease.</td></tr>
+<tr><td><b>K4</b></td><td><b>Physical envelope.</b> Power, kVA and ramp limits hold at hub, meter, transformer, feeder and substation, in both directions; no synchronized fleet steps.</td><td>Allocator (<code>allocator/flow_limits.py</code>, derating on); guardian <code>G-02</code> to <code>G-06</code> and <code>G-26</code> to <code>G-32</code>; checker <code>FLOW_LIMIT</code>.</td><td>A <code>VETOED</code> or <code>PARTLY_VETOED</code> verdict with a reason such as <code>HUB_POWER_LIMIT</code>, <code>BANK_KVA_LIMIT</code>, <code>HUB_RAMP_LIMIT</code>, <code>XFMR_LIMIT</code>, <code>FEEDER_THERMAL_LIMIT</code>; the allocator re-solves without the vetoed hubs. <code>ALR-XFMR-UNMAPPED</code> when a hub has no transformer mapping; <code>ALR-BANK-UNMAPPED-TOPOLOGY</code> when a bank has no feeder (its G-06/G-28/G-32 checks cannot run). A device report never changes a hub's seeded ratings or location; a mismatch raises <code>ALR-DEVICE-RATING-MISMATCH</code>.</td></tr>
+<tr><td><b>K5</b></td><td><b>Grid authority.</b> Utility/ISO (L2) instructions are hard constraints, never traded for money.</td><td>Allocator (L2 limits); guardian <code>G-15</code>; og-safestop's L2 intake engages a BANK stop for every <code>BLOCK</code>/<code>ESTOP</code> instruction.</td><td>Shortfalls with <code>R-SHORTFALL-L2-INSTRUCTION</code>; a utility-initiated bank stop that operators cannot release.</td></tr>
+<tr><td><b>K6</b></td><td><b>Command freshness.</b> Every command has a sequence, epoch, precondition and lease; stale, duplicate or out-of-order commands are rejected.</td><td>Guardian <code>G-13</code>; hub lease handling. Default lease 30 s.</td><td>Rejected commands in the guardian verdicts; hubs resync.</td></tr>
+<tr><td><b>K7</b></td><td><b>Degrade, don't trip.</b> TIMEOUT is not VETO is not STOP. Losing an input or process falls back to hold, then schedule, then local autonomy, never an unplanned step to zero for firm obligations.</td><td>Guardian timeouts (<code>verdict_timeout_ms</code> 300) and escalation (<code>guardian/escalation.py</code>); engine holds when the guardian is not heartbeating; health degraded modes.</td><td>Degraded modes <code>HOLD</code>, <code>HOLD_LOCAL_AUTONOMY</code>, <code>NO_NEW_COMMITMENTS</code>, <code>DIST_DEFERRAL_OPEN_LOOP</code>; <code>ALR-GUARDIAN-TIMEOUT-RATE</code>; <code>ALR-SCOPE-CONSERVATIVE</code>; <code>ALR-SAFE-STOP-REQUESTED</code> after repeated vetoes. See <a href="#ev-degraded">Degraded modes</a>.</td></tr>
+<tr><td><b>K8</b></td><td><b>Stop authority.</b> A scoped safe stop works when the engine is down. The stop key can only stop; a release needs the guardian plus a second operator.</td><td><code>opengrid.safestop</code> (separate process, stop-only key, durable <code>og.stop_outbox</code>); <code>opengrid.guardian.stop_release</code>.</td><td>The safe-stop panel on the Fleet page; a release that stays pending until a second authorised operator approves; the critical <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> if a stop can never be published. See <a href="#hw-safestop">Safe stop</a>.</td></tr>
+<tr><td><b>K9</b></td><td><b>One loop per quantity.</b> Exactly one integrating controller regulates a physical quantity such as bank kVA.</td><td>Allocator <code>DIST_DEFERRAL</code> PI loop (<code>allocator/dist_deferral_pi.py</code>); guardian <code>G-03</code>.</td><td>With a bank's SCADA silent, the loop runs open-loop: degraded mode <code>DIST_DEFERRAL_OPEN_LOOP</code> and <code>ALR-SCADA-SILENT-BANK</code>.</td></tr>
+<tr><td><b>K10</b></td><td><b>Trace before act.</b> No command is signed unless its decision pre-image is durably in the trace.</td><td>Guardian <code>G-14</code>; every operator write path appends the trace event before acting.</td><td>The guardian refuses to sign and the scope holds; <code>ALR-TRACE-VERDICT-WRITE-FAILED</code> if it cannot record its own verdict.</td></tr>
+<tr><td><b>K11</b></td><td><b>Verifiable track record.</b> Every event is in a per-stream SHA-256 hash chain; pruning keeps checkpoints so verification still passes; the chain head is anchored outside the database.</td><td><code>opengrid.trace</code> (store, local journal, anchoring); checker <code>TRACE_VERIFY</code> every 300 s and <code>ANCHOR_FRESHNESS</code>.</td><td><code>ALR-TRACE-VERIFY-FAILED</code>, <code>ALR-ANCHOR-PUBLISH-FAILED</code>, <code>ALR-ANCHOR-SECONDARY-FAILED</code>. <b>Run chain verify</b> on the Billing &amp; audit page.</td></tr>
+<tr><td><b>K12</b></td><td><b>Time quality.</b> The guardian refuses to sign when its clock offset exceeds its limit.</td><td>Guardian <code>G-20</code>; <code>[guardian].clock_offset_max_ms</code> = 200.</td><td><code>ALR-CLOCK-QUALITY</code>; batches hold.</td></tr>
+<tr><td><b>K13</b></td><td><b>Commitment lock.</b> A committed obligation's allocation is never reduced or given to another obligation before fulfilment, except for L0/L1/L2 or physical infeasibility. Hubs may be substituted within the same obligation.</td><td>Selector (frozen commitments, C24); allocator; <code>core.limits.check_commitment_lock</code>; engine escalation; guardian <code>G-19</code>; checker <code>K13_LOCK_VIOLATION</code>.</td><td>AT_RISK and SHORTFALL on the obligation, with a reason code; delivery continues at the maximum feasible kW. Control Room tile <b>Commitment switches</b> (must read 0). See <a href="#hw-lock">Commitments and the lock</a>.</td></tr>
+<tr><td><b>K14</b></td><td><b>Power-quality envelope.</b> Dispatch for a customer keeps per-phase imbalance, voltage/frequency deviation and THD inside that customer's envelope.</td><td>Guardian <code>G-21</code> to <code>G-25</code> (always wired); PQ eligibility in the allocator; corrective ladder in <code>engine/pq_ladder.py</code>.</td><td>Vetoes from G-21..G-25; AT_RISK with <code>R-PQ-DRIFT-AT-RISK</code>. The ladder runs only when <code>[site_ingest].enabled</code> or <code>[allocator.closed_loop].enabled</code> is true; both are false at r3.4, so the ladder is inactive.</td></tr>
+<tr><td><b>K15</b></td><td><b>Territory.</b> A regulated utility's obligation is served only by assets inside its territory; regulated-territory assets take ERCOT opportunities only with wholesale access; no net export out of the territory.</td><td><code>market/territory.py</code> <code>check_territory</code> (the one predicate) used by selector C25, allocator (<code>[allocator].enforce_territory</code> = true) and guardian <code>G-33</code>; <code>G-30</code> (export); checker <code>K15_TERRITORY</code>.</td><td>A 0 kW grant and a shortfall for a blocked obligation; vetoes with <code>R-TERRITORY-INELIGIBLE</code>. Contract admission does not check territory at r3.4, and <code>G-30</code> is idle (no regulated bank flow data).</td></tr>
+</tbody></table></div>
+<p class="hp-note">The Control Room tiles and the <code>og_*_total</code> counters are measured by <code>opengrid.invariants</code> inside og-settle every 60 s from what landed in the database, independently of the code that prevents the violation.</p>
+<p class="hp-note">Known gaps recorded in the invariants document: G-31's peak-power allowance cannot be used (field-name defect, so every above-continuous setpoint is vetoed; safe), reverse flow is not measured from SCADA, and the AS-hold check runs only while a deployment is active.</p>
+</section>
+
+<section class="hp-sub" id="ov-roles">
+<h3>Roles and identity</h3>
+<h4>How your identity is resolved</h4>
+<ol class="hp-steps">
+<li>Apache terminates HTTP Basic authentication. It removes any <code>X-Remote-User</code> header the client sent and sets it from the authenticated user.</li>
+<li>Apache also sets <code>X-OG-Proxy-Auth</code> to the shared secret <code>OG_API_PROXY_SECRET</code>. og-api believes <code>X-Remote-User</code> only when that header matches (constant-time compare). No secret configured, no header, or a wrong one: <code>401</code>.</li>
+<li>The user name is mapped to a role through <code>[api.roles]</code> in <code>orchestrator.toml</code> (<code>opengrid.api.auth.role_for_identity</code>). The literal accounts <code>operator</code> and <code>viewer</code> map by name; customers must be listed explicitly under <code>[api.roles.customer]</code>.</li>
+<li>An identity with no role gets <code>403</code> from the API. The console (<code>opengrid.ui.role</code>) shows an unmapped or missing identity as <code>viewer</code> (read-only), never as operator, and every write it relays is re-checked by the API.</li>
+<li>The allow/deny decision itself goes through the policy in <code>config/authz.toml</code> (deny by default). Denials of audited actions are written to the trace as <code>TRACE_AUTHZ_DENY</code>.</li>
+</ol>
+<p class="hp-note"><code>/og/api/health</code> is the deployment liveness probe: it accepts loopback connections only and never reads the identity header.</p>
+
+<h4>Roles</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Role</th><th scope="col">Who (r3.4 config)</th><th scope="col">Can do</th></tr></thead>
+<tbody>
+<tr><td><b>Viewer</b></td><td><code>viewer</code></td><td>Every read (GET and live SSE streams) in the console and API. No write buttons are shown.</td></tr>
+<tr><td><b>Operator</b></td><td><code>operator</code>, <code>og-op-a</code>, <code>og-op-b</code></td><td>Everything a viewer can, plus every write: manual targets and bulk commands, safe-stop engage and release requests, AS deployments and utility calls, contract writes, charge windows, calibration and waveform capture, firmware campaigns, alert acknowledgement, retention settings, topology re-seed.</td></tr>
+<tr><td><b>Two-person safe-stop release</b></td><td>Two different operators, both on <code>[guardian].stop_release_authorised_operators</code> (<code>og-op-a</code>, <code>og-op-b</code>)</td><td>Operator 1 requests the release; operator 2 approves. The API refuses the requester as approver (<code>403</code>), and the guardian signs only if both names are on its allow-list, the approval is at most 300 s old and the scope is still engaged. See <a href="#hw-safestop">Safe stop</a>.</td></tr>
+<tr><td><b>Second operator (other flows)</b></td><td>Any operator</td><td>A firmware campaign touching more than 50 hubs needs approval by a second operator. A bulk command that needs a second confirmation does not check that the second confirmer is a different person.</td></tr>
+<tr><td><b>Customer</b></td><td><code>og-cust-*</code> accounts, each mapped to its own <code>customer_id</code></td><td>Only the customer API under <code>/og/api/customer/</code> (own contracts, obligations, invoices, disputes, cancel and re-nominate requests), always scoped to its own <code>customer_id</code>. Refused by every console and fleet-wide endpoint. <b>Off at r3.4:</b> the routes are mounted only when <code>[api.customer_api].enabled</code> = true, which waits for the owner's go-live.</td></tr>
+<tr><td><b>Admin</b></td><td>None</td><td>Reserved in <code>config/authz.toml</code> (<code>admin.*</code>, audited) but not implemented: the role enum has no admin value and no account maps to it.</td></tr>
+<tr><td><b>Release manager</b></td><td>A person, not an application role</td><td>Runs deployments, migrations and seed scripts on the server with the lead's approval. The console has no release-manager permission; see <a href="#mt-release">Release</a>.</td></tr>
+</tbody></table></div>
+<p class="hp-warn">Customers authenticate the same way as staff (Apache Basic authentication plus the proxy secret). Bearer tokens are not in use at r3.4: an OIDC bearer-JWT provider exists in <code>opengrid.authz.identity</code> but is off (<code>[authz.oidc].enabled</code>) and not wired into the API, and there are no per-customer API keys.</p>
+</section>
+</section>

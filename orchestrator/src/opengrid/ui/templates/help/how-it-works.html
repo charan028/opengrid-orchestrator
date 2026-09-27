@@ -1,0 +1,219 @@
+<section class="hp-sec" id="how-it-works" aria-labelledby="how-it-works-h">
+<h2 id="how-it-works-h">How it works</h2>
+
+<section class="hp-sub" id="hw-cycle">
+<h3>Decision cycle</h3>
+<p>OpenGrid decides on two time scales. Every 15 minutes the <b>selector</b> decides what to sell and commit to over the next day. Every 2 seconds the <b>allocator</b> decides how much each bank delivers right now against what is already committed. The <b>guardian</b> checks and signs every resulting command before any battery moves.</p>
+<figure class="hp-fig">
+<svg viewBox="0 0 1000 300" role="img" aria-labelledby="hw-cycle-t">
+<title id="hw-cycle-t">Forecast, selector gate, allocator cycle and guardian</title>
+<rect class="hp-box" x="20" y="40" width="190" height="90" rx="6"/>
+<text class="hp-tb" x="115" y="68" text-anchor="middle" font-size="14">Forecast</text>
+<text class="hp-tm" x="115" y="90" text-anchor="middle" font-size="12">og-feeds, every 15 min</text>
+<text class="hp-tm" x="115" y="108" text-anchor="middle" font-size="12">24 h, P10/P50/P90</text>
+<rect class="hp-box hp-box-accent" x="260" y="40" width="210" height="90" rx="6"/>
+<text class="hp-tb" x="365" y="68" text-anchor="middle" font-size="14">Selector gate</text>
+<text class="hp-tm" x="365" y="90" text-anchor="middle" font-size="12">every 15 min + admission</text>
+<text class="hp-tm" x="365" y="108" text-anchor="middle" font-size="12">commits obligations</text>
+<rect class="hp-box hp-box-accent" x="520" y="40" width="200" height="90" rx="6"/>
+<text class="hp-tb" x="620" y="68" text-anchor="middle" font-size="14">Allocator cycle</text>
+<text class="hp-tm" x="620" y="90" text-anchor="middle" font-size="12">every 2 s</text>
+<text class="hp-tm" x="620" y="108" text-anchor="middle" font-size="12">grants per bank</text>
+<rect class="hp-box hp-box-warn" x="770" y="40" width="210" height="90" rx="6"/>
+<text class="hp-tb" x="875" y="68" text-anchor="middle" font-size="14">Guardian</text>
+<text class="hp-tm" x="875" y="90" text-anchor="middle" font-size="12">verdict within 300 ms</text>
+<text class="hp-tm" x="875" y="108" text-anchor="middle" font-size="12">sign or veto</text>
+<line class="hp-edge" x1="210" y1="85" x2="258" y2="85" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="470" y1="85" x2="518" y2="85" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-accent" x1="720" y1="85" x2="768" y2="85" marker-end="url(#hp-arrow)"/>
+<rect class="hp-box hp-box-muted" x="520" y="180" width="200" height="70" rx="6"/>
+<text class="hp-t" x="620" y="208" text-anchor="middle" font-size="13">Hub telemetry, SCADA</text>
+<text class="hp-tm" x="620" y="228" text-anchor="middle" font-size="12">every 10 s, via MQTT</text>
+<line class="hp-edge-dash" x1="620" y1="180" x2="620" y2="132" marker-end="url(#hp-arrow)"/>
+<rect class="hp-box hp-box-muted" x="770" y="180" width="210" height="70" rx="6"/>
+<text class="hp-t" x="875" y="208" text-anchor="middle" font-size="13">Signed commands</text>
+<text class="hp-tm" x="875" y="228" text-anchor="middle" font-size="12">30 s lease on the hub</text>
+<line class="hp-edge-accent" x1="875" y1="130" x2="875" y2="178" marker-end="url(#hp-arrow)"/>
+<text class="hp-tm" x="20" y="285" font-size="12">A vetoed hub is excluded and the allocator re-solves; a guardian timeout holds the last signed setpoint until its lease expires (K7).</text>
+</svg>
+<figcaption>The selector plans and commits; the allocator realises commitments every 2 s; the guardian is the only signer (K3).</figcaption>
+</figure>
+
+<h4>Inputs: feeds and forecast</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Input</th><th scope="col">Source</th><th scope="col">Poll cadence</th><th scope="col">Stale after</th></tr></thead>
+<tbody>
+<tr><td>Real-time settlement point prices (SPP) per load zone</td><td>ERCOT <code>np6-905-cd</code></td><td>5 min</td><td><code>ercot_price_fresh_s</code> = 2700 s</td></tr>
+<tr><td>Actual system load by weather zone</td><td>ERCOT <code>np6-345-cd</code> (EIA as standby)</td><td>60 min</td><td><code>ercot_load_fresh_s</code> = 172800 s</td></tr>
+<tr><td>Wind and solar (system)</td><td>ERCOT <code>np4-732-cd</code>, <code>np4-737-cd</code></td><td>30 min</td><td><code>wind_solar_fresh_s</code> = 10800 s</td></tr>
+<tr><td>Regional solar (D-28)</td><td>ERCOT <code>np4-745-cd</code> (<code>solar_by_region_enabled</code> = true)</td><td>30 min</td><td><code>wind_solar_fresh_s</code></td></tr>
+<tr><td>DAM ancillary-service clearing prices (MCPC)</td><td>ERCOT <code>np4-188-cd</code></td><td>24 h</td><td><code>as_price_fresh_s</code> = 93600 s</td></tr>
+<tr><td>Weather</td><td>NWS</td><td>60 min</td><td><code>nws_fresh_s</code> = 10800 s</td></tr>
+</tbody></table></div>
+<p>At r3.4 og-feeds polls only the ERCOT products listed in <code>[feeds.ercot].products</code> (all six above in the shipped config; an unknown name stops og-feeds at startup, and <code>disabled_products</code> can still remove a listed one). A failed poll, or one skipped because the circuit breaker is open, is retried after 5 minutes, doubling per consecutive failure up to 60 minutes and never later than the product's normal cadence, so one missed daily <code>np4-188-cd</code> poll no longer leaves AS prices stale for a day.</p>
+<p>og-feeds recomputes the forecast every 15 minutes: a 24-hour horizon at 15-minute resolution with quantiles 0.10, 0.50 and 0.90 (P10/P50/P90), for eight load-zone price and load series (<code>[forecast]</code>). A stale feed that is allowed to block firm commitments puts the system into <code>NO_NEW_COMMITMENTS</code>: existing commitments keep running, new ones are not made.</p>
+
+<h4>The 15-minute selector gate</h4>
+<ul>
+<li>og-engine checks the wall-clock 15-minute gate on each 2 s tick and runs <code>selector.run_gate</code>; it also runs gates for due <code>ADMISSION</code> and <code>RENOMINATION</code> triggers. Gate kinds in <code>og.plan</code>: <code>SCHEDULED_15MIN</code>, <code>ADMISSION</code>, <code>RENOMINATION</code>.</li>
+<li>The model is a HiGHS MILP over banks x 96 intervals x P10/P50/P90 scenarios. Existing commitments are loaded frozen (K13, constraint C24). Regulated candidates are selected first (stage R), then the full net value on the rest (stage F).</li>
+<li>Time limits: 45 s for the scheduled gate, 15 s for admission and re-nomination, target relative gap 1 %.</li>
+<li>The solution is re-validated independently (K1, K2, K13, product rules). On infeasibility, a time-out without an acceptable gap, or a failed validation, the deterministic rule selector F2 is used instead (<code>plan_mode</code> <code>RULE_FALLBACK</code>). F2 also runs on every gate as the comparison baseline.</li>
+<li>Each bank is priced at its own load zone. Wear is charged at <code>[allocator].wear_usd_per_kwh</code> = 0.03 on discharged kWh; charging cost includes M1 in the ERCOT competitive area (see <a href="#hw-market">Market model</a>).</li>
+<li>A failed gate is traced and raises <code>ALR-SELECTOR-GATE-FAILED</code>; the allocator keeps serving what is already committed.</li>
+</ul>
+
+<h4>The 2-second engine and allocator cycle</h4>
+<ol class="hp-steps">
+<li>Write the engine heartbeat (<code>og.heartbeat</code>).</li>
+<li>Flush the fleet twin (latest hub telemetry and health).</li>
+<li>Run any due selector gate (above).</li>
+<li>Run the allocator (<code>[allocator].cycle_interval_s</code> = 2; idle banks every 10 s). For every bank with an active obligation it re-derives how much of each committed kW is deliverable now, substitutes hubs within an obligation on health loss, applies the <code>DIST_DEFERRAL</code> PI loop, enforces flow limits and territory, then offers leftover headroom to the ERCOT energy market with a 300 s dwell (<code>dwell_s</code>) and a $5/MWh hysteresis (<code>hysteresis_usd_per_mwh</code>).</li>
+<li>If the guardian's heartbeat is current, write one <code>og.command_batch</code> per bank with grants and <code>NOTIFY og_command_batch</code>. If not, the cycle holds and no new batches are proposed.</li>
+<li>The guardian evaluates each batch on its own reads and returns <code>PASS</code>, <code>PARTLY_VETOED</code>, <code>VETOED</code> or <code>TIMEOUT</code> (<code>og.verdict</code>). Passed items are signed and published; a vetoed hub is excluded and re-solved next cycle (<code>R-HUB-VETO-EXCLUDED</code>).</li>
+</ol>
+<p class="hp-note">Hub telemetry arrives every 10 s. A hub is stale after 25 s and offline after 60 s (<code>[health]</code>). The engine's cycle latency is exported on its loopback metrics port and alerted by <code>ALR-CYCLE-P99</code> and <code>ALR-CYCLE-P99-APPROACHING</code>.</p>
+</section>
+
+<section class="hp-sub" id="hw-lock">
+<h3>Commitments and the lock (K13)</h3>
+<p>Once OpenGrid commits to a delivery, the delivery runs to completion. A better price arriving mid-contract never moves capacity away from a committed obligation (decision D-4).</p>
+
+<h4>Obligation states</h4>
+<p><code>og.obligation.state</code> is one of <code>OFFERED</code>, <code>SELECTED</code>, <code>COMMITTED</code>, <code>DELIVERING</code>, <code>FULFILLED</code>, <code>SHORTFALL</code>, <code>SETTLED</code>, <code>REJECTED</code>, <code>EXPIRED</code>. <b>AT_RISK</b> is not a state but a flag (<code>og.obligation.at_risk</code>) set on top of the state, traced as <code>AT_RISK</code> / <code>AT_RISK_CLEARED</code>.</p>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Situation</th><th scope="col">What the code does</th><th scope="col">Reason code</th></tr></thead>
+<tbody>
+<tr><td>Normal delivery</td><td>The allocator grants the committed kW; the selector treats the commitment as frozen.</td><td><code>R-GRANT-COMMITTED</code></td></tr>
+<tr><td>A hub goes unhealthy</td><td>Another hub of the same obligation takes over. Which hub delivers changes, never how much.</td><td><code>R-SUBSTITUTION</code></td></tr>
+<tr><td>Energy may run out before the window ends</td><td>Checked every cycle against energy above reserve on eligible hubs. The obligation is flagged AT_RISK and <code>ALR-ENERGY-SHORTFALL-RISK</code> is raised. Missing or stale SoC counts as zero.</td><td><code>R-ENERGY-SOC-MISSING</code> when SoC is missing</td></tr>
+<tr><td>Delivery is reduced by safety, reserve, a grid instruction or physics</td><td>If the signal persists for 30 consecutive cycles (60 s), the obligation moves <code>DELIVERING</code> to <code>SHORTFALL</code>. It keeps receiving the maximum feasible kW and returns to the full commitment as soon as the constraint clears (D-17). Settlement uses actual delivered energy.</td><td><code>R-COMMIT-LOCK-OVERRIDE-L0</code>, <code>-L1</code>, <code>-L2</code>, <code>R-COMMIT-LOCK-INFEASIBLE</code>; shortfall reasons <code>R-SHORTFALL-L2-INSTRUCTION</code>, <code>R-SHORTFALL-NO-SUBSTITUTE</code>, <code>R-SHORTFALL-BANK-CAPACITY</code>; recovery <code>R-SHORTFALL-RESTORED</code></td></tr>
+<tr><td>An operator puts a manual target on hubs serving the obligation</td><td>The hubs leave the allocator; their kW moves to other hubs of the obligation. Only if the bank cannot cover the floor without them is the obligation reduced, and G-19 signs that only after its own check.</td><td><code>R-OPERATOR-OVERRIDE</code></td></tr>
+<tr><td>Need-basis profile (DATA_CENTER, PIPELINE_AC)</td><td>The committed kW is a reserved maximum that stays locked; delivery follows the measured need (D-18). Disabled at r3.4 (<code>[allocator.closed_loop].enabled</code> = false; admission closed by <code>[contracts.activation].data_center</code> = false).</td><td><code>R-GRANT-CLOSED-LOOP</code></td></tr>
+<tr><td>Releasing held AS capacity to sell elsewhere</td><td>Audited release path; off by default in the guardian.</td><td><code>R-AS-RELEASE</code></td></tr>
+</tbody></table></div>
+<p>Any other reduction is a lock violation (<code>R-COMMIT-LOCK-VIOLATION</code>). The guardian's <code>G-19</code> independently refuses one, and the invariant checker (<code>K13_LOCK_VIOLATION</code>, counter <code>og_lock_violations_total</code>) measures it after the fact; the Control Room shows it as <b>Commitment switches</b>. A commitment changes only at an agreed re-nomination point (<code>og.renomination_point</code>).</p>
+</section>
+
+<section class="hp-sub" id="hw-holds">
+<h3>Capacity holds: ancillary services and tolls</h3>
+<p>Some obligations sell <b>availability</b>, not energy. They are committed and reserved like any other obligation, but granted 0 kW until the buyer calls them. The reservation stays locked (K13) and enough energy is kept above reserve to answer the call.</p>
+
+<h4>ERCOT ancillary services (ERCOT_AS)</h4>
+<ol class="hp-steps">
+<li><b>Offer.</b> Contract intake values an AS offer at the latest <code>np4-188-cd</code> clearing price (MCPC), only if that price is at most <code>[contracts.intake].as_price_max_age_s</code> (93600 s) old; otherwise nothing is offered that gate (<code>INTAKE_SKIPPED</code>, <code>R-AS-PRICE-STALE</code>).</li>
+<li><b>Award and hold.</b> The selector commits the award. The allocator grants it 0 kW (<code>R-GRANT-AS-HOLD</code>), and the award keeps committed kW x product duration / discharge efficiency above the reserve floor (selector C3&prime; floor, engine hold floor). Durations come from the product rule: ECRS 60 min, Non-Spin (NSPIN) 240 min.</li>
+<li><b>Deployment.</b> While an <code>og.as_deployment</code> row covers now, the allocator discharges the award up to its committed kW. Operators create one from the Dispatch page (<b>Propose deployment</b>, then <b>Confirm deployment</b>), which calls <code>POST /og/api/dispatch/as-deployments</code>. One award per deployment, capped at its product duration, no chaining; <b>Stop deploy</b> ends it early and the award returns to a 0 kW hold next cycle.</li>
+<li><b>Settlement.</b> Paid on the award. If <code>ALR-ENERGY-SHORTFALL-RISK</code> was open during a settled interval, the settlement is flagged <code>R-AS-HOLD-SHORT</code>; the payment is unchanged.</li>
+</ol>
+<p class="hp-warn">At r3.4 there is no live ERCOT deployment signal. Deployments come only from an operator, a scenario, or the market simulator's poller, which is off (<code>[market_sim].as_deployment_poll</code> = false). ERCOT market submission (<code>ercot_mms</code>) is built but off. The <code>AS_HOLD</code> invariant check measures only while a deployment is active.</p>
+
+<h4>Utility toll (D-29)</h4>
+<ul>
+<li>A toll is a <code>REGULATED_CAPACITY</code> contract with variant <code>TOLLING</code> (Austin Energy terms: $102/kW-yr, 90-minute product rule), paid on availability.</li>
+<li><code>opengrid.contracts.tolling</code> offers one obligation per day for the utility's window, <code>[contracts.tolling]</code> <code>window_start</code> 16:30 to <code>window_end</code> 18:00 America/Chicago, every day, for today (if not started) and tomorrow. The window length must equal the product rule's 90 minutes, or nothing is reserved.</li>
+<li>The selector commits it as a regulated capacity hold; the allocator holds it at 0 kW until the utility calls.</li>
+<li>A <b>utility call</b> uses the same deployment route as AS (reason prefixed "utility call"), capped at 90 minutes. The utility calls discharge only; charging follows local solar or the owner's schedule (D-30).</li>
+<li>The toll runs on the Austin substation battery (and the Austin home block where seeded). Its feeder has a 20 MW/min ramp ceiling so a 20 MW call reaches full output within one minute.</li>
+</ul>
+<p class="hp-note">Not implemented at r3.4: a true contract-term toll reservation (planned after R3).</p>
+</section>
+
+<section class="hp-sub" id="hw-manual">
+<h3>Manual targets and commands</h3>
+<p>An operator can take hubs out of automatic dispatch and hold them at a chosen power. A manual target is not a one-shot command: it is a recorded intent that the engine ramps toward every cycle, with every step signed by the guardian.</p>
+<h4>Single hub or bank</h4>
+<ol class="hp-steps">
+<li>On the Fleet page choose a hub or bank, a setpoint in kW, a reason and optionally a duration, and press <b>Propose (step 1 of 2)</b>. Nothing is commanded yet (<code>POST /og/api/fleet/command</code>); the proposal expires after 60 s.</li>
+<li>Confirm in the dialog (<code>POST /og/api/fleet/command/{proposal_id}/confirm</code>). The API writes a <code>MANUAL_TARGET</code> trace event (K10) and an <code>og.operator_action</code> row, and returns status <code>RAMPING</code> only once the <code>MANUAL_TARGET</code> row is durably in <code>og.trace</code>. If the trace backend fell back to its local journal (database unreachable), the confirm answers <code>503</code> "not recorded", writes no operator action and nothing ramps; retry when the database is back.</li>
+<li>Every 2 s the engine steps each hub toward the target within the <code>G-04</code> ramp limit (about p_kw/180 per cycle), reason <code>R-MANUAL-RAMP</code>, then holds it there. Home hubs step from their measured power; utility-scale hubs (the substation battery) step from the last commanded setpoint, so a 20 MW call reaches full power at the G-04 rate.</li>
+<li>The target ends at <code>expires_at</code>: 15 minutes by default, at most 240. <b>Cancel target</b> ends it now (<code>POST /og/api/fleet/manual-targets/{trace_id}/cancel</code>); the hubs return to the allocator next cycle. The cancel acts only on hubs where that target is still <code>ACTIVE</code>: <code>404</code> for an unknown trace id, <code>409</code> (with the current statuses) when the target exists but has already ended, <code>503</code> when the cancel itself could not be recorded.</li>
+</ol>
+<h4>Target status: one rule</h4>
+<p>At r3.4 one pure function, <code>core.manual_targets.effective_targets</code>, decides the status of every hub's newest target. The engine dispatches by it, <code>GET /og/api/fleet/manual-targets</code> lists it, and the guardian uses it for its <code>R-OPERATOR-OVERRIDE</code> evidence, so the three can no longer disagree. Precedence: an operator or late-record cancel, then a safe stop, then expiry; otherwise <code>ACTIVE</code>.</p>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Status</th><th scope="col">Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>ACTIVE</code></td><td>The engine is ramping or holding the hub at the target. Only ACTIVE targets control a hub and appear as markers and ramps on the Fleet page.</td></tr>
+<tr><td><code>CANCELLED_BY_OPERATOR</code></td><td>Ended by <b>Cancel target</b>; <code>cancelled_by</code> names the cancel row's trace id.</td></tr>
+<tr><td><code>CANCELLED_BY_SAFE_STOP</code></td><td>A safe-stop ENGAGE covering the hub's bank, zone or the fleet was issued at or after the target, or a covering stop is still engaged; <code>stop_event_id</code> names the stop. A stop-cancelled target is never shown as active.</td></tr>
+<tr><td><code>CANCELLED_LATE_RECORD</code></td><td>The engine first saw the target more than 30 s after it was issued (for example a trace-journal replay of a write the API had reported as failed). It is never activated; the engine appends a cancel row with <code>cancel_kind</code> <code>LATE_RECORD</code> so every reader shows it.</td></tr>
+<tr><td><code>EXPIRED</code></td><td>Past <code>expires_at</code>. Listed only with <code>include_expired=true</code>.</td></tr>
+</tbody></table></div>
+<ul>
+<li>Sign convention everywhere: <b>+charge / -discharge</b> (<code>+charge/-discharge</code>). A target with any other convention is ignored (fail closed).</li>
+<li>The newest target per hub wins. <code>GET /og/api/fleet/manual-targets</code> lists each hub's newest target with its status, <code>stop_event_id</code> and <code>cancelled_by</code>.</li>
+<li>A hub under an ACTIVE target is operator-owned: its committed kW moves to other hubs of the same obligation (K13 substitution; see <a href="#hw-lock">the lock</a>).</li>
+<li>A safe stop covering the hub cancels the target for good (status <code>CANCELLED_BY_SAFE_STOP</code>); it does not resume after the release.</li>
+<li>In a regulated or toll territory a manual <b>discharge</b> is vetoed by <code>G-33</code> unless it serves that utility's own obligation; a manual charge or a 0 kW hold is allowed (D-29 c&prime;).</li>
+</ul>
+<h4>Bulk commands</h4>
+<ol class="hp-steps">
+<li>Select hubs on the Fleet page and press <b>Propose for selection (step 1 of 2)</b> (<code>POST /og/api/fleet/commands/bulk</code>, at most 500 hubs by default). The response says whether a second confirmation is needed and why.</li>
+<li>Confirm (<code>POST /og/api/fleet/commands/bulk/{proposal_id}/confirm</code>). A second confirmation is required when any selected hub serves a <code>COMMITTED</code>/<code>DELIVERING</code> obligation (<code>SERVES_COMMITTED_OBLIGATION</code>), is faulted (<code>HUB_FAULT</code>), has a critical alert (<code>CRITICAL_ALERT</code>) or is at or below reserve (<code>AT_OR_BELOW_RESERVE</code>); the first confirm returns <code>AWAITING_SECOND_CONFIRM</code>. An offline hub (<code>HUB_OFFLINE</code>) is only a warning.</li>
+<li>The final confirm creates one manual target for the whole selection, exactly as for a single hub. Each step is traced as <code>OPERATOR_BULK_COMMAND</code>.</li>
+</ol>
+<p class="hp-note">The second bulk confirmation may be given by the same operator; it is a deliberate re-acknowledgement, not a two-person control.</p>
+</section>
+
+<section class="hp-sub" id="hw-safestop">
+<h3>Safe stop</h3>
+<p>A safe stop ramps every hub in a scope to 0 kW and keeps it there until a release. It is run by <code>og-safestop</code>, a separate process with a stop-only Ed25519 key, so it works even when og-engine and og-guardian are down (K8). Scopes are <code>FLEET</code>, <code>ZONE</code> (a load zone) and <code>BANK</code>.</p>
+<h4>Engage (one operator, two steps)</h4>
+<ol class="hp-steps">
+<li>On the Fleet page choose the scope and a reason and press <b>Propose safe stop (step 1 of 2)</b> (<code>POST /og/api/safestop</code>). og-api sends a <code>PROPOSE</code> to og-safestop over the Postgres channel <code>og_safestop_request</code>. Nothing stops yet.</li>
+<li>Confirm within 30 s (<code>[safestop].confirm_window_s</code>; <code>POST /og/api/safestop/{proposal_id}/confirm</code>). og-safestop traces the stop, writes the <code>og.stop_event</code> ENGAGE row, and publishes a signed, retained message on <code>&lt;root&gt;/stop/&lt;scope&gt;/&lt;id&gt;/&lt;stop_id&gt;</code>. The API waits up to 3 s for the ENGAGE row and answers <code>503</code> if none appears (og-safestop down or its window elapsed); a proposal older than the window gets <code>409</code>.</li>
+</ol>
+<p><b>The stop outbox.</b> At r3.4 the <code>og.stop_event</code> row and its <code>og.stop_outbox</code> entry are written in one transaction (ENGAGE and relayed RELEASE), so a stop can no longer be recorded without being queued. The outbox is re-published (QoS 1, retained) until the broker acknowledges it, including after a broker reconnect; every queued ENGAGE is drained before older RELEASEs, each oldest first. A stop engaged while the broker is down is recorded and delivered as soon as the broker returns.</p>
+<ul>
+<li><b>Redelivery repair.</b> A redelivered utility L2 instruction that was already acted on but whose ENGAGE has no outbox row is re-signed under the same <code>stop_id</code> and queued (hubs de-duplicate by <code>stop_id</code>); never for a bank released since. A re-handed RELEASE that is already recorded is queued if missing.</li>
+<li><b>Dead letter.</b> Only permanent failures (a payload that can never be published) count as attempts; a broker outage never dead-letters a stop. At <code>outbox_max_attempts</code> (5) the entry is skipped, traced and the critical <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> is raised once, so one poison entry never blocks later stops. See the playbook <a href="#pb-safe-stop">Safe stop</a>.</li>
+</ul>
+<p>The simulated hubs ramp to 0 kW over 4 s (<code>stop_ramp_s</code>). The <code>[safestop]</code> keys <code>ramp_bank_s</code>, <code>ramp_zone_s</code>, <code>ramp_fleet_s</code> are reserved and not read by any code at r3.4.</p>
+<h4>Other ways a stop is engaged</h4>
+<ul>
+<li><b>Utility instruction.</b> og-safestop engages a BANK stop for every unexpired L2 <code>BLOCK</code> or <code>ESTOP</code> instruction (initiator <code>UTILITY</code>). Operators cannot release such a stop.</li>
+<li><b>Host CLI.</b> When og-api is unavailable: <code>python -m opengrid.safestop.cli engage</code> with <code>--confirm &lt;SCOPE&gt;:&lt;ref&gt;</code>. It needs Postgres (K10) and has no release command.</li>
+<li><b>Guardian request.</b> After three escalations of a scope that keeps getting vetoes (K7), the guardian raises <code>ALR-SAFE-STOP-REQUESTED</code> and pre-fills the stop form. It never engages a stop itself.</li>
+</ul>
+<h4>Release (two different operators)</h4>
+<ol class="hp-steps">
+<li>Operator 1 presses <b>Request release (operator 1)</b> (<code>POST /og/api/safestop/{scope}/{scope_id}/release</code>). The request expires after 60 s.</li>
+<li>A different operator presses <b>Review and approve (operator 2)</b> (<code>POST /og/api/safestop/release/{proposal_id}/approve</code>). The requester is refused with <code>403</code>. The API writes one confirmed <code>SAFE_STOP_RELEASE</code> operator action (tier <code>TIER2</code>).</li>
+<li>The guardian verifies it on its own: both operators on <code>[guardian].stop_release_authorised_operators</code> and distinct, approval at most 300 s old, request traced, scope still engaged, not a utility stop and no active L2 instruction. It then signs the RELEASE; og-safestop verifies the guardian signature and relays it on the stop's own topic.</li>
+<li>The API waits up to 10 s: <code>200</code> when the release landed, <code>202</code> while the guardian has not signed (it may refuse; this is never faked).</li>
+</ol>
+<p class="hp-note">The stop-only key can never sign a release (<code>opengrid.safestop.release</code> always raises). See the playbook <a href="#pb-safe-stop">Safe stop</a>.</p>
+</section>
+
+<section class="hp-sub" id="hw-market">
+<h3>Market model: FREE and REGULATED</h3>
+<p>Every contract belongs to one market (<code>og.contract.market</code>): <code>FREE</code> (ERCOT) or <code>REGULATED</code> with a <code>utility_id</code> (<code>AUSTIN_ENERGY</code> or <code>CPS_ENERGY</code>). <code>REGULATED_CAPACITY</code> exists only in the regulated market. Each bank's territory comes from its load zone through <code>[zone_territory]</code> in <code>config/tdsp_tariffs.toml</code>. The code is in <code>opengrid.market</code> (<code>MarketModel</code>, <code>check_territory</code>) and <code>opengrid.settle</code>.</p>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Zone</th><th scope="col">Territory</th><th scope="col">Market</th><th scope="col">Delivery charge</th></tr></thead>
+<tbody>
+<tr><td><code>LZ_NORTH</code>, <code>LZ_SOUTH</code>, <code>LZ_HOUSTON</code>, <code>LZ_WEST</code></td><td>ERCOT competitive area</td><td>FREE</td><td>M1 of the zone's default TDSP</td></tr>
+<tr><td><code>LZ_AEN</code></td><td>Austin Energy</td><td>REGULATED</td><td>None (inside the utility's charging terms)</td></tr>
+<tr><td><code>LZ_CPS</code></td><td>CPS Energy</td><td>REGULATED</td><td>None</td></tr>
+<tr><td><code>LZ_LCRA</code>, <code>LZ_RAYBN</code></td><td>LCRA, Rayburn Country EC</td><td>FREE (until Base confirms, D-29 d)</td><td>None (no competitive TDSP tariff)</td></tr>
+</tbody></table></div>
+
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Rule</th><th scope="col">What it means</th><th scope="col">Where in code</th><th scope="col">Status at r3.4</th></tr></thead>
+<tbody>
+<tr><td><b>K15 territory</b></td><td>A regulated obligation is served only by assets in that utility's territory; a regulated-territory asset takes ERCOT work only with wholesale access; no net export out of the territory.</td><td>Selector C25 (bank eligibility); allocator (<code>[allocator].enforce_territory</code> = true); guardian <code>G-33</code> and <code>G-30</code>; checker <code>K15_TERRITORY</code>.</td><td>Built in selector, allocator and G-33. Not built: contract admission check, the wholesale-access and export checker counters. G-30 is idle without regulated bank flow data.</td></tr>
+<tr><td><b>M1 delivery charge</b></td><td>The TDSP's flat per-kWh delivery charge on energy drawn from the grid to charge, in the ERCOT competitive area only. The full charge applies; serving the home's own load avoids it; exports never recover it (D-19).</td><td><code>settle/tariffs.py</code>; selector charging cost; settle P&amp;L <code>delivery_charge</code>.</td><td>Built. Rates effective 2026-09-01 ($/kWh): ONCOR 0.060295, CENTERPOINT 0.064130, AEP_CENTRAL 0.058, AEP_NORTH 0.057, TNMP 0.074022. Zone defaults: <code>LZ_NORTH</code> ONCOR, <code>LZ_HOUSTON</code> CENTERPOINT, <code>LZ_SOUTH</code> AEP_CENTRAL, <code>LZ_WEST</code> AEP_NORTH. A zone with no TDSP is charged $0. A missing tariff file disables M1 in settle for that run. Per-site TDSP (needed for TNMP) is not implemented.</td></tr>
+<tr><td><b>D-28 solar share</b></td><td>The share of charging that came from solar is measured, not assumed: hub telemetry first (<code>charge_pv_kw</code> / <code>charge_grid_kw</code>), then ERCOT published solar for the zone or system, then the 30 % planning assumption. The source used is recorded.</td><td><code>core.solar_share</code>; <code>selector/solar_history.py</code> (trailing 7-day same-hour share); settle M1 (trailing 24 h grid share).</td><td>Built. The weather-zone to solar-region mapping in <code>[feeds.ercot.solar_share_zones]</code> is marked proposed, pending sign-off, and the per-region field names are unconfirmed against a live response.</td></tr>
+<tr><td><b>D-29 utility toll</b></td><td>Daily availability hold, discharge on utility call only. See <a href="#hw-holds">Capacity holds</a>.</td><td><code>contracts/tolling.py</code>; <code>api/routers/dispatch.py</code>; guardian <code>manual_charge_territory_exempt</code>.</td><td>Built for one obligation per day. Contract-term reservation not implemented.</td></tr>
+<tr><td><b>D-30 charge windows</b></td><td>Toll (regulated) banks charge from the grid only inside the owner's windows (default 22:00-06:00 America/Chicago); solar charging is allowed any time. The most specific scope wins: FLEET &lt; PROVIDER &lt; ZONE &lt; SUBSTATION &lt; FEEDER &lt; BANK &lt; HUB. At most 4 windows per scope; an empty list means no grid charging.</td><td><code>core/charge_windows.py</code>; <code>og.owner_charge_window</code> (migration 0038); <code>/og/api/fleet/charge-windows</code>; selector.</td><td>Built. Edit on the Fleet page (<b>Review change (step 1 of 2)</b>, then confirm). The selector re-reads the table at most every 60 s. Config <code>[selector.owner_charge_windows]</code> sets <code>AUSTIN_ENERGY</code> to 22:00-06:00. The plan is per bank, so a HUB-scope window only partly applies.</td></tr>
+<tr><td><b>D-31 trucks</b></td><td>A mobile unit is never charged from the fleet; it charges only at its registered home station, from that station's connection and tariff, and is unavailable while charging.</td><td>Guardian <code>G-35</code> (vetoes any charge while away or location unknown, <code>R-MOBILE-CHARGE-AWAY-FROM-HOME-STATION</code>); selector <code>mark_mobile_units</code> (zone = home station's zone).</td><td>Partly built. The home-station registry is a config file (listed by <code>GET /og/api/fleet/home-stations</code>; the Fleet page labels mobile units <b>Truck</b>); the database tables and the deployment schedule are not implemented, so a mobile unit never charges (fail closed). <code>bootstrap_from_scratch.sh</code> seeds trucks only when <code>dev/seed/mobile_trucks_seed.sql</code> is in the release, which it is not at r3.4.</td></tr>
+<tr><td><b>Zones</b></td><td>ERCOT load zones (<code>LZ_*</code>) are the unit for pricing each bank, forecasting, territory lookup and ZONE-scope safe stops. <code>[fleet].zones</code> lists the four dispatchable zones; the forecast also covers <code>LZ_AEN</code>, <code>LZ_CPS</code>, <code>LZ_LCRA</code>, <code>LZ_RAYBN</code> for market information.</td><td><code>[fleet]</code>, <code>[forecast]</code>, <code>[zone_territory]</code>, <code>[zone_default_tdsp]</code>.</td><td>Built. Territory boundaries are approximate: <code>LZ_AEN</code> and <code>LZ_CPS</code> stand in for the utilities' service territories until GIS polygons exist. <b>D-32</b> (owner decision, 2026-09-26) enables the free-market zones <code>LZ_LCRA</code> (<code>bank-060</code>..<code>069</code>) and <code>LZ_RAYBN</code> (<code>bank-070</code>..<code>079</code>), 500 hubs and 10 banks each, in the shipped simulator <code>fleet.yaml</code>/<code>scada.yaml</code>. <code>LZ_AEN</code> and <code>LZ_CPS</code> stay off there; production enables <code>LZ_AEN</code> through its generated override <code>/etc/opengrid/sim/fleet.yaml</code> (<code>[fleet].sim_config_path</code>), and <code>bootstrap_from_scratch.sh --d32</code> adds LCRA and RAYBN to it.</td></tr>
+</tbody></table></div>
+<h4>Charging in each market</h4>
+<ul>
+<li><b>FREE:</b> zone price plus M1 on grid-drawn kWh.</li>
+<li><b>REGULATED:</b> the utility's own charging terms (TOU off-peak or night rate), no M1, a 30 % soft solar floor, and grid charging only in the owner's windows. No charging while delivering a regulated obligation (no wash trade).</li>
+<li><b>Capacity payment:</b> settle pays a <code>REGULATED</code> contract its capacity price on availability, keyed on the contract's market (not on the asset's territory).</li>
+</ul>
+</section>
+</section>

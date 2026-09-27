@@ -1,0 +1,501 @@
+<section class="hp-sec" id="maintenance" aria-labelledby="maintenance-h">
+<h2 id="maintenance-h">Maintenance and operations</h2>
+<p>This section covers the base server's operational procedures: releases, database migrations, backups, the data lifecycle, firmware campaigns, calibration, charge schedules, a from-scratch bootstrap, logs, health checks and configuration files. The sources are <code>deploy/RUNBOOK.md</code>, <code>deploy/README.md</code>, the scripts under <code>deploy/scripts/</code>, the systemd units under <code>deploy/systemd/</code>, <code>deploy/BOOTSTRAP.md</code> and the r3.4 code. Where the documents disagree with the scripts or the code, this page follows the scripts and the code and says where they differ.</p>
+<p class="hp-warn">Every command runs as <code>root</code> on the base server unless it says otherwise. The server has no sudo. Never print secrets: <code>/etc/opengrid/*.env</code>, <code>/root/opengrid-ui-credentials.txt</code> and the Apache proxy-secret conf are read by scripts and are never <code>cat</code>-ed. Stop and start services by their <b>exact unit name</b>, never with <code>pkill</code> or <code>killall</code> by pattern, because test workspaces run as the same <code>opengrid</code> user as production.</p>
+
+<!-- ============================================================ mt-release -->
+<section class="hp-sub" id="mt-release">
+<h3>Releases, deploy and rollback</h3>
+<p>A release is a directory that holds <code>orchestrator/</code> and <code>integration-sims/</code>. <code>deploy.sh</code> copies it to <code>/opt/opengrid/releases/&lt;timestamp&gt;</code>, where the timestamp is <code>YYYYMMDDHHMMSS</code>. The symlink <code>/opt/opengrid/current</code> points at the live release, and every unit runs from <code>/opt/opengrid/current</code>. Releases are built from the git checkout <code>/opt/opengrid/src</code>, which belongs to user <code>opengrid</code>.</p>
+
+<h4>Tags and versions</h4>
+<p>The RUNBOOK builds a release from <code>git archive HEAD</code> of the server checkout after a fast-forward pull. The release directory is named after the short commit hash (<code>/root/release-&lt;rev&gt;</code>). <code>deploy.sh</code> takes any release directory, for example an extracted tagged checkout. It does not read or check a git tag. On the server a release is identified only by its timestamp directory, and <code>/var/log/opengrid/deploy.log</code> records which source directory went into which timestamp. This console release (r3.4) is code tag r3.3 plus the r3.4 fix branches.</p>
+
+<h4>Who may deploy</h4>
+<ul>
+<li>A deploy is run as root by whoever holds the root session on the base server. In <code>BUILD.md</code> terms that is the <b>deploy</b> role: "Only the deploy agent may run root scripts". The deploy role may touch only the <code>og-*</code> units, <code>/etc/apache2/conf-available/opengrid*.conf</code>, <code>/etc/cron.d/opengrid</code>, <code>/etc/logrotate.d/opengrid</code>, <code>/opt/opengrid</code>, <code>/opt/ogsim</code> and <code>/var/lib/opengrid</code>.</li>
+<li>The console has no deploy button. No API route runs a deploy script.</li>
+<li>Deploying while a FIRM or AS obligation is <code>DELIVERING</code> needs an explicit <code>--during-delivery</code> (see step 6 below). Use it only with the lead's agreement.</li>
+</ul>
+
+<figure class="hp-fig">
+<svg viewBox="0 0 1040 250" role="img" aria-labelledby="mt-deploy-t">
+<title id="mt-deploy-t">deploy.sh pipeline with automatic rollback</title>
+<rect class="hp-box" x="10" y="30" width="150" height="64" rx="6"/>
+<text class="hp-tb" x="85" y="56" text-anchor="middle" font-size="13">1 Preflight</text>
+<text class="hp-tm" x="85" y="76" text-anchor="middle" font-size="12">FIRM/AS DELIVERING?</text>
+<rect class="hp-box" x="190" y="30" width="150" height="64" rx="6"/>
+<text class="hp-tb" x="265" y="56" text-anchor="middle" font-size="13">2 Copy release</text>
+<text class="hp-tm" x="265" y="76" text-anchor="middle" font-size="12">releases/&lt;timestamp&gt;</text>
+<rect class="hp-box" x="370" y="30" width="150" height="64" rx="6"/>
+<text class="hp-tb" x="445" y="56" text-anchor="middle" font-size="13">3 Migrate</text>
+<text class="hp-tm" x="445" y="76" text-anchor="middle" font-size="12">opengrid.platform.db</text>
+<rect class="hp-box" x="550" y="30" width="150" height="64" rx="6"/>
+<text class="hp-tb" x="625" y="56" text-anchor="middle" font-size="13">4 Seed topology</text>
+<text class="hp-tm" x="625" y="76" text-anchor="middle" font-size="12">opengrid.fleet.seed</text>
+<rect class="hp-box" x="730" y="30" width="140" height="64" rx="6"/>
+<text class="hp-tb" x="800" y="56" text-anchor="middle" font-size="13">5 Switch + restart</text>
+<text class="hp-tm" x="800" y="76" text-anchor="middle" font-size="12">current, units, targets</text>
+<rect class="hp-box-good" x="900" y="30" width="130" height="64" rx="6"/>
+<text class="hp-tb" x="965" y="56" text-anchor="middle" font-size="13">6 Health poll</text>
+<text class="hp-tm" x="965" y="76" text-anchor="middle" font-size="12">/og/api/health 30 s</text>
+<line class="hp-edge" x1="160" y1="62" x2="186" y2="62" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="340" y1="62" x2="366" y2="62" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="520" y1="62" x2="546" y2="62" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="700" y1="62" x2="726" y2="62" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="870" y1="62" x2="896" y2="62" marker-end="url(#hp-arrow)"/>
+<rect class="hp-box-warn" x="370" y="160" width="500" height="60" rx="6"/>
+<text class="hp-tb" x="620" y="185" text-anchor="middle" font-size="13">ERR trap: re-point current at the previous release, restart targets, exit 1</text>
+<text class="hp-tm" x="620" y="205" text-anchor="middle" font-size="12">applied migrations are NOT reverted (forward-only)</text>
+<line class="hp-edge-dash" x1="445" y1="94" x2="445" y2="156" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="625" y1="94" x2="625" y2="156" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="800" y1="94" x2="800" y2="156" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="965" y1="94" x2="860" y2="156" marker-end="url(#hp-arrow)"/>
+<rect class="hp-box-muted" x="10" y="160" width="300" height="60" rx="6"/>
+<text class="hp-t" x="160" y="185" text-anchor="middle" font-size="13">exit 3: delivering and no --during-delivery</text>
+<text class="hp-tm" x="160" y="205" text-anchor="middle" font-size="12">nothing copied, nothing changed</text>
+<line class="hp-edge-dash" x1="85" y1="94" x2="85" y2="156" marker-end="url(#hp-arrow)"/>
+</svg>
+<figcaption>What <code>deploy/scripts/deploy.sh</code> does. On success it also prunes old releases and keeps the 5 newest.</figcaption>
+</figure>
+
+<h4>Deploy a release (RUNBOOK)</h4>
+<ol class="hp-steps">
+<li>Pick a quiet moment. Restarting <code>og-engine</code>, <code>og-guardian</code> or <code>og-sim-*</code> while a FIRM or AS obligation is <code>DELIVERING</code> interrupts it: hubs hold their last setpoint only for lease + hold, about 35 s. Prefer the minutes right after a Postgres <code>checkpoint complete</code> line, when the disk is quietest:
+<br><code>grep 'checkpoint complete' /var/log/postgresql/postgresql-17-main.log | tail -1</code></li>
+<li>Update the server checkout:
+<br><code>cd /opt/opengrid/src</code>
+<br><code>runuser -u opengrid -- env GIT_SSH_COMMAND="ssh -F /opt/opengrid/.ssh/config" git pull --ff-only</code></li>
+<li>Build the release directory:
+<br><code>REV=$(runuser -u opengrid -- git rev-parse --short HEAD)</code>
+<br><code>rm -rf /root/release-$REV &amp;&amp; mkdir /root/release-$REV</code>
+<br><code>runuser -u opengrid -- git archive HEAD | tar -x -C /root/release-$REV</code></li>
+<li>Install the release's own <code>deploy.sh</code> at its stable path, which survives across releases:
+<br><code>install -m 755 /root/release-$REV/deploy/scripts/deploy.sh /opt/opengrid/deploy/scripts/deploy.sh</code></li>
+<li>Run the deploy:
+<br><code>bash /opt/opengrid/deploy/scripts/deploy.sh /root/release-$REV</code>
+<br>Add <code>--during-delivery</code> as the first argument only when you have decided to interrupt a delivering obligation.</li>
+<li>Read the result. The script prints each step and appends it to <code>/var/log/opengrid/deploy.log</code>. Exit 0 ends with <code>deploy OK: /opt/opengrid/releases/&lt;timestamp&gt;</code>. Exit 3 means FIRM or AS obligations were delivering and nothing was changed. Exit 1 means a step failed and the script rolled back on its own.</li>
+<li>If the release changed <code>integration-sims/config/fleet.yaml</code> or <code>scada.yaml</code>, regenerate <code>/etc/opengrid/sim/fleet.yaml</code> and <code>/etc/opengrid/sim/scada.yaml</code> with the owner-approved zone blocks: <code>python deploy/scripts/gen_sim_overrides.py --release &lt;release_dir&gt; --out /etc/opengrid/sim --zones LZ_AEN</code> (add <code>LZ_LCRA,LZ_RAYBN</code> once D-32 is enabled in production; <code>--dry-run</code> first). The script enables exactly the listed zones. Otherwise the sims keep running the old topology (see <a href="#mt-bootstrap">Bootstrap</a>). Regenerate before the deploy: the seed reads the same file.</li>
+<li>If the release changed the operator accounts or <code>deploy/apache/opengrid.conf</code>, install the conf, then run <code>apache2ctl configtest &amp;&amp; systemctl reload apache2</code>. Never reload a config that fails configtest.</li>
+</ol>
+
+<h4>What deploy.sh does, in order</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Step</th><th scope="col">Action</th><th scope="col">On failure</th></tr></thead>
+<tbody>
+<tr><td>Preflight</td><td>Queries <code>og.obligation</code> for <code>state = 'DELIVERING'</code> and <code>service_type</code> in <code>ERCOT_AS</code>, <code>DIST_DEFERRAL</code>, <code>PARTNER_CAPACITY</code>, <code>DATA_CENTER</code>. If any are found, it lists them and stops unless <code>--during-delivery</code> was given. A failed query counts as "UNKNOWN" and also stops the deploy.</td><td>exit 3, nothing changed</td></tr>
+<tr><td>Copy</td><td><code>cp -a</code> into <code>/opt/opengrid/releases/&lt;timestamp&gt;</code>, owned by <code>opengrid</code>.</td><td>rollback</td></tr>
+<tr><td>Migrate</td><td>As <code>opengrid</code>, with the env files loaded: <code>python -m opengrid.platform.db migrate</code> against the <b>new</b> release (see <a href="#mt-migrations">Migrations</a>).</td><td>rollback (migrations already committed stay)</td></tr>
+<tr><td>Seed</td><td><code>python -m opengrid.fleet.seed</code>, which is idempotent (upserts). At r3.4 it reads the generated production override <code>/etc/opengrid/sim/fleet.yaml</code> (<code>[fleet].sim_config_path</code> in the shipped <code>orchestrator.toml</code>, and <code>deploy.sh</code> also exports <code>OG_FLEET_SIM_CONFIG</code> when the file exists), never the repo yaml: bank and hub ids follow the enabled zone blocks in order, so seeding from the repo yaml would re-key the <code>LZ_AEN</code> banks. If the override file is missing the seed fails and <code>deploy.sh</code> rolls back. The same file is used by <code>POST /og/api/admin/seed-fleet-topology</code>.</td><td>rollback</td></tr>
+<tr><td>Switch</td><td><code>ln -sfn</code> re-points <code>/opt/opengrid/current</code> at the new release in one step.</td><td>rollback</td></tr>
+<tr><td>Install units</td><td>New at r3.4: installs the release's <code>deploy/systemd/*.service</code>, <code>*.target</code> and <code>*.timer</code> into <code>/etc/systemd/system/</code> and runs <code>systemctl daemon-reload</code>. Drop-ins under <code>/etc/systemd/system/&lt;unit&gt;.d/</code> are left untouched, and timers are installed but never enabled. A rollback reinstalls the previous release's units.</td><td>rollback</td></tr>
+<tr><td>Restart</td><td><code>systemctl restart opengrid.target ogsim.target</code>. Every unit has <code>PartOf=</code> its target, so the whole target restarts.</td><td>rollback</td></tr>
+<tr><td>Health</td><td>Polls <code>GET http://localhost:8080/og/api/health</code> 15 times, 2 s apart (about 30 s).</td><td>rollback</td></tr>
+<tr><td>Prune</td><td>Keeps the 5 newest directories under <code>/opt/opengrid/releases/</code> and deletes the rest.</td><td>n/a</td></tr>
+</tbody></table></div>
+
+<h4>Verification after a deploy</h4>
+<ol class="hp-steps">
+<li>All units are active:
+<br><code>for u in og-engine og-guardian og-safestop og-api og-feeds og-settle og-sim-fleet og-sim-scada og-sim-market og-sim-control; do printf '%s=%s ' "$u" "$(systemctl is-active "$u")"; done; echo</code></li>
+<li>The API answers on loopback: <code>curl -fsS http://localhost:8080/og/api/health &gt;/dev/null &amp;&amp; echo api-ok</code></li>
+<li><code>https://base.tocy-net.net/og/</code> loads for both an operator and a viewer.</li>
+<li>Guardian verdicts are mostly PASS (Dispatch and Health screens).</li>
+<li><code>og.invariant_check</code> shows 0 new violations.</li>
+<li>Engine cycle p99 is in range: <code>curl -s http://localhost:9101/metrics | grep og_engine_cycle_latency_ms</code></li>
+<li>No new errors: <code>journalctl -u og-engine -u og-guardian -u og-settle -u og-api --since -10min -o cat | grep -E '"ERROR"|Traceback'</code></li>
+<li>Optionally run the smoke test (see <a href="#mt-health">Health checks</a>).</li>
+</ol>
+
+<h4>Rollback</h4>
+<ol class="hp-steps">
+<li>List the releases, newest first: <code>ls -1t /opt/opengrid/releases</code></li>
+<li>Roll back to one of them by its timestamp name: <code>bash /opt/opengrid/deploy/scripts/rollback.sh &lt;release_timestamp&gt;</code></li>
+<li><code>rollback.sh</code> re-points <code>current</code>, restarts both targets and polls <code>/og/api/health</code> the same way <code>deploy.sh</code> does. It prints <code>rollback OK</code>. If the health check fails it prints <code>rollback health check FAILED - manual intervention needed</code> and exits 1.</li>
+<li>Verify as after a deploy.</li>
+</ol>
+<p class="hp-note">A rollback never runs migrations and never touches the database. Older code runs against the newer schema because migrations are additive. Data-only migrations such as <code>0022_demo_as_ecrs.sql</code> are not reverted, so reverse them by hand if needed. If a bad migration has to be undone, restore from a backup (see <a href="#mt-backups">Backups</a>).</p>
+<p>See also the playbook <a href="#pb-release">Release</a>.</p>
+</section>
+
+<!-- ============================================================ mt-migrations -->
+<section class="hp-sub" id="mt-migrations">
+<h3>Database migrations</h3>
+<dl class="hp-dl">
+<dt>Where</dt><dd><code>orchestrator/migrations/NNNN_description.sql</code>. At r3.4 they run from <code>0001_init.sql</code> to <code>0043_hub_device_reported.sql</code>, 42 files in all. There is no <code>0015</code>, and the gap does not matter to the runner. r3.4 adds <code>0041_trace_authz_deny.sql</code> (the trace CHECK accepts <code>AUTHZ_DENY</code>, added <code>NOT VALID</code>), <code>0042_drop_hot_indexes.sql</code> (drops two <code>og.hub_state</code> indexes that defeated HOT updates) and <code>0043_hub_device_reported.sql</code> (the <code>og.hub.device_*</code> reported-value columns). See <a href="#dm-migrations-r34">Migrations added in r3.4</a>.</dd>
+<dt>Numbering</dt><dd>A four-digit, zero-padded prefix, an underscore and a short snake_case description. The runner accepts any file matching <code>^(\d+)_.*\.sql$</code> and applies files in <b>sorted filename order</b>. A new migration takes the next free number.</dd>
+<dt>Runner</dt><dd><code>python -m opengrid.platform.db migrate</code> (<code>opengrid.platform.db.migrate_sync</code>). It creates <code>og.schema_migrations(filename, applied_at)</code> if the table is missing, skips every file already recorded there, and runs each pending file in its own transaction, recording its filename in the same transaction.</dd>
+<dt>Lock safety</dt><dd>The runner migrates while the previous release is still writing telemetry every few seconds. Each session sets <code>lock_timeout = '5s'</code> and <code>statement_timeout = '15min'</code>. A file that hits the lock timeout is rolled back and retried up to 3 more times, with backoff of 2, 4 and 8 s. After that it raises <code>MigrationLockTimeoutError</code>, nothing of that file is applied, and <code>deploy.sh</code> rolls back the code.</dd>
+<dt>Additive-only rule</dt><dd>Migrations are forward-only. Each one adds columns, tables, functions or constraints, and never renames or drops in the same migration. That way a rollback to older code tolerates a schema that is slightly ahead of it. Migrations are written to be idempotent (<code>IF NOT EXISTS</code>, <code>ON CONFLICT DO NOTHING</code>), and a widened CHECK is added <code>NOT VALID</code> so that it does not scan. Dropping an index that older code does not need is allowed (0042, <code>DROP INDEX IF EXISTS</code> under <code>lock_timeout</code>). There are no down-migrations.</dd>
+<dt>Credentials</dt><dd>The DSN is built from <code>[postgres]</code> in the config, with the password taken from the environment variable <code>OG_DB_PASSWORD</code> (loaded from <code>secrets.env</code>). The runner fails loudly if that variable is unset. <code>OG_DB_USER</code> and <code>OG_DB_PORT</code> can override the user and the port.</dd>
+</dl>
+<h4>Run migrations by hand</h4>
+<p>Normally <code>deploy.sh</code> runs them. To run them by hand against the live release, use the same pattern as <code>deploy.sh</code>. It sources the env files without printing them:</p>
+<ol class="hp-steps">
+<li><code>runuser -u opengrid -- bash -c 'set -a; . /etc/opengrid/secrets.env; . /etc/opengrid/api_keys.env; set +a; export OG_CONFIG=/opt/opengrid/current/orchestrator/config/orchestrator.toml PYTHONPATH=/opt/opengrid/current/orchestrator/src; exec /opt/opengrid/venv/bin/python -m opengrid.platform.db migrate'</code></li>
+<li>The output is <code>Applied N migration(s): ...</code> or <code>No pending migrations.</code></li>
+</ol>
+</section>
+
+<!-- ============================================================ mt-backups -->
+<section class="hp-sub" id="mt-backups">
+<h3>Backups and restore</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">What</th><th scope="col">Where</th><th scope="col">Cadence and retention</th><th scope="col">Mechanism</th></tr></thead>
+<tbody>
+<tr><td>Database <code>og</code> (<code>pg_dump --format=custom</code>)</td><td><code>/srv/ogbackup/og-YYYY-MM-DD.dump</code>, mode 640, on its own LV. <code>OG_BACKUP_DIR</code> overrides the directory.</td><td>Nightly at 03:00, 7 days kept (older <code>og-*.dump</code> files are deleted)</td><td>Cron <code>/etc/cron.d/opengrid</code>, user <code>opengrid</code>, runs <code>/opt/opengrid/deploy/scripts/backup.sh</code>. Output goes to <code>/var/log/opengrid/backup.log</code>.</td></tr>
+<tr><td>Cold tier of aged data (CSV plus manifest)</td><td><code>/srv/ogbackup/cold/</code></td><td>Written by the lifecycle job; never pruned</td><td>See <a href="#mt-lifecycle">Data lifecycle</a></td></tr>
+<tr><td>Hot standby (optional)</td><td>A separate data directory, port 5433</td><td>Streaming replication</td><td><code>deploy/ha/pg_standby_setup.sh</code> and <code>deploy/ha/FAILOVER.md</code>. Setup and failover are manual and done by the owner or lead.</td></tr>
+</tbody></table></div>
+<p class="hp-note">The databases <code>og_test</code> and <code>og_t_*</code> (per-workspace test databases) are never backed up, because they are disposable. The dump is written to <code>og-YYYY-MM-DD.dump.in-progress</code> first and renamed only when it is complete.</p>
+
+<h4>On-demand backup</h4>
+<ol class="hp-steps">
+<li><code>runuser -u opengrid -- bash -lc 'set -a; . /etc/opengrid/secrets.env; set +a; /opt/opengrid/deploy/scripts/backup.sh'</code></li>
+<li>Success prints <code>backup OK: /srv/ogbackup/og-YYYY-MM-DD.dump</code>. The password is never printed.</li>
+</ol>
+
+<h4>Restore test and restore (RUNBOOK)</h4>
+<p>The restore path is covered by <code>tests/integration/platform/test_es01_s05_restore_and_verify.py</code>. That test dumps the database, restores it into a second database and checks that the trace hash chain still verifies. Always restore into a scratch database first.</p>
+<ol class="hp-steps">
+<li>Create the scratch database: <code>runuser -u postgres -- createdb -O opengrid og_restore_check</code></li>
+<li>Restore into it:
+<br><code>runuser -u opengrid -- bash -lc 'set -a; . /etc/opengrid/secrets.env; set +a; export PGPASSWORD="$OG_DB_PASSWORD"; pg_restore -h localhost -U opengrid -d og_restore_check --no-owner /srv/ogbackup/og-YYYY-MM-DD.dump'</code></li>
+<li>Check <code>og_restore_check</code>: compare row counts and run the trace verify against it.</li>
+<li>To replace production (this needs downtime), stop the application: <code>systemctl stop ogsim.target opengrid.target</code></li>
+<li><code>runuser -u postgres -- psql -c "ALTER DATABASE og RENAME TO og_before_restore"</code></li>
+<li><code>runuser -u postgres -- psql -c "ALTER DATABASE og_restore_check RENAME TO og"</code></li>
+<li><code>systemctl start opengrid.target ogsim.target</code>, then verify as after a deploy.</li>
+<li>Keep <code>og_before_restore</code> until the restored system has been verified. Drop it only after that, and only with the lead's agreement.</li>
+</ol>
+<p class="hp-warn"><code>deploy/README.md</code> still describes a restore that runs <code>dropdb og</code> in place and reads from <code>/var/lib/opengrid/backups</code>. Use the RUNBOOK procedure above. The backup script writes to <code>/srv/ogbackup</code>.</p>
+</section>
+
+<!-- ============================================================ mt-lifecycle -->
+<section class="hp-sub" id="mt-lifecycle">
+<h3>Data lifecycle: retention, cold archive, rollups</h3>
+<p>Code: <code>orchestrator/src/opengrid/lifecycle/</code>. Schema: migration <code>0033_data_lifecycle.sql</code>. Design: <code>docs/orchestrator/07-delivery/15-data-lifecycle.md</code>. The database is plain PostgreSQL 17 with no TimescaleDB. The lifecycle uses native daily partitions, batched deletes and a single Python job.</p>
+
+<h4>Retention per table (og.data_retention, as seeded by 0033)</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mode</th><th scope="col">Kept in PostgreSQL</th><th scope="col">Cold copy</th><th scope="col">Notes</th></tr></thead>
+<tbody>
+<tr><td><code>telemetry</code></td><td>PARTITION (daily)</td><td>7 days</td><td>yes, pre-exported the day after (hot_days 1)</td><td>Raw per-hub telemetry</td></tr>
+<tr><td><code>telemetry_1m</code></td><td>PARTITION (daily)</td><td>60 days</td><td>yes (hot_days 1)</td><td>1-minute rollup; the M&amp;V source after raw data ages out</td></tr>
+<tr><td><code>telemetry_15m</code></td><td>DELETE</td><td>kept (no keep_days)</td><td>yes (hot_days 1)</td><td>15-minute rollup</td></tr>
+<tr><td><code>command_batch</code> (+ <code>verdict</code>)</td><td>DELETE</td><td>60 days</td><td>yes (two archives)</td><td>A batch referenced by a <code>calibration_attempt</code> is kept</td></tr>
+<tr><td><code>command_ack</code></td><td>DELETE</td><td>60 days</td><td>yes</td><td>Hub command acknowledgements</td></tr>
+<tr><td><code>grant</code></td><td>DELETE</td><td>60 days</td><td>yes</td><td>Per-cycle allocator grants</td></tr>
+<tr><td><code>pq_waveform_summary</code></td><td>DELETE</td><td>30 days</td><td>yes</td><td></td></tr>
+<tr><td><code>pq_waveform_raw_index</code></td><td>DELETE</td><td>14 days</td><td>no</td><td>The blob file is deleted with its row; a row with <code>retain_until</code> in the future is kept</td></tr>
+<tr><td><code>feed_obs</code></td><td>DELETE</td><td>30 days</td><td>yes</td><td>Market and SCADA observations</td></tr>
+<tr><td><code>plan_energy_value</code></td><td>DELETE</td><td>60 days</td><td>no</td><td>Derivable selector analytics</td></tr>
+<tr><td><code>lifecycle_run</code></td><td>DELETE</td><td>90 days</td><td>no</td><td>The job's own run log</td></tr>
+<tr><td><code>invoice_line</code>, <code>pnl</code></td><td>NONE (protected)</td><td>forever</td><td>monthly write-once export</td><td>A CHECK constraint makes a deletion policy impossible</td></tr>
+<tr><td><code>meter_interval</code>, <code>performance</code></td><td>NONE (protected)</td><td>forever</td><td>no</td><td>Settlement M&amp;V</td></tr>
+<tr><td><code>trace</code></td><td>NONE (protected)</td><td>per <code>og.retention_policy</code></td><td>no</td><td>Pruned only behind a checkpoint (K11) by <code>og-settle</code>'s <code>trace_prune</code> job, never by this job</td></tr>
+</tbody></table></div>
+<ul>
+<li>Only tables in the code whitelist <code>opengrid.lifecycle.policy.DELETABLE_TABLES</code> are ever deleted from, whatever their policy row says.</li>
+<li>A day is dropped once its end is at or before today 00:00 UTC minus <code>keep_days</code>. All days are UTC days.</li>
+<li><b>Unarchived data is never dropped.</b> A PARTITION drop detaches the partition, recounts the rows per day, re-exports a day whose count changed, re-verifies every export from disk and only then drops it. Any failure re-attaches the partition. A DELETE-mode day is exported and verified first, then deleted in batches of <code>[lifecycle].batch_rows</code> (at most 10,000).</li>
+</ul>
+
+<h4>Cold archive</h4>
+<ul>
+<li>Path: <code>/srv/ogbackup/cold/&lt;archive&gt;/&lt;yyyy&gt;/&lt;mm&gt;/&lt;dd&gt;.csv.gz</code> plus <code>&lt;dd&gt;.manifest.json</code>. The format is zstd (<code>.csv.zst</code>) when the <code>zstandard</code> package is installed. The server venv does not have it, so files are gzip.</li>
+<li>Files are written once. The job writes to <code>.partial</code>, fsyncs, renames and sets mode 0440. It records the SHA-256 and size in the manifest and in <code>og.lifecycle_archive</code>, and re-reads the file before any drop. A day that later gains rows gets a new revision file (<code>&lt;dd&gt;.r2.csv.gz</code>).</li>
+<li>Billing: <code>/srv/ogbackup/cold/billing/&lt;yyyy&gt;/&lt;mm&gt;/</code> holds <code>invoice_line.csv.gz</code>, <code>pnl.csv.gz</code> and <code>manifest.json</code>. Each month is written once, a day after it closes. The manifest carries a checksum digest; there is no cryptographic signature.</li>
+<li>An export refuses to start when the cold volume has less than <code>[lifecycle].cold_min_free_gb</code> free (default 5). No export means no drop. The cold tier has no pruning of its own.</li>
+</ul>
+
+<h4>Rollups</h4>
+<p><code>telemetry_1m</code> and <code>telemetry_15m</code> hold one row per hub per bucket (<code>p_kw_avg/min/max</code>, <code>soc_kwh_last</code>, <code>energy_in_kwh</code>, <code>energy_out_kwh</code>, <code>sample_count</code>). Each rollup keeps a watermark in <code>og.lifecycle_watermark</code>. Every run re-aggregates from the watermark minus <code>rollup_late_minutes</code> (default 15), and at most <code>rollup_max_hours_per_run</code> (default 6 h) per run. The 15-minute buckets are built from the 1-minute rows. Re-running any range is idempotent.</p>
+
+<h4>Running the job</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Command (as opengrid, with OG_CONFIG and the env files set)</th><th scope="col">Does</th></tr></thead>
+<tbody>
+<tr><td><code>python -m opengrid.lifecycle run --cycle auto</code></td><td>One cycle. <code>fast</code> ensures partitions, builds indexes and runs the rollups. <code>hourly</code> adds exports, retention and the monthly billing export. <code>auto</code> runs <code>hourly</code> when the last successful hourly run started 55 minutes or more ago. An advisory lock allows only one runner at a time. Exit 1 when a step failed.</td></tr>
+<tr><td><code>python -m opengrid.lifecycle status [--json]</code></td><td>Size, rows, partitions, oldest row and next drop for each table, disk headroom and the last runs. Exit 0 OK, 1 WARN, 2 CRIT. WARN is <code>/srv/pgdata</code> at 80 % or more; CRIT is 90 % or more, or the cold tier below <code>cold_min_free_gb</code>.</td></tr>
+<tr><td><code>python -m opengrid.lifecycle restore --archive telemetry --day 2026-09-20</code></td><td>Verifies the checksum and loads the day into <code>og_restore.telemetry_20260920</code>, then checks the row count against the manifest. For billing, <code>--day</code> is the first day of the month. Drop the scratch table afterwards.</td></tr>
+<tr><td><code>python -m opengrid.lifecycle export-billing --month YYYY-MM</code></td><td>The write-once monthly billing export, normally run by the hourly cycle.</td></tr>
+</tbody></table></div>
+<h4>The systemd units (r3.4)</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Unit</th><th scope="col">What it does</th></tr></thead>
+<tbody>
+<tr><td><code>og-lifecycle.service</code></td><td><code>Type=oneshot</code>, user <code>opengrid</code>, runs <code>python -m opengrid.lifecycle run --cycle auto</code> from <code>/opt/opengrid/current</code> with <code>secrets.env</code>. Background priority: <code>Nice=10</code>, <code>IOSchedulingClass=idle</code>, <code>IOWeight=10</code> (the <code>og-*</code> services carry <code>IOWeight=500</code>, so production commits win disk contention). <code>TimeoutStartSec=50min</code>, <code>MemoryMax=512M</code>, writes only <code>/var/lib/opengrid</code>, <code>/var/log/opengrid</code> and <code>/srv/ogbackup/cold</code>.</td></tr>
+<tr><td><code>og-lifecycle.timer</code></td><td><code>OnBootSec=5min</code>, <code>OnUnitActiveSec=10min</code>, <code>RandomizedDelaySec=60</code>. <b>Installed by <code>deploy.sh</code> (and <code>bootstrap_from_scratch.sh</code> phase j) but never enabled by them.</b></td></tr>
+</tbody></table></div>
+<ol class="hp-steps">
+<li>Check the I/O headroom of the database disk under normal load: <code>iostat -dx 5</code>. Utilisation of the <code>/srv/pgdata</code> device should stay well below 80 %.</li>
+<li>Enable the timer: <code>systemctl enable --now og-lifecycle.timer</code>.</li>
+<li>Confirm: <code>systemctl list-timers og-lifecycle.timer</code>, then <code>journalctl -u og-lifecycle.service --since -30min -o cat</code> and <code>python -m opengrid.lifecycle status</code>.</li>
+<li>To pause it: <code>systemctl disable --now og-lifecycle.timer</code>. A run in progress finishes; the advisory lock prevents overlapping runs.</li>
+</ol>
+<p class="hp-note">Until the timer is enabled, the lifecycle runs only when someone starts it with the commands above or with <code>systemctl start og-lifecycle.service</code>.</p>
+
+<h4>Changing retention</h4>
+<ul>
+<li>Table retention: <code>UPDATE og.data_retention SET keep_days = ... WHERE table_name = '...'</code> (or <code>hot_days</code>, <code>archive</code>). It takes effect on the next hourly run. Lowering <code>keep_days</code> drops more data after it has been exported.</li>
+<li>Legal hold: <code>UPDATE og.data_retention SET legal_hold = true WHERE table_name = '...'</code> stops every deletion for that table. Exports still run.</li>
+<li>Trace retention per event class lives in <code>og.retention_policy</code>. Read it with <code>GET /og/api/retention</code> (viewer) and change it with <code>PUT /og/api/retention</code> (operator, body <code>event_class</code>, <code>retention_days</code>). Each change is traced as <code>OPERATOR_ACTION</code> / <code>CONFIG_CHANGE</code>.</li>
+<li>At the 2 s simulator cadence, 7 days of raw telemetry does not fit the 147 GB <code>/srv/pgdata</code>. The design document recommends <code>keep_days = 3</code> for <code>telemetry</code> and 14 for <code>grant</code>, <code>command_batch</code> and <code>command_ack</code> until the cadence is 10 s. The r3.4 config sets hub telemetry to 10 s (<code>[fleet].telemetry_interval_s</code>; <code>[health]</code> comment, V-32).</li>
+</ul>
+</section>
+
+<!-- ============================================================ mt-firmware -->
+<section class="hp-sub" id="mt-firmware">
+<h3>Firmware campaigns</h3>
+<p>Code: <code>orchestrator/src/opengrid/firmware/</code>. Guardian check G-36. API: <code>/og/api/firmware/*</code>. Schema: migration <code>0037_firmware_campaign.sql</code>. Operator note: <code>docs/orchestrator/07-delivery/16-firmware-updates.md</code>.</p>
+<p class="hp-note">At r3.4 firmware campaigns are <b>API only</b>. The <b>Firmware update</b> card on the Fleet page is still a disabled placeholder ("available after R3.1"), even though the API is mounted. The catalogue in <code>orchestrator.toml</code> is a demo catalogue (<code>1.20.0</code> for <code>RevA</code> to <code>RevD</code>) with placeholder hashes for the simulated fleet.</p>
+
+<h4>Rules</h4>
+<ul>
+<li>Only catalogued images can be targeted. A catalogue entry is a version and hardware revision with its sha256 (<code>[[firmware.catalogue]]</code>, <code>GET /og/api/firmware/catalogue</code>). Hubs without a matching entry, or already on the version, are listed as SKIPPED.</li>
+<li>A downgrade needs <code>allow_downgrade</code> and always needs a second operator.</li>
+<li>The console never sends anything to a battery. The engine asks, and the guardian re-checks each hub (G-36) and signs one command per attempt with a fresh <code>(epoch, seq)</code> and a 120 s lease.</li>
+</ul>
+
+<h4>Staged rollout</h4>
+<ol class="hp-steps">
+<li><b>Propose</b>: <code>POST /og/api/firmware/campaigns</code> with <code>name</code>, <code>target_version</code>, <code>selection</code> (<code>hub_ids</code>, <code>bank_ids</code>, <code>zones</code>, <code>feeder_ids</code>, <code>hardware_revisions</code>, <code>firmware_versions</code>) and <code>reason</code>. Optional fields: <code>waves</code> (default <code>canary</code> 1 hub, then <code>size_pct</code> 25), <code>bank_max_concurrent_pct</code> and <code>feeder_max_concurrent_pct</code> (default 10 each, minimum 1 hub), <code>max_failures</code> (default 2) and <code>max_failure_pct</code> (default 5), <code>window_start</code> and <code>window_end</code>, <code>allow_downgrade</code>, <code>override_committed</code>. The hub list is fixed at this moment.</li>
+<li><b>Confirm</b> within 60 s: <code>POST /og/api/firmware/campaigns/{campaign_id}/confirm</code>. An expired proposal is aborted, so propose again.</li>
+<li><b>Second operator</b>, when the proposal shows <code>requires_second_operator</code>: more than 50 hubs, <code>override_committed</code> on a hub serving a COMMITTED or DELIVERING obligation, or a downgrade. A different operator calls <code>POST .../{campaign_id}/approve</code>. The proposer and the confirmer cannot approve.</li>
+<li>The engine starts the campaign on its next cycle. A wave starts only when every hub of the previous wave has finished. A canary wave with no success halts the campaign.</li>
+</ol>
+<p>G-36 refuses to sign unless all of these hold: the campaign is RUNNING; the hub is online, not inside a safe stop and not already updating; the hub serves no committed obligation in the next 15 minutes (unless overridden by two operators); SoC is at least reserve + 10 % of capacity; the image and its sha256 are catalogued for the hub's hardware; and the bank and feeder caps hold. A refusal is a hold, not a failure, and the hub is re-checked 60 s later. Catalogue refusals are terminal.</p>
+
+<h4>Watching</h4>
+<ul>
+<li><code>GET /og/api/firmware/campaigns</code> and <code>GET .../{campaign_id}</code> show campaign state (<code>PROPOSED</code>, <code>APPROVED</code>, <code>RUNNING</code>, <code>PAUSED</code>, <code>HALTED</code>, <code>COMPLETED</code>, <code>ABORTED</code>) and per-hub state (<code>PENDING</code>, <code>SENT</code>, <code>UPDATING</code>, <code>SUCCEEDED</code>, <code>FAILED</code>, <code>ROLLED_BACK</code>, <code>SKIPPED</code>).</li>
+<li><code>GET .../{campaign_id}/events?after=&lt;event_id&gt;</code> is the feed of every transition, including the hub's own progress (<code>HUB_DOWNLOADING</code> to <code>HUB_DONE</code> or <code>HUB_FAILED</code>).</li>
+<li>Alerts: <code>ALR-FIRMWARE-CAMPAIGN-STARTED</code> and <code>ALR-FIRMWARE-CAMPAIGN-COMPLETED</code> (info), <code>ALR-FIRMWARE-HUB-FAILED</code> (warning) and <code>ALR-FIRMWARE-CAMPAIGN-HALTED</code> (critical). See <a href="#ev-alerts">alert rules</a>.</li>
+</ul>
+
+<h4>Halt, retry, rollback</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Situation or action</th><th scope="col">How</th><th scope="col">Behaviour</th></tr></thead>
+<tbody>
+<tr><td>Transient failure</td><td>automatic</td><td>No ack before the lease expired, the hub quiet for 10 minutes while updating, or a download or verify error. Retried up to 3 attempts with backoff 60 s, 120 s, 240 s and so on, capped at 15 minutes. Each retry is re-checked and re-signed.</td></tr>
+<tr><td>Terminal failure</td><td>automatic</td><td>A sha256 mismatch, a hardware incompatibility, a bad signature, or an install or boot failure (the battery reverts by itself). Not retried, and alerted. Only terminal failures count toward the halt threshold.</td></tr>
+<tr><td>Halt</td><td>automatic</td><td>At <code>max_failures</code> terminal failures or <code>max_failure_pct</code> of the campaign, whichever comes first. The campaign becomes HALTED and never resumes directly.</td></tr>
+<tr><td>Pause / resume</td><td><code>POST .../{campaign_id}/pause</code>, <code>.../resume</code></td><td>Hubs already updating finish, and nothing new starts.</td></tr>
+<tr><td>Abort</td><td><code>POST .../{campaign_id}/abort</code></td><td>Pending hubs become SKIPPED. A hub that is mid-install cannot be recalled.</td></tr>
+<tr><td>Retry failed hubs</td><td><code>POST .../{campaign_id}/retry-failed</code>, then <code>.../retry-failed/{proposal_id}/confirm</code></td><td>Gives the hubs a fresh attempt budget. A HALTED campaign becomes PAUSED, and you then resume it deliberately.</td></tr>
+<tr><td>Roll back one hub</td><td><code>POST .../{campaign_id}/hubs/{hub_id}/rollback</code>, then <code>.../rollback/{proposal_id}/confirm</code></td><td>Installs the version the hub ran before the campaign. Allowed while the campaign is paused, halted or completed.</td></tr>
+</tbody></table></div>
+<p>Before retrying a halted campaign, read the failures and compare the failed hubs' cohort with the control cohort (RB-005). Roll back the affected hubs if the image is suspect. See the playbook <a href="#pb-firmware">Firmware</a>.</p>
+</section>
+
+<!-- ============================================================ mt-calibration -->
+<section class="hp-sub" id="mt-calibration">
+<h3>Calibration and asset health</h3>
+<p>Code: <code>orchestrator/src/opengrid/assets/</code>. Schema: migrations <code>0011_asset_health.sql</code> and <code>0016_calibration_command.sql</code>. Each hub inverter has an asset state in <code>og.hub_inverter_pq.asset_state</code>:</p>
+<p><code>OK</code> &rarr; <code>WATCH</code> &rarr; <code>DEGRADED</code> / <code>DERATED</code> &rarr; <code>QUARANTINED</code> &rarr; <code>AWAITING_REPLACEMENT</code> &rarr; <code>RECOMMISSIONING</code> &rarr; <code>OK</code></p>
+
+<h4>The calibration loop</h4>
+<ol class="hp-steps">
+<li><b>Request.</b> The request comes either from the automatic drift sweep (a <code>WATCH</code> hub) or from an operator on the PQ screen: <b>Request calibration (step 1 of 2)</b>, then confirm. The API equivalent is <code>POST /og/api/hubs/{hub_id}/calibrate</code>, then <code>.../calibrate/{proposal_id}/confirm</code>. The confirm writes a <code>PENDING</code> row in <code>og.calibration_attempt</code>, with a correction equal to the negative of the latest measured offset, clipped to firmware bounds. It returns 409 when the ladder refuses: a live PQ-sensitive delivery on the hub, the per-hub 24 h rate limit, or no fresh drift measurement.</li>
+<li><b>Sign.</b> <code>og-guardian</code> polls pending attempts, runs G-25 and, on PASS, signs and publishes the command to <code>&lt;root&gt;/cmd/cal/&lt;hub_id&gt;</code> (QoS 1). On refusal the row stays pending. The API never signs.</li>
+<li><b>Ack.</b> The hub answers on <code>ack/cal/&lt;hub_id&gt;</code>. <code>og-engine</code> routes that ack to <code>opengrid.assets.calibration_ack.handle_calibration_ack</code>, which classifies the outcome as <code>CORRECTED</code>, <code>IMPROVED</code>, <code>NO_CHANGE</code> or <code>WORSE_ROLLED_BACK</code> and advances the asset state.</li>
+<li><b>Escalate.</b> <code>NO_CHANGE</code>, <code>WORSE_ROLLED_BACK</code>, or a <code>REJECTED</code> or <code>EXPIRED</code> ack opens a maintenance work order in <code>og.maintenance_work_order</code>. A physical inverter swap is recorded, never decided, here. Substitution of delivery is the allocator's job.</li>
+</ol>
+
+<h4>Where to look</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Need</th><th scope="col">UI</th><th scope="col">API (viewer)</th></tr></thead>
+<tbody>
+<tr><td>Open work orders</td><td>PQ screen, <b>Maintenance work orders</b> panel</td><td><code>GET /og/api/work-orders?status=OPEN|IN_PROGRESS|CLOSED|CANCELLED</code></td></tr>
+<tr><td>A hub's asset state, history and open work order</td><td>PQ screen hub detail; hub drill-down (<b>Last calibration</b>)</td><td><code>GET /og/api/hubs/{hub_id}/asset-health</code></td></tr>
+<tr><td>Calibration attempts and the guardian's G-25 decision</td><td>PQ screen, <b>Calibration history</b></td><td><code>GET /og/api/hubs/{hub_id}/calibration-history</code></td></tr>
+</tbody></table></div>
+<p class="hp-warn">The automatic drift sweep is <b>off</b> at r3.4: <code>[assets].drift_enabled = false</code>. It runs inside <code>og-settle</code> every <code>drift_interval_s</code> (60 s) only when enabled. Turning it on fleet-wide on 2026-09-26 put 188 hubs in DEGRADED and 4 in QUARANTINED and opened 192 work orders within 10 minutes, so the thresholds need tuning first. Operator-requested calibrations and the ack handling still work. The "Wiring" section of <code>assets/README.md</code> is out of date: settle, guardian and engine are all wired at r3.4.</p>
+<p>See the playbook <a href="#pb-pq-drift">PQ drift</a>.</p>
+</section>
+
+<!-- ============================================================ mt-charge -->
+<section class="hp-sub" id="mt-charge">
+<h3>Charge schedules (D-30)</h3>
+<p>Owner grid-charging windows limit when hubs may charge <b>from the grid</b>. Solar charging is always allowed. The windows are stored in <code>og.owner_charge_window</code> (migration <code>0038_owner_charge_window.sql</code>) and resolved by <code>opengrid.core.charge_windows</code>. The selector and the API share that one resolver, so they always agree.</p>
+<dl class="hp-dl">
+<dt>Format</dt><dd><code>"HH:MM-HH:MM"</code> in America/Chicago local time, 24 h, end exclusive. A window may wrap midnight (<code>22:00-06:00</code>). A scope takes at most 4 windows, with no duplicates and no zero-length windows. Overlaps are allowed, and their union applies. An <b>empty list</b> is a valid override that means no grid charging at that scope.</dd>
+<dt>Scopes</dt><dd>From least to most specific: <code>FLEET</code> &lt; <code>PROVIDER</code> &lt; <code>ZONE</code> &lt; <code>SUBSTATION</code> &lt; <code>FEEDER</code> &lt; <code>BANK</code> &lt; <code>HUB</code>. The most specific scope that has a row wins. <code>FLEET</code> uses <code>scope_ref</code> <code>*</code> and cannot be removed, only edited. <code>PROVIDER</code> is the zone's regulated utility (for example <code>AUSTIN_ENERGY</code>) or, in a competitive zone, its TDSP (for example <code>ONCOR</code>), resolved from <code>tdsp_tariffs.toml</code>.</dd>
+<dt>Default</dt><dd>Migration 0038 seeds <code>FLEET * = ["22:00-06:00"]</code>. <code>[selector.owner_charge_windows]</code> in <code>orchestrator.toml</code> (for example <code>AUSTIN_ENERGY</code>) is a fallback. Database rows win over it, and it wins over the built-in default.</dd>
+</dl>
+
+<h4>Change windows in the UI (Fleet page, Charging schedule)</h4>
+<ol class="hp-steps">
+<li>Open <a href="/og/fleet">/og/fleet</a> and go to the <b>Charging schedule</b> panel. Viewers see the current windows grouped by scope. Operators also see <b>Set windows for a scope</b>.</li>
+<li>Pick the <b>Scope</b>, enter the <b>Scope id</b> (the Fleet default applies to every hub without an override), set up to 4 windows (<b>Add window</b>), and give a <b>Reason</b>.</li>
+<li>Click <b>Review change (step 1 of 2)</b>, read the old and new windows, then confirm to save.</li>
+<li>To drop an override, click <b>Remove</b> on its row, then confirm. The next less specific scope then applies.</li>
+<li>Check the result with <b>Preview effective schedule for hub</b>, which shows the effective windows and the scope they come from.</li>
+</ol>
+
+<h4>API</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Method and path</th><th scope="col">Role</th><th scope="col">Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>GET /og/api/fleet/charge-windows</code></td><td>viewer</td><td>Every scope's windows, with <code>tz</code></td></tr>
+<tr><td><code>GET /og/api/fleet/charge-windows/effective?hub_id=</code> or <code>?bank_id=</code></td><td>viewer</td><td>The windows that apply and their source scope. Give exactly one of the two parameters.</td></tr>
+<tr><td><code>PUT /og/api/fleet/charge-windows/{scope_kind}/{scope_ref}</code></td><td>operator</td><td>Step 1: propose. Body <code>windows</code>, <code>reason</code>. Answers 202 with a <code>proposal_id</code>.</td></tr>
+<tr><td><code>DELETE /og/api/fleet/charge-windows/{scope_kind}/{scope_ref}</code></td><td>operator</td><td>Step 1: propose removing an override. Body <code>reason</code>. FLEET gives 409.</td></tr>
+<tr><td><code>POST /og/api/fleet/charge-windows/proposals/{proposal_id}/confirm</code></td><td>operator</td><td>Step 2: apply. 409 if the scope changed since the proposal; 410 if the proposal expired.</td></tr>
+</tbody></table></div>
+<p>Every applied change is traced before it is written, as <code>OPERATOR_ACTION</code> / <code>CHARGE_WINDOW_CHANGE</code> with the old and new windows, and it gets an <code>og.operator_action</code> row. See the playbook <a href="#pb-charge-schedule">Charge schedule</a>.</p>
+</section>
+
+<!-- ============================================================ mt-bootstrap -->
+<section class="hp-sub" id="mt-bootstrap">
+<h3>Bootstrap from scratch</h3>
+<p>At r3.4 a new base server, or a rebuild after a total loss, is done by one idempotent script, <code>deploy/scripts/bootstrap_from_scratch.sh</code>. It automates steps 3 to 10 of <code>deploy/BOOTSTRAP.md</code>, which is the full procedure; <code>dev/seed/README.md</code> describes each seed. Run it as root from the release checkout. It re-executes itself at idle I/O priority and <code>nice 19</code>.</p>
+<ol class="hp-steps">
+<li><b>By hand first (BOOTSTRAP.md 1-2).</b> Storage: <code>/srv/pgdata</code> (production cluster <code>17/main</code>), <code>/srv/pgstandby</code> (the disposable test cluster <code>17/ogtest</code> on port 5433) and <code>/srv/ogbackup</code>, ext4 with <code>noatime</code>. Packages: <code>postgresql-17 mosquitto apache2 python3.13-venv sysstat</code>, and the two venvs <code>/opt/opengrid/venv</code> and <code>/opt/ogsim/venv</code>.</li>
+<li><b>Owner-supplied files.</b> <code>/etc/opengrid/api_keys.env</code> (ERCOT and EIA credentials; without it the units that load it do not start, so create it, even empty, and point og-feeds at the market simulator) and, optionally, <code>/etc/opengrid/ai_agent.env</code> (the AI copilot runs its no-model tier without it). Every other secret is generated on the host and never printed.</li>
+<li><b>Get the release:</b> <code>git archive &lt;tag&gt; | tar -x -C /root/release-&lt;tag&gt;</code>, then from that directory:
+<br><code>bash deploy/scripts/bootstrap_from_scratch.sh --dry-run</code> (shows what each phase would do, changes nothing)
+<br><code>bash deploy/scripts/bootstrap_from_scratch.sh</code> (phases a-l)</li>
+<li><b>Enable the data lifecycle</b> only after the I/O check (see <a href="#mt-lifecycle">Data lifecycle</a>); the script leaves <code>og-lifecycle.timer</code> disabled.</li>
+<li><b>Real operator accounts (manual, before real operation).</b> Replace the test accounts <code>og-op-a</code> and <code>og-op-b</code>, keeping three places in sync: <code>/etc/opengrid/htpasswd</code> (<code>htpasswd -B /etc/opengrid/htpasswd &lt;person&gt;</code>), <code>orchestrator.toml</code> (<code>[guardian].stop_release_authorised_operators</code> and <code>[api.roles].operator</code>), and the <code>Require user</code> line in <code>deploy/apache/opengrid.conf</code>. Then deploy and reload Apache after configtest.</li>
+</ol>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Phase</th><th scope="col">Does</th></tr></thead>
+<tbody>
+<tr><td>a</td><td>Checks packages, venvs, the release tree and the owner-supplied files (read-only).</td></tr>
+<tr><td>b</td><td>The <code>opengrid</code> user and the directories (<code>/etc/opengrid</code>, <code>/var/lib/opengrid</code>, <code>/srv/ogbackup/{anchors,cold}</code>).</td></tr>
+<tr><td>c</td><td>The Postgres role and database; generates <code>OG_DB_PASSWORD</code> into <code>secrets.env</code> and sets it over stdin.</td></tr>
+<tr><td>d</td><td>Every migration (<code>python -m opengrid.platform.db migrate</code>).</td></tr>
+<tr><td>e</td><td>All seeds in order: fleet (base plus the enabled zone blocks), market model (utilities, the $102/kW-yr toll, the substation asset), customer services, services, topology, and trucks only when <code>dev/seed/mobile_trucks_seed.sql</code> is in the release (it is not at r3.4). Then <code>deploy/scripts/bootstrap_check.py</code> asserts the seeded counts.</td></tr>
+<tr><td>f</td><td><code>/etc/opengrid/sim/{fleet,scada}.yaml</code> with the approved zone blocks on (<code>deploy/scripts/gen_sim_overrides.py</code>).</td></tr>
+<tr><td>g</td><td>The MQTT users (passwords generated into <code>secrets.env</code>/<code>customer_sim.env</code>), the ACL and <code>conf.d/opengrid.conf</code>. An existing ACL is not rewritten.</td></tr>
+<tr><td>h</td><td>The guardian, safestop and trace-anchor Ed25519 seeds.</td></tr>
+<tr><td>i</td><td>The proxy secret (<code>api_proxy.env</code> and the Apache <code>Define</code>), then <code>install.sh</code> (Apache conf, htpasswd accounts, cron, logrotate, units), then the eight <code>og-cust-*</code> accounts.</td></tr>
+<tr><td>j</td><td>Unit files and timers from the release, the sim drop-ins <code>og-sim-{fleet,scada}.service.d/austin.conf</code>, <code>opengrid.target</code>/<code>ogsim.target</code> enabled; <code>og-lifecycle.timer</code> stays disabled.</td></tr>
+<tr><td>k</td><td>Optional ERCOT price backfill (<code>orchestrator/tools/ercot_backfill.py</code>, default 14 days, at most 6 requests per minute), only when <code>api_keys.env</code> holds the ERCOT keys.</td></tr>
+<tr><td>l</td><td>The first release through <code>deploy.sh</code> (or a start when <code>/opt/opengrid/current</code> exists), then the post-start checks (<code>bootstrap_check.py --live</code>).</td></tr>
+</tbody></table></div>
+<dl class="hp-dl">
+<dt>Options</dt><dd><code>--phase LIST</code> (letters and ranges, for example <code>c-e</code> or <code>g,h</code>; phase <code>x</code> runs only <code>bootstrap_check.py</code>), <code>--dry-run</code>, <code>--release DIR</code>, <code>--etc DIR</code>, <code>--db-port</code>/<code>--db-name</code>/<code>--db-role</code>, <code>--fresh-db</code> (refused on port 5432), <code>--zones LIST</code> (default <code>LZ_AEN</code>, the production set), <code>--d32</code> (adds <code>LZ_LCRA</code> and <code>LZ_RAYBN</code>), <code>--demo-customers</code>, <code>--backfill-days N</code>, <code>--public-url URL</code>.</dd>
+<dt>Idempotent</dt><dd>Every phase converges. An existing secret, key, account, MQTT user or ACL is kept, never rotated and never printed. Generated passwords go only to the env files and <code>/root/opengrid-ui-credentials.txt</code> (600).</dd>
+<dt>Expected result</dt><dd>With <code>LZ_AEN</code>: every migration applied; 2,500 home hubs (500 in each of <code>LZ_NORTH</code>, <code>LZ_SOUTH</code>, <code>LZ_HOUSTON</code>, <code>LZ_WEST</code>, <code>LZ_AEN</code>) plus the substation hub; 50 home banks plus <code>bank-sub-LZ_AEN-00</code>; utilities <code>AUSTIN_ENERGY</code> and <code>CPS_ENERGY</code>; the FLEET charge window 22:00-06:00. With <code>--d32</code>: 3,500 hubs and 70 banks. After start: all 10 <code>og-*</code> units active, <code>/og/api/health</code> 200, <code>/og/</code> 401 without credentials, every hub fresh within <code>hub_stale_s</code> (25 s), invariants 0, and only forecast degraded modes until about two weeks of price history exist (phase k backfills it).</dd>
+<dt>Test first</dt><dd><code>make bootstrap-check</code> runs phases c-e into a fresh <code>og_t_boot</code> database on the test cluster (port 5433), never on 5432.</dd>
+</dl>
+<p class="hp-note">Optional extras the script does not do: test-workspace MQTT users (<code>deploy/mosquitto/provision_ws_users.sh --dry-run</code>, then <code>--apply</code>), the hot standby (<code>deploy/ha/pg_standby_setup.sh</code>, owner or lead only) and the watchdog drop-ins in <code>deploy/ha/systemd-dropins/</code> (install one only for a process that already calls <code>notify_watchdog()</code>).</p>
+<p>See the playbook <a href="#pb-rebuild">Rebuild</a>.</p>
+</section>
+<!-- ============================================================ mt-logs -->
+<section class="hp-sub" id="mt-logs">
+<h3>Log locations</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Source</th><th scope="col">Where</th><th scope="col">Read it with</th></tr></thead>
+<tbody>
+<tr><td>Orchestrator processes (<code>og-engine</code>, <code>og-guardian</code>, <code>og-safestop</code>, <code>og-api</code>, <code>og-feeds</code>, <code>og-settle</code>)</td><td>journald. One JSON object per line on stdout (<code>opengrid.platform.log</code>).</td><td><code>journalctl -u og-engine -f</code>; <code>journalctl -u og-engine -u og-guardian -u og-settle -u og-api --since -10min -o cat | grep -E '"ERROR"|Traceback'</code></td></tr>
+<tr><td>Simulators (<code>og-sim-fleet</code>, <code>og-sim-scada</code>, <code>og-sim-market</code>, <code>og-sim-control</code>, <code>og-sim-customer</code>)</td><td>journald</td><td><code>journalctl -u og-sim-fleet --since -30min</code></td></tr>
+<tr><td>Deploy and rollback</td><td><code>/var/log/opengrid/deploy.log</code></td><td><code>tail -n 50 /var/log/opengrid/deploy.log</code></td></tr>
+<tr><td>Nightly backup</td><td><code>/var/log/opengrid/backup.log</code></td><td><code>tail -n 20 /var/log/opengrid/backup.log</code></td></tr>
+<tr><td>PostgreSQL</td><td><code>/var/log/postgresql/postgresql-17-main.log</code></td><td><code>grep 'checkpoint complete' /var/log/postgresql/postgresql-17-main.log | tail -1</code></td></tr>
+<tr><td>Mosquitto</td><td>journald (unit <code>mosquitto</code>)</td><td><code>journalctl -u mosquitto --since -30min</code></td></tr>
+<tr><td>Apache (<code>/og/</code>, <code>/ogsim/</code>)</td><td>The <code>base-ssl</code> vhost's access and error logs under <code>/var/log/apache2/</code>. The file names come from that vhost, not from this repo.</td><td><code>tail -f /var/log/apache2/*error*.log</code>; 401 and 403 results appear in the access log</td></tr>
+<tr><td>Lifecycle job</td><td>journald (unit <code>og-lifecycle</code>) when run by the timer, otherwise stdout of the CLI; <code>og.lifecycle_run</code>; trace stream <code>lifecycle</code></td><td><code>journalctl -u og-lifecycle --since -1h -o cat</code>; <code>python -m opengrid.lifecycle status</code></td></tr>
+</tbody></table></div>
+<ul>
+<li><code>/etc/logrotate.d/opengrid</code> rotates <code>/var/log/opengrid/*.log</code> daily, keeps 14 and compresses them.</li>
+<li>Log lines never contain secret values. Do not paste <code>journalctl -u &lt;unit&gt; -o verbose</code> output or <code>systemctl show</code> environment output anywhere, because the latter can list environment values.</li>
+<li><code>deploy/README.md</code> says application logs go to <code>/var/log/opengrid/*.log</code>. At r3.4 the processes log only to journald. The <code>/var/log/opengrid</code> files are those written by the deploy and backup scripts.</li>
+</ul>
+</section>
+
+<!-- ============================================================ mt-health -->
+<section class="hp-sub" id="mt-health">
+<h3>Health checks</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Check</th><th scope="col">Where</th><th scope="col">Healthy looks like</th></tr></thead>
+<tbody>
+<tr><td><code>GET /og/api/health</code></td><td>Loopback port 8080 without auth (the probe dependency <code>require_loopback_health_probe</code>), or through Apache as operator or viewer</td><td>HTTP 200 with <code>"status": "ok"</code>; every process in <code>processes</code> with a recent <code>ts</code>; <code>degraded_modes</code> empty; <code>reserve_breaches</code>, <code>double_sold_kwh</code>, <code>lock_violations</code>, <code>orphan_reservations</code> and <code>orphan_commitments</code> at 0; <code>feeds</code> fresh</td></tr>
+<tr><td><code>GET /og/api/stream/health</code>, <code>/og/api/stream/alerts</code></td><td>SSE (viewer), used by the Health and Control room screens</td><td>A steady event stream with heartbeats every 15 s (<code>[api].sse_heartbeat_s</code>)</td></tr>
+<tr><td><code>GET /og/api/alerts</code></td><td>viewer</td><td>No open critical alerts</td></tr>
+<tr><td>Engine metrics</td><td><code>http://localhost:9101/metrics</code> (loopback only)</td><td><code>og_engine_cycle_latency_ms</code> p99 under 500 ms at 2,000 hubs</td></tr>
+<tr><td>Unit status</td><td><code>systemctl status opengrid.target ogsim.target</code> or the per-unit loop in <a href="#mt-release">Releases</a></td><td>All units <code>active</code>; <code>og-sim-customer</code> inactive until go-live</td></tr>
+<tr><td>Process heartbeats</td><td>Health screen <a href="/og/health">/og/health</a></td><td>A heartbeat every 5 s (<code>[health].heartbeat_interval_s</code>). A process is missed after 3 intervals (<code>heartbeat_miss_threshold</code>).</td></tr>
+<tr><td>Hub freshness</td><td>Health and Fleet screens</td><td>Hubs are stale after 25 s and offline after 60 s without telemetry (<code>[health].hub_stale_s</code>, <code>hub_offline_s</code>). At r3.4 the fleet twin, the health rules and the console badges all use these two values, so a hub reporting every 10 s no longer blinks stale between reports.</td></tr>
+<tr><td>Data lifecycle and disk</td><td><code>python -m opengrid.lifecycle status</code></td><td>Exit 0 (OK); <code>/srv/pgdata</code> under 80 %</td></tr>
+</tbody></table></div>
+
+<h4>Scheduled jobs</h4>
+<p>The repo ships one systemd timer, <code>og-lifecycle.timer</code> (every 10 minutes), installed but <b>not enabled</b> by <code>deploy.sh</code> (see <a href="#mt-lifecycle">Data lifecycle</a>). The cron entry <code>/etc/cron.d/opengrid</code> runs the backup at 03:00. Other periodic work runs inside the services: <code>og-settle</code> runs the heartbeat, <code>health.evaluate_once</code> (alert rules), settlement, <code>trace_prune</code> and, when enabled, <code>asset_drift</code>.</p>
+
+<h4>Smoke test (tests-e2e/smoke.py)</h4>
+<ol class="hp-steps">
+<li>On the server, as root (the test reads <code>/root/opengrid-ui-credentials.txt</code> but never prints it): <code>python3 tests-e2e/smoke.py</code></li>
+<li>It prints one <code>[PASS]</code> or <code>[FAIL]</code> line for each acceptance item: A1 live feeds (<code>feed_obs</code>), A2 fleet twin of 2,000 hubs, A4 allocator grants persisted, A6 guardian PASS verdicts and signed batches, A8 settle writes <code>pnl</code> and <code>invoice_line</code>, A9 trace chain verify, A10 UI 200 with operator credentials, and A11 anomaly injection raises an alert.</li>
+<li>Exit 0 only if every check passes.</li>
+</ol>
+<p class="hp-warn">A11 injects an anomaly through the simulator control plane (loopback port 8091), which raises a real alert on the production console. Acknowledge that alert after the run, and do not run the smoke test while a FIRM or AS obligation is delivering.</p>
+</section>
+
+<!-- ============================================================ mt-config -->
+<section class="hp-sub" id="mt-config">
+<h3>Configuration files</h3>
+<p class="hp-note">This page names configuration files and sections only. It never shows values from <code>/etc/opengrid</code>. The main TOML configuration is <b>not</b> under <code>/etc/opengrid</code>. It ships inside each release, and every unit points at it with <code>OG_CONFIG=/opt/opengrid/current/orchestrator/config/orchestrator.toml</code>, so a config change is a code change that is deployed like any release.</p>
+
+<h4>Files under /etc/opengrid (server only, not in git)</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">File</th><th scope="col">Read by</th><th scope="col">Holds (names only)</th></tr></thead>
+<tbody>
+<tr><td><code>secrets.env</code></td><td>Every <code>og-*</code> unit and the sims (<code>EnvironmentFile</code>); the deploy, backup and smoke scripts</td><td>Process secrets resolved by env-variable name (<code>orchestrator.toml</code> holds no secrets), including the database password <code>OG_DB_PASSWORD</code>. Mode 640 <code>root:opengrid</code>.</td></tr>
+<tr><td><code>api_keys.env</code></td><td>The six orchestrator units; <code>deploy.sh</code></td><td>Credentials for the external data feeds (ERCOT, EIA), resolved by env-variable name. Mode 640 <code>root:opengrid</code>.</td></tr>
+<tr><td><code>api_proxy.env</code></td><td><code>og-api</code> only</td><td>The Apache proxy shared secret that og-api checks on <code>X-OG-Proxy-Auth</code></td></tr>
+<tr><td><code>customer_sim.env</code></td><td><code>og-sim-customer</code> only</td><td><code>OGSIM_CUSTOMER_API_BASE</code> and the per-group customer credentials</td></tr>
+<tr><td><code>htpasswd</code></td><td>Apache (<code>root:www-data</code> 640)</td><td>Basic-auth accounts: <code>operator</code>, <code>viewer</code>, <code>tester</code>, <code>og-op-a</code>, <code>og-op-b</code>, <code>og-cust-*</code></td></tr>
+<tr><td><code>ai_agent.env</code> (optional)</td><td><code>og-api</code> (<code>EnvironmentFile=-</code>)</td><td>The owner's key for the AI copilot's model tier</td></tr>
+<tr><td><code>sim/fleet.yaml</code>, <code>sim/scada.yaml</code></td><td><code>og-sim-fleet</code> and <code>og-sim-scada</code> through the <code>austin.conf</code> drop-ins; every fleet seed (<code>[fleet].sim_config_path</code>)</td><td>Sim topology with the owner-approved zone blocks (<code>LZ_AEN</code>; plus <code>LZ_LCRA</code>/<code>LZ_RAYBN</code> when generated with <code>--d32</code>), generated by <code>deploy/scripts/gen_sim_overrides.py</code></td></tr>
+</tbody></table></div>
+<p>Related server files outside that directory: <code>/root/opengrid-ui-credentials.txt</code> (generated UI passwords, 0600), <code>/etc/apache2/conf-available/opengrid.conf</code> and <code>opengrid-proxy-secret.conf</code>, <code>/etc/mosquitto/conf.d/opengrid.conf</code>, <code>/etc/mosquitto/opengrid.acl</code>, <code>/etc/cron.d/opengrid</code> and <code>/etc/logrotate.d/opengrid</code>.</p>
+
+<h4>Files in the release (orchestrator/config/)</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">File</th><th scope="col">Controls</th></tr></thead>
+<tbody>
+<tr><td><code>orchestrator.toml</code></td><td>The production configuration (<code>OG_CONFIG</code>); sections below</td></tr>
+<tr><td><code>authz.toml</code></td><td><code>[[rule]]</code> authorisation rules</td></tr>
+<tr><td><code>tdsp_tariffs.toml</code></td><td><code>[[tariff]]</code> delivery charges per TDSP, <code>[zone_default_tdsp]</code>, <code>[zone_territory]</code> (the regulated utility per zone, used for the charge-window PROVIDER scope). The path can be overridden with <code>OG_TDSP_TARIFFS_PATH</code>.</td></tr>
+<tr><td><code>test.toml</code></td><td>Test and workspace configuration, never production</td></tr>
+<tr><td><code>service_profiles/*.toml</code></td><td>Per-service delivery profiles (<code>data_center</code>, <code>large_load</code>, <code>mobile_storage</code>, <code>mobile_storage_home_stations</code>, <code>pjm_capacity</code>)</td></tr>
+<tr><td><code>grid/*.json</code></td><td>Grid map data, customer sites and zone centroids for the maps</td></tr>
+</tbody></table></div>
+
+<h4>orchestrator.toml sections</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Section</th><th scope="col">Controls</th></tr></thead>
+<tbody>
+<tr><td><code>[general]</code></td><td>Environment name, node id, market time zone</td></tr>
+<tr><td><code>[postgres]</code></td><td>Database host, port, database name (<code>OG_DB</code> overrides it) and pool sizes. The password comes from the environment.</td></tr>
+<tr><td><code>[mqtt]</code></td><td>Broker host and port, topic root (<code>og/v1</code>), client id prefix, keepalive. Credentials come from the environment; <code>OG_MQTT_ROOT</code> overrides the root.</td></tr>
+<tr><td><code>[feeds.ercot]</code>, <code>[feeds.ercot.solar_share_zones]</code>, <code>[feeds.eia]</code>, <code>[feeds.nws]</code>, <code>[feeds.staleness]</code></td><td>Market and weather feed endpoints, polling and staleness limits. <code>[feeds.ercot].products</code> lists the ERCOT products polled (honoured from r3.4; an unknown name stops og-feeds at startup). Switching to the market simulator is a <code>base_url</code> change, and needs the lead's OK.</td></tr>
+<tr><td><code>[contracts.activation]</code>, <code>[contracts.intake]</code>, <code>[contracts.tolling]</code></td><td>Contract activation, intake and tolling rules</td></tr>
+<tr><td><code>[forecast]</code></td><td>Forecast model settings, including <code>pooled_min_own_day_samples</code> (default 2) and <code>pooled_max_rel_spread</code> for the pooled firm-fitness rule</td></tr>
+<tr><td><code>[fleet]</code></td><td>Fleet twin and topology, including <code>telemetry_interval_s</code> (10 s) and <code>sim_config_path</code> (<code>/etc/opengrid/sim/fleet.yaml</code>, the file every seed reads)</td></tr>
+<tr><td><code>[allocator]</code>, <code>[allocator.flow_limits]</code>, <code>[allocator.closed_loop]</code>, <code>[allocator.veto_retry]</code></td><td>The allocator cycle, flow limits, closed-loop correction, and the K4 veto re-solve (<code>enabled = false</code> at r3.4)</td></tr>
+<tr><td><code>[guardian]</code>, <code>[guardian.flow]</code>, <code>[guardian.feeder_ramp_ceiling_kw_per_min_by_feeder]</code></td><td>Guardian checks and limits, <code>stop_release_authorised_operators</code>, feeder ramp ceilings; <code>[guardian.flow]</code> <code>default_pv_rated_kw</code> (10 kW per hub from r3.4) and <code>fail_closed_missing_topology</code> (false)</td></tr>
+<tr><td><code>[trace]</code></td><td>Trace store settings</td></tr>
+<tr><td><code>[safestop]</code></td><td>Safe stop, including <code>confirm_window_s</code> (30 s)</td></tr>
+<tr><td><code>[ai_agent]</code>, <code>[ai_agent.prices.*]</code></td><td>The AI assistant, its budget and per-model token prices</td></tr>
+<tr><td><code>[health]</code></td><td>Heartbeat interval and miss threshold, <code>hub_stale_s</code> (25) and <code>hub_offline_s</code> (60), <code>sim_offline_s</code>, and the engine metrics URL used for latency alerts</td></tr>
+<tr><td><code>[retention]</code></td><td>Per-class retention days. <b>No code under <code>orchestrator/src</code> reads this section at r3.4.</b> Trace pruning reads <code>og.retention_policy</code>, and table lifecycle reads <code>og.data_retention</code>.</td></tr>
+<tr><td><code>[api]</code>, <code>[api.roles]</code>, <code>[api.roles.customer]</code>, <code>[api.customer_api]</code></td><td>og-api bind address and port, SSE heartbeat, CSRF hosts; which Apache accounts are operators and viewers; customer account mapping; the customer API switch (<code>enabled = false</code>, ships dark)</td></tr>
+<tr><td><code>[site_ingest]</code></td><td>Customer site-meter and corridor ingest (off until go-live)</td></tr>
+<tr><td><code>[ui]</code></td><td>Console <code>base_path</code> (<code>/og</code>)</td></tr>
+<tr><td><code>[metrics]</code></td><td>The loopback <code>/metrics</code> bind address and <code>engine_port</code></td></tr>
+<tr><td><code>[assets]</code></td><td><code>drift_enabled</code> (off) and <code>drift_interval_s</code> for the asset-health sweep</td></tr>
+<tr><td><code>[pq_ingest]</code></td><td>Waveform summary buffering and flush, the raw blob directory <code>/var/lib/opengrid/pq_waveform</code>, the characterization interval</td></tr>
+<tr><td><code>[selector.owner_charge_windows]</code></td><td>Fallback D-30 charge windows per utility or bank; database rows win</td></tr>
+<tr><td><code>[market_sim]</code></td><td>The og-feeds AS-deployment poller against the market simulator (off)</td></tr>
+<tr><td><code>[firmware]</code>, <code>[[firmware.catalogue]]</code></td><td>Campaign safety defaults (SoC margin, look-ahead, caps, halt thresholds, second-operator threshold) and the image catalogue</td></tr>
+<tr><td><code>[lifecycle]</code> (optional, absent at r3.4)</td><td>Cold root, partition window, batch size, rollup windows, disk thresholds. The defaults in <code>15-data-lifecycle.md</code> apply when the section is absent.</td></tr>
+</tbody></table></div>
+<p class="hp-note">A config change is made in git, released and deployed. The restart that <code>deploy.sh</code> does picks it up. For a <code>[feeds.*]</code>-only change, <code>deploy/README.md</code> allows <code>systemctl restart og-feeds</code> after the new release is current.</p>
+</section>
+</section>

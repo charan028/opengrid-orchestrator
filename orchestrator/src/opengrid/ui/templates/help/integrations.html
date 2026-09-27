@@ -1,0 +1,127 @@
+<section class="hp-sec" id="integrations" aria-labelledby="integrations-h"><h2 id="integrations-h">Integrations</h2>
+<p>Everything OpenGrid exchanges with systems outside its own processes: what comes in, what goes out, how often, where it lands and what uses it. Every MQTT topic below lives under the configured root <code>[mqtt].topic_root</code> (production <code>og/v1</code>), written <code>&lt;root&gt;</code>; the full topic table with QoS and schemas is in <a href="#ev-mqtt">MQTT topics</a>.</p>
+
+<figure class="hp-fig"><svg viewBox="0 0 1040 380" role="img" aria-labelledby="in-fig-t"><title id="in-fig-t">Inbound and outbound integrations around the OpenGrid processes</title>
+<rect class="hp-box" x="20" y="20" width="250" height="40" rx="6"/><text class="hp-t" x="32" y="45" font-size="13">ERCOT public API (6 products)</text>
+<rect class="hp-box" x="20" y="70" width="250" height="40" rx="6"/><text class="hp-t" x="32" y="95" font-size="13">EIA v2 (fallback load), NWS</text>
+<rect class="hp-box" x="20" y="120" width="250" height="40" rx="6"/><text class="hp-t" x="32" y="145" font-size="13">Hubs: tel, ack, info, ack/fw, ack/cal</text>
+<rect class="hp-box" x="20" y="170" width="250" height="40" rx="6"/><text class="hp-t" x="32" y="195" font-size="13">Utility SCADA (MQTT; DNP3/ICCP/2030.5)</text>
+<rect class="hp-box" x="20" y="220" width="250" height="40" rx="6"/><text class="hp-t" x="32" y="245" font-size="13">Customer site meter / corridor</text>
+<rect class="hp-box-accent hp-box" x="395" y="60" width="250" height="200" rx="8"/>
+<text class="hp-tb" x="415" y="90" font-size="14">OpenGrid (base server)</text>
+<text class="hp-t" x="415" y="118" font-size="12">og-feeds: feed_obs, feed_status</text>
+<text class="hp-t" x="415" y="140" font-size="12">og-engine: MQTT ingest, fleet twin</text>
+<text class="hp-t" x="415" y="162" font-size="12">og-guardian: signs cmd, lease, cmd/fw</text>
+<text class="hp-t" x="415" y="184" font-size="12">og-safestop: signs stop</text>
+<text class="hp-t" x="415" y="206" font-size="12">og-api: REST, customer API (off)</text>
+<text class="hp-t" x="415" y="228" font-size="12">PostgreSQL og.* schema</text>
+<rect class="hp-box" x="770" y="45" width="250" height="40" rx="6"/><text class="hp-t" x="782" y="70" font-size="13">Hubs: cmd, lease, stop, cmd/fw, cmd/cal</text>
+<rect class="hp-box" x="770" y="105" width="250" height="40" rx="6"/><text class="hp-t" x="782" y="130" font-size="13">Simulators: scenario/cmd, wave request</text>
+<rect class="hp-box-muted hp-box" x="770" y="165" width="250" height="40" rx="6"/><text class="hp-tm" x="782" y="190" font-size="13">ERCOT MMS (disabled)</text>
+<rect class="hp-box-muted hp-box" x="770" y="225" width="250" height="40" rx="6"/><text class="hp-tm" x="782" y="250" font-size="13">Customer API (off by default)</text>
+<line class="hp-edge" x1="270" y1="40" x2="395" y2="110" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="270" y1="90" x2="395" y2="125" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="270" y1="140" x2="395" y2="145" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="270" y1="190" x2="395" y2="170" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="270" y1="240" x2="395" y2="200" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-accent" x1="645" y1="130" x2="770" y2="65" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="645" y1="150" x2="770" y2="125" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="645" y1="180" x2="770" y2="185" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="645" y1="220" x2="770" y2="245" marker-end="url(#hp-arrow)"/>
+<text class="hp-tm" x="20" y="300" font-size="12">Solid: live at r3.4. Dashed / muted: built and tested but switched off by configuration.</text>
+<text class="hp-tm" x="20" y="322" font-size="12">Every outbound grid command is Ed25519-signed by og-guardian (commands) or og-safestop (stop ENGAGE).</text>
+</svg><figcaption>Inbound sources on the left, outbound sinks on the right.</figcaption></figure>
+
+<section class="hp-sub" id="in-summary"><h3>Summary table</h3>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Integration</th><th scope="col">Direction</th><th scope="col">Data</th><th scope="col">Cadence</th><th scope="col">Stored in</th><th scope="col">Used by</th></tr></thead><tbody>
+<tr><td>ERCOT public API</td><td>In (HTTPS pull)</td><td>RT prices, system load, wind, solar, AS prices, regional solar</td><td>5 min to 24 h per product</td><td><code>og.feed_obs</code>, <code>og.feed_status</code></td><td>Forecast, selector, NO_NEW_COMMITMENTS, Markets</td></tr>
+<tr><td>EIA v2</td><td>In (HTTPS pull)</td><td>ERCO hourly demand</td><td>Only while ERCOT load is unavailable</td><td><code>og.feed_obs</code></td><td>Fallback for NP6-345-CD</td></tr>
+<tr><td>NWS (api.weather.gov)</td><td>In (HTTPS pull)</td><td>Hourly forecast for one grid point</td><td>Hourly</td><td><code>og.feed_obs</code></td><td>Forecast</td></tr>
+<tr><td>Battery telemetry</td><td>In (MQTT)</td><td>Per-hub P, SoC, state</td><td>Every 10 s per hub</td><td><code>og.hub_state</code>, <code>og.telemetry</code></td><td>Fleet twin, guardian, health</td></tr>
+<tr><td>Command acks</td><td>In (MQTT)</td><td>Per-hub ack of a batch</td><td>Per batch</td><td><code>og.command_ack</code></td><td>Engine, guardian</td></tr>
+<tr><td>DEVICE-INFO</td><td>In (MQTT, retained)</td><td>Identity, ratings, location as reported</td><td>On connect and firmware change</td><td><code>og.hub</code> <code>device_*</code> columns (r3.4)</td><td>Fleet drill-down, ALR-DEVICE-RATING-MISMATCH</td></tr>
+<tr><td>Firmware status</td><td>In (MQTT)</td><td>Phase changes of an update</td><td>Per phase change</td><td><code>og.firmware_job</code>, <code>og.firmware_job_event</code></td><td>Firmware executor</td></tr>
+<tr><td>Utility SCADA</td><td>In (MQTT today)</td><td>Bank signals, utility instructions</td><td>Per reading / per change</td><td><code>og.feed_obs</code> (source <code>scada</code>)</td><td>Guardian G-03/G-15, DIST_DEFERRAL PI loop, health</td></tr>
+<tr><td>PQ waveforms</td><td>In (MQTT)</td><td>Summaries; triggered raw captures</td><td>Periodic / on request</td><td><code>og.pq_waveform_summary</code>, <code>og.pq_waveform_raw_index</code>, <code>og.hub_inverter_pq</code></td><td>Power quality screen, G-21..G-25</td></tr>
+<tr><td>Customer site ingest</td><td>In (MQTT)</td><td>Site meter, corridor current</td><td>Per reading, flushed in batches</td><td><code>og.customer_site_meter_reading</code>, <code>og.corridor_current_reading</code></td><td>DATA_CENTER / PIPELINE_AC closed loops</td></tr>
+<tr><td>Signed commands</td><td>Out (MQTT)</td><td>Command batches, leases, stops</td><td>Engine cycle (2 s)</td><td><code>og.trace</code> (pre-image before signing)</td><td>Hubs</td></tr>
+<tr><td>Firmware commands</td><td>Out (MQTT)</td><td>Guardian-signed FIRMWARE_UPDATE</td><td>Per campaign job</td><td><code>og.firmware_command</code></td><td>Hubs</td></tr>
+<tr><td>ERCOT MMS</td><td>Out (HTTPS/SOAP)</td><td>Offers, awards, VDIs</td><td>n/a</td><td>n/a</td><td>Disabled</td></tr>
+<tr><td>Customer API</td><td>Out/in (HTTPS)</td><td>Contracts, obligations, invoices, disputes</td><td>On request</td><td><code>og.customer_obligation_request</code>, <code>og.invoice_dispute</code></td><td>Disabled by default</td></tr>
+</tbody></table></div>
+</section>
+
+<section class="hp-sub" id="in-ercot"><h3>ERCOT public API feeds</h3>
+<p>og-feeds polls the ERCOT public reports API (<code>[feeds.ercot].base_url</code>) with a subscription key and an ERCOT API account. The key and account are read from environment variables named in the config (<code>subscription_key_env</code>, <code>subscription_key_secondary_env</code>, <code>username_env</code>, <code>password_env</code>); their values live in the environment files under <code>/etc/opengrid</code>. Requests share one token bucket (<code>budget_requests_per_min = 24</code>) and one circuit breaker per source.</p>
+<p>At r3.4 the scheduler polls exactly the products listed in <code>[feeds.ercot].products</code>. A product not listed is never polled, whatever its own switch says; an unknown product id in the list stops og-feeds at start-up with a configuration error. When the key is absent from the file, every known product is polled. A failed or skipped poll is retried with a capped exponential backoff from 5 minutes up to 60 minutes, never later than the product's normal cadence.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Product</th><th scope="col">Endpoint</th><th scope="col">Data</th><th scope="col">Poll</th><th scope="col">Staleness key</th><th scope="col">Feeds</th></tr></thead><tbody>
+<tr><td><code>np6-905-cd</code></td><td><code>/np6-905-cd/spp_node_zone_hub</code> (load zones)</td><td>Real-time settlement point prices, $/MWh, 15-min intervals</td><td>5 min</td><td><code>ercot_price_fresh_s</code> 2700, LGV <code>ercot_price_lgv_s</code> 900</td><td>Price forecast, selector, Markets, profitability. Blocks new commitments when stale (firm-blocking).</td></tr>
+<tr><td><code>np6-345-cd</code></td><td><code>/np6-345-cd/act_sys_load_by_wzn</code></td><td>Actual system load per weather zone plus <code>total</code></td><td>1 h</td><td><code>ercot_load_fresh_s</code> 172800 (actuals post about a day late)</td><td>Load forecast, solar share of load. EIA stands in when its breaker is open or it is stale.</td></tr>
+<tr><td><code>np4-732-cd</code></td><td><code>/np4-732-cd/wpp_hrly_avrg_actl_fcast</code></td><td>System wind actual and forecast (<code>wind_actual</code>, <code>wind_forecast</code>)</td><td>30 min</td><td><code>wind_solar_fresh_s</code> 10800</td><td>Forecast inputs</td></tr>
+<tr><td><code>np4-737-cd</code></td><td><code>/np4-737-cd/spp_hrly_avrg_actl_fcast</code></td><td>System solar actual and STPPF forecast (<code>solar_actual</code>, <code>solar_forecast</code>)</td><td>30 min</td><td><code>wind_solar_fresh_s</code></td><td>Forecast, system solar share</td></tr>
+<tr><td><code>np4-188-cd</code></td><td><code>/np4-188-cd/dam_clear_price_for_cap</code></td><td>DAM ancillary-service clearing prices (MCPC)</td><td>24 h (fixed interval, not aligned to the 14:00 CT posting)</td><td><code>as_price_fresh_s</code> 93600</td><td>AS pricing, selector. Firm-blocking when stale.</td></tr>
+<tr><td><code>np4-745-cd</code></td><td><code>/np4-745-cd/spp_hrly_actual_fcast_geo</code></td><td>Solar actual and forecast per ERCOT solar region (D-28)</td><td>30 min</td><td><code>wind_solar_fresh_s</code></td><td>Regional solar share via <code>[feeds.ercot.solar_share_zones]</code>. Also switchable with <code>solar_by_region_enabled</code> (true).</td></tr>
+</tbody></table></div>
+<p class="hp-note">Only <code>np6-905-cd</code> and <code>np4-188-cd</code> are firm-blocking by default: a stale reading (or no <code>feed_status</code> row at all) of either raises <code>NO_NEW_COMMITMENTS</code>. Every other feed still raises its own <code>ALR-FEED-STALE</code> but blocks nothing. See <a href="#ev-degraded">Degraded modes</a> and <a href="#pb-price-spike">the price-spike playbook</a>.</p>
+</section>
+
+<section class="hp-sub" id="in-eia-nws"><h3>EIA and NWS</h3>
+<dl class="hp-dl">
+<dt>EIA v2 (<code>[feeds.eia]</code>)</dt><dd>Hourly demand (<code>type=D</code>) for respondent <code>ERCO</code> from <code>/electricity/rto/region-data/data/</code>. API key read from the environment variable named by <code>api_key_env</code> (<code>EIA_API_KEY</code>). It is polled only from inside the ERCOT <code>np6-345-cd</code> poll when that product's breaker blocks the request, so it is idle while ERCOT is healthy. An old EIA row does not raise <code>ALR-FEED-STALE</code> unless the ERCOT product it backs is itself unavailable. Staleness <code>eia_fresh_s</code> 10800. Stored in <code>og.feed_obs</code>.</dd>
+<dt>NWS (<code>[feeds.nws]</code>)</dt><dd>api.weather.gov, no key; a descriptive <code>User-Agent</code> is sent. The grid point (<code>grid_point</code>) is resolved once at start-up, then the hourly forecast is polled every hour with <code>If-Modified-Since</code>. Staleness <code>nws_fresh_s</code> 10800. Stored in <code>og.feed_obs</code>; used by the forecast. Not firm-blocking.</dd>
+<dt>AS deployment poller (<code>[market_sim]</code>)</dt><dd>An og-feeds poller against the local market simulator for AS deployments. Off: <code>as_deployment_poll = false</code>.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="in-telemetry"><h3>Battery telemetry, acks and DEVICE-INFO</h3>
+<dl class="hp-dl">
+<dt>Telemetry <code>&lt;root&gt;/tel/&lt;zone&gt;/&lt;bank_id&gt;/&lt;hub_id&gt;</code></dt><dd>QoS 0, every 10 s per hub (<code>[fleet].telemetry_interval_s</code>). og-engine's ingest loop updates the fleet twin and writes <code>og.hub_state</code> and <code>og.telemetry</code> (kept 14 days); og-guardian subscribes separately for its own hub-state read. A hub is stale after 25 s (<code>[health].hub_stale_s</code>) and offline after 60 s (<code>hub_offline_s</code>); r3.4 uses these two values everywhere (health, fleet twin, screens). A missed sample is covered by the next one.</dd>
+<dt>Acks <code>&lt;root&gt;/ack/&lt;hub_id&gt;</code></dt><dd>QoS 1, one per received command batch; stored in <code>og.command_ack</code>; read by og-engine and og-guardian.</dd>
+<dt>DEVICE-INFO <code>&lt;root&gt;/hub/&lt;hub_id&gt;/info</code></dt><dd>QoS 1, retained; topic set by <code>[mqtt].device_info_topic</code> (default <code>hub/+/info</code>); schema <code>device_info.schema.json</code>. Handled by og-engine through <code>opengrid.fleet.device_info</code>. At r3.4 (H4) the hub is taken from the topic: a payload whose <code>hub_id</code> differs, or an unknown hub, is rejected and traced, nothing written. Reported units, rated kW and kWh, reserve floor and latitude/longitude go only to the <code>og.hub.device_*</code> columns (migration 0043). The seed columns the fleet plans and signs with (<code>units</code>, <code>p_kw</code>, <code>e_kwh</code>, <code>r_kwh</code>, <code>lat</code>, <code>lon</code>) are never changed by a report. A difference raises <code>ALR-DEVICE-RATING-MISMATCH</code>. Every report is traced as <code>DEVICE_INFO</code> or <code>DEVICE_INFO_REJECTED</code> on stream <code>fleet_device_info</code>.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="in-firmware-status"><h3>Firmware status (ack/fw)</h3>
+<p><code>&lt;root&gt;/ack/fw/&lt;hub_id&gt;</code>, QoS 1, schema <code>firmware_status.schema.json</code>. The hub reports each phase of an update (for example DOWNLOADING, INSTALLING, REBOOTING) with a timestamp. og-engine validates it with its own parser (never the command-ack parser) and hands it to <code>opengrid.firmware.ingest</code>, which updates <code>og.firmware_job</code> and appends <code>og.firmware_job_event</code>. The executor then retries transient failures with backoff, raises <code>ALR-FIRMWARE-HUB-FAILED</code> on a terminal one and halts or completes the campaign. After a successful update the hub republishes DEVICE-INFO with the new firmware version. See <a href="#mt-firmware">firmware maintenance</a> and <a href="#pb-firmware">the firmware playbook</a>.</p>
+</section>
+
+<section class="hp-sub" id="in-scada"><h3>Utility SCADA and protocol adapters</h3>
+<p>The only SCADA path running at r3.4 is MQTT: <code>&lt;root&gt;/scada/&lt;bank_id&gt;</code> (bank signals, QoS 0) and <code>&lt;root&gt;/scada/instruction/&lt;bank_id&gt;</code> (utility ESTOP / BLOCK / LIMIT instructions, QoS 1), today published by the simulator <code>ogsim.scada</code>. og-engine stores readings in <code>og.feed_obs</code> (source <code>scada</code>) for the DIST_DEFERRAL PI loop and guardian G-03; og-guardian subscribes to instructions itself (G-15, K5). Health watches freshness (<code>ALR-SCADA-SILENT</code>, <code>ALR-SCADA-SILENT-BANK</code>, <code>DIST_DEFERRAL_OPEN_LOOP</code>).</p>
+<p><code>opengrid.integrations</code> holds production protocol backends behind one <code>ScadaSource</code> interface (docs <code>docs/orchestrator/07-delivery/integrations/protocol-adapters.md</code>). They emit the same <code>ScadaBankSignal</code> / <code>ScadaUtilityInstruction</code> models and, in production, republish on the same MQTT topics through <code>MqttBridgeSink</code>, so the guardian keeps its independent subscription.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Backend</th><th scope="col">Protocol behaviour in code</th><th scope="col">Status at r3.4</th></tr></thead><tbody>
+<tr><td><code>mqtt</code> (default)</td><td>Starts nothing; the existing topics are the ingest path.</td><td>Live. The only backend in use.</td></tr>
+<tr><td><code>dnp3</code></td><td>DNP3 master (IEEE 1815 Level 2): integrity poll on connect and every <code>integrity_poll_s</code>, event polls between, unsolicited responses confirmed. A failed poll delivers nothing and reconnects with capped backoff.</td><td>Implemented and tested against the ogsim outstation; not selected on any host.</td></tr>
+<tr><td><code>iccp</code></td><td>ICCP/TASE.2 association under a bilateral table, DS transfer set, report timeout and reconnect backoff. <code>transport = "sim_tcp"</code> works against the simulator; <code>transport = "mms"</code> (real TASE.2, port 102) raises "not implemented" until a vendor stack is bound.</td><td>Simulator transport implemented; production MMS transport is a stub.</td></tr>
+<tr><td><code>ieee2030_5</code></td><td>2030.5 client (CSIP aggregator): walks DeviceCapability to DERControlList; <code>opModEnergize=false</code> maps to ESTOP, <code>opModConnect=false</code> to BLOCK, W limits to LIMIT; posts DERControlResponse when required.</td><td>Implemented and tested against the simulator; not selected on any host.</td></tr>
+</tbody></table></div>
+<p class="hp-note">No <code>[integrations]</code> table exists in the shipped <code>orchestrator.toml</code> and no og-* process builds these backends at r3.4, so behaviour is plain MQTT SCADA with no market submission. Moving to a real utility needs its point list or bilateral table, certificates under <code>/etc/opengrid/certs/</code> and a release that wires the backend in.</p>
+</section>
+
+<section class="hp-sub" id="in-site-ingest"><h3>Customer site ingest</h3>
+<p><code>&lt;root&gt;/site/&lt;customer_id&gt;/&lt;site_id&gt;/meter</code> (<code>customer_site_meter.schema.json</code>) and <code>&lt;root&gt;/corridor/&lt;customer_id&gt;/&lt;corridor_id&gt;/current</code> (<code>pipeline_corridor_current.schema.json</code>), QoS 0, published by the customer's equipment or the <code>og_sim_customer</code> simulator. <code>opengrid.site_ingest</code> validates each payload and checks that its customer and source ids match the topic (one customer cannot write into another's loop), keeps the newest reading per source in memory and flushes in batches on the engine's timer into <code>og.customer_site_meter_reading</code> and <code>og.corridor_current_reading</code>. The DATA_CENTER and PIPELINE_AC closed-loop controllers read them through the profile's <code>feedback_signal_ref</code>. Switched by <code>[site_ingest].enabled</code>, which ships <code>false</code> (on at go-live).</p>
+</section>
+
+<section class="hp-sub" id="in-signed-commands"><h3>Outbound signed MQTT commands</h3>
+<p>Nothing reaches a hub unsigned. og-guardian signs command batches (<code>&lt;root&gt;/cmd/&lt;bank_id&gt;/batch</code>), leases (<code>&lt;root&gt;/lease/&lt;hub_id&gt;</code>, retained), calibration commands (<code>cmd/cal</code>) and firmware commands (<code>cmd/fw</code>); og-safestop signs stop ENGAGE events (<code>&lt;root&gt;/stop/&lt;scope&gt;/&lt;id&gt;</code>, retained); a stop RELEASE carries the guardian's signature after two-person approval.</p>
+<dl class="hp-dl">
+<dt>Scheme</dt><dd>Ed25519 (RFC 8032) over the RFC 8785 JSON Canonicalization Scheme (JCS) bytes of the object without its <code>signature</code> and <code>key_id</code> fields; signature encoded base64url without padding; <code>key_id</code> names the public key. Specified in <code>interfaces/crypto.md</code>.</dd>
+<dt>Freshness</dt><dd>Every batch carries <code>epoch</code>, <code>seq</code>, <code>issued_at</code> and <code>expires_at</code> (lease-bounded, <code>fleet.lease_ttl_s</code> 30 s). Hubs verify the signature first, then freshness (K6, G-13). A hub whose lease expires holds its last signed setpoint.</dd>
+<dt>Keys</dt><dd>Guardian: <code>[guardian].key_path</code> = <code>/etc/opengrid/guardian_ed25519.key</code>. Safe stop: <code>[safestop].key_path</code> = <code>/etc/opengrid/safestop_ed25519.key</code>. Trace anchors: <code>/etc/opengrid/trace_anchor_ed25519.key</code>. Only the owning process reads its key; og-api never holds one.</dd>
+<dt>Order</dt><dd>The decision pre-image is traced before signing (G-14, K10); the guardian publishes only after a PASS verdict.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="in-firmware-cmd"><h3>Firmware commands (cmd/fw)</h3>
+<p><code>&lt;root&gt;/cmd/fw/&lt;hub_id&gt;</code>, QoS 1, not retained, schema <code>firmware_command.schema.json</code>. A campaign job asks the guardian's firmware hand-off (<code>opengrid.firmware.guardian_flow</code>), which reads every input itself, runs G-36 and signs only on PASS; the signed command is recorded in <code>og.firmware_command</code> and published. Refusals are holds: the engine re-requests after its defer interval, except catalogue refusals, which no waiting fixes. Campaigns are created and approved through the API (<code>/og/api/firmware/campaigns</code>).</p>
+</section>
+
+<section class="hp-sub" id="in-mms"><h3>ERCOT MMS adapter (disabled)</h3>
+<p><code>opengrid.integrations.ercot_mms</code> is a QSE submission client for ERCOT MMS External Web Services: energy and three-part offers and AS offers (BidSet create/cancel), DAM/RTM awards (AwardSet get) and verbal dispatch instructions (VDIs get and acknowledge). A submission is POSTed exactly once; timeouts and 5xx are recorded as errors and never resent.</p>
+<p class="hp-warn">It is off twice over: the market backend defaults to <code>backend = "none"</code>, and the factory refuses to build <code>ercot_mms</code> unless <code>[integrations.market].enabled = true</code>. Neither key is set in <code>orchestrator.toml</code>, and no process constructs the adapter at r3.4. Nothing is ever submitted to ERCOT. The Markets bid funnel shows an <code>mms</code> count only if an MMS submissions table exists.</p>
+</section>
+
+<section class="hp-sub" id="in-customer-api"><h3>Customer API</h3>
+<p><code>opengrid.customer_api</code> adds customer-scoped routes under <code>/og/api/customer/</code>: <code>me</code>, <code>contracts</code>, <code>opportunities</code> (priced admission; 409 with <code>reason_code</code> on rejection), <code>obligations</code>, <code>invoices</code> and disputes, <code>obligations/{id}/cancel</code> (direct only before selection, otherwise an operator-reviewed request) and <code>obligations/{id}/renominate</code>. A customer is an Apache account mapped in <code>[api.roles.customer]</code>; every read is scoped to its <code>customer_id</code> (another customer's object answers 404) and it gets 403 on operator and viewer endpoints. Operators see requests at <code>GET /og/api/customer-disputes</code> and <code>GET /og/api/customer-requests</code>.</p>
+<p class="hp-note">The routes are mounted only when <code>[api.customer_api].enabled = true</code>; the default and the shipped value is <code>false</code> (go-live step, after owner confirmation). See <a href="#pb-customer-onboarding">customer onboarding</a> and <a href="#apis">APIs</a>.</p>
+</section>
+</section>

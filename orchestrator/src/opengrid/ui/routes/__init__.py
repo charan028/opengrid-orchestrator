@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from opengrid.ui.api_client import bind_remote_user
 from opengrid.ui.role import remote_user
 from opengrid.ui.routes import control_room, copilot, fleet, health
+from opengrid.ui.routes import help as help_screen
 from opengrid.ui.templating import TEMPLATES_DIR
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ router.include_router(control_room.router)
 router.include_router(fleet.router)
 router.include_router(health.router)
 router.include_router(copilot.router)
+router.include_router(help_screen.router)
 
 # ui-b's screens (BUILD.md S4 ownership split). Imported by name so a missing module during early build
 # degrades to "screen not mounted yet" rather than breaking ui-a's own screens or the app startup.

@@ -1,0 +1,238 @@
+<section class="hp-sec" id="architecture" aria-labelledby="architecture-h">
+<h2 id="architecture-h">Architecture</h2>
+<p>OpenGrid runs as six orchestrator processes (<code>og-*</code> systemd units grouped by <code>opengrid.target</code>) that share one PostgreSQL database (schema <code>og</code>) and one Mosquitto MQTT broker. Apache sits in front and handles authentication. The integration simulators (<code>og-sim-*</code>, grouped by <code>ogsim.target</code>) play the part of the hub fleet, SCADA, the market data sources and the customer operators. Everything below reflects release r3.4 (tag r3.3 plus the r3.4 fixes).</p>
+
+<section class="hp-sub" id="arch-system">
+<h3>System architecture</h3>
+<figure class="hp-fig">
+<svg viewBox="0 0 1000 870" role="img" aria-labelledby="ar-sys-t">
+<title id="ar-sys-t">OpenGrid system architecture at r3.4: browsers reach og-api and og-sim-control through Apache; six og processes share PostgreSQL; og-engine, og-guardian and og-safestop use Mosquitto; simulators and field hubs sit behind MQTT.</title>
+<!-- top row -->
+<rect class="hp-box" x="20" y="16" width="310" height="60" rx="8"/>
+<text class="hp-tb" x="175" y="40" text-anchor="middle" font-size="13">Operator, viewer, customer, tester</text>
+<text class="hp-tm" x="175" y="60" text-anchor="middle" font-size="12">browser or API client, HTTPS + Basic Auth</text>
+<rect class="hp-box-muted" x="640" y="16" width="350" height="60" rx="8"/>
+<text class="hp-tb" x="815" y="40" text-anchor="middle" font-size="13">ERCOT public API, EIA v2, NWS</text>
+<text class="hp-tm" x="815" y="60" text-anchor="middle" font-size="12">external HTTP sources ([feeds.*].base_url)</text>
+<!-- apache -->
+<rect class="hp-box" x="20" y="100" width="560" height="64" rx="8"/>
+<text class="hp-tb" x="36" y="120" font-size="13">Apache reverse proxy (Basic Auth, /etc/opengrid/htpasswd)</text>
+<text class="hp-tm" x="36" y="138" font-size="12">/og/ to localhost:8080 (og-api), sets X-Remote-User and X-OG-Proxy-Auth</text>
+<text class="hp-tm" x="36" y="155" font-size="12">/og/api/customer/ for og-cust-* users; /ogsim/ to localhost:8091 (tester)</text>
+<line class="hp-edge" x1="175" y1="76" x2="175" y2="100" marker-end="url(#hp-arrow)"/>
+<!-- row A -->
+<rect class="hp-box-accent" x="20" y="190" width="310" height="112" rx="8"/>
+<text class="hp-tb" x="36" y="212" font-size="13">og-api</text>
+<text class="hp-tm" x="36" y="230" font-size="12">python -m opengrid.api, uvicorn on :8080</text>
+<text class="hp-t" x="36" y="249" font-size="12">FastAPI REST, SSE, OpenAPI</text>
+<text class="hp-t" x="36" y="266" font-size="12">opengrid.ui console mounted at /og</text>
+<text class="hp-t" x="36" y="283" font-size="12">MQTT: publishes scenario/cmd only</text>
+<rect class="hp-box-accent" x="350" y="190" width="290" height="112" rx="8"/>
+<text class="hp-tb" x="366" y="212" font-size="13">og-settle</text>
+<text class="hp-tm" x="366" y="230" font-size="12">opengrid.settle.main, 5 s and 60 s jobs</text>
+<text class="hp-t" x="366" y="249" font-size="12">metering, billing, P&amp;L, trace pruning</text>
+<text class="hp-t" x="366" y="266" font-size="12">health rules, invariants, trace anchors</text>
+<text class="hp-t" x="366" y="283" font-size="12">no MQTT connection</text>
+<rect class="hp-box-accent" x="660" y="190" width="330" height="112" rx="8"/>
+<text class="hp-tb" x="676" y="212" font-size="13">og-feeds</text>
+<text class="hp-tm" x="676" y="230" font-size="12">opengrid.feeds.main, 5 s tick</text>
+<text class="hp-t" x="676" y="249" font-size="12">polls ERCOT, EIA, NWS into feed_obs</text>
+<text class="hp-t" x="676" y="266" font-size="12">opengrid.forecast recompute every 15 min</text>
+<text class="hp-t" x="676" y="283" font-size="12">no MQTT, no signing key</text>
+<line class="hp-edge" x1="175" y1="164" x2="175" y2="190" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="815" y1="76" x2="815" y2="190" marker-end="url(#hp-arrow)"/>
+<!-- postgres -->
+<rect class="hp-box-good" x="20" y="330" width="970" height="70" rx="8"/>
+<text class="hp-tb" x="505" y="354" text-anchor="middle" font-size="13">PostgreSQL, schema og (73 tables, see Data model)</text>
+<text class="hp-tm" x="505" y="373" text-anchor="middle" font-size="12">each process opens its own pool; engine to guardian handoff: command_batch + NOTIFY og_command_batch</text>
+<text class="hp-tm" x="505" y="390" text-anchor="middle" font-size="12">og-api and og-guardian to og-safestop: NOTIFY og_safestop_request (PROPOSE, CONFIRM, signed RELEASE)</text>
+<line class="hp-edge" x1="175" y1="302" x2="175" y2="330" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="495" y1="302" x2="495" y2="330" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="825" y1="302" x2="825" y2="330" marker-end="url(#hp-arrow)"/>
+<!-- row B -->
+<rect class="hp-box-accent" x="20" y="430" width="310" height="130" rx="8"/>
+<text class="hp-tb" x="36" y="452" font-size="13">og-engine</text>
+<text class="hp-tm" x="36" y="470" font-size="12">opengrid.engine.main, 2 s tick</text>
+<text class="hp-t" x="36" y="489" font-size="12">fleet twin, contract intake, lifecycle</text>
+<text class="hp-t" x="36" y="506" font-size="12">selector gates (15 min), ledger, allocator</text>
+<text class="hp-t" x="36" y="523" font-size="12">PQ and site ingest, firmware executor</text>
+<text class="hp-tm" x="36" y="542" font-size="12">sub: tel, ack, ack/cal, scada, scada/wave</text>
+<rect class="hp-box-accent" x="350" y="430" width="290" height="130" rx="8"/>
+<text class="hp-tb" x="366" y="452" font-size="13">og-guardian</text>
+<text class="hp-tm" x="366" y="470" font-size="12">opengrid.guardian.main</text>
+<text class="hp-t" x="366" y="489" font-size="12">G-checks on its own reads</text>
+<text class="hp-t" x="366" y="506" font-size="12">sole Ed25519 signer (K3)</text>
+<text class="hp-t" x="366" y="523" font-size="12">verdict, lease_state, scope_posture</text>
+<text class="hp-tm" x="366" y="542" font-size="12">pub: cmd/&lt;bank&gt;/batch, lease, cmd/cal, cmd/fw</text>
+<rect class="hp-box-warn" x="660" y="430" width="330" height="130" rx="8"/>
+<text class="hp-tb" x="676" y="452" font-size="13">og-safestop</text>
+<text class="hp-tm" x="676" y="470" font-size="12">opengrid.safestop.main</text>
+<text class="hp-t" x="676" y="489" font-size="12">independent stop authority (K8)</text>
+<text class="hp-t" x="676" y="506" font-size="12">no import of engine or guardian</text>
+<text class="hp-t" x="676" y="523" font-size="12">stop_event, stop_outbox; L2 BLOCK/ESTOP intake</text>
+<text class="hp-tm" x="676" y="542" font-size="12">pub: stop/&lt;scope&gt;/&lt;id&gt; (QoS 1, retained)</text>
+<line class="hp-edge" x1="175" y1="400" x2="175" y2="430" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="495" y1="400" x2="495" y2="430" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="825" y1="400" x2="825" y2="430" marker-end="url(#hp-arrow)"/>
+<!-- mosquitto -->
+<rect class="hp-box" x="20" y="590" width="970" height="56" rx="8"/>
+<text class="hp-tb" x="505" y="612" text-anchor="middle" font-size="13">Mosquitto (MQTT), topic root og/v1, one user and ACL per process</text>
+<text class="hp-tm" x="505" y="632" text-anchor="middle" font-size="12">tel, ack, cmd, lease, stop, scada, scada/instruction, scada/wave, cmd/cal, ack/cal, cmd/fw, ack/fw, scenario/cmd, site, corridor</text>
+<line class="hp-edge" x1="175" y1="560" x2="175" y2="590" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="495" y1="560" x2="495" y2="590" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="825" y1="560" x2="825" y2="590" marker-end="url(#hp-arrow)"/>
+<!-- sims -->
+<rect class="hp-box-muted" x="20" y="676" width="180" height="96" rx="8"/>
+<text class="hp-tb" x="32" y="698" font-size="13">og-sim-control</text>
+<text class="hp-tm" x="32" y="716" font-size="12">ogsim.control :8091</text>
+<text class="hp-t" x="32" y="735" font-size="12">/ogsim control plane:</text>
+<text class="hp-t" x="32" y="752" font-size="12">REST, web UI, CLI</text>
+<rect class="hp-box-muted" x="215" y="676" width="180" height="96" rx="8"/>
+<text class="hp-tb" x="227" y="698" font-size="13">og-sim-market</text>
+<text class="hp-tm" x="227" y="716" font-size="12">ogsim.market :8090</text>
+<text class="hp-t" x="227" y="735" font-size="12">mimics ERCOT, EIA, NWS</text>
+<text class="hp-t" x="227" y="752" font-size="12">HTTP only, no MQTT</text>
+<rect class="hp-box-muted" x="410" y="676" width="180" height="96" rx="8"/>
+<text class="hp-tb" x="422" y="698" font-size="13">og-sim-fleet</text>
+<text class="hp-tm" x="422" y="716" font-size="12">ogsim.fleet</text>
+<text class="hp-t" x="422" y="735" font-size="12">2,000 base hubs + zone blocks</text>
+<text class="hp-t" x="422" y="752" font-size="12">verifies, applies, acks</text>
+<rect class="hp-box-muted" x="605" y="676" width="180" height="96" rx="8"/>
+<text class="hp-tb" x="617" y="698" font-size="13">og-sim-scada</text>
+<text class="hp-tm" x="617" y="716" font-size="12">ogsim.scada</text>
+<text class="hp-t" x="617" y="735" font-size="12">bank signals and L2</text>
+<text class="hp-t" x="617" y="752" font-size="12">utility instructions</text>
+<rect class="hp-box-muted" x="800" y="676" width="190" height="96" rx="8"/>
+<text class="hp-tb" x="812" y="698" font-size="13">og-sim-customer</text>
+<text class="hp-tm" x="812" y="716" font-size="12">ogsim.customer</text>
+<text class="hp-t" x="812" y="735" font-size="12">site meters, corridor</text>
+<text class="hp-t" x="812" y="752" font-size="12">current (not in ogsim.target)</text>
+<line class="hp-edge" x1="110" y1="646" x2="110" y2="676" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="500" y1="646" x2="500" y2="676" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="695" y1="646" x2="695" y2="676" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="895" y1="646" x2="895" y2="676" marker-end="url(#hp-arrow)"/>
+<!-- apache to sim-control along left margin -->
+<path class="hp-edge-dash" d="M20,150 H8 V740 H20" fill="none" marker-end="url(#hp-arrow)"/>
+<!-- field hubs -->
+<rect class="hp-box" x="410" y="798" width="580" height="56" rx="8"/>
+<text class="hp-tb" x="422" y="820" font-size="13">Field batteries and hubs, bank aggregators (production)</text>
+<text class="hp-tm" x="422" y="840" font-size="12">same topics and signed-command contract as og-sim-fleet; at r3.4 the fleet is simulated</text>
+<path class="hp-edge-dash" d="M990,620 H996 V826 H990" fill="none" marker-end="url(#hp-arrow)"/>
+</svg>
+<figcaption>Processes, stores and simulators at r3.4. Arrows show the direction of requests or connections; all six og processes read and write PostgreSQL. The dashed left line is the Apache /ogsim/ route to og-sim-control; the dashed right line is the MQTT link that real hubs would use. In development, <code>[feeds.*].base_url</code> points og-feeds at og-sim-market instead of the public sources.</figcaption>
+</figure>
+
+<h4>Processes</h4>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Unit</th><th scope="col">Entry point</th><th scope="col">What it does</th><th scope="col">Reads</th><th scope="col">Writes</th></tr></thead>
+<tbody>
+<tr><td><code>og-api</code></td><td><code>python -m opengrid.api</code> (<code>opengrid.api.main</code>)</td><td>FastAPI app from <code>opengrid.api.app.create_app</code>: REST, SSE, OpenAPI (<code>/og/api/openapi.json</code>) and the <code>opengrid.ui</code> console at <code>/og</code>. Refuses a non-loopback bind unless <code>[api].allow_non_loopback_bind</code> is set, because it trusts <code>X-Remote-User</code> from Apache. The customer API (<code>opengrid.customer_api</code>) is mounted only when <code>[api.customer_api].enabled</code> is true (default false).</td><td>Almost every table, for the screens (plan, reservation, grant, pnl, invoice_line, trace, hub, bank, hub_state, alert, forecast, feed_obs).</td><td>contract, opportunity, obligation (operator CRUD and admit), operator_action, alert (acknowledge), as_deployment, owner_charge_window, retention_policy, firmware campaigns, heartbeat, trace; NOTIFY <code>og_safestop_request</code>; MQTT <code>scenario/cmd</code>.</td></tr>
+<tr><td><code>og-engine</code></td><td><code>python -m opengrid.engine.main</code></td><td>2 s tick: obligation lifecycle, allocator cycle, proposal of one command batch per bank to the guardian, K1 energy check, shortfall escalation, then gate scheduling (selector runs in the background every 15 min and on admission or renomination triggers). Also hosts the fleet twin, MQTT ingest, PQ and site ingest, the calibration-ack handler, the device-info handler and the firmware executor. The device-info handler takes the hub from the MQTT topic and writes only the <code>og.hub.device_*</code> columns: a device report never changes a hub's seeded ratings, reserve or location, and a mismatch raises <code>ALR-DEVICE-RATING-MISMATCH</code>.</td><td>feed_obs, forecast, contract, product_rule, obligation, verdict, scope_posture, degraded_mode_state, stop_event, owner_charge_window, flow-limit tables.</td><td>hub_state, telemetry, command_ack, opportunity, obligation, plan, plan_value, plan_energy_value, plan_shadow_obligation, commitment, reservation, grant, command_batch, obligation_energy_status, pq_waveform_*, customer_site_meter_reading, corridor_current_reading, firmware_*, alert, heartbeat, trace.</td></tr>
+<tr><td><code>og-guardian</code></td><td><code>python -m opengrid.guardian.main</code></td><td>Picks up proposed batches without a verdict, runs the G-checks on independently read state (its own MQTT telemetry cache), signs on PASS and publishes the batch and leases; vetoes or holds otherwise. Also signs calibration and firmware commands and two-person stop releases, and tracks K7 scope posture. A bank with no feeder mapping raises <code>ALR-BANK-UNMAPPED-TOPOLOGY</code>; with <code>fail_closed_missing_topology</code> = true a batch that raises that bank's net setpoint is vetoed (<code>BANK_TOPOLOGY_UNMAPPED</code>).</td><td>command_batch, trace, reservation, commitment, grant, bank, hub, hub_state, stop_event, flow-limit tables, firmware_command.</td><td>verdict, lease_state, scope_posture, calibration_command, firmware_command status, operator_action, alert, heartbeat, trace; MQTT <code>cmd/&lt;bank&gt;/batch</code>, <code>lease/&lt;hub&gt;</code>, <code>cmd/cal/&lt;hub&gt;</code>, <code>cmd/fw/&lt;hub&gt;</code>.</td></tr>
+<tr><td><code>og-safestop</code></td><td><code>python -m opengrid.safestop.main</code></td><td>Independent stop-only authority (K8). Engages a stop only after a PROPOSE and a matching CONFIRM within the confirmation window; engages a BANK stop on each unexpired BLOCK or ESTOP utility instruction; publishes guardian-signed RELEASE events after verifying the signature. Writes each stop and its outbox entry in one transaction and dead-letters an entry after 5 permanent publish failures (<code>ALR-STOP-PUBLISH-DEAD-LETTER</code>).</td><td>NOTIFY <code>og_safestop_request</code>, <code>scada/instruction</code>, retention_policy.</td><td>stop_event, stop_outbox, trace, trace_checkpoint, heartbeat; MQTT <code>stop/&lt;scope&gt;/&lt;id&gt;</code> (retained).</td></tr>
+<tr><td><code>og-feeds</code></td><td><code>python -m opengrid.feeds.main</code></td><td>Polls ERCOT (only the products in <code>[feeds.ercot].products</code>, failed polls retried after 5 to 60 minutes), EIA and NWS (or og-sim-market) with circuit breakers and staleness tracking; runs <code>opengrid.forecast.run_forecast_cycle</code> every 15 minutes inside the same loop.</td><td>External HTTP APIs, feed_obs history.</td><td>feed_obs, feed_status, forecast, heartbeat.</td></tr>
+<tr><td><code>og-settle</code></td><td><code>python -m opengrid.settle.main</code></td><td>One loop with independent jobs: heartbeat and <code>opengrid.health</code> evaluation every 5 s (alert rules, hub health, degraded modes, <code>opengrid.invariants</code> checks and the K11 anchor publish every 15 min); settlement every 60 s; trace pruning every 60 s; optional asset drift sweep (<code>[assets].drift_enabled</code>, default false).</td><td>telemetry, reservation, grant, obligation, contract, feed_obs, customer_site_meter_reading, trace.</td><td>meter_interval, performance, invoice_line, pnl, obligation (close to SETTLED), alert, degraded_mode_state, hub_state.health, invariant_*, trace_checkpoint, trace_anchor, heartbeat, trace.</td></tr>
+<tr><td><code>og-sim-market</code></td><td><code>python -m ogsim.market</code></td><td>Serves ERCOT, EIA and NWS look-alike endpoints on :8090 (synthetic or replay data) plus an admin API for og-sim-control.</td><td>Its own data sets.</td><td>HTTP responses only.</td></tr>
+<tr><td><code>og-sim-fleet</code></td><td><code>python -m ogsim.fleet</code></td><td>About 2,000 simulated hubs and bank aggregators. Verifies Ed25519 signatures and epoch/seq/lease freshness, applies or holds setpoints, publishes telemetry, acks and PQ waveforms.</td><td>MQTT cmd, lease, stop, cmd/cal, cmd/fw, scenario/cmd.</td><td>MQTT tel, ack, ack/cal, ack/fw, scada/wave.</td></tr>
+<tr><td><code>og-sim-scada</code></td><td><code>python -m ogsim.scada</code></td><td>Per-bank SCADA signals and utility L2 instructions, with an anomaly catalogue.</td><td>MQTT tel, scenario/cmd.</td><td>MQTT scada, scada/instruction.</td></tr>
+<tr><td><code>og-sim-control</code></td><td><code>python -m ogsim.control</code></td><td>The <code>/ogsim</code> control plane (REST, web UI, CLI) for scenario and anomaly injection, reached through Apache as user <code>tester</code>.</td><td>Operator input.</td><td>MQTT scenario/cmd; HTTP admin calls to og-sim-market.</td></tr>
+<tr><td><code>og-sim-customer</code></td><td><code>python -m ogsim.customer</code></td><td>Customer-operator simulators (site meters, pipeline corridor current). The unit exists but is not part of <code>ogsim.target</code>.</td><td>Its own configuration (<code>/etc/opengrid/customer_sim.env</code>).</td><td>MQTT site, corridor.</td></tr>
+<tr><td><code>og-lifecycle</code> (<code>.service</code> + <code>.timer</code>)</td><td><code>python -m opengrid.lifecycle run --cycle auto</code> (also <code>status</code>, <code>restore</code>, <code>export-billing</code> by hand)</td><td>Data lifecycle: partitions, BRIN indexes, telemetry rollups, cold-tier export, retention. A oneshot service at nice 10 and idle I/O priority; the timer runs it every 10 minutes but is installed disabled. See <a href="#mt-lifecycle">Data lifecycle</a>.</td><td>data_retention, all managed tables.</td><td>lifecycle_*, telemetry_1m, telemetry_15m, partitions; deletes past retention.</td></tr>
+</tbody>
+</table></div>
+<p class="hp-note">Every orchestrator unit requires <code>postgresql.service</code> and <code>mosquitto.service</code> and carries <code>IOWeight=500</code> so production wins disk contention; the simulator units require only <code>mosquitto.service</code>. The nightly database backup is a cron job (<code>deploy/cron/opengrid</code>, 03:00). An optional warm-standby unit and per-process watchdog drop-ins are in <code>deploy/ha/</code>.</p>
+<p class="hp-warn">At r3.4 <code>deploy.sh</code> reinstalls the release's unit files on every deploy, including <code>og-lifecycle.service</code> and <code>og-lifecycle.timer</code>, but never enables a timer: enable <code>og-lifecycle.timer</code> by hand after an I/O check (see <a href="#mt-lifecycle">Data lifecycle</a>). Not wired: the AS-deployment poller (<code>opengrid.contracts.as_deployment_poll</code>, <code>[market_sim].as_deployment_poll</code>) has no caller in any process, so AS deployments come only from the API.</p>
+</section>
+
+<section class="hp-sub" id="arch-functional">
+<h3>Functional flow</h3>
+<figure class="hp-fig">
+<svg viewBox="0 0 1000 560" role="img" aria-labelledby="ar-fn-t">
+<title id="ar-fn-t">Functional flow: market data, forecast, selector gate, 2 s allocator, guardian, signed MQTT to hubs, telemetry back to the engine, settlement; safe-stop path and trace journal.</title>
+<!-- row 1 -->
+<rect class="hp-box" x="15" y="30" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="27" y="52" font-size="13">1. Market data</text>
+<text class="hp-t" x="27" y="72" font-size="12">og-feeds polls ERCOT,</text>
+<text class="hp-t" x="27" y="89" font-size="12">EIA, NWS</text>
+<text class="hp-tm" x="27" y="112" font-size="12">feed_obs, feed_status</text>
+<rect class="hp-box" x="265" y="30" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="277" y="52" font-size="13">2. Forecast</text>
+<text class="hp-t" x="277" y="72" font-size="12">opengrid.forecast in og-feeds,</text>
+<text class="hp-t" x="277" y="89" font-size="12">every 15 min, p10/p50/p90</text>
+<text class="hp-tm" x="277" y="112" font-size="12">forecast</text>
+<rect class="hp-box-accent" x="515" y="30" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="527" y="52" font-size="13">3. Selector gate (15 min)</text>
+<text class="hp-t" x="527" y="72" font-size="12">HiGHS MILP/LP, F2 fallback;</text>
+<text class="hp-t" x="527" y="89" font-size="12">commit via ledger (K2, K13)</text>
+<text class="hp-tm" x="527" y="112" font-size="12">plan, commitment, reservation</text>
+<rect class="hp-box-accent" x="765" y="30" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="777" y="52" font-size="13">4. Allocator (2 s)</text>
+<text class="hp-t" x="777" y="72" font-size="12">og-engine: tiers, water-fill,</text>
+<text class="hp-t" x="777" y="89" font-size="12">trace pre-image first (K10)</text>
+<text class="hp-tm" x="777" y="112" font-size="12">grant, command_batch + NOTIFY</text>
+<line class="hp-edge" x1="235" y1="80" x2="265" y2="80" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="485" y1="80" x2="515" y2="80" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="735" y1="80" x2="765" y2="80" marker-end="url(#hp-arrow)"/>
+<!-- row 2 (right to left) -->
+<rect class="hp-box-accent" x="765" y="190" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="777" y="212" font-size="13">5. Guardian</text>
+<text class="hp-t" x="777" y="232" font-size="12">G-checks on own reads;</text>
+<text class="hp-t" x="777" y="249" font-size="12">PASS signs (K3), else hold</text>
+<text class="hp-tm" x="777" y="272" font-size="12">verdict, lease_state</text>
+<rect class="hp-box" x="515" y="190" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="527" y="212" font-size="13">6. Hubs (signed MQTT)</text>
+<text class="hp-t" x="527" y="232" font-size="12">cmd/&lt;bank&gt;/batch, lease;</text>
+<text class="hp-t" x="527" y="249" font-size="12">verify, apply or hold (K6, K7)</text>
+<text class="hp-tm" x="527" y="272" font-size="12">og-sim-fleet or field hubs</text>
+<rect class="hp-box" x="265" y="190" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="277" y="212" font-size="13">7. Telemetry</text>
+<text class="hp-t" x="277" y="232" font-size="12">tel, ack into og-engine</text>
+<text class="hp-t" x="277" y="249" font-size="12">fleet twin, flushed to DB</text>
+<text class="hp-tm" x="277" y="272" font-size="12">hub_state, telemetry</text>
+<rect class="hp-box-good" x="15" y="190" width="220" height="100" rx="8"/>
+<text class="hp-tb" x="27" y="212" font-size="13">8. Settle (60 s)</text>
+<text class="hp-t" x="27" y="232" font-size="12">metering, performance,</text>
+<text class="hp-t" x="27" y="249" font-size="12">billing, P&amp;L</text>
+<text class="hp-tm" x="27" y="272" font-size="12">meter_interval, pnl, invoices</text>
+<line class="hp-edge" x1="875" y1="130" x2="875" y2="190" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="765" y1="240" x2="735" y2="240" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="515" y1="240" x2="485" y2="240" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="265" y1="240" x2="235" y2="240" marker-end="url(#hp-arrow)"/>
+<path class="hp-edge-dash" d="M375,190 V160 H800 V130" fill="none" marker-end="url(#hp-arrow)"/>
+<text class="hp-tm" x="590" y="154" text-anchor="middle" font-size="12">next cycle reads fresh state</text>
+<!-- safe-stop row -->
+<rect class="hp-box-warn" x="15" y="340" width="345" height="96" rx="8"/>
+<text class="hp-tb" x="27" y="362" font-size="13">Stop requests</text>
+<text class="hp-t" x="27" y="382" font-size="12">operator: POST /og/api/safestop, then /confirm</text>
+<text class="hp-t" x="27" y="399" font-size="12">utility L2 BLOCK or ESTOP on scada/instruction</text>
+<text class="hp-tm" x="27" y="420" font-size="12">guardian escalation only proposes (never engages)</text>
+<rect class="hp-box-warn" x="390" y="340" width="345" height="96" rx="8"/>
+<text class="hp-tb" x="402" y="362" font-size="13">og-safestop (K8)</text>
+<text class="hp-t" x="402" y="382" font-size="12">stop_event, stop_outbox, trace</text>
+<text class="hp-t" x="402" y="399" font-size="12">publishes stop/&lt;scope&gt;/&lt;id&gt;, retained</text>
+<text class="hp-tm" x="402" y="420" font-size="12">guardian vetoes batches while a stop is engaged</text>
+<line class="hp-edge" x1="360" y1="388" x2="390" y2="388" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-accent" x1="625" y1="340" x2="625" y2="290" marker-end="url(#hp-arrow)"/>
+<!-- trace band -->
+<rect class="hp-box-muted" x="15" y="470" width="970" height="72" rx="8"/>
+<text class="hp-tb" x="27" y="492" font-size="13">Trace journal (K10, K11)</text>
+<text class="hp-t" x="27" y="512" font-size="12">og.trace hash chain per stream, mirrored to the local journal file; checkpoints; trace_anchor every 15 min (og-settle).</text>
+<text class="hp-tm" x="27" y="530" font-size="12">Written by the selector, allocator (pre-image before each batch), guardian, safe-stop and settlement.</text>
+<line class="hp-edge-dash" x1="562" y1="436" x2="562" y2="470" marker-end="url(#hp-arrow)"/>
+</svg>
+<figcaption>Planning runs every 15 minutes, dispatch every 2 seconds. Hubs only ever act on guardian-signed commands; the safe-stop path does not pass through the engine or the guardian.</figcaption>
+</figure>
+<ol class="hp-steps">
+<li><b>Market data.</b> og-feeds polls the ERCOT public API, EIA v2 and NWS (or og-sim-market in development) on each source's own schedule and writes normalized points to <code>feed_obs</code> with a quality flag (GOOD, ESTIMATED, STALE). <code>feed_status</code> tracks failures and the breaker. A feed that goes STALE makes the health evaluator set the <code>NO_NEW_COMMITMENTS</code> degraded mode; intake is then skipped.</li>
+<li><b>Forecast.</b> Inside the same og-feeds loop, <code>opengrid.forecast</code> recomputes quantile forecasts (p10, p50, p90, firm fitness) every 15 minutes into <code>forecast</code>.</li>
+<li><b>Selector gate.</b> og-engine's gate scheduler starts gates on the 15-minute boundary (a day-ahead plan once a day, intraday otherwise), on admission of a new opportunity, and on a due renomination point. Gates run as one background task so they never hold the 2 s tick. The model is solved with HiGHS; if it is infeasible, times out or fails validation, the rule fallback F2 is used. Selected candidates go through <code>selector.commit</code>: obligations move OFFERED to SELECTED to COMMITTED and the ledger writes <code>reservation</code> and <code>commitment</code> together (K2 one buyer per capacity, K13 commitment lock). Results are kept in <code>plan</code>, <code>plan_value</code>, <code>plan_energy_value</code> and <code>plan_shadow_obligation</code>.</li>
+<li><b>Allocator.</b> Every 2 s og-engine advances the obligation lifecycle and runs <code>allocator.run_cycle</code>: utility L2 instructions cap capability first, energy is capped over the lease duration, tiers are served in strict order, each obligation is water-filled across eligible hubs, and remaining headroom may follow price. Grants are written to <code>grant</code>. For each bank the engine writes the trace pre-image first, then inserts <code>command_batch</code>, then sends <code>NOTIFY og_command_batch</code>. If the guardian heartbeat is missing, the engine holds and proposes nothing.</li>
+<li><b>Guardian.</b> og-guardian evaluates each new batch against its own reads (G-20 clock check first, then the other G-checks independently). PASS signs the batch with Ed25519 and renews hub leases; VETOED, PARTLY_VETOED and TIMEOUT are holds, never a step to zero for firm obligations (K7). The engine re-solves without vetoed hubs. Sustained vetoes move a bank or zone to CONSERVATIVE in <code>scope_posture</code>.</li>
+<li><b>Hubs.</b> The signed batch goes out on <code>cmd/&lt;bank&gt;/batch</code> and leases on <code>lease/&lt;hub&gt;</code> (retained). Each hub verifies the signature and the epoch, seq and lease freshness, then applies the setpoint or keeps holding the last signed one when the lease expires.</li>
+<li><b>Telemetry.</b> Hubs publish <code>tel/...</code> every 10 s (<code>[fleet].telemetry_interval_s</code>) and an <code>ack/&lt;hub&gt;</code> per command. og-engine updates the in-memory fleet twin and a separate periodic task flushes <code>hub_state</code>, <code>telemetry</code> and <code>command_ack</code>. The guardian keeps its own telemetry cache and does not trust the engine's copy. A hub is stale after <code>[health].hub_stale_s</code> (25 s) and offline after <code>hub_offline_s</code> (60 s); the fleet twin, the health rules and the console use the same two values. The next allocator cycle reads this state.</li>
+<li><b>Settle.</b> Every 60 s og-settle meters pending obligation intervals from telemetry (<code>meter_interval</code>), scores <code>performance</code>, writes versioned <code>invoice_line</code> rows and <code>pnl</code> (including the delivery charge where configured), and closes FULFILLED or SHORTFALL obligations to SETTLED.</li>
+<li><b>Safe-stop path.</b> An operator stop is two-step: <code>POST /og/api/safestop</code> then <code>/confirm</code>; og-api passes both to og-safestop through <code>NOTIFY og_safestop_request</code>, and a single message can never stop the fleet. Utility BLOCK or ESTOP instructions trigger a bank stop directly. og-safestop writes <code>stop_event</code> and <code>stop_outbox</code> in one transaction, then publishes the retained <code>stop/&lt;scope&gt;/&lt;id&gt;</code> message. Release needs two operators and a guardian signature. See <a href="#hw-safestop">Safe stop</a>.</li>
+<li><b>Trace journal.</b> Every decision is appended to <code>trace</code> as a per-stream hash chain and mirrored to the local journal file. og-settle writes checkpoints, prunes by <code>retention_policy</code>, and publishes a signed external anchor (<code>trace_anchor</code>, files under <code>/var/lib/opengrid/anchors</code>) every 15 minutes; the invariants checks verify the chain and flag stale anchors.</li>
+</ol>
+</section>
+</section>

@@ -53,7 +53,35 @@ NAV_TOOLS: tuple[dict[str, str], ...] = (
     },
 )
 
+#: The Help page (r3.4): the last entry of the left navigation on every screen, above the role footer.
+HELP_PATH = f"{BASE_PATH}/help"
+
+#: First path segment under `BASE_PATH` -> the Help page section that documents that screen. The Help
+#: entry deep-links to it (`/og/help#page-fleet`), so each screen opens the Help page at its own section.
+HELP_SECTIONS: dict[str, str] = {
+    "": "page-control-room",
+    "fleet": "page-fleet",
+    "dispatch": "page-dispatch",
+    "markets": "page-markets",
+    "health": "page-health",
+    "profitability": "page-profitability",
+    "billing": "page-billing",
+    "pq": "page-pq",
+    "help": "page-help",
+}
+
+
+def help_href(path: str) -> str:
+    """The Help link for the screen at `path`: `/og/help#page-<screen>`, or the page top for a path that
+    is not a documented screen."""
+    rest = path[len(BASE_PATH) :] if path.startswith(BASE_PATH) else path
+    section = HELP_SECTIONS.get(rest.strip("/").split("/", 1)[0])
+    return f"{HELP_PATH}#{section}" if section else HELP_PATH
+
+
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[_csrf_context])
 templates.env.globals["nav_screens"] = NAV_SCREENS
 templates.env.globals["nav_tools"] = NAV_TOOLS
 templates.env.globals["base_path"] = BASE_PATH
+templates.env.globals["help_path"] = HELP_PATH
+templates.env.globals["help_href"] = help_href
