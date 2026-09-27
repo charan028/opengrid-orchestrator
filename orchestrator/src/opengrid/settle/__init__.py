@@ -406,6 +406,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
         performance_factor=performance_factor,
         penalty_amount=pnl.penalty,
         regulated_capacity_amount=regulated_capacity_amount,
+        duration_hours=duration_hours,
         discharge_spp_per_kwh=ctx.wholesale_price_per_kwh,
     )
     any_line_posted = False

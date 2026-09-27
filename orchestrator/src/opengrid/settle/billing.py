@@ -10,6 +10,11 @@
 | REGULATED_CAPACITY | `CAPACITY_PAYMENT` = `opengrid.market.capacity.regulated_capacity_payment` verbatim (08 S3) |
 | HOME               | none                                                                          |
 
+Capacity lines (`ERCOT_AS`, `DIST_DEFERRAL`, `PARTNER_CAPACITY`) are kW-based (issue #43 A8): quantity =
+the committed kW, unit `kW`, rate = $/kW for the interval (the $/kWh-equivalent price x interval hours), so
+quantity x rate is the payment a $/kW buyer reads. `REGULATED_CAPACITY` keeps its line shape until the toll
+payment basis is settled (issue #36).
+
 `draft_invoice_lines` is pure (given the interval's numbers, decide *what* to post); `next_version`
 is the insert-only correction rule (02a S1.1: "never UPDATE, only INSERT ... a `supersedes` column
 for corrections") -- it never mutates anything, it only decides whether a new row is needed and, if
@@ -38,6 +43,7 @@ def draft_invoice_lines(
     performance_factor: Decimal,
     penalty_amount: Decimal,
     regulated_capacity_amount: Decimal | None = None,
+    duration_hours: Decimal,
     discharge_spp_per_kwh: Decimal | None = None,
 ) -> list[InvoiceLineDraft]:
     """Which invoice lines this obligation-interval posts, per the table above. `performance_factor`
@@ -59,6 +65,10 @@ def draft_invoice_lines(
     if service_type == "HOME":
         return []
 
+    # #43 A8: capacity is sold per kW held, not per kWh (committed_kwh = committed_kw x hours).
+    committed_kw = committed_kwh / duration_hours if duration_hours > 0 else Decimal("0")
+    rate_per_kw = price_per_kwh * duration_hours
+
     if service_type == "ERCOT_ENERGY":
         # `rate` reflects what `revenue` was actually priced at (the zone's real-time SPP,
         # profitability.compute_revenue's 2026-09-26 fix), not the opportunity's `price_per_kwh` --
@@ -77,9 +87,9 @@ def draft_invoice_lines(
         lines = [
             InvoiceLineDraft(
                 line_type="CAPACITY_PAYMENT",
-                quantity=committed_kwh,
-                unit="kWh",
-                rate=price_per_kwh,
+                quantity=committed_kw,
+                unit="kW",
+                rate=rate_per_kw,
                 amount=committed_kwh * price_per_kwh,
             )
         ]
@@ -112,9 +122,9 @@ def draft_invoice_lines(
         lines = [
             InvoiceLineDraft(
                 line_type="CAPACITY_PAYMENT",
-                quantity=committed_kwh,
-                unit="kWh",
-                rate=price_per_kwh,
+                quantity=committed_kw,
+                unit="kW",
+                rate=rate_per_kw,
                 amount=capacity_amount,
             )
         ]
