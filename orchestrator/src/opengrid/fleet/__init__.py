@@ -22,7 +22,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol, cast
 
 from prometheus_client import Counter
 
@@ -187,8 +187,8 @@ class _BankRuntime:
 
 
 #: Fallback when [health].hub_stale_s is unset: HealthThresholds' own default, never a second copy of it.
-_HUB_STALE_S_DEFAULT: float = next(
-    f.default for f in dataclasses.fields(HealthThresholds) if f.name == "hub_stale_s"
+_HUB_STALE_S_DEFAULT: float = cast(
+    float, next(f.default for f in dataclasses.fields(HealthThresholds) if f.name == "hub_stale_s")
 )
 _HUB_OFFLINE_S_DEFAULT = 30.0
 _TELEMETRY_INTERVAL_S_DEFAULT = 2.0
