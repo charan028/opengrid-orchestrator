@@ -11,6 +11,10 @@
   {% elif status_code == 404 %}
   <p>{% with status='caution', label='UNKNOWN' %}{% include "_partials/status_badge.html" %}{% endwith %}
     No such target: the API does not know this trace id.</p>
+  {% elif status_code == 503 and outcome_unknown %}
+  <p>{% with status='caution', label='OUTCOME UNKNOWN' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    OUTCOME UNKNOWN &mdash; check the target list before retrying. The API could not confirm whether this was
+    recorded, so it may already be live: look for the operator-target markers on <a href="{{ base_path }}/fleet#fleet-table">the Fleet table</a>. {{ message }}</p>
   {% elif status_code == 503 %}
   <p>{% with status='critical', label='NOT RECORDED' %}{% include "_partials/status_badge.html" %}{% endwith %}
     The cancel was not recorded (the trace store is unavailable); the target is still running. Try again.</p>

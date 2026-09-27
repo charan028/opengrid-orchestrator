@@ -8,6 +8,7 @@ positions never leave the tool, and `POST /og/api/ai/ask` wires the tool in.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -84,7 +85,17 @@ async def test_trucks_at_home_uses_the_one_d31_rule_and_returns_no_position(
     rows = RecordingRows([{"grp": "all", "hubs": 1}])
     rows.pages = [
         [],  # the top-rows page
-        [{"hub_id": "truck-aus-01", "bank_id": "bank-truck-aus-01", "lat": 30.5196, "lon": -97.6481}],
+        [{"hub_id": "truck-aus-01", "bank_id": "bank-truck-aus-01"}],  # the mobile units matching
+        # their DEVICE-REPORTED positions (core.geo.DEVICE_POSITIONS_SQL), never the seeded og.hub.lat/lon
+        [
+            {
+                "hub_id": "truck-aus-01",
+                "bank_id": "bank-truck-aus-01",
+                "device_lat": 30.5196,
+                "device_lon": -97.6481,
+                "device_info_at": datetime.now(UTC),
+            }
+        ],
     ]
 
     result, rows = await _run(FleetQuery(asset_class="truck", at_home=True), rows)
@@ -145,9 +156,9 @@ def test_dual_unit_homes_are_home_hubs_with_two_units() -> None:
 
 def test_unit_at_home_is_the_geo_rule() -> None:
     sites = {"bank-t": (30.0, -97.0)}
-    assert unit_at_home("t", "bank-t", 30.001, -97.001, sites) is True
-    assert unit_at_home("t", "bank-t", 30.1, -97.0, sites) is False
-    assert unit_at_home("t", "bank-t", None, None, sites) is None
+    assert unit_at_home("t", "bank-t", (30.001, -97.001), sites) is True
+    assert unit_at_home("t", "bank-t", (30.1, -97.0), sites) is False
+    assert unit_at_home("t", "bank-t", None, sites) is None
 
 
 async def test_the_tool_refuses_anything_but_one_select() -> None:

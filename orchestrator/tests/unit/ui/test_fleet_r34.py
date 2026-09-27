@@ -216,3 +216,37 @@ def test_unavailable_hub_badge_filter_and_chip(monkeypatch: Any) -> None:
     assert 'class="fl-unavail" title="Unavailable: regulated (NOIE) territory' in page
     assert "Regulated market" in page and 'name="availability" value="UNAVAILABLE" checked' in page
     assert "Availability: Regulated market" in page
+
+
+def test_confirm_outcome_unknown_is_distinct_from_not_recorded(monkeypatch: Any) -> None:
+    from opengrid.ui.api_client import ApiUnavailable
+
+    unknown = ApiUnavailable(
+        "503",
+        status_code=503,
+        detail={
+            "detail": "manual target outcome unknown (the trace store failed and could not be re-checked)"
+        },
+    )
+    body = (
+        _post_client(monkeypatch, unknown)
+        .post("/og/fleet/command/33333333-3333-3333-3333-333333333333/confirm")
+        .text
+    )
+    assert "OUTCOME UNKNOWN" in body and "check the target list before retrying" in body
+    assert "NOT RECORDED" not in body
+    plain = ApiUnavailable("503", status_code=503, detail={"detail": "manual target not recorded"})
+    body = (
+        _post_client(monkeypatch, plain)
+        .post("/og/fleet/command/33333333-3333-3333-3333-333333333333/confirm")
+        .text
+    )
+    assert "NOT RECORDED" in body and "OUTCOME UNKNOWN" not in body
+
+
+def test_cancel_outcome_unknown(monkeypatch: Any) -> None:
+    from opengrid.ui.api_client import ApiUnavailable
+
+    unknown = ApiUnavailable("503", status_code=503, detail={"detail": "outcome unknown"})
+    body = _post_client(monkeypatch, unknown).post("/og/fleet/manual-targets/t-1/cancel").text
+    assert "OUTCOME UNKNOWN" in body and "NOT RECORDED" not in body
