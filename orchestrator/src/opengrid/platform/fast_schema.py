@@ -24,7 +24,7 @@ own type, `minimum` fails on `instance < minimum` (so NaN passes, exactly as the
 from __future__ import annotations
 
 import numbers
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 import jsonschema
@@ -75,9 +75,9 @@ _TYPE_PREDICATES: dict[str, Check] = {
 }
 
 
-def compile_schema(schema: Mapping[str, Any], validator: jsonschema.protocols.Validator) -> Check | None:
-    """The accept predicate for `schema` as `validator` (its reference `jsonschema` validator) judges it, or `None`
-    when it cannot be mirrored exactly (see the module docstring)."""
+def compile_schema(validator: jsonschema.protocols.Validator) -> Check | None:
+    """The accept predicate for the reference `validator`'s own schema (`validator.schema`, so the two can never
+    be a mismatched pair), or `None` when it cannot be mirrored exactly (see the module docstring)."""
     if type(validator) is not jsonschema.Draft202012Validator:
         return None
     if validator.format_checker is not None:
@@ -85,7 +85,7 @@ def compile_schema(schema: Mapping[str, Any], validator: jsonschema.protocols.Va
     if validator.TYPE_CHECKER is not jsonschema.Draft202012Validator.TYPE_CHECKER:
         return None
     try:
-        return _compile(schema)
+        return _compile(validator.schema, root=True)
     except _UnsupportedError:
         return None
 
@@ -109,9 +109,12 @@ def _type_check(names: list[str]) -> Check:
     return _type
 
 
-def _compile(schema: Any) -> Check:
+def _compile(schema: Any, *, root: bool = False) -> Check:
     if not isinstance(schema, dict):
         raise _UnsupportedError("boolean or non-object subschema")
+    if not root and ("$schema" in schema or "$id" in schema):
+        # A subschema declaring its own dialect or base URI: never assume draft 2020-12 semantics there.
+        raise _UnsupportedError("$schema/$id in a subschema")
     unknown = set(schema) - _SUPPORTED - _ANNOTATIONS
     if unknown:
         raise _UnsupportedError(f"keywords {sorted(unknown)}")

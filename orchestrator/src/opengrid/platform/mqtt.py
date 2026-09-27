@@ -107,7 +107,7 @@ FAST_CHECK_KINDS: frozenset[str] = frozenset({"telemetry"})
 def _fast_check_for(kind: str) -> Check | None:
     if kind not in FAST_CHECK_KINDS:
         return None
-    return compile_schema(_load_schema(kind), _validator_for(kind))
+    return compile_schema(_validator_for(kind))
 
 
 def topic(cfg: Config, suffix: str) -> str:

@@ -12,6 +12,8 @@ error message as the reference on every rejected case.
 
 from __future__ import annotations
 
+import importlib.util
+import itertools
 import json
 import math
 import random
@@ -22,7 +24,7 @@ from typing import Any
 import jsonschema
 import pytest
 
-from opengrid.platform import mqtt
+from opengrid.platform import fast_schema, mqtt
 from opengrid.platform.fast_schema import compile_schema
 
 FUZZ_CASES = 10_000
@@ -41,8 +43,8 @@ def _reference(path: Path) -> tuple[dict[str, Any], jsonschema.protocols.Validat
 
 
 def _compiled(path: Path) -> Any:
-    schema, validator = _reference(path)
-    return compile_schema(schema, validator)
+    _schema, validator = _reference(path)
+    return compile_schema(validator)
 
 
 SUPPORTED = [p for p in _schemas() if _compiled(p) is not None]
@@ -144,7 +146,9 @@ def _mutate(rng: random.Random, schema: dict[str, Any], payload: Any) -> Any:
     elif op == 3 and props:
         name = rng.choice(sorted(props))
         sub = props[name]
-        bound = sub.get("minimum", sub.get("maximum"))
+        # Either bound of a field (C1: a field with a minimum AND a maximum has both exercised).
+        bounds = [sub[key] for key in ("minimum", "maximum") if key in sub]
+        bound = rng.choice(bounds) if bounds else None
         if bound is not None:
             eps = rng.choice([0, 1e-12, 1e-9, 1, 0.5])
             out[name] = rng.choice([bound, bound - eps, bound + eps, float(bound), int(bound)])
@@ -321,9 +325,70 @@ def test_a_crashing_precheck_is_never_an_accept(monkeypatch: pytest.MonkeyPatch)
 def test_unsupported_schemas_and_validators_are_not_compiled() -> None:
     base = {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}
     v = jsonschema.Draft202012Validator
-    assert compile_schema({**base, "pattern": "x"}, v({**base, "pattern": "x"})) is None
-    assert compile_schema({**base, "additionalProperties": {"type": "string"}}, v(base)) is None
-    assert compile_schema({**base, "enum": [1, 2]}, v(base)) is None
-    assert compile_schema(base, v(base, format_checker=v.FORMAT_CHECKER)) is None
-    assert compile_schema(base, jsonschema.Draft7Validator(base)) is None
-    assert compile_schema(base, v(base)) is not None
+    assert compile_schema(v({**base, "pattern": "x"})) is None
+    assert compile_schema(v({**base, "additionalProperties": {"type": "string"}})) is None
+    assert compile_schema(v({**base, "enum": [1, 2]})) is None
+    assert compile_schema(v(base, format_checker=v.FORMAT_CHECKER)) is None
+    assert compile_schema(jsonschema.Draft7Validator(base)) is None
+    nested_dialect = {**base, "properties": {"a": {"$schema": "http://json-schema.org/draft-07/schema#"}}}
+    assert compile_schema(v(nested_dialect)) is None
+    assert compile_schema(v({**base, "properties": {"a": {"$id": "urn:x", "type": "string"}}})) is None
+    assert compile_schema(v(base)) is not None
+
+
+# ------------------------------------------------------------------------------------ planted bugs (C2)
+#: Deliberate bugs in `fast_schema` (source text -> buggy text). Each must make the differential check diverge
+#: from `jsonschema` somewhere -- otherwise the equivalence tests above could not catch that regression.
+PLANTED_BUGS = [
+    ("x < low:", "x <= low:"),
+    ("x > high:", "x > high + 1e-9:"),  # SAFETY C1: accepts just above a maximum
+    (
+        "return not isinstance(x, bool) and isinstance(x, numbers.Number)",
+        "return isinstance(x, numbers.Number)",
+    ),
+    ("or (isinstance(x, float) and x.is_integer())", ""),
+    ("len(x) < min_len:", "len(x) <= min_len:"),
+    ("if key not in allowed:", "if key not in allowed and False:"),
+    ("if each == x:", "if each == str(x).lower():"),
+    ("if each == x:", "if isinstance(x, str) and each.startswith(x):"),  # enum prefix match
+    ("if name not in x:", "if name not in x and False:"),
+    ("if name in x and not sub(x[name]):", "if name in x and not sub(x[name]) and x[name] is not None:"),
+    ("if number and _is_number(x):", "if number and isinstance(x, (int, float)):"),
+    ("if isinstance(x, simple):", "if x is None or isinstance(x, simple):"),  # null accepted for any type
+]
+PLANTED_FUZZ_CASES = 3_000
+
+
+def _load_mutant(tmp_path: Path, old: str, new: str) -> Any:
+    source = Path(fast_schema.__file__).read_text(encoding="utf-8")
+    assert source.count(old) >= 1, old
+    path = tmp_path / "fast_schema_mutant.py"
+    path.write_text(source.replace(old, new, 1), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("fast_schema_mutant", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _diverges(mutant: Any) -> bool:
+    """Whether the mutant disagrees with jsonschema on the corpus or a (shorter) seeded fuzz of each schema."""
+    for path in SUPPORTED:
+        schema, validator = _reference(path)
+        check = mutant.compile_schema(validator)
+        if check is None:
+            continue
+        cases: list[Any] = list(TELEMETRY_CORPUS) if path.name == "telemetry.schema.json" else []
+        cases.extend(itertools.islice(_fuzz(schema), PLANTED_FUZZ_CASES))
+        if any(_verdict(check, payload) != validator.is_valid(payload) for payload in cases):
+            return True
+    return False
+
+
+@pytest.mark.parametrize(("old", "new"), PLANTED_BUGS, ids=[new for _, new in PLANTED_BUGS])
+def test_every_planted_bug_is_caught(tmp_path: Path, old: str, new: str) -> None:
+    assert _diverges(_load_mutant(tmp_path, old, new))
+
+
+def test_the_unmutated_compiler_passes_the_same_check(tmp_path: Path) -> None:
+    assert not _diverges(_load_mutant(tmp_path, "x < low:", "x < low:"))
