@@ -21,6 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.models.market import Utility, UtilityId
 from opengrid.core.reasons import ALR_ENERGY_SHORTFALL_RISK
+from opengrid.core.services import HOME_SERVICE_TYPE
 from opengrid.core.solar_share import (
     ERCOT_SOLAR_ACTUAL_SERIES,
     ERCOT_SOLAR_PRODUCT,
@@ -496,7 +497,7 @@ class PgSettleBackend:
                 charging_proxy = await cur.fetchone()
         if row is None:
             raise LookupError(f"obligation not found: {obligation_id}")
-        if row["value_per_mwh"] is None and row["service_type"] != "HOME":
+        if row["value_per_mwh"] is None and row["service_type"] != HOME_SERVICE_TYPE:
             _logger.warning(
                 "obligation has no opportunity value_per_mwh: revenue settles as 0 (flagged)",
                 extra={"obligation_id": str(obligation_id), "service_type": row["service_type"]},

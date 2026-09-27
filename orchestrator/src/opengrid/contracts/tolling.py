@@ -32,6 +32,7 @@ from opengrid.contracts.errors import AdmissionError
 from opengrid.contracts.repository import ContractsRepo
 from opengrid.core.models.engine import Contract, Opportunity, ProductRule
 from opengrid.core.models.market import Utility, UtilityId
+from opengrid.core.services import REGULATED_CAPACITY_SERVICE_TYPE
 from opengrid.core.timeutil import MARKET_TZ
 from opengrid.market.capacity import capacity_value_usd_per_mwh
 from opengrid.market.config import DEFAULT_UTILITIES
@@ -39,7 +40,7 @@ from opengrid.trace import TraceStore
 
 logger = logging.getLogger(__name__)
 
-TOLLING_SERVICE_TYPE = "REGULATED_CAPACITY"
+TOLLING_SERVICE_TYPE = REGULATED_CAPACITY_SERVICE_TYPE
 TOLLING_VARIANT = "TOLLING"
 TRACE_EVENT = "TOLLING"
 

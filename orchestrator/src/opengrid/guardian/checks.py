@@ -19,6 +19,8 @@ from typing import Literal
 from opengrid.core import limits as core_limits
 from opengrid.core import reasons
 from opengrid.core.physics import BankParams, HubParams
+from opengrid.core.services import ERCOT_AS_SERVICE_TYPE
+from opengrid.core.services import HOLD_SERVICE_TYPES as HOLD_SERVICE_TYPES
 from opengrid.core.timeutil import check_command_freshness, clock_offset_ok
 from opengrid.guardian.ports import L2Instruction, ProposedItem
 from opengrid.market.territory import TERRITORY_REASONS
@@ -155,28 +157,29 @@ def g04_anchor_kw(
     toll never delivered. For a utility-scale hub G-04 anchors at the last setpoint the GUARDIAN ITSELF SIGNED
     for it whenever that signed lease is still live -- while it is, the hub is following that setpoint, so that
     is where its physical step starts (lead's decision with DISPATCH; a "signed newer than the telemetry sample"
-    condition dropped to the stale telemetry on a timestamp tie and vetoed every following step). dt = the time
-    since that signature (at least one cycle). Otherwise -- homes always, or no live signed lease -- the telemetry
-    `prev_p_kw` over one cycle, as before. The bound itself is unchanged: `hub_ramp_kw_per_s(params) x dt`.
-    `telemetry_ts` is accepted for the caller's record and future use; it does not change the anchor."""
-    del telemetry_ts  # the live signed lease alone decides (see above)
+    condition dropped to the stale telemetry on a timestamp tie and vetoed every following step). Otherwise --
+    homes always, or no live signed lease -- the telemetry `prev_p_kw`, as before.
+
+    The signed anchor sets only the STARTING POINT (r3.4.3 HIGH-B): dt is ALWAYS one cycle. Stretching dt to the
+    time since the signature made the bound ramp x elapsed, so after a 20 s hold a 2.2 MW jump -- ten cycles'
+    worth -- signed in one step (a 9x feeder-ramp breach). `last_signed_at` is kept for the caller's record;
+    `telemetry_ts` likewise. Neither widens the bound."""
+    del telemetry_ts, last_signed_at  # the live signed lease alone picks the anchor; dt is one cycle
     if (
         utility_scale
         and last_signed_kw is not None
-        and last_signed_at is not None
         and lease_expires_at is not None
         and lease_expires_at > now
     ):
-        elapsed_s = max((now - last_signed_at).total_seconds(), 0.0)
-        return G04Anchor(last_signed_kw, max(elapsed_s, cycle_interval_s), "SIGNED")
+        return G04Anchor(last_signed_kw, cycle_interval_s, "SIGNED")
     return G04Anchor(prev_telemetry_kw, cycle_interval_s, "TELEMETRY")
 
 
-def ramp_step_per_cycle_kw(setpoint_kw: float, anchor: G04Anchor, cycle_interval_s: float) -> float:
+def ramp_step_kw(setpoint_kw: float, anchor: G04Anchor) -> float:
     """The step a hub takes this cycle for the RATE checks (G-05 fleet ramp and stagger, G-06/G-32 feeder ramp):
-    from the same anchor as G-04, scaled to one cycle when the anchor is older than one (a utility-scale hub whose
-    last signed step was two cycles ago spreads that change over both). Homes: setpoint - telemetry, as before."""
-    return (setpoint_kw - anchor.kw) * (cycle_interval_s / anchor.dt_s) if anchor.dt_s > 0 else 0.0
+    the FULL change from G-04's anchor, never scaled down by elapsed time (r3.4.3 HIGH-B). Homes: setpoint minus
+    telemetry, as before."""
+    return setpoint_kw - anchor.kw
 
 
 def check_g05_fleet_ramp(
@@ -439,9 +442,9 @@ def check_g19_need_basis(
 
 
 #: `og.obligation.service_type`s held at 0 kW with R-GRANT-AS-HOLD until deployed (og.as_deployment): an ERCOT
-#: ancillary-service award, and a REGULATED_CAPACITY utility toll (D-29, deployed only per obligation).
-AS_SERVICE_TYPE = "ERCOT_AS"
-HOLD_SERVICE_TYPES = frozenset({AS_SERVICE_TYPE, "REGULATED_CAPACITY"})
+#: ancillary-service award, and a REGULATED_CAPACITY utility toll (D-29, deployed only per obligation) --
+#: `core.services`, the one definition shared with the allocator and the K13 invariant.
+AS_SERVICE_TYPE = ERCOT_AS_SERVICE_TYPE
 
 
 def check_g19_as_hold(

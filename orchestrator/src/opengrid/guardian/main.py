@@ -59,6 +59,7 @@ from opengrid.guardian.repo import (
     build_pg_ports,
     load_bank_membership,
     load_hub_params,
+    load_signed_anchors,
     load_zones_by_bank,
 )
 from opengrid.guardian.service import GuardianService
@@ -421,6 +422,12 @@ async def main() -> None:
     calibration_queue = PgCalibrationQueuePort(pool)
 
     service = GuardianService(ports=ports, config=guardian_cfg, signing_seed=signing_seed)
+    # r3.4.3 HIGH-A: G-04's signed anchors survive a restart (live leases only). A failed read starts on
+    # telemetry, which the engine also falls back to after the first veto (DISPATCH contract).
+    try:
+        service.seed_signed_anchors(await load_signed_anchors(pool, now=datetime.now(UTC)))
+    except Exception:
+        logger.exception("signed-anchor reload failed: G-04 starts on telemetry")
     guardian_module.configure(service)
 
     mqtt_password = resolve_secret("OG_MQTT_GUARDIAN_PASSWORD")

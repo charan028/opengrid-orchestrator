@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from opengrid.allocator.models import HubSnapshot
 from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.core.reasons import K13_SHORTFALL_REASONS, R_AS_RELEASE, R_SUBSTITUTION
+from opengrid.core.services import HOLD_SERVICE_TYPES
 from opengrid.invariants import checks
 from opengrid.invariants.models import CheckState, InvariantsSummary, Violation
 
@@ -188,17 +189,22 @@ async def fetch_bank_capability_inputs(
 async def fetch_lock_commitment_candidates(
     pool: AsyncConnectionPool, *, since: datetime, now: datetime, limit: int = _DEFAULT_BATCH_LIMIT
 ) -> tuple[list[tuple[UUID, datetime, datetime, float]], datetime | None]:
-    """K13: active commitments (`supersedes IS NULL`) whose interval has fully elapsed
+    """K13: current commitments -- rows no later commitment supersedes -- whose interval has fully elapsed
     (`interval_end <= now`) since the last watermark -- one row per (obligation, interval), bounded by
     the `interval_end` range plus `limit`. Callers combine each candidate with its own
     `fetch_grant_cycle_series`/`fetch_covering_trace_info` (`invariants.checks.find_dip` decides whether
     it actually dipped) -- this function only enumerates WHICH commitments need checking. Returns
     `(rows, new_watermark)`; `new_watermark` is the latest `interval_end` seen.
+
+    `supersedes` points from the NEW row to the one it replaces, so `supersedes IS NULL` selected every
+    ORIGINAL commitment -- including ones already replaced -- and missed every replacement (r3.4.3): the
+    current row is the one nothing supersedes.
     """
     sql = """
         SELECT c.obligation_id, c.interval_start, c.interval_end, c.committed_kw
         FROM og.commitment c
-        WHERE c.supersedes IS NULL AND c.interval_end <= %(now)s AND c.interval_end > %(since)s
+        WHERE NOT EXISTS (SELECT 1 FROM og.commitment c2 WHERE c2.supersedes = c.commitment_id)
+          AND c.interval_end <= %(now)s AND c.interval_end > %(since)s
         ORDER BY c.interval_end
         LIMIT %(limit)s
     """
@@ -266,6 +272,54 @@ async def fetch_grant_cycle_series(
         )
         rows = await cur.fetchall()
     return [(r[0], float(r[1]), r[2]) for r in rows]
+
+
+_HOLD_WINDOWS_SQL = """
+    SELECT d.start_at, LEAST(d.end_at, COALESCE(d.cancelled_at, d.end_at)),
+           LEAST(COALESCE(ABS(d.requested_kw)::float8, %(committed_kw)s::float8), %(committed_kw)s::float8)
+    FROM og.obligation o
+    JOIN og.as_deployment d
+      ON d.obligation_id = o.obligation_id OR (d.obligation_id IS NULL AND o.service_type = 'ERCOT_AS')
+    WHERE o.obligation_id = %(obligation_id)s
+      AND d.start_at < %(window_end)s AND LEAST(d.end_at, COALESCE(d.cancelled_at, d.end_at)) > %(window_start)s
+    ORDER BY d.start_at
+"""
+
+
+async def fetch_hold_windows(
+    pool: AsyncConnectionPool,
+    *,
+    obligation_id: UUID,
+    committed_kw: float,
+    window_start: datetime,
+    window_end: datetime,
+) -> tuple[checks.HoldWindow, ...] | None:
+    """K13 for capacity holds (`core.services.HOLD_SERVICE_TYPES`: ERCOT_AS, REGULATED_CAPACITY): the
+    `og.as_deployment` windows covering `obligation_id` inside `[window_start, window_end)` -- its own rows,
+    plus the fleet-wide (`obligation_id IS NULL`) ones for an ERCOT_AS award, the same match the AS hold check
+    uses -- each ending at `min(end_at, cancelled_at)` with its deployed kW (`checks.HoldWindow`). Returns
+    `None` for any other service type (its floor stays `committed_kw` throughout), and `()` for a hold with no
+    deployment in the window (floor 0: an undeployed hold granted 0 kW is not a K13 dip). Bounded by one
+    obligation's deployments in one window."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT service_type FROM og.obligation WHERE obligation_id = %(obligation_id)s",
+            {"obligation_id": obligation_id},
+        )
+        row = await cur.fetchone()
+        if row is None or row[0] not in HOLD_SERVICE_TYPES:
+            return None
+        await cur.execute(
+            _HOLD_WINDOWS_SQL,
+            {
+                "obligation_id": obligation_id,
+                "committed_kw": committed_kw,
+                "window_start": window_start,
+                "window_end": window_end,
+            },
+        )
+        rows = await cur.fetchall()
+    return tuple(checks.HoldWindow(r[0], r[1], float(r[2])) for r in rows)
 
 
 async def fetch_covering_trace_info(

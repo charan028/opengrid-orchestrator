@@ -37,6 +37,7 @@ from opengrid.core import geo, manual_targets
 from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.core.pq import OffsetVector
+from opengrid.guardian import checks
 from opengrid.guardian.config import DEFAULT_CLOCK_CACHE_S, ClockSource
 from opengrid.guardian.ports import (
     ActiveObligation,
@@ -118,6 +119,25 @@ ORDER BY created_at DESC LIMIT 1
 _STOP_STATE_SQL = """
 SELECT action FROM og.stop_event WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s
 ORDER BY created_at DESC LIMIT 1
+"""
+
+_LAST_ENGAGE_SQL = """
+SELECT max(created_at) FROM og.stop_event
+WHERE scope_kind = %(scope_kind)s AND scope_ref = %(scope_ref)s AND action = 'ENGAGE'
+"""
+
+#: r3.4.3 HIGH-A: every batch this guardian signed recently, with the proposal it signed (the RT_ALLOCATION
+#: trace row G-14 required before signing). `load_signed_anchors` keeps the live-lease setpoints.
+_SIGNED_ANCHORS_SQL = """
+SELECT v.signed_at, t.payload
+FROM og.verdict v
+JOIN LATERAL (
+    SELECT tr.payload FROM og.trace tr
+    WHERE tr.decision_type = 'RT_ALLOCATION' AND tr.payload ->> 'command_batch_id' = v.command_batch_id::text
+    ORDER BY tr.seq DESC LIMIT 1
+) t ON true
+WHERE v.outcome = 'PASS' AND v.signed_at IS NOT NULL AND v.signed_at > %(since)s
+ORDER BY v.signed_at
 """
 
 _PROPOSAL_SQL = """
@@ -399,6 +419,31 @@ class ConfigMobileUnitPort:
         return geo.at_home_station(await self._position(hub_id), site, radius_km=self._radius_km)
 
 
+#: Hubs out of service for firmware: the job states the engine's executor excludes (IN_FLIGHT_JOB_STATES plus a
+#: PENDING job whose command was already requested), in a campaign that was not aborted -- as
+#: `firmware.repo._IN_FLIGHT_SQL` counts them, per hub.
+_FIRMWARE_UPDATING_SQL = """
+SELECT DISTINCT j.hub_id
+FROM og.firmware_job j JOIN og.firmware_campaign c ON c.campaign_id = j.campaign_id
+WHERE j.bank_id::text = %(bank_id)s
+  AND (j.state IN ('SENT', 'UPDATING') OR (j.state = 'PENDING' AND j.command_id IS NOT NULL))
+  AND c.state <> 'ABORTED'
+"""
+
+
+class PgFirmwareUpdatingPort:
+    """G-19 capability evidence (r3.4.3, with DISPATCH's M1): the guardian's own read of hubs a firmware campaign
+    has taken out of service, so an R-COMMIT-LOCK-OVERRIDE-L0 for them corroborates."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def updating_hub_ids(self, bank_id: str) -> set[str]:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_FIRMWARE_UPDATING_SQL, {"bank_id": bank_id})
+            return {str(r[0]) for r in await cur.fetchall()}
+
+
 class PgManualTargetPort:
     """G-19 R-OPERATOR-OVERRIDE: the guardian's own read of the operator targets, through the ONE status rule
     (`core.manual_targets.effective_targets`, shared with the engine and the API): only an ACTIVE target counts
@@ -566,6 +611,12 @@ class PgSafeStopPort:
             return False
         return bool(row[0] == "ENGAGE")
 
+    async def last_engaged_at(self, scope: SafeStopScope, scope_ref: str) -> datetime | None:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_LAST_ENGAGE_SQL, {"scope_kind": scope, "scope_ref": scope_ref})
+            row = await cur.fetchone()
+        return row[0] if row is not None else None
+
 
 def _trace_payload_to_proposal(payload: dict[str, Any]) -> ProposedBatch:
     items = [
@@ -594,6 +645,26 @@ def _trace_payload_to_proposal(payload: dict[str, Any]) -> ProposedBatch:
         items=items,
         is_firm_event=bool(payload.get("is_firm_event", False)),
     )
+
+
+async def load_signed_anchors(
+    pool: AsyncConnectionPool, *, now: datetime, lookback_s: float = 300.0
+) -> dict[str, tuple[float, datetime, datetime]]:
+    """r3.4.3 HIGH-A: G-04's signed anchors after a guardian restart -- per hub, the net setpoint of the LATEST
+    batch this guardian signed (og.verdict PASS, its proposal from the RT_ALLOCATION trace) whose lease is still
+    live at `now`: `(setpoint_kw, signed_at, lease_expires_at)`, the shape `GuardianService._last_signed` keeps.
+    `lookback_s` only bounds the scan (a lease is seconds long); a batch whose lease has lapsed contributes
+    nothing. A later signature for a hub replaces an earlier one, even if the later lease is shorter."""
+    since = datetime.fromtimestamp(now.timestamp() - lookback_s, tz=UTC)
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_SIGNED_ANCHORS_SQL, {"since": since})
+        rows = await cur.fetchall()
+    anchors: dict[str, tuple[float, datetime, datetime]] = {}
+    for signed_at, payload in rows:  # oldest first: the latest signature per hub wins
+        proposal = _trace_payload_to_proposal(dict(payload))
+        for item in checks.hub_setpoints(proposal.items):
+            anchors[item.hub_id] = (item.p_kw_setpoint, signed_at, proposal.expires_at)
+    return {hub: entry for hub, entry in anchors.items() if entry[2] > now}
 
 
 class PgProposalPort:
@@ -1133,6 +1204,7 @@ def build_pg_ports(
         topology=topology,
         territory=territory,
         manual_targets=PgManualTargetPort(pool),
+        firmware_updating=PgFirmwareUpdatingPort(pool),
         pq=PqPorts(
             envelopes=PgPqEnvelopeStatePort(pool),
             measurements=PgPqMeasurementPort(pool),

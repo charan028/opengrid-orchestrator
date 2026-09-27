@@ -369,12 +369,20 @@ async def _run_k13_checks(pool: AsyncConnectionPool, now: datetime) -> dict[str,
                 (str(obligation_id), interval_start, interval_end, committed_kw, cycles, shortfall_events)
             )
 
+        hold_windows = await queries.fetch_hold_windows(
+            pool,
+            obligation_id=obligation_id,
+            committed_kw=committed_kw,
+            window_start=interval_start,
+            window_end=interval_end,
+        )
         dip = checks.find_dip(
             interval_start=interval_start,
             interval_end=interval_end,
             committed_kw=committed_kw,
             cycles=cycles,
             max_gap_s=_k13_max_grant_gap_s,
+            hold_windows=hold_windows,
         )
         if dip is None:
             continue
@@ -391,7 +399,7 @@ async def _run_k13_checks(pool: AsyncConnectionPool, now: datetime) -> dict[str,
                 str(obligation_id),
                 interval_start,
                 interval_end,
-                committed_kw,
+                dip.floor_kw,  # the floor in force at the dip: committed_kw, or a hold's deployed kW
                 dip,
                 earliest_covering_at,
                 covered_cycle_ids,

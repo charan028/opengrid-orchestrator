@@ -56,6 +56,7 @@ from opengrid.allocator.pq_eligibility import EligibilityResult, HubEligibilityV
 from opengrid.allocator.price_response import price_responsive_schedule
 from opengrid.allocator.substitution import realize_obligation
 from opengrid.core.physics import hub_sustainable_discharge_kw
+from opengrid.core.services import DIST_DEFERRAL_SERVICE_TYPE
 from opengrid.market.territory import FREE, check_territory
 
 _EPS = 1e-9
@@ -206,7 +207,7 @@ def cycle(
         # per DIST_DEFERRAL call on this bank. Its relief is applied to at most one obligation (the
         # first DIST_DEFERRAL call in deterministic order) rather than compounded across several.
         pi_extra_kw = 0.0
-        dist_deferral_calls = [c for c in calls if c.service_type == "DIST_DEFERRAL"]
+        dist_deferral_calls = [c for c in calls if c.service_type == DIST_DEFERRAL_SERVICE_TYPE]
         if dist_deferral_calls and bank_id in scada:
             pi_state = pi_states.get(bank_id, PiState())
             pi = DistDeferralPI(bank)
@@ -270,7 +271,11 @@ def cycle(
                 grants.append(_zero_grant(bank_id, oid, reasons.R_GRANT_AS_HOLD))
                 continue
 
-            if call.service_type == "DIST_DEFERRAL" and not pi_extra_applied and pi_extra_kw > _EPS:
+            if (
+                call.service_type == DIST_DEFERRAL_SERVICE_TYPE
+                and not pi_extra_applied
+                and pi_extra_kw > _EPS
+            ):
                 tier_granted += pi_extra_kw
                 reason_code = reasons.R_GRANT_DIST_DEFERRAL_PI
                 pi_extra_applied = True

@@ -24,6 +24,12 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core.reasons import R_AS_HOLD_SHORT
+from opengrid.core.services import (
+    ERCOT_AS_SERVICE_TYPE,
+    HOLD_SERVICE_TYPES,
+    PJM_CAPACITY_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.core.solar_share import SolarShare
 from opengrid.market.capacity import regulated_capacity_payment
 from opengrid.market.charging import regulated_charging_cost
@@ -173,7 +179,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     # from ever closing as SHORTFALL -- no engine-side lifecycle change is needed.
     # REGULATED_CAPACITY is likewise a capacity hold (08 S3, 09 D1/D2): the utility pays for kW
     # committed, not kWh delivered, so it gets the identical availability treatment as ERCOT_AS.
-    is_capacity_hold_service = ctx.service_type in ("ERCOT_AS", "REGULATED_CAPACITY")
+    is_capacity_hold_service = ctx.service_type in HOLD_SERVICE_TYPES
     if is_capacity_hold_service:
         # og.performance.compliance_pct is NOT NULL (0001_init.sql) -- it must always be a number.
         # 1.0 (100%) while held and available (our default, absent an independent unavailability
@@ -189,7 +195,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     # (R-AS-HOLD-SHORT on the settlement trace, `as_hold_short` in its payload). The payment is unchanged:
     # there is no owner decision on an AS hold penalty yet. --------------------------------------------
     settlement_reasons: list[str] = []
-    if ctx.service_type == "ERCOT_AS" and await backend.fetch_shortfall_risk_open(
+    if ctx.service_type == ERCOT_AS_SERVICE_TYPE and await backend.fetch_shortfall_risk_open(
         obligation_id, interval_start, interval_end
     ):
         settlement_reasons.append(R_AS_HOLD_SHORT)
@@ -255,7 +261,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
             charging_cost_per_kwh = regulated_charging_cost(
                 utility, ctx.zone or "", interval_start
             ).blended_usd_per_kwh
-            if ctx.service_type == "REGULATED_CAPACITY":
+            if ctx.service_type == REGULATED_CAPACITY_SERVICE_TYPE:
                 regulated_capacity_amount = regulated_capacity_payment(
                     committed_kw=ctx.committed_kw,
                     # "price None -> 0" handled here, not inside opengrid.market.capacity.
@@ -316,7 +322,7 @@ async def settle(obligation_id: UUID, interval_start: datetime, interval_end: da
     # invoice_line's insert-only versioning is keyed one row per (contract, obligation, period,
     # line_type), so two independently-versioned LD_PENALTY drafts for the same interval would race
     # each other's next_version() lookup -- one combined amount is the safe, documented choice.
-    if ctx.service_type == "PJM_CAPACITY":
+    if ctx.service_type == PJM_CAPACITY_SERVICE_TYPE:
         pjm_rate = await backend.fetch_pjm_emergency_rate(obligation_id, interval_start, interval_end)
         if pjm_rate is not None:
             delivered_kw = metering.delivered_kwh / duration_hours if duration_hours != 0 else Decimal("0")

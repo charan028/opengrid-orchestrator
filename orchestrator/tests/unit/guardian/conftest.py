@@ -155,6 +155,9 @@ class FakeSafeStop:
     async def is_stopped(self, scope: str, scope_ref: str) -> bool:
         return (scope, scope_ref) in self.stopped
 
+    async def last_engaged_at(self, scope: str, scope_ref: str) -> datetime | None:
+        return getattr(self, "engaged_at", {}).get((scope, scope_ref))
+
 
 class FakeBankMembers:
     """The guardian's own per-bank member snapshots (G-19 override capability evidence)."""

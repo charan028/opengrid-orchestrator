@@ -18,6 +18,14 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from opengrid.core.services import (
+    DATA_CENTER_SERVICE_TYPE,
+    DIST_DEFERRAL_SERVICE_TYPE,
+    ERCOT_AS_SERVICE_TYPE,
+    PARTNER_CAPACITY_SERVICE_TYPE,
+    PJM_CAPACITY_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.market.capacity import HOURS_PER_YEAR
 from opengrid.market.config import HOME_UNIT_CAPEX_USD, HOME_UNIT_KW
 from opengrid.market.economics import ILLUSTRATIVE_OM_FRAC, PeriodTotals
@@ -25,7 +33,14 @@ from opengrid.market.territory import MarketModelError, market_of
 
 #: Services whose revenue is a capacity payment (08 S3.4 "$/kW-out: capacity payments").
 CAPACITY_SERVICE_TYPES = frozenset(
-    {"REGULATED_CAPACITY", "DIST_DEFERRAL", "PARTNER_CAPACITY", "ERCOT_AS", "DATA_CENTER", "PJM_CAPACITY"}
+    {
+        REGULATED_CAPACITY_SERVICE_TYPE,
+        DIST_DEFERRAL_SERVICE_TYPE,
+        PARTNER_CAPACITY_SERVICE_TYPE,
+        ERCOT_AS_SERVICE_TYPE,
+        DATA_CENTER_SERVICE_TYPE,
+        PJM_CAPACITY_SERVICE_TYPE,
+    }
 )
 PLANNING_NOTE = "PLANNING capex/O&M: hardware view $7,000/11 kW, O&M 3%/yr (no og.asset_finance yet)"
 
