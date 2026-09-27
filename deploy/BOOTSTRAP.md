@@ -50,13 +50,17 @@ printed; generated passwords go only to the env files (640 root:opengrid, `api_p
 | `/etc/opengrid/ai_agent.env` (`ANTHROPIC_API_KEY`) | the AI copilot's model tier | optional; the copilot runs its no-model tier |
 
 **Check on the test cluster:** `make bootstrap-check` runs phases c-e into a fresh `og_t_boot` on port 5433 (role
-`og_boot`, secrets under `/srv/ogwork/bootstrap/etc`), never on 5432. Expected on r3.3 + rm-r34, LZ_AEN enabled:
-39/39 migrations; 2,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH, LZ_HOUSTON, LZ_WEST, LZ_AEN; 500 dual-unit)
-plus the substation hub (2,501 `og.hub` rows); 50 home banks plus `bank-sub-LZ_AEN-00` (51); substation asset
+`og_boot`, secrets under `/srv/ogwork/bootstrap/etc`), never on 5432. Expected on r3.4.1 with `--d32` (production's
+blocks: LZ_AEN, LZ_LCRA, LZ_RAYBN): 43/43 migrations; 3,500 home hubs (500 in each of LZ_NORTH, LZ_SOUTH,
+LZ_HOUSTON, LZ_WEST, LZ_AEN, LZ_LCRA, LZ_RAYBN; 700 dual-unit) plus the substation hub and the 8 trucks (3,509
+`og.hub` rows); 70 home banks plus `bank-sub-LZ_AEN-00` and the 8 truck banks (79); substation asset
 `sub-LZ_AEN-00` ACTIVE; utilities AUSTIN_ENERGY ($102/kW-yr) and CPS_ENERGY; the toll contract
-(REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 350
-service transformers, every hub mapped; 17 feeder limits; 8 substation limits; 51 assets; the FLEET charge window
-`22:00-06:00`; 4 firmware catalogue entries from config. With `--d32`: 3,500 hubs and 70 banks.
+(REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 499
+service transformers (490 for the home banks, one each for the substation set and the 8 trucks), every hub mapped;
+23 feeder limits; 7 substation limits; 79 assets (70 HOME_BANK, 1 SUBSTATION, 8 MOBILE_STORAGE); every
+`opengrid.fleet.topology_audit` unmapped count 0 (no ALR-XFMR-UNMAPPED / ALR-BANK-UNMAPPED-TOPOLOGY source); the
+FLEET charge window `22:00-06:00`; 4 firmware catalogue entries from config. A database seeded before r3.4.1 gets
+the missing topology rows from `deploy/scripts/topology_backfill.sh` (dry run by default, insert-only).
 
 ### Database schema: `deploy/scripts/create_schema.sh` and `orchestrator/schema/og_schema.sql`
 
@@ -174,7 +178,7 @@ build, enable the targets once: `systemctl enable opengrid.target ogsim.target`.
 ## 7. Seeds (after the first deploy)
 
 Phase e runs the complete list in order (fleet with the zone blocks, market model, customer services, services,
-topology, trucks); `dev/seed/README.md` describes each seed. By hand, the three SQL seeds are:
+trucks, topology); `dev/seed/README.md` describes each seed. By hand, the three SQL seeds are:
 
 As `opengrid`, with `PGPASSWORD` from `secrets.env`:
 

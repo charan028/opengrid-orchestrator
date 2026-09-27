@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from psycopg import sql
 
 from opengrid.fleet.seed import build_topology, load_sim_fleet_topology_config
+from opengrid.fleet.topology_audit import count_unmapped
 from opengrid.platform.config import load_config
 from opengrid.platform.db import MIGRATIONS_DIR, build_dsn
 
@@ -135,11 +135,10 @@ def check_seeded(c: Checker, cfg: Any, trucks_expected: bool) -> None:
     n_contracts = c.scalar("SELECT count(*) FROM og.contract")
     print(f"  [info] contracts total: {n_contracts}")
 
-    c.check(
-        "hubs without a service transformer",
-        c.scalar("SELECT count(*) FROM og.hub WHERE hub_id LIKE 'hub-%%' AND transformer_id IS NULL"),
-        0,
-    )
+    # Complete topology (dev/seed/topology_seed.py): no ALR-XFMR-UNMAPPED / ALR-BANK-UNMAPPED-TOPOLOGY source
+    # anywhere -- home hubs, the substation set and the trucks alike.
+    for label, n in count_unmapped(c.conn).items():
+        c.check(f"unmapped: {label}", n, 0)
     feeders = {b.feeder_id for b in topo.banks if b.feeder_id}
     n_limits = c.scalar("SELECT count(*) FROM og.feeder_limit")
     c.check("feeder limits", n_limits, f">= {len(feeders)}", ok=n_limits >= len(feeders))
@@ -163,22 +162,17 @@ def check_seeded(c: Checker, cfg: Any, trucks_expected: bool) -> None:
         ok=len(catalogue) >= 1 and c.table_exists("og.firmware_catalogue"),
     )
 
-    truck_table = next(
-        (t for t in ("mobile_unit", "truck", "mobile_truck") if c.table_exists(f"og.{t}")), None
+    # mobile_trucks_seed.sql: each truck is a single-hub bank with a MOBILE_STORAGE og.asset row (0044).
+    n = c.scalar(
+        "SELECT count(*) FROM og.asset a JOIN og.hub h ON h.hub_id = a.asset_id AND h.bank_id = a.bank_id"
+        " WHERE a.asset_class = 'MOBILE_STORAGE'"
     )
-    if truck_table:
-        n = c.scalar(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier("og", truck_table)))
-        c.check(
-            f"trucks (og.{truck_table})",
-            n,
-            ">= 1" if trucks_expected else "any",
-            ok=n >= 1 or not trucks_expected,
-        )
-    else:
-        print(
-            f"  [{'FAIL' if trucks_expected else 'SKIP'}] trucks: no truck table (mobile_trucks seed not in this release)"
-        )
-        c.failures += 1 if trucks_expected else 0
+    c.check(
+        "trucks (MOBILE_STORAGE assets with their hub)",
+        n,
+        ">= 1" if trucks_expected else "any",
+        ok=n >= 1 or not trucks_expected,
+    )
 
 
 def check_live(c: Checker, stale_s: int) -> None:
