@@ -184,3 +184,19 @@ def test_an_operator_clears_a_meter_mismatch_with_a_reason(api, monkeypatch, tra
         ).status_code
         == 404
     )
+
+
+@pytest.mark.parametrize(
+    ("path", "headers"),
+    [
+        ("/og/api/customer/v1/utility/delivery-records", AEN),
+        ("/og/api/customer/delivery-records", CUSTOMER),
+        ("/og/api/delivery/records", VIEWER),
+    ],
+)
+@pytest.mark.parametrize("param", ["since", "until"])
+def test_a_timestamp_without_utc_offset_is_422(api, records, path, headers, param) -> None:
+    naive = T0.replace(tzinfo=None).isoformat()
+    resp = api.get(path, headers=headers, params={param: naive})
+    assert resp.status_code == 422 and "timezone" in resp.text
+    assert api.get(path, headers=headers, params={param: T0.isoformat()}).status_code == 200

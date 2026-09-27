@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 from opengrid.api.auth import Identity, require_operator, require_viewer
 from opengrid.api.deps import get_pool, get_trace_store
@@ -35,8 +35,8 @@ async def list_delivery_records(
     result: str | None = None,
     utility_id: str | None = None,
     call_ids: Annotated[str | None, Query(description="comma-separated call ids")] = None,
-    since: datetime | None = None,
-    until: datetime | None = None,
+    since: AwareDatetime | None = None,
+    until: AwareDatetime | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 200,
 ) -> list[dict[str, Any]]:
     """Delivery records newest first (without their per-bucket series), filtered by service, contract,
