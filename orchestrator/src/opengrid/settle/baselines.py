@@ -35,18 +35,28 @@ from decimal import Decimal
 from typing import get_args
 
 from opengrid.core.models.engine import ServiceType
+from opengrid.core.services import (
+    DATA_CENTER_SERVICE_TYPE,
+    DIST_DEFERRAL_SERVICE_TYPE,
+    ERCOT_AS_SERVICE_TYPE,
+    ERCOT_ENERGY_SERVICE_TYPE,
+    HOME_SERVICE_TYPE,
+    PARTNER_CAPACITY_SERVICE_TYPE,
+    PIPELINE_AC_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.settle.models import MeterSource
 from opengrid.settle.services_extra import EXTRA_METER_SOURCE_BY_SERVICE
 
 METER_SOURCE_BY_SERVICE: dict[ServiceType, MeterSource] = {
-    "HOME": "AMI_INTERVAL",
-    "ERCOT_ENERGY": "DIRECT_HUB_METER",
-    "ERCOT_AS": "DIRECT_HUB_METER",
-    "DIST_DEFERRAL": "SCADA_OUTCOME",
-    "PARTNER_CAPACITY": "DIRECT_HUB_METER",
-    "DATA_CENTER": "AMI_INTERVAL",
-    "PIPELINE_AC": "DIRECT_HUB_METER",
-    "REGULATED_CAPACITY": "DIRECT_HUB_METER",
+    HOME_SERVICE_TYPE: "AMI_INTERVAL",
+    ERCOT_ENERGY_SERVICE_TYPE: "DIRECT_HUB_METER",
+    ERCOT_AS_SERVICE_TYPE: "DIRECT_HUB_METER",
+    DIST_DEFERRAL_SERVICE_TYPE: "SCADA_OUTCOME",
+    PARTNER_CAPACITY_SERVICE_TYPE: "DIRECT_HUB_METER",
+    DATA_CENTER_SERVICE_TYPE: "AMI_INTERVAL",
+    PIPELINE_AC_SERVICE_TYPE: "DIRECT_HUB_METER",
+    REGULATED_CAPACITY_SERVICE_TYPE: "DIRECT_HUB_METER",
     # PJM_CAPACITY, MOBILE_STORAGE, LARGE_LOAD: the SERVICES agent's canonical sources
     # (opengrid.settle.services_extra.EXTRA_METER_SOURCE_BY_SERVICE's own docstring reasoning --
     # MOBILE_STORAGE is AMI_INTERVAL, site-meter-scoped like DATA_CENTER, not hub-metered).
@@ -63,7 +73,7 @@ if set(METER_SOURCE_BY_SERVICE) != set(get_args(ServiceType)):
 
 def has_baseline(service_type: ServiceType) -> bool:
     """HOME has no M&V baseline and posts no invoice line (02a S7.1/S7.3)."""
-    return service_type != "HOME"
+    return service_type != HOME_SERVICE_TYPE
 
 
 def compute_baseline_kwh(

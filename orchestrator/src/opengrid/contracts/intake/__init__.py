@@ -42,6 +42,14 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
+from opengrid.core.services import (
+    DIST_DEFERRAL_SERVICE_TYPE,
+    ERCOT_AS_SERVICE_TYPE,
+    ERCOT_ENERGY_SERVICE_TYPE,
+    HOME_SERVICE_TYPE,
+    PARTNER_CAPACITY_SERVICE_TYPE,
+)
+
 if TYPE_CHECKING:
     # Type-only: `opengrid.forecast.models` has no side effects, but intake still avoids a *runtime*
     # import of the `opengrid.forecast` package itself (module docstring: dependency injected via
@@ -251,7 +259,7 @@ async def run_intake_gate(
 
 
 async def _generate_for_contract(state: _IntakeState, contract: Contract, now: datetime) -> list[Opportunity]:
-    if contract.service_type == "HOME":
+    if contract.service_type == HOME_SERVICE_TYPE:
         # K1 reserve is an L1 envelope constraint (opengrid.core.limits.check_reserve_floor), never a
         # sellable opportunity -- nothing to generate, nothing to trace as a rejection.
         return []
@@ -259,7 +267,7 @@ async def _generate_for_contract(state: _IntakeState, contract: Contract, now: d
         # D-29: a utility toll is reserved once per day for the utility's window (opengrid.contracts.tolling),
         # through the same admission path; idempotent, so running it at every gate is harmless.
         return await run_tolling_contract(state.repo, state.trace, contract, now=now, config=state.tolling)
-    if contract.service_type == "PARTNER_CAPACITY":
+    if contract.service_type == PARTNER_CAPACITY_SERVICE_TYPE:
         # Event-driven only (module docstring): POST /og/api/opportunities or the control plane's
         # partner-call scenario admits these directly; a 15-minute gate has nothing to poll for.
         return []
@@ -267,11 +275,11 @@ async def _generate_for_contract(state: _IntakeState, contract: Contract, now: d
     rules = await state.repo.get_product_rules(contract.contract_id)
     rule = rules[0] if rules else None
 
-    if contract.service_type == "ERCOT_ENERGY":
+    if contract.service_type == ERCOT_ENERGY_SERVICE_TYPE:
         return await _intake_energy(state, contract, rule, now)
-    if contract.service_type == "ERCOT_AS":
+    if contract.service_type == ERCOT_AS_SERVICE_TYPE:
         return await _intake_as(state, contract, rule, now)
-    if contract.service_type == "DIST_DEFERRAL":
+    if contract.service_type == DIST_DEFERRAL_SERVICE_TYPE:
         return await _intake_deferral(state, contract, rule, now)
     return []
 

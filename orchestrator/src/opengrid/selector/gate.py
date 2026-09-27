@@ -33,6 +33,19 @@ from opengrid.core.models.engine import Plan
 from opengrid.core.models.market import ERCOT_COMPETITIVE, Utility, UtilityId
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
 from opengrid.core.reasons import R_DEGRADED_NO_NEW_COMMIT
+from opengrid.core.services import (
+    DATA_CENTER_SERVICE_TYPE,
+    DIST_DEFERRAL_SERVICE_TYPE,
+    ERCOT_AS_SERVICE_TYPE,
+    ERCOT_ENERGY_SERVICE_TYPE,
+    HOME_SERVICE_TYPE,
+    LARGE_LOAD_SERVICE_TYPE,
+    MOBILE_STORAGE_SERVICE_TYPE,
+    PARTNER_CAPACITY_SERVICE_TYPE,
+    PIPELINE_AC_SERVICE_TYPE,
+    PJM_CAPACITY_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.core.solar_share import SolarShare
 from opengrid.core.timeutil import floor_to_interval, to_market_tz
 from opengrid.fleet import bank_feeder as fleet_bank_feeder
@@ -86,22 +99,22 @@ SCHEDULED_HORIZON_INTERVALS = 96  # 24h / 15min, 02a S3.2
 # (`CandidateOpportunity.category`'s docstring). `ERCOT_ENERGY` (spot-like) falls back to `MARKET`.
 # Every `core.models.engine.ServiceType` value must be here (tested).
 _CATEGORY_BY_SERVICE_TYPE: dict[str, Literal["FIRM", "AS", "MARKET"]] = {
-    "HOME": "FIRM",
-    "DIST_DEFERRAL": "FIRM",
-    "PARTNER_CAPACITY": "FIRM",
-    "DATA_CENTER": "FIRM",  # firm bridging capacity (06-service-profiles S4.b)
-    "PIPELINE_AC": "FIRM",
-    "REGULATED_CAPACITY": "FIRM",  # regulated market: selected first, in stage R (09 D3)
-    "PJM_CAPACITY": "MARKET",  # a simulated ISO capacity market (SERVICES agent)
-    "MOBILE_STORAGE": "FIRM",
-    "LARGE_LOAD": "FIRM",
-    "ERCOT_AS": "AS",
-    "ERCOT_ENERGY": "MARKET",
+    HOME_SERVICE_TYPE: "FIRM",
+    DIST_DEFERRAL_SERVICE_TYPE: "FIRM",
+    PARTNER_CAPACITY_SERVICE_TYPE: "FIRM",
+    DATA_CENTER_SERVICE_TYPE: "FIRM",  # firm bridging capacity (06-service-profiles S4.b)
+    PIPELINE_AC_SERVICE_TYPE: "FIRM",
+    REGULATED_CAPACITY_SERVICE_TYPE: "FIRM",  # regulated market: selected first, in stage R (09 D3)
+    PJM_CAPACITY_SERVICE_TYPE: "MARKET",  # a simulated ISO capacity market (SERVICES agent)
+    MOBILE_STORAGE_SERVICE_TYPE: "FIRM",
+    LARGE_LOAD_SERVICE_TYPE: "FIRM",
+    ERCOT_AS_SERVICE_TYPE: "AS",
+    ERCOT_ENERGY_SERVICE_TYPE: "MARKET",
 }
 
 #: Capacity-hold services outside the AS category: a regulated capacity commitment is a need-basis
 #: reservation (09 D9) -- kW locked, energy held for its sustain duration, nothing drained while held.
-_CAPACITY_HOLD_SERVICE_TYPES = frozenset({"REGULATED_CAPACITY"})
+_CAPACITY_HOLD_SERVICE_TYPES = frozenset({REGULATED_CAPACITY_SERVICE_TYPE})
 
 #: 09 S1.3 psi: expected share of a held ERCOT_AS award actually deployed, for its wear (D8). A planning
 #: ASSUMPTION (~30 min/day for Non-Spin/ECRS) until settle measures deployment from og.as_deployment.

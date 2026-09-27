@@ -26,6 +26,7 @@ from opengrid.allocator.energy_hold import (
 from opengrid.allocator.models import HubSnapshot
 from opengrid.core.limits import continuous_power_kw
 from opengrid.core.physics import BankParams, HubParams, bank_capability
+from opengrid.core.services import ERCOT_AS_SERVICE_TYPE
 from opengrid.invariants.models import Violation
 
 # Float-compare tolerances, matching `opengrid.core.limits`' own 1e-9-scale epsilons (no separate,
@@ -601,7 +602,7 @@ class HoldReservation:
 
     @property
     def is_as(self) -> bool:
-        return self.service_type == "ERCOT_AS"
+        return self.service_type == ERCOT_AS_SERVICE_TYPE
 
 
 def _energy_owed_kwh(res: HoldReservation, now: datetime, eta_d: float) -> float:

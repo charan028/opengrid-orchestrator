@@ -28,6 +28,13 @@ from typing import Protocol
 from uuid import UUID
 
 from opengrid.core.models.engine import ServiceType
+from opengrid.core.services import (
+    ERCOT_AS_SERVICE_TYPE,
+    ERCOT_ENERGY_SERVICE_TYPE,
+    HOME_SERVICE_TYPE,
+    PIPELINE_AC_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.settle.models import InvoiceLineDraft, QualityFlag
 
 _AMOUNT_EPSILON = Decimal("0.000001")  # numeric(18,6) column precision
@@ -62,14 +69,14 @@ def draft_invoice_lines(
     `performance_factor` (delivered/committed) would otherwise near-zero the payment on a normal
     hold-not-discharge interval (2026-09-26 live-soak correction, alongside `profitability.
     compute_revenue`'s matching fix for `pnl.revenue`)."""
-    if service_type == "HOME":
+    if service_type == HOME_SERVICE_TYPE:
         return []
 
     # #43 A8: capacity is sold per kW held, not per kWh (committed_kwh = committed_kw x hours).
     committed_kw = committed_kwh / duration_hours if duration_hours > 0 else Decimal("0")
     rate_per_kw = price_per_kwh * duration_hours
 
-    if service_type == "ERCOT_ENERGY":
+    if service_type == ERCOT_ENERGY_SERVICE_TYPE:
         # `rate` reflects what `revenue` was actually priced at (the zone's real-time SPP,
         # profitability.compute_revenue's 2026-09-26 fix), not the opportunity's `price_per_kwh` --
         # showing the stale forward price here would make the invoice line self-contradictory
@@ -83,7 +90,7 @@ def draft_invoice_lines(
                 amount=revenue,
             )
         ]
-    elif service_type == "ERCOT_AS":
+    elif service_type == ERCOT_AS_SERVICE_TYPE:
         lines = [
             InvoiceLineDraft(
                 line_type="CAPACITY_PAYMENT",
@@ -93,7 +100,7 @@ def draft_invoice_lines(
                 amount=committed_kwh * price_per_kwh,
             )
         ]
-    elif service_type == "PIPELINE_AC":
+    elif service_type == PIPELINE_AC_SERVICE_TYPE:
         # 06 S4.a: a flat corridor AC-mitigation service fee -- never scaled by delivered kWh or
         # performance_factor, since the service is continuous line monitoring, not energy delivery.
         lines = [
@@ -105,7 +112,7 @@ def draft_invoice_lines(
                 amount=committed_kwh * price_per_kwh,
             )
         ]
-    elif service_type == "REGULATED_CAPACITY":
+    elif service_type == REGULATED_CAPACITY_SERVICE_TYPE:
         # 08 S3: the utility capacity payment, already computed by opengrid.market.capacity.
         # regulated_capacity_payment (BUILD.md S1 no-duplication) -- never scaled here again.
         lines = [

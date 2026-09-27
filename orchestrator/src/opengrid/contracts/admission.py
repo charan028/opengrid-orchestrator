@@ -19,6 +19,7 @@ from opengrid.contracts.repository import ContractsRepo
 from opengrid.core.models.engine import Contract, Obligation, Opportunity, ProductRule
 from opengrid.core.products import ProductRule as RoundingRule
 from opengrid.core.products import is_feasible, round_quantity
+from opengrid.core.services import DATA_CENTER_SERVICE_TYPE
 from opengrid.trace import TraceStore
 
 
@@ -55,7 +56,7 @@ def _select_product_rule(rules: list[ProductRule]) -> ProductRule | None:
 #: Service types whose admission is gated behind `[contracts.activation]` (06-service-profiles-and-
 #: power-quality.md S9.2's activation-gate item, 03 S2.7): both went live as new/tightened dispatch
 #: profiles the controllers may not yet be ready for, so admission defaults to CLOSED.
-_ACTIVATION_GATED_SERVICE_TYPES = frozenset({"DATA_CENTER"})
+_ACTIVATION_GATED_SERVICE_TYPES = frozenset({DATA_CENTER_SERVICE_TYPE})
 #: `PIPELINE_AC` has no `og.contract.service_type` value of its own yet (unlike `DATA_CENTER`,
 #: 0013_service_type_data_center.sql) -- it is admitted today as a `variant` under an existing service
 #: type (the same convention as `DIST_DEFERRAL`'s `TDU_SB415`/`PARTNER_CAPACITY`'s `EVENT` variants),

@@ -26,6 +26,7 @@ from opengrid.core.pq.constants import (
     DRIFT_OBSERVATION_WINDOW_S_DEFAULT,
     NOMINAL_FREQ_HZ,
 )
+from opengrid.core.services import DATA_CENTER_SERVICE_TYPE, PIPELINE_AC_SERVICE_TYPE
 from opengrid.guardian.pq_ports import AssetState
 from opengrid.pq_ingest import aggregation as pq_ingest_aggregation
 from opengrid.trace import TraceStore
@@ -564,7 +565,7 @@ class TraceStoreAssetTracePort:
 #: `PgProposalPort` reads, `guardian/repo.py`). This adapter reads that same trace payload rather than
 #: introducing a second hub-to-obligation index; if a dedicated hub-level grant table is added later,
 #: point this query at it instead.
-PQ_SENSITIVE_SERVICE_TYPES = frozenset({"DATA_CENTER", "PIPELINE_AC"})
+PQ_SENSITIVE_SERVICE_TYPES = frozenset({DATA_CENTER_SERVICE_TYPE, PIPELINE_AC_SERVICE_TYPE})
 
 _ACTIVE_SENSITIVE_GRANT_SQL = """
 SELECT 1

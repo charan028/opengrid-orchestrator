@@ -32,6 +32,7 @@ from opengrid.allocator import closed_loop_pipeline_ac as pac
 from opengrid.allocator.closed_loop_common import closed_loop_caps
 from opengrid.allocator.models import CycleResult, FleetState, LedgerView, ObligationCall
 from opengrid.core.pq import PqEnvelopeLimits, PqMeasurement
+from opengrid.core.services import DATA_CENTER_SERVICE_TYPE, PIPELINE_AC_SERVICE_TYPE
 from opengrid.engine.settings import DispatchSettings
 from opengrid.site_ingest import (
     CorridorCurrentReading,
@@ -43,7 +44,7 @@ from opengrid.site_ingest import (
 
 logger = logging.getLogger(__name__)
 
-CLOSED_LOOP_SERVICES = frozenset({"DATA_CENTER", "PIPELINE_AC"})
+CLOSED_LOOP_SERVICES = frozenset({DATA_CENTER_SERVICE_TYPE, PIPELINE_AC_SERVICE_TYPE})
 #: How often the obligations' profile/envelope rows are re-read (not every 2 s cycle).
 SPEC_REFRESH_S = 10.0
 _DEFAULT_CYCLE_S = 2.0
@@ -220,7 +221,7 @@ class ClosedLoopRunner:
         self, spec: ClosedLoopSpec, committed: float, available: float, now: datetime, dt_s: float
     ) -> float | None:
         oid = spec.obligation_id
-        if spec.service_type == "DATA_CENTER":
+        if spec.service_type == DATA_CENTER_SERVICE_TYPE:
             params = self._dc_params(committed)
             site_id = _source_id(spec.feedback_signal_ref)
             out = dc.step(
@@ -239,7 +240,7 @@ class ClosedLoopRunner:
             self._dc_states[oid] = out.state
             self._note_mode(oid, out.mode.value, out.reason_code)
             return out.setpoint_kw
-        if spec.service_type == "PIPELINE_AC":
+        if spec.service_type == PIPELINE_AC_SERVICE_TYPE:
             defaults = self._settings.pipeline_ac
             params_pac = pac.PipelineAcParams(
                 line_kv=defaults.line_kv,
@@ -295,7 +296,7 @@ class ClosedLoopRunner:
             if spec.limits is None:
                 continue
             source = _source_id(spec.feedback_signal_ref)
-            if spec.service_type == "DATA_CENTER":
+            if spec.service_type == DATA_CENTER_SERVICE_TYPE:
                 reading = self._signals.latest_site(spec.customer_id, source) if source else None
                 meter = self._feedback(spec, self._dc_params(1.0).freshness_s, now)
                 out[oid] = (

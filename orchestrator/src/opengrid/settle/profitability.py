@@ -36,6 +36,11 @@ from decimal import Decimal
 
 from opengrid.core.economics import wear_cost
 from opengrid.core.models.engine import ServiceType
+from opengrid.core.services import (
+    ERCOT_AS_SERVICE_TYPE,
+    ERCOT_ENERGY_SERVICE_TYPE,
+    REGULATED_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.settle.models import PenaltyParams, PnlBreakdown
 
 _ZERO = Decimal("0")
@@ -82,11 +87,11 @@ def compute_revenue(
     ERCOT_ENERGY revenue was settling at $0 despite real delivered energy and a live SPP feed).
     `price_per_kwh` is still used for every other, non-market-dispatch service (its own contract
     price is the right basis there, e.g. a regulated or capacity-hold rate)."""
-    if service_type == "ERCOT_AS":
+    if service_type == ERCOT_AS_SERVICE_TYPE:
         return committed_kwh * price_per_kwh + delivered_kwh * discharge_spp_per_kwh
-    if service_type == "REGULATED_CAPACITY":
+    if service_type == REGULATED_CAPACITY_SERVICE_TYPE:
         return regulated_capacity_amount if regulated_capacity_amount is not None else _ZERO
-    if service_type == "ERCOT_ENERGY":
+    if service_type == ERCOT_ENERGY_SERVICE_TYPE:
         return delivered_kwh * discharge_spp_per_kwh
     return price_per_kwh * delivered_kwh
 

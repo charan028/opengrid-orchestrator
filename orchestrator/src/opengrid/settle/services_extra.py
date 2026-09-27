@@ -43,6 +43,11 @@ from __future__ import annotations
 from decimal import Decimal
 
 from opengrid.core.models.engine import ServiceType
+from opengrid.core.services import (
+    LARGE_LOAD_SERVICE_TYPE,
+    MOBILE_STORAGE_SERVICE_TYPE,
+    PJM_CAPACITY_SERVICE_TYPE,
+)
 from opengrid.settle.models import MeterSource
 
 #: `opengrid.settle.baselines.METER_SOURCE_BY_SERVICE`'s missing keys for the three new service types
@@ -50,9 +55,9 @@ from opengrid.settle.models import MeterSource
 #: `ERCOT_AS`; `MOBILE_STORAGE` meters at the deployment's site meter like `DATA_CENTER` (S1.1: both are
 #: `SITE_METER`-scoped in their `ServiceProfile.target_scope`).
 EXTRA_METER_SOURCE_BY_SERVICE: dict[ServiceType, MeterSource] = {
-    "PJM_CAPACITY": "DIRECT_HUB_METER",
-    "MOBILE_STORAGE": "AMI_INTERVAL",
-    "LARGE_LOAD": "DIRECT_HUB_METER",
+    PJM_CAPACITY_SERVICE_TYPE: "DIRECT_HUB_METER",
+    MOBILE_STORAGE_SERVICE_TYPE: "AMI_INTERVAL",
+    LARGE_LOAD_SERVICE_TYPE: "DIRECT_HUB_METER",
 }
 
 #: numeric(14,6)/numeric(18,6) column precision (matches `opengrid.settle`'s own `_KWH_EPSILON`/

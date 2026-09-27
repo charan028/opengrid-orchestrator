@@ -25,6 +25,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
+from opengrid.core.services import ERCOT_AS_SERVICE_TYPE, REGULATED_CAPACITY_SERVICE_TYPE
 from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json
 from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.templating import BASE_PATH, templates
@@ -581,7 +582,7 @@ AS_MAX_DEPLOY_MINUTES: dict[str, int] = {
     "TOLLING": 90,
 }
 #: Only an AWARDED AS obligation is a hold that can be deployed; an OFFERED one is just an offer.
-_TOLL_SERVICE_TYPE = "REGULATED_CAPACITY"
+_TOLL_SERVICE_TYPE = REGULATED_CAPACITY_SERVICE_TYPE
 _TOLL_VARIANT = "TOLLING"
 _AS_AWARDED_STATES = frozenset({"COMMITTED", "DELIVERING", "SHORTFALL"})
 
@@ -626,7 +627,7 @@ def as_awards_view(
         # D-29: a tolling obligation (REGULATED_CAPACITY, contract variant TOLLING) is deployed by a
         # utility's call through the same route; anything else that is not an ERCOT_AS award is skipped.
         is_toll = award.get("service_type") == _TOLL_SERVICE_TYPE and product_hint == _TOLL_VARIANT
-        if award.get("service_type") != "ERCOT_AS" and not is_toll:
+        if award.get("service_type") != ERCOT_AS_SERVICE_TYPE and not is_toll:
             continue
         obligation_id = str(award.get("obligation_id") or "")
         deployment = active_by_obligation.get(obligation_id) or all_deployment
