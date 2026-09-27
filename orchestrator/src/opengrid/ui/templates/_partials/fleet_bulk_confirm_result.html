@@ -30,6 +30,10 @@
     {% if failed|length > 20 %}<li>and {{ failed|length - 20 }} more</li>{% endif %}
   </ul>
   {% endif %}
+  {% elif status_code == 503 and outcome_unknown %}
+  <p>{% with status='caution', label='OUTCOME UNKNOWN' %}{% include "_partials/status_badge.html" %}{% endwith %}
+    OUTCOME UNKNOWN &mdash; check the target list before retrying. The API could not confirm whether this was
+    recorded, so it may already be live: look for the operator-target markers on <a href="{{ base_path }}/fleet#fleet-table">the Fleet table</a>. {{ message }}</p>
   {% elif status_code == 503 %}
   <p>{% with status='critical', label='NOT RECORDED' %}{% include "_partials/status_badge.html" %}{% endwith %}
     The API did not record this command (503), so nothing is ramping. Propose it again to retry. {{ message }}</p>

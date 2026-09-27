@@ -351,9 +351,11 @@ def test_truck_detail_names_its_home_station(
             }
         ]
     )
+    # the seeded og.hub lat/lon IS the home station; with no device report the position is UNKNOWN
     body = search_client.get("/og/api/fleet/hubs/trailer-mb-01/detail", headers=VIEWER_HEADERS).json()
     assert body["asset_class"] == "MOBILE"
-    assert body["mobile"]["status"] == "AT_HOME_STATION" and body["mobile"]["charging_allowed"] is False
+    assert body["mobile"]["status"] == "UNKNOWN" and body["mobile"]["charging_allowed"] is False
+    assert body["mobile"]["location"]["lat"] is None and body["mobile"]["location"]["source"] == "device"
     assert body["mobile"]["home_station"]["home_station_id"] == "hs-1"
     stations = search_client.get("/og/api/fleet/home-stations", headers=VIEWER_HEADERS).json()
     assert stations["items"] == [station]
@@ -448,3 +450,114 @@ def test_availability_filter_rejects_unknown_states(search_client: TestClient) -
     assert (
         search_client.get("/og/api/fleet/table?availability=MAYBE", headers=VIEWER_HEADERS).status_code == 422
     )
+
+
+def _truck_detail(
+    search_client: TestClient,
+    rows_store: RecordingStore,
+    monkeypatch: pytest.MonkeyPatch,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    monkeypatch.setattr(fleet_search, "mobile_units", lambda: {"trailer-mb-01": "LZ_AEN"})
+    station = {
+        "home_station_id": "hs-1",
+        "zone": "LZ_AEN",
+        "lat": 30.401,
+        "lon": -97.719,
+        "units": ["trailer-mb-01"],
+    }
+    monkeypatch.setattr(fleet_search, "home_stations", lambda: [station])
+    seed = {
+        "hub_id": "trailer-mb-01",
+        "bank_id": "trailer-mb-01",
+        "zone": "LZ_AEN",
+        "e_kwh": 600,
+        "r_kwh": 60,
+        "p_kw": 250,
+        "lat": 30.401,
+        "lon": -97.719,
+    }
+    rows_store.answers.extend(
+        [
+            [
+                {
+                    "hub": seed,
+                    "state": {"soc_kwh": 300, "p_kw": 0, "last_seen_at": datetime.now(UTC).isoformat()},
+                    "bank": {},
+                }
+            ],
+            [],
+            [],
+            [],
+            [{"hub_id": "trailer-mb-01", "bank_id": "trailer-mb-01", "last_seen_at": None, **report}],
+        ]
+    )
+    body: dict[str, Any] = search_client.get(
+        "/og/api/fleet/hubs/trailer-mb-01/detail", headers=VIEWER_HEADERS
+    ).json()
+    assert any("device_lat" in sql and "og.hub.lat" not in sql for sql, _ in rows_store.calls)
+    return body["mobile"]
+
+
+def test_truck_uses_the_device_reported_position_not_the_seed(
+    search_client: TestClient, rows_store: RecordingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    away = {
+        "device_lat": 30.27,
+        "device_lon": -97.74,
+        "device_info_at": datetime.now(UTC) - timedelta(seconds=20),
+    }
+    m = _truck_detail(search_client, rows_store, monkeypatch, away)
+    assert m["status"] == "AWAY"  # seeded lat/lon is at the station; the device says it left
+    assert (m["location"]["lat"], m["location"]["lon"]) == (30.27, -97.74) and m["location"]["fresh"] is True
+    assert 15 <= m["location"]["age_s"] <= 60
+
+
+def test_truck_at_home_by_the_core_geo_rule(
+    search_client: TestClient, rows_store: RecordingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = {
+        "device_lat": 30.4015,
+        "device_lon": -97.7192,
+        "device_info_at": datetime.now(UTC) - timedelta(seconds=5),
+    }
+    assert _truck_detail(search_client, rows_store, monkeypatch, home)["status"] == "AT_HOME_STATION"
+
+
+def test_truck_with_a_stale_report_is_unknown(
+    search_client: TestClient, rows_store: RecordingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = {
+        "device_lat": 30.401,
+        "device_lon": -97.719,
+        "device_info_at": datetime.now(UTC) - timedelta(minutes=10),
+    }
+    m = _truck_detail(search_client, rows_store, monkeypatch, stale)
+    assert m["status"] == "UNKNOWN" and m["location"]["fresh"] is False and m["location"]["lat"] == 30.401
+
+
+def test_parked_truck_old_report_with_fresh_telemetry_is_at_home(
+    search_client: TestClient, rows_store: RecordingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TRUCKS r3.4.3 stationary rule, applied as G-35 does (telemetry_max_age_s = [health].hub_stale_s)."""
+    parked = {
+        "device_lat": 30.4015,
+        "device_lon": -97.7192,
+        "device_info_at": datetime.now(UTC) - timedelta(minutes=20),
+        "last_seen_at": datetime.now(UTC) - timedelta(seconds=2),
+    }
+    m = _truck_detail(search_client, rows_store, monkeypatch, parked)
+    assert m["status"] == "AT_HOME_STATION" and m["location"]["stationary"] is True
+
+
+async def test_device_positions_pass_hub_stale_s_like_g35(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def spy(rows: Any, now: datetime, **kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {}
+
+    monkeypatch.setattr(fleet_search.geo, "fresh_positions", spy)
+    th = Thresholds(HealthThresholds(hub_stale_s=25.0, hub_offline_s=60.0))
+    await fleet_search.device_positions(RecordingStore(), ["t1"], th, now=NOW)
+    assert seen == {"telemetry_max_age_s": 25.0}

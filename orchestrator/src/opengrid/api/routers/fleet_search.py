@@ -537,16 +537,44 @@ def home_station_sites() -> dict[str, tuple[float, float]]:
 
 
 def unit_at_home(
-    hub_id: str, bank_id: str | None, lat: Any, lon: Any, sites: dict[str, tuple[float, float]]
+    hub_id: str, bank_id: str | None, position: geo.LatLon | None, sites: dict[str, tuple[float, float]]
 ) -> bool | None:
-    """The ONE D-31 at-home rule (`core.geo.at_home_station`, as G-35 and the selector apply it): True at
-    the station, False away, None when the position or the station is unknown."""
+    """The ONE D-31 at-home rule (`core.geo.at_home_station`, as G-35 and the selector apply it) on the
+    unit's fresh DEVICE-REPORTED position: True at the station, False away, None when the position (no
+    fresh report) or the station is unknown."""
     site = sites.get(hub_id) or sites.get(bank_id or "")
-    la, lo = _num(lat), _num(lon)
-    return geo.at_home_station((la, lo) if la is not None and lo is not None else None, site)
+    return geo.at_home_station(position, site)
 
 
-_MOBILE_POSITIONS = "SELECT h.hub_id, h.bank_id, h.lat, h.lon {from_} WHERE {where} AND {asset} = 'MOBILE'"
+#: `core.geo.DEVICE_POSITIONS_SQL` (the one query G-35 and the selector run), with its named `ids` bound
+#: positionally for `fleet_rows`: never `og.hub.lat/lon`, which is the seeded home station.
+_DEVICE_POSITIONS = geo.DEVICE_POSITIONS_SQL.replace("%(ids)s", "%s")
+
+
+async def device_positions(
+    store: FleetRowsStore, ids: list[str], th: Thresholds, *, now: datetime
+) -> tuple[dict[str, geo.LatLon], dict[str, dict[str, Any]]]:
+    """(trusted positions by hub AND bank id -- `core.geo.fresh_positions` --, the raw report row by hub id)
+    for the mobile units `ids`. Trusted exactly as G-35 and the selector trust them: a report younger than
+    `MOBILE_POSITION_MAX_AGE_S`, or the stationary rule while the unit's telemetry is younger than
+    `[health].hub_stale_s`. A database without the device columns reads as no report (guarded)."""
+    rows = await _optional_rows(store, _DEVICE_POSITIONS, (ids, ids)) if ids else []
+    reports = [
+        (
+            r["hub_id"],
+            r.get("bank_id"),
+            r.get("device_lat"),
+            r.get("device_lon"),
+            _parse_ts(r.get("device_info_at")),
+            _parse_ts(r.get("last_seen_at")),
+        )
+        for r in rows
+    ]
+    fresh = geo.fresh_positions(reports, now, telemetry_max_age_s=th.health.hub_stale_s)
+    return fresh, {str(r["hub_id"]): r for r in rows}
+
+
+_MOBILE_POSITIONS = "SELECT h.hub_id, h.bank_id {from_} WHERE {where} AND {asset} = 'MOBILE'"
 
 
 async def mobile_positions_at_home(
@@ -562,11 +590,19 @@ async def mobile_positions_at_home(
     sql += " ORDER BY h.hub_id LIMIT %s"
     rows = await store.fleet_rows(sql, (*where.params, *asset.params, 2 * len(th.mobile)))
     sites = home_station_sites()
+    fresh, _reports = await device_positions(
+        store, [str(r["hub_id"]) for r in rows], th, now=datetime.now(UTC)
+    )
     return [
         {
             "hub_id": str(r["hub_id"]),
             "bank_id": r.get("bank_id"),
-            "at_home": unit_at_home(str(r["hub_id"]), r.get("bank_id"), r.get("lat"), r.get("lon"), sites),
+            "at_home": unit_at_home(
+                str(r["hub_id"]),
+                r.get("bank_id"),
+                fresh.get(str(r["hub_id"])) or fresh.get(str(r.get("bank_id") or "")),
+                sites,
+            ),
         }
         for r in rows
     ]
@@ -939,17 +975,35 @@ async def _asset_detail(
     bank_id = str(hub.get("bank_id") or "")
     if hub_id in th.mobile or bank_id in th.mobile:
         station = next((s for s in home_stations() if hub_id in s["units"] or bank_id in s["units"]), None)
-        lat, lon = _num(hub.get("lat")), _num(hub.get("lon"))
         site: dict[str, tuple[float, float]] = {}
         if station is not None and station.get("lat") is not None and station.get("lon") is not None:
             site[hub_id] = (float(station["lat"]), float(station["lon"]))
-        at_home = unit_at_home(hub_id, bank_id, lat, lon, site) is True
+        # The DEVICE-REPORTED position (as G-35 and the selector read it), never og.hub.lat/lon: that is
+        # the seed, i.e. the home station, and never moves (fix-trucks-r342).
+        now = datetime.now(UTC)
+        fresh, reports = await device_positions(store, [hub_id, bank_id], th, now=now)
+        report = reports.get(hub_id) or {}
+        reported_at = _parse_ts(report.get("device_info_at"))
+        position = fresh.get(hub_id) or fresh.get(bank_id)
+        at_home = unit_at_home(hub_id, bank_id, position, site)
         return (
             "MOBILE",
             {
                 "home_station": station,
-                "location": {"lat": lat, "lon": lon},
-                "status": "AT_HOME_STATION" if at_home else "AWAY",
+                "location": {
+                    "lat": _num(report.get("device_lat")),
+                    "lon": _num(report.get("device_lon")),
+                    "reported_at": reported_at.isoformat() if reported_at else None,
+                    "age_s": round((now - reported_at).total_seconds(), 1) if reported_at else None,
+                    "fresh": position is not None,
+                    # trusted although older than max_age_s: parked, with fresh telemetry (stationary rule)
+                    "stationary": position is not None
+                    and reported_at is not None
+                    and (now - reported_at).total_seconds() > geo.MOBILE_POSITION_MAX_AGE_S,
+                    "max_age_s": geo.MOBILE_POSITION_MAX_AGE_S,
+                    "source": "device",
+                },
+                "status": {True: "AT_HOME_STATION", False: "AWAY", None: "UNKNOWN"}[at_home],
                 "charging_allowed": False,
                 "charging_note": "Charges only at its home station (D-31); held off until a deployment "
                 "schedule exists (the gate fails closed).",

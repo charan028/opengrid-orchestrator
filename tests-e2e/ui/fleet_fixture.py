@@ -293,7 +293,16 @@ def detail(hub_id: str) -> dict[str, Any]:
     mobile = (
         {
             "home_station": HOME_STATIONS["items"][0],
-            "location": {"lat": hub["lat"], "lon": hub["lon"]},
+            # device-reported (fresh, away from the seeded station)
+            "location": {
+                "lat": hub["lat"],
+                "lon": hub["lon"],
+                "reported_at": hub["last_seen_at"],
+                "age_s": 20.0,
+                "fresh": True,
+                "max_age_s": 300.0,
+                "source": "device",
+            },
             "status": "AWAY",
             "charging_allowed": False,
             "charging_note": "D-31",

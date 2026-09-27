@@ -254,6 +254,13 @@ def parse_hub_ids(raw: str | None) -> list[str]:
     return list(seen)
 
 
+def outcome_unknown(exc: ApiUnavailable) -> bool:
+    """The API's 503 "outcome unknown" (the trace store failed and the write could not be re-checked: the
+    target may be live), as opposed to its 503 "not recorded" (nothing will ramp)."""
+    detail = exc.detail.get("detail", exc.detail) if isinstance(exc.detail, dict) else exc.detail
+    return "outcome unknown" in f"{detail} {exc}".lower()
+
+
 def _confirm_dialog_context(
     *,
     dialog_id: str,
@@ -953,7 +960,12 @@ async def confirm_bulk_command(request: Request, proposal_id: str) -> HTMLRespon
         return templates.TemplateResponse(
             request,
             "_partials/fleet_bulk_confirm_result.html",
-            {"result": result, "status_code": exc.status_code, "message": str(exc)},
+            {
+                "result": result,
+                "status_code": exc.status_code,
+                "message": str(exc),
+                "outcome_unknown": outcome_unknown(exc),
+            },
         )
     return templates.TemplateResponse(
         request,
@@ -985,7 +997,12 @@ async def confirm_command(request: Request, proposal_id: str) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
             "_partials/fleet_command_confirm_result.html",
-            {"result": result, "status_code": exc.status_code, "message": str(exc)},
+            {
+                "result": result,
+                "status_code": exc.status_code,
+                "message": str(exc),
+                "outcome_unknown": outcome_unknown(exc),
+            },
         )
     return templates.TemplateResponse(
         request,
@@ -1080,6 +1097,7 @@ async def cancel_target(request: Request, trace_id: str) -> HTMLResponse:
                 "message": str(exc),
                 "statuses": statuses if isinstance(statuses, list) else [],
                 "trace_id": trace_id,
+                "outcome_unknown": outcome_unknown(exc),
             },
         )
     return templates.TemplateResponse(
