@@ -216,6 +216,10 @@ anchor_key_path = "/etc/opengrid/trace_anchor_ed25519.key"
 [safestop]
 key_path = "/etc/opengrid/safestop_ed25519.key"
 # confirm_window_s (default 30) is og-safestop's PROPOSE->CONFIRM window; og-api's safe-stop proposal uses it.
+# K8 fail closed: seconds the stop publish connection or the L2 listener may stay down before og-safestop exits
+# for a systemd restart -- the same as [guardian].mqtt_down_exit_s. Both stop-path connections retry from 1 s,
+# at most 5 s apart, so a broker blip well under this never restarts the process.
+mqtt_down_exit_s = 60
 # RESERVED, currently unused: no code reads ramp_*_s; the hub simulator ramps every scope to 0 kW over its
 # own stop_ramp_s (4.0 s, integration-sims fleet config).
 ramp_bank_s = 30

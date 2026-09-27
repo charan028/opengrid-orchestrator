@@ -38,7 +38,10 @@ logger = logging.getLogger(__name__)
 #: daemon's publishing client `og-safestop`, so this subscriber can reconnect on its own.
 L2_PROCESS_NAME = "safestop-l2"
 INSTRUCTION_TOPIC_SUFFIX = "scada/instruction/+"
-DEFAULT_RECONNECT_DELAY_S = 5.0
+#: Stop-path reconnect backoff (r3.4.4 live: 5-10-20 s let a 20 s broker blip run past the process's exit timer and
+#: restart og-safestop): retry from 1 s, never waiting more than 5 s, well inside `safestop.mqtt_down_exit_s`.
+DEFAULT_RECONNECT_DELAY_S = 1.0
+DEFAULT_MAX_BACKOFF_S = 5.0
 
 #: (bank_id, reason, initiator_ref) -> engage a BANK stop with initiator_kind UTILITY.
 EngageFn = Callable[[str, str, str], Awaitable[object]]
@@ -215,6 +218,7 @@ def build_l2_session(
     already_acted_fn: AlreadyActedFn,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     min_backoff_s: float = DEFAULT_RECONNECT_DELAY_S,
+    max_backoff_s: float = DEFAULT_MAX_BACKOFF_S,
     ensure_published_fn: EnsurePublishedFn | None = None,
     record_lift_fn: RecordLiftFn | None = None,
 ) -> MqttSession:
@@ -251,4 +255,5 @@ def build_l2_session(
         subscriptions=[(topic(cfg, INSTRUCTION_TOPIC_SUFFIX), 1)],
         on_message=on_message,
         min_backoff_s=min_backoff_s,
+        max_backoff_s=max_backoff_s,
     )

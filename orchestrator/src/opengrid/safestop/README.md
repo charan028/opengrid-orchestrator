@@ -69,6 +69,11 @@ dead-letter alerts are one per entry, not coalesced into a single summary alert.
 `og_mqtt_reconnects_total{client="safestop"|"safestop-l2"}` and `og_mqtt_connected`. The guardian's is
 `[metrics].guardian_port` (9103).
 
+Both stop-path MQTT connections (`safestop` publishing, `safestop-l2` listening) reconnect under the same client id
+from 1 s, doubling to at most 5 s between attempts. While either is down no heartbeat is written; past
+`[safestop].mqtt_down_exit_s` (default **60** s, the guardian's value) the process exits for a systemd restart. A
+broker blip of tens of seconds therefore recovers in place.
+
 ## Keys
 
 `python -m opengrid.safestop.keys keygen --key-id safestop-2026a --pubkey-out

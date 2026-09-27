@@ -43,6 +43,8 @@ from opengrid.safestop.confirmation import (
     UnknownProposalError,
 )
 from opengrid.safestop.keys import load_signing_key
+from opengrid.safestop.l2_intake import DEFAULT_MAX_BACKOFF_S as L2_MAX_BACKOFF_S
+from opengrid.safestop.l2_intake import DEFAULT_RECONNECT_DELAY_S as L2_MIN_BACKOFF_S
 from opengrid.safestop.l2_intake import build_l2_session
 from opengrid.safestop.mqtt_publish import AiomqttStopPublisher
 from opengrid.safestop.pg_backend import PgStopEventBackend, listen_for_requests, retry_trace_conflict
@@ -63,8 +65,9 @@ GUARDIAN_PUBLIC_KEY_LENGTH = 32
 #: hub may be offline and still hold its in-memory stop set; after that a reconnecting hub that lost its
 #: memory starts unstopped anyway, which is correct once the stop is released.
 DEFAULT_RELEASE_RETAIN_S = 86_400.0
-#: K8 fail closed: seconds the stop publish connection may stay down before the process exits for a restart.
-DEFAULT_MQTT_DOWN_EXIT_S = 30.0
+#: K8 fail closed: seconds the stop publish connection (or the L2 listener) may stay down before the process exits for
+#: a restart -- the guardian's value (r3.4.4 live: at 30 s every ~15-20 s broker blip restarted og-safestop).
+DEFAULT_MQTT_DOWN_EXIT_S = 60.0
 #: og-safestop's /metrics port (02b S1.2's process table), e.g. og_mqtt_reconnects_total{client="safestop"}.
 DEFAULT_METRICS_PORT = 9106
 
@@ -164,6 +167,8 @@ async def main(cfg: Config | None = None) -> None:
     client = MqttSession(
         lambda: build_client(cfg, username=mqtt_username, password=mqtt_password, process="safestop"),
         name="safestop",
+        min_backoff_s=L2_MIN_BACKOFF_S,  # the stop path retries fast: 1 s, at most 5 s apart
+        max_backoff_s=L2_MAX_BACKOFF_S,
     )
     mqtt_down_exit_s = float(cfg.get("safestop.mqtt_down_exit_s", DEFAULT_MQTT_DOWN_EXIT_S))
     publisher = AiomqttStopPublisher(client=client, config=cfg)
