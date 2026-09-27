@@ -1,0 +1,128 @@
+{{- /* Migrations (deploy/scripts/create_schema.sh) and seeds (bootstrap_from_scratch.sh --phase e) as plain Jobs (not hooks), so `helm upgrade --wait --wait-for-jobs` converges in one
+pass: the app pods' wait-schema initContainers hold them until the migrate Job is done. Job names carry a hash of
+their inputs: an unchanged release leaves the finished Job alone (idempotent); a new image or zone set runs again.
+install.sh --phase migrate|seed deletes the Job first to force a re-run. */ -}}
+{{- $fn := include "og.fullname" . -}}
+{{- $migrateHash := include "og.tag" . | sha256sum | trunc 8 -}}
+{{- $seedHash := printf "%s|%s" (include "og.tag" .) .Values.zones | sha256sum | trunc 8 -}}
+{{- range $job := list (dict "name" "migrate" "hash" $migrateHash "args" (list "migrate"))
+                       (dict "name" "seed" "hash" $seedHash "args" (list "seed")) }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fn }}-{{ $job.name }}-{{ $job.hash }}
+  labels:
+    {{- include "og.labels" (dict "root" $ "component" $job.name) | nindent 4 }}
+spec:
+  backoffLimit: {{ $.Values.jobs.backoffLimit }}
+  activeDeadlineSeconds: {{ $.Values.jobs.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "og.labels" (dict "root" $ "component" $job.name) | nindent 8 }}
+        opengrid.io/db-client: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- include "og.imagePullSecrets" $ | nindent 6 }}
+      securityContext:
+        {{- include "og.podSecurityContext" $ | nindent 8 }}
+      containers:
+        - name: {{ $job.name }}
+          image: {{ include "og.image" (dict "root" $ "which" "orchestrator") }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args: {{ toJson $job.args }}
+          env:
+            {{- include "og.dbEnv" $ | nindent 12 }}
+            - name: OG_ZONES
+              value: {{ $.Values.zones | quote }}
+            {{- if and (eq $job.name "migrate") (not $.Values.postgres.external.enabled) }}
+            # create_schema.sh's admin connection (role, database, schema og); the bundled server's superuser
+            - name: OG_PG_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.db }}
+                  key: POSTGRES_PASSWORD
+            {{- end }}
+          securityContext:
+            {{- include "og.containerSecurityContext" $ | nindent 12 }}
+          resources:
+            {{- toYaml $.Values.jobs.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "og.runVolumeMounts" $ | nindent 12 }}
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        {{- include "og.runVolumes" $ | nindent 8 }}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+{{- end }}
+---
+{{- /* og-lifecycle: suspended by default, like production's og-lifecycle.timer (BOOTSTRAP.md section 9). Its cold
+store is the cold/ directory of og-settle's PVC; the pod is scheduled next to og-settle so the ReadWriteOnce volume
+can be shared (a separate PVC would stay Pending under WaitForFirstConsumer and stall helm --wait). */}}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fn }}-lifecycle
+  labels:
+    {{- include "og.labels" (dict "root" . "component" "lifecycle") | nindent 4 }}
+spec:
+  schedule: {{ .Values.lifecycle.schedule | quote }}
+  suspend: {{ .Values.lifecycle.suspend }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3000
+      template:
+        metadata:
+          labels:
+            {{- include "og.labels" (dict "root" . "component" "lifecycle") | nindent 12 }}
+            opengrid.io/db-client: "true"
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      {{- include "og.selector" (dict "root" . "component" "settle") | nindent 22 }}
+          {{- include "og.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            {{- include "og.podSecurityContext" . | nindent 12 }}
+          containers:
+            - name: lifecycle
+              image: {{ include "og.image" (dict "root" . "which" "orchestrator") }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args: ["lifecycle"]
+              env:
+                {{- include "og.dbEnv" . | nindent 16 }}
+              securityContext:
+                {{- include "og.containerSecurityContext" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.lifecycle.resources | nindent 16 }}
+              volumeMounts:
+                {{- include "og.runVolumeMounts" . | nindent 16 }}
+                - name: cold
+                  mountPath: /srv/ogbackup/cold
+                  subPath: cold
+                - name: varlib
+                  mountPath: /var/lib/opengrid
+          volumes:
+            {{- include "og.runVolumes" . | nindent 12 }}
+            - name: cold
+              persistentVolumeClaim:
+                claimName: {{ $fn }}-settle-data
+            - name: varlib
+              emptyDir:
+                sizeLimit: 1Gi

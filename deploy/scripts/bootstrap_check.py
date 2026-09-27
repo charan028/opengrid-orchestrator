@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from psycopg import sql
 
 from opengrid.fleet.seed import build_topology, load_sim_fleet_topology_config
 from opengrid.platform.config import load_config
@@ -163,22 +162,14 @@ def check_seeded(c: Checker, cfg: Any, trucks_expected: bool) -> None:
         ok=len(catalogue) >= 1 and c.table_exists("og.firmware_catalogue"),
     )
 
-    truck_table = next(
-        (t for t in ("mobile_unit", "truck", "mobile_truck") if c.table_exists(f"og.{t}")), None
+    # D-31 trucks: one og.asset MOBILE_STORAGE row per truck (migration 0044, dev/seed/mobile_trucks_seed.sql).
+    n_trucks = c.scalar("SELECT count(*) FROM og.asset WHERE asset_class = 'MOBILE_STORAGE'")
+    c.check(
+        "trucks (og.asset MOBILE_STORAGE)",
+        n_trucks,
+        ">= 1" if trucks_expected else "any",
+        ok=n_trucks >= 1 or not trucks_expected,
     )
-    if truck_table:
-        n = c.scalar(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier("og", truck_table)))
-        c.check(
-            f"trucks (og.{truck_table})",
-            n,
-            ">= 1" if trucks_expected else "any",
-            ok=n >= 1 or not trucks_expected,
-        )
-    else:
-        print(
-            f"  [{'FAIL' if trucks_expected else 'SKIP'}] trucks: no truck table (mobile_trucks seed not in this release)"
-        )
-        c.failures += 1 if trucks_expected else 0
 
 
 def check_live(c: Checker, stale_s: int) -> None:
