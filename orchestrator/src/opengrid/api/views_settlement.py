@@ -32,6 +32,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from opengrid.api.auth import Identity, require_viewer
 from opengrid.api.deps import get_config, get_pool
+from opengrid.core.models.market import SAMPLE_INACTIVE_LABEL
+from opengrid.market.availability import BANK_CAPACITY_SQL, capacity_summary
 from opengrid.platform.config import Config
 
 router = APIRouter(prefix="/og/api/views", tags=["views"])
@@ -43,8 +45,10 @@ MAX_PERIOD_DAYS = 366
 MAX_ROWS = 2000
 
 _CONTRACTS_SQL = """
-    SELECT contract_id, customer_id, service_type, variant, tier, status
-    FROM og.contract ORDER BY contract_id
+    SELECT contract_id, customer_id, service_type, variant, tier, status,
+           -- D-37 (migration 0046); to_jsonb keeps a pre-0046 database working
+           to_jsonb(c) ->> 'name' AS name, (to_jsonb(c) ->> 'is_sample')::boolean AS is_sample
+    FROM og.contract c ORDER BY contract_id
 """
 
 _PNL_SQL = """
@@ -123,6 +127,19 @@ def obligation_label(
     return " ".join(parts)
 
 
+def sample_fields(contract: dict[str, Any]) -> dict[str, Any]:
+    """D-37: `name`, `status`, `is_sample` and `sample_label` of a contract row. A sample contract is never
+    ACTIVE (0046 CHECK), so it has no obligation, P&L or invoice line: it is outside every revenue total by
+    construction, and listed only with its SAMPLE - INACTIVE label."""
+    is_sample = bool(contract.get("is_sample"))
+    return {
+        "name": contract.get("name"),
+        "status": contract.get("status"),
+        "is_sample": is_sample,
+        "sample_label": SAMPLE_INACTIVE_LABEL if is_sample else None,
+    }
+
+
 def _period(from_: date | None, to: date | None) -> tuple[date, date]:
     """`[from, to)` in days; default the last 30 days through tomorrow. 422 on an inverted or huge range."""
     today = datetime.now(UTC).date()
@@ -171,8 +188,14 @@ def build_view(
                 "tier": c.get("tier"),
                 "customer_id": customer,
                 "customer_label": names.get(customer, short_code(customer)),
+                **sample_fields(c),
             }
         )
+        if c.get("is_sample"):
+            # D-37: a sample contract is listed with its SAMPLE - INACTIVE label wherever contracts show.
+            contract_rows[-1]["label"] = (
+                f"{SAMPLE_INACTIVE_LABEL} \u00b7 {c.get('name') or contract_rows[-1]['label']}"
+            )
     obligation_map = {
         str(o["obligation_id"]): {
             "obligation_id": str(o["obligation_id"]),
@@ -237,6 +260,18 @@ async def settlement_view(
         names=customer_names(cfg),
         period=(d0, d1),
     )
+
+
+@router.get("/availability")
+async def availability_view(
+    _identity: Annotated[Identity, Depends(require_viewer)],
+    pool: Annotated[AsyncConnectionPool, Depends(get_pool)],
+) -> dict[str, Any]:
+    """D-37: bank availability per zone and the fleet capacity split -- available kW vs "Regulated market -
+    no contract" kW -- for the Profitability capacity line and the Control room zone summary. Rated kW is
+    the bank's kVA rating (the bank's discharge ceiling). A database before 0046 reads all AVAILABLE."""
+    rows = await _fetch(pool, BANK_CAPACITY_SQL)
+    return {"as_of": datetime.now(UTC).isoformat(), **capacity_summary(rows)}
 
 
 @router.get("/scope-posture")

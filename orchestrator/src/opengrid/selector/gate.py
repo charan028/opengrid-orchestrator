@@ -46,6 +46,11 @@ from opengrid.market import (
     load_market_model,
     market_of,
 )
+from opengrid.market.availability import (
+    grandfathered_banks_by_obligation,
+    parse_availability,
+    unavailable_bank_ids,
+)
 from opengrid.market.capacity import capacity_value_usd_per_mwh
 from opengrid.market.territory import utility_of_territory
 from opengrid.platform.config import load_config
@@ -820,6 +825,81 @@ def prepare_obligations(
     return tuple(narrowed_candidates), tuple(narrowed_committed)
 
 
+@dataclass(frozen=True, slots=True)
+class GateAvailability:
+    """D-37 bank availability for one gate: the UNAVAILABLE banks, and the K13-grandfathered
+    `(obligation -> banks)` pairs (`opengrid.market.availability`, the one rule)."""
+
+    unavailable: frozenset[str] = frozenset()
+    grandfathered: Mapping[str, frozenset[str]] = dataclasses.field(default_factory=dict)
+
+
+async def load_availability() -> GateAvailability:
+    """`og.bank.availability` and the grandfathered pairs. An unreadable table raises: the gate fails
+    loudly rather than plan on banks whose availability it cannot see (migration 0046 is a precondition)."""
+    rows = await db.load_bank_availability()
+    pairs = await db.load_grandfathered_pairs()
+    return GateAvailability(
+        unavailable=unavailable_bank_ids(parse_availability(b, a, r, s) for b, a, r, s in rows),
+        grandfathered=grandfathered_banks_by_obligation(pairs),
+    )
+
+
+def apply_availability(
+    banks: tuple[BankSnapshot, ...],
+    candidates: tuple[CandidateOpportunity, ...],
+    committed: tuple[CommittedObligation, ...],
+    availability: GateAvailability,
+    bank_ids: Sequence[str],
+) -> tuple[tuple[BankSnapshot, ...], tuple[CandidateOpportunity, ...], tuple[CommittedObligation, ...]]:
+    """D-37: nothing is offered or planned on an UNAVAILABLE bank.
+
+    - Candidates (new commitments, ERCOT or utility): never eligible there.
+    - Committed obligations: never newly placed there, but a K13-grandfathered obligation keeps the
+      unavailable banks it already holds (and only those), even where K15 (`prepare_obligations`) removed
+      them: it was committed while the zone was ERCOT competitive and completes untouched.
+    - The bank itself: no FREE headroom, no charging (idle hold: no grid window, no solar, 0 kW charge
+      envelope), and no discharge envelope unless a grandfathered obligation is on it."""
+    unavailable = availability.unavailable
+    if not unavailable:
+        return banks, candidates, committed
+    order = {b: i for i, b in enumerate(bank_ids)}
+    out_candidates = tuple(
+        dataclasses.replace(
+            c, eligible_bank_ids=tuple(b for b in c.eligible_bank_ids if b not in unavailable)
+        )
+        for c in candidates
+    )
+    out_committed = []
+    for co in committed:
+        kept = {b for b in co.eligible_bank_ids if b not in unavailable}
+        kept |= {b for b in availability.grandfathered.get(co.obligation_id, frozenset()) if b in order}
+        out_committed.append(
+            dataclasses.replace(co, eligible_bank_ids=tuple(sorted(kept, key=lambda b: order.get(b, 0))))
+        )
+    carrying = {b for banks_of in availability.grandfathered.values() for b in banks_of}
+    out_banks = []
+    for bank in banks:
+        if bank.bank_id not in unavailable:
+            out_banks.append(bank)
+            continue
+        out_banks.append(
+            dataclasses.replace(
+                bank,
+                free_market_access=False,
+                grid_charge_intervals=frozenset(),
+                solar_charge_kw={},
+                max_charge_kw=dict.fromkeys(bank.max_charge_kw, 0.0),
+                max_discharge_kw=(
+                    bank.max_discharge_kw
+                    if bank.bank_id in carrying
+                    else dict.fromkeys(bank.max_discharge_kw, 0.0)
+                ),
+            )
+        )
+    return tuple(out_banks), out_candidates, tuple(out_committed)
+
+
 async def new_commitments_allowed() -> bool:
     """02b S6.5 row 1: False while health's NO_NEW_COMMITMENTS mode is active (a feed crossed STALE).
     An unreadable mode counts as active (fail closed): no new commitment on data that may be stale."""
@@ -1270,6 +1350,10 @@ async def run_gate(gate_kind: GateKind, contract_scope: UUID | None = None) -> P
         ),
     )
     candidates, committed = prepare_obligations(candidates, committed, market)
+    # D-37: nothing offered or planned on an UNAVAILABLE bank; K13-grandfathered obligations keep theirs.
+    banks, candidates, committed = apply_availability(
+        banks, candidates, committed, await load_availability(), bank_ids
+    )
     # 02b S6.5 row 1: no new selection on stale data. The structural (pre-freeze) eligibility is kept for
     # the R-ADMIT-REJECT check, so a candidate withheld only for a stale series is never rejected for it.
     structural_by_id = {c.opportunity_id: c for c in candidates}

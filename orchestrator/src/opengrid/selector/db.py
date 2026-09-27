@@ -29,6 +29,7 @@ from opengrid.core.solar_share import (
 )
 from opengrid.core.timeutil import to_utc
 from opengrid.health.queries import fetch_degraded_modes
+from opengrid.market.availability import BANK_AVAILABILITY_SQL, GRANDFATHERED_SQL
 from opengrid.platform.config import load_config
 from opengrid.platform.db import make_pool
 
@@ -141,6 +142,24 @@ async def load_bank_zones(bank_ids: list[str]) -> dict[str, str]:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(_BANK_ZONES_SQL, {"ids": bank_ids})
         return {str(row[0]): str(row[1]) async for row in cur}
+
+
+async def load_bank_availability() -> list[tuple[str, str | None, str | None, Any]]:
+    """Read-only (D-37, migration 0046): `(bank_id, availability, availability_reason, availability_since)`
+    per bank, `opengrid.market.availability.BANK_AVAILABILITY_SQL`."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(BANK_AVAILABILITY_SQL)
+        return [(str(r[0]), r[1], r[2], r[3]) async for r in cur]
+
+
+async def load_grandfathered_pairs() -> list[tuple[str, str]]:
+    """Read-only (D-37, K13): `(obligation_id, bank_id)` pairs grandfathered on an unavailable bank,
+    `opengrid.market.availability.GRANDFATHERED_SQL` (the one rule)."""
+    pool = await get_pool()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(GRANDFATHERED_SQL)
+        return [(str(r[0]), str(r[1])) async for r in cur]
 
 
 #: A mobile unit is a single-hub bank; its hub's recorded position (device-reported, `og.hub.lat/lon`).

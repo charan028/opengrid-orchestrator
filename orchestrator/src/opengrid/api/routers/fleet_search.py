@@ -45,6 +45,7 @@ from opengrid.api.deps import get_config, get_proposals, get_store
 from opengrid.api.proposals import ProposalStore
 from opengrid.health.model import HealthThresholds
 from opengrid.health.rules import classify_hub_health
+from opengrid.market.availability import BANK_AVAILABILITY_SQL, availability_fields, with_availability
 from opengrid.platform.config import Config
 
 router = APIRouter(prefix="/og/api/fleet", tags=["fleet-search"])
@@ -107,12 +108,18 @@ _ACTIVITY_CASE = (
     f" WHEN {_ACTIVITY_SQL['serving_home']} THEN 'serving_home'"
     f" WHEN {_ACTIVITY_SQL['charging']} THEN 'charging' ELSE 'idle' END)"
 )
-_FROM = "FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id"
+_FROM = (
+    "FROM og.hub h JOIN og.hub_state s ON s.hub_id = h.hub_id LEFT JOIN og.bank b ON b.bank_id = h.bank_id"
+)
+#: D-37 (migration 0046) bank availability, read guarded: NULL before 0046 reads AVAILABLE (the default).
+_AVAILABILITY_SQL = "coalesce(to_jsonb(b.*) ->> 'availability', 'AVAILABLE')"
+AVAILABILITY_STATES = ("AVAILABLE", "UNAVAILABLE")
 _ROW_COLUMNS = (
     "h.hub_id, h.bank_id, h.zone, h.e_kwh, h.r_kwh, h.p_kw AS rated_p_kw, s.soc_kwh, s.p_kw,"
     " s.health AS stored_health, s.fault_code, s.last_seen_at, s.lease_epoch, s.lease_expires_at,"
     f" s.last_command_id, {_ACTIVITY_CASE} AS activity,"
-    f" {_HW_SQL} AS hardware_revision, {_FW_SQL} AS firmware_version"
+    f" {_HW_SQL} AS hardware_revision, {_FW_SQL} AS firmware_version,"
+    f" {_AVAILABILITY_SQL} AS availability, (to_jsonb(b.*) ->> 'availability_reason') AS availability_reason"
 )
 
 
@@ -131,12 +138,14 @@ class HubFilter:
     fw: tuple[str, ...] = ()  # firmware versions
     fw_not: str | None = None  # "FW != version": finds out-of-date hubs
     asset_class: tuple[str, ...] = ()  # HOME / MOBILE / UTILITY_SCALE
+    availability: tuple[str, ...] = ()  # D-37: AVAILABLE / UNAVAILABLE (the hub's bank)
 
     @property
     def empty(self) -> bool:
         return not (
             self.hw
             or self.asset_class
+            or self.availability
             or self.fw
             or self.fw_not
             or self.zones
@@ -250,6 +259,19 @@ def home_stations() -> list[dict[str, Any]]:
 _SUBSTATION_KEYS = "SELECT asset_id, bank_id FROM og.asset WHERE asset_class = 'SUBSTATION'"
 
 
+async def bank_availability(store: Any) -> dict[str, dict[str, str | None]]:
+    """`bank_id -> availability fields` for the UNAVAILABLE banks (D-37, `BANK_AVAILABILITY_SQL`); empty
+    on a store without the fleet read helper or a database before 0046 (guarded)."""
+    if not isinstance(store, FleetRowsStore):
+        return {}
+    rows = await _optional_rows(store, BANK_AVAILABILITY_SQL, ())
+    return {
+        str(r["bank_id"]): availability_fields(r.get("availability"), r.get("availability_reason"))
+        for r in rows
+        if r.get("availability") not in (None, "AVAILABLE")
+    }
+
+
 async def substation_keys(store: Any) -> set[str]:
     """Ids (asset_id and bank_id) of every substation BESS in `og.asset`; empty on a store without the
     fleet read helper or a schema without `og.asset` (a guarded read)."""
@@ -312,6 +334,9 @@ def where_clause(flt: HubFilter, th: Thresholds) -> Sql:
         a = asset_sql(th)
         parts.append(f"{a.text} = ANY(%s)")
         out.params.extend([*a.params, list(flt.asset_class)])
+    if flt.availability:
+        parts.append(f"{_AVAILABILITY_SQL} = ANY(%s)")
+        out.params.append(list(flt.availability))
     out.text = " AND ".join(parts)
     return out
 
@@ -447,6 +472,7 @@ def _filter(
     fw: Annotated[list[str] | None, Query()] = None,
     fw_not: Annotated[str | None, Query(max_length=64)] = None,
     asset_class: Annotated[list[str] | None, Query()] = None,
+    availability: Annotated[list[str] | None, Query()] = None,
 ) -> HubFilter:
     states: list[str] = []
     for value in health or []:
@@ -471,7 +497,17 @@ def _filter(
         fw=tuple(v for v in fw or [] if v),
         fw_not=(fw_not or "").strip() or None,
         asset_class=_asset_classes(asset_class),
+        availability=_availability_states(availability),
     )
+
+
+def _availability_states(values: list[str] | None) -> tuple[str, ...]:
+    out = tuple(dict.fromkeys(v.upper() for v in values or [] if v))
+    if any(v not in AVAILABILITY_STATES for v in out):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"availability must be one of {AVAILABILITY_STATES}"
+        )
+    return out
 
 
 def _asset_classes(values: list[str] | None) -> tuple[str, ...]:
@@ -497,7 +533,10 @@ def shape_hub(row: dict[str, Any], th: Thresholds, *, now: datetime) -> dict[str
         health = stored
     e_kwh = _num(row.get("e_kwh"))
     soc_kwh = _num(row.get("soc_kwh"))
-    out = {k: v for k, v in row.items() if k not in ("sort_value", "stored_health")}
+    # D-37: the four availability fields, one shape everywhere (`opengrid.market.availability`)
+    out: dict[str, Any] = with_availability(
+        {k: v for k, v in row.items() if k not in ("sort_value", "stored_health")}
+    )
     out.update(
         health=health,
         health_label=HEALTH_LABELS.get(health, health.upper()),
@@ -828,10 +867,15 @@ async def hub_detail(
         verdict = dict(found[0]["verdict"]) if found else None
     e_kwh, r_kwh, soc_kwh = _num(hub.get("e_kwh")), _num(hub.get("r_kwh")), _num(state.get("soc_kwh"))
     merged = {**bank, **hub}
+    availability = availability_fields(
+        str(bank["availability"]) if bank.get("availability") else None,
+        str(bank["availability_reason"]) if bank.get("availability_reason") else None,
+    )
     asset_class, mobile, utility = await _asset_detail(store, th, hub_id, hub)
     return {
         "hub_id": hub_id,
         "asset_class": asset_class,
+        "availability": availability,
         "mobile": mobile,
         "utility_scale": utility,
         "status": {

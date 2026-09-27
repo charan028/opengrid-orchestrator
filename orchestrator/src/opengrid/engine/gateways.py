@@ -71,6 +71,12 @@ from opengrid.health.model import AlertFinding
 from opengrid.health.queries import raise_alert
 from opengrid.health.rules import evaluate_energy_shortfall_risk_alert
 from opengrid.ledger import GrantRecord
+from opengrid.market.availability import (
+    BANK_AVAILABILITY_SQL,
+    GRANDFATHERED_SQL,
+    parse_availability,
+    unavailable_bank_ids,
+)
 from opengrid.market.config import load_zone_territory
 from opengrid.market.model import MarketModel
 from opengrid.market.territory import FREE, MarketModelError, MarketRef, market_of
@@ -423,6 +429,33 @@ _UTILITY_SCALE_BANKS: set[str] = set()
 _SUBSTATION_BANKS_SQL = NAMEPLATE_BANKS_SQL
 
 
+#: D-37: UNAVAILABLE banks (`og.bank.availability`, regulated with no contract), refreshed with the market
+#: model: the allocator dispatches nothing on them except K13-grandfathered calls.
+_UNAVAILABLE_BANKS: set[str] = set()
+
+
+def set_unavailable_banks(bank_ids: set[str]) -> None:
+    _UNAVAILABLE_BANKS.clear()
+    _UNAVAILABLE_BANKS.update(bank_ids)
+
+
+def is_unavailable_bank(bank_id: str) -> bool:
+    return bank_id in _UNAVAILABLE_BANKS
+
+
+async def load_unavailable_banks(pool: AsyncConnectionPool) -> set[str] | None:
+    """D-37: the UNAVAILABLE banks (`market.availability`, one parser); `None` (logged) when unreadable (keep
+    the last set; K15 still keeps FREE dispatch off regulated banks and the guardian re-checks G-33)."""
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(BANK_AVAILABILITY_SQL)
+            rows = await cur.fetchall()
+    except Exception:
+        logger.error("og.bank availability unreadable; unavailable banks unchanged", exc_info=True)
+        return None
+    return set(unavailable_bank_ids(parse_availability(str(b), a, r, s) for b, a, r, s in rows))
+
+
 def set_utility_scale_banks(bank_ids: set[str]) -> None:
     _UTILITY_SCALE_BANKS.clear()
     _UTILITY_SCALE_BANKS.update(bank_ids)
@@ -484,6 +517,7 @@ class EngineFleetGateway:
                     zone=fleet.bank_zone(bank_id),
                     territory=territory,
                     free_access=self._market.free_access(territory) if self._market is not None else False,
+                    available=not is_unavailable_bank(bank_id),
                 )
             )
             for snap in fleet.hub_capabilities(bank_id):
@@ -710,6 +744,7 @@ class EngineLedgerGateway:
         #: (obligation_id, reason, interval) K13 shortfalls already traced in the current episode.
         self._traced_shortfalls: set[tuple[str, str, str]] = set()
         self._market_warned = False
+        self._grandfather_warned = False
         #: This cycle's committed kW and SHORTFALL state per obligation (from `ledger_view`), and granted
         #: kW (from `persist_grants`), for the restore check.
         self._committed_kw: dict[str, float] = {}
@@ -728,6 +763,10 @@ class EngineLedgerGateway:
             await cur.execute(_PRIOR_GRANTS_SQL, {"bank_ids": list(bank_ids)})
             prior_rows = await cur.fetchall()
         markets = await self._markets([str(row[0]) for row in call_rows])
+        # D-37/K13: grandfathering only matters on an UNAVAILABLE bank (the switched zones), so the read
+        # runs only when a call sits on one.
+        on_unavailable = any(is_unavailable_bank(str(row[1])) for row in call_rows)
+        grandfathered = await self._grandfathered() if on_unavailable else set()
 
         prior_by_obligation = {str(obligation_id): float(kw) for obligation_id, kw in prior_rows}
         call_scale = called_kw_scale(call_rows)
@@ -773,9 +812,25 @@ class EngineLedgerGateway:
                         else None
                     ),
                     market_ref=markets.get(str(obligation_id), FREE),
+                    grandfathered=(str(obligation_id), str(bank_id)) in grandfathered,
                 )
             )
         return LedgerView(calls=tuple(calls))
+
+    async def _grandfathered(self) -> set[tuple[str, str]]:
+        """D-37/K13: `(obligation_id, bank_id)` pairs grandfathered on an unavailable bank
+        (`market.availability.GRANDFATHERED_SQL`, the one rule). Unreadable: none (fail closed -- the
+        allocator then keeps them off the bank and reports the K13 shortfall; the guardian agrees)."""
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(GRANDFATHERED_SQL)
+                rows = await cur.fetchall()
+        except Exception:
+            if not self._grandfather_warned:
+                logger.error("grandfathered obligations unreadable; none grandfathered", exc_info=True)
+                self._grandfather_warned = True
+            return set()
+        return {(str(o), str(b)) for o, b in rows}
 
     async def _markets(self, obligation_ids: Sequence[str]) -> dict[str, MarketRef | None]:
         """K15: each obligation's market from its contract (`og.contract.market`/`utility_id`, migration

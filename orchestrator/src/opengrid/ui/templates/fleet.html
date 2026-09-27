@@ -74,6 +74,14 @@
         {% endfor %}
       </div>
     </details>
+    <details class="fl-multi" id="flt-availability">
+      <summary>Availability{% if state.availability %} ({{ state.availability|length }}){% endif %}</summary>
+      <div class="fl-multi-list">
+        {% for key, label in availability_labels.items() %}
+        <label class="fl-check"><input type="checkbox" name="availability" value="{{ key }}" {{ 'checked' if key in state.availability else '' }}> {{ label }}</label>
+        {% endfor %}
+      </div>
+    </details>
     <details class="fl-multi" id="flt-hw">
       <summary>HW rev{% if state.hw %} ({{ state.hw|length }}){% endif %}</summary>
       <div class="fl-multi-list">
@@ -167,7 +175,7 @@
           {% if is_operator %}
           <td class="sel"><input type="checkbox" class="og-row-select" value="{{ row.hub_id }}" aria-label="Select {{ row.hub_id }}"></td>
           {% endif %}
-          <td>{{ row.hub_id }}</td>
+          <td>{{ row.hub_id }}{% if row.availability == 'UNAVAILABLE' %} <span class="fl-unavail" title="{{ row.availability_text }}">{{ row.availability_badge }}</span>{% endif %}</td>
           <td>{{ row.bank_id }}</td>
           <td>{{ row.zone }}</td>
           <td class="num">{{ row.soc_pct if row.soc_pct is not none else '—' }}</td>

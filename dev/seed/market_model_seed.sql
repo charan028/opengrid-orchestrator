@@ -48,7 +48,21 @@ INSERT INTO og.utility (
      'NIGHT_RATE', 0.05026, NULL, NULL,
      0, 0.040, 0.30, false, 'CPS-2024-PL-PLANNING',
      'PLACEHOLDER pending the contract (09 OQ-6): CPS has no published TOU night rate; uses Schedule PL '
-     || 'additional-kWh energy 3.610 + fuel base 1.416 cents/kWh. Capacity $45/kW per season (C&I DR).')
+     || 'additional-kWh energy 3.610 + fuel base 1.416 cents/kWh. Capacity $45/kW per season (C&I DR).'),
+    -- D-37: LCRA / Rayburn are regulated (NOIE) utilities with NO contract. PLACEHOLDER terms cloned from
+    -- Austin's (opengrid.market.config.LCRA / RAYBURN). Real counterparties may be member cities / co-ops.
+    ('LCRA', 'LCRA (Lower Colorado River Authority)', ARRAY['LZ_LCRA'], 'UTILITY_TOLLING', 'USD_PER_KW_YEAR', 102,
+     'TOU_OFF_PEAK', 0.02677, 0.04118, 0.08442,
+     0, 0.040, 0.30, false, 'LCRA-PLACEHOLDER-D37',
+     'PLACEHOLDER (D-37): no contract exists. Terms cloned from Austin Energy''s toll (D-29: 90 min, $102/kW-yr, '
+     || 'discharge calls only) and AE''s TOU off-peak charging rates until the real tariff and contract are known. '
+     || 'The real counterparty may be a member city or distribution co-op.'),
+    ('RAYBURN', 'Rayburn Country Electric Cooperative', ARRAY['LZ_RAYBN'], 'UTILITY_TOLLING', 'USD_PER_KW_YEAR', 102,
+     'TOU_OFF_PEAK', 0.02677, 0.04118, 0.08442,
+     0, 0.040, 0.30, false, 'RAYBURN-PLACEHOLDER-D37',
+     'PLACEHOLDER (D-37): no contract exists. Terms cloned from Austin Energy''s toll (D-29: 90 min, $102/kW-yr, '
+     || 'discharge calls only) and AE''s TOU off-peak charging rates until the real tariff and contract are known. '
+     || 'The real counterparty may be a member city or distribution co-op.')
 ON CONFLICT (utility_id) DO UPDATE SET
     name = EXCLUDED.name, territory_zones = EXCLUDED.territory_zones,
     capacity_product = EXCLUDED.capacity_product, payment_basis = EXCLUDED.payment_basis,

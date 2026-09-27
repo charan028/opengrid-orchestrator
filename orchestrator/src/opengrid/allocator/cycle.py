@@ -241,8 +241,13 @@ def cycle(
             tier_granted = tier_result.granted_kw.get(oid, 0.0)
             reason_code = reasons.R_GRANT_COMMITTED
 
-            if enforce_territory:
-                block = check_territory(call.market_ref, bank.territory, free_access=bank.free_access)
+            # D-37: nothing is dispatched on an UNAVAILABLE bank (regulated, no contract) except a call
+            # grandfathered under K13, which is also exempt from K15 (committed while the zone was ERCOT).
+            unavailable_block = None if bank.available or call.grandfathered else reasons.R_BANK_UNAVAILABLE
+            if unavailable_block is not None or (enforce_territory and not call.grandfathered):
+                block = unavailable_block or check_territory(
+                    call.market_ref, bank.territory, free_access=bank.free_access
+                )
                 if block is not None:
                     # K15 fail-safe: never served here; the shortfall is recorded against the same
                     # obligation. Its tier capacity stays locked (never exported as headroom).
@@ -434,6 +439,10 @@ def _headroom_kw(
     - 09 D7: only when the price clears the stored-energy value (`threshold`); unknown value: none.
     """
     bank_id = bank.bank_id
+    if not bank.available:
+        # D-37: an UNAVAILABLE bank (regulated, no contract) takes no headroom, whatever the territory says.
+        territory_blocks.append(TerritoryBlock(bank_id, None, reasons.R_BANK_UNAVAILABLE))
+        return 0.0
     if enforce_territory:
         block = check_territory(FREE, bank.territory, free_access=bank.free_access)
         if block is not None:

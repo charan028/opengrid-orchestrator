@@ -5,7 +5,9 @@ banks. Blocks stay disabled by default -- no behaviour change today."""
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -46,7 +48,7 @@ def test_disabled_zone_blocks_do_not_change_the_base_bank_roster(base_config) ->
     """A disabled block adds nothing to the roster; an enabled one appends after the base banks in
     `zone_blocks:` list order. Expected counts are computed from `base_config.zone_blocks` itself (not
     hardcoded), so this test doesn't need updating every time the shipped defaults change which blocks
-    are on (OWNER DECISION D-32, 2026-09-26, enables LZ_LCRA/LZ_RAYBN by default)."""
+    are on (LZ_LCRA/LZ_RAYBN are enabled by default: D-32, kept by D-37 as regulated, unavailable banks)."""
     engine = ScadaEngine(base_config, seed=1)
     assert engine.bank_ids[: base_config.bank_count] == [
         f"bank-{i:03d}" for i in range(base_config.bank_count)
@@ -56,11 +58,26 @@ def test_disabled_zone_blocks_do_not_change_the_base_bank_roster(base_config) ->
 
 
 def test_shipped_scada_config_ships_aen_cps_disabled_lcra_raybn_enabled() -> None:
-    """OWNER DECISION D-32, 2026-09-26: the free-market zones LZ_LCRA/LZ_RAYBN are live in the shipped
-    default; the regulated zones LZ_AEN/LZ_CPS stay off (production enables AEN via its own override)."""
+    """D-37 (2026-09-26, supersedes D-32): LZ_LCRA/LZ_RAYBN stay simulated in the shipped default, but as
+    REGULATED (NOIE) territory -- utilities LCRA/RAYBURN, no M1, their banks UNAVAILABLE (no contract) --
+    not ERCOT free market. LZ_AEN/LZ_CPS stay off (production enables AEN via its own override)."""
     config = load_scada_config()
     enabled_by_zone = {block.zone: block.enabled for block in config.zone_blocks}
     assert enabled_by_zone == {"LZ_AEN": False, "LZ_CPS": False, "LZ_LCRA": True, "LZ_RAYBN": True}
+    assert regulated_zone_territory() == {
+        "LZ_AEN": "AUSTIN_ENERGY",
+        "LZ_CPS": "CPS_ENERGY",
+        "LZ_LCRA": "LCRA",
+        "LZ_RAYBN": "RAYBURN",
+    }
+
+
+def regulated_zone_territory() -> dict[str, str]:
+    """[zone_territory] REGULATED entries of orchestrator/config/tdsp_tariffs.toml (D-37 baseline)."""
+    path = Path(__file__).resolve().parents[2] / "orchestrator" / "config" / "tdsp_tariffs.toml"
+    with path.open("rb") as fh:
+        table = tomllib.load(fh)["zone_territory"]
+    return {z: str(e["utility"]) for z, e in table.items() if e.get("market") == "REGULATED"}
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +178,7 @@ def test_background_load_per_bank_share_matches_base_fleet_semantics(base_config
     )
     # aen_config REPLACES zone_blocks entirely with its own (AEN_BLOCK, CPS_BLOCK_DISABLED), so its
     # expected total is self-contained; base_config's is computed from its own zone_blocks (not
-    # hardcoded), since OWNER DECISION D-32 (2026-09-26) may enable some of the shipped defaults it
+    # hardcoded), since the shipped defaults enable some blocks (LZ_LCRA/LZ_RAYBN, regulated per D-37) it
     # otherwise inherits.
     assert aen_engine.background.per_bank_multiplier.shape[0] == base_config.bank_count + AEN_BLOCK.banks
     base_extra = sum(b.banks for b in base_config.zone_blocks if b.enabled)

@@ -23,8 +23,10 @@ from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from opengrid.api.deps import get_config
+from opengrid.core.models.market import REGULATED_NO_CONTRACT
 from opengrid.core.timeutil import to_utc
 from opengrid.health.model import HealthThresholds
+from opengrid.market.availability import availability_badge
 from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json, put_json
 from opengrid.ui.render import render_stale_badge
 from opengrid.ui.role import is_operator, remote_user, role_of
@@ -51,6 +53,12 @@ _HOME_STATIONS_PATH = "/og/api/fleet/home-stations"
 #: `GET /og/api/fleet/manual-targets` status meaning the engine is ramping the hub (r3.4).
 TARGET_ACTIVE = "ACTIVE"
 #: Owner asset classes (R3.1): shape + colour on the map, a column, a filter and a drawer badge.
+#: D-37 availability filter: AVAILABLE / UNAVAILABLE, the latter in the owner's words (one source:
+#: `opengrid.market.availability.availability_badge`).
+AVAILABILITY_LABELS: dict[str, str] = {
+    "AVAILABLE": "Available",
+    "UNAVAILABLE": availability_badge(REGULATED_NO_CONTRACT),
+}
 ASSET_LABELS: dict[str, str] = {"HOME": "Home battery", "MOBILE": "Truck", "UTILITY_SCALE": "Substation BESS"}
 DEFAULT_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 240
@@ -143,6 +151,8 @@ def map_hub(hub: dict[str, Any]) -> dict[str, Any]:
         "lat": hub.get("lat"),
         "lon": hub.get("lon"),
         "serving_obligations": hub.get("serving_obligations") or [],
+        "availability": hub.get("availability") or "AVAILABLE",
+        "availability_badge": hub.get("availability_badge"),
         "can_serve_services": hub.get("can_serve_services") or [],
         "asset_class": hub.get("asset_class") or "HOME",
         "rated_p_kw": hub.get("rated_p_kw", hub.get("rated_kw")),
@@ -287,6 +297,7 @@ class TableState:
     fw: tuple[str, ...] = ()
     fw_not: str = ""
     asset: tuple[str, ...] = ()
+    availability: tuple[str, ...] = ()
     sort: str = "hub"
     dir: str = "asc"
     size: int = DEFAULT_PAGE_SIZE
@@ -306,6 +317,7 @@ class TableState:
         if self.fw_not:
             out.append(("fw_not", self.fw_not))
         out += [("asset_class", v) for v in self.asset]
+        out += [("availability", v) for v in self.availability]
         return out
 
     def view_params(self) -> list[tuple[str, str]]:
@@ -354,6 +366,13 @@ class TableState:
             chips.append({"label": f"HW: {v}", "url": self.url(hw=_without(self.hw, v), cursor="")})
         for v in self.fw:
             chips.append({"label": f"FW: {v}", "url": self.url(fw=_without(self.fw, v), cursor="")})
+        for v in self.availability:
+            chips.append(
+                {
+                    "label": f"Availability: {AVAILABILITY_LABELS[v]}",
+                    "url": self.url(availability=_without(self.availability, v), cursor=""),
+                }
+            )
         for v in self.asset:
             chips.append(
                 {
@@ -399,6 +418,9 @@ def table_state(request: Request) -> TableState:
         fw=_values(qp.getlist("fw")),
         fw_not=(qp.get("fw_not") or "").strip()[:64],
         asset=tuple(dict.fromkeys(v.upper() for v in qp.getlist("asset_class") if v.upper() in ASSET_LABELS)),
+        availability=tuple(
+            dict.fromkeys(v.upper() for v in qp.getlist("availability") if v.upper() in AVAILABILITY_LABELS)
+        ),
         sort=qp.get("sort", "hub") if qp.get("sort", "hub") in SORT_COLUMNS else "hub",
         dir="desc" if qp.get("dir") == "desc" else "asc",
         size=int(size) if size in {str(s) for s in PAGE_SIZES} else DEFAULT_PAGE_SIZE,
@@ -475,6 +497,9 @@ def _table_row(
         "activity": ACTIVITY_LABELS.get(str(hub.get("activity") or ""), "-"),
         "health": hub.get("health", "unknown"),
         "health_label": hub.get("health_label") or str(hub.get("health", "unknown")).upper(),
+        "availability": hub.get("availability") or "AVAILABLE",
+        "availability_badge": hub.get("availability_badge"),
+        "availability_text": hub.get("availability_text"),
         "last_seen_at": last_seen_at,
         "age_badge": render_stale_badge(
             _age_s(last_seen_at), since_iso=last_seen_at, stale_after_s=stale_after_s
@@ -567,6 +592,7 @@ async def fleet_screen(
             "hub_stale_s": stale_s,
             "hw_options": hw_options,
             "asset_labels": ASSET_LABELS,
+            "availability_labels": AVAILABILITY_LABELS,
             "home_stations": (stations or {}).get("items", []) if isinstance(stations, dict) else [],
             "fw_options": fw_options,
             "target_count": len(targets),

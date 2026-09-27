@@ -21,21 +21,44 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 Market = Literal["REGULATED", "FREE"]
-UtilityId = Literal["AUSTIN_ENERGY", "CPS_ENERGY"]
+#: D-37 (2026-09-26, supersedes D-32): LCRA (LZ_LCRA) and Rayburn Country EC (LZ_RAYBN) are regulated
+#: (NOIE) utilities like Austin Energy. The real counterparties may be their member cities and co-ops.
+UtilityId = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "LCRA", "RAYBURN"]
 #: Where an asset sits: inside a regulated utility's service territory, the ERCOT competitive area, or a
 #: NOIE zone (a non-opt-in entity: a co-op or municipal utility outside retail choice that is not one of
 #: our regulated customers). A NOIE asset serves neither market until the owner decides otherwise.
-Territory = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "ERCOT_COMPETITIVE", "NOIE"]
+Territory = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "LCRA", "RAYBURN", "ERCOT_COMPETITIVE", "NOIE"]
 ERCOT_COMPETITIVE: Territory = "ERCOT_COMPETITIVE"
 NOIE: Territory = "NOIE"
 #: What `[zone_territory]` can assign a zone to: a regulated utility customer, or NOIE.
-ZoneOwner = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "NOIE"]
+ZoneOwner = Literal["AUSTIN_ENERGY", "CPS_ENERGY", "LCRA", "RAYBURN", "NOIE"]
+
+#: Bank availability (D-37, migration 0046 `og.bank.availability`): the ONE representation the selector,
+#: allocator, guardian, UI and APIs share. A hub inherits its bank's availability.
+Availability = Literal["AVAILABLE", "UNAVAILABLE"]
+AVAILABLE: Availability = "AVAILABLE"
+UNAVAILABLE: Availability = "UNAVAILABLE"
+#: Why a bank is UNAVAILABLE. REGULATED_NO_CONTRACT: regulated (NOIE) territory, so no ERCOT sales (K15),
+#: and no utility capacity contract to reserve it.
+AvailabilityReason = Literal["REGULATED_NO_CONTRACT"]
+REGULATED_NO_CONTRACT: AvailabilityReason = "REGULATED_NO_CONTRACT"
+#: Owner wording (D-37), shown wherever such a hub/bank appears (UI badge, tooltip, API text, refusals).
+AVAILABILITY_BADGE: dict[str, str] = {REGULATED_NO_CONTRACT: "Regulated market – no contract"}  # noqa: RUF001
+AVAILABILITY_TEXT: dict[str, str] = {
+    REGULATED_NO_CONTRACT: (
+        "Unavailable: regulated (NOIE) territory, so energy can't be sold into ERCOT, and there is no "
+        "utility capacity contract to reserve it. Available once a contract is signed."
+    )
+}
+#: Contract-list label for a sample contract (`og.contract.is_sample`): never callable, never billed.
+SAMPLE_CONTRACT_PREFIX = "Sample Contract"
+SAMPLE_INACTIVE_LABEL = "SAMPLE – INACTIVE"  # noqa: RUF001
 AssetClass = Literal["HOME_BANK", "SUBSTATION", "MOBILE_STORAGE"]  # MOBILE_STORAGE: D-31 truck (0044)
 CapacityPaymentBasis = Literal["USD_PER_KW_MONTH", "USD_PER_KW_YEAR"]
 ChargingTariffKind = Literal["TOU_OFF_PEAK", "NIGHT_RATE"]
 
 MARKETS: tuple[Market, ...] = ("REGULATED", "FREE")
-UTILITY_IDS: tuple[UtilityId, ...] = ("AUSTIN_ENERGY", "CPS_ENERGY")
+UTILITY_IDS: tuple[UtilityId, ...] = ("AUSTIN_ENERGY", "CPS_ENERGY", "LCRA", "RAYBURN")
 
 #: 08 S3a / D-22: at least 30% of regulated charging energy is solar. A floor, not a fixed ratio.
 DEFAULT_SOLAR_SHARE_FLOOR = Decimal("0.30")

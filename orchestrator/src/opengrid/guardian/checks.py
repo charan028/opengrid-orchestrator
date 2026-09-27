@@ -348,7 +348,9 @@ def check_g19_override_evidence(
 
 #: K15 territory blocks an allocator may carry on a 0 kW grant for an obligation it must not serve from this
 #: bank (`market.territory.check_territory`'s codes, plus the guardian's own G-33 code).
-TERRITORY_BLOCK_REASONS = TERRITORY_REASONS | {reasons.R_TERRITORY_INELIGIBLE}
+#: D-37: plus R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT (an UNAVAILABLE bank), corroborated the same way by the
+#: guardian's own availability read (`GuardianService._territory_block`).
+TERRITORY_BLOCK_REASONS = TERRITORY_REASONS | {reasons.R_TERRITORY_INELIGIBLE, reasons.R_BANK_UNAVAILABLE}
 
 
 def check_g19_territory_block(obligation_id: str, *, guardian_block: str | None) -> CheckOutcome:

@@ -2,8 +2,8 @@
 """deploy/scripts/gen_sim_overrides.py -- generate the production sim configs with the approved zone blocks on.
 
 The repo's `integration-sims/config/{fleet,scada}.yaml` declare every zone block but ship them disabled (tests
-pin that). Production enables the blocks the owner approved (LZ_AEN since 2026-09-26; LZ_LCRA/LZ_RAYBN per D-32
-when enabled) through generated copies in `/etc/opengrid/sim/`, which `og-sim-fleet`/`og-sim-scada` load through
+pin that). Production enables the blocks the owner approved (LZ_AEN since 2026-09-26; LZ_LCRA/LZ_RAYBN when enabled --
+regulated and UNAVAILABLE per D-37) through generated copies in `/etc/opengrid/sim/`, which `og-sim-fleet`/`og-sim-scada` load through
 drop-ins and which `opengrid.fleet.seed` / `dev/seed/topology_seed.py` read to seed the same hubs and banks.
 This is the repo version of the release manager's `aen.sh pre` step, generalised to a list of zones.
 

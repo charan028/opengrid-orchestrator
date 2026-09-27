@@ -499,6 +499,31 @@ journalctl -u og-engine --since -10min | grep -i 'grid link'   # listening, asso
 3. MQTT user `og_gridlink` with publish on `og/v1/scada/instruction/#`;
 4. a firewall opening for the utility's EMS addresses only;
 5. both `enabled` switches in `[grid_link]`, then a restart of og-engine.
+### 6.10 Regulated zones with no contract (LZ_LCRA, LZ_RAYBN; D-37)
+Hubs and banks in `LZ_LCRA` (bank-050..059) and `LZ_RAYBN` (bank-060..069) carry the badge **"Regulated market – no contract"**
+(`og.bank.availability = UNAVAILABLE`, reason `REGULATED_NO_CONTRACT`). The tooltip reads: *Unavailable: regulated
+(NOIE) territory, so energy can't be sold into ERCOT, and there is no utility capacity contract to reserve it.
+Available once a contract is signed.*
+- Nothing is offered, planned or dispatched there, and they are not charged (idle hold). A manual target other than
+  0 kW is refused (409) with that reason; the guardian vetoes any non-idle item there (G-33,
+  `R-BANK-UNAVAILABLE-REGULATED-NO-CONTRACT`).
+- They stay monitored: telemetry, alerts, health, safe stop (a 0 kW hold), firmware and the invariants all work.
+- Profitability and the Control room show their capacity on its own line ("Regulated market – no contract: N kW"), never in
+  available kW. The Fleet table filter `Availability` lists them.
+- ERCOT obligations that were already committed on those banks at the switch complete untouched (K13
+  grandfathering); only new commitments are affected. Check with `deploy/scripts/noie_switch_check.sql` (read-only).
+- Each utility has a "Sample Contract: ..." listed as **SAMPLE – INACTIVE**: a template, never active.
+**Making a zone AVAILABLE once a real contract is signed** (release manager / lead, with the owner's approval):
+1. Enter the real contract for the utility (`og.contract`, `market = 'REGULATED'`, `utility_id = 'LCRA'` or
+   `'RAYBURN'`, `is_sample = false`, its own name and product rule) and set it `ACTIVE`. Leave the sample SUSPENDED
+   (it can never be activated: a CHECK forbids it). Update the `og.utility` terms from the contract.
+2. In one transaction, flip that utility's banks:
+   `UPDATE og.bank b SET availability = 'AVAILABLE', availability_reason = NULL, availability_since = now()
+   FROM og.utility u WHERE u.utility_id = 'LCRA' AND b.zone = ANY (u.territory_zones);`
+   (`noie_switch_seed.sql` never marks a zone unavailable again while an ACTIVE non-sample contract exists.)
+3. Nothing to restart: og-engine re-reads availability with the market model, the selector every gate, the
+   guardian on its topology refresh. Confirm on the Fleet page (badge gone) and at the next gate (the toll is
+   reserved in the utility's window). Record it in the decision log.
 
 ## 7. Degraded modes and guardian escalation
 

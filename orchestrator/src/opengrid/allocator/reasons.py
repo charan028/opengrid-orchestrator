@@ -11,6 +11,7 @@ from __future__ import annotations
 from opengrid.core.reasons import (
     COMMIT_LOCK_OVERRIDE_REASONS,
     R_AS_RELEASE,
+    R_BANK_UNAVAILABLE,
     R_COMMIT_LOCK_INFEASIBLE,
     R_COMMIT_LOCK_OVERRIDE_L0,
     R_COMMIT_LOCK_OVERRIDE_L1,
@@ -37,6 +38,7 @@ from opengrid.core.reasons import (
 __all__ = [
     "COMMIT_LOCK_OVERRIDE_REASONS",
     "R_AS_RELEASE",
+    "R_BANK_UNAVAILABLE",
     "R_COMMIT_LOCK_INFEASIBLE",
     "R_COMMIT_LOCK_OVERRIDE_L0",
     "R_COMMIT_LOCK_OVERRIDE_L1",
