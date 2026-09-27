@@ -5,13 +5,14 @@ service, the HTMX UI and the API), Postgres 17, the Mosquitto broker with the pr
 seeds, the data-lifecycle CronJob and the ogsim integration simulators. It first lists and checks every
 prerequisite. It stops on any failure, and every phase is safe to re-run.
 
-> **Status (r3.4.3, chart 0.2.0, 2026-09-27): validated offline only, never deployed to a real cluster.** The chart passes
-> `helm lint --strict` (helm 3.22.0 and 4.3.0) and `kubeconform -strict` (Kubernetes 1.30 and 1.33 schemas). The
-> scripts pass `shellcheck`, the two images build, and `install.sh --dry-run` runs end to end. A smoke test ran every
-> workload from the built images in one isolated network namespace with podman, using the chart's rendered
-> ConfigMaps. In that test, `create_schema.sh` applied every migration through 0050; the seed Job and `bootstrap_check.py --live`
-> passed; every heartbeat was fresh; `/og/api/health` returned 200; the gateway returned 401 without credentials and
-> 200 as operator. No Kubernetes cluster was available, so the first real install is also the first integration test
+> **Status (r3.4.3, chart 0.2.0, 2026-09-27): lint-verified only, never deployed to a real cluster.** The chart
+> passes `helm lint --strict` (helm 3.22.0 and 4.3.0) and `kubeconform -strict` (Kubernetes 1.30 and 1.33 schemas,
+> five value sets). The scripts pass `shellcheck`, and `install.sh --dry-run` runs end to end. **No r3.4.3 smoke test
+> was run** (see [Known gaps](#known-gaps)). The last smoke test is r3.4.1's (chart 0.1.0): every workload ran from
+> the built images in one isolated network namespace with podman, using the chart's rendered ConfigMaps.
+> `create_schema.sh` applied migrations 0001 to 0044; the seed Job and `bootstrap_check.py --live` passed; every
+> heartbeat was fresh; `/og/api/health` returned 200; and the gateway returned 401 without credentials and 200 as
+> operator. No Kubernetes cluster was available, so the first real install is also the first integration test
 > of the Kubernetes objects themselves (scheduling, PVCs, Services, Ingress, NetworkPolicies). Treat it as a pilot,
 > and read [Known gaps](#known-gaps).
 
@@ -209,6 +210,11 @@ every subcommand (`og-entrypoint` with no arguments).
 
 - **Never run on a real cluster.** Everything above was validated offline. The first real install should be on a
   disposable cluster.
+- **No r3.4.3 smoke test.** Chart 0.2.0 went into r3.4.3 as lint-verified only. The container smoke test of the
+  r3.4.3 additions hasn't run: og-sim-utility end to end, the grid-link Secret mount and `og_gridlink`, the
+  safestop metrics probe, and migrations 0045 to 0050 with the NOIE seed in the seed Job. The owner removed podman
+  from base after r3.4.1 and no image builds or smoke runs happen on the production host. The test will run on a
+  non-production machine (the workstation's Docker, after its performance campaign) or on a real cluster.
 - The smoke test had no network, so og-feeds could not reach ERCOT, EIA or NWS, and its ticks failed as expected.
   Live feeds on Kubernetes are untested.
 - Backups: production's `deploy/scripts/backup.sh` and the cron jobs aren't ported. Use your platform's volume
