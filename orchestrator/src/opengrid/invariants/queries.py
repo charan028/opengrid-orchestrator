@@ -124,17 +124,25 @@ _HUB_UNITS_COLUMN_SQL = """
 
 async def fetch_bank_capability_inputs(
     pool: AsyncConnectionPool,
-) -> list[tuple[str, float, float, float, float, float, float, float, float, str, int | None]]:
+) -> list[tuple[str, float, float, float, float, float, float, float, float, str, int | None, bool]]:
     """K2's capability inputs: one row per hub, everything `checks.compute_bank_rated_capabilities_kw`
     needs for each bank's RATED capability (unit-capped hub ratings within the bank's kVA). `soc_kwh` and
     `health` are still returned for callers/diagnostics but K2 ignores them (owner ruling 2026-09-26: a
     live capability loss after commitment is K13's, not a double sale).
 
+    Every hub counts, with or without an `og.hub_state` row (LEFT JOIN): a RATED capability does not
+    depend on telemetry, and an inner join dropped never-reporting hubs, reading their bank as 0 kW and every
+    reservation on it as double-sold.
+
     Bounded by hub count, which is fixed by the fleet's own size (`opengrid.fleet.seed`) -- this does NOT
     grow with reservation/obligation volume the way the rest of this package's fetches are bounded by a
     rolling window; a fleet's hub count is its own separate, comparatively static scale.
 
-    `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health, units)` per hub.
+    `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health, units,
+    utility_scale)` per hub. `utility_scale` is true when the hub's bank is an `og.asset` SUBSTATION (migration
+    0025; e.g. the D-29 Austin toll set): such a hub is rated at its nameplate `p_kw`, never the home unit cap
+    -- the same rule as `guardian.repo._ALL_HUB_PARAMS_SQL` (live defect 2026-09-26: an 18 MW reservation on
+    bank-sub-LZ_AEN-00 read as double-sold against a 20 kW home rating).
     `units` is `og.hub.units` (migration 0032) -- the unit count `hub_capability`'s G-02 per-unit cap needs.
     Schema-guarded: on a database without that column yet, `units` is `None` for every hub and the cap
     fails closed to one unit (`opengrid.core.limits.unit_rating_kw`), never to the seeded `p_kw`.
@@ -145,10 +153,12 @@ async def fetch_bank_capability_inputs(
         units_expr = "h.units" if exists_row is not None and exists_row[0] else "NULL::smallint"
         sql = f"""
             SELECT h.bank_id, b.kva_rating, b.reserve_kva, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d,
-                   hs.soc_kwh, hs.health, {units_expr}
+                   COALESCE(hs.soc_kwh, 0), COALESCE(hs.health, 'unknown'), {units_expr},
+                   EXISTS (SELECT 1 FROM og.asset a WHERE a.bank_id = h.bank_id AND a.asset_class = 'SUBSTATION')
+                       AS utility_scale
             FROM og.hub h
             JOIN og.bank b ON b.bank_id = h.bank_id
-            JOIN og.hub_state hs ON hs.hub_id = h.hub_id
+            LEFT JOIN og.hub_state hs ON hs.hub_id = h.hub_id
         """  # noqa: S608 -- units_expr is one of two literal column expressions, never user input
         await cur.execute(sql)
         rows = await cur.fetchall()
@@ -165,6 +175,7 @@ async def fetch_bank_capability_inputs(
             float(r[8]),
             r[9],
             int(r[10]) if r[10] is not None else None,
+            bool(r[11]),
         )
         for r in rows
     ]

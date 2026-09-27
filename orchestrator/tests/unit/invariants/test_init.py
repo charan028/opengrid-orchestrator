@@ -213,7 +213,7 @@ async def test_run_once_detects_seeded_double_sold_using_true_capability(fake_qu
     # stored energy to sustain its rating for the whole interval: capability is energy-limited, ES03-S05).
     # 30 dual-unit homes (20 kW each, the G-02 unit cap) = 600 kW.
     fake_queries.bank_capability_inputs = [
-        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 20.0, 0.9487, 0.9487, 1000.0, "online", 2),
+        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 20.0, 0.9487, 0.9487, 1000.0, "online", 2, False),
     ] * 30
 
     outcomes = await invariants.run_once()
@@ -381,7 +381,7 @@ async def test_run_once_does_not_recount_a_persisting_violation_across_runs(
     fake_queries.reservation_agg_rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 700.0)]
     # 30 dual-unit homes (20 kW each, the G-02 unit cap) = 600 kW.
     fake_queries.bank_capability_inputs = [
-        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 20.0, 0.9487, 0.9487, 1000.0, "online", 2),
+        ("bank-000", 10_000.0, 0.0, 1000.0, 7.84, 20.0, 0.9487, 0.9487, 1000.0, "online", 2, False),
     ] * 30
 
     await invariants.run_once()

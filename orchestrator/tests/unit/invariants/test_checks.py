@@ -75,7 +75,7 @@ def test_find_double_sold_treats_bank_with_no_capability_row_as_zero_capacity() 
     assert violations[0].detail["capability_kw"] == 0.0
 
 
-_ROW = tuple[str, float, float, float, float, float, float, float, float, str, int | None]
+_ROW = tuple[str, float, float, float, float, float, float, float, float, str, int | None, bool]
 
 
 def test_rated_capability_ignores_health_and_soc_and_caps_at_bank_rating() -> None:
@@ -83,11 +83,11 @@ def test_rated_capability_ignores_health_and_soc_and_caps_at_bank_rating() -> No
     bank's kVA (minus reserve) caps the sum."""
     hub_rows: list[_ROW] = [
         # (bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health, units)
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online", 1),
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 0.0, "offline", 1),
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 7.84, "fault", 1),
-        ("bank-001", 25.0, 5.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", 2),
-        ("bank-001", 25.0, 5.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", 2),
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online", 1, False),
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 0.0, "offline", 1, False),
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 7.84, "fault", 1, False),
+        ("bank-001", 25.0, 5.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", 2, False),
+        ("bank-001", 25.0, 5.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", 2, False),
     ]
     result = checks.compute_bank_rated_capabilities_kw(hub_rows)
     assert result["bank-000"] == pytest.approx(33.0)
@@ -98,9 +98,9 @@ def test_rated_capability_applies_the_unit_cap() -> None:
     """K2 units (migration 0032): a dual-unit home counts at 20 kW; a single-unit home mis-seeded at 20 kW
     and a home with an unknown unit count (pre-0032 database) both fail closed to 11 kW."""
     hub_rows: list[_ROW] = [
-        ("bank-000", 600.0, 0.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", 2),
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 20.0, 0.9487, 0.9487, 39.2, "online", 1),
-        ("bank-000", 600.0, 0.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", None),
+        ("bank-000", 600.0, 0.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", 2, False),
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 20.0, 0.9487, 0.9487, 39.2, "online", 1, False),
+        ("bank-000", 600.0, 0.0, 78.4, 15.68, 20.0, 0.9487, 0.9487, 78.4, "online", None, False),
     ]
     result = checks.compute_bank_rated_capabilities_kw(hub_rows)
     assert result["bank-000"] == pytest.approx(20.0 + 11.0 + 11.0)
@@ -110,7 +110,8 @@ def test_all_hubs_offline_is_not_a_double_sale() -> None:
     """Dev-stack regression (2026-09-26): K2 rose 0 -> 750 kWh while every hub was OFFLINE. Reservations
     within rated capability are never K2, whatever the live state -- that loss is a K13 shortfall."""
     hub_rows: list[_ROW] = [
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 0.0, "offline", 1) for _ in range(10)
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 0.0, "offline", 1, False)
+        for _ in range(10)
     ]
     rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 110.0)]  # the full rated 10 x 11 kW
     assert checks.find_double_sold(rows, checks.compute_bank_rated_capabilities_kw(hub_rows)) == []
@@ -119,7 +120,8 @@ def test_all_hubs_offline_is_not_a_double_sale() -> None:
 def test_a_true_double_reservation_is_a_double_sale() -> None:
     """Two obligations reserving the same bank/interval beyond its rated capability: K2 > 0."""
     hub_rows: list[_ROW] = [
-        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online", 1) for _ in range(10)
+        ("bank-000", 600.0, 0.0, 39.2, 7.84, 11.0, 0.9487, 0.9487, 39.2, "online", 1, False)
+        for _ in range(10)
     ]
     rows = [("bank-000", NOW, NOW + timedelta(minutes=15), 110.0 + 80.0)]  # 110 kW + a second 80 kW sale
     violations = checks.find_double_sold(rows, checks.compute_bank_rated_capabilities_kw(hub_rows))
@@ -224,3 +226,32 @@ def test_energy_on_unhealthy_hubs_does_not_count() -> None:
     assert (
         len(checks.find_as_hold_violations([_hold("ob-1", 50.0)], _bank(500.0, health="STALE"), now=NOW)) == 1
     )
+
+
+def test_a_utility_scale_substation_bank_is_rated_at_nameplate_not_the_home_unit_cap() -> None:
+    """Live defect 2026-09-26: the 24 MW Austin toll reserved 18,000 kW on bank-sub-LZ_AEN-00, whose one
+    substation "hub" was rated at the 20 kW home cap, so K2 reported a false double sale (6)."""
+    hub_rows: list[
+        tuple[str, float, float, float, float, float, float, float, float, str, int | None, bool]
+    ] = [
+        (
+            "bank-sub-LZ_AEN-00",
+            24_000.0,
+            0.0,
+            96_000.0,
+            19_200.0,
+            24_000.0,
+            0.95,
+            0.95,
+            60_000.0,
+            "online",
+            1,
+            True,
+        )
+    ]
+    capability = checks.compute_bank_rated_capabilities_kw(hub_rows)
+    assert capability["bank-sub-LZ_AEN-00"] >= 18_000.0
+    rows = [("bank-sub-LZ_AEN-00", NOW, NOW + timedelta(minutes=15), 18_000.0)]
+    assert checks.find_double_sold(rows, capability) == []
+    home = checks.compute_bank_rated_capabilities_kw([(*hub_rows[0][:11], False)])
+    assert home["bank-sub-LZ_AEN-00"] == pytest.approx(11.0)

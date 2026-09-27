@@ -62,7 +62,7 @@ def find_reserve_breaches(
 
 
 def compute_bank_rated_capabilities_kw(
-    hub_rows: list[tuple[str, float, float, float, float, float, float, float, float, str, int | None]],
+    hub_rows: list[tuple[str, float, float, float, float, float, float, float, float, str, int | None, bool]],
 ) -> dict[str, float]:
     """K2's ceiling: each bank's RATED capability -- the sum of its hubs' unit-capped continuous ratings
     (`opengrid.core.limits.continuous_power_kw`: 11 kW per unit, 20 kW dual-unit, one unit when unknown),
@@ -76,14 +76,36 @@ def compute_bank_rated_capabilities_kw(
     sale (dev stack: K2 rose 0 -> 750 kWh while all hubs were offline). `soc_kwh`/`health` are ignored.
 
     `hub_rows`: `(bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, soc_kwh, health,
-    units)` -- one row per hub (`invariants.queries.fetch_bank_capability_inputs`). Every bank with a hub
-    row appears in the result.
+    units, utility_scale)` -- one row per hub (`invariants.queries.fetch_bank_capability_inputs`). A utility-scale
+    hub (its bank is an `og.asset` SUBSTATION) is rated at nameplate `p_kw` by `continuous_power_kw`, never the
+    home unit cap. Every bank with a hub row appears in the result.
     """
     rated_kw_by_bank: dict[str, list[float]] = {}
     bank_params_by_bank: dict[str, BankParams] = {}
-    for bank_id, kva_rating, reserve_kva, e_kwh, r_kwh, p_kw, eta_c, eta_d, _soc, _health, units in hub_rows:
+    for (
+        bank_id,
+        kva_rating,
+        reserve_kva,
+        e_kwh,
+        r_kwh,
+        p_kw,
+        eta_c,
+        eta_d,
+        _soc,
+        _health,
+        units,
+        utility_scale,
+    ) in hub_rows:
         bank_params_by_bank.setdefault(bank_id, BankParams(kva_rating=kva_rating, reserve_kva=reserve_kva))
-        hub_params = HubParams(e_kwh=e_kwh, r_kwh=r_kwh, p_kw=p_kw, eta_c=eta_c, eta_d=eta_d, units=units)
+        hub_params = HubParams(
+            e_kwh=e_kwh,
+            r_kwh=r_kwh,
+            p_kw=p_kw,
+            eta_c=eta_c,
+            eta_d=eta_d,
+            units=units,
+            utility_scale=utility_scale,
+        )
         rated_kw_by_bank.setdefault(bank_id, []).append(continuous_power_kw(hub_params))
     return {
         bank_id: bank_capability(rated_kw_by_bank.get(bank_id, []), bank_params)
