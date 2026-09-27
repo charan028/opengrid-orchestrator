@@ -10,6 +10,9 @@ fields the status carries:
 - r3.4.2 has the allocator's `granted_kw`, `delivery_measured` is always false, and a running call is ACTIVE.
 - r3.4.3 (D-38) has the measured `delivered_kw`. A running call is ACTIVE until a measured bucket gives it a
   delivered kW, then RAMPING or DELIVERING.
+Where r3.4.3 changed a reason code (cancelling an ended call, or a call the utility did not issue), r3.4.2's code is
+accepted on r3.4.2. The r3.4.3-only checks (a timestamp without a UTC offset is 422, a refused read is traced) skip
+on r3.4.2.
 
 Nothing here discharges outside the toll window:
 - The scheduled-call scenario starts its call a few minutes ahead and cancels it before it starts.
@@ -18,7 +21,7 @@ Nothing here discharges outside the toll window:
 - Only the two in-window scenarios run a call now: inside the 16:30-18:00 CT window, for 1 MW. One ends its call
   at once. The slow one (r3.4.3) ends it after the first measured bucket, about a minute in.
 
-A run adds at most six rows to og-util-aen's hourly call budget. It raises the alerts a real call raises
+A run adds at most seven rows to og-util-aen's hourly call budget. It raises the alerts a real call raises
 (ALR-UTILITY-CALL, ALR-UTILITY-CALL-REFUSED).
 
 Not covered: the per-account rate limit (`[dispatch.calls]`, 30 calls an hour). Reaching it takes 30 calls and
@@ -121,6 +124,10 @@ def _assert_delivery(status: dict[str, Any]) -> None:
         assert status["delivery_state"] in DELIVERY_RESULTS and status["delivery_as_of"], status
     else:
         assert status["delivery_state"] == "UNMEASURED" and status["delivered_kw"] is None, status
+    if (
+        "granted_description" in status
+    ):  # r3.4.2 "planned/granted, ..."; r3.4.3 "planned; removed in r3.5; ..."
+        assert status["granted_description"].startswith("planned"), status
 
 
 def _energy(status: dict[str, Any]) -> tuple[Any, Any]:
@@ -138,13 +145,13 @@ def _assert_not_started(status: dict[str, Any], state: str) -> None:
 
 
 def _assert_running(status: dict[str, Any]) -> None:
-    """ACTIVE until measured delivery gives the call a delivered kW, then RAMPING or DELIVERING. A record with no
-    delivered kW (the job's first pass, or a bucket without telemetry) keeps it ACTIVE."""
+    """Unmeasured (always on r3.4.2): ACTIVE with delivery_state UNMEASURED. Measured (r3.4.3, D-38): a delivered
+    kW exists and the state is RAMPING or DELIVERING."""
     _assert_delivery(status)
-    if _measures_delivery(status) and status["delivery_measured"] and status["delivered_kw"] is not None:
-        assert status["state"] in {"RAMPING", "DELIVERING"}, status
+    if status["delivery_measured"]:
+        assert status["delivered_kw"] is not None and status["state"] in {"RAMPING", "DELIVERING"}, status
     else:
-        assert status["state"] == "ACTIVE", status
+        assert status["state"] == "ACTIVE" and status["delivery_state"] == "UNMEASURED", status
 
 
 def _deployable(ob: dict[str, Any], minutes: int) -> bool:
@@ -181,6 +188,19 @@ def austin(stack: Stack, utility: dict[str, Any]) -> dict[str, Any]:
     return utility
 
 
+@pytest.fixture(scope="module")
+def measures_delivery(stack: Stack, utility: dict[str, Any]) -> bool:
+    """True from r3.4.3 on: the call status carries the measured `delivered_kw` (D-38). Read from the status of
+    the utility's newest call, or of a refused probe when it has none."""
+    history = _get(stack, "/calls", limit=1)
+    assert history.status_code == 200, history.text
+    calls = history.json()["calls"]
+    call_id = calls[0]["call_id"] if calls else _probe(stack, str(uuid4())).json()["detail"]["call_id"]
+    status = _get(stack, f"/calls/{call_id}")
+    assert status.status_code == 200, status.text
+    return _measures_delivery(status.json())
+
+
 def test_me_names_the_callers_utility(utility: dict[str, Any]) -> None:
     assert utility == {"user": UTILITY_USER, "utility_id": UTILITY_ID, "api_version": "v1"}
 
@@ -194,6 +214,20 @@ def test_a_non_utility_identity_is_refused(stack: Stack, utility: dict[str, Any]
         _probe(stack, str(uuid4()), user=user),
     ):
         assert resp.status_code == 403, (user, str(resp.request.url), resp.text)
+
+
+def test_a_refused_read_is_traced_as_authz_deny(stack: Stack, measures_delivery: bool) -> None:
+    if not measures_delivery:
+        pytest.skip("r3.4.2 traces refused calls and cancels only, not refused reads")
+    since = stack.rows("SELECT now() - interval '5 seconds' AS t")[0]["t"]
+
+    assert stack.get(f"{BASE}/me", user="viewer").status_code == 403
+
+    assert stack.rows(
+        """SELECT 1 FROM og.trace WHERE stream_id = 'authz_deny:viewer' AND event_class = 'TRACE_AUTHZ_DENY'
+             AND payload ->> 'action' = 'utility.read' AND created_at >= %(t)s""",
+        {"t": since},
+    ), "the refused utility.read was not traced as AUTHZ_DENY"
 
 
 def test_the_utility_account_is_refused_by_the_operator_api(stack: Stack, utility: dict[str, Any]) -> None:
@@ -298,6 +332,65 @@ def test_another_utilitys_call_is_404_like_an_unknown_one(stack: Stack, utility:
         assert resp.json()["detail"] == {"reason_code": "R-CALL-NOT-FOUND", "detail": "no such call"}
     assert history.status_code == 200, history.text
     assert call_id not in {c["call_id"] for c in history.json()["calls"]}
+
+
+def test_a_timestamp_without_a_utc_offset_is_422(stack: Stack, measures_delivery: bool) -> None:
+    if not measures_delivery:
+        pytest.skip("r3.4.2 accepts a timestamp without a UTC offset in the schema; r3.4.3 answers 422")
+    naive = (now_utc() + timedelta(days=7)).replace(tzinfo=None).isoformat()
+    body = {**_call_body(str(uuid4()), start_at=None), "start_at": naive}
+
+    for resp in (
+        _post(stack, "/calls", body),
+        _post(stack, f"/calls/{uuid4()}/cancel", {"end_at": naive}),
+        _get(stack, "/calls", since=naive),
+    ):
+        assert resp.status_code == 422 and "timezone" in resp.text, (str(resp.request.url), resp.text)
+
+
+def test_cancelling_an_ended_call_is_409(stack: Stack, measures_delivery: bool) -> None:
+    ended = stack.rows(
+        """SELECT call_id FROM og.dispatch_call
+           WHERE principal = %(p)s AND origin = 'UTILITY' AND outcome = 'ACCEPTED'
+             AND deployment_id IS NOT NULL AND end_at < now()
+           ORDER BY created_at DESC LIMIT 1""",
+        {"p": UTILITY_USER},
+    )
+    if not ended:
+        pytest.skip(f"{UTILITY_USER} has no ended call on this stack yet")
+
+    resp = _post(stack, f"/calls/{ended[0]['call_id']}/cancel", {})
+
+    assert resp.status_code == 409, resp.text
+    expected = "R-CALL-ALREADY-ENDED" if measures_delivery else "R-CALL-CANNOT-EXTEND"  # r3.4.3 : r3.4.2
+    assert resp.json()["detail"]["reason_code"] == expected, resp.text
+
+
+def test_the_utility_reads_but_cannot_cancel_a_call_it_did_not_issue(
+    stack: Stack, measures_delivery: bool
+) -> None:
+    # An ended operator (or grid-link) call on the utility's own toll: nothing runs, whatever the answer.
+    theirs = stack.rows(
+        """SELECT call_id FROM og.dispatch_call
+           WHERE utility_id = %(u)s AND origin <> 'UTILITY' AND outcome = 'ACCEPTED'
+             AND deployment_id IS NOT NULL AND end_at < now()
+           ORDER BY created_at DESC LIMIT 1""",
+        {"u": UTILITY_ID},
+    )
+    if not theirs:
+        pytest.skip("no ended operator or grid-link call on the Austin Energy toll on this stack")
+    call_id = str(theirs[0]["call_id"])
+
+    read = _get(stack, f"/calls/{call_id}")
+    cancel = _post(stack, f"/calls/{call_id}/cancel", {})
+
+    assert read.status_code == 200, read.text  # a utility reads every call on its own toll
+    if measures_delivery:  # r3.4.3: only the issuer may cancel or shorten
+        assert cancel.status_code == 403, cancel.text
+        assert cancel.json()["detail"]["reason_code"] == "R-CALL-NOT-ISSUER", cancel.text
+    else:  # r3.4.2: any call on its toll may be cancelled, but this one has ended
+        assert cancel.status_code == 409, cancel.text
+        assert cancel.json()["detail"]["reason_code"] == "R-CALL-CANNOT-EXTEND", cancel.text
 
 
 def _schedulable_toll(stack: Stack) -> tuple[dict[str, Any], datetime]:
