@@ -16,6 +16,7 @@
   <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="{{ base_path }}/static/og.js"></script>
   <script src="{{ base_path }}/static/og-map.js"></script>
+  {% block head %}{% endblock %}
 </head>
 <body hx-ext="sse" hx-headers='{"{{ csrf_header_name }}": "{{ csrf_token }}"}'>
   {# one drawn icon set (Lucide outlines), referenced by id so every nav item / badge shares one stroke #}
@@ -39,6 +40,7 @@
     <symbol id="i-wave" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
     <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
     <symbol id="i-play"viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m10 8 6 4-6 4Z"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
   </svg>
   <div class="og-shell">
     <nav class="og-nav" aria-label="Screens">
@@ -67,6 +69,17 @@
           </a>
         </li>
         {% endfor %}
+      </ul>
+      {# Help (r3.4): the last menu entry on every screen, deep-linked to this screen's Help section. #}
+      <ul class="og-nav-help">
+        <li>
+          <a href="{{ help_href(request.url.path) }}" id="nav-help" aria-label="Help" title="Help: how this screen and the platform work"
+             class="{{ 'active' if request.url.path == help_path else '' }}"
+             {% if request.url.path == help_path %}aria-current="page"{% endif %}>
+            <svg class="og-icon" aria-hidden="true"><use href="#i-help"/></svg>
+            <span>Help</span>
+          </a>
+        </li>
       </ul>
       <div class="og-nav-foot">
         <span class="og-nav-role" data-role="{{ role|default('viewer') }}">

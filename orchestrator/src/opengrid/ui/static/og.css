@@ -2375,3 +2375,28 @@ label > select {
 .og-map-legend .og-legend-diamond { display: inline-block; width: 9px; height: 9px; border-radius: 1px !important; transform: rotate(45deg); margin: 0 7px 0 1px; }
 .og-map-legend .og-legend-depot { display: inline-block; width: 11px; height: 11px; margin-right: 6px; background: transparent !important;
   border: 2px solid var(--text); clip-path: polygon(50% 0, 100% 40%, 100% 100%, 0 100%, 0 40%); }
+
+/* Help entry (r3.4): the last item of the left navigation, above the role footer, on every screen. */
+.og-nav ul.og-nav-help {
+  flex: 0 0 auto;
+  margin-top: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 900px) {
+  .og-nav ul.og-nav-help {
+    margin-top: 0;
+    padding: 0;
+    border-top: 0;
+  }
+
+  .og-nav ul.og-nav-help {
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+
+  .og-nav-help a span {
+    display: none;
+  }
+}

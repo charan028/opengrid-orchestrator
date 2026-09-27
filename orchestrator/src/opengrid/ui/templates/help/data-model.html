@@ -1,0 +1,300 @@
+<section class="hp-sec" id="data-model" aria-labelledby="data-model-h">
+<h2 id="data-model-h">Data model</h2>
+<p>All state lives in PostgreSQL, schema <code>og</code>, created by the SQL migrations in <code>orchestrator/migrations/</code> (0001 to 0043 at r3.4; there is no 0015). The migrations create 73 tables plus 2 default partitions (<code>telemetry_default</code>, <code>telemetry_1m_default</code>) and one view (<code>lifecycle_partitions</code>). Daily partitions of <code>telemetry</code> and <code>telemetry_1m</code> are created at run time by the lifecycle job. The "Mig." column gives the migration that created each table; later migrations add columns (for example 0027 and 0034 on telemetry, 0029, 0032, 0036 and 0043 on hub). The r3.4 migrations are listed under <a href="#dm-migrations-r34">Migrations added in r3.4</a>. "Written by" and "Read by" name the Python package and, in brackets, the process it runs in.</p>
+
+<section class="hp-sub" id="dm-er">
+<h3>Entity relationships (simplified)</h3>
+<figure class="hp-fig">
+<svg viewBox="0 0 1000 610" role="img" aria-labelledby="dm-er-t">
+<title id="dm-er-t">Simplified entity-relationship diagram of the og schema: contracts to obligations to commitments, reservations and grants; command batches and verdicts; fleet tables; settlement; trace chain.</title>
+<!-- row 0 -->
+<rect class="hp-box-accent" x="20" y="30" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="100" y="51" text-anchor="middle" font-size="13">contract</text>
+<text class="hp-tm" x="100" y="68" text-anchor="middle" font-size="12">contract_id, tier</text>
+<rect class="hp-box" x="420" y="30" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="500" y="51" text-anchor="middle" font-size="13">plan</text>
+<text class="hp-tm" x="500" y="68" text-anchor="middle" font-size="12">plan_id, plan_mode</text>
+<rect class="hp-box-good" x="820" y="30" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="900" y="51" text-anchor="middle" font-size="13">bank</text>
+<text class="hp-tm" x="900" y="68" text-anchor="middle" font-size="12">bank_id, kva_rating</text>
+<!-- row 1 -->
+<rect class="hp-box" x="20" y="130" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="100" y="151" text-anchor="middle" font-size="13">product_rule</text>
+<text class="hp-tm" x="100" y="168" text-anchor="middle" font-size="12">product_code</text>
+<rect class="hp-box" x="220" y="130" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="300" y="151" text-anchor="middle" font-size="13">opportunity</text>
+<text class="hp-tm" x="300" y="168" text-anchor="middle" font-size="12">window, requested_kw</text>
+<rect class="hp-box" x="420" y="130" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="500" y="151" text-anchor="middle" font-size="13">commitment</text>
+<text class="hp-tm" x="500" y="168" text-anchor="middle" font-size="12">interval, committed_kw</text>
+<rect class="hp-box-good" x="620" y="130" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="700" y="151" text-anchor="middle" font-size="13">telemetry</text>
+<text class="hp-tm" x="700" y="168" text-anchor="middle" font-size="12">hub_id, ts, p_kw</text>
+<rect class="hp-box-good" x="820" y="130" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="900" y="151" text-anchor="middle" font-size="13">hub</text>
+<text class="hp-tm" x="900" y="168" text-anchor="middle" font-size="12">hub_id, e_kwh, p_kw</text>
+<!-- row 2 -->
+<rect class="hp-box" x="20" y="230" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="100" y="251" text-anchor="middle" font-size="13">renomination_point</text>
+<text class="hp-tm" x="100" y="268" text-anchor="middle" font-size="12">scheduled_at, outcome</text>
+<rect class="hp-box-accent" x="220" y="230" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="300" y="251" text-anchor="middle" font-size="13">obligation</text>
+<text class="hp-tm" x="300" y="268" text-anchor="middle" font-size="12">state, committed kW</text>
+<rect class="hp-box" x="420" y="230" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="500" y="251" text-anchor="middle" font-size="13">reservation</text>
+<text class="hp-tm" x="500" y="268" text-anchor="middle" font-size="12">bank_id, kind, amount</text>
+<rect class="hp-box" x="620" y="230" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="700" y="251" text-anchor="middle" font-size="13">grant</text>
+<text class="hp-tm" x="700" y="268" text-anchor="middle" font-size="12">cycle_id, granted_kw</text>
+<rect class="hp-box-good" x="820" y="230" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="900" y="251" text-anchor="middle" font-size="13">hub_state</text>
+<text class="hp-tm" x="900" y="268" text-anchor="middle" font-size="12">soc_kwh, health, lease</text>
+<!-- row 3 -->
+<rect class="hp-box-warn" x="20" y="330" width="260" height="64" rx="8"/>
+<text class="hp-tb" x="150" y="351" text-anchor="middle" font-size="13">settlement</text>
+<text class="hp-tm" x="150" y="368" text-anchor="middle" font-size="12">meter_interval, performance,</text>
+<text class="hp-tm" x="150" y="384" text-anchor="middle" font-size="12">invoice_line, pnl</text>
+<rect class="hp-box" x="410" y="330" width="190" height="50" rx="8"/>
+<text class="hp-tb" x="505" y="351" text-anchor="middle" font-size="12">obligation_energy_status</text>
+<text class="hp-tm" x="505" y="368" text-anchor="middle" font-size="12">margin_kwh, at_risk</text>
+<rect class="hp-box" x="620" y="330" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="700" y="351" text-anchor="middle" font-size="13">command_batch</text>
+<text class="hp-tm" x="700" y="368" text-anchor="middle" font-size="12">merkle_root, pre-image</text>
+<rect class="hp-box" x="820" y="330" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="900" y="351" text-anchor="middle" font-size="13">verdict</text>
+<text class="hp-tm" x="900" y="368" text-anchor="middle" font-size="12">outcome, signature</text>
+<!-- row 4 -->
+<rect class="hp-box-warn" x="20" y="440" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="100" y="461" text-anchor="middle" font-size="13">stop_event</text>
+<text class="hp-tm" x="100" y="478" text-anchor="middle" font-size="12">scope, action</text>
+<rect class="hp-box" x="220" y="440" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="300" y="461" text-anchor="middle" font-size="13">operator_action</text>
+<text class="hp-tm" x="300" y="478" text-anchor="middle" font-size="12">action_kind, tier</text>
+<rect class="hp-box-muted" x="420" y="440" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="500" y="461" text-anchor="middle" font-size="13">trace</text>
+<text class="hp-tm" x="500" y="478" text-anchor="middle" font-size="12">stream_id, seq, hash</text>
+<rect class="hp-box-muted" x="620" y="440" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="700" y="461" text-anchor="middle" font-size="13">trace_checkpoint</text>
+<text class="hp-tm" x="700" y="478" text-anchor="middle" font-size="12">stream_heads, hash</text>
+<rect class="hp-box-muted" x="820" y="440" width="160" height="50" rx="8"/>
+<text class="hp-tb" x="900" y="461" text-anchor="middle" font-size="13">trace_anchor</text>
+<text class="hp-tm" x="900" y="478" text-anchor="middle" font-size="12">signed anchor file</text>
+<!-- strip -->
+<rect class="hp-box-muted" x="20" y="530" width="960" height="62" rx="8"/>
+<text class="hp-tb" x="36" y="552" font-size="13">No foreign keys to the core above (joined by id or time)</text>
+<text class="hp-tm" x="36" y="572" font-size="12">feed_obs, feed_status, forecast, alert, heartbeat, degraded_mode_state, scope_posture, command_ack, lease_state,</text>
+<text class="hp-tm" x="36" y="587" font-size="12">owner_charge_window, flow limits, PQ and asset health, firmware, lifecycle; see the tables per area below.</text>
+<!-- edges: child to parent -->
+<line class="hp-edge" x1="100" y1="130" x2="100" y2="80" marker-end="url(#hp-arrow)"/>
+<path class="hp-edge" d="M300,130 V55 H180" fill="none" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="220" y1="155" x2="180" y2="155" marker-end="url(#hp-arrow)"/>
+<path class="hp-edge-dash" d="M380,140 H400 V55 H420" fill="none" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="300" y1="230" x2="300" y2="180" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="180" y1="255" x2="220" y2="255" marker-end="url(#hp-arrow)"/>
+<path class="hp-edge" d="M440,180 V205 H360 V230" fill="none" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="500" y1="130" x2="500" y2="80" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="420" y1="255" x2="380" y2="255" marker-end="url(#hp-arrow)"/>
+<path class="hp-edge" d="M620,265 H600 V305 H340 V280" fill="none" marker-end="url(#hp-arrow)"/>
+<path class="hp-edge" d="M410,355 H310 V280" fill="none" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="250" y1="330" x2="250" y2="280" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="780" y1="155" x2="820" y2="155" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="900" y1="130" x2="900" y2="80" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="900" y1="230" x2="900" y2="180" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge-dash" x1="700" y1="280" x2="700" y2="330" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="820" y1="355" x2="780" y2="355" marker-end="url(#hp-arrow)"/>
+<path class="hp-edge-dash" d="M650,380 V410 H520 V440" fill="none" marker-end="url(#hp-arrow)"/>
+<line class="hp-edge" x1="820" y1="465" x2="780" y2="465" marker-end="url(#hp-arrow)"/>
+</svg>
+<figcaption>Arrows point from the referencing table to the referenced one. Solid arrows are declared foreign keys; dashed arrows are id references without a constraint (opportunity.gate_id to plan is a foreign key drawn dashed for readability; grant.command_batch_id and command_batch.trace_pre_image_id are plain columns). The four settlement tables each reference obligation; invoice_line also references contract. trace has a self reference (parent_trace_id).</figcaption>
+</figure>
+</section>
+
+<section class="hp-sub" id="dm-fleet">
+<h3>Fleet, hubs, banks and grid assets</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>bank</code></td><td>0001</td><td>Bank (transformer group of hubs) with its kVA rating.</td><td>bank_id (text since 0004), zone, kva_rating, reserve_kva, feeder_id</td><td>fleet seed, dev/seed SQL</td><td>engine, guardian, selector, settle, health, api</td></tr>
+<tr><td><code>hub</code></td><td>0001</td><td>Static hub parameters and device data.</td><td>hub_id, bank_id, zone, lat, lon, e_kwh, r_kwh, p_kw, eta_c, eta_d, units (0032), export_limit_kw, service_kw, transformer_id, pv_rated_kw (0029), firmware_version, serial_number, commissioned_at, device_info_at (0036), device_units, device_rated_kw, device_rated_kwh, device_reserve_floor_pct, device_lat, device_lon (0043)</td><td>fleet seed, dev/seed SQL (ratings, reserve, location); device info by fleet (og-engine) writes only identity columns (serial, manufacturer, model, firmware and hardware revision, dates) and the <code>device_*</code> columns</td><td>engine, guardian, settle, health, pq_ingest, api</td></tr>
+<tr><td><code>hub_state</code></td><td>0001</td><td>Latest live state per hub.</td><td>hub_id, soc_kwh, p_kw, health, lease_epoch, lease_expires_at, last_seen_at, home_load_kw, pv_kw (0027), charge_grid_kw (0034)</td><td>fleet flush (og-engine); health column by health (og-settle)</td><td>engine, guardian, invariants, api</td></tr>
+<tr><td><code>telemetry</code></td><td>0001</td><td>Raw hub telemetry, range-partitioned by day.</td><td>hub_id, ts, soc_kwh, p_kw, seq, epoch, health, flow columns (0027), charge_pv_kw, charge_grid_kw (0034)</td><td>fleet flush, COPY (og-engine)</td><td>settle, invariants, selector, lifecycle, api</td></tr>
+<tr><td><code>telemetry_default</code></td><td>0001</td><td>Default partition of telemetry; rows land here until a day partition exists.</td><td>as telemetry</td><td>(via telemetry)</td><td>lifecycle (partition swap)</td></tr>
+<tr><td><code>utility</code></td><td>0025</td><td>Regulated utility and its capacity payment terms.</td><td>utility_id, name, territory_zones, capacity_product, payment_basis, capacity_price_usd_per_kw</td><td>dev/seed SQL only</td><td>market, contracts, guardian, settle, invariants</td></tr>
+<tr><td><code>asset</code></td><td>0025</td><td>Grid asset classes (for example SUBSTATION BESS) tied to banks and utilities.</td><td>asset_id, asset_class, bank_id, feeder_id, substation_id, zone, utility_id</td><td>dev/seed SQL only</td><td>fleet, engine, guardian, market, settle, api</td></tr>
+<tr><td><code>service_transformer</code></td><td>0029</td><td>Service transformer rating per bank for flow checks.</td><td>transformer_id, bank_id, rating_kva</td><td>no writer in code or seed at r3.4</td><td>engine, guardian, invariants</td></tr>
+<tr><td><code>feeder_limit</code></td><td>0029</td><td>Feeder thermal and reverse-flow limits.</td><td>feeder_id, thermal_kw, reverse_kw</td><td>dev/seed SQL only</td><td>engine (flow limits), guardian (G-28), invariants</td></tr>
+<tr><td><code>substation_limit</code></td><td>0029</td><td>Substation rating and reverse-flow limit.</td><td>substation_id, rating_kva, reverse_kw</td><td>dev/seed SQL only</td><td>engine, guardian (G-29), invariants</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-contracts">
+<h3>Contracts, obligations, plans, commitments and grants</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>contract</code></td><td>0001</td><td>Customer contract and its commercial terms.</td><td>contract_id, customer_id, service_type, variant, tier, territory_id, start_at, end_at, penalty_*, market and utility_id (0025)</td><td>contracts (og-api CRUD, og-engine intake); seed</td><td>engine, selector, guardian, settle, api, customer_api</td></tr>
+<tr><td><code>product_rule</code></td><td>0001</td><td>Product sizing rules per contract.</td><td>product_rule_id, contract_id, product_code, min_qty_kw, increment_kw, duration_minutes</td><td>contracts; seed</td><td>engine, selector, invariants, api</td></tr>
+<tr><td><code>opportunity</code></td><td>0001</td><td>A candidate delivery window offered to the selector.</td><td>opportunity_id, contract_id, product_rule_id, window_start, window_end, requested_kw, value_per_mwh, state, gate_id</td><td>contracts (og-engine intake, og-api)</td><td>selector, engine, settle, api</td></tr>
+<tr><td><code>obligation</code></td><td>0001</td><td>An admitted delivery obligation and its lifecycle state.</td><td>obligation_id, contract_id, window_start, window_end, committed_qty_kw, state, at_risk, last_reason_code, version</td><td>contracts (og-engine lifecycle and selector commit, og-api, og-settle close)</td><td>almost every package</td></tr>
+<tr><td><code>renomination_point</code></td><td>0001</td><td>Scheduled points where a contract may be renominated.</td><td>renomination_point_id, contract_id, obligation_id, scheduled_at, exercised_at, outcome, plan_id</td><td>contracts (og-engine)</td><td>engine (gate triggers), customer_api</td></tr>
+<tr><td><code>plan</code></td><td>0001</td><td>One selector solve (day-ahead or intraday).</td><td>plan_id, plan_mode, gate_kind, horizon_start, horizon_end, solver_status, objective_value, superseded_by</td><td>selector (og-engine)</td><td>api</td></tr>
+<tr><td><code>commitment</code></td><td>0001</td><td>Committed kW per obligation interval (K13 lock).</td><td>commitment_id, obligation_id, plan_id, interval_start, interval_end, committed_kw, supersedes, reason_code</td><td>ledger (og-engine)</td><td>selector, guardian (G-19), invariants, api</td></tr>
+<tr><td><code>reservation</code></td><td>0001</td><td>Capacity reserved per bank and interval (K2 one buyer).</td><td>reservation_id, obligation_id, bank_id, kind, amount, interval_start, interval_end, ledger_version, released_at</td><td>ledger (og-engine)</td><td>engine, guardian (G-09), settle, invariants, api</td></tr>
+<tr><td><code>grant</code></td><td>0001</td><td>Per-cycle kW granted to an obligation on a bank; insert-only.</td><td>grant_id, cycle_id, obligation_id, bank_id, granted_kw, is_headroom, ledger_version, command_batch_id</td><td>ledger (og-engine)</td><td>guardian, settle, invariants, api</td></tr>
+<tr><td><code>obligation_energy_status</code></td><td>0009</td><td>K1 energy sufficiency per obligation, every cycle.</td><td>obligation_id, required_kwh, available_kwh, margin_kwh, time_to_depletion_h, at_risk</td><td>engine</td><td>api, customer_api</td></tr>
+<tr><td><code>as_deployment</code></td><td>0020</td><td>Ancillary-service deployment windows that release an AS capacity hold.</td><td>deployment_id, obligation_id, start_at, end_at, source, requested_by, cancelled_at</td><td>api (POST as-deployments); contracts poller not wired</td><td>allocator, guardian, selector, settle, invariants</td></tr>
+<tr><td><code>plan_value</code></td><td>0030</td><td>LP versus rule-baseline value per plan.</td><td>plan_id, lp_net_value, rule_net_value, value_added, forgone_upside, breakdown</td><td>selector (og-engine)</td><td>api (LP value)</td></tr>
+<tr><td><code>plan_energy_value</code></td><td>0030</td><td>Water value and discharge threshold per plan and bank.</td><td>plan_id, bank_id, water_value_usd_per_mwh, discharge_threshold_usd_per_mwh, planned_floor_kwh, hold_floor_kwh, solar_share</td><td>selector (og-engine)</td><td>engine (discharge threshold)</td></tr>
+<tr><td><code>plan_shadow_obligation</code></td><td>0030</td><td>LP versus rule kW per obligation interval, for analytics.</td><td>plan_id, obligation_id, interval_start, lp_kw, rule_kw, best_competing_value_per_kwh</td><td>selector (og-engine)</td><td>analytics only</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-market">
+<h3>Market data, feeds and forecasts</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>feed_obs</code></td><td>0001</td><td>Normalized observations from ERCOT, EIA and NWS.</td><td>source, product, series, ts, value, unit, quality (GOOD, ESTIMATED, STALE)</td><td>feeds (og-feeds)</td><td>forecast, selector, engine, guardian, settle, health, api</td></tr>
+<tr><td><code>feed_status</code></td><td>0001</td><td>Per source and product poll status and breaker.</td><td>source, product, last_value_at, consecutive_failures, breaker_open</td><td>feeds (og-feeds)</td><td>health, api</td></tr>
+<tr><td><code>forecast</code></td><td>0003</td><td>Quantile forecasts per series and interval.</td><td>series_key, kind, interval_start_utc, horizon_step, p10, p50, p90, firm_fitness, computed_at</td><td>forecast (og-feeds)</td><td>selector, engine, api, ui</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-guardian">
+<h3>Command batches, guardian verdicts and stops</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>command_batch</code></td><td>0001</td><td>One proposed batch per bank per cycle; the engine to guardian queue.</td><td>command_batch_id, cycle_id, ledger_version, command_count, merkle_root, trace_pre_image_id, created_at</td><td>engine; api; lifecycle (retention)</td><td>guardian</td></tr>
+<tr><td><code>verdict</code></td><td>0001</td><td>Guardian decision on a batch.</td><td>verdict_id, command_batch_id, outcome, vetoed_rule_ids, latency_ms, inputs_hash, signature, signed_at</td><td>guardian</td><td>engine (veto handling), api</td></tr>
+<tr><td><code>command_ack</code></td><td>0012</td><td>Per-hub acknowledgement of a batch.</td><td>batch_id, hub_id, accepted, applied_p_kw, reject_reason, ts</td><td>fleet flush (og-engine)</td><td>lifecycle (retention)</td></tr>
+<tr><td><code>lease_state</code></td><td>0005</td><td>Guardian epoch and sequence per bank.</td><td>bank_id, epoch, seq, updated_at</td><td>guardian</td><td>engine</td></tr>
+<tr><td><code>scope_posture</code></td><td>0019</td><td>K7 escalation posture per bank or zone.</td><td>scope_kind, scope_ref, posture, veto_ratio, consecutive, stop_requested, since</td><td>guardian</td><td>engine, allocator, api, ui</td></tr>
+<tr><td><code>stop_event</code></td><td>0001</td><td>Every stop ENGAGE and RELEASE.</td><td>stop_event_id, scope_kind, scope_ref, action, initiator_kind, initiator_ref, reason, approver_ref, signature</td><td>safestop</td><td>guardian, engine, firmware, api</td></tr>
+<tr><td><code>stop_outbox</code></td><td>0035</td><td>Outbox of stop messages still to publish on MQTT.</td><td>seq, stop_id, action, topic_suffix, payload, published_at, attempts, last_error</td><td>safestop (in the same transaction as the <code>stop_event</code> row at r3.4; <code>attempts</code> counts permanent failures only, dead-lettered at 5)</td><td>safestop</td></tr>
+<tr><td><code>operator_action</code></td><td>0001</td><td>Audited operator actions with tier and approver.</td><td>operator_action_id, operator_ref, action_kind, target_ref, tier, reason, approver_ref, trace_id</td><td>api, guardian (stop release)</td><td>api, customer_api</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-trace">
+<h3>Trace, anchors and invariants</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>trace</code></td><td>0001</td><td>Append-only decision journal, hash-chained per stream.</td><td>trace_id, parent_trace_id, decision_type, event_class, stream_id, seq, payload, reason_codes, prev_hash, hash</td><td>trace (every process that traces); pruned by settle</td><td>guardian (G-14), invariants, api</td></tr>
+<tr><td><code>trace_checkpoint</code></td><td>0001</td><td>Periodic checkpoint of all stream heads.</td><td>checkpoint_id, checkpoint_at, stream_heads, checkpoint_hash, anchor_ref</td><td>trace (og-settle, og-safestop)</td><td>trace_anchor</td></tr>
+<tr><td><code>trace_anchor</code></td><td>0028</td><td>Record of each signed external anchor file (K11).</td><td>anchor_id, checkpoint_id, published_at, checkpoint_hash, primary_path, secondary_path, key_id, signature</td><td>trace.anchoring (og-settle)</td><td>invariants (anchor freshness)</td></tr>
+<tr><td><code>retention_policy</code></td><td>0001</td><td>Trace retention per event class.</td><td>event_class, retention_days, prune_after_checkpoint</td><td>migrations; api (retention router)</td><td>settle, safestop, guardian, trace</td></tr>
+<tr><td><code>invariant_check</code></td><td>0014</td><td>Last run and totals per invariant check.</td><td>check_name, last_run_at, last_violations, total_violations, watermark</td><td>invariants (og-settle)</td><td>health, api</td></tr>
+<tr><td><code>invariant_violation</code></td><td>0014</td><td>Individual violations found.</td><td>id, check_name, detected_at, scope, detail, dedupe_key (0017)</td><td>invariants (og-settle)</td><td>invariants</td></tr>
+<tr><td><code>invariant_trace_watermark</code></td><td>0017</td><td>Incremental trace-verification position per stream.</td><td>stream_id, next_from_seq</td><td>invariants (og-settle)</td><td>invariants</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-settlement">
+<h3>Settlement and invoices</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>meter_interval</code></td><td>0001</td><td>Metered delivery per obligation interval, versioned.</td><td>meter_interval_id, obligation_id, interval_start, delivered_kwh, baseline_kwh, source, quality_flag, version, superseded_by</td><td>settle</td><td>api</td></tr>
+<tr><td><code>performance</code></td><td>0001</td><td>Compliance scoring per interval.</td><td>performance_id, obligation_id, compliance_pct, availability_pct, response_time_s, passed_threshold</td><td>settle</td><td>engine, api</td></tr>
+<tr><td><code>invoice_line</code></td><td>0001</td><td>Versioned invoice lines; immutable once written (0024).</td><td>invoice_line_id, contract_id, obligation_id, period_start, line_type, quantity, rate, amount, status, supersedes, version</td><td>settle</td><td>api, customer_api, lifecycle (billing export)</td></tr>
+<tr><td><code>pnl</code></td><td>0001</td><td>Profit and loss per obligation interval.</td><td>pnl_id, obligation_id, revenue, energy_cost, degradation_cost, penalty, net_value, version (0006), delivery_charge (0023)</td><td>settle</td><td>api, market, lifecycle</td></tr>
+<tr><td><code>invoice_dispute</code></td><td>0026</td><td>Customer dispute against an invoice line.</td><td>dispute_id, invoice_line_id, contract_id, customer_id, reason</td><td>customer_api (og-api, disabled by default)</td><td>customer_api</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-health">
+<h3>Alerts, health and degraded modes</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>alert</code></td><td>0001</td><td>Operator alerts (ALR-* rules). See <a href="#ev-alerts">alert rules</a>.</td><td>id, rule, severity, summary, detail, opened_at, cleared_at, acked_by, scope_kind, scope_ref (0031)</td><td>health.queries (called from og-settle, og-engine, og-guardian); fleet device info (og-engine, <code>ALR-DEVICE-RATING-MISMATCH</code>); guardian (<code>ALR-BANK-UNMAPPED-TOPOLOGY</code>); safestop (<code>ALR-STOP-PUBLISH-DEAD-LETTER</code>); api (acknowledge)</td><td>api, ui, engine, guardian, settle</td></tr>
+<tr><td><code>heartbeat</code></td><td>0001</td><td>One row per process, refreshed every few seconds.</td><td>process, pid, ts, status</td><td>platform.heartbeat (every og process)</td><td>health, engine (guardian availability), api</td></tr>
+<tr><td><code>degraded_mode_state</code></td><td>0021</td><td>Active degraded modes. See <a href="#ev-degraded">degraded modes</a>.</td><td>mode, since</td><td>health (og-settle)</td><td>engine, selector, api</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-firmware">
+<h3>Firmware</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>firmware_catalogue</code></td><td>0037</td><td>Released firmware images (merged with <code>[[firmware.catalogue]]</code> config entries).</td><td>version, hardware_revision, sha256, release_note, released_at, withdrawn_at</td><td>no code writer (manual rows)</td><td>firmware</td></tr>
+<tr><td><code>firmware_campaign</code></td><td>0037</td><td>A rollout campaign with waves and failure limits.</td><td>campaign_id, name, target_version, state, selection, waves, bank_max_concurrent_pct, feeder_max_concurrent_pct, max_failures</td><td>firmware (og-api create, og-engine executor)</td><td>firmware, api</td></tr>
+<tr><td><code>firmware_job</code></td><td>0037</td><td>One hub in a campaign.</td><td>job_id, campaign_id, hub_id, bank_id, wave, action, state, attempts, next_attempt_at</td><td>firmware (og-engine executor)</td><td>firmware, api</td></tr>
+<tr><td><code>firmware_job_event</code></td><td>0037</td><td>State history of each job.</td><td>event_id, campaign_id, job_id, hub_id, event, from_state, to_state, reason, trace_id</td><td>firmware</td><td>firmware, api</td></tr>
+<tr><td><code>firmware_command</code></td><td>0037</td><td>Commands awaiting guardian signature and publish on <code>cmd/fw/&lt;hub&gt;</code>.</td><td>command_id, job_id, hub_id, action, target_version, sha256, expires_at, status, refuse_reason</td><td>firmware (og-engine; og-guardian flow)</td><td>guardian, api</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-charge">
+<h3>Owner charge windows</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>owner_charge_window</code></td><td>0038</td><td>Allowed grid-charging windows per scope set by the owner.</td><td>scope_kind, scope_ref, windows, updated_by, updated_at</td><td>api (charge-windows router); default row from 0038</td><td>selector (og-engine), core.charge_windows</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section class="hp-sub" id="dm-lifecycle">
+<h3>Data lifecycle: retention, archive and rollups</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>data_retention</code></td><td>0033</td><td>Per-table hot, keep and archive policy.</td><td>table_name, ts_column, mode, hot_days, keep_days, archive, legal_hold, protected</td><td>migration 0033 seed; operators</td><td>lifecycle</td></tr>
+<tr><td><code>lifecycle_watermark</code></td><td>0033</td><td>Progress marks for rollups and exports.</td><td>name, upto</td><td>lifecycle</td><td>lifecycle</td></tr>
+<tr><td><code>lifecycle_archive</code></td><td>0033</td><td>Cold-tier export manifest per archive and day.</td><td>archive_name, day, path, row_count, sha256, bytes, verified_at</td><td>lifecycle</td><td>lifecycle (restore, status)</td></tr>
+<tr><td><code>lifecycle_run</code></td><td>0033</td><td>History of lifecycle runs.</td><td>run_id, cycle, started_at, finished_at, ok, summary</td><td>lifecycle</td><td>lifecycle status</td></tr>
+<tr><td><code>telemetry_1m</code></td><td>0033</td><td>1-minute telemetry rollup, partitioned.</td><td>hub_id, bucket, p_kw_avg, p_kw_min, p_kw_max, soc_kwh_last, energy_in_kwh, energy_out_kwh</td><td>lifecycle</td><td>lifecycle</td></tr>
+<tr><td><code>telemetry_1m_default</code></td><td>0033</td><td>Default partition of telemetry_1m.</td><td>as telemetry_1m</td><td>(via telemetry_1m)</td><td>lifecycle</td></tr>
+<tr><td><code>telemetry_15m</code></td><td>0033</td><td>15-minute telemetry rollup.</td><td>hub_id, bucket, same measures as telemetry_1m</td><td>lifecycle</td><td>lifecycle</td></tr>
+</tbody>
+</table></div>
+<p class="hp-note">All writers here are <code>python -m opengrid.lifecycle</code>, run by <code>og-lifecycle.service</code> from <code>og-lifecycle.timer</code> (every 10 minutes). <code>deploy.sh</code> installs both units but leaves the timer disabled until an operator enables it. Migration 0033 also creates the view <code>lifecycle_partitions</code>. See <a href="#mt-lifecycle">Data lifecycle</a>.</p>
+</section>
+
+<section class="hp-sub" id="dm-migrations-r34">
+<h3>Migrations added in r3.4</h3>
+<p>r3.4 adds three additive migrations on top of r3.3's 0001-0040. No table is created or dropped. Column additions that r3.4 already carried, such as <code>0027_discharge_flow_telemetry</code> (flow columns on <code>telemetry</code> and <code>hub_state</code>, and the <code>hub.lat</code>/<code>lon</code> backfill), are unchanged.</p>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Migration</th><th scope="col">Change</th><th scope="col">Why</th></tr></thead>
+<tbody>
+<tr><td><code>0041_trace_authz_deny.sql</code></td><td>The <code>og.trace.decision_type</code> CHECK accepts <code>AUTHZ_DENY</code>. Added <code>NOT VALID</code> (no scan of <code>og.trace</code>) and deliberately not validated in the same file.</td><td>Every audited deny raised a check violation, was journalled as a database outage, and blocked trace-journal replay for the whole process.</td></tr>
+<tr><td><code>0042_drop_hot_indexes.sql</code></td><td>Drops 0039's <code>og.hub_state_last_seen_hub_idx</code> and <code>og.hub_state_p_kw_hub_idx</code>.</td><td>Both columns change on every telemetry flush, so the indexes defeated HOT updates on the hottest table. The Fleet table sorts by P and telemetry age with a scan and a top-N sort instead.</td></tr>
+<tr><td><code>0043_hub_device_reported.sql</code></td><td>Adds <code>og.hub.device_units</code>, <code>device_rated_kw</code>, <code>device_rated_kwh</code>, <code>device_reserve_floor_pct</code>, <code>device_lat</code>, <code>device_lon</code>.</td><td>H4: what a battery reports is kept apart from the seed. <code>units</code>, <code>p_kw</code>, <code>e_kwh</code>, <code>r_kwh</code> (the K1 reserve), <code>lat</code> and <code>lon</code> are never written from a device report; a difference raises <code>ALR-DEVICE-RATING-MISMATCH</code>.</td></tr>
+</tbody></table></div>
+<p class="hp-note"><code>og.hub.pv_rated_kw</code> (0029) is still never written by a seed. At r3.4 the guardian reads NULL as <code>[guardian.flow].default_pv_rated_kw</code> = 10 kW per hub (conservative), not 0; an explicit 0 still means no PV.</p>
+</section>
+
+<section class="hp-sub" id="dm-other">
+<h3>Customer services, power quality and calibration</h3>
+<div class="hp-scroll"><table class="hp-table">
+<thead><tr><th scope="col">Table</th><th scope="col">Mig.</th><th scope="col">Purpose</th><th scope="col">Key columns</th><th scope="col">Written by</th><th scope="col">Read by</th></tr></thead>
+<tbody>
+<tr><td><code>service_profile</code></td><td>0010</td><td>Per-contract control profile (pipeline, data center, arbitrage).</td><td>service_profile_id, contract_id, version, control_primitive, target_quantity, setpoint_source, response_time_s, ramp_limit</td><td>dev/seed SQL only</td><td>engine, guardian, settle, invariants, api</td></tr>
+<tr><td><code>pq_envelope</code></td><td>0010</td><td>Customer power-quality limits.</td><td>pq_envelope_id, customer_id, phase_config, voltage_band_pct, thd_voltage_limit_pct, pf_min, ride_through_class</td><td>dev/seed SQL only</td><td>engine, guardian, api</td></tr>
+<tr><td><code>hub_inverter_pq</code></td><td>0010</td><td>Measured inverter characteristics and asset state per hub.</td><td>hub_id, kva_rating, freq_offset_hz, voltage_offset_pct, thd_current_pct, asset_state (0011)</td><td>pq_ingest (og-engine), assets</td><td>engine (PQ eligibility), guardian, api</td></tr>
+<tr><td><code>pq_waveform_summary</code></td><td>0011</td><td>Per-hub waveform summaries.</td><td>hub_id, ts, v_rms_a, freq_hz, pf_a, thd_v_pct_a, thd_i_pct_a, sync_quality_ns</td><td>pq_ingest (og-engine)</td><td>guardian, assets, api</td></tr>
+<tr><td><code>pq_waveform_raw_index</code></td><td>0011</td><td>Index of raw waveform captures stored as files.</td><td>capture_id, hub_id, ts, trigger_reason, blob_ref, sample_rate_hz, retain_until</td><td>pq_ingest (og-engine)</td><td>api</td></tr>
+<tr><td><code>calibration_attempt</code></td><td>0011</td><td>Calibration measurement and correction per hub.</td><td>calibration_id, hub_id, requested_at, measured_offset_*, correction_*, command_batch_id, outcome</td><td>assets</td><td>guardian, api</td></tr>
+<tr><td><code>calibration_command</code></td><td>0016</td><td>Signed calibration command and its ack status.</td><td>calibration_id, hub_id, status, epoch, seq, signed_at, ack_consumed_at</td><td>assets, guardian</td><td>engine (ack guard), api</td></tr>
+<tr><td><code>maintenance_work_order</code></td><td>0011</td><td>Field work orders raised from asset health.</td><td>work_order_id, hub_id, severity, evidence, status, opened_at, closed_at</td><td>assets</td><td>api</td></tr>
+<tr><td><code>asset_event</code></td><td>0011</td><td>Asset state changes and part swaps per hub.</td><td>asset_event_id, hub_id, work_order_id, event_type, from_state, to_state, reason_code</td><td>assets</td><td>api</td></tr>
+<tr><td><code>customer_site_meter_reading</code></td><td>0026</td><td>Customer site meter readings (MQTT <code>site/...</code>).</td><td>customer_id, site_id, ts, p_kw, q_kvar, v_rms_*, freq_hz, pf, thd_v_pct</td><td>site_ingest (og-engine, <code>[site_ingest].enabled</code> default false)</td><td>settle, invariants, api</td></tr>
+<tr><td><code>corridor_current_reading</code></td><td>0026</td><td>Pipeline corridor current (MQTT <code>corridor/...</code>).</td><td>customer_id, corridor_id, line_id, ts, i_ac_a, limit_a, quality</td><td>site_ingest (og-engine, disabled by default)</td><td>invariants, site_ingest</td></tr>
+<tr><td><code>customer_obligation_request</code></td><td>0026</td><td>Customer requests to change an obligation.</td><td>request_id, obligation_id, contract_id, customer_id, kind, requested_kw, status, raised_by</td><td>customer_api (og-api, disabled by default)</td><td>customer_api</td></tr>
+</tbody>
+</table></div>
+<p class="hp-note">The asset drift sweep that updates <code>hub_inverter_pq</code>, work orders and asset events runs in og-settle only when <code>[assets].drift_enabled</code> is true (default false).</p>
+</section>
+</section>

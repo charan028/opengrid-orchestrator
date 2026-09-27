@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Help -- OpenGrid Orchestrator{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ base_path }}/static/og-help.css">{% endblock %}
+{% block header_title %}Help{% endblock %}
+{% block content %}
+{# One arrow marker shared by every diagram on the page (fragments reference url(#hp-arrow)). #}
+<svg width="0" height="0" class="hp-defs" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="hp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10z"/>
+    </marker>
+  </defs>
+</svg>
+<div class="hp-layout">
+  <aside class="hp-toc-wrap" aria-label="Help contents">
+    <div class="hp-search">
+      <label for="hp-search-input">Search this page</label>
+      <input type="search" id="hp-search-input" placeholder="e.g. safe stop, ALR-FEED-STALE, G-07" autocomplete="off"
+             aria-describedby="hp-search-status">
+      <p id="hp-search-status" class="hp-search-status" role="status" aria-live="polite"></p>
+    </div>
+    <nav class="hp-toc" aria-label="Table of contents">
+      <ol>
+        {% for sec_id, title, subs in toc %}
+        <li>
+          <a href="#{{ sec_id }}">{{ title }}</a>
+          {% if subs %}
+          <ol>
+            {% for sub_id, sub_title in subs %}<li><a href="#{{ sub_id }}">{{ sub_title }}</a></li>{% endfor %}
+          </ol>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+    </nav>
+  </aside>
+  <div class="hp-body" id="hp-body">
+    <p class="hp-lede">A complete guide to OpenGrid release r3.4: what the platform does, how it decides, what every
+      screen shows and how each figure is derived, the integrations and APIs, events and error handling,
+      maintenance, and step-by-step playbooks. Every screen's <b>Help</b> entry (bottom of the left menu) opens this
+      page at that screen's section. You are signed in as <b>{{ role }}</b>; this page is read-only.</p>
+    <p class="hp-no-match" id="hp-no-match" hidden>No topic matches this search.</p>
+
+    {% for name in fragments_before_pages %}{% include "help/" ~ name ~ ".html" ignore missing %}{% endfor %}
+
+    <section class="hp-sec" id="pages" aria-labelledby="pages-h">
+      <h2 id="pages-h">Screens</h2>
+      <p>One section per screen. Each lists every tile, column, chart and action, what it means, how it is
+        derived, what an operator can do, and the related <a href="#playbooks">playbooks</a>.</p>
+      {% for name in page_fragments %}{% include "help/" ~ name ~ ".html" ignore missing %}{% endfor %}
+    </section>
+
+    {% for name in fragments_after_pages %}{% include "help/" ~ name ~ ".html" ignore missing %}{% endfor %}
+
+    <section class="hp-sec" id="apis" aria-labelledby="apis-h">
+      <h2 id="apis-h">APIs</h2>
+      <section class="hp-sub" id="api-about">
+        <h3>About this reference</h3>
+        <p>Generated when this page is rendered from the routes this process actually serves ({{ api_endpoint_count }}
+          endpoints under <code>/og/api</code>), so it always matches the running release. The role column is read
+          from each endpoint's own authorisation dependency: <b>viewer</b> (any mapped identity), <b>operator</b>
+          (write actions; the API re-checks it even when the console already did), <b>customer key</b> (the customer
+          API, mounted only when <code>[api.customer_api].enabled</code> is on), <b>local probe</b> (health probes
+          from the host itself). Inbound endpoints are called by the console, operators, viewers and customers;
+          <code>/og/api/stream/*</code> are outbound server-sent event streams that push live updates to the console.
+          Outbound integrations to devices and markets (signed MQTT commands, firmware commands, the disabled ERCOT
+          MMS adapter) are described under <a href="#integrations">Integrations</a> and
+          <a href="#ev-mqtt">MQTT topics</a>.</p>
+        <p>Raw specification: <a href="{{ openapi_path }}">{{ openapi_path }}</a> (OpenAPI 3 JSON) and the
+          interactive reference at <a href="{{ docs_path }}">{{ docs_path }}</a>.</p>
+        {% if not api_groups %}
+        <p class="hp-warn">This process serves no <code>/og/api</code> routes (the console is running without the
+          API), so no endpoint list can be generated here. Use <a href="{{ openapi_path }}">{{ openapi_path }}</a>
+          on the production host.</p>
+        {% endif %}
+      </section>
+      {% for group in api_groups %}
+      <section class="hp-sub" id="{{ group.slug }}">
+        <h3>{{ group.name }} <span class="hp-count">{{ group.endpoints|length }}</span></h3>
+        <div class="hp-scroll">
+          <table class="hp-table hp-api">
+            <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">Role</th><th scope="col">Direction</th><th scope="col">Purpose</th></tr></thead>
+            <tbody>
+              {% for ep in group.endpoints %}
+              <tr>
+                <td><code>{{ ep.methods }}</code></td>
+                <td><code>{{ ep.path }}</code></td>
+                <td>{{ ep.role }}</td>
+                <td>{{ ep.direction }}</td>
+                <td>{% if ep.summary and ep.summary != ep.purpose %}<b>{{ ep.summary }}.</b> {% endif %}{{ ep.purpose }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endfor %}
+      <section class="hp-sub" id="api-console">
+        <h3>Console routes <span class="hp-count">{{ console_routes|length }}</span></h3>
+        <p>The console's own pages and HTMX fragments. Write actions here relay to the API above with the
+          operator's forwarded identity; the API makes the final role check.</p>
+        <div class="hp-scroll">
+          <table class="hp-table">
+            <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">Purpose</th></tr></thead>
+            <tbody>
+              {% for r in console_routes %}
+              <tr><td><code>{{ r.methods }}</code></td><td><code>{{ r.path }}</code></td><td>{{ r.purpose }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    {% for name in fragments_after_apis %}{% include "help/" ~ name ~ ".html" ignore missing %}{% endfor %}
+    <p class="hp-top"><a href="#hp-body">Back to top</a></p>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ base_path }}/static/og-help.js"></script>{% endblock %}

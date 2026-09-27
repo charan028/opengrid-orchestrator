@@ -1,0 +1,471 @@
+<section class="hp-sec" id="playbooks" aria-labelledby="playbooks-h">
+<h2 id="playbooks-h">Playbooks: what to do when...</h2>
+<p>One playbook per situation. Each uses the same layout: how the situation shows on the console, who acts, what the system already does on its own, then the steps with the exact screen and button, what has to be confirmed, how to tell it is over, and when to escalate. Button labels are the ones in the r3.4 templates. Where a step cannot be done from the console at r3.4, the playbook says so and gives the API path or the <code>deploy/RUNBOOK.md</code> step instead.</p>
+<p class="hp-note">The design runbooks <code>RB-*</code> in <code>docs/orchestrator/02-architecture/05-failure-modes-and-recovery.md</code> describe the target platform (for example NATS, EMQX, a separate Safe-Stop Authority host). The r3.4 deployment is a single base server with Postgres 17, Mosquitto and ten systemd units. The playbooks below cite an <code>RB-*</code> only for the intent and follow the r3.4 code and <code>deploy/RUNBOOK.md</code> for the actual commands.</p>
+<p class="hp-warn">Never print or paste the contents of <code>/etc/opengrid/*.env</code>, <code>/etc/opengrid/htpasswd</code>, the signing keys under <code>/etc/opengrid</code> or <code>/root/opengrid-ui-credentials.txt</code>. Scripts read them; people do not.</p>
+
+<section class="hp-sub" id="pb-personas">
+<h3>Who is who: personas and access</h3>
+<p>Every console user signs in through Apache Basic Auth. Apache forwards the account name to og-api together with a shared proxy secret, and og-api trusts the name only with that secret. An account without a role mapping is treated as a viewer. The footer of the left navigation shows "Role: operator" or "Role: viewer". The <b>Help</b> entry (this page) is at the bottom of the left navigation menu, just above that role footer, on every console page; each screen's Help link opens its own section here (<code>/og/help#page-&lt;screen&gt;</code>).</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Persona</th><th scope="col">Accounts and how access is granted</th><th scope="col">Can see</th><th scope="col">Can do</th><th scope="col">Cannot do at r3.4</th></tr></thead><tbody>
+<tr><td>Viewer</td><td><code>viewer</code>, or any Apache account not listed under <code>[api.roles]</code>. Granted by adding an <code>htpasswd</code> entry and the Apache <code>Require user</code> line.</td><td>Every console screen (<a href="/og/">/og/</a>, <a href="/og/fleet">/og/fleet</a>, <a href="/og/dispatch">/og/dispatch</a>, <a href="/og/markets">/og/markets</a>, <a href="/og/health">/og/health</a>, <a href="/og/pq">/og/pq</a>, <a href="/og/profitability">/og/profitability</a>, <a href="/og/billing">/og/billing</a>), the charging schedule, the trace explorer.</td><td>Read, filter, export invoice CSV, run the trace verify (<code>POST /og/api/trace/verify</code> is open to viewers).</td><td>Any write: the operator panels are not rendered and every write route answers 403. The "Economics per kW" panel shows "Operator role required for the $/kW view."</td></tr>
+<tr><td>Operator (control room)</td><td><code>operator</code> (shared), <code>og-op-a</code>, <code>og-op-b</code>; listed in <code>[api.roles].operator</code> in <code>orchestrator.toml</code> and in the Apache <code>Require user</code> line.</td><td>Everything a viewer sees, plus the operator panels.</td><td>Acknowledge alerts, manual and bulk targets, engage a safe stop, request a release, deploy an AS award, edit the charging schedule, request PQ captures and calibrations; API-only: tolling calls, firmware campaigns, contract admission.</td><td>The shared <code>operator</code> account cannot complete a safe-stop release: it is not in <code>[guardian].stop_release_authorised_operators</code>, so the guardian refuses (<code>OPERATOR_NOT_AUTHORISED</code>).</td></tr>
+<tr><td>Second operator (two-person approver)</td><td>A different named account from the requester. For safe-stop release: must be in <code>[guardian].stop_release_authorised_operators</code> (today <code>og-op-a</code>, <code>og-op-b</code>). For a firmware campaign: any other operator who is neither the proposer nor the confirmer.</td><td>Same as operator.</td><td>Approve a safe-stop release (<b>Review and approve (operator 2)</b>, then <b>Approve release</b>); approve a firmware campaign flagged <code>requires_second_operator</code> (<code>POST /og/api/firmware/campaigns/{id}/approve</code>, API-only).</td><td>Approve their own request: the API answers 403 and the guardian refuses the same person twice.</td></tr>
+<tr><td>Admin / release manager (maintenance)</td><td>Root shell on the base server (no sudo); no console role of its own. Acts with the lead's OK.</td><td>Unit status, <code>journalctl</code>, the loopback metrics (<code>localhost:9101/metrics</code>), the deploy log <code>/var/log/opengrid/deploy.log</code>.</td><td>Start and stop units by exact name, deploy and roll back (<code>deploy.sh</code>, <code>rollback.sh</code>), back up and restore, fail over to the hot standby (<code>deploy/ha/FAILOVER.md</code>), manage accounts (<code>htpasswd</code>, <code>[api.roles]</code>, Apache), edit <code>orchestrator.toml</code> through a release.</td><td>Nothing in the console needs root; nothing root does bypasses the guardian for grid commands.</td></tr>
+<tr><td>Customer (customer API / portal)</td><td><code>og-cust-*</code> accounts (<code>dc</code>, <code>pipe</code>, <code>ercot</code>, <code>dist</code>, <code>partner</code>, <code>pjm</code>, <code>mobile</code>, <code>largeld</code>), each mapped to one <code>customer_id</code> in <code>[api.roles.customer]</code>.</td><td>Only its own contracts, obligations and invoices through <code>/og/api/customer/...</code>; never the console.</td><td>When switched on: <code>GET /me</code>, <code>/contracts</code>, <code>/obligations</code>, <code>/invoices</code>; <code>POST /opportunities</code>, <code>/invoices/{id}/dispute</code>, <code>/obligations/{id}/cancel</code>, <code>/obligations/{id}/renominate</code>.</td><td>Everything: <code>[api.customer_api] enabled = false</code> in the shipped config, so og-api does not mount these routes until the owner's go-live. There is no customer portal page.</td></tr>
+<tr><td>Utility / partner (toll calls)</td><td>No login of its own at r3.4. The utility calls its tolling window through its agreed channel; an operator issues the call. <code>og-cust-partner</code> exists for the partner customer but only on the customer API (off).</td><td>Nothing directly.</td><td>Through an operator: a D-29 discharge call on its tolling obligation (<a href="#pb-toll-call">pb-toll-call</a>).</td><td>Issue a call itself; there is no utility-facing endpoint.</td></tr>
+<tr><td>Base asset / field services</td><td>No dedicated account or role at r3.4; uses a viewer (or operator) account.</td><td>Work orders, asset health, waveforms and calibration history on <a href="/og/pq">/og/pq</a>; hub HW rev and FW version on <a href="/og/fleet">/og/fleet</a>.</td><td>Read. An operator requests captures and calibrations for them.</td><td>Create, assign or close a work order: only <code>GET /og/api/work-orders</code> exists; no write route and no UI action.</td></tr>
+</tbody></table></div>
+<p class="hp-note">To add or replace a named operator: <code>htpasswd -B /etc/opengrid/htpasswd &lt;person&gt;</code>; add the name to <code>[api.roles].operator</code> (and to <code>[guardian].stop_release_authorised_operators</code> if they may release stops); add it to the <code>Require user</code> line in <code>deploy/apache/opengrid.conf</code>; deploy; then <code>apache2ctl configtest &amp;&amp; systemctl reload apache2</code> (<code>deploy/RUNBOOK.md</code>, "Operator accounts for the two-person release").</p>
+</section>
+
+<section class="hp-sub" id="pb-normal">
+<h3>Normal operations and the daily plan</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>Control room (<a href="/og/">/og/</a>): header badge <code>live</code>; the story line ends "0 promises broken today"; the three "Promises kept" tiles (Reserve breaches, kWh sold twice, Commitment switches) read <code>0</code>. The notification bell says "Nothing needs attention." except for the expected <a href="#ev-alerts"><code>ALR-XFMR-UNMAPPED</code></a> warnings (one per commanded bank until transformers are mapped).</dd>
+<dt>Who acts</dt><dd>Operator on shift; viewers watch.</dd>
+<dt>What the system does automatically</dt><dd>og-engine runs the 2 s allocator and the quarter-hour selector gates (LP optimizer over 96 quarter-hours, rule-based fallback); og-guardian checks and signs every batch; og-engine offers each active tolling contract's daily window (<code>[contracts.tolling]</code>, 16:30-18:00 CT, today if not started plus tomorrow); og-settle meters, settles and runs the health evaluator every 5 s; the invariant and trace-chain checks run; the nightly backup runs at 03:00. There is no separate daily-plan approval step at r3.4: the "daily plan" is the selector's latest plan.</dd>
+</dl>
+<h4>Steps (start of shift)</h4>
+<ol class="hp-steps">
+<li><a href="/og/">/og/</a>: read the story line, the "Promises kept" tiles and the KPIs. Open the bell and read the Safety, Degraded modes and Alerts groups.</li>
+<li><a href="/og/health">/og/health</a>: every row in "Processes" has a recent heartbeat time; no <a href="#ev-alerts"><code>ALR-PROCESS-DOWN</code></a>; "Hub health" mostly Online.</li>
+<li><a href="/og/markets">/og/markets</a>: "Freshness &amp; source status" shows each feed <code>LIVE</code>, failures 0, breaker <code>closed</code>.</li>
+<li><a href="/og/dispatch">/og/dispatch</a>: the "Opportunity pipeline" cards (no amber border), "Latest selector plan" (Mode, Gate, Horizon, Solver status), the "Ledger timeline" per scope (header <b>View</b>), and "AS awards &amp; deployment" (awards <code>held</code>, Risk <code>OK</code>).</li>
+<li>Acknowledge what you have read: tick rows in the Alerts panel and press <b>Acknowledge selected (N)</b>, then <b>Acknowledge N</b> in the dialog; or <b>Ack</b> on one row. Acknowledging records who looked; it never clears an alert.</li>
+<li><a href="/og/billing">/og/billing</a>: set From and To, then <b>Run chain verify</b> (or <code>POST /og/api/trace/verify</code> with body <code>{}</code>).</li>
+<li><a href="/og/profitability">/og/profitability</a>: today's Net margin and "Forgone upside (lock)".</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>None for reading. A bulk acknowledgement asks once.</dd>
+<dt>Verify recovery</dt><dd>Not applicable; this is the baseline the other playbooks return to.</dd>
+<dt>Escalate when</dt><dd>Any "Promises kept" tile is non-zero; <a href="#ev-alerts"><code>ALR-RESERVE-BREACH</code></a> or <a href="#ev-alerts"><code>ALR-TRACE-VERIFY-FAILED</code></a> is open; the selector plan shows "Rule-based fallback" repeatedly or <a href="#ev-alerts"><code>ALR-SELECTOR-GATE-FAILED</code></a> keeps adding rows.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-price-spike">
+<h3>Price spike or feed outage (stale feed, NO_NEW_COMMITMENTS)</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>A spike: every load-zone line on <a href="/og/markets">/og/markets</a> "Wholesale price ($/MWh)" and the Control room "Market ticker" jump; no alert is raised for the price itself. An outage: <a href="#ev-alerts"><code>ALR-FEED-STALE</code></a> (warning, "Feed ERCOT:np6-905-cd stale for over 2700s") or <a href="#ev-alerts"><code>ALR-FEED-LGV-EXHAUSTED</code></a> (critical, breaker open); on the price feed, the degraded mode <a href="#ev-degraded">Feed stale (<code>NO_NEW_COMMITMENTS</code>)</a> shows in the bell as "Degraded mode: Feed stale" and as the page banner "Degraded: ...". Markets shows the feed's breaker <code>OPEN</code> and a rising failure count.</dd>
+<dt>Who acts</dt><dd>Operator; admin if og-feeds itself is down or needs a restart.</dd>
+<dt>What the system does automatically</dt><dd>Spike: committed obligations keep their kW (K13); only L0/L1/L2 overrides or proven infeasibility may reduce one, and the guardian re-checks any such claim (<a href="#ev-guardian">G-19</a>). Outage: og-feeds opens the product's circuit breaker; EIA backs the ERCOT load feed only while that feed is unavailable. From r3.4 og-feeds polls only the products in <code>[feeds.ercot].products</code>, and a failed or breaker-skipped poll is retried after 5 minutes, doubling up to 60 minutes (never later than the product's own cadence), so a missed daily AS-price poll recovers within the hour instead of the next day. Only the feeds in <code>[health] firm_blocking_feeds</code> (default the price feed <code>ERCOT:np6-905-cd</code>) set <code>NO_NEW_COMMITMENTS</code>; a blocking feed with no status row at all counts as stale. While the mode is active og-engine skips intake (trace <code>INTAKE_SKIPPED</code>) and every selector gate selects nothing new; offers stay OFFERED; committed deliveries continue. Contract admission through the API is not blocked.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Spike: open <a href="/og/dispatch">/og/dispatch</a> and confirm every Committed/Delivering card keeps its kW and reads "Locked: this promise is kept even if a better price appears (K13)". Nothing to do; within a 30 s refresh <a href="/og/profitability">/og/profitability</a> shows the non-zero "Forgone upside (lock)".</li>
+<li>Outage: <a href="/og/markets">/og/markets</a> "Freshness &amp; source status": which feed, its mode (<code>LIVE</code>, <code>SIM</code>, <code>HIST</code>), age, failures, breaker.</li>
+<li><a href="/og/health">/og/health</a>: "Feed freshness" and "Alerts" (filter Rule). Check "Processes" for the <code>feeds</code> heartbeat; a missing one also raises <a href="#ev-alerts"><code>ALR-PROCESS-DOWN</code></a>.</li>
+<li>Admin, if og-feeds is down or wedged: <code>journalctl -u og-feeds --since -10min</code>, then <code>systemctl restart og-feeds</code>. Do not point og-feeds at the market simulator without the lead's OK (<code>deploy/README.md</code>, "Switching live APIs vs. the market simulator").</li>
+<li>If the upstream (ERCOT) is down, wait: nothing new is committed, and what is committed is delivered. Tell the desk that new offers will sit in OFFERED.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>None; no operator action changes feed handling from the console.</dd>
+<dt>Verify recovery</dt><dd>The breaker reads <code>closed</code>, the alert clears by itself, the "Feed stale" entry leaves the bell, and the next gate selects again ("Latest selector plan" gate time moves; OFFERED cards move to Selected).</dd>
+<dt>Escalate when</dt><dd>The price feed stays stale into a day-ahead gate; the breaker re-opens after every close; authentication to ERCOT fails (treat as <a href="#pb-security">pb-security</a>); a price move reduces any commitment (that would be a K13 breach).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-as-deploy">
+<h3>AS award held, then an ERCOT deployment</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="/og/dispatch">/og/dispatch</a>, panel "AS awards &amp; deployment": one row per awarded ERCOT_AS obligation with Obligation, Product (<code>ECRS · 1 h hold</code>, Non-Spin <code>· 4 h hold</code>), Committed, Energy held, State (<code>held</code> or <code>deployed</code>) and Risk (<code>OK</code> or <code>AT_RISK</code>). A held award short of energy raises <a href="#ev-alerts"><code>ALR-ENERGY-SHORTFALL-RISK</code></a>.</dd>
+<dt>Who acts</dt><dd>Operator, on ERCOT's deployment instruction (received outside OpenGrid).</dd>
+<dt>What the system does automatically</dt><dd>A held award is granted 0 kW (<code>R-GRANT-AS-HOLD</code>); its capacity stays out of sellable headroom and its homes keep enough energy above reserve for the whole product (ECRS 1 h, Non-Spin 4 h). The guardian signs the 0 kW hold only when its own reads show an ERCOT_AS award with no active deployment (<a href="#ev-guardian">G-19</a>). While a deployment is active the allocator discharges the award up to its committed kW; at its end time the award returns to a 0 kW hold. ERCOT deployment instructions are not ingested automatically at r3.4: the market-simulator poller is off (<code>[market_sim] as_deployment_poll = false</code>).</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li><a href="/og/dispatch">/og/dispatch</a>, "AS awards &amp; deployment": find the award's row; check State <code>held</code> and Risk <code>OK</code>.</li>
+<li>Press <b>Deploy&hellip;</b> on that row. It selects the award in the form below and focuses Duration.</li>
+<li>Set Duration (min) within the product (the hint reads "Up to 60 min for ECRS"; Non-Spin 240) and Reason, then <b>Propose deployment</b>.</li>
+<li>Read the dialog "Confirm ERCOT AS deployment" (step 1 of 2; nothing changes yet), then <b>Confirm deployment</b>. The result reads "Deployment &lt;id&gt; is active." and State turns <code>deployed</code>.</li>
+<li>Watch "Real-time grants &amp; substitutions" and the ledger for the award's bank.</li>
+<li>To end early: <b>Stop deploy</b> on the row, dialog "Confirm stop deployment", <b>Stop deployment</b>. Result: "Deployment &lt;id&gt; stopped."</li>
+<li>API equivalent: <code>POST /og/api/dispatch/as-deployments</code> with <code>{"obligation_id": "&lt;id&gt;", "duration_minutes": 15, "reason": "..."}</code>; <code>DELETE /og/api/dispatch/as-deployments/{deployment_id}</code>; list with <code>GET</code>.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>One operator, one confirm dialog (no countdown). og-api refuses: a missing award (422), a fleet-wide deployment (409, it would need two people), an award not in COMMITTED/DELIVERING/SHORTFALL (409 "award is ..., not deployable"), a duration over the product (409), and a second deployment while one is active (409 "an active deployment already covers this obligation").</dd>
+<dt>Verify recovery</dt><dd>After the end time or a stop, State reads <code>held</code> again and the grant returns to 0 kW. <a href="/og/billing">/og/billing</a> "Trace explorer" shows <code>AS_DEPLOYMENT</code> and <code>AS_DEPLOYMENT_END</code> on stream <code>operator_action:&lt;user&gt;</code>.</dd>
+<dt>Escalate when</dt><dd>The award is AT_RISK when ERCOT deploys it; the deployment is refused for a reason you cannot resolve; delivered kW stays well below committed kW during the deployment (see <a href="#pb-at-risk">pb-at-risk</a>).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-toll-call">
+<h3>Utility toll call (D-29)</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>A tolling obligation (<code>REGULATED_CAPACITY</code>, contract variant <code>TOLLING</code>) appears as a card in the <a href="/og/dispatch">/og/dispatch</a> pipeline; the "Ledger timeline" draws it in the "Held (AS/toll)" series and the text reads "N kW held for AS/tolling awards (reserved, 0 kW granted until deployed)". It does not appear in the "AS awards &amp; deployment" table, which lists ERCOT_AS only.</dd>
+<dt>Who acts</dt><dd>The utility calls (outside OpenGrid); an operator issues the call through the API.</dd>
+<dt>What the system does automatically</dt><dd>og-engine offers one OFFERED opportunity per day for each ACTIVE tolling contract, for the <code>[contracts.tolling]</code> window (16:30-18:00 America/Chicago, <code>days_ahead = 1</code>, <code>days = "ALL"</code>), through normal admission. It is idempotent, never re-offers a window that overlaps a COMMITTED/DELIVERING obligation of the same contract (K13), and reserves nothing when the window length differs from the product rule's duration (90 min) or the rule has no size (logged by og-engine). The selector commits it as a regulated capacity hold; the allocator holds it at 0 kW until called; settlement pays availability. The Austin substation battery feeder has a 20 MW/min ramp ceiling (<a href="#ev-guardian">G-06</a>, <code>[guardian.feeder_ramp_ceiling_kw_per_min_by_feeder]</code>).</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Find the tolling obligation id: the card's first line on <a href="/og/dispatch">/og/dispatch</a> (the full id is in its tooltip), or <code>GET /og/api/dispatch/opportunities</code>.</li>
+<li>Not possible in the UI at r3.4. Issue the call from a shell as an operator: <code>POST /og/api/dispatch/as-deployments</code> with <code>{"obligation_id": "&lt;id&gt;", "duration_minutes": 90, "reason": "&lt;utility reference&gt;"}</code>. og-api stores the reason prefixed "utility call: " and returns <code>kind: "UTILITY_CALL"</code>.</li>
+<li>Watch "Real-time grants &amp; substitutions" and the ledger for the carrying banks.</li>
+<li>End early if the utility releases the call: <code>DELETE /og/api/dispatch/as-deployments/{deployment_id}</code>. Check what is active with <code>GET /og/api/dispatch/as-deployments</code>.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>None beyond the single API call (no two-step). The same refusals as an AS deployment apply; the cap is the obligation's product rule (TOLLING 90 min).</dd>
+<dt>Verify recovery</dt><dd>The deployment disappears from the GET list at its end; the grant returns to 0 kW; the trace shows <code>AS_DEPLOYMENT</code> with <code>kind</code> <code>UTILITY_CALL</code> and the operator action <code>UTILITY_CALL:&lt;id&gt;</code>.</dd>
+<dt>Escalate when</dt><dd>No tolling obligation exists for today's window (check og-engine's log for "tolling window does not match the product rule duration" or "no sized product rule"); og-api answers "award is OFFERED, not deployable" (the selector has not committed it); delivery falls short during the window.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-at-risk">
+<h3>Commitment AT_RISK or SHORTFALL: substitution and restore</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>On <a href="/og/dispatch">/og/dispatch</a> the card gets an amber border, with a falling "energy margin" and "depletes in"; <a href="#ev-alerts"><code>ALR-ENERGY-SHORTFALL-RISK</code></a> (critical) opens when energy is the cause. A SHORTFALL card moves to "Fulfilled / shortfall" and reads "Delivered short; penalty applies" although delivery continues.</dd>
+<dt>Who acts</dt><dd>Operator.</dd>
+<dt>What the system does automatically</dt><dd>Every 2 s the engine checks that committed hubs hold enough energy above reserve for the rest of the window; delivery moves to other hubs (grant kind <code>substitution</code>). A shortfall held 60 s moves the obligation to SHORTFALL with <code>R-COMMIT-LOCK-INFEASIBLE</code> or an L0/L1/L2 override reason. Decision D-17: it keeps receiving the maximum feasible kW for the rest of its window (never 0, never stopped), the full commitment returns at the earliest feasible interval, and it settles on what was delivered. The guardian re-checks every reduction claim (<a href="#ev-guardian">G-19</a>). No home is discharged below reserve (K1, <a href="#ev-guardian">G-01</a>).</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Note the obligation id from the card. In the header set Ledger to <b>Feeder segment (bank)</b> for the carrying bank and press <b>View</b>; read "Real-time grants &amp; substitutions".</li>
+<li>Find the cause: <a href="/og/health">/og/health</a> Alerts and Hub health (comms, see <a href="#pb-comms-loss">pb-comms-loss</a>); <a href="/og/fleet">/og/fleet</a> filtered by that bank (SoC, Health, Activity); a SCADA limit (see <a href="#pb-bank-overload">pb-bank-overload</a>).</li>
+<li>Read the history in <a href="/og/billing">/og/billing</a> "Trace explorer": stream <code>shortfall-&lt;obligation id&gt;</code> (class <code>ALLOCATOR_SHORTFALL</code>) and the obligation's own stream (<code>AT_RISK</code>, <code>AT_RISK_CLEARED</code>, the SHORTFALL transition).</li>
+<li>Fix the cause where you can (restore comms, end an operator target that is holding hubs, see <a href="#pb-manual-target">pb-manual-target</a>). Restoration of the commitment is automatic: there is no "restore" button or API at r3.4.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>None for the automatic path; any manual target you use needs its own two-step confirm.</dd>
+<dt>Verify recovery</dt><dd>The amber border goes, <code>ALR-ENERGY-SHORTFALL-RISK</code> clears (og-engine clears it), grants return to the committed kW, and the trace shows <code>AT_RISK_CLEARED</code>. A SHORTFALL state stays until the window closes, by design.</dd>
+<dt>Escalate when</dt><dd>A firm customer (DIST_DEFERRAL, PARTNER_CAPACITY, ERCOT_AS, tolling) is in SHORTFALL; the energy margin is negative close to the window; <a href="#ev-alerts"><code>ALR-RESERVE-BREACH</code></a> opens. DOC1 (R2) lists two gaps to watch for: the "Commitment-lock events (K13)" table may stay empty (use the trace), and a delivery cut by a utility L2 instruction may not return to full when the instruction lifts (watch the grants, not the card).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-comms-loss">
+<h3>Hub or zone comms loss (hubs offline)</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="/og/fleet">/og/fleet</a>: the summary counts (Online, Stale, Offline / fault) and the Health column; the hub drawer's "Last communication" and its age badge. A hub turns stale after <code>[health] hub_stale_s</code> (25 s) and offline after <code>hub_offline_s</code> (60 s) without telemetry. At r3.4 the Fleet summary, the age badges, the fleet twin and the Health rules all use these same two values, so a hub reporting every 10 s no longer flickers stale between reports. <a href="/og/health">/og/health</a> "Hub health" strip; <a href="#ev-alerts"><code>ALR-HUB-OFFLINE-RATIO</code></a> per zone (warning over 5% offline plus fault, critical over 20%); <a href="#ev-alerts"><code>ALR-SIM-OFFLINE</code></a> (critical) when no hub telemetry and no SCADA reading has arrived for <code>sim_offline_s</code> (90 s).</dd>
+<dt>Who acts</dt><dd>Operator; admin for the broker or simulators.</dd>
+<dt>What the system does automatically</dt><dd>Hubs hold their last setpoint for the lease plus hold (about 35 s), then serve their own homes (local autonomy). Offline hubs drop out of sellable capacity; delivery is substituted to other hubs, and a loss that cannot be replaced becomes a best-effort SHORTFALL (<a href="#pb-at-risk">pb-at-risk</a>). MQTT clients reconnect by themselves (counter <code>og_mqtt_reconnects_total</code>). Stop messages are retained, so a hub that reconnects still receives an engaged stop.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li><a href="/og/fleet">/og/fleet</a>: tick Zone and Health (<code>OFFLINE</code>) and press <b>Apply filters</b>; open a hub row for its drawer.</li>
+<li>Decide the scale: one hub, one bank, one zone, or the whole fleet. Fleet-wide silence with <code>ALR-SIM-OFFLINE</code> points at the broker, og-engine (it writes telemetry and SCADA readings, so its outage also raises this alert) or the simulators.</li>
+<li>Admin: <code>systemctl is-active mosquitto og-engine og-sim-fleet og-sim-scada</code>; <code>journalctl -u og-engine --since -10min</code>. On the simulated fleet, check <code>/ogsim/</code> for an active <code>comms_loss</code> anomaly (for example scenario <code>demo-03-zone-comms-loss</code>) and stop it.</li>
+<li>Follow any affected obligation on <a href="/og/dispatch">/og/dispatch</a> as in <a href="#pb-at-risk">pb-at-risk</a>.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>None. A safe stop is not needed for comms loss alone.</dd>
+<dt>Verify recovery</dt><dd>Hubs read online again, the ratio alert clears when the zone is at or below 5%, grants return to the carrying banks.</dd>
+<dt>Escalate when</dt><dd>A zone passes 20% (critical); the whole fleet is silent; the broker does not come back (<a href="#pb-broker-db">pb-broker-db</a>); a real field outage is suspected (call Base field services).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-bank-overload">
+<h3>Bank overload or SCADA silent</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="#ev-alerts"><code>ALR-SCADA-OVERLOAD</code></a> per bank: warning when the latest SCADA apparent power exceeds the bank's kVA rating (600 kVA), critical above 120%. <a href="#ev-alerts"><code>ALR-SCADA-SILENT</code></a> (critical) when no SCADA bank reading has arrived for <code>scada_silent_s</code>, and <a href="#ev-alerts"><code>ALR-SCADA-SILENT-BANK</code></a> (warning) per silent bank while others report; the degraded mode <a href="#ev-degraded">SCADA silent (<code>DIST_DEFERRAL_OPEN_LOOP</code>)</a> shows in the bell. Neither is raised before the first reading ever arrives.</dd>
+<dt>Who acts</dt><dd>Operator; the utility (for its own feeder); admin for the SCADA link or simulator.</dd>
+<dt>What the system does automatically</dt><dd>Overload: the DIST_DEFERRAL grant on the bank rises (more discharge relieves the segment) while committed kW stay unchanged; the guardian's flow checks (<a href="#ev-guardian">G-26 to G-33</a>) bound every setpoint; a utility LIMIT instruction is applied by og-engine. SCADA silent: shown and recorded only. Nothing acts on it at r3.4; the DIST_DEFERRAL loop keeps using the last SCADA reading.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li><a href="/og/health">/og/health</a>, Alerts: filter Rule <code>ALR-SCADA-OVERLOAD</code> (or <code>ALR-SCADA-SILENT</code>); note the bank and the percentage in the summary.</li>
+<li><a href="/og/dispatch">/og/dispatch</a>: Ledger <b>Feeder segment (bank)</b>, that bank, <b>View</b>; check the DIST_DEFERRAL grant and the committed cards.</li>
+<li>If the overload persists at critical, call the utility. A safe stop on the bank removes OpenGrid's dispatch support there; it does not reduce the bank's own load, so use it only for a device or safety concern (<a href="#pb-safe-stop">pb-safe-stop</a>).</li>
+<li>SCADA silent, admin: check <code>og-sim-scada</code> (simulated SCADA) or the real SCADA link (RB-023 intent). Treat DIST_DEFERRAL decisions as open loop until readings return.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>None, unless you engage a safe stop.</dd>
+<dt>Verify recovery</dt><dd>The overload alert clears when the reading is at or under the rating; SCADA silent clears when a reading arrives (og-settle clears it), and the bell's "Degraded mode: SCADA silent" disappears.</dd>
+<dt>Escalate when</dt><dd>Critical overload for more than a few minutes; <a href="#ev-alerts"><code>ALR-BANK-UNMAPPED-TOPOLOGY</code></a> is open (the bank has no feeder, so the guardian cannot run G-06/G-28/G-32 for it; with <code>[guardian.flow] fail_closed_missing_topology = true</code> it vetoes any batch that raises that bank's net setpoint, <code>BANK_TOPOLOGY_UNMAPPED</code>): fix the bank's <code>feeder_id</code> through a topology re-seed; SCADA silent during a DIST_DEFERRAL delivery window; the utility issues a LIMIT with no expiry.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-veto-burst">
+<h3>Guardian veto burst: K7 conservative, then a safe-stop request</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="#ev-alerts"><code>ALR-SCOPE-CONSERVATIVE</code></a> (warning): the bell's Safety group reads "N scope(s) held conservative" and links to the Health alerts filtered on that rule. Then <a href="#ev-alerts"><code>ALR-SAFE-STOP-REQUESTED</code></a> (critical): the Safety group lists "Guardian requests a safe stop: bank bank-007" with a <b>Review (two-step)</b> button, and the critical strip under the header shows it with a <b>View</b> link. The hub drawer's "Verdict" shows the last command's outcome (for example VETOED).</dd>
+<dt>Who acts</dt><dd>Operator decides; a second operator only if a stop is later released.</dd>
+<dt>What the system does automatically</dt><dd>Per bank and per zone, every 2 s tick: more than 5% of a scope's commands vetoed puts it CONSERVATIVE (the engine stops selling spot headroom there; committed deliveries continue). An escalation count of 3 raises the stop request and records an unconfirmed safe-stop proposal. The guardian never engages a stop itself (K8). The scope returns to normal after 3 consecutive good ticks (at most 2.5% vetoed) or 30 ticks with no commands; the count then drops by one per good tick. The posture lives in og-guardian's memory, so after a guardian restart a scope may stay CONSERVATIVE until it recovers again.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Open the bell; note the scope. On <a href="/og/fleet">/og/fleet</a>, filter by that bank or zone and open a few hub drawers (Verdict, Fault, Last communication).</li>
+<li>Find the rule ids: <a href="/og/billing">/og/billing</a> "Trace explorer", class <code>GUARDIAN_VERDICT</code>. Typical causes are bad telemetry, a flow limit (<a href="#ev-guardian">G-26 to G-33</a>), or an operator target pushing hubs; cancel such a target with <b>Cancel target</b> (<a href="#pb-manual-target">pb-manual-target</a>).</li>
+<li>If the cause is a device or area fault that needs dispatch stopped: press <b>Review (two-step)</b>. It opens <a href="/og/fleet">/og/fleet</a> with the "Safe stop" card prefilled (scope, scope id, reason "Guardian escalation: safe stop requested") and the note "Prefilled from the guardian's safe-stop request...". Continue with <a href="#pb-safe-stop">pb-safe-stop</a>.</li>
+<li>If not, do nothing: with the cause gone the escalation clears on its own.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Only if you stop: propose, then confirm within 30 s.</dd>
+<dt>Verify recovery</dt><dd>Both alerts clear (og-guardian clears them) and the Safety group empties. The guardian's unconfirmed proposal stays in the operator-action log and is never acted on.</dd>
+<dt>Escalate when</dt><dd>Stop requests recur on the same scope; <a href="#ev-alerts"><code>ALR-CLOCK-QUALITY</code></a> is open (every verdict is TIMEOUT while the clock is off, <a href="#ev-guardian">G-20</a>); vetoes spread across zones. Note: <code>ALR-GUARDIAN-TIMEOUT-RATE</code> is never raised with the shipped config (<code>[health] guardian_metrics_url</code> is not set).</dd>
+</dl>
+<p class="hp-note">DEMO-2 step 15 triggers the burst with a loop of <code>POST /og/api/fleet/command</code> confirms expecting 409 vetoes. At r3.4 a confirmed manual command returns 202 <code>RAMPING</code> and the guardian judges each engine step instead, so that loop no longer shows a row of 409s.</p>
+</section>
+
+<section class="hp-sub" id="pb-safe-stop">
+<h3>Emergency safe stop and the two-person release</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>Engaged: the result badge <code>ENGAGED</code> "Safe stop engaged for bank/bank-022. Trace ..."; the bank's hubs drop toward 0 kW on <a href="/og/fleet">/og/fleet</a>. Pending releases appear in the "Release request id" list.</dd>
+<dt>Who acts</dt><dd>Any operator engages. Release: operator 1 requests, a different authorised operator (today <code>og-op-a</code> / <code>og-op-b</code>) approves.</dd>
+<dt>What the system does automatically</dt><dd>og-safestop signs the stop with its own stop-only key and publishes a retained message per scope (<code>og/v1/stop/&lt;scope&gt;/&lt;id&gt;/&lt;stop_id&gt;</code>, event <code>og.stop_event</code>). While a bank is stopped the guardian signs no command for it, so its hubs get no new setpoint. A stop never forces a home below reserve. og-safestop works with og-engine and og-guardian down; it needs og-api, Postgres and Mosquitto. Every accepted ENGAGE or RELEASE is written together with its stop outbox entry (<code>og.stop_outbox</code>) in one transaction and republished until the broker acknowledges it, including after a broker outage; ENGAGEs go before older RELEASEs. A redelivered utility instruction whose stop was recorded but never queued is re-queued under the same stop id. An entry that fails permanently 5 times is dead-lettered: skipped, traced, and <a href="#ev-alerts"><code>ALR-STOP-PUBLISH-DEAD-LETTER</code></a> (critical) is raised once, so later stops still go out. Engaging a stop also cancels every manual target it covers (status <code>CANCELLED_BY_SAFE_STOP</code>); the target does not resume after the release. The guardian signs a release only after its own checks; og-safestop's key can never sign one.</dd>
+</dl>
+<h4>Steps: engage</h4>
+<ol class="hp-steps">
+<li><a href="/og/fleet">/og/fleet</a>, "Actions", card "Safe stop": Scope (Fleet, Zone, Bank), Scope id (empty for Fleet), Reason.</li>
+<li>Press <b>Propose safe stop (step 1 of 2)</b>. The dialog "Confirm scoped safe stop" shows the API's summary and "Expires in 30s".</li>
+<li>Press <b>Engage safe stop</b> within the countdown (focus starts on <b>Cancel</b>; Tab moves to the confirm button). Results: <code>ENGAGED</code>, <code>TIMEOUT</code> (no confirmation from og-safestop), <code>EXPIRED</code> (propose again), <code>FAILED</code>.</li>
+<li>API: <code>POST /og/api/safestop</code> with <code>{"scope": "bank", "scope_id": "bank-034", "reason": "..."}</code>, then <code>POST /og/api/safestop/{proposal_id}/confirm</code> within 30 s (later answers 409 "proposal expired, propose again").</li>
+</ol>
+<h4>Steps: release (two people)</h4>
+<ol class="hp-steps">
+<li>Operator 1, card "Release a safe stop": Scope, Scope id, Reason, <b>Request release (operator 1)</b>. Result <code>REQUESTED</code> with the request id and "a second operator approves it below within 60 s".</li>
+<li>Operator 2 (different account): pick the request in "Release request id" (it lists id, scope, requester and age), press <b>Review and approve (operator 2)</b>, read "Approve safe-stop release", press <b>Approve release</b>.</li>
+<li>Results: <code>RELEASED</code> "Safe stop released for ..."; <code>PENDING</code> (approved, the guardian has not signed within og-api's 10 s wait); <code>REFUSED</code> "The requesting operator cannot approve their own release." (the request stays valid for another operator); <code>EXPIRED</code>; <code>FAILED</code>.</li>
+<li>API: <code>POST /og/api/safestop/{scope}/{scope_id}/release</code> (operator 1), <code>POST /og/api/safestop/release/{proposal_id}/approve</code> (operator 2: 200 released, 202 pending, 403 same person, 410 expired).</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Engage: two steps by one operator, confirm within 30 s (<code>[safestop].confirm_window_s</code>). Release: two different authorised operators; the approval must be fresh (at most 300 s).</dd>
+<dt>Verify recovery</dt><dd>After release the bank's hubs take commands again (drawer "Last command" changes; P follows the allocator). The trace shows <code>SAFE_STOP_ENGAGE</code>, <code>SAFE_STOP_RELEASE</code> (on the approver's stream, with the requester in the payload) and the guardian's signed release (<code>GUARDIAN_VERDICT</code>).</dd>
+<dt>Escalate when</dt><dd>The guardian refuses the release (<code>GUARDIAN_VERDICT kind=STOP_RELEASE outcome=REFUSED</code>: unauthorised operator, same person twice, stale approval, no stop engaged, a stop engaged after the approval, a utility-initiated stop, or an active ESTOP/BLOCK in scope): the stop stays engaged; fix the cause and request again. If og-api is down no stop can be requested from the console or API; the admin restores og-api first (<code>systemctl restart og-api</code>). <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> is open: that stop message was never published, so the hubs did not receive it. Read the entry's <code>last_error</code> in <code>og.stop_outbox</code> and <code>journalctl -u og-safestop</code>, fix the cause, then engage the stop again from Fleet (it gets a new stop id; recommended practice, the system does not do this automatically) and tell the lead.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-manual-target">
+<h3>Manual command or target: ramp, expiry, cancel</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>After confirm: badge <code>RAMPING</code> "Ramping N hubs to X kW ... Holds until ... Trace ...", a progress bar and "Now: ..."; the Hubs table bar reads "N under an operator target" and each row "target X kW"; the hub drawer shows "Operator target X kW until ... (by ...: reason)".</dd>
+<dt>Who acts</dt><dd>Operator.</dd>
+<dt>What the system does automatically</dt><dd>Confirm records a <code>MANUAL_TARGET</code> trace event (reason code <code>MANUAL_OPERATOR</code>). The confirm succeeds only once that event is durably in <code>og.trace</code>; otherwise it answers 503 and nothing ramps. og-engine then ramps each hub toward the target at the hub's ramp limit every cycle (<a href="#ev-guardian">G-04</a>), every step signed by the guardian; the guardian accepts the override only from its own read of live targets (<a href="#ev-guardian">G-19</a>, <code>R-OPERATOR-OVERRIDE</code>). Engine, API and guardian share one status rule (<code>core.manual_targets.effective_targets</code>): <code>ACTIVE</code>, <code>EXPIRED</code>, <code>CANCELLED_BY_OPERATOR</code>, <code>CANCELLED_BY_SAFE_STOP</code> (a covering stop engaged at or after the target, or still engaged) or <code>CANCELLED_LATE_RECORD</code> (the target reached the trace more than 30 s after it was issued, for example a journal replay of a confirm that failed; it is never activated). Only ACTIVE targets show as markers and ramps, and the ramp display stops when the target ends. At <code>expires_at</code> (1 to 240 min, default 15) the hubs return to normal dispatch on the next cycle. A newer target on a hub replaces the older one. See <a href="#hw-manual">Manual targets</a>.</dd>
+</dl>
+<h4>Steps: one hub or one bank</h4>
+<ol class="hp-steps">
+<li><a href="/og/fleet">/og/fleet</a>, card "Command one hub": Hub id (its bank fills in) or Bank id, Setpoint (kW) (sign: + charges, &minus; discharges), Expires in (min), Reason.</li>
+<li><b>Propose (step 1 of 2)</b>. Dialog "Confirm manual command", summary "Set &lt;target&gt; to X kW (reason)", "Expires in 60s".</li>
+<li><b>Send command</b>. Results: <code>RAMPING</code>; <code>NOT RECORDED</code> (the API answered 503 because the trace store was unavailable; nothing is ramping, propose again to retry); <code>EXPIRED</code> (propose again); <code>FAILED</code>.</li>
+<li>To end early: <b>Cancel target</b> under the ramp status. Results: <code>CANCELLED</code> "Target cancelled for N hub(s); they return to normal dispatch."; 409, the target is no longer active, with the reason (expired, cancelled by operator, cancelled by safe stop or cancelled late record) and nothing to cancel; <code>UNKNOWN</code> (404, the API does not know this trace id); <code>NOT RECORDED</code> (503, the target is still running; press <b>Retry cancel</b>); <code>FAILED</code>.</li>
+</ol>
+<h4>Steps: a selection</h4>
+<ol class="hp-steps">
+<li>Select hubs: tick table rows, <b>Select this page</b>, <b>Select all N matching</b>, or on the "Fleet map" <b>Select an area</b> (drag; Shift adds). <b>Clear selection</b> empties it; the sticky bar offers <b>Command selection&hellip;</b>.</li>
+<li>Card "Command selection": Setpoint (kW), Expires in, Reason, <b>Propose for selection (step 1 of 2)</b>. Dialog "Confirm command for N hubs".</li>
+<li>If any selected hub serves a customer, is delivering, faulted, offline, under a critical alert or at reserve, tick "I understand this overrides what these hubs are doing now: ..." before <b>Send to selection</b> will act.</li>
+<li>If the API asks for it, badge <code>SECOND CONFIRM</code>: press <b>Confirm again and send to the selection</b>. Results: <code>RAMPING</code>, or <code>PASS</code> / <code>PARTIAL</code> with each refused hub and its rule ids.</li>
+<li>API: <code>POST /og/api/fleet/command</code> then <code>/og/api/fleet/command/{proposal_id}/confirm</code>; bulk <code>POST /og/api/fleet/commands/bulk</code> then <code>.../bulk/{proposal_id}/confirm</code>; list <code>GET /og/api/fleet/manual-targets</code> (each hub's newest target with its <code>status</code>, <code>stop_event_id</code> and <code>cancelled_by</code>; add <code>include_expired=true</code> for EXPIRED ones); cancel <code>POST /og/api/fleet/manual-targets/{trace_id}/cancel</code> (200, 404 unknown, 409 no longer active, 503 not recorded).</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Two steps within 60 s; a selection that overrides customer-serving or faulted hubs needs the acknowledgement tick and may need a second confirm.</dd>
+<dt>Verify recovery</dt><dd>The P column converges on the target; after expiry or cancel the target marker disappears and <code>GET /og/api/fleet/manual-targets</code> shows the hubs with a status other than <code>ACTIVE</code> (expired targets only with <code>include_expired=true</code>).</dd>
+<dt>Escalate when</dt><dd>A ramp never moves (check the drawer's Verdict for vetoes); a confirm keeps answering <code>NOT RECORDED</code> (the database or trace store is down, see <a href="#pb-broker-db">pb-broker-db</a>); the target starves a committed delivery (see <a href="#pb-at-risk">pb-at-risk</a>); a charging target on a truck is vetoed by <a href="#ev-guardian">G-35</a> (expected, <a href="#pb-trucks">pb-trucks</a>).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-pq-drift">
+<h3>PQ drift, calibration and asset work order</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="/og/pq">/og/pq</a>: "Maintenance work orders (N open)", "Asset health" state (<code>OK</code>, <code>WATCH</code>, <code>DEGRADED</code>, <code>QUARANTINED</code>) with its history, "Calibration history" with the "Guardian (G-25)" column. <a href="/og/fleet">/og/fleet</a> Health filter values <code>WATCH</code>, <code>DEGRADED</code>, <code>QUARANTINED</code>. Alerts <a href="#ev-alerts"><code>ALR-CALIBRATION-BUDGET</code></a> and <a href="#ev-alerts"><code>ALR-CALIBRATION-PROTOCOL</code></a> (no automatic clear).</dd>
+<dt>Who acts</dt><dd>Operator; Base asset/field services for the physical work.</dd>
+<dt>What the system does automatically</dt><dd>The drift sweep in og-settle (WATCH to guardian-signed calibration, DEGRADED to work order) is off at r3.4 (<code>[assets] drift_enabled = false</code>, switched off after it flagged 188 hubs within 10 minutes), so no work order or calibration is raised automatically. The guardian checks every calibration (<a href="#ev-guardian">G-25</a>: fleet budget, concurrency, suspected systemic drift) and signs or refuses it. A missing measurement is never shown as compliant.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li><a href="/og/pq">/og/pq</a>: enter the hub in "Hub" and press <b>Show</b> (or click a work-order hub).</li>
+<li>Read "Waveform summary", "Bank ... measured PQ", "Harmonic spectrum (latest)" and "Current harmonics, last 15 minutes".</li>
+<li>For evidence: Reason, <b>Request raw capture (step 1 of 2)</b>, dialog "Confirm raw waveform capture", <b>Request capture</b> (rate-limited).</li>
+<li>To correct drift: Reason, <b>Request calibration (step 1 of 2)</b>, dialog "Confirm remote calibration request", <b>Request calibration</b>. The attempt is recorded PENDING for the guardian's G-25 decision.</li>
+<li>Work orders cannot be created, assigned or closed at r3.4 (UI or API; only <code>GET /og/api/work-orders</code>). Pass the hub id, evidence and severity to Base field services out of band.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Two steps by one operator for a capture or a calibration.</dd>
+<dt>Verify recovery</dt><dd>"Calibration history" shows the guardian's decision and outcome; the waveform summary returns within the envelope; the asset state returns to <code>OK</code>.</dd>
+<dt>Escalate when</dt><dd>A hub is <code>QUARANTINED</code>; calibrations are refused repeatedly; <code>ALR-CALIBRATION-BUDGET</code> suggests systemic drift (a cohort problem, see <a href="#pb-firmware">pb-firmware</a>).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-firmware">
+<h3>Firmware rollout: staged, halted, retry, rollback</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="/og/fleet">/og/fleet</a>: the "FW version" and "HW rev" columns and filters, and "FW &ne; (out of date)"; the drawer's "HW rev" and "FW". Alerts <a href="#ev-alerts"><code>ALR-FIRMWARE-CAMPAIGN-STARTED</code></a> and <code>ALR-FIRMWARE-CAMPAIGN-COMPLETED</code> (info), <code>ALR-FIRMWARE-HUB-FAILED</code> (warning, one per hub failed for good), <code>ALR-FIRMWARE-CAMPAIGN-HALTED</code> (critical).</dd>
+<dt>Who acts</dt><dd>Operator proposes and confirms; a second operator approves when required.</dd>
+<dt>What the system does automatically</dt><dd>og-engine's executor works through the waves (default canary of 1 hub, then 25% steps; next wave only when the current one has finished; a canary with no success halts). Caps: at most 10% of a bank's and of a feeder's hubs at once. Halt at 2 terminal failures or 5%. Every attempt is signed by the guardian after <a href="#ev-guardian">G-36</a> (campaign RUNNING, hub online and not stopped, not serving a committed obligation in the next 15 min, SoC at least reserve plus 10%, catalogued image and sha256 for its hardware, caps). A refusal is a hold, re-checked after 60 s. Retries: up to 3 attempts with backoff for no ack, silence or download errors; never for a sha256 mismatch, incompatibility, bad signature or install failure.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Not possible in the UI at r3.4: the Fleet card "Firmware update" shows a disabled <b>Firmware update &mdash; available after R3.1</b> button, although the API is served. Use the API as an operator.</li>
+<li>Check the catalogue: <code>GET /og/api/firmware/catalogue</code>. The r3.4 catalogue is the demo set for the simulated fleet (placeholder sha256 values); never use it for real batteries.</li>
+<li>Propose: <code>POST /og/api/firmware/campaigns</code> with name, <code>target_version</code>, <code>selection</code> (hub ids or banks, zones, feeders, hardware revisions, current versions), <code>waves</code>, caps, optional window, <code>reason</code>. Hubs already on the version, or with no catalogue entry, are SKIPPED.</li>
+<li>Confirm within 60 s: <code>POST /og/api/firmware/campaigns/{id}/confirm</code>.</li>
+<li>If <code>requires_second_operator</code> (more than 50 hubs, <code>override_committed</code>, or <code>allow_downgrade</code>): a different operator calls <code>POST .../{id}/approve</code>.</li>
+<li>Watch: <code>GET .../campaigns/{id}</code> (per-hub state and counts) and <code>GET .../campaigns/{id}/events?after=&lt;event_id&gt;</code>.</li>
+<li>Pause, resume or abort: <code>POST .../{id}/pause</code>, <code>/resume</code>, <code>/abort</code> (a hub mid-install cannot be recalled).</li>
+<li>Halted: read the failures first (RB-005: compare the failed cohort with the control cohort). Retry: <code>POST .../{id}/retry-failed</code>, then <code>.../retry-failed/{proposal_id}/confirm</code>; the campaign becomes PAUSED, resume it deliberately. Roll back a hub: <code>POST .../{id}/hubs/{hub_id}/rollback</code>, then <code>.../rollback/{proposal_id}/confirm</code>.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Propose plus confirm within 60 s; second operator (never the proposer or confirmer) when flagged; retry and rollback are two-step.</dd>
+<dt>Verify recovery</dt><dd><code>ALR-FIRMWARE-CAMPAIGN-COMPLETED</code>; the FW version filter shows the target on the selected hubs; no open <code>ALR-FIRMWARE-HUB-FAILED</code>.</dd>
+<dt>Escalate when</dt><dd><code>ALR-FIRMWARE-CAMPAIGN-HALTED</code>; a canary fails; failures cluster on one hardware revision (suspect image: roll back affected hubs).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-trucks">
+<h3>Trucks: deployment, return, charging at home only (D-31)</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="/og/fleet">/og/fleet</a>: Asset type filter "Truck"; home stations (depots) on the map; the drawer's "Truck" section: Status ("At home station" or "Away from home station (in transit or deployed)"), Home station, Current location, "Charging allowed: No · only at its home station (D-31)", "Next planned return: not scheduled (no deployment schedule yet)".</dd>
+<dt>Who acts</dt><dd>Operator; admin for the registry; Base field services for the physical move.</dd>
+<dt>What the system does automatically</dt><dd>The registry is config-first: <code>orchestrator/config/service_profiles/mobile_storage_home_stations.toml</code> (<code>[[home_station]]</code> depots, <code>[[assignment]]</code> of a single-hub bank such as <code>trailer-mb-01</code> to <code>hs-austin-north-01</code>). The selector caps a mobile unit's charge at 0 outside home-station intervals, and those intervals are always unknown at r3.4, so it never plans a charge; only a mobile bank may serve MOBILE_STORAGE. The guardian vetoes any charging setpoint on a mobile unit unless it is at its home station (<a href="#ev-guardian">G-35</a>, <code>R-MOBILE-CHARGE-AWAY-FROM-HOME-STATION</code>); unknown location counts as away, so every charge is vetoed (fail closed).</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Check a truck: filter Asset type "Truck", open its drawer.</li>
+<li>Deployment and return are not implemented at r3.4 in the UI or API: there is no deployment schedule (<code>og.mobile_deployment</code> is a deferred migration). Plan the move with Base outside OpenGrid.</li>
+<li>Charging is not possible at r3.4; a manual charging target on a truck is vetoed by G-35. Discharge and 0 kW are allowed.</li>
+<li>Change a home-station assignment: admin edits the registry file in the release source and deploys (og-guardian reads it once at start). The stations are listed by <code>GET /og/api/fleet/home-stations</code>.</li>
+<li>A from-scratch bootstrap seeds trucks only when <code>dev/seed/mobile_trucks_seed.sql</code> is in the release (<code>bootstrap_from_scratch.sh</code> phase e). It is not in r3.4, so the phase reports the truck seed as skipped.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Any manual target on a truck uses the normal two-step confirm.</dd>
+<dt>Verify recovery</dt><dd>Not applicable at r3.4 beyond the drawer showing the expected home station.</dd>
+<dt>Escalate when</dt><dd>A MOBILE_STORAGE contract needs a charged truck (needs the deferred migration and an owner decision); a charging setpoint on a truck was ever signed (would breach D-31).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-charge-schedule">
+<h3>Charge schedule change (D-30)</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="/og/fleet">/og/fleet</a>, panel "Charging schedule": "Windows (America/Chicago)" grouped by scope with "changed by" and its age; the hub drawer's "Grid charging: ... from SCOPE:ref".</dd>
+<dt>Who acts</dt><dd>Operator (viewers read).</dd>
+<dt>What the system does automatically</dt><dd>Solar charging is always allowed; the windows limit charging from the grid. The most specific scope wins: Fleet &lt; Provider &lt; Zone &lt; Substation &lt; Feeder &lt; Bank &lt; Hub. Rows saved here (<code>og.owner_charge_window</code>, migration 0038) win over <code>[selector.owner_charge_windows]</code> (<code>AUSTIN_ENERGY = ["22:00-06:00"]</code>), which win over the built-in default; the selector reads them when it plans charging.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Preview first: "Preview effective schedule for hub", <b>Preview</b>.</li>
+<li>"Set windows for a scope": Scope, Scope id, up to 4 windows (they may wrap past midnight; <b>Add window</b>, &times; removes one), Reason.</li>
+<li><b>Review change (step 1 of 2)</b>. Dialog "Confirm charging schedule" shows old -&gt; new. Press <b>Save schedule</b>.</li>
+<li>Remove an override: fill Reason, press <b>Remove</b> on its row, dialog "Confirm override removal", <b>Save schedule</b>. The scope then inherits; the Fleet default cannot be removed.</li>
+<li>API: <code>GET /og/api/fleet/charge-windows</code>, <code>GET .../effective?hub_id=</code>, <code>PUT</code> or <code>DELETE /og/api/fleet/charge-windows/{scope_kind}/{scope_ref}</code>, then <code>POST /og/api/fleet/charge-windows/proposals/{proposal_id}/confirm</code>.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Two steps by one operator; a reason is mandatory.</dd>
+<dt>Verify recovery</dt><dd>The list shows the new windows with your name; the preview and the drawer show the effective windows and their source scope.</dd>
+<dt>Escalate when</dt><dd>A change would break the charging mix agreed with Base (D-22: at least 30% solar, the rest off-peak) or leave committed obligations without energy.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-broker-db">
+<h3>Broker or database outage: reconnect, journal, stop outbox</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>Broker down: telemetry stops, so <a href="#ev-alerts"><code>ALR-SIM-OFFLINE</code></a> and <a href="#ev-alerts"><code>ALR-HUB-OFFLINE-RATIO</code></a> open and live badges read <code>reconnecting</code>. Database down: console pages and the API fail; no health alert is raised or cleared (the evaluator in og-settle needs Postgres) and the degraded modes freeze.</dd>
+<dt>Who acts</dt><dd>Admin, with the lead; operators watch.</dd>
+<dt>What the system does automatically</dt><dd>Hubs hold about 35 s, then serve their homes. MQTT clients reconnect on their own (<code>og_mqtt_reconnects_total</code>). og-safestop records every accepted ENGAGE or RELEASE together with its <code>og.stop_outbox</code> entry in one transaction and republishes them (ENGAGEs first) once the broker is back; a broker outage never counts toward the dead-letter limit. Trace writes fall back to the local append-only journal <code>[trace].journal_path</code> (<code>/var/lib/opengrid/trace_journal.jsonl</code>, fsynced per line) and drain into Postgres automatically when it returns (K11). While the database is down a manual-target confirm or cancel answers 503 (<code>NOT RECORDED</code>) and nothing ramps; a target that reaches the trace later by journal replay is refused by the engine as a late record (<code>CANCELLED_LATE_RECORD</code>).</dd>
+</dl>
+<h4>Steps (admin, root; <code>deploy/RUNBOOK.md</code>)</h4>
+<ol class="hp-steps">
+<li>Status: <code>systemctl is-active mosquitto postgresql@17-main</code>; <code>journalctl -u mosquitto</code> or the Postgres log <code>/var/log/postgresql/postgresql-17-main.log</code>.</li>
+<li>Restart by exact unit name (never <code>pkill</code>): <code>systemctl restart mosquitto</code> or <code>systemctl start postgresql@17-main</code>; then the og units if they exited (<code>systemctl start opengrid.target ogsim.target</code>).</li>
+<li>Postgres data directory suspect (I/O errors, will not start): follow <code>deploy/ha/FAILOVER.md</code> (manual promotion of the hot standby on port 5433, repoint <code>[postgres]</code>, verify the trace chain), or restore the latest dump from <code>/srv/ogbackup</code> into a scratch database first (RUNBOOK "Backup and restore").</li>
+<li>After recovery: <code>POST /og/api/trace/verify</code>; confirm the trace journal has drained; check that every stop engaged during the outage reached its hubs (<a href="/og/fleet">/og/fleet</a>, P near 0 kW on the stopped scope) and that no <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> is open; re-propose any manual target whose confirm answered <code>NOT RECORDED</code>.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>The lead's OK before a failover or a restore (both are destructive if done out of order).</dd>
+<dt>Verify recovery</dt><dd>All units active; <code>curl -fsS http://localhost:8080/og/api/health</code> succeeds; heartbeats current on <a href="/og/health">/og/health</a>; alerts clear; trace verify <code>passed: true</code>.</dd>
+<dt>Escalate when</dt><dd>The trace chain does not verify after a promotion or restore (stop and involve the lead before og-engine writes new rows); the journal does not drain; the broker keeps dropping clients (RB-015 intent).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-disk-perf">
+<h3>Disk or performance degradation</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd><a href="#ev-alerts"><code>ALR-CYCLE-P99</code></a> (engine 2 s cycle p99 over its 500 ms budget for 3 reads) and <code>ALR-CYCLE-P99-APPROACHING</code> (80-100% of it); <a href="#ev-alerts"><code>ALR-SETTLE-STALLED</code></a> (settlement not completed for over 180 s); <a href="#ev-alerts"><code>ALR-SELECTOR-GATE-FAILED</code></a> (including solver timeouts). The "Cycle latency (p50/p99)" panel on <a href="/og/health">/og/health</a> is not wired to data at r3.4; the numbers are on the loopback metrics <code>http://localhost:9101/metrics</code> (<code>og_engine_cycle_latency_ms</code>).</dd>
+<dt>Who acts</dt><dd>Admin; operator reports.</dd>
+<dt>What the system does automatically</dt><dd>Each unit runs under its systemd memory limit (<code>MemoryMax</code>/<code>MemoryHigh</code>, <code>deploy/README.md</code>). Retention prunes by class (<code>[retention]</code>: telemetry 14 days, feed observations 30, command trace 30, operator actions 400). Logs rotate daily, 14 kept. Backups keep 7 days on their own volume (<code>/srv/ogbackup</code>).</dd>
+</dl>
+<h4>Steps (admin)</h4>
+<ol class="hp-steps">
+<li><code>curl -s http://localhost:9101/metrics | grep og_engine_cycle_latency_ms</code>; <code>df -h</code> (Postgres data is in <code>/srv/pgdata/17/main</code>); <code>journalctl -u og-engine -u og-guardian -u og-settle -u og-api --since -10min -o cat | grep -E '"ERROR"|Traceback'</code>.</li>
+<li>Disk pressure: check retention (<code>GET /og/api/retention</code>; an operator may change a class with <code>PUT /og/api/retention</code>, traced as <code>CONFIG_CHANGE</code>, effective on the next prune); old releases beyond the last 5 are pruned by <code>deploy.sh</code>.</li>
+<li>Restart a leaking unit only outside a FIRM/AS delivery window, and preferably right after a Postgres <code>checkpoint complete</code> line (RUNBOOK).</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>None in the console; follow the RUNBOOK caution on restarts during delivery.</dd>
+<dt>Verify recovery</dt><dd>p99 back under budget; the alerts clear; the selector plan's "Solve time" normal.</dd>
+<dt>Escalate when</dt><dd>p99 stays over budget (late commands); settlement stalls repeatedly; a volume nears full (RB-044 and RB-045 intent).</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-release">
+<h3>Release, deploy or rollback</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>A planned change. <code>deploy.sh</code> logs to <code>/var/log/opengrid/deploy.log</code>.</dd>
+<dt>Who acts</dt><dd>Admin / release manager, with the lead's OK; the operator on shift is told first.</dd>
+<dt>What the system does automatically</dt><dd><code>deploy.sh</code> refuses (exit 3) while a FIRM or AS obligation (ERCOT_AS, DIST_DEFERRAL, PARTNER_CAPACITY, DATA_CENTER) is DELIVERING unless given <code>--during-delivery</code>; copies the release, runs forward-only migrations, re-seeds topology (idempotent, from <code>/etc/opengrid/sim/fleet.yaml</code>), switches <code>current</code>, reinstalls the release's systemd units (timers installed, never enabled), restarts both targets, polls <code>/og/api/health</code> for 30 s and rolls back automatically on any failure. It keeps the 5 newest releases.</dd>
+</dl>
+<h4>Steps (RUNBOOK "Deploy a release" and "Rollback")</h4>
+<ol class="hp-steps">
+<li>Check <a href="/og/dispatch">/og/dispatch</a> for DELIVERING firm or AS cards; pick a quiet moment (right after a Postgres checkpoint).</li>
+<li>In <code>/opt/opengrid/src</code>: <code>git pull --ff-only</code> as <code>opengrid</code>, <code>git archive HEAD</code> into <code>/root/release-&lt;rev&gt;</code>, install the release's <code>deploy.sh</code>, run <code>bash /opt/opengrid/deploy/scripts/deploy.sh /root/release-&lt;rev&gt;</code>.</li>
+<li>If a <code>yaml</code> under <code>integration-sims/config</code> changed, regenerate <code>/etc/opengrid/sim/fleet.yaml</code> and <code>scada.yaml</code> <b>before</b> the deploy, because the seed reads them: <code>python deploy/scripts/gen_sim_overrides.py --release &lt;release_dir&gt; --out /etc/opengrid/sim --zones LZ_AEN</code> (the owner-approved zones; see <a href="#mt-release">Releases</a>).</li>
+<li>Rollback: <code>ls -1t /opt/opengrid/releases</code>, then <code>bash /opt/opengrid/deploy/scripts/rollback.sh &lt;timestamp&gt;</code>. Migrations are not reverted; data-only migrations must be reversed by hand if needed.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>The lead's OK; <code>--during-delivery</code> only as an explicit decision (a restart interrupts delivery for about 35 s).</dd>
+<dt>Verify recovery</dt><dd>All units active; the console loads for operator and viewer; guardian verdicts mostly PASS; <code>og.invariant_check</code> shows no new violations; engine p99 normal; no <code>ALR-PROCESS-DOWN</code>.</dd>
+<dt>Escalate when</dt><dd>The automatic rollback fired; a migration failed; the health check passes but the guardian vetoes most batches.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-rebuild">
+<h3>From-scratch rebuild</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>The host or its disks are lost, or a clean re-install is required.</dd>
+<dt>Who acts</dt><dd>Admin / release manager with the lead.</dd>
+<dt>What the system does automatically</dt><dd>At r3.4 one idempotent script, <code>deploy/scripts/bootstrap_from_scratch.sh</code>, rebuilds the whole solution (phases a-l: prerequisites check, user and directories, Postgres role and database, migrations, all seeds with a count check, sim configs, MQTT users and ACL, Ed25519 keys, proxy secret and accounts, systemd units, optional ERCOT backfill, first deploy and post-start checks). Every phase converges; existing secrets, keys and accounts are kept, never rotated or printed. Details: <a href="#mt-bootstrap">Bootstrap from scratch</a> and <code>deploy/BOOTSTRAP.md</code>.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>By hand: storage (<code>/srv/pgdata</code>, <code>/srv/pgstandby</code>, <code>/srv/ogbackup</code>), the packages and the two venvs (<code>deploy/BOOTSTRAP.md</code> steps 1-2). The owner places <code>/etc/opengrid/api_keys.env</code> and, optionally, <code>ai_agent.env</code>; never copy secrets or keys through chat or tickets.</li>
+<li>Get the release: <code>git archive &lt;tag&gt; | tar -x -C /root/release-&lt;tag&gt;</code>. From there, as root: <code>bash deploy/scripts/bootstrap_from_scratch.sh --dry-run</code>, read what each phase would do, then run it without <code>--dry-run</code>. Use <code>--phase</code> to repeat single phases (for example <code>--phase k</code> once the ERCOT keys are installed). Production zones default to <code>LZ_AEN</code>; add <code>--d32</code> only when the owner enables <code>LZ_LCRA</code> and <code>LZ_RAYBN</code> in production.</li>
+<li>To prove a release seeds correctly without touching production, first run <code>make bootstrap-check</code> (phases c-e into a fresh <code>og_t_boot</code> on the test cluster, port 5433).</li>
+<li>Restore the latest dump if data must survive: restore into <code>og_restore_check</code>, verify, then rename (RUNBOOK "Backup and restore"); run <code>POST /og/api/trace/verify</code>.</li>
+<li>Enable <code>og-lifecycle.timer</code> after the I/O check (<a href="#mt-lifecycle">Data lifecycle</a>); replace the test release operators with named accounts; stand up the hot standby again if used (<code>deploy/ha/pg_standby_setup.sh</code>). For a local copy only: <code>make dev-up</code>, or <code>make dev-reset</code> for a full wipe (<code>dev/README.md</code>).</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>The lead's OK at each destructive step (<code>--fresh-db</code> is refused on port 5432).</dd>
+<dt>Verify recovery</dt><dd>The script's phase l checks: all 10 <code>og-*</code> units active, <code>/og/api/health</code> 200, <code>/og/</code> 401 without credentials, every hub fresh within 25 s, invariants 0, only forecast degraded modes until price history exists. Then as after a deploy, plus trace verify on restored data and a working two-person release with named accounts.</dd>
+<dt>Escalate when</dt><dd><code>bootstrap_check.py</code> reports a count mismatch; the restored trace chain fails verification; signing keys had to be regenerated (hubs and og-safestop must trust the new guardian key, see <a href="#pb-security">pb-security</a>).</dd>
+</dl>
+</section>
+<section class="hp-sub" id="pb-security">
+<h3>Security event: a denied action, key or secret rotation</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>A write answered 403 (for example "Operator role required to acknowledge alerts."); a guardian refusal (<code>GUARDIAN_VERDICT</code> outcome REFUSED, reason such as <code>OPERATOR_NOT_AUTHORISED</code>); the banner "... no identity reached the console" when og-api is reached directly on its port; <a href="#ev-alerts"><code>ALR-TRACE-VERIFY-FAILED</code></a>, <code>ALR-ANCHOR-PUBLISH-FAILED</code>, <code>ALR-TRACE-VERDICT-WRITE-FAILED</code>.</dd>
+<dt>Who acts</dt><dd>Operator reports; admin and lead investigate and rotate.</dd>
+<dt>What the system does automatically</dt><dd>og-api believes an identity only with Apache's proxy secret; unknown accounts are viewers; every operator action is traced on <code>operator_action:&lt;user&gt;</code>; hubs execute only guardian-signed commands for their current lease epoch (K3, K6); og-safestop's key can only stop; the trace is hash-chained and checked every 5 minutes.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Denied action: confirm who and what in <a href="/og/billing">/og/billing</a> "Trace explorer" (filter the class, e.g. <code>GUARDIAN_VERDICT</code>) and in <code>journalctl -u og-api</code>. A legitimate user with the wrong role: fix the account (<a href="#pb-personas">pb-personas</a>). An unknown user or repeated attempts: tell the lead.</li>
+<li>Password rotation: <code>htpasswd -B /etc/opengrid/htpasswd &lt;user&gt;</code>; update the credentials file by hand; <code>htpasswd -D</code> removes an account (also remove it from <code>[api.roles]</code>, <code>stop_release_authorised_operators</code> and the Apache <code>Require user</code> line; deploy; <code>apache2ctl configtest</code> before <code>systemctl reload apache2</code>).</li>
+<li>Service secrets (<code>secrets.env</code>, <code>api_keys.env</code>, <code>ai_agent.env</code>): edit on the server, restart the units that read them. Never print them.</li>
+<li>Signing keys (guardian, safe-stop, trace anchor): no rotation procedure is implemented at r3.4. RB-057 describes the intent; a guardian key change also needs every verifier (hubs, og-safestop) to trust the new public key. Treat as a lead-owned change.</li>
+<li>Chain failure: run <code>POST /og/api/trace/verify</code>; note <code>first_broken</code> stream and sequence; do not edit rows.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>The lead for any account, secret or key change.</dd>
+<dt>Verify recovery</dt><dd>The affected user can do exactly what the role allows; trace verify <code>passed: true</code>; no anchor alerts.</dd>
+<dt>Escalate when</dt><dd>Any sign of a forged or unsigned command, a broken chain, a leaked secret or key, or a spoofed identity header: immediately.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="pb-customer-onboarding">
+<h3>Customer onboarding (the customer API is off until owner go-live)</h3>
+<dl class="hp-dl">
+<dt>How it shows</dt><dd>A new customer or contract; its opportunities then appear as cards on <a href="/og/dispatch">/og/dispatch</a>.</dd>
+<dt>Who acts</dt><dd>Operator (contract admission, API-only); admin (accounts and config); the owner decides go-live.</dd>
+<dt>What the system does automatically</dt><dd>Admission checks every contract and opportunity; the selector commits only what fits. Held back at r3.4: <code>[api.customer_api] enabled = false</code> (routes not mounted); <code>[contracts.activation] data_center = false</code> (DATA_CENTER and PIPELINE_AC admission closed, <code>R-ADMIT-REJECT</code>); <code>[allocator.closed_loop] enabled = false</code> and <code>[site_ingest] enabled = false</code>; the <code>og-sim-customer</code> unit is installed but not enabled.</dd>
+</dl>
+<h4>Steps</h4>
+<ol class="hp-steps">
+<li>Not possible in the UI at r3.4 (no contract screen). As an operator: <code>GET /og/api/customers</code>, <code>POST /og/api/contracts</code>, <code>PATCH /og/api/contracts/{contract_id}</code>, <code>GET /og/api/contracts</code>; offer an opportunity with <code>POST /og/api/opportunities</code>.</li>
+<li>Admin: create the customer's Apache account and map it to its <code>customer_id</code> in <code>[api.roles.customer]</code>; deploy.</li>
+<li>Only after the owner's go-live confirmation: set <code>[api.customer_api] enabled = true</code> through a release. The customer then uses <code>/og/api/customer/...</code>; operators handle disputes and requests with <code>GET</code>/<code>PATCH /og/api/customer-disputes</code> and <code>/og/api/customer-requests</code> (mounted only when enabled).</li>
+<li>For closed-loop services (DATA_CENTER, PIPELINE_AC), the activation, closed-loop and site-ingest switches are separate owner decisions.</li>
+</ol>
+<dl class="hp-dl">
+<dt>Confirmations required</dt><dd>Owner go-live for the customer API; the lead for account and config changes.</dd>
+<dt>Verify recovery</dt><dd>The contract lists in <code>GET /og/api/contracts</code>; its first opportunity moves through the pipeline; with the API on, <code>GET /og/api/customer/me</code> answers for the new account.</dd>
+<dt>Escalate when</dt><dd>Admission rejects a contract you expect to pass; anyone asks to enable the customer API without the owner's confirmation.</dd>
+</dl>
+</section>
+</section>

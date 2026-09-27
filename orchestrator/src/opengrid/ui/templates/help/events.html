@@ -1,0 +1,187 @@
+<section class="hp-sec" id="events" aria-labelledby="events-h"><h2 id="events-h">Events, alerts and errors</h2>
+<p>What moves on the message bus, what raises an alert, which degraded modes exist, what each guardian veto code means, and how the processes behave when the broker, the database or the API is unavailable. Alerts are rows in <code>og.alert</code>, listed on <a href="/og/health">/og/health</a> and in the header bell; degraded modes are rows in <code>og.degraded_mode_state</code> and appear as the "Degraded:" banner.</p>
+
+<section class="hp-sub" id="ev-mqtt"><h3>MQTT topics</h3>
+<p>Broker: Mosquitto on localhost port 1883, plain TCP, loopback only. Every topic sits under <code>[mqtt].topic_root</code> (production <code>og/v1</code>; override <code>OG_MQTT_ROOT</code>), shown as <code>&lt;root&gt;</code>. Each process has its own MQTT user with an ACL limited to its rows; <code>og-feeds</code> and <code>og-settle</code> never touch MQTT. Every payload is validated against its schema in <code>interfaces/mqtt/</code> before use.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Topic pattern</th><th scope="col">Direction</th><th scope="col">Publisher</th><th scope="col">Subscriber(s)</th><th scope="col">QoS / retain</th><th scope="col">Schema</th></tr></thead><tbody>
+<tr><td><code>&lt;root&gt;/tel/&lt;zone&gt;/&lt;bank_id&gt;/&lt;hub_id&gt;</code></td><td>hub to orchestrator</td><td>hub (<code>og_sim</code>)</td><td>og-engine (fleet twin), og-guardian</td><td>0 / no</td><td><code>telemetry.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/cmd/&lt;bank_id&gt;/batch</code></td><td>guardian to hubs</td><td>og-guardian (signed)</td><td>hubs of that bank</td><td>1 / no</td><td><code>command_batch.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/ack/&lt;hub_id&gt;</code></td><td>hub to orchestrator</td><td>hub</td><td>og-engine, og-guardian</td><td>1 / no</td><td><code>ack.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/lease/&lt;hub_id&gt;</code></td><td>guardian to hub</td><td>og-guardian (signed)</td><td>that hub</td><td>1 / yes</td><td><code>lease.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/stop/&lt;scope&gt;/&lt;id&gt;</code> (scope <code>fleet</code>, <code>zone/&lt;zone&gt;</code>, <code>bank/&lt;bank_id&gt;</code>; id = stop_event UUID)</td><td>safestop to hubs</td><td>og-safestop (ENGAGE signed by safestop key, RELEASE by guardian key)</td><td>hubs in scope, og-api</td><td>1 / yes</td><td><code>stop.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/scada/&lt;bank_id&gt;</code></td><td>SCADA to orchestrator</td><td>utility SCADA (<code>og_sim</code>)</td><td>og-engine (DIST_DEFERRAL PI loop, <code>og.feed_obs</code>)</td><td>0 / no</td><td><code>scada_bank_signal.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/scada/instruction/&lt;bank_id&gt;</code></td><td>utility to orchestrator</td><td>utility system (<code>og_sim</code>)</td><td>og-engine, og-guardian (G-15), og-safestop (L2 intake)</td><td>1 / no</td><td><code>scada_utility_instruction.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/scenario/cmd</code></td><td>API to simulators</td><td>og-api (scenario panel)</td><td>hub and customer simulators</td><td>1 / no</td><td><code>scenario_control.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/scada/wave/&lt;zone&gt;/&lt;bank_id&gt;/&lt;hub_id&gt;/summary</code></td><td>hub to orchestrator</td><td>hub</td><td>og-engine (PQ ingest)</td><td>0 / no</td><td><code>pq_waveform_summary.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/scada/wave/&lt;zone&gt;/&lt;bank_id&gt;/&lt;hub_id&gt;/raw</code></td><td>hub to orchestrator</td><td>hub (triggered only)</td><td>og-engine (PQ ingest), og-guardian (G-22 evidence)</td><td>1 / no</td><td><code>pq_waveform_raw.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/scada/wave/&lt;zone&gt;/&lt;bank_id&gt;/&lt;hub_id&gt;/request</code></td><td>orchestrator to hub</td><td>og-api (capture request)</td><td>hub</td><td>1 / no</td><td><code>waveform_capture_request.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/cmd/cal/&lt;hub_id&gt;</code></td><td>guardian to hub</td><td>og-guardian (signed, G-25)</td><td>that hub</td><td>1 / no</td><td><code>calibration_command.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/ack/cal/&lt;hub_id&gt;</code></td><td>hub to orchestrator</td><td>hub (signed ack)</td><td>og-engine (<code>assets.calibration_ack</code>), og-guardian</td><td>1 / no</td><td><code>calibration_ack.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/cmd/fw/&lt;hub_id&gt;</code></td><td>guardian to hub</td><td>og-guardian (signed, G-36)</td><td>that hub</td><td>1 / no</td><td><code>firmware_command.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/ack/fw/&lt;hub_id&gt;</code></td><td>hub to orchestrator</td><td>hub</td><td>og-engine (<code>firmware.ingest</code>)</td><td>1 / no</td><td><code>firmware_status.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/hub/&lt;hub_id&gt;/info</code> (<code>[mqtt].device_info_topic</code>)</td><td>hub to orchestrator</td><td>hub</td><td>og-engine (<code>fleet.device_info</code>)</td><td>1 / yes</td><td><code>device_info.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/site/&lt;customer_id&gt;/&lt;site_id&gt;/meter</code></td><td>customer to orchestrator</td><td>customer meter (<code>og_sim_customer</code>)</td><td>og-engine (<code>site_ingest</code>, when enabled)</td><td>0 / no</td><td><code>customer_site_meter.schema.json</code></td></tr>
+<tr><td><code>&lt;root&gt;/corridor/&lt;customer_id&gt;/&lt;corridor_id&gt;/current</code></td><td>customer to orchestrator</td><td>corridor monitor (<code>og_sim_customer</code>)</td><td>og-engine (<code>site_ingest</code>, when enabled)</td><td>0 / no</td><td><code>pipeline_corridor_current.schema.json</code></td></tr>
+</tbody></table></div>
+<p class="hp-note">Retained <code>stop</code> and <code>lease</code> messages reach a hub that reconnects mid-stop or mid-lease at once. A retained empty payload on a stop topic is only broker housekeeping: it never releases a stop (K8). QoS 1 consumers de-duplicate by <code>batch_id</code>, <code>seq</code>, <code>calibration_id</code> or <code>request_id</code>. The topic contract is <code>interfaces/mqtt/topics.md</code> (the firmware and device-info topics are defined in the firmware and fleet code and schemas).</p>
+</section>
+
+<section class="hp-sub" id="ev-alerts"><h3>Alert rules</h3>
+<p>Every rule writes through the same <code>og.alert</code> writer, raised once per condition key (never an alert storm). The health evaluator (inside og-settle) auto-clears only its own rules (<code>HEALTH_OWNED_ALERT_RULES</code>); an alert raised by another module stays open until that module clears it, or, where the table says "no automatic clear", until an operator acknowledges it on <a href="/og/health">/og/health</a>. Severities are <code>critical</code>, <code>warning</code> and <code>info</code>.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Alert id</th><th scope="col">Source</th><th scope="col">Trigger</th><th scope="col">Severity</th><th scope="col">Clears when</th><th scope="col">Operator action</th></tr></thead><tbody>
+<tr><td><code>ALR-FEED-STALE</code></td><td>health/rules.py</td><td>A feed's last value older than its staleness threshold (<code>[feeds.staleness]</code>). EIA suppressed while the ERCOT load it backs is healthy.</td><td>warning</td><td>A fresh value arrives (auto)</td><td><a href="#pb-price-spike">pb-price-spike</a>; firm feeds also raise NO_NEW_COMMITMENTS</td></tr>
+<tr><td><code>ALR-FEED-LGV-EXHAUSTED</code></td><td>health/rules.py</td><td>Feed circuit breaker open, last-good-value window exhausted</td><td>critical</td><td>Breaker closes (auto)</td><td>Check feed credentials and ERCOT status; <a href="#pb-price-spike">pb-price-spike</a></td></tr>
+<tr><td><code>ALR-PROCESS-DOWN</code></td><td>health/rules.py</td><td>A process's heartbeat missing for <code>heartbeat_miss_threshold</code> (3) x <code>heartbeat_interval_s</code> (5 s); og-engine also stops beating when MQTT ingest is down over 30 s</td><td>critical</td><td>Heartbeat resumes (auto)</td><td><a href="#pb-broker-db">pb-broker-db</a>; <a href="#mt-logs">logs</a></td></tr>
+<tr><td><code>ALR-HUB-OFFLINE-RATIO</code></td><td>health/rules.py</td><td>Offline plus faulted hubs in a zone over 5 % (warning) or 20 % (critical); offline = no telemetry for 60 s</td><td>warning / critical</td><td>Ratio back under 5 % (auto)</td><td><a href="#pb-comms-loss">pb-comms-loss</a></td></tr>
+<tr><td><code>ALR-SIM-OFFLINE</code></td><td>health/rules.py</td><td>No hub telemetry and no SCADA reading for <code>sim_offline_s</code> (90 s), after data had been flowing</td><td>critical</td><td>Fresh telemetry or SCADA (auto)</td><td><a href="#pb-comms-loss">pb-comms-loss</a></td></tr>
+<tr><td><code>ALR-SCADA-SILENT</code></td><td>health/rules.py</td><td>No SCADA bank reading fleet-wide for <code>scada_silent_s</code> (not on cold start)</td><td>critical</td><td>A fresh reading (auto)</td><td><a href="#pb-comms-loss">pb-comms-loss</a>; DIST_DEFERRAL_OPEN_LOOP applies</td></tr>
+<tr><td><code>ALR-SCADA-SILENT-BANK</code></td><td>health/rules.py</td><td>One bank's SCADA silent for <code>scada_silent_s</code> while others report</td><td>warning</td><td>That bank reports again (auto)</td><td><a href="#pb-comms-loss">pb-comms-loss</a></td></tr>
+<tr><td><code>ALR-SCADA-OVERLOAD</code></td><td>health/rules.py</td><td>A bank's SCADA kVA over its <code>kva_rating</code> by the warning / critical ratios (<code>bank_kva_overload_*_pct</code>)</td><td>warning / critical</td><td>Load back under rating ratio (auto)</td><td><a href="#pb-bank-overload">pb-bank-overload</a></td></tr>
+<tr><td><code>ALR-CYCLE-P99-APPROACHING</code></td><td>health/rules.py</td><td>Engine cycle p99 at or above <code>cycle_p99_warn_ratio</code> (80 %) of budget, below the budget</td><td>warning</td><td>p99 back under 80 % or escalates (auto)</td><td><a href="#pb-disk-perf">pb-disk-perf</a></td></tr>
+<tr><td><code>ALR-CYCLE-P99</code></td><td>health/rules.py</td><td>Cycle p99 over budget for <code>cycle_p99_breach_cycles</code> consecutive cycles</td><td>warning</td><td>p99 within budget (auto)</td><td><a href="#pb-disk-perf">pb-disk-perf</a></td></tr>
+<tr><td><code>ALR-GUARDIAN-TIMEOUT-RATE</code></td><td>health/rules.py</td><td>Guardian verdict timeout rate over 1 %</td><td>critical</td><td>Rate back under 1 % (auto)</td><td><a href="#pb-veto-burst">pb-veto-burst</a>; <a href="#pb-disk-perf">pb-disk-perf</a></td></tr>
+<tr><td><code>ALR-RESERVE-BREACH</code></td><td>health/rules.py</td><td>Reserve-floor breach counter above 0 (must stay 0, K1)</td><td>critical</td><td>Counter back to 0 (auto)</td><td><a href="#pb-safe-stop">pb-safe-stop</a> if spreading; escalate to lead</td></tr>
+<tr><td><code>ALR-ENERGY-SHORTFALL-RISK</code></td><td>engine (rule shape in health/rules.py; K1 energy check)</td><td>A committed obligation's eligible hubs no longer hold enough energy above reserve for its remaining window (AT_RISK)</td><td>critical</td><td>Engine clears when the obligation is served in full again</td><td><a href="#pb-at-risk">pb-at-risk</a></td></tr>
+<tr><td><code>ALR-METER-EXPORT-LIMIT</code></td><td>health/rules.py</td><td>Hub meter export sustained near its limit</td><td>warning</td><td>Not wired at r3.4 (no telemetry field yet); never raised</td><td>n/a</td></tr>
+<tr><td><code>ALR-TEMPERATURE-LIMIT</code></td><td>health/rules.py</td><td>Hub temperature sustained near its limit</td><td>warning</td><td>Not wired at r3.4; never raised</td><td>n/a</td></tr>
+<tr><td><code>ALR-SELECTOR-GATE-FAILED</code></td><td>engine/gates.py</td><td>A selector gate run raised an error (traced; the tick continues)</td><td>warning</td><td>Engine clears when that gate next succeeds</td><td>Check og-engine logs; <a href="#pb-normal">pb-normal</a></td></tr>
+<tr><td><code>ALR-OBLIGATION-STUCK-SELECTED</code></td><td>engine (stuck sweep, 30 s)</td><td>An obligation a failed commit left in SELECTED cannot be completed or rejected; capacity may be locked</td><td>critical</td><td>Engine clears when it is no longer stuck</td><td>Escalate to lead; review on <a href="/og/dispatch">/og/dispatch</a></td></tr>
+<tr><td><code>ALR-SCOPE-CONSERVATIVE</code></td><td>guardian/escalation.py</td><td>Over 5 % of a tick's commands in a bank or zone vetoed (K7)</td><td>warning</td><td>Guardian clears after 3 good ticks, or 30 idle ticks</td><td><a href="#pb-veto-burst">pb-veto-burst</a></td></tr>
+<tr><td><code>ALR-SAFE-STOP-REQUESTED</code></td><td>guardian/escalation.py</td><td>Scope escalation count reached 3; an unconfirmed safe-stop proposal is created</td><td>critical</td><td>Guardian clears with the scope's CONSERVATIVE state</td><td><a href="#pb-safe-stop">pb-safe-stop</a>; <a href="#pb-veto-burst">pb-veto-burst</a></td></tr>
+<tr><td><code>ALR-CLOCK-QUALITY</code></td><td>guardian/service.py</td><td>G-20: guardian clock offset beyond its limit; signing held</td><td>critical</td><td>Guardian clears when the clock is back in limit</td><td>Check time sync on the base server; <a href="#pb-broker-db">pb-broker-db</a></td></tr>
+<tr><td><code>ALR-XFMR-UNMAPPED</code></td><td>guardian/service.py</td><td>Hubs with no service-transformer mapping: G-27 checks each as a group of one</td><td>warning</td><td>No automatic clear</td><td>Add transformer mapping; <a href="#pb-customer-onboarding">pb-customer-onboarding</a></td></tr>
+<tr><td><code>ALR-BANK-UNMAPPED-TOPOLOGY</code> (r3.4, H3)</td><td>guardian/service.py</td><td>A bank with no <code>feeder_id</code>: G-06/G-28/G-32 skipped for it. With <code>fail_closed_missing_topology = true</code>, a batch raising the bank's net setpoint is vetoed (G-28 <code>BANK_TOPOLOGY_UNMAPPED</code>)</td><td>warning</td><td>No automatic clear (deduped per bank)</td><td>Map the bank to its feeder; <a href="#pb-customer-onboarding">pb-customer-onboarding</a></td></tr>
+<tr><td><code>ALR-TRACE-VERDICT-WRITE-FAILED</code></td><td>guardian/service.py</td><td>A verdict's GUARDIAN_VERDICT trace row could not be written (the verdict stands; K11)</td><td>warning</td><td>No automatic clear</td><td><a href="#ev-trace">Trace</a>; <a href="#pb-broker-db">pb-broker-db</a></td></tr>
+<tr><td><code>ALR-CALIBRATION-BUDGET</code></td><td>guardian/service.py (G-25)</td><td>Fleet calibration cap or systemic-drift hold refused a calibration command</td><td>warning</td><td>No automatic clear (raised once while open)</td><td><a href="#pb-pq-drift">pb-pq-drift</a></td></tr>
+<tr><td><code>ALR-CALIBRATION-PROTOCOL</code></td><td>assets/calibration_ack.py</td><td>A calibration ack failed its protocol checks (signature, ids, state)</td><td>warning</td><td>No automatic clear</td><td><a href="#pb-pq-drift">pb-pq-drift</a></td></tr>
+<tr><td><code>ALR-ANCHOR-PUBLISH-FAILED</code></td><td>invariants/anchor_alerts.py</td><td>Trace anchor publish failed: nothing anchored</td><td>critical</td><td>Next successful anchor (auto)</td><td><a href="#ev-trace">Trace</a>; <a href="#pb-disk-perf">pb-disk-perf</a></td></tr>
+<tr><td><code>ALR-ANCHOR-SECONDARY-FAILED</code></td><td>invariants/anchor_alerts.py</td><td>Primary anchor written but no secondary copy (backup tree)</td><td>warning</td><td>Next anchor with a secondary copy (auto)</td><td>Check <code>/srv/ogbackup</code>; <a href="#pb-disk-perf">pb-disk-perf</a></td></tr>
+<tr><td><code>ALR-TRACE-VERIFY-FAILED</code></td><td>invariants/trace_verify.py</td><td>Scheduled chain verification found a broken trace stream</td><td>critical</td><td>Every stream verifies again (auto)</td><td><a href="#pb-security">pb-security</a></td></tr>
+<tr><td><code>ALR-SETTLE-STALLED</code></td><td>settle/main.py</td><td>A settlement job stalled or fails on every run</td><td>critical</td><td>og-settle clears when the job recovers</td><td><a href="#pb-broker-db">pb-broker-db</a>; <a href="#page-billing">Billing</a></td></tr>
+<tr><td><code>ALR-FIRMWARE-CAMPAIGN-STARTED</code></td><td>firmware/executor.py</td><td>A campaign started</td><td>info</td><td>No automatic clear</td><td>None; <a href="#pb-firmware">pb-firmware</a></td></tr>
+<tr><td><code>ALR-FIRMWARE-HUB-FAILED</code></td><td>firmware/executor.py</td><td>A hub's update failed terminally</td><td>warning</td><td>No automatic clear</td><td><a href="#pb-firmware">pb-firmware</a></td></tr>
+<tr><td><code>ALR-FIRMWARE-CAMPAIGN-HALTED</code></td><td>firmware/executor.py</td><td>A running campaign crossed its failure threshold and halted</td><td>critical</td><td>No automatic clear</td><td><a href="#pb-firmware">pb-firmware</a></td></tr>
+<tr><td><code>ALR-FIRMWARE-CAMPAIGN-COMPLETED</code></td><td>firmware/executor.py</td><td>Every job of a campaign finished</td><td>info</td><td>No automatic clear</td><td>None</td></tr>
+<tr><td><code>ALR-STOP-PUBLISH-DEAD-LETTER</code> (r3.4, H5)</td><td>safestop outbox</td><td>A stop publication failed permanently <code>outbox_max_attempts</code> (5) times and was skipped</td><td>critical</td><td>No automatic clear (once per stop and action)</td><td><a href="#pb-safe-stop">pb-safe-stop</a>; <a href="#ev-outbox">outbox</a></td></tr>
+<tr><td><code>ALR-DEVICE-RATING-MISMATCH</code> (r3.4, H4)</td><td>fleet/device_info.py</td><td>A DEVICE-INFO report's ratings or location differ from the seed values</td><td>warning</td><td>A later report matches the seed (auto)</td><td>Decide whether the seed or the device is wrong; <a href="#page-fleet">Fleet</a></td></tr>
+</tbody></table></div>
+<p class="hp-note">35 rules at r3.4, two of them prepared but never raised. The one-line critical strip at the top of every page is reserved for a requested safe stop (<code>ALR-SAFE-STOP-REQUESTED</code>) and a fleet hold (the critical degraded modes <code>HOLD</code> and <code>HOLD_LOCAL_AUTONOMY</code>).</p>
+</section>
+
+<section class="hp-sub" id="ev-degraded"><h3>Degraded modes</h3>
+<p>The health evaluator derives the current modes each cycle (<code>health/rules.py</code> <code>derive_degraded_modes</code>) and persists them in <code>og.degraded_mode_state</code>; <code>GET /og/api/health</code> returns them as <code>degraded_modes</code>, and the console shows them in operator words.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Mode</th><th scope="col">Label</th><th scope="col">Trigger</th><th scope="col">What it blocks</th><th scope="col">How it clears</th></tr></thead><tbody>
+<tr><td><code>NO_NEW_COMMITMENTS</code></td><td>Feed stale</td><td>A firm-blocking feed (<code>np6-905-cd</code>, <code>np4-188-cd</code> by default) is stale, or has no <code>feed_status</code> row</td><td>Selector intake: no new obligation is selected or committed; existing commitments keep delivering (commitment lock)</td><td>The feed is fresh again at the next health cycle</td></tr>
+<tr><td><code>HOLD_LOCAL_AUTONOMY</code></td><td>Engine down</td><td>og-engine heartbeat missing (includes MQTT ingest down over 30 s)</td><td>No new plans or batches; hubs hold their last signed setpoint until the lease expires, then local autonomy</td><td>og-engine heartbeats again (systemd restarts it)</td></tr>
+<tr><td><code>HOLD</code></td><td>Guardian down</td><td>og-guardian heartbeat missing</td><td>Nothing is signed, so nothing new reaches hubs; hubs hold within their leases</td><td>og-guardian heartbeats again</td></tr>
+<tr><td><code>DIST_DEFERRAL_OPEN_LOOP</code></td><td>SCADA silent</td><td>No SCADA bank reading for <code>scada_silent_s</code></td><td>SCADA-dependent loops HOLD then SCHEDULE (no closed-loop correction); guardian G-03 vetoes on a missing or stale bank load</td><td>A fresh SCADA reading arrives</td></tr>
+</tbody></table></div>
+<h4>Related held states (not in <code>og.degraded_mode_state</code>)</h4>
+<dl class="hp-dl">
+<dt>CONSERVATIVE scope</dt><dd>A bank or zone in <code>og.scope_posture</code> CONSERVATIVE gets reduced or zero new dispatch; see <a href="#ev-k7">K7 escalation</a>.</dd>
+<dt>Clock hold (G-20)</dt><dd>The guardian signs nothing while its clock is out of limit (<code>ALR-CLOCK-QUALITY</code>).</dd>
+<dt>Closed-loop HOLD</dt><dd>A DATA_CENTER or PIPELINE_AC loop that loses its customer signal holds the delivered level, then schedules.</dd>
+<dt>Safe stop engaged</dt><dd>Batches for a stopped scope are refused (rule <code>SAFE_STOP</code>, not counted as a veto); see <a href="#hw-safestop">safe stop</a>.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="ev-guardian"><h3>Guardian checks G-01 to G-36</h3>
+<p>The guardian re-checks every proposed batch from its own reads and either signs it (PASS), vetoes it, or holds it (TIMEOUT). A veto carries the rule id and a reason code (<code>core/reasons.py</code>); bounds come from <code>core/limits.py</code>, the same functions the allocator uses, so the guardian never clips, it only passes or refuses. Missing or stale data fails closed. Codes marked "not implemented" are specified in <code>docs/orchestrator/03-security/02-security-architecture.md</code> but have no check in code at r3.4.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Code</th><th scope="col">Meaning</th><th scope="col">Typical reason codes</th><th scope="col">Module</th></tr></thead><tbody>
+<tr><td><code>G-01</code></td><td>Reserve floor: the hub's SoC must clear reserve plus margin under the setpoint (K1)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-01-ENERGY</code></td><td>Lease-duration energy projection: the hub keeps its reserve for the whole lease (K1)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-02</code></td><td>Hub power: within rated power and the derated P_max(SoC, T) per direction (K4)</td><td><code>HUB_POWER_DERATED</code></td><td>checks.py, flow_checks.py</td></tr>
+<tr><td><code>G-03</code></td><td>Bank kVA loading as a magnitude, needs a fresh SCADA bank load (K4/K9)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-04</code></td><td>Per-hub ramp rate (K4)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-05</code></td><td>Fleet ramp and synchronized (unstaggered) step in one tick</td><td><code>SYNC_STEP_LIMIT</code></td><td>checks.py, flow_checks.py</td></tr>
+<tr><td><code>G-06</code></td><td>Feeder / substation ramp ceiling for firm events</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-07</code></td><td>Frequency-aware holds</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-08</code></td><td>Voltage-aware holds</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-09</code></td><td>Ledger version: batch built on the ledger version the guardian reads now (K2)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-10</code></td><td>Approval evidence and blast radius</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-11</code></td><td>Profile envelope</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-12</code></td><td>Topology freshness</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-13</code></td><td>Command freshness: epoch, seq and lease window (K6)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-14</code></td><td>Decision pre-image already durably traced before signing (K10)</td><td><code>TRACE_PREIMAGE_MISSING</code></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-15</code></td><td>Active L2 utility/ISO instruction is a hard boundary (K5)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-16</code></td><td>Emergency (EEA) posture</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-17</code></td><td>Cross-principal cumulative windows</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-18</code></td><td>Counterparty-supplied dynamic limits</td><td></td><td>Not implemented at r3.4</td></tr>
+<tr><td><code>G-19</code></td><td>Commitment lock (K13): a committed obligation is not reduced without evidence (override, territory block, operator target, need basis, AS hold)</td><td><code>R-OPERATOR-OVERRIDE</code> and other K13 reasons</td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-20</code></td><td>Guardian clock quality; runs first, holds all signing (K12)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-21</code></td><td>Phase imbalance within the PQ envelope</td><td></td><td>guardian/pq_checks.py</td></tr>
+<tr><td><code>G-22</code></td><td>Harmonic distortion (THD) within the envelope</td><td></td><td>guardian/pq_checks.py</td></tr>
+<tr><td><code>G-23</code></td><td>Frequency and voltage deviation within the envelope</td><td></td><td>guardian/pq_checks.py</td></tr>
+<tr><td><code>G-24</code></td><td>Asset conformance: PQ asset state and ride-through class</td><td><code>PQ_RIDE_THROUGH_CLASS_UNKNOWN</code></td><td>guardian/pq_checks.py</td></tr>
+<tr><td><code>G-25</code></td><td>Calibration safety: bounds, rate limit, lease and fleet budget</td><td><code>PQ_CALIBRATION_FLEET_BUDGET_EXCEEDED</code></td><td>guardian/pq_checks.py</td></tr>
+<tr><td><code>G-26</code></td><td>Home meter: export and import limits of the premise</td><td><code>HOME_EXPORT_LIMIT</code>, <code>HOME_IMPORT_LIMIT</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-27</code></td><td>Service transformer, either direction</td><td><code>XFMR_LIMIT</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-28</code></td><td>Feeder thermal limit and feeder-head reverse flow; r3.4 also vetoes increases on an unmapped bank when fail-closed</td><td><code>FEEDER_THERMAL_LIMIT</code>, <code>FEEDER_REVERSE_FLOW</code>, <code>BANK_TOPOLOGY_UNMAPPED</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-29</code></td><td>Substation transformer / POI limit</td><td><code>SUBSTATION_LIMIT</code>, <code>POI_LIMIT</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-30</code></td><td>No net export out of a regulated territory (K15)</td><td><code>TERRITORY_EXPORT</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-31</code></td><td>Above continuous rating only with a valid peak allowance</td><td><code>PEAK_POWER_LIMIT</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-32</code></td><td>Feeder ramp for non-firm steps</td><td><code>FEEDER_RAMP_NON_FIRM</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-33</code></td><td>Territory eligibility: a regulated obligation served only inside its territory (K15)</td><td><code>R-TERRITORY-INELIGIBLE</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-34</code></td><td>Every item's hub is on the proposal's bank (unknown hub fails closed)</td><td><code>R-HUB-NOT-IN-BANK</code></td><td>guardian/flow_checks.py</td></tr>
+<tr><td><code>G-35</code></td><td>A MOBILE_STORAGE unit charges only at its home station (D-31)</td><td></td><td>guardian/checks.py</td></tr>
+<tr><td><code>G-36</code></td><td>Firmware eligibility of a FIRMWARE_UPDATE command (stop, online, lease, catalogue, caps)</td><td></td><td>guardian/firmware_check.py</td></tr>
+</tbody></table></div>
+<p class="hp-note">A burst of vetoes is handled by <a href="#pb-veto-burst">pb-veto-burst</a>; vetoes feed the <a href="#ev-k7">K7 escalation</a>.</p>
+</section>
+
+<section class="hp-sub" id="ev-k7"><h3>K7 escalation: CONSERVATIVE and safe-stop request</h3>
+<p>TIMEOUT is not VETO is not STOP. og-guardian counts vetoes per tick for every bank and for the zone containing it (<code>guardian/escalation.py</code>); only explicit invariant vetoes count, never timeouts or batches refused because a stop is engaged.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Parameter</th><th scope="col">Default</th><th scope="col">Effect</th></tr></thead><tbody>
+<tr><td><code>conservative_ratio</code></td><td>5 %</td><td>A tick with more than 5 % of the scope's commands vetoed is BAD: the scope goes CONSERVATIVE in <code>og.scope_posture</code>, <code>ALR-SCOPE-CONSERVATIVE</code> is raised and the escalation count rises by one.</td></tr>
+<tr><td><code>stop_request_after</code></td><td>3</td><td>At a count of 3, <code>ALR-SAFE-STOP-REQUESTED</code> is raised with an unconfirmed safe-stop proposal for a person. Nothing here engages a stop; the operator uses the normal two-step flow.</td></tr>
+<tr><td><code>clear_ratio_factor</code></td><td>0.5</td><td>A GOOD tick is at or under 2.5 %. A tick between 2.5 % and 5 % breaks the good streak and leaves the count alone.</td></tr>
+<tr><td><code>clear_after_good_ticks</code></td><td>3</td><td>Three consecutive good ticks clear the scope back to NORMAL and clear both alerts. The count decays by one per good tick after that; it does not reset.</td></tr>
+<tr><td><code>idle_clear_ticks</code></td><td>30</td><td>A CONSERVATIVE scope that sends no commands for 30 ticks also clears, with the same decay.</td></tr>
+</tbody></table></div>
+<p>The engine honours CONSERVATIVE with reduced or zero new dispatch in that scope. On restart the guardian reconciles open escalation alerts against its state and resets scopes whose alerts it no longer tracks. See <a href="#pb-veto-burst">pb-veto-burst</a> and <a href="#pb-safe-stop">pb-safe-stop</a>.</p>
+</section>
+
+<section class="hp-sub" id="ev-broker"><h3>Broker loss and reconnect</h3>
+<dl class="hp-dl">
+<dt>og-engine ingest (<code>engine/mqtt_supervisor.py</code>)</dt><dd>When the connection ends (MQTT error, keepalive timeout, stream closed) it reconnects with exponential backoff and jitter, 0.5 s doubling to a 30 s cap, one client at a time under the same client id, and resubscribes. After 30 s down (<code>[mqtt].ingest_down_heartbeat_s</code>) it stops writing its heartbeat, so health raises <code>ALR-PROCESS-DOWN</code> and <code>HOLD_LOCAL_AUTONOMY</code>. After 120 s (<code>[mqtt].ingest_give_up_s</code>) it exits with status 3 and systemd restarts it. Counter: <code>og_engine_mqtt_reconnects_total</code>.</dd>
+<dt>og-guardian and og-safestop (<code>platform/mqtt_session.py</code>)</dt><dd>One long-lived session per process with a fixed client id; on disconnect the old client is closed and a new one opened after 1 s backoff doubling to 30 s. <code>publish</code> waits up to 5 s for a connection and then raises rather than dropping a message. The guardian holds signing while disconnected. Metrics: <code>og_mqtt_reconnects_total</code>, <code>og_mqtt_connected</code>.</dd>
+<dt>og-safestop</dt><dd>Every (re)connect drains the stop outbox in order, so a stop accepted during an outage is published as soon as the broker is back (<a href="#ev-outbox">outbox</a>).</dd>
+<dt>Hubs</dt><dd>Retained lease and stop messages reach them on reconnect; without a fresh batch a hub holds its last signed setpoint until the lease (30 s) expires.</dd>
+</dl>
+<p>Client construction and schema validation are in <code>platform/mqtt.py</code> (<code>build_client()</code>, topic root, <code>interfaces/mqtt</code> schemas). Recovery steps: <a href="#pb-broker-db">pb-broker-db</a>.</p>
+</section>
+
+<section class="hp-sub" id="ev-trace"><h3>Trace journal and anchoring</h3>
+<p>Every decision, command pre-image, verdict and operator action is written to the hash-chained <code>og.trace</code> (K10/K11). If the database write fails, the trace backend appends the entry to the local journal <code>[trace].journal_path</code> (<code>/var/lib/opengrid/trace_journal.jsonl</code>) and replays it later; a corrupt journal line is reported, never skipped. At r3.4 a manual-target confirm or cancel succeeds only once its row is in <code>og.trace</code>: if it reached only the journal, the API answers 503 "not recorded", and the engine never activates a target first seen more than 30 s after issue (it records a <code>LATE_RECORD</code> cancel).</p>
+<p>og-settle's invariants hook anchors the chain head every 15 minutes (<code>trace.anchor_interval_s</code>, default 900): it signs the head hash with the anchor key, writes it to <code>[trace].anchor_dir</code> and the secondary copy <code>anchor_secondary_dir</code>, and records it in <code>og.trace_anchor</code>. While the anchor key is absent, anchors are published unsigned (logged). Failures raise <code>ALR-ANCHOR-PUBLISH-FAILED</code> or <code>ALR-ANCHOR-SECONDARY-FAILED</code>; scheduled verification raises <code>ALR-TRACE-VERIFY-FAILED</code>.</p>
+<ol class="hp-steps"><li>Open <a href="/og/billing">/og/billing</a> (Billing and audit), trace explorer.</li><li>Set the class and From / To range, then <b>Run chain verify</b>.</li><li>A pass shows the verified range; a fail shows the first broken link (stream and sequence). Do not edit rows; follow <a href="#pb-security">pb-security</a>.</li></ol>
+<p class="hp-note">The same check is <code>POST /og/api/trace/verify</code>, open to viewers.</p>
+</section>
+
+<section class="hp-sub" id="ev-outbox"><h3>Safe-stop outbox</h3>
+<p>og-safestop never publishes a stop directly from the request. Each accepted ENGAGE or RELEASE is queued in <code>og.stop_outbox</code> (migration 0035, once per stop and action) and published from there at QoS 1, retained; an entry counts as published only when the broker acknowledges it. The outbox is drained on every (re)connect and on every tick as a backstop.</p>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">r3.4 behaviour (H5)</th><th scope="col">What it means</th></tr></thead><tbody>
+<tr><td>Atomic record</td><td>The <code>og.stop_event</code> row and its <code>og.stop_outbox</code> entry are written in one transaction (ENGAGE and relayed RELEASE). A failure can no longer leave a recorded stop with nothing to publish.</td></tr>
+<tr><td>Redelivery repair</td><td>A redelivered utility L2 instruction already acted on, whose ENGAGE has no outbox row, is re-signed under the same <code>stop_id</code> and queued (hubs de-duplicate by <code>stop_id</code>), never for a bank released since. A re-handed RELEASE already recorded is queued if missing.</td></tr>
+<tr><td>Drain order</td><td>Every ENGAGE before older RELEASEs, each oldest first.</td></tr>
+<tr><td>Dead-letter</td><td>Attempts count only permanent failures (a payload that can never be published); a broker outage stops the drain and never counts. At <code>outbox_max_attempts</code> (5) the entry is skipped, traced with reason <code>SAFE_STOP_DEAD_LETTER</code>, and <code>ALR-STOP-PUBLISH-DEAD-LETTER</code> (critical) is raised once, so one poison entry never blocks later stops.</td></tr>
+</tbody></table></div>
+<p class="hp-warn">A dead-lettered stop was not delivered to hubs. Treat it as a stop that did not happen: check the scope on <a href="/og/fleet">/og/fleet</a> and engage again if still needed (<a href="#pb-safe-stop">pb-safe-stop</a>).</p>
+</section>
+
+<section class="hp-sub" id="ev-errors"><h3>API errors and the console's unavailable states</h3>
+<div class="hp-scroll"><table class="hp-table"><thead><tr><th scope="col">Status</th><th scope="col">Meaning</th><th scope="col">Where it comes from</th></tr></thead><tbody>
+<tr><td>401</td><td>No valid proxy identity</td><td>Request did not come through Apache with the proxy secret (<code>api/auth.py</code>).</td></tr>
+<tr><td>403</td><td>Role not allowed</td><td>Identity maps to no role; a viewer or customer calling an operator route; the same operator approving their own safe-stop release; a bulk action refused by policy.</td></tr>
+<tr><td>404</td><td>Not found</td><td>Any <code>LookupError</code> (unknown hub, obligation, target); for customers, another customer's object.</td></tr>
+<tr><td>409</td><td>Conflict, with <code>detail.reason_code</code></td><td>Contract admission or reservation refused (<code>AdmissionError</code>, <code>ReservationError</code>); a manual target that exists but is no longer active (r3.4, with its status such as <code>CANCELLED_BY_SAFE_STOP</code>); a guardian veto relayed to the UI.</td></tr>
+<tr><td>422</td><td>Payload invalid</td><td>Request failed schema validation (<code>SchemaValidationError</code>, or FastAPI's own validation).</td></tr>
+<tr><td>503</td><td>Service unavailable</td><td>A dependency not implemented in this deployment, or a singleton (guardian, safestop, ledger) not available in og-api; a manual target not durably traced ("not recorded", r3.4).</td></tr>
+</tbody></table></div>
+<dl class="hp-dl">
+<dt>Degraded banner</dt><dd>Each screen renders its first paint from og-api. If that call fails (connection error, 3 s timeout for reads, 5 s for writes, or a non-2xx answer), the screen still renders and shows a red <b>Degraded:</b> banner with the error text; live panels keep updating over SSE when they can.</dd>
+<dt>API unreachable</dt><dd>Actions that go through og-api report it in place, for example "Alert N could not be acknowledged: the API is unreachable." The header bell shows its unavailable state instead of notices. Check <code>og-api</code> with <a href="#mt-logs">logs</a> and <a href="#pb-broker-db">pb-broker-db</a>.</dd>
+<dt>Degraded modes</dt><dd>Separate from the banner: listed in the header bell under Degraded modes (<a href="#ev-degraded">above</a>); HOLD and HOLD_LOCAL_AUTONOMY also use the critical strip.</dd>
+</dl>
+</section>
+</section>
