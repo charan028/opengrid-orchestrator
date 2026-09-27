@@ -56,7 +56,7 @@ Returns one record with its `series`. Each entry is one bucket:
 | `md` | Meter change from its pre-call baseline, on metered banks |
 | `bd` | Battery change from its pre-call baseline, on metered banks |
 
-The response is 404 when there is no record yet.
+The response is 404 when there is no record yet. After `[delivery].series_keep_days` (60 d) the series of a final record is emptied (`series: []`, `series_pruned_at` set); the summary fields are kept.
 
 ### `GET /og/api/delivery/summary?days=7`
 

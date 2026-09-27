@@ -284,6 +284,10 @@ meter_tolerance_frac = 0.10
 meter_floor_kw = 25.0
 # Extra independently metered banks (SUBSTATION asset banks are always metered).
 meter_bank_ids = []
+# Retention (migration 0051): the summary is kept like og.as_deployment; the per-bucket series of a final
+# record is emptied after this many days (og.grant / og.command_batch, its sources, keep 60 d).
+series_keep_days = 60
+series_prune_batch = 500
 
 [delivery.ramp_time_s]
 # Time to reach target_frac of committed, per product (contract variant). Unlisted: 600 s.

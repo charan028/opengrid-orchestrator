@@ -264,3 +264,30 @@ async def test_restart_and_meter_queries_run_on_postgres(
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DELETE FROM og.trace WHERE stream_id = %s", (f"obligation-{obligation_id}",))
+
+
+async def test_retention_keeps_the_summary_and_prunes_old_series(
+    pool: AsyncConnectionPool, seeded: dict[str, UUID], dsn: str
+) -> None:
+    settings = DeliverySettings(bucket_s=30.0, telemetry_lag_s=0.0)
+    await DeliveryJob(pool, _Trace(), settings).run_once()  # type: ignore[arg-type]
+    call_id = str(seeded["ok"])
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        policy = conn.execute(
+            "SELECT mode, keep_days, protected FROM og.data_retention WHERE table_name = 'delivery_record'"
+        ).fetchone()
+        assert policy == ("NONE", None, False)  # kept like og.as_deployment
+        conn.execute(
+            "UPDATE og.delivery_record SET window_end = window_end - interval '90 days' WHERE call_id = %s",
+            (call_id,),
+        )
+    now = datetime.now(UTC)
+    async with pool.connection() as conn:
+        pruned = await store.prune_series(conn, now=now, keep_days=60, batch=500)
+        await conn.commit()
+    assert pruned >= 1
+    record = await store.fetch_record(pool, call_id)
+    assert record is not None and record.series == [] and record.series_pruned_at is not None
+    assert record.result == "PASS" and record.discharged_kwh > 0  # the summary stays
+    recent = await store.fetch_record(pool, str(seeded["mismatch"]))
+    assert recent is not None and recent.series and recent.series_pruned_at is None

@@ -35,11 +35,16 @@ og-settle runs `job.DeliveryJob.run_once` every `[delivery].interval_s`. For eac
    - While a SHORTFALL or NONE alert is open, the obligation is flagged AT_RISK through `contracts.set_obligation_at_risk` (R-DELIVERY-MEASURED-SHORTFALL). The flag is cleared when delivery recovers.
 6. **Changes no dispatch** (K7, D-17). Mid-window SHORTFALL escalation remains the engine's.
 
+## Retention (migration 0051)
+
+The summary row is kept like the `og.as_deployment` it verifies: `og.data_retention` mode NONE, not protected. Each pass, the job also empties the per-bucket `series` of final records whose window ended more than `[delivery].series_keep_days` ago (default 60 d, the horizon of `og.grant` and `og.command_batch`, which the series is derived from). It does this in batches of `series_prune_batch` and sets `series_pruned_at`.
+
 ## Config (`[delivery]`)
 
 - `enabled`, `interval_s`, `bucket_s`, `telemetry_lag_s`, `lookback_s`, `baseline_s`;
 - tolerances: `target_frac`, `sustain_pass_pct`, `shortfall_alert_s`, `none_alert_s`, `meter_tolerance_frac`, `meter_floor_kw`;
 - `meter_bank_ids`;
+- `series_keep_days`, `series_prune_batch`;
 - `[delivery.ramp_time_s]` per product (TOLLING, ECRS, RRS, REGUP, REGDN, NSPIN, MANUAL).
 
 ## Tests

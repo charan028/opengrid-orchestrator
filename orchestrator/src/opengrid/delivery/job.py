@@ -87,6 +87,9 @@ class DeliverySettings:
     default_ramp_time_s: float = 600.0
     ramp_time_s: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_RAMP_TIME_S))
     meter_bank_ids: tuple[str, ...] = ()
+    #: Retention (migration 0051): the per-bucket series of a final record is emptied after this many days.
+    series_keep_days: float = 60.0
+    series_prune_batch: int = 500
     policy: DeliveryPolicy = field(default_factory=DeliveryPolicy)
 
     @classmethod
@@ -115,6 +118,8 @@ class DeliverySettings:
             default_ramp_time_s=float(cfg.get("delivery.default_ramp_time_s", default.default_ramp_time_s)),
             ramp_time_s={**DEFAULT_RAMP_TIME_S, **ramp},
             meter_bank_ids=tuple(str(b) for b in cfg.get("delivery.meter_bank_ids", []) or []),
+            series_keep_days=float(cfg.get("delivery.series_keep_days", default.series_keep_days)),
+            series_prune_batch=int(cfg.get("delivery.series_prune_batch", default.series_prune_batch)),
             policy=policy,
         )
 
@@ -215,6 +220,7 @@ class DeliveryJob:
         if not self._reconciled:
             await self._reconcile_at_risk(open_alerts, open_ids, now)
         await self._clear_ended(open_alerts, open_ids, now)
+        await self._prune(now)
         written = 0
         for spec in specs:
             try:
@@ -311,6 +317,23 @@ class DeliveryJob:
             ):
                 await clear_alert(self._pool, alert.id, cleared_at=now)
         await self._flag_at_risk(record, short=bool(set(wanted) & SHORT_RULES))
+
+    async def _prune(self, now: datetime) -> None:
+        """Retention: empty old final records' per-bucket series (bounded per pass); never blocks a pass."""
+        try:
+            async with self._pool.connection() as conn:
+                pruned = await store.prune_series(
+                    conn,
+                    now=now,
+                    keep_days=self._settings.series_keep_days,
+                    batch=self._settings.series_prune_batch,
+                )
+                await conn.commit()
+        except Exception:
+            logger.exception("delivery series retention failed this pass")
+            return
+        if pruned:
+            logger.info("delivery series pruned", extra={"records": pruned})
 
     async def _reconcile_at_risk(self, open_alerts: list[Alert], open_ids: set[str], now: datetime) -> None:
         """Startup: the AT_RISK flags this job set live only in memory. Adopt those whose call is still open

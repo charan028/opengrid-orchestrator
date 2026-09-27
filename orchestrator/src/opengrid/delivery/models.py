@@ -140,6 +140,8 @@ class DeliveryRecord(BaseModel):
     evaluated_to: datetime | None = None
     final: bool = False
     trace_id: UUID | None = None
+    #: When retention (migration 0051) emptied `series`; None while the per-bucket series is kept.
+    series_pruned_at: datetime | None = None
     updated_at: datetime | None = None
 
     def public(self, *, with_series: bool = False) -> dict[str, Any]:

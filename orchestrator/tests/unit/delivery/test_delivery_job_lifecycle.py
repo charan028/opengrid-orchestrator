@@ -105,6 +105,12 @@ def world(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(job_mod.store, "fetch_open_records", fetch_open_records)
     monkeypatch.setattr(job_mod.store, "delivery_at_risk_flags", flags)
     monkeypatch.setattr(job_mod.store, "latest_meter_status", latest_meter)
+
+    async def prune_series(_conn: Any, **kw: Any) -> int:
+        state.setdefault("pruned", []).append(kw)
+        return 0
+
+    monkeypatch.setattr(job_mod.store, "prune_series", prune_series)
     monkeypatch.setattr(job_mod, "fetch_open_alerts", fetch_open_alerts)
     monkeypatch.setattr(job_mod, "clear_alert", clear_alert)
     return state
@@ -179,3 +185,15 @@ def monkey_verify_nothing(job: DeliveryJob) -> None:
         raise RuntimeError("not verified in this test")
 
     job._verify = verify  # type: ignore[method-assign]
+
+
+async def test_every_pass_prunes_old_series_with_the_configured_retention(world) -> None:
+    settings = DeliverySettings.from_config(
+        Config({"delivery": {"series_keep_days": 30, "series_prune_batch": 50}})
+    )
+    job = DeliveryJob(_Pool(), _Trace(), settings)  # type: ignore[arg-type]
+
+    await job.run_once(NOW)
+
+    assert world["pruned"] == [{"now": NOW, "keep_days": 30.0, "batch": 50}]
+    assert DeliverySettings().series_keep_days == 60.0  # default: og.grant / og.command_batch's horizon

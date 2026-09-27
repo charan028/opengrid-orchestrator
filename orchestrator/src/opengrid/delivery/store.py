@@ -76,7 +76,7 @@ _COLUMNS = (
     "committed_kw, commanded_kw_avg, delivered_kw_avg, delivered_kw_last, commanded_kw_last, ramp_time_s, "
     "time_to_target_s, sustained_pct, lowest_kw, lowest_at, lowest_run_s, discharged_kwh, committed_kwh, "
     "stale_frac, result, reasons, meter_status, meter_mismatch_frac, meter_baseline_kw, battery_baseline_kw, "
-    "series, evaluated_to, final, trace_id"
+    "series, evaluated_to, final, trace_id, series_pruned_at"
 )
 _UPDATABLE = [c.strip() for c in _COLUMNS.split(",") if c.strip() != "call_id"]
 
@@ -115,6 +115,18 @@ FROM og.delivery_record, unnest(meter_bank_ids) AS bank
 WHERE final AND meter_bank_ids && %(banks)s::text[] AND window_end > %(since)s
   AND meter_status IN ('CORROBORATED', 'UNCORROBORATED')
 ORDER BY bank, window_end DESC
+"""
+
+#: Retention (migration 0051): empty the per-bucket series of final records older than the keep horizon, a
+#: bounded batch per pass; the summary columns are kept like og.as_deployment.
+_PRUNE_SERIES_SQL = """
+UPDATE og.delivery_record SET series = '[]'::jsonb, series_pruned_at = %(now)s
+WHERE call_id IN (
+    SELECT call_id FROM og.delivery_record
+    WHERE final AND series_pruned_at IS NULL AND window_end < %(cutoff)s
+    ORDER BY window_end
+    LIMIT %(batch)s
+)
 """
 
 _SUMMARY_SQL = """
@@ -334,6 +346,16 @@ async def summary(pool: AsyncConnectionPool, *, since: datetime, until: datetime
         }
         for r in rows
     ]
+
+
+async def prune_series(conn: AsyncConnection[Any], *, now: datetime, keep_days: float, batch: int) -> int:
+    """Empty the series of up to `batch` final records whose window ended over `keep_days` ago; returns how
+    many. The summary (result, energy, meter check) stays."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            _PRUNE_SERIES_SQL, {"now": now, "cutoff": now - timedelta(days=keep_days), "batch": batch}
+        )
+        return int(cur.rowcount or 0)
 
 
 async def delivery_at_risk_flags(
