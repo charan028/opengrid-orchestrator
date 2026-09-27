@@ -434,3 +434,39 @@ def test_ts_d33_29_limits_come_from_config_and_are_validated() -> None:
         CallLimits(max_calls_per_hour=10, max_calls_per_day=5)
     with pytest.raises(ValueError):
         CallLimits(ramping_fraction=0.0)
+
+
+async def test_ts_d33_44_cancelling_an_ended_call_is_already_ended_not_cannot_extend(store, trace) -> None:
+    record = await issue_call(
+        store, trace, _utility(_toll(store), duration_minutes=10), limits=LIMITS, now=NOW
+    )
+    later = NOW + timedelta(minutes=30)
+    for end_at in (None, later + timedelta(minutes=5)):
+        with pytest.raises(CallRefused) as info:
+            await cancel_call(
+                store,
+                trace,
+                record.call_id,
+                origin=CallOrigin.UTILITY,
+                principal="og-util-aen",
+                end_at=end_at,
+                now=later,
+            )
+        assert info.value.reason_code == r.R_ALREADY_ENDED
+
+
+async def test_ts_d33_45_only_the_issuer_or_an_operator_may_cancel(store, trace) -> None:
+    oid = _toll(store, window_end=WINDOW[0] + timedelta(hours=3))
+    record = await issue_call(store, trace, _utility(oid), limits=LIMITS, now=NOW)
+    for origin, principal in (
+        (CallOrigin.UTILITY, "og-util-other"),
+        (CallOrigin.GRID_LINK, "grid_link:AUSTIN_ENERGY"),
+    ):
+        with pytest.raises(CallRefused) as info:
+            await cancel_call(store, trace, record.call_id, origin=origin, principal=principal, now=NOW)
+        assert (info.value.reason_code, info.value.http_status) == (r.R_NOT_ISSUER, 403)
+    assert trace.classes().count("TRACE_AUTHZ_DENY") == 2
+    ended = await cancel_call(
+        store, trace, record.call_id, origin=CallOrigin.OPERATOR, principal="operator", now=NOW
+    )
+    assert ended.cancelled_at == NOW

@@ -44,6 +44,7 @@ EVENT_CALL = "DISPATCH_CALL"
 EVENT_CALL_REFUSED = "DISPATCH_CALL_REFUSED"
 EVENT_CALL_END = "DISPATCH_CALL_END"
 AUTHZ_ACTION_CALL = "dispatch.call"
+AUTHZ_ACTION_CANCEL = "dispatch.call.cancel"
 ALERT_UTILITY_CALL = "ALR-UTILITY-CALL"
 ALERT_UTILITY_CALL_REFUSED = "ALR-UTILITY-CALL-REFUSED"
 ALERT_CALL = "ALR-DISPATCH-CALL"
@@ -345,6 +346,26 @@ async def _own_call(
     return record
 
 
+async def _require_issuer(
+    trace: TraceStore, record: CallRecord, *, origin: CallOrigin, principal: str
+) -> None:
+    """A utility (customer API or grid link) may READ every call on its own toll, but cancel or shorten only
+    the calls it issued itself (same origin and principal); an operator may end any call. Anything else is
+    403 NOT-ISSUER, traced as AUTHZ_DENY."""
+    if origin is CallOrigin.OPERATOR or (record.origin is origin and record.principal == principal):
+        return
+    await audit_deny(
+        trace,
+        actor=principal,
+        action=AUTHZ_ACTION_CANCEL,
+        decision=Decision(False, f"call {record.call_id} was issued by {record.origin.value}", audited=True),
+        resource=None,
+    )
+    raise CallRefused(
+        rules.R_NOT_ISSUER, "only the issuer of a call may cancel or shorten it", rules.HTTP_FORBIDDEN
+    )
+
+
 async def cancel_call(
     store: CallStore,
     trace: TraceStore,
@@ -361,10 +382,13 @@ async def cancel_call(
     Traced before it takes effect; the allocator returns the obligation to its 0 kW hold next cycle."""
     now = now or datetime.now(UTC)
     record = await _own_call(store, trace, call_id, principal, utility_id)
+    await _require_issuer(trace, record, origin=origin, principal=principal)
     if record.outcome is CallOutcome.REFUSED or record.deployment_id is None:
         raise CallRefused(
             rules.R_ALREADY_ENDED, "the call was refused; nothing to cancel", rules.HTTP_CONFLICT
         )
+    if record.cancelled_at is not None or record.end_at <= now:
+        raise CallRefused(rules.R_ALREADY_ENDED, "the call has already ended", rules.HTTP_CONFLICT)
     target_end = max(end_at or now, now)
     if target_end > record.end_at:
         raise CallRefused(
