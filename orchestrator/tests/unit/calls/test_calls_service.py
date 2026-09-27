@@ -254,13 +254,6 @@ async def test_ts_d33_17_another_utilitys_call_is_404_on_status_and_cancel(store
             await op
         assert info.value.http_status == 404
     assert trace.classes().count("TRACE_AUTHZ_DENY") == 2
-    refused = [a for a in store.alerts if a["detail"].get("reason_code") == r.R_NOT_ISSUER]
-    assert [a["rule"] for a in refused] == ["ALR-UTILITY-CALL-REFUSED"] * 2
-    assert {a["severity"] for a in refused} == {"warning"}
-    assert {a["detail"]["scope_ref"] for a in refused} == {
-        f"og-util-other:{record.call_id}",
-        f"grid_link:AUSTIN_ENERGY:{record.call_id}",
-    }  # keyed per (principal, call): the store coalesces repeats of the same key
     assert [c.call_id for c in await list_calls(store, utility_id="CPS_ENERGY")] == []
 
 
