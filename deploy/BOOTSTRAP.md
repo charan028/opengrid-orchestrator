@@ -22,8 +22,8 @@ bash deploy/scripts/bootstrap_from_scratch.sh --phase c-e        # only the data
 |---|---|---|
 | a | checks packages, venvs, the release tree and the owner-supplied files (read-only) | 2 |
 | b | the `opengrid` user and the directories (`/etc/opengrid`, `/var/lib/opengrid`, `/srv/ogbackup/{anchors,cold}`) | 1, 4 |
-| c | the Postgres role and database; generates `OG_DB_PASSWORD` into `secrets.env` and sets it over stdin | 3 |
-| d | every migration (`opengrid.platform.db migrate`) | 6 |
+| c | `create_schema.sh --no-migrate`: the Postgres role, database, extensions and schema `og`; generates `OG_DB_PASSWORD` into `secrets.env` and sets it over stdin | 3 |
+| d | `create_schema.sh`: every migration (`opengrid.platform.db migrate`); on `--fresh-db` also the snapshot comparison | 6 |
 | e | all seeds in order (see `dev/seed/README.md`), then `deploy/scripts/bootstrap_check.py` asserts the counts | 7, 8 |
 | f | `/etc/opengrid/sim/{fleet,scada}.yaml` with the approved zone blocks on (`deploy/scripts/gen_sim_overrides.py`) | 8 |
 | g | the MQTT users (`og_engine`, `og_guardian`, `og_safestop`, `og_api`, `og_sim`, `og_simctl`, `og_sim_customer`): passwords generated into `secrets.env`/`customer_sim.env`, hashed with `mosquitto_passwd -U`; the ACL from `dev/scripts/gen_mosquitto_acl.py` plus production's two extra grants; `conf.d/opengrid.conf` | 4, 5 |
@@ -57,6 +57,36 @@ plus the substation hub (2,501 `og.hub` rows); 50 home banks plus `bank-sub-LZ_A
 (REGULATED_CAPACITY/TOLLING); 11 contracts (the 8 customer contracts, the toll and the other migration demo rows); 350
 service transformers, every hub mapped; 17 feeder limits; 8 substation limits; 51 assets; the FLEET charge window
 `22:00-06:00`; 4 firmware catalogue entries from config. With `--d32`: 3,500 hubs and 70 banks.
+
+### Database schema: `deploy/scripts/create_schema.sh` and `orchestrator/schema/og_schema.sql`
+
+`create_schema.sh` builds the database from nothing and is what phases c and d run:
+
+1. It generates the role's password into `secrets.env` when absent and sets it over stdin (never in argv), then
+   converges it on every run.
+2. It creates the role (LOGIN) and the database `og` (owned by that role).
+3. It creates the extensions: none are required. `gen_random_uuid()` is core since PostgreSQL 13, and the script
+   refuses an older server. A future extension goes in its `EXTENSIONS` list, never in a migration, because
+   creating one needs a superuser.
+4. It creates schema `og`, owned by the role.
+5. It applies migrations 0001..latest through the one runner (`python -m opengrid.platform.db migrate`) and checks
+   that every file is recorded in `og.schema_migrations`.
+
+It is idempotent: an existing role, database or schema is kept, and only pending migrations run. Options are
+`--db-port`/`--db-name`/`--db-role`/`--etc`, `--fresh-db` (refused on 5432), `--no-migrate` and `--dry-run`.
+
+`orchestrator/schema/og_schema.sql` is a generated, read-only snapshot of the consolidated schema. It is
+`pg_dump --schema-only --no-owner --no-privileges` of schema `og` on a fresh database after every migration. It is
+for review and diffing only; a new database is always built by the migrations, never from the snapshot.
+
+- `make schema-check` rebuilds a fresh `og_t_schema` on 5433 and fails (exit 3) when the migrations no longer
+  produce exactly the committed file.
+- `make schema-snapshot` regenerates the file. Commit it together with the migration that changed it.
+- On a `--fresh-db` bootstrap, phase d runs the same comparison and prints a warning on drift.
+
+The committed snapshot is at the r3.4 migration set (0001-0043, 42 files; 0015 does not exist). It was generated on
+the assembled r3.4 tree (integ/bootstrap + fix-h4-devinfo + fix-ui-r34), so `make schema-check` passes only once
+0041-0043 are in the tree.
 
 ## 1. Storage
 
