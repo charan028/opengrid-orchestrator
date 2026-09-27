@@ -102,8 +102,8 @@ def test_a_manual_target_can_be_cancelled(client, fake_store, fake_trace_store) 
     (written,) = _manual_targets(fake_trace_store)
     fake_store.manual_target_rows_data = [(trace_id, written, datetime.now(UTC))]
     listed = client.get("/og/api/fleet/manual-targets", headers=VIEWER_HEADERS).json()["items"]
-    assert [(i["hub_id"], i["trace_id"], i["p_kw_target"], i["reason"]) for i in listed] == [
-        (SAMPLE_HUB_ID, trace_id, 3.5, "demo")
+    assert [(i["hub_id"], i["status"], i["trace_id"], i["p_kw_target"], i["reason"]) for i in listed] == [
+        (SAMPLE_HUB_ID, "ACTIVE", trace_id, 3.5, "demo")
     ]
 
     resp = client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS)
@@ -114,12 +114,13 @@ def test_a_manual_target_can_be_cancelled(client, fake_store, fake_trace_store) 
     assert cancel["expires_at"] == cancel["issued_at"]  # expires now
     assert cancel["sign_convention"] == "+charge/-discharge"
 
-    # With the cancel row stored too, the shared parser no longer sees a live target: nothing to cancel.
+    # With the cancel row stored too, the shared status rule lists it as operator-cancelled, never active.
     fake_store.manual_target_rows_data.append((resp.json()["trace_id"], cancel, datetime.now(UTC)))
-    assert client.get("/og/api/fleet/manual-targets", headers=VIEWER_HEADERS).json()["items"] == []
+    (item,) = client.get("/og/api/fleet/manual-targets", headers=VIEWER_HEADERS).json()["items"]
+    assert item["status"] == "CANCELLED_BY_OPERATOR" and item["cancelled_by"] == resp.json()["trace_id"]
     assert (
         client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS).status_code
-        == 404
+        == 409  # known but no longer active: already cancelled
     )
 
 
@@ -227,3 +228,35 @@ def test_the_release_request_keeps_the_60_s_window(client, fake_proposals) -> No
     )
     assert resp.json()["expires_in_s"] == 60.0
     assert fake_proposals._proposals[UUID(resp.json()["proposal_id"])].ttl_s == 60.0
+
+
+def test_a_stop_cancelled_target_is_listed_as_such_and_cannot_be_cancelled(
+    client, fake_store, fake_trace_store
+) -> None:
+    proposal_id = _propose_command(client)
+    trace_id = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS).json()[
+        "trace_id"
+    ]
+    (written,) = _manual_targets(fake_trace_store)
+    fake_store.manual_target_rows_data = [(trace_id, written, datetime.now(UTC))]
+    fake_store.stop_event_rows_data = [
+        ("stop-1", "FLEET", "*", "ENGAGE", datetime.now(UTC) + timedelta(seconds=1))
+    ]
+
+    (item,) = client.get("/og/api/fleet/manual-targets", headers=VIEWER_HEADERS).json()["items"]
+    assert item["status"] == "CANCELLED_BY_SAFE_STOP" and item["stop_event_id"] == "stop-1"
+    resp = client.post(f"/og/api/fleet/manual-targets/{trace_id}/cancel", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 409 and resp.json()["detail"]["status"] == ["CANCELLED_BY_SAFE_STOP"]
+
+
+def test_a_target_that_only_reached_the_journal_is_a_503_not_ramping(client, fake_store, monkeypatch) -> None:
+    """DISPATCH review (3): success only once the MANUAL_TARGET row is durably in og.trace."""
+    proposal_id = _propose_command(client)
+
+    async def _not_recorded(trace_id):
+        return False
+
+    monkeypatch.setattr(fake_store, "trace_recorded", _not_recorded)
+    resp = client.post(f"/og/api/fleet/command/{proposal_id}/confirm", headers=OPERATOR_HEADERS)
+    assert resp.status_code == 503 and "not recorded" in resp.json()["detail"]
+    assert fake_store.operator_actions == []  # no audit row claims a command that never ramps

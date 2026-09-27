@@ -18,7 +18,13 @@ from opengrid.api.routers import charge_windows as _charge_windows
 from opengrid.api.schemas import CommandProposalRequest, ProposalAccepted
 from opengrid.api.sse import sse_response
 from opengrid.api.store import StoreProtocol
-from opengrid.core.manual_targets import MANUAL_TARGET_EVENT, SIGN_CONVENTION, parse_targets
+from opengrid.core.manual_targets import (
+    MANUAL_TARGET_EVENT,
+    SIGN_CONVENTION,
+    TargetState,
+    TargetStatus,
+    effective_targets,
+)
 from opengrid.platform.config import Config
 from opengrid.trace.store import TraceStore
 
@@ -203,6 +209,7 @@ async def issue_manual_target(
         },
         reason_codes=["MANUAL_OPERATOR"],
     )
+    await _require_recorded(store, trace_ref.trace_id)
     await store.insert_operator_action(
         operator_ref=operator,
         action_kind="MANUAL_COMMAND",
@@ -222,30 +229,64 @@ async def issue_manual_target(
     }
 
 
+async def _require_recorded(store: StoreProtocol, trace_id: UUID) -> None:
+    """Success only once the MANUAL_TARGET row is DURABLY in og.trace: if the trace backend fell back to its
+    local journal (database unreachable), the row reaches og.trace only on a later replay -- which the engine
+    refuses as a late record -- so the operator must be told it was not recorded (503), not that it ramps."""
+    if not await store.trace_recorded(trace_id):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="manual target not recorded (trace store unavailable); nothing will ramp -- retry",
+        )
+
+
+async def _target_states(store: StoreProtocol, now: datetime) -> dict[str, TargetState]:
+    """Every hub's newest manual target and its status (`core.manual_targets.effective_targets`, the rule the
+    engine dispatches by: operator/late-record cancels, safe stops, expiry)."""
+    rows = await store.manual_target_rows()
+    hub_ids = sorted({str(h) for _id, payload, _at in rows for h in (payload.get("hub_ids") or [])})
+    topology = await store.hub_banks_zones(hub_ids)
+    zone_by_bank = {bank: zone for bank, zone in topology.values()}
+    return effective_targets(
+        rows,
+        await store.stop_event_rows(),
+        now,
+        bank_of_hub=lambda hub: topology[hub][0] if hub in topology else None,
+        zone_of_bank=zone_by_bank.get,
+    )
+
+
 @router.get("/manual-targets")
 async def list_manual_targets(
     store: Annotated[StoreProtocol, Depends(get_store)],
     _identity: Annotated[Identity, Depends(require_viewer)],
+    include_expired: bool = False,
 ) -> dict[str, Any]:
-    """Hubs under a live manual target (newest per hub, not expired): `{"items": [{hub_id, p_kw_target,
-    issued_at, expires_at, trace_id, proposer, reason}]}`. The ramp rate is the engine's, not listed."""
+    """Every hub's newest manual target with its status -- `ACTIVE` (the engine is ramping it),
+    `CANCELLED_BY_OPERATOR`, `CANCELLED_BY_SAFE_STOP` (with `stop_event_id`), `CANCELLED_LATE_RECORD`, and
+    with `include_expired=true` also `EXPIRED`. Only `ACTIVE` targets control a hub; a stop-cancelled target is
+    never reported as active. `{"items": [{hub_id, status, p_kw_target, issued_at, expires_at, trace_id,
+    proposer, reason, stop_event_id, cancelled_by}]}`. The ramp rate is the engine's, not listed."""
     rows = await store.manual_target_rows()
     reasons = {str(trace_id): str(payload.get("reason", "")) for trace_id, payload, _at in rows}
-    live = parse_targets(rows, datetime.now(UTC))
-    return {
-        "items": [
-            {
-                "hub_id": t.hub_id,
-                "p_kw_target": t.p_kw_target,
-                "issued_at": t.issued_at.isoformat(),
-                "expires_at": t.expires_at.isoformat(),
-                "trace_id": t.trace_id,
-                "proposer": t.proposer,
-                "reason": reasons.get(t.trace_id, ""),
-            }
-            for t in sorted(live.values(), key=lambda t: t.hub_id)
-        ]
-    }
+    states = await _target_states(store, datetime.now(UTC))
+    items = [
+        {
+            "hub_id": hub_id,
+            "status": state.status.value,
+            "p_kw_target": state.target.p_kw_target,
+            "issued_at": state.target.issued_at.isoformat(),
+            "expires_at": state.target.expires_at.isoformat(),
+            "trace_id": state.target.trace_id,
+            "proposer": state.target.proposer,
+            "reason": reasons.get(state.target.trace_id, ""),
+            "stop_event_id": state.stop_event_id,
+            "cancelled_by": state.cancelled_by,
+        }
+        for hub_id, state in sorted(states.items())
+        if include_expired or state.status is not TargetStatus.EXPIRED
+    ]
+    return {"items": items}
 
 
 @router.post("/manual-targets/{trace_id}/cancel")
@@ -256,14 +297,24 @@ async def cancel_manual_target(
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
     """End a manual target now: appends a MANUAL_TARGET for the hubs it still controls with
-    `expires_at = now` (`core.manual_targets.parse_targets`, shared with the engine: they return to
+    `expires_at = now` (`core.manual_targets.effective_targets`, shared with the engine: they return to
     the allocator next cycle). Hubs a NEWER target has since taken over are left alone. 404 when the
     target is unknown or no longer controls any hub."""
     now = datetime.now(UTC)
-    live = parse_targets(await store.manual_target_rows(), now)
-    hub_ids = sorted(h for h, t in live.items() if t.trace_id == str(trace_id))
+    states = await _target_states(store, now)
+    mine = {h: s for h, s in states.items() if s.target.trace_id == str(trace_id)}
+    if not mine:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no manual target with that trace id")
+    live = {h: s.target for h, s in mine.items() if s.status is TargetStatus.ACTIVE}
+    hub_ids = sorted(live)
     if not hub_ids:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no live manual target with that trace id")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "message": "target is not active",
+                "status": sorted({s.status.value for s in mine.values()}),
+            },
+        )
     trace_ref = await trace_store.append(
         stream_id=f"operator_action:{identity.user}",
         decision_type="OPERATOR_ACTION",
@@ -280,6 +331,7 @@ async def cancel_manual_target(
         },
         reason_codes=["MANUAL_OPERATOR"],
     )
+    await _require_recorded(store, trace_ref.trace_id)
     await store.insert_operator_action(
         operator_ref=identity.user,
         action_kind="MANUAL_COMMAND",

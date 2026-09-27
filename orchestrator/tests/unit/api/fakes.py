@@ -72,6 +72,10 @@ class FakeStore:
     as_awards: dict[UUID, dict[str, Any]] = field(default_factory=dict)
     #: MANUAL_TARGET trace rows `(trace_id, payload, created_at)` served by `manual_target_rows`.
     manual_target_rows_data: list[tuple[Any, dict[str, Any], datetime]] = field(default_factory=list)
+    #: og.stop_event rows `(stop_event_id, scope_kind, scope_ref, action, created_at)` for `stop_event_rows`.
+    stop_event_rows_data: list[tuple[Any, ...]] = field(default_factory=list)
+    #: trace ids `trace_recorded` reports as NOT in og.trace (the backend journaled them).
+    unrecorded_trace_ids: set[str] = field(default_factory=set)
     #: (scope_kind, scope_ref) -> og.owner_charge_window row (D-30).
     charge_windows: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     #: ("HUB", hub_id) / ("BANK", bank_id) -> {hub_id, bank_id, zone, feeder_id, substation_id}.
@@ -450,6 +454,15 @@ class FakeStore:
     ) -> dict[str, Any] | None:
         key = ("HUB", hub_id) if hub_id is not None else ("BANK", bank_id)
         return self.topology.get(key)
+
+    async def stop_event_rows(self) -> list[tuple[Any, ...]]:
+        return list(self.stop_event_rows_data)
+
+    async def hub_banks_zones(self, hub_ids: list[str]) -> dict[str, tuple[str, str]]:
+        return {h: (SAMPLE_BANK_ID, "LZ_SOUTH") for h in hub_ids if h == SAMPLE_HUB_ID}
+
+    async def trace_recorded(self, trace_id: UUID) -> bool:
+        return str(trace_id) not in self.unrecorded_trace_ids
 
     async def manual_target_rows(self) -> list[tuple[Any, dict[str, Any], datetime]]:
         """Test-set `manual_target_rows_data` (the SQL itself runs in the integration suite)."""
