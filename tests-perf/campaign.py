@@ -215,7 +215,13 @@ class Campaign:
         ports, secrets = read_env(self.run / "ports.env"), read_env(self.run / "etc" / "secrets.env")
         api = dispatch.Api(f"http://127.0.0.1:{ports['API_PORT']}/og/api", secrets["OG_API_PROXY_SECRET"])
         result = dispatch.drive(
-            REPO, api, self._dsn("ogperf-dispatch"), window, self.a.deliver_frac, self.log
+            REPO,
+            api,
+            self._dsn("ogperf-dispatch"),
+            window,
+            self.a.deliver_frac,
+            self.log,
+            kw_per_offer=self.a.deliver_kw,
         )
         (self.run / "data" / f"dispatch-{homes}.json").write_text(json.dumps(result, indent=2))
         self.log(
@@ -399,6 +405,12 @@ def main() -> int:
         "--deliver-min", type=float, default=None, help="DELIVERING measured window (default: --step-min)"
     )
     p.add_argument("--no-deliver", action="store_const", const=0.0, dest="deliver_frac")
+    p.add_argument(
+        "--deliver-kw",
+        type=float,
+        default=300.0,
+        help="kW per DELIVERING offer (fits banks the AS holds use in part)",
+    )
     args = p.parse_args()
     if args.deliver_min is None:
         args.deliver_min = args.step_min
