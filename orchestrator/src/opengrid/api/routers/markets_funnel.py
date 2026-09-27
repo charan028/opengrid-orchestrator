@@ -4,7 +4,10 @@ product and by hour or day, with the rejection reasons.
 - available: every opportunity the intake offered (`og.opportunity`), plus offers rejected at
   admission before they became one (`R-ADMIT-*`, traced by `opengrid.contracts.admission`);
 - submitted: selected at a gate (`SELECTED`, or its obligation moved on from there), plus the ERCOT MMS
-  submissions table when the INTEGRATIONS agent's table exists (reported separately under `mms`);
+  submissions table when the INTEGRATIONS agent's table exists (reported separately under `mms`). The key
+  name is kept for the API contract, but nothing is sent to ERCOT today
+  (`integrations.build_market_submission` is never called), so the UI labels this stage "Selected by
+  optimizer (not sent to ERCOT)" (#43 B6);
 - awarded: its obligation reached COMMITTED (or a later state);
 - rejected: `REJECTED` / `R-ADMIT-*`, grouped by reason code; expired is counted apart.
 

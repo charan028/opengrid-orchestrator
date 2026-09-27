@@ -73,20 +73,18 @@
   <section class="og-panel" aria-labelledby="per-kw-heading" id="per-kw">
     <h2 id="per-kw-heading">Economics per kW (annualised)</h2>
     {% if per_kw %}
-    <p class="og-card-meta">Hardware view {{ '%.0f'|format(per_kw.hardware_view_usd_per_kw) }} USD/kW &middot; target payback {{ '%g'|format(per_kw.target_payback_years) }} years
+    <p class="og-card-meta">Net = Out - In - wear - O&amp;M; the O&amp;M allowance is (Assumed)
       {% if per_kw.period_hours %}&middot; from {{ per_kw.period_hours }} h of this month{% endif %} &middot; <span title="method">{{ per_kw.method_version }}</span></p>
     <div class="og-table-wrap"><table class="data-table" id="per-kw-table">
-      <thead><tr><th scope="col">Scope</th><th scope="col" class="num">kW</th><th scope="col" class="num">In $/kW-yr</th><th scope="col" class="num">Out $/kW-yr</th><th scope="col" class="num">Net $/kW-yr</th><th scope="col" class="num">Payback (yr)</th><th scope="col">3-yr target</th></tr></thead>
+      <thead><tr><th scope="col">Scope</th><th scope="col" class="num">kW</th><th scope="col" class="num">In $/kW-yr</th><th scope="col" class="num">Out $/kW-yr</th><th scope="col" class="num">Net $/kW-yr</th></tr></thead>
       <tbody>
       {% for r in per_kw.rows %}
         <tr class="per-kw-{{ r.kind }}"{% if r.title %} title="{{ r.title }}"{% endif %}>
-          <td>{{ r.label }}</td>
+          <td>{{ r.label }}{% if r.kind == 'reference' %} (Assumed){% endif %}</td>
           <td class="num">{{ '%.0f'|format(r.kw_basis) if r.kw_basis is not none else '--' }}</td>
           <td class="num">{{ '%.2f'|format(r.in_per_kw) if r.in_per_kw is not none else '--' }}</td>
           <td class="num">{{ '%.2f'|format(r.out_per_kw) if r.out_per_kw is not none else '--' }}</td>
           <td class="num">{{ '%.2f'|format(r.net_per_kw) if r.net_per_kw is not none else '--' }}</td>
-          <td class="num">{{ '%.1f'|format(r.payback_years) if r.payback_years is not none else '--' }}</td>
-          <td>{% if r.meets_target is none %}--{% else %}{% with status=('good' if r.meets_target else 'caution'), label=('meets' if r.meets_target else 'misses') %}{% include "_partials/status_badge.html" %}{% endwith %}{% endif %}</td>
         </tr>
       {% endfor %}
       </tbody>

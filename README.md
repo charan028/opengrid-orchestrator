@@ -27,4 +27,4 @@ powershell -File tools\remote.ps1 -Ws <ws> -Cmd "cd orchestrator && bash tools/c
 ## Layout
 
 See `orchestrator/INTERFACES.md` for the module interface index, `interfaces/` for the language-neutral
-wire contracts, and `docs/orchestrator/07-delivery/` (outside this repo) for the approved specs.
+wire contracts, and `docs/orchestrator/07-delivery/` (in this repo) for the approved specs.
