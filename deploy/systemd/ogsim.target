@@ -1,6 +1,6 @@
 [Unit]
-Description=OpenGrid integration-sims (all processes: market, fleet, scada, control)
-Wants=og-sim-market.service og-sim-fleet.service og-sim-scada.service og-sim-control.service
+Description=OpenGrid integration-sims (all processes: market, fleet, scada, control, utility)
+Wants=og-sim-market.service og-sim-fleet.service og-sim-scada.service og-sim-control.service og-sim-utility.service
 
 [Install]
 WantedBy=multi-user.target

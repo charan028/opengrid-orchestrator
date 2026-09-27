@@ -66,6 +66,12 @@ WIRE_TYPE_TO_CATALOGUE_ID: dict[str, str] = {
     "CUSTOMER_INVOICE_DISPUTE": "invoice_dispute",
     "CUSTOMER_SITE_METER_STALE": "site_meter_stale",
     "CUSTOMER_LARGE_LOAD_CURTAILMENT_REQUEST": "large_load_curtailment_request",
+    # ogsim.utility_aen (the simulated utility EMS, D-29/D-33).
+    "UTILITY_CALL_NORMAL": "utility_call_normal",
+    "UTILITY_CALL_OVERLAP": "utility_call_overlap",
+    "UTILITY_CALL_OVER_CAP": "utility_call_over_cap",
+    "UTILITY_CALL_CHARGE": "utility_call_charge",
+    "UTILITY_CALL_CANCEL_MID": "utility_call_cancel_mid",
 }
 
 

@@ -1,0 +1,33 @@
+[Unit]
+Description=OpenGrid integration-sims - simulated utility EMS (Austin Energy toll calls, D-29/D-33)
+After=network.target mosquitto.service
+Requires=mosquitto.service
+PartOf=ogsim.target
+
+[Service]
+Type=simple
+User=opengrid
+Group=opengrid
+WorkingDirectory=/opt/opengrid/current/integration-sims
+Environment=PYTHONPATH=/opt/opengrid/current/integration-sims/src
+# Production marker: ogsim.common.config refuses the production topic root (og/v1) without it.
+Environment=OGSIM_ENV=prod
+EnvironmentFile=/etc/opengrid/secrets.env
+# OGSIM_UTILITY_API_BASE, OGSIM_UTILITY_AEN_USER/_PASSWORD (Apache account og-util-aen) and
+# OG_MQTT_UTILITY_PASSWORD (MQTT user og_sim_utility, read og/v1/scenario/cmd only); 0640 root:opengrid,
+# written by deploy/scripts/r341_utility_api_apache.sh and r343_utility_sim_install.sh -- never logged.
+EnvironmentFile=/etc/opengrid/utility_sim.env
+ExecStart=/opt/ogsim/venv/bin/python -m ogsim.utility_aen
+Restart=always
+RestartSec=5
+MemoryMax=128M
+MemoryHigh=96M
+CPUWeight=20
+IOWeight=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opengrid /var/log/opengrid
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
