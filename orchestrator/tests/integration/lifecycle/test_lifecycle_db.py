@@ -129,10 +129,13 @@ def _mode(path: Path) -> int:
 
 def test_0033_reapplies_cleanly(dsn: str) -> None:
     text = MIGRATION.read_text(encoding="utf-8")
+    # Re-applied twice inside ONE transaction that the rollback below discards: this proves 0033 is re-runnable
+    # without persisting its 0033-era definitions over later migrations. A committed re-run put back og.trace's
+    # decision_type CHECK without AUTHZ_DENY (widened by 0041), which broke any suite run after this one
+    # (test_followups_sql::test_trace_accepts_authz_deny). The shared database keeps exactly the migrated schema.
     with psycopg.connect(dsn) as conn:
         conn.execute(text)
         conn.execute(text)
-        conn.commit()
         applied = conn.execute(
             "SELECT 1 FROM og.schema_migrations WHERE filename = '0033_data_lifecycle.sql'"
         ).fetchone()

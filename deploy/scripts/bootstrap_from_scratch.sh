@@ -7,8 +7,9 @@
 # Phases (default: all, in this order; select with --phase, e.g. --phase c-e or --phase g,h,i):
 #   a  prerequisites check (packages, venvs, release tree, owner-supplied files)      read-only
 #   b  OS user and directories                                                        BOOTSTRAP.md 1, 4
-#   c  Postgres role + database, generated password in <etc>/secrets.env              BOOTSTRAP.md 3
-#   d  migrations 0001 -> latest (opengrid.platform.db migrate)                       BOOTSTRAP.md 6
+#   c  create_schema.sh --no-migrate: role (generated password in <etc>/secrets.env), database,
+#      extensions, schema og                                                          BOOTSTRAP.md 3
+#   d  create_schema.sh: migrations 0001 -> latest (opengrid.platform.db migrate)     BOOTSTRAP.md 6
 #   e  seeds, in order: fleet (base + enabled zone blocks) -> market model (utilities, $102 toll, substation
 #      asset) -> customer services -> services -> topology -> trucks (when the release has them); the
 #      charge-window default and the firmware catalogue come with 0038 and [firmware.catalogue]; then
@@ -90,10 +91,11 @@ SIM_DIR="$ETC/sim"
 
 # --- helpers -----------------------------------------------------------------------------------------------
 
-log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*"; }
+# log, die, run and the env-file/secret helpers (env_get, env_set, secure_env, gen_secret, env_ensure) are
+# shared with create_schema.sh.
+# shellcheck source=deploy/scripts/lib_secrets.sh
+. "$SCRIPT_DIR/lib_secrets.sh"
 phase() { printf '\n== (%s) %s ==\n' "$1" "$2"; }
-die() { echo "ERROR: $*" >&2; exit 1; }
-run() { if [ "$DRY" -eq 1 ]; then echo "  DRY: $*"; else "$@"; fi; }
 
 expand_phases() {  # "a,c-e" -> "a c d e"
   local out="" part s e c
@@ -110,29 +112,6 @@ expand_phases() {  # "a,c-e" -> "a c d e"
 SELECTED=" $(expand_phases "$PHASES") "
 want() { [[ "$SELECTED" == *" $1 "* ]]; }
 
-# env files: values are read into variables and written with printf (a builtin: never in argv or output).
-env_get() { [ -f "$1" ] && sed -n "s/^$2=//p" "$1" | tail -1 | sed -e "s/^'//" -e "s/'\$//" || true; }
-env_set() {  # file key value (value passed as the 3rd argument of a function, never to an external command)
-  local f="$1" k="$2" v="$3" tmp
-  tmp="$(mktemp "${f}.XXXXXX")"
-  [ -f "$f" ] && grep -v "^$k=" "$f" > "$tmp" || true
-  printf '%s=%s\n' "$k" "$v" >> "$tmp"
-  mv "$tmp" "$f"
-}
-secure_env() { [ -f "$1" ] || return 0; chown "${2:-root:opengrid}" "$1"; chmod "${3:-640}" "$1"; }
-gen_secret() { openssl rand -hex 24; }
-# env_ensure file key: generate the key when absent. Returns 0 if it was present, 10 if generated now.
-env_ensure() {
-  local f="$1" k="$2"
-  if [ -n "$(env_get "$f" "$k")" ]; then echo "  $k: present"; return 0; fi
-  if [ "$DRY" -eq 1 ]; then echo "  DRY: generate $k into $f"; return 10; fi
-  mkdir -p "$(dirname "$f")"
-  env_set "$f" "$k" "$(gen_secret)"
-  secure_env "$f" "${3:-root:opengrid}" "${4:-640}"
-  echo "  $k: generated (not displayed)"
-  return 10
-}
-
 # Run a command with the orchestrator's DB environment (password from <etc>/secrets.env, exported only
 # inside the subshell).
 with_db() {
@@ -148,7 +127,6 @@ with_db() {
     "$@"
   )
 }
-pg_admin() { runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -p "$DB_PORT" "$@"; }
 psql_file() { with_db psql -X -q -v ON_ERROR_STOP=1 -f "$1"; }
 
 # --- phases ------------------------------------------------------------------------------------------------
@@ -199,37 +177,32 @@ phase_b() {
   fi
 }
 
+# Phases c and d are deploy/scripts/create_schema.sh (role, database, extensions, schema; then the migrations).
+schema_args() {
+  local a=(--release "$RELEASE" --etc "$ETC" --db-port "$DB_PORT" --db-name "$DB_NAME" --db-role "$DB_ROLE")
+  [ "$DRY" -eq 1 ] && a+=(--dry-run)
+  printf '%s\n' "${a[@]}"
+}
 phase_c() {
-  phase c "Postgres role and database (port $DB_PORT)"
-  local rc=0
-  env_ensure "$ETC/secrets.env" OG_DB_PASSWORD || rc=$?
-  [ "$DRY" -eq 1 ] && { echo "  DRY: create role $DB_ROLE / database $DB_NAME if missing, sync password"; return 0; }
-  if [ "$FRESH_DB" -eq 1 ]; then
-    [ "$DB_PORT" != 5432 ] || die "--fresh-db is refused on the production cluster (5432)"
-    pg_admin -c "DROP DATABASE IF EXISTS \"$DB_NAME\" WITH (FORCE)"
-    echo "  dropped $DB_NAME (fresh)"
-  fi
-  if [ "$(pg_admin -Atc "SELECT count(*) FROM pg_roles WHERE rolname = '$DB_ROLE'")" = 0 ]; then
-    pg_admin -c "CREATE ROLE \"$DB_ROLE\" LOGIN"
-    echo "  role $DB_ROLE: created"; rc=10
-  else
-    echo "  role $DB_ROLE: present"
-  fi
-  # Always converge the role's password to the file (over stdin, never in argv): a no-op when they already match.
-  printf "ALTER ROLE \"%s\" PASSWORD '%s';\n" "$DB_ROLE" "$(env_get "$ETC/secrets.env" OG_DB_PASSWORD)" | pg_admin -f -
-  echo "  role $DB_ROLE: password $([ "$rc" -eq 10 ] && echo set || echo synced) from $ETC/secrets.env"
-  if [ "$(pg_admin -Atc "SELECT count(*) FROM pg_database WHERE datname = '$DB_NAME'")" = 0 ]; then
-    pg_admin -c "CREATE DATABASE \"$DB_NAME\" OWNER \"$DB_ROLE\""
-    echo "  database $DB_NAME: created"
-  else
-    echo "  database $DB_NAME: present"
-  fi
+  phase c "Postgres role, database, extensions and schema (port $DB_PORT)"
+  local fresh=(); [ "$FRESH_DB" -eq 1 ] && fresh=(--fresh-db)
+  mapfile -t args < <(schema_args)
+  OG_PY="$OG_PY" bash "$SCRIPT_DIR/create_schema.sh" "${args[@]}" "${fresh[@]}" --no-migrate
 }
 
 phase_d() {
   phase d "migrations"
-  if [ "$DRY" -eq 1 ]; then echo "  DRY: $OG_PY -m opengrid.platform.db migrate (db $DB_NAME:$DB_PORT)"; return 0; fi
-  with_db "$OG_PY" -m opengrid.platform.db migrate | sed 's/^/  /'
+  mapfile -t args < <(schema_args)
+  if [ "$FRESH_DB" -eq 1 ] && [ -f "$RELEASE/orchestrator/schema/og_schema.sql" ]; then
+    # A fresh database must match the committed snapshot exactly (make schema-check); an older live database
+    # carries lifecycle partitions, so the comparison is made only on a fresh one.
+    local rc=0
+    OG_PY="$OG_PY" bash "$SCRIPT_DIR/create_schema.sh" "${args[@]}" --check-snapshot || rc=$?
+    [ "$rc" -eq 3 ] && echo "  WARN: the fresh schema differs from orchestrator/schema/og_schema.sql (above); seeding continues"
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || die "create_schema.sh failed ($rc)"
+  else
+    OG_PY="$OG_PY" bash "$SCRIPT_DIR/create_schema.sh" "${args[@]}"
+  fi
 }
 
 phase_f() {

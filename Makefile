@@ -1,4 +1,4 @@
-.PHONY: test-unit test-int lint format typecheck dupcheck coverage migrate check bootstrap-check
+.PHONY: test-unit test-int lint format typecheck dupcheck coverage migrate check bootstrap-check schema-check schema-snapshot
 
 PY ?= python
 
@@ -42,3 +42,15 @@ BOOT_ETC ?= /srv/ogwork/bootstrap/etc
 bootstrap-check:
 	bash deploy/scripts/bootstrap_from_scratch.sh --phase c-e --fresh-db \
 		--db-port $(BOOT_PORT) --db-name $(BOOT_DB) --db-role $(BOOT_ROLE) --etc $(BOOT_ETC)
+
+# Consolidated schema snapshot (orchestrator/schema/og_schema.sql): pg_dump --schema-only of a fresh database
+# after every migration. schema-check fails when the migrations no longer produce exactly the committed file;
+# schema-snapshot regenerates it (commit the result with the migration that changed it). Test cluster only.
+SCHEMA_DB ?= og_t_schema
+schema-check:
+	bash deploy/scripts/create_schema.sh --fresh-db --check-snapshot \
+		--db-port $(BOOT_PORT) --db-name $(SCHEMA_DB) --db-role $(BOOT_ROLE) --etc $(BOOT_ETC)
+
+schema-snapshot:
+	bash deploy/scripts/create_schema.sh --fresh-db --snapshot orchestrator/schema/og_schema.sql \
+		--db-port $(BOOT_PORT) --db-name $(SCHEMA_DB) --db-role $(BOOT_ROLE) --etc $(BOOT_ETC)
