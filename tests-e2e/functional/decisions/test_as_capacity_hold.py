@@ -3,8 +3,9 @@
 A committed Non-Spin award reserves its kW and holds energy for a full deployment above the reserve floor, but
 discharges 0 kW until ERCOT deploys it; an operator-recorded deployment (`POST /og/api/dispatch/as-deployments`)
 starts delivery and ending it returns the hold to 0 kW. The deployment's discharge is checked as DELIVERED power
-(D-38, `delivery_check`): measured from telemetry, it reaches 95% of the award's kW within the policy's 600 s ramp
-time and holds it. Needs a live window, so `slow`.
+(D-38, `delivery_check`): measured from telemetry, it reaches 95% of the award's kW within the product's ramp time
+(the delivery job's: 600 s for this `NONSPIN` variant) and holds it, and on r3.4.3 og-settle's own record of the
+deployment must agree. Needs a live window, so `slow`.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from delivery_check import CHECK_MINUTES, assert_delivered, obligation_buckets, wait_delivered
+from delivery_check import CHECK_MINUTES, assert_system_record, check_delivered, obligation_buckets
 from e2e_stack import Stack, now_utc, wait_until
 
 pytestmark = pytest.mark.slow
@@ -113,15 +114,18 @@ def test_an_as_award_holds_capacity_at_0_kw_until_ercot_deploys_it(stack: Stack)
         # Granted is not delivered (D-38): the award's measured discharge must reach its committed kW and hold it,
         # judged by core.delivery's own policy (the deployment names no kW, so it deploys all of it).
         start = datetime.fromisoformat(deployed.json()["start_at"])
-        delivered = wait_delivered(
+        delivered = check_delivered(
             lambda until: obligation_buckets(
                 stack, award["obligation_id"], committed_discharge_kw=AWARD_KW, call_start=start, until=until
             ),
             call_start=start,
             call_end=datetime.fromisoformat(deployed.json()["end_at"]),
+            product="NONSPIN",
             what="the deployed Non-Spin award",
         )
-        assert_delivered(delivered, what="the deployed Non-Spin award")
+        assert_system_record(
+            stack, deployment_id, call_start=start, metrics=delivered, what="the deployed Non-Spin award"
+        )
     finally:
         stack.http.delete(
             f"{stack.api_base}/dispatch/as-deployments/{deployment_id}", headers=stack.headers()

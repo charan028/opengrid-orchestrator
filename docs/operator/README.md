@@ -672,10 +672,10 @@ alert is raised or cleared and the degraded modes freeze.
 | `ALR-ERCOT-AS-REFUSED` | warning | Since r3.4.1 (D-35): og-feeds refused an ERCOT AS dispatch instruction (404/409/422 and a reason code) and answered ERCOT REJECT. One row per instruction; a re-delivered duplicate adds none (6.5) | No automatic clear |
 | `ALR-ERCOT-AS-POLL-FAILED` | warning | Three ERCOT AS instruction polls in a row failed | og-feeds clears it on the next good poll |
 | `ALR-ERCOT-AS-POLL-STALE` | critical | No ERCOT AS instruction poll has succeeded for 60 s: a deployment may be missed | og-feeds clears it on the next good poll |
-| `ALR-DELIVERY-RAMP-LATE` | not set yet | **Known gap: never raised in this release** (8.1). Its rule in `opengrid.core.delivery`: a discharge call's measured power has not reached 95% of the called kW 600 s after the call's start (RAMP_TOO_SLOW) | Not defined yet |
-| `ALR-DELIVERY-SHORTFALL` | not set yet | **Known gap: never raised** (8.1). Its rule: after reaching that level, measured power stays under it (SUSTAIN_BELOW_TARGET when under 95% of the measured intervals hold it; the policy's `shortfall_alert_s` is 60 s) | Not defined yet |
-| `ALR-DELIVERY-NONE` | not set yet | **Known gap: never raised** (8.1). Its rule: the call is commanded but the hubs deliver at most 5% of the called kW (NO_DELIVERY; the policy's `none_alert_s` is 60 s) | Not defined yet |
-| `ALR-DELIVERY-METER-MISMATCH` | not set yet | **Known gap: never raised** (8.1). Its rule: over the call, an independent meter's energy differs from the batteries' telemetry by more than 10%, floored at 25 kW (UNCORROBORATED) | Not defined yet |
+| `ALR-DELIVERY-RAMP-LATE` | critical | Since r3.4.3 (D-38, 8.1): a running discharge call (toll call, AS deployment or manual discharge target) is past its product's ramp time and its measured power has never reached 95% of the called kW. "Call {id} not at target after N s (ramp R s): delivered X kW of Y kW" | og-settle's delivery job clears it once delivery reaches the target, or when the call ends |
+| `ALR-DELIVERY-SHORTFALL` | critical | Since r3.4.3: a running call's measured power has stayed under 95% of the called kW for 60 s (`[delivery] shortfall_alert_s`), counted from when it reached the target, or from the end of its ramp time if it never did. Its obligation is AT_RISK meanwhile. "Call {id} below target for N s: delivered X kW of Y kW" | The delivery job clears it when delivery is back at target, or when the call ends; AT_RISK clears with it |
+| `ALR-DELIVERY-NONE` | critical | Since r3.4.3: guardian-signed commands ask the call's hubs to discharge, but the measured delivery has stayed at or under 5% of the called kW for 60 s (`none_alert_s`). Its obligation is AT_RISK meanwhile. "Call {id} commanded for N s with no measurable delivery" | The delivery job clears it when delivery resumes, or when the call ends; AT_RISK clears with it |
+| `ALR-DELIVERY-METER-MISMATCH` | critical | Since r3.4.3: at the end of a call, the independent meter on its banks disagrees with the batteries' telemetry by more than 10% of the energy, floored at 25 kW (the record is UNCORROBORATED). "Call {id}: independent meter disagrees with battery telemetry by N%; delivery UNCORROBORATED" | No automatic clear: the delivery job leaves it open for an operator, and the console and API can only acknowledge it (6.8) |
 | `ALR-TRACE-VERDICT-WRITE-FAILED` | warning | A verdict's `GUARDIAN_VERDICT` trace row could not be written (the verdict stands; the audit row is missing) | No automatic clear |
 
 An open alert keeps the severity it opened with: a zone that goes from 6% to 25% offline stays a warning until
@@ -683,46 +683,63 @@ it clears and re-opens.
 
 ### 8.1 Delivery alerts (D-38)
 
-A grant is what the allocator planned, not what the homes delivered: a grant the guardian vetoes still counts as
-granted. Decision D-38 judges a discharge call (a utility toll call, an AS deployment) on the power the hubs
-actually reported, their telemetry, with one set of rules in `opengrid.core.delivery`.
+Since r3.4.3 a discharge call is judged on the power its hubs actually reported (telemetry), never on its grants:
+a grant the guardian vetoes still counts as granted. og-settle's delivery job does this every 15 s for every toll
+call, ERCOT AS deployment (whatever its origin) and operator manual discharge target, and it alone raises and
+clears the four `ALR-DELIVERY-*` alerts above. r3.4.2 and older raise none of them.
 
-**Known gap: in this release no delivery alert is raised.** The rules exist and the end-to-end tests use them,
-but no running process applies them yet. So:
+**How a call is judged** (`[delivery]` in the orchestrator config; defaults shown):
 
-- the four `ALR-DELIVERY-*` rules in the table above never open;
-- a call's status reports granted kW and kWh with `delivery_measured: false` and `delivery_state: "UNMEASURED"`,
-  never RAMPING or DELIVERING;
-- the grid link still serves CALL_DELIVERED_KW (AI 5) with COMM_LOST (grid link, 6.10).
+- **Intervals:** 30 s from the call's start (`bucket_s`), each read 30 s after it ends (`telemetry_lag_s`), so a
+  verdict lags real time by about 30 to 60 s. An interval without telemetry is unmeasured, never counted as 0.
+- **Reach:** measured discharge must reach 95% of the called kW (`target_frac`) within the product's ramp time,
+  `[delivery.ramp_time_s]` by contract variant: ECRS, RRS and TOLLING 600 s, REGUP and REGDN 300 s, NSPIN 1800 s,
+  a manual target (MANUAL) 120 s, anything else 600 s. Hubs ramp, so a large step takes minutes (6.2).
+- **Sustain:** from then on (from the end of the ramp time if it never got there), at least 95% of the measured
+  intervals (`sustain_pass_pct`) stay at or above that level.
+- **Result:** IN_PROGRESS while the call runs. At its end: FAIL when nothing was measured, when the average was
+  at most 5% of the called kW, or when under half the called kWh was delivered; PARTIAL for any other reason
+  (late, not sustained, over 10% of the intervals unmeasured, at least half the command cycles vetoed, ended
+  early); otherwise PASS. The final result is traced (stream `delivery`).
+- **Meter:** on a bank with an independent meter (a substation battery set's bank, plus `meter_bank_ids`), the
+  meter's change over the call is compared with the batteries'. More than 10% apart (`meter_tolerance_frac`,
+  floored at 25 kW, `meter_floor_kw`) is UNCORROBORATED. Manual targets are never metered.
+- **AT_RISK:** while SHORTFALL or NONE is open, the call's obligation is AT_RISK (reason
+  `R-DELIVERY-MEASURED-SHORTFALL`). It clears when delivery recovers or the call ends. The obligation's SHORTFALL
+  state (7.3) stays the engine's.
+- The check only observes. It never changes dispatch or stops a call (K7), a firm call keeps its best effort
+  (7.3), and settlement bills measured energy.
 
-**The rules** (the `DeliveryPolicy` defaults), for a call of X kW:
+**Where to look**
 
-- **Reach:** measured discharge reaches 95% of X within 600 s (10 minutes) of the call's start. Hubs ramp, so a
-  large step takes minutes (6.2).
-- **Sustain:** from then on (from the 10-minute mark if it never got there), at least 95% of the measured
-  intervals stay at or above that level.
-- **Nothing delivered:** the average measured discharge is at most 5% of X.
-- **Energy:** under half of the called kWh fails the call.
-- **Stale:** an interval without telemetry is unmeasured, never counted as 0; more than 10% of them marks the
-  result stale.
-- **Meter:** where an independent meter covers the banks, its energy over the call must be within 10% of the
-  batteries' (floored at 25 kW).
-- The check only observes. A shortfall never changes dispatch (K7), a firm call keeps its best effort (7.3), and
-  settlement bills measured energy.
+- The alert's summary names the call id: a deployment's id, or a manual target's trace id.
+- `GET /og/api/delivery/records/<call id>` (viewer role): the call's record with its 30 s series. Each point has
+  `c` committed, `m` commanded (guardian-signed), `d` delivered (none = no telemetry), `p`/`v` proposed and
+  vetoed command cycles, `md`/`bd` meter and battery change; the record adds `result`, `reasons`,
+  `time_to_target_s`, `sustained_pct`, `lowest_kw` and `meter_status`.
+- `GET /og/api/delivery/records` lists records newest first; filter with `service_type`, `contract_id`,
+  `call_kind`, `result`, `utility_id`, `call_ids`, `since`, `until`, `limit`. `GET /og/api/delivery/summary?days=7`
+  gives, per contract per day, the calls, PASS/PARTIAL/FAIL, meter mismatches and delivered vs committed kWh.
+- A utility's call status and the grid link report the measured kW: RAMPING under 90% of the call's target
+  (`[dispatch.calls] ramping_fraction`), DELIVERING at or above it, ACTIVE while unmeasured.
 
-**What to do meanwhile:** check delivered power yourself while a call runs.
+**What to check**
 
-1. Dispatch: set the **Ledger scope** to one of the call's banks; **Real-time grants & substitutions** then lists
-   its grants. That is the plan, not the power.
-2. Fleet: filter the Hubs table to those banks and read **P (kW)**. Hubs report every 10 s, and their power
-   includes any other grant on those banks.
-3. **Late** (the RAMP-LATE rule): 10 minutes after the start, those hubs still discharge under 95% of the called
-   kW. **Short** (SHORTFALL): they reached it, then fell back under it. **None** (NONE): they barely move. Open a
-   stalled hub's **Hub detail** for its health and last command; a refused step is recorded as a guardian verdict
-   (6.2). Look for a safe stop, or a utility L2 limit or block on the bank (7.3). A shortfall is not a reason for a
-   safe stop (K7: a measured shortfall never stops a firm obligation).
-4. **Meter disagrees** (METER-MISMATCH): no screen shows it yet.
-5. Tell the lead about any call that is late, short or dead, with its call id and banks.
+- **RAMP-LATE:** open the record. `m` rising while `d` lags means the hubs are slow or stalled; `m` flat means
+  nothing signed reaches them (`reasons` has VETOED when at least half the cycles were vetoed). In Dispatch, set
+  the Ledger scope to a call bank: **Real-time grants & substitutions** shows its grants. In Fleet, filter to that
+  bank: are the hubs' P (kW) moving? Hub detail shows health and last command. Look for a safe stop, or a utility
+  L2 limit or block on the bank (7.1, 7.3).
+- **SHORTFALL:** delivery got there and fell back. Look for what changed on those banks: hubs going stale or
+  offline (System Health's hub counts, `ALR-HUB-OFFLINE-RATIO`), an L2 limit or block, homes near reserve
+  (`ALR-ENERGY-SHORTFALL-RISK`). The obligation stays AT_RISK until it recovers.
+- **NONE:** commands are signed but nothing moves. Check the hubs' health and last command, and whether telemetry
+  reaches the database at all (`ALR-SIM-OFFLINE`). Tell the lead at once.
+- **METER-MISMATCH:** the meter and the batteries disagree on how much was delivered. Compare `md` and `bd` in the
+  record's series, and check the bank's SCADA alerts (`ALR-SCADA-SILENT-BANK`, `ALR-SCADA-OVERLOAD`). Settlement
+  bills battery telemetry, so tell the lead. Acknowledge the alert once investigated; it does not clear by itself.
+- No delivery alert is a reason for a safe stop (K7: a measured shortfall never stops a firm obligation). Tell the
+  lead about any call that is late, short or dead, with its call id.
 
 ## 9. Known gaps in this release
 
@@ -737,5 +754,7 @@ but no running process applies them yet. So:
 | The AS price feed is polled once a day; one missed poll can keep Feed stale on for up to about a day | Check `ALR-FEED-STALE` for `ERCOT:np4-188-cd`; tell the lead |
 | Escalations, Control-room banner and alerts reflect page load | Reload; System Health's banner and alerts are live |
 | Best-effort shortfall is labelled "Delivered short" | Watch the grants, not the card |
-| Delivery is not measured yet (D-38): no `ALR-DELIVERY-*` alert opens, and a call's status shows granted kW (`delivery_measured: false`) | Read the serving hubs' reported power during a call (8.1) |
+| No console screen shows delivery records or the meter check yet (r3.4.3: operator API only) | Use `GET /og/api/delivery/records` and `/records/<call id>` (8.1) |
+| `ALR-DELIVERY-METER-MISMATCH` never clears: the delivery job leaves it for an operator, and the console and API can only acknowledge it | Acknowledge it once investigated (8.1) |
+| A Non-Spin contract whose variant is spelled `NONSPIN` or `NON_SPIN` gets the 600 s default ramp time, not `NSPIN`'s 1800 s (`[delivery.ramp_time_s]` is keyed by the variant) | Read a RAMP-LATE on such a call within its first 30 minutes as possibly early; tell the lead |
 | One permanent `ALR-XFMR-UNMAPPED` warning per bank | Expected until transformers are mapped; acknowledge |

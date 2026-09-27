@@ -5,13 +5,15 @@ inferred from grants or commands.
 The verdict is `opengrid.core.delivery`'s own: its `DeliveryPolicy` tolerances, `verify_delivery` for time to
 target and sustained compliance, and `attributed_discharge_kw` for an obligation's share of its banks' measured
 discharge (the attribution settlement meters with). This module only reads rows and aligns them into the core's
-`DeliveryBucket`s from the call's start. One sign convention, the core's: +charge / -discharge.
+`DeliveryBucket`s from the call's start. One sign convention, the core's: +charge / -discharge. On r3.4.3 and
+later, `assert_system_record` also holds og-settle's own record of the same call (`og.delivery_record`) to it.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -28,6 +30,7 @@ from opengrid.core.delivery import (
 
 #: The core's tolerances, unchanged (`DeliveryPolicy` defaults): delivered must reach 95% of the committed kW
 #: within 600 s of the call's start, then stay at or above that in at least 95% of the measured buckets.
+#: `policy_for` swaps in the product's ramp time where og-settle's delivery job has one.
 POLICY = DeliveryPolicy()
 #: Aligned bucket length, as in the core's unit tests (orchestrator/tests/unit/core/test_delivery.py, 30 s). Hubs
 #: report every 10 s, so each hub has samples in every bucket.
@@ -38,7 +41,7 @@ INGEST_LAG_S = 15.0
 #: How long delivery is watched once the target is reached: the policy's `shortfall_alert_s` (60 s), so a
 #: sustained delivery is one that holds at least that long.
 SUSTAIN_S = POLICY.shortfall_alert_s
-#: Minutes a call or target must run for `wait_delivered` to see the whole ramp window plus one sustain window
+#: Minutes a call or target must run for `check_delivered` to see a 600 s ramp window plus one sustain window
 #: (12 with the defaults). A shorter call is judged only over the part that ran.
 CHECK_MINUTES = math.ceil((POLICY.ramp_time_s + SUSTAIN_S + BUCKET_S + INGEST_LAG_S) / 60)
 #: The core's reasons that mean "did not reach the target, or did not stay there". ENERGY_SHORT is left out on
@@ -77,7 +80,9 @@ cyc AS (
            coalesce(sum(g.granted_kw) FILTER (WHERE g.obligation_id = %(o)s), 0) AS ob_kw,
            sum(g.granted_kw) AS tot_kw
     FROM og.grant g
-    WHERE g.bank_id IN (SELECT bank_id FROM banks) AND g.created_at >= %(a)s AND g.created_at < %(b)s
+    -- cycle_id is '<epoch s>-<seq>': a text range on it uses ix_grant_cycle instead of scanning og.grant
+    WHERE g.cycle_id >= %(ca)s AND g.cycle_id < %(cb)s
+      AND g.bank_id IN (SELECT bank_id FROM banks) AND g.created_at >= %(a)s AND g.created_at < %(b)s
     GROUP BY 1, 2, 3
 ),
 share AS (SELECT k, bank_id, avg(ob_kw) AS ob_kw, avg(tot_kw) AS tot_kw FROM cyc GROUP BY 1, 2)
@@ -131,13 +136,17 @@ def obligation_buckets(
     n = _complete(call_start, until)
     if n == 0:
         return []
+    end = call_start + timedelta(seconds=n * BUCKET_S)
     rows = stack.rows(
         _OBLIGATION_SQL,
         {
             "o": obligation_id,
             "a": call_start,
-            "b": call_start + timedelta(seconds=n * BUCKET_S),
+            "b": end,
             "step": BUCKET_S,
+            # The engine's cycle ids ("<epoch s>-<seq>", 10-digit epoch: text order is time order), 5 s wider.
+            "ca": str(int(call_start.timestamp()) - 5),
+            "cb": str(int(end.timestamp()) + 5),
         },
     )
     granted: dict[int, float] = {}
@@ -191,47 +200,102 @@ def hub_buckets(
     ]
 
 
-def wait_delivered(
+def policy_for(product: str | None) -> DeliveryPolicy:
+    """The core's tolerances with the product's ramp time as og-settle's delivery job judges the call (r3.4.3,
+    `opengrid.delivery.job.DeliverySettings.ramp_for`: TOLLING and ECRS 600 s, MANUAL 120 s, an unlisted product
+    600 s; its defaults, which the shipped `[delivery.ramp_time_s]` repeats). Where that module does not exist
+    yet (r3.4.2 and older), the core's own 600 s."""
+    try:
+        from opengrid.delivery.job import DeliverySettings
+    except ImportError:
+        return POLICY
+    return replace(POLICY, ramp_time_s=DeliverySettings().ramp_for(product))
+
+
+def check_delivered(
     buckets_of: Callable[[datetime], list[DeliveryBucket]],
     *,
     call_start: datetime,
     call_end: datetime | None = None,
+    product: str | None,
     what: str,
 ) -> DeliveryMetrics:
     """Watch a running call until its delivered power has reached the target and held it for `SUSTAIN_S`, or
-    until the policy's ramp window plus one sustain window (or the call's end, if sooner) has passed. Returns the
-    core's metrics over the buckets watched, with `final=False`: the call is still running, so the result is
-    IN_PROGRESS with the provisional reasons. `buckets_of(until)` returns the complete buckets up to `until`."""
-    horizon = call_start + timedelta(seconds=POLICY.ramp_time_s + SUSTAIN_S + BUCKET_S)
+    until the product's ramp window plus one sustain window (or the call's end, if sooner) has passed, then
+    assert it reached the target in time and stayed there. The core's metrics are taken with `final=False`: the
+    call is still running, so the result is IN_PROGRESS with the provisional reasons. `buckets_of(until)`
+    returns the complete buckets up to `until`."""
+    policy = policy_for(product)
+    horizon = call_start + timedelta(seconds=policy.ramp_time_s + SUSTAIN_S + BUCKET_S)
     if call_end is not None:
         horizon = min(horizon, call_end)
 
     def settled() -> DeliveryMetrics | None:
         cutoff = min(now_utc() - timedelta(seconds=INGEST_LAG_S), horizon)
         buckets = buckets_of(cutoff)
-        metrics = verify_delivery(buckets, POLICY, call_start=call_start, final=False)
+        metrics = verify_delivery(buckets, policy, call_start=call_start, final=False)
         watched_s = len(buckets) * BUCKET_S
         held = metrics.time_to_target_s is not None and watched_s - metrics.time_to_target_s >= SUSTAIN_S
         return metrics if held or cutoff >= horizon else None
 
-    return wait_until(
+    metrics = wait_until(
         settled,
         timeout_s=max((horizon - now_utc()).total_seconds(), 0.0) + INGEST_LAG_S + 60.0,
         interval_s=5.0,
         what=f"{what}: delivered power through its ramp and one sustain window",
     )
-
-
-def assert_delivered(metrics: DeliveryMetrics, *, what: str) -> None:
-    """Delivered power reached the policy's share of the target within its ramp time and stayed there."""
     missed = sorted(NOT_DELIVERED.intersection(metrics.reasons))
     if metrics.reached_target and not missed:
-        return
+        return metrics
     raise AssertionError(
-        f"{what}: delivered power (telemetry) did not reach {POLICY.target_frac:.0%} of the target within "
-        f"{POLICY.ramp_time_s:.0f} s and hold it in {POLICY.sustain_pass_pct:.0f}% of buckets (core.delivery, "
+        f"{what}: delivered power (telemetry) did not reach {policy.target_frac:.0%} of the target within "
+        f"{policy.ramp_time_s:.0f} s and hold it in {policy.sustain_pass_pct:.0f}% of buckets (core.delivery, "
         f"D-38): reasons {missed or list(metrics.reasons)}, time to target {metrics.time_to_target_s} s, "
         f"sustained {metrics.sustained_pct}%, lowest {metrics.lowest_kw} kW held {metrics.lowest_run_s:.0f} s, "
         f"delivered avg {metrics.delivered_kw_avg} kW vs commanded avg {metrics.commanded_kw_avg:.1f} kW, "
         f"stale {metrics.stale_frac:.0%}"
+    )
+
+
+_RECORD_TABLE_SQL = "SELECT to_regclass('og.delivery_record') IS NOT NULL AS present"
+_RECORD_SQL = (
+    "SELECT result, reasons, time_to_target_s, evaluated_to FROM og.delivery_record WHERE call_id = %(c)s"
+)
+
+
+def assert_system_record(
+    stack: Stack,
+    call_id: str,
+    *,
+    call_start: datetime,
+    metrics: DeliveryMetrics,
+    what: str,
+    timeout_s: float = 120.0,
+) -> None:
+    """r3.4.3 and later: og-settle's delivery job keeps its own record of the call (`og.delivery_record`,
+    migration 0050; call id = the deployment id, or a manual target's trace id). Once it has evaluated the span
+    `check_delivered` watched, it must not be FAIL nor carry a not-delivered reason. A stack without the table
+    (r3.4.2 and older) keeps no record: nothing to compare."""
+    if not stack.rows(_RECORD_TABLE_SQL)[0]["present"]:
+        return
+    through = call_start + timedelta(seconds=(metrics.time_to_target_s or 0.0) + SUSTAIN_S)
+    record = wait_until(
+        lambda: next(
+            (
+                row
+                for row in stack.rows(_RECORD_SQL, {"c": call_id})
+                if row["evaluated_to"] is not None and row["evaluated_to"] >= through
+            ),
+            None,
+        ),
+        timeout_s=timeout_s,
+        interval_s=5.0,
+        what=f"{what}: og-settle's delivery record through {through:%H:%M:%S} UTC (is [delivery] enabled?)",
+    )
+    missed = sorted(NOT_DELIVERED.intersection(record["reasons"] or []))
+    if record["result"] != "FAIL" and not missed:
+        return
+    raise AssertionError(
+        f"{what}: the system's own delivery record (og.delivery_record {call_id}) disagrees: result "
+        f"{record['result']}, reasons {record['reasons']}, time to target {record['time_to_target_s']} s"
     )

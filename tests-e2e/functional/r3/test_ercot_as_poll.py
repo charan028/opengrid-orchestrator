@@ -8,10 +8,11 @@ The stack must run og-feeds with `[feeds.ercot_as_poll]` enabled against the sta
 to run; otherwise the module skips.
 
 The accepted ECRS deployment is also checked as DELIVERED power (D-38, `delivery_check`) before it is recalled:
-measured from telemetry with `opengrid.core.delivery`, it must reach 95% of the deployed kW within the policy's
-600 s ramp time and hold it (the sim's instruction carries the same 10-minute ECRS ramp, which the call does not
-use). That check watches the running deployment for up to about 12 minutes; the deployment ends with the sim's
-instruction, 30 minutes by default.
+measured from telemetry with `opengrid.core.delivery`, it must reach 95% of the deployed kW within the product's
+ramp time (the delivery job's ECRS 600 s; the sim's instruction carries the same 10-minute ramp, which the call
+does not use) and hold it, and on r3.4.3 og-settle's own record of the deployment must agree. That check watches
+the running deployment for up to about 12 minutes (the deployment ends with the sim's instruction, 30 minutes by
+default), so that test is `slow`.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from delivery_check import assert_delivered, obligation_buckets, wait_delivered
+from delivery_check import assert_system_record, check_delivered, obligation_buckets
 from e2e_stack import Stack, wait_until
 
 pytestmark = [
@@ -87,6 +88,7 @@ def test_a_refused_instruction_is_traced_alerted_and_deploys_nothing(
     assert after == deployments_before
 
 
+@pytest.mark.slow
 def test_an_ecrs_deployment_its_duplicate_and_its_recall(stack: Stack) -> None:
     live = stack.rows(
         """SELECT o.obligation_id FROM og.obligation o
@@ -114,8 +116,9 @@ def test_an_ecrs_deployment_its_duplicate_and_its_recall(stack: Stack) -> None:
     # Accepted is not delivered (D-38): the deployment's measured discharge must reach the deployed kW (its signed
     # `requested_kw`; none = the award's full committed kW) and hold it, judged by core.delivery's own policy.
     deployment = stack.rows(
-        "SELECT d.start_at, d.end_at, d.requested_kw, o.committed_qty_kw FROM og.as_deployment d "
-        "JOIN og.obligation o USING (obligation_id) WHERE d.deployment_id = %(d)s",
+        "SELECT d.start_at, d.end_at, d.requested_kw, o.committed_qty_kw, c.variant FROM og.as_deployment d "
+        "JOIN og.obligation o USING (obligation_id) JOIN og.contract c ON c.contract_id = o.contract_id "
+        "WHERE d.deployment_id = %(d)s",
         {"d": rows[0]["deployment_id"]},
     )[0]
     called_kw = (
@@ -123,7 +126,7 @@ def test_an_ecrs_deployment_its_duplicate_and_its_recall(stack: Stack) -> None:
         if deployment["requested_kw"] is not None
         else float(deployment["committed_qty_kw"])
     )
-    delivered = wait_delivered(
+    delivered = check_delivered(
         lambda until: obligation_buckets(
             stack,
             UUID(accepted["payload"]["obligation_id"]),
@@ -133,9 +136,16 @@ def test_an_ecrs_deployment_its_duplicate_and_its_recall(stack: Stack) -> None:
         ),
         call_start=deployment["start_at"],
         call_end=deployment["end_at"],
+        product=deployment["variant"],
         what="the polled ECRS deployment",
     )
-    assert_delivered(delivered, what="the polled ECRS deployment")
+    assert_system_record(
+        stack,
+        str(rows[0]["deployment_id"]),
+        call_start=deployment["start_at"],
+        metrics=delivered,
+        what="the polled ECRS deployment",
+    )
 
     stack.inject("ercot_as_recall", RESOURCE, service="ECRS")
     recalled = _decided(stack, since, "AS_RECALL_APPLIED")

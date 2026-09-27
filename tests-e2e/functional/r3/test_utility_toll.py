@@ -7,8 +7,9 @@ the committed kW, capped at 90 min (409 above it); a second overlapping call is 
 deployment never touches the toll. Settlement pays availability ($/kW-yr), not kWh.
 
 The call's discharge is also checked as DELIVERED power (D-38, `delivery_check`): measured from hub telemetry
-with `opengrid.core.delivery`, it must reach 95% of the committed kW within the policy's 600 s ramp time and hold
-it. That check watches the running call for up to about 12 minutes before the call is ended.
+with `opengrid.core.delivery`, it must reach 95% of the committed kW within the TOLLING ramp time (600 s) and hold
+it, and on r3.4.3 og-settle's own record of the call must agree. That check watches the running call for up to
+about 12 minutes before the call is ended, so the call test is `slow`.
 
 The contract row is a DB fixture until the contracts API accepts market/utility_id (R3 contracts repo).
 """
@@ -20,7 +21,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from delivery_check import assert_delivered, obligation_buckets, wait_delivered
+from delivery_check import assert_system_record, check_delivered, obligation_buckets
 from e2e_stack import Stack, now_utc, wait_until
 
 pytestmark = pytest.mark.usefixtures("stack")
@@ -93,6 +94,7 @@ def _served_kw(stack: Stack, obligation_id: UUID, since) -> list:
     ]
 
 
+@pytest.mark.slow
 def test_the_toll_is_held_at_0_kw_until_called_then_a_call_discharges_it(stack: Stack, toll: dict) -> None:
     if not _in_window(now_utc()):
         pytest.skip("outside the toll's 16:30-18:00 CT window: hold and call are only observable inside it")
@@ -128,15 +130,18 @@ def test_the_toll_is_held_at_0_kw_until_called_then_a_call_discharges_it(stack: 
         # names no kW, so it calls all of it) and hold it, judged by core.delivery's own policy.
         call = called.json()
         start = datetime.fromisoformat(call["start_at"])
-        delivered = wait_delivered(
+        delivered = check_delivered(
             lambda until: obligation_buckets(
                 stack, ob["obligation_id"], committed_discharge_kw=committed, call_start=start, until=until
             ),
             call_start=start,
             call_end=datetime.fromisoformat(call["end_at"]),
+            product="TOLLING",
             what="the toll call",
         )
-        assert_delivered(delivered, what="the toll call")
+        assert_system_record(
+            stack, call["deployment_id"], call_start=start, metrics=delivered, what="the toll call"
+        )
     finally:
         stack.http.delete(
             f"{stack.api_base}/dispatch/as-deployments/{called.json()['deployment_id']}",

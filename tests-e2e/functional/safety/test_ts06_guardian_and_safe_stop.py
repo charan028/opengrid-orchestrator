@@ -15,7 +15,7 @@ import os
 from datetime import datetime
 
 import pytest
-from delivery_check import CHECK_MINUTES, assert_delivered, hub_buckets, wait_delivered
+from delivery_check import CHECK_MINUTES, assert_system_record, check_delivered, hub_buckets
 from e2e_stack import Stack, now_utc, wait_until
 
 pytestmark = pytest.mark.usefixtures("stack")
@@ -130,10 +130,11 @@ def test_every_veto_is_traced_with_its_rule(stack: Stack) -> None:
 #: The discharge target, as a share of the hub's power rating. The engine steps a hub from its last REPORTED power
 #: by 0.9 x its G-04 step per 2 s cycle (`opengrid.engine._ramped_setpoint_kw`, RAMP_SAFETY_FACTOR; firm default:
 #: full rating in 3 minutes, `core.physics.hub_ramp_kw_per_s`), and hubs report every 10 s, so on the sim a hub
-#: moves about 1% of its rating per 10 s (operator guide 6.2): a full-rating target needs about 1000 s, longer than
-#: the core's ramp window (`DeliveryPolicy.ramp_time_s`, 600 s). The check keeps the core's window and tolerance and
-#: asks for 20% instead: 95% of it is reached in about 190 s.
-MANUAL_TARGET_SHARE = 0.2
+#: moves about 1% of its rating per 10 s (operator guide 6.2): a full-rating target needs about 1000 s. og-settle's
+#: delivery job judges a manual target with a 120 s ramp time (r3.4.3, `[delivery.ramp_time_s] MANUAL`), which the
+#: check uses too (`delivery_check.policy_for`); 5% of the rating reaches 95% of the target in about 50 s, well
+#: inside it, so the test never raises the system's own ALR-DELIVERY-RAMP-LATE.
+MANUAL_TARGET_SHARE = 0.05
 
 
 def _issued_at(stack: Stack, trace_id: str) -> datetime:
@@ -156,17 +157,19 @@ def test_r3_a_manual_discharge_target_is_reached_and_held_measured_from_telemetr
 
     assert resp.status_code == 202 and resp.json().get("status") == "RAMPING", resp.text
     trace_id = resp.json()["trace_id"]
+    what = f"the {target_kw:.2f} kW manual target on {hub['hub_id']}"
     try:
         start = _issued_at(stack, trace_id)
-        delivered = wait_delivered(
+        delivered = check_delivered(
             lambda until: hub_buckets(
                 stack, hub["hub_id"], target_kw=target_kw, call_start=start, until=until
             ),
             call_start=start,
             call_end=datetime.fromisoformat(resp.json()["expires_at"]),
-            what=f"the {target_kw:.2f} kW manual target on {hub['hub_id']}",
+            product="MANUAL",
+            what=what,
         )
-        assert_delivered(delivered, what=f"the {target_kw:.2f} kW manual target on {hub['hub_id']}")
+        assert_system_record(stack, trace_id, call_start=start, metrics=delivered, what=what)
     finally:
         stack.post(f"/fleet/manual-targets/{trace_id}/cancel")
 
