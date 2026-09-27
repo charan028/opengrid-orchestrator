@@ -195,3 +195,54 @@ async def test_manual_target_read_sees_only_live_targets(pool):
         async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("DELETE FROM og.trace WHERE stream_id = %s", (stream,))
             await conn.commit()
+
+
+async def test_manual_target_read_uses_the_shared_status_rule(pool):
+    """`core.manual_targets.effective_targets` (the engine's and the API's rule): a target the operator cancelled,
+    or that a safe stop on its bank cancelled, is not evidence; an untouched live one is."""
+    from uuid import uuid4
+
+    port = repo.PgManualTargetPort(pool)
+    live, cancelled, stopped = (f"hub-it-{uuid4().hex[:6]}" for _ in range(3))
+    bank = f"bank-it-{uuid4().hex[:6]}"
+    stream = f"it-manual-{uuid4().hex[:8]}"
+    stop_id = uuid4()
+    cancelled_trace = uuid4()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO og.bank (bank_id, zone, kva_rating) VALUES (%s, 'LZ_NORTH', 500)", (bank,)
+        )
+        await cur.execute(
+            "INSERT INTO og.hub (hub_id, bank_id, zone, e_kwh, r_kwh, p_kw) VALUES (%s, %s, 'LZ_NORTH', 39.2, 7.84, 11)",
+            (stopped, bank),
+        )
+        targets = [(uuid4(), live, None), (cancelled_trace, cancelled, None), (uuid4(), stopped, None)]
+        targets.append((uuid4(), cancelled, str(cancelled_trace)))  # the operator's cancel row
+        for seq, (trace_id, hub, cancels) in enumerate(targets):
+            await cur.execute(
+                """INSERT INTO og.trace (trace_id, stream_id, seq, decision_type, event_class, payload, hash)
+                   VALUES (%s, %s, %s, 'OPERATOR_ACTION', 'MANUAL_TARGET',
+                           jsonb_build_object('hub_ids', jsonb_build_array(%s::text), 'p_kw_command', -5.0,
+                                              'issued_at', (now() - interval '1 minute')::text,
+                                              'expires_at', (now() + interval '10 minutes')::text)
+                           || CASE WHEN %s::text IS NULL THEN '{}'::jsonb
+                                   ELSE jsonb_build_object('cancels', %s::text) END,
+                           %s)""",
+                (trace_id, stream, seq, hub, cancels, cancels, uuid4().hex),
+            )
+        await cur.execute(
+            """INSERT INTO og.stop_event (stop_event_id, scope_kind, scope_ref, action, initiator_kind,
+                                          initiator_ref, reason, signature)
+               VALUES (%s, 'BANK', %s, 'ENGAGE', 'OPERATOR', 'it', 'it-guard', %s)""",
+            (stop_id, bank, uuid4().hex),
+        )
+        await conn.commit()
+    try:
+        assert await port.manual_target_hubs([live, cancelled, stopped]) == {live}
+    finally:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("DELETE FROM og.trace WHERE stream_id = %s", (stream,))
+            await cur.execute("DELETE FROM og.stop_event WHERE stop_event_id = %s", (stop_id,))
+            await cur.execute("DELETE FROM og.hub WHERE hub_id = %s", (stopped,))
+            await cur.execute("DELETE FROM og.bank WHERE bank_id = %s", (bank,))
+            await conn.commit()
