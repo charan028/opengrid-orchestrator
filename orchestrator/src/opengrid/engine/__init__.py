@@ -29,7 +29,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -885,6 +885,22 @@ def make_firmware_status_handler(pool: Any) -> Callable[[dict[str, Any]], Corout
     return _handle
 
 
+async def ledger_version_for_cycle(state: Any, grants: Sequence[Grant]) -> int:
+    """The ledger version this cycle's batches are built on: the one stamped on its grants, else (no grant
+    at all, e.g. only a manual target on an idle bank) the ledger version read now. Never 0 by default:
+    the guardian's G-09 vetoes a batch whose version is not the current one."""
+    versions = [g.ledger_version for g in grants]
+    if versions:
+        return max(versions)
+    return int(await state.ledger_gateway.ledger_version())
+
+
+def bank_ledger_version(bank_grants: Sequence[Grant], cycle_version: int) -> int:
+    """A bank batch's ledger version: its grants' (they all carry this cycle's), else the cycle's -- a bank
+    proposed only for a manual target has no grant to take it from."""
+    return max((g.ledger_version for g in bank_grants), default=cycle_version)
+
+
 def manual_bank_ids(targets: Mapping[str, ManualTarget], fleet_module: Any) -> list[str]:
     """Banks with at least one hub under a live manual target (each gets a batch even with no grant)."""
     banks: set[str] = set()
@@ -996,6 +1012,10 @@ async def repropose_banks(
     grants_by_bank: dict[str, list[Grant]] = {}
     for grant in grants:
         grants_by_bank.setdefault(str(grant.bank_id), []).append(grant)
+    for bank_id in bank_ids:
+        if bank_id in manual_bank_ids(state.manual_targets, fleet_module):
+            grants_by_bank.setdefault(bank_id, [])
+    cycle_ledger_version = await ledger_version_for_cycle(state, grants)
 
     async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
         await propose_batch_to_guardian(
@@ -1006,7 +1026,7 @@ async def repropose_banks(
             attempt=1,
             bank_id=bank_id,
             grants=bank_grants,
-            ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+            ledger_version=bank_ledger_version(bank_grants, cycle_ledger_version),
             epoch=state.epoch,
             seq=state.cycle_seq,
             now=now,
@@ -1094,6 +1114,7 @@ async def _engine_tick(state: _EngineState) -> None:
             grants_by_bank.setdefault(bank_id, [])
 
         proposed: dict[UUID, str] = {}
+        cycle_ledger_version = await ledger_version_for_cycle(state, grants)
 
         async def _propose(bank_id: str, bank_grants: list[Grant]) -> None:
             batch_id = await propose_batch_to_guardian(
@@ -1103,7 +1124,7 @@ async def _engine_tick(state: _EngineState) -> None:
                 cycle_id=cycle_id,
                 bank_id=bank_id,
                 grants=bank_grants,
-                ledger_version=max((g.ledger_version for g in bank_grants), default=0),
+                ledger_version=bank_ledger_version(bank_grants, cycle_ledger_version),
                 epoch=state.epoch,
                 seq=state.cycle_seq,
                 now=now,
@@ -1593,15 +1614,19 @@ def build_device_info_worker(pool: Any, cfg: Config) -> BackgroundIngest:
     (re)connect, so the queue holds a whole fleet (live r3 19:03: 2,000 of 2,501 dropped at the default 500)."""
     return BackgroundIngest(
         "device-info",
-        make_device_info_handler(pool),
+        make_device_info_handler(pool, cfg),
         queue_max=int(cfg.get("mqtt.device_info_queue_max", DEVICE_INFO_QUEUE_MAX)),
     )
 
 
-def make_device_info_handler(pool: Any) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+def make_device_info_handler(pool: Any, cfg: Config) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
     """Background handler for a DEVICE-INFO message: `opengrid.fleet.device_info.upsert_device_info(pool,
     msg)` (FOLLOWUPS). Until that module lands, messages are logged once and dropped."""
+    from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
+    from opengrid.trace.store import TraceStore
+
     warned: list[bool] = []
+    trace_store = TraceStore(PgTraceBackend(pool, journal_path=journal_path_from_config(cfg)))
 
     async def _handle(item: dict[str, Any]) -> None:
         try:
@@ -1612,7 +1637,9 @@ def make_device_info_handler(pool: Any) -> Callable[[dict[str, Any]], Coroutine[
                 logger.warning("opengrid.fleet.device_info not available; DEVICE-INFO messages dropped")
                 warned.append(True)
             return
-        await device_info.upsert_device_info(pool, item["payload"])
+        await device_info.upsert_device_info(
+            pool, item["payload"], topic=str(item["topic"]), trace=trace_store
+        )
 
     return _handle
 
