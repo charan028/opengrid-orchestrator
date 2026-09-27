@@ -14,7 +14,9 @@ Exit 0 when every check passes, 1 otherwise. Prints counts only, never a credent
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,20 @@ from opengrid.platform.db import MIGRATIONS_DIR, build_dsn
 SUBSTATION_ASSET = "sub-LZ_AEN-00"
 TOLL_CONTRACT = "00000000-0000-7000-8000-00000000ae0d"
 UTILITIES = ("AUSTIN_ENERGY", "CPS_ENERGY")
+# D-37 (migration 0046, dev/seed/noie_switch_seed.sql): the two NOIE utilities, their inactive sample tolls,
+# and the zone blocks whose banks are UNAVAILABLE until a contract exists.
+NOIE_UTILITIES = ("LCRA", "RAYBURN")
+SAMPLE_CONTRACTS = (
+    "00000000-0000-7000-8000-00000000ac1d",
+    "00000000-0000-7000-8000-00000000ac2d",
+)
+NOIE_ZONES = ("LZ_LCRA", "LZ_RAYBN")
+ZONE_UTILITY = {
+    "LZ_AEN": "AUSTIN_ENERGY",
+    "LZ_CPS": "CPS_ENERGY",
+    "LZ_LCRA": "LCRA",
+    "LZ_RAYBN": "RAYBURN",
+}
 # 0002 demo + customer_services_seed.sql + services_seed.sql (the customer ids in [api.roles.customer]).
 SEEDED_CONTRACTS = (
     "00000000-0000-7000-8000-000000000d02",
@@ -132,6 +148,7 @@ def check_seeded(c: Checker, cfg: Any, trucks_expected: bool) -> None:
         ),
         len(SEEDED_CONTRACTS),
     )
+    check_noie(c, topo)
     n_contracts = c.scalar("SELECT count(*) FROM og.contract")
     print(f"  [info] contracts total: {n_contracts}")
 
@@ -173,6 +190,76 @@ def check_seeded(c: Checker, cfg: Any, trucks_expected: bool) -> None:
         ">= 1" if trucks_expected else "any",
         ok=n >= 1 or not trucks_expected,
     )
+
+
+def check_noie(c: Checker, topo: Any) -> None:
+    """D-37: LCRA/RAYBURN regulated territory, inactive sample tolls, and bank availability. The sample
+    contracts and utilities are seeded on every bootstrap; the UNAVAILABLE banks exist only with
+    --noie-blocks, so their expected count comes from the same topology the fleet seed used."""
+    if not c.scalar(
+        "SELECT count(*) FROM information_schema.columns"
+        " WHERE table_schema = 'og' AND table_name = 'bank' AND column_name = 'availability'"
+    ):
+        print("  [SKIP] D-37 checks: migration 0046 not in this release")
+        return
+    everyone = sorted((*UTILITIES, *NOIE_UTILITIES))
+    c.check(
+        "utilities (D-37)",
+        sorted(r[0] for r in c.conn.execute("SELECT utility_id FROM og.utility").fetchall()),
+        everyone,
+    )
+    rows = c.conn.execute(
+        "SELECT contract_id::text, is_sample, status, coalesce(name, '') FROM og.contract"
+        " WHERE contract_id = ANY(%s::uuid[]) ORDER BY 1",
+        (list(SAMPLE_CONTRACTS),),
+    ).fetchall()
+    good = [r for r in rows if r[1] and r[2] != "ACTIVE" and r[3].startswith("Sample Contract")]
+    c.check(
+        "sample contracts (is_sample, not ACTIVE, 'Sample Contract...')",
+        f"{len(good)} ({', '.join(sorted({r[2] for r in rows})) or 'none'})",
+        f"{len(SAMPLE_CONTRACTS)} (SUSPENDED)",
+        ok=len(good) == len(SAMPLE_CONTRACTS) and all(r[2] == "SUSPENDED" for r in rows),
+    )
+    used = c.scalar(
+        "SELECT (SELECT count(*) FROM og.opportunity WHERE contract_id = ANY(%s::uuid[]))"
+        " + (SELECT count(*) FROM og.obligation WHERE contract_id = ANY(%s::uuid[]))",
+        (list(SAMPLE_CONTRACTS), list(SAMPLE_CONTRACTS)),
+    )
+    c.check("sample contracts: opportunities + obligations", used, 0)
+
+    noie_banks = sum(1 for b in topo.banks if b.zone in NOIE_ZONES)
+    c.check(
+        "banks UNAVAILABLE/REGULATED_NO_CONTRACT (NOIE zones)",
+        c.scalar(
+            "SELECT count(*) FROM og.bank WHERE zone = ANY(%s) AND availability = 'UNAVAILABLE'"
+            " AND availability_reason = 'REGULATED_NO_CONTRACT'",
+            (list(NOIE_ZONES),),
+        ),
+        noie_banks,
+    )
+    c.check(
+        "banks not AVAILABLE outside the NOIE zones",
+        c.scalar(
+            "SELECT count(*) FROM og.bank WHERE NOT (zone = ANY(%s)) AND availability <> 'AVAILABLE'",
+            (list(NOIE_ZONES),),
+        ),
+        0,
+    )
+    c.check(
+        "NOIE HOME_BANK assets owned by LCRA/RAYBURN",
+        c.scalar(
+            "SELECT count(*) FROM og.asset WHERE asset_class = 'HOME_BANK' AND zone = ANY(%s)"
+            " AND utility_id = ANY(%s)",
+            (list(NOIE_ZONES), list(NOIE_UTILITIES)),
+        ),
+        noie_banks,
+    )
+    tariffs = Path(os.environ["OG_CONFIG"]).parent / "tdsp_tariffs.toml"
+    with tariffs.open("rb") as fh:
+        table = tomllib.load(fh).get("zone_territory", {})
+    territory = {z: (str(e.get("utility")), str(e.get("market", "REGULATED"))) for z, e in table.items()}
+    for zone, utility in ZONE_UTILITY.items():
+        c.check(f"territory {zone} ({tariffs.name})", territory.get(zone), (utility, "REGULATED"))
 
 
 def check_live(c: Checker, stale_s: int) -> None:
