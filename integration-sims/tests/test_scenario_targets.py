@@ -5,8 +5,13 @@ scenario step aimed at a mistyped id (e.g. `BANK_12` instead of the fleet's `ban
 does nothing when it runs. This loads EVERY `scenarios/*.yaml` and resolves each step through the
 same path the running simulators use:
 
-- market steps: the target must be a product id the market simulator serves (or `*`/`eia`/`nws`);
-- fleet steps: `catalogue.infer_wire_target_kind` (what `Injector` puts on the wire), then the
+- market steps: the target must be a product id the market simulator serves, a registered simulated
+  zone id (`ogsim.market.data.SIMULATED_PJM_ZONES`), or `*`/`eia`/`nws`;
+- customer steps: the target must be an id named somewhere in the shipped sim configs
+  (`integration-sims/config/*.yaml`) -- a customer_id, site_id, corridor_id, etc.;
+- fleet steps targeting a mobile trailer: the target must be a `trailer_id` in fleet.yaml's
+  `mobile_units:` registry (#33 target-check, D-31, 2026-09-26);
+- other fleet steps: `catalogue.infer_wire_target_kind` (what `Injector` puts on the wire), then the
   default `FleetEngine`'s own resolver -- at least 1 hub;
 - SCADA steps: the same wire kind, then the default `ScadaEngine`'s resolver -- at least 1 bank,
   and those banks must hold at least 1 hub in the default fleet.
@@ -25,7 +30,7 @@ from ogsim.control import catalogue
 from ogsim.control.scenarios import ScenarioStep, load_scenarios_dir
 from ogsim.fleet.pq import PQ_ANOMALY_TYPES
 from ogsim.fleet.runtime import FleetEngine
-from ogsim.market.data import PRODUCTS
+from ogsim.market.data import PRODUCTS, SIMULATED_PJM_ZONES
 from ogsim.scada.runtime import ScadaEngine
 
 SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
@@ -34,10 +39,11 @@ SIMS_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 #: Found by this guard on R2 (6470cfa): shipped scenarios target ids no sim config names, so those steps
 #: would do nothing when run. Recorded as expected failures until the sims owner adds them (or retargets
 #: the scenarios); remove an entry once its id resolves.
-KNOWN_UNCONFIGURED_TARGETS: dict[str, str] = {
-    "site-large-load-crypto-01": "svc-large-load.yaml: no customer site with this id in config/*.yaml",
-    "pjm-zone-aep-01": "svc-pjm-capacity.yaml: no sim resolves this PJM zone id (not in config/*.yaml)",
-}
+#:
+#: #33 target-check, 2026-09-26: both prior entries now resolve -- `site-large-load-crypto-01` was
+#: retargeted to the real LARGE_LOAD customer_id (config/customer.yaml), and `pjm-zone-aep-01` is now a
+#: registered simulated PJM zone (`ogsim.market.data.SIMULATED_PJM_ZONES`). Empty until the next gap.
+KNOWN_UNCONFIGURED_TARGETS: dict[str, str] = {}
 
 
 def _config_ids(config_dir: Path) -> set[str]:
@@ -59,8 +65,9 @@ def _config_ids(config_dir: Path) -> set[str]:
     return found
 
 
-# ogsim.market.anomalies: a market anomaly's target is a product id, "eia", "nws", or "*".
-KNOWN_MARKET_TARGETS = set(PRODUCTS) | {"*", "eia", "nws"}
+# ogsim.market.anomalies: a market anomaly's target is a real product id, a registered simulated zone
+# id (SIMULATED_PJM_ZONES), "eia", "nws", or "*".
+KNOWN_MARKET_TARGETS = set(PRODUCTS) | set(SIMULATED_PJM_ZONES) | {"*", "eia", "nws"}
 
 
 def _scenario_steps() -> list[Any]:
@@ -110,10 +117,14 @@ def test_scenario_step_target_resolves(step: ScenarioStep, fleet: FleetEngine, s
         )
         return
     if "trailer" in (entry.target_kind or ""):
-        pytest.skip(
-            f"{step.type} targets a mobile trailer ({step.target!r}); ogsim has no trailer registry yet to "
-            "resolve it against (R2 svc-mobile-storage) -- follow-up for the sims owner"
+        # #33 target-check, D-31, 2026-09-26: fleet.yaml's `mobile_units:` registry
+        # (`ogsim.common.config.MobileUnitConfig`) now covers this -- no longer a skip.
+        trailer_ids = {u.trailer_id for u in fleet.config.mobile_units}
+        assert step.target in trailer_ids, (
+            f"{step.type} targets a mobile trailer ({step.target!r}) not in fleet.yaml's mobile_units "
+            "registry"
         )
+        return
 
     wire_kind = catalogue.infer_wire_target_kind(entry, step.target)
     if entry.owner == "scada":

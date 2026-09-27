@@ -40,6 +40,15 @@ PRODUCTS = {
     "np4-188-cd": "dam_clear_price_for_cap",
 }
 
+#: Simulated PJM Reliability Pricing Model zone ids (#33 target-check, 2026-09-26, svc-pjm-capacity.
+#: yaml). PJM is fully simulated -- no real PJM membership, eRPM/eDART feed, or product-serving
+#: endpoint exists for these, unlike `PRODUCTS` above (real ERCOT NP report codes the market simulator
+#: actually serves over HTTP via routes_ercot.py). This is a target-existence registry only, kept
+#: separate from `PRODUCTS` so it's never mistaken for a real served product; `pjm_emergency_
+#: performance_event` (catalogue.py, owner: market) has no handler in `ogsim.market.anomalies.
+#: MARKET_ANOMALY_TYPES` yet -- injecting it is a no-op until that wiring lands.
+SIMULATED_PJM_ZONES = frozenset({"pjm-zone-aep-01"})
+
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_SETTLEMENT_POINT_TYPE = "LZ"
 

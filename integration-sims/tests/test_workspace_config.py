@@ -173,7 +173,11 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     below to have zero effect on the simulated base fleet (`ZoneBlockConfig`'s docstring: a disabled
     block reserves no ids and changes nothing) -- it is excluded from the raw dict-equality check
     because it is the one field this shipped YAML deliberately does NOT match the bare
-    "does-not-exist.yaml" built-in default (`()`, no blocks at all) on."""
+    "does-not-exist.yaml" built-in default (`()`, no blocks at all) on. `substation_assets` is
+    excluded for the same reason (D-29(b) enables one by default in the shipped YAML). `mobile_units`
+    (#33 target-check, D-31, 2026-09-26) is excluded too: it's a target-existence registry with no
+    effect on the simulated fleet at all (`MobileUnitConfig`'s docstring), but shipped fleet.yaml
+    declares `trailer-mb-01` while the bare built-in default has none."""
     for loader, path in (
         (load_fleet_config, DEFAULT_FLEET_CONFIG_PATH),
         (load_scada_config, DEFAULT_SCADA_CONFIG_PATH),
@@ -184,6 +188,8 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
         builtin.pop("zone_blocks", None)
         shipped.pop("substation_assets", None)
         builtin.pop("substation_assets", None)
+        shipped.pop("mobile_units", None)
+        builtin.pop("mobile_units", None)
         assert shipped == builtin
     fleet = load_fleet_config()
     assert (fleet.e_kwh_default, fleet.p_kw_default, fleet.dual_unit_share) == (39.2, 11.0, 0.2)
@@ -196,6 +202,11 @@ def test_shipped_yaml_matches_the_built_in_defaults(production: pytest.MonkeyPat
     # demo (its zone_blocks/LZ_AEN home-fleet block above stays disabled independently).
     assert fleet.substation_assets[0].enabled is True
     assert (fleet.substation_assets[0].rated_mw, fleet.substation_assets[0].duration_h) == (20.0, 2.0)
+    # #33 target-check / D-31, 2026-09-26: matches SERVICES' mobile_storage_home_stations.toml
+    # [[assignment]] 1:1 (trailer-mb-01 -> hs-austin-north-01).
+    assert [(u.trailer_id, u.home_station_id) for u in fleet.mobile_units] == [
+        ("trailer-mb-01", "hs-austin-north-01")
+    ]
 
 
 # --- broker credentials ----------------------------------------------------------------------

@@ -99,6 +99,25 @@ class SubstationAssetConfig:
     enabled: bool = False
 
 
+@dataclass(frozen=True)
+class MobileUnitConfig:
+    """One simulated mobile battery/trailer unit (D-31, 2026-09-26: docs/orchestrator/07-delivery/
+    11-decision-log.md -- a mobile unit is NEVER charged from the fleet, only from its home station's
+    own grid connection). Mirrors SERVICES' `orchestrator/config/service_profiles/
+    mobile_storage_home_stations.toml` `[[assignment]]` 1:1 -- same `trailer_id`/`bank_id` and
+    `home_station_id` id space (`trailer_id` IS the `og.bank.bank_id`/`og.hub.hub_id` once the D-31
+    migration lands; today it's a plain string, no DB row).
+
+    This is a target-existence registry only, for the #33 scenario target-check (svc-mobile-storage.
+    yaml's `trailer-mb-01`) -- `ogsim.fleet` does not simulate a mobile unit's physics (charge/
+    discharge/SoC) as a `FleetState` hub yet; `mobile_deployment_start`/`mobile_home_station_charge`
+    aren't wired into `ogsim.control.injector.Injector` either (see svc-mobile-storage.yaml's own
+    docstring for the still-pending FLEET-SIM wiring)."""
+
+    trailer_id: str
+    home_station_id: str
+
+
 def bank_topology(
     bank_count: int, zones: tuple[str, ...], zone_blocks: tuple[ZoneBlockConfig, ...]
 ) -> tuple[list[str], list[str]]:
@@ -269,6 +288,9 @@ class FleetConfig:
     # Optional substation-sited battery-set assets (D11 SUBSTATION_BESS, `SubstationAssetConfig`'s
     # docstring); empty by default, so no substation asset is simulated unless explicitly configured.
     substation_assets: tuple[SubstationAssetConfig, ...] = ()
+    # Mobile-unit (trailer) registry (#33 target-check, D-31, 2026-09-26); see `MobileUnitConfig`'s
+    # docstring. Empty by default -- a workspace/deployment without any mobile units configures none.
+    mobile_units: tuple[MobileUnitConfig, ...] = ()
     guardian_public_key_path: str = "/etc/opengrid/guardian_ed25519.pub"
     guardian_public_key_path_dev: str = ""
     safestop_public_key_path: str = "/etc/opengrid/safestop_ed25519.pub"
@@ -373,6 +395,7 @@ def load_fleet_config(path: str | None = None) -> FleetConfig:
             raw.get("peak_power_budget_s_default", defaults.peak_power_budget_s_default)
         ),
         substation_assets=_substation_assets_from_raw(raw.get("substation_assets", [])),
+        mobile_units=_mobile_units_from_raw(raw.get("mobile_units", [])),
         guardian_public_key_path=str(raw.get("guardian_public_key_path", defaults.guardian_public_key_path)),
         guardian_public_key_path_dev=str(
             os.environ.get("OGSIM_GUARDIAN_PUBLIC_KEY_PATH") or raw.get("guardian_public_key_path_dev", "")
@@ -459,6 +482,25 @@ def _firmware_from_raw(raw_firmware: Any, default: dict[str, Any]) -> dict[str, 
     if isinstance(raw_firmware.get("failure_kinds"), list):
         merged["failure_kinds"] = tuple(str(k) for k in raw_firmware["failure_kinds"])
     return merged
+
+
+def _mobile_units_from_raw(raw_units: Any) -> tuple[MobileUnitConfig, ...]:
+    """Reads the optional `mobile_units:` YAML list (`MobileUnitConfig`'s docstring); a missing key,
+    non-list value, or non-mapping entry parses to "no mobile units" (same permissive-default policy
+    as `_zone_blocks_from_raw`/`_substation_assets_from_raw`)."""
+    if not isinstance(raw_units, list):
+        return ()
+    units = []
+    for unit in raw_units:
+        if not isinstance(unit, dict):
+            continue
+        units.append(
+            MobileUnitConfig(
+                trailer_id=str(unit["trailer_id"]),
+                home_station_id=str(unit["home_station_id"]),
+            )
+        )
+    return tuple(units)
 
 
 def _inverter_pq_fields(raw: dict[str, Any], defaults: FleetConfig) -> dict[str, Any]:
