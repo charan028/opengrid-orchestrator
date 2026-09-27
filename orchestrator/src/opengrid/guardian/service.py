@@ -74,6 +74,9 @@ _ITEM_LEVEL_RULES = frozenset(
 XFMR_UNMAPPED_ALERT_RULE = "ALR-XFMR-UNMAPPED"
 #: A bank with no feeder mapping: G-06/G-28/G-32 are skipped for it (vetoed with fail_closed_missing_topology).
 BANK_UNMAPPED_ALERT_RULE = "ALR-BANK-UNMAPPED-TOPOLOGY"
+#: A bank with no substation topology (og.asset mapping or og.substation_limit row): G-29 is skipped for it
+#: (vetoed with fail_closed_missing_topology).
+SUBSTATION_UNMAPPED_ALERT_RULE = "ALR-SUBSTATION-UNMAPPED-TOPOLOGY"
 #: K11: a verdict's GUARDIAN_VERDICT trace row could not be written (the verdict itself stands).
 TRACE_VERDICT_ALERT_RULE = "ALR-TRACE-VERDICT-WRITE-FAILED"
 guardian_trace_verdict_failures_total = Counter(
@@ -484,29 +487,37 @@ class GuardianService:
         return violations
 
     async def _check_unmapped_bank(
-        self, bank_id: str, hub_items: list[ProposedItem], snapshots: dict[str, HubSnapshot]
+        self,
+        bank_id: str,
+        hub_items: list[ProposedItem],
+        snapshots: dict[str, HubSnapshot],
+        *,
+        rule_id: str = flow_checks.G28,
+        reason: str = flow_checks.BANK_TOPOLOGY_UNMAPPED,
+        alert_rule: str = BANK_UNMAPPED_ALERT_RULE,
+        summary: str = "bank has no feeder mapping: G-06/G-28/G-32 are not evaluated for it (09 S2.6)",
     ) -> list[CheckOutcome]:
-        """A bank with no feeder mapping skips G-06/G-28/G-32: always ALR-BANK-UNMAPPED-TOPOLOGY (a warning,
-        deduped per bank by the alert port), and with `fail_closed_missing_topology` a batch that raises the
-        bank's net |setpoint| is vetoed (09 S2.6)."""
-        await self._alert_unmapped_bank(bank_id)
+        """A bank whose feeder (G-06/G-28/G-32) or substation (G-29) topology is missing: always the alert (a
+        warning, deduped per bank by the alert port), and with `fail_closed_missing_topology` only relief is
+        signed -- |net setpoint| no larger and on the same side of zero (09 S2.6)."""
+        await self._alert_missing_topology(alert_rule, summary, bank_id)
         if not self.config.flow_fail_closed_missing_topology:
             return []
         seen = [item for item in hub_items if item.hub_id in snapshots]
         prev = sum(snapshots[item.hub_id].prev_p_kw for item in seen)
         new = sum(item.p_kw_setpoint for item in seen)
-        outcome = flow_checks.check_unmapped_bank(bank_id, prev, new)
+        outcome = flow_checks.check_unmapped_bank(bank_id, prev, new, rule_id=rule_id, reason=reason)
         return [] if outcome.ok else [outcome]
 
-    async def _alert_unmapped_bank(self, bank_id: str) -> None:
+    async def _alert_missing_topology(self, alert_rule: str, summary: str, bank_id: str) -> None:
         alerts = self.ports.alerts
         if alerts is None:
             return
         try:
             await alerts.raise_alert(
-                BANK_UNMAPPED_ALERT_RULE,
+                alert_rule,
                 "warning",
-                "bank has no feeder mapping: G-06/G-28/G-32 are not evaluated for it (09 S2.6)",
+                summary,
                 bank_id,
                 {
                     "bank_id": bank_id,
@@ -514,7 +525,7 @@ class GuardianService:
                 },
             )
         except Exception:
-            logger.exception("failed to raise %s", BANK_UNMAPPED_ALERT_RULE)
+            logger.exception("failed to raise %s", alert_rule)
 
     def _flow_policy(self) -> flow_checks.FlowPolicy:
         c = self.config
@@ -589,6 +600,18 @@ class GuardianService:
                 reasons.R_TERRITORY_EXPORT,
             ),
         ]
+        if aggregates[1][1] is None:
+            violations.extend(
+                await self._check_unmapped_bank(
+                    proposal.bank_id,
+                    hub_items,
+                    snapshots,
+                    rule_id="G-29",
+                    reason=flow_checks.SUBSTATION_TOPOLOGY_UNMAPPED,
+                    alert_rule=SUBSTATION_UNMAPPED_ALERT_RULE,
+                    summary="bank has no substation mapping or limits: G-29 is not evaluated for it (09 S2.6)",
+                )
+            )
         for rule_id, flow, reverse_reason, forward_reason in aggregates:
             if flow is None:
                 continue
