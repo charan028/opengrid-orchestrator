@@ -60,7 +60,7 @@ def test_an_as_award_holds_capacity_at_0_kw_until_ercot_deploys_it(stack: Stack)
     # The intake prices hourly Non-Spin offers for every active ERCOT_AS contract; end this one now so only
     # the award under test holds fleet capacity and energy.
     stack.end_contract(contract_id)
-    assert award["state"] == "COMMITTED", award
+    stack.require_committed(award, "the AS award")
     reserved = stack.rows(
         "SELECT sum(amount) AS kw FROM og.reservation WHERE obligation_id = %(o)s AND kind = 'POWER_KW' "
         "AND released_at IS NULL AND interval_start = %(s)s",

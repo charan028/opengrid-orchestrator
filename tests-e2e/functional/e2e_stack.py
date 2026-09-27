@@ -137,7 +137,10 @@ class Stack:
         return self.http.patch(f"{self.api_base}{path}", headers=self.headers(user), json=body)
 
     def control(self, method: str, path: str, body: dict[str, Any] | None = None) -> httpx.Response:
-        return self.http.request(method, f"{self.control_base}{path}", json=body)
+        # R3: the sim control plane refuses a state-changing request without this CSRF marker (403).
+        return self.http.request(
+            method, f"{self.control_base}{path}", json=body, headers={"X-OGSim-Request": "1"}
+        )
 
     def rows(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         with psycopg.connect(self.dsn, row_factory=dict_row) as conn:
@@ -386,6 +389,48 @@ class Stack:
             timeout=180,
         )
 
+    def metric(self, service: str, port: int, name: str) -> float | None:
+        """Sum of a Prometheus counter/gauge `name` scraped from a dev-stack container's loopback-only
+        `/metrics` (via `docker compose exec`, since the endpoint never binds a published port). `None` when
+        the endpoint or the series is absent."""
+        docker = shutil.which("docker")
+        if docker is None:
+            pytest.skip("docker CLI not available to scrape a loopback metrics endpoint")
+        script = (
+            "import urllib.request; "
+            f"print(urllib.request.urlopen('http://127.0.0.1:{port}/metrics', timeout=5).read().decode())"
+        )
+        compose_file = str(REPO_ROOT / "dev" / "docker-compose.yml")
+        done = subprocess.run(  # noqa: S603 -- fixed argv, test-authored service name and script
+            [docker, "compose", "-f", compose_file, "exec", "-T", service, "python", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if done.returncode != 0:
+            return None
+        values = [
+            float(line.rsplit(" ", 1)[1])
+            for line in done.stdout.splitlines()
+            if line.startswith(name) and not line.startswith("#")
+        ]
+        return sum(values) if values else None
+
+    def restart_count(self, service: str) -> int:
+        """How many times Docker has restarted a dev-stack service's container (the systemd-restart analogue)."""
+        docker = shutil.which("docker")
+        if docker is None:
+            pytest.skip("docker CLI not available")
+        done = subprocess.run(  # noqa: S603 -- fixed argv
+            [docker, "inspect", "-f", "{{.RestartCount}}", f"dev-{service}-1"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        return int(done.stdout.strip() or 0)
+
     def heartbeat_age_s(self, process: str) -> float | None:
         found = self.rows(
             "SELECT extract(epoch FROM now() - ts) AS age FROM og.heartbeat WHERE process = %(p)s",
@@ -407,6 +452,15 @@ class Stack:
         )
         assert proposed.status_code == 202, proposed.text
         return self.post(f"/fleet/command/{proposed.json()['proposal_id']}/confirm", user=user)
+
+    def bank_verdicts(self, bank_id: str, since: datetime) -> list[dict[str, Any]]:
+        """The guardian's verdicts on this bank's engine batches created since `since` (R3: manual commands
+        ramp through the engine, so every step to a bank shows up here, not as a per-command verdict)."""
+        return self.rows(
+            """SELECT v.outcome, v.vetoed_rule_ids FROM og.verdict v JOIN og.command_batch b USING (command_batch_id)
+               WHERE b.created_at >= %(t)s AND b.submission_id LIKE %(sub)s""",
+            {"t": since, "sub": f"%{bank_id}%"},
+        )
 
     def online_hub(self, *, exclude_banks: tuple[str, ...] = (), idle: bool = False) -> dict[str, Any]:
         """An online hub (params + live state) in the ERCOT competitive area, outside `exclude_banks`. `idle=True` wants one at 0 kW, i.e.
@@ -451,7 +505,8 @@ class Stack:
         modes = [row["mode"] for row in self.rows("SELECT mode FROM og.degraded_mode_state")]
         pytest.skip(
             f"{what} was not committed ({obligation['state']}); degraded modes: {modes or 'none'}. The selector "
-            "withholds banks without a zone price forecast (NOT_FOR_FIRM): let the forecast build history"
+            "withholds banks without a zone price forecast (NOT_FOR_FIRM, ~3 days of history on a fresh DB): "
+            "backfill it with orchestrator/tools/ercot_backfill.py (see its --status/--dry-run) before this suite"
         )
 
     def free_window(
