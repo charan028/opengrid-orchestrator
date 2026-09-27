@@ -1,0 +1,7 @@
+season,duration,battery_days,batteries,fleet_capture,median_battery_capture
+summer 2025,under 1.2 h,6018,109,0.192,0.183
+summer 2025,1.2 to 1.8 h,3174,59,0.354,0.357
+summer 2025,1.8 h or more,3797,71,0.363,0.369
+summer 2026,under 1.2 h,3089,140,0.265,0.297
+summer 2026,1.2 to 1.8 h,1642,99,0.386,0.347
+summer 2026,1.8 h or more,3664,154,0.45,0.432
