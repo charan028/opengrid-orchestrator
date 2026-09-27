@@ -138,7 +138,8 @@ _LATEST_SUMMARIES_SQL = sql.SQL(
 #   - phase_presence:  bool_or(v_rms_<phase> IS NOT NULL)           <-> `_infer_phase_connection`'s
 #     "which v_rms_<phase> was EVER populated" set, via `characterize._phase_connection_from_presence`
 #   - latest_harmonics: DISTINCT ON (hub_id) ... ORDER BY ts DESC   <-> `_dominant_harmonics`'s "most
-#     recent non-null harmonics_i"
+#     recent non-null, non-EMPTY harmonics_i" (L-7 fix: `<> '{}'::jsonb` matches Python's truthiness
+#     check on the dict, not just NULL)
 # freq_agg/voltage_agg are INNER JOINed (both required -- matches `_aggregate_hub`'s
 # "if not freq_values or not voltage_devs: return None"); thd/angle/harmonics are LEFT JOINed with the
 # same defaults Python uses when that list is empty (0.0 / None).
@@ -191,7 +192,13 @@ phase_presence AS (
 latest_harmonics AS (
     SELECT DISTINCT ON (hub_id) hub_id, harmonics_i
     FROM window_rows
-    WHERE harmonics_i IS NOT NULL
+    -- L-7 fix: `characterize._dominant_harmonics` treats an empty `{}` block as absent (Python
+    -- truthiness: `if summary.harmonics_i:`), skipping it to look further back for a real one. This
+    -- CTE previously only excluded NULL, so a hub whose LATEST sample had an empty (but non-null)
+    -- harmonics_i disagreed with Python: SQL picked the empty `{}`, Python skipped it. Matching
+    -- Python's condition exactly here keeps the two paths identical (proven by
+    -- test_characterize.py's equivalence test, which now covers this empty-harmonics case).
+    WHERE harmonics_i IS NOT NULL AND harmonics_i <> '{}'::jsonb
     ORDER BY hub_id, ts DESC
 )
 SELECT

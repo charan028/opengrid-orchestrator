@@ -114,6 +114,23 @@ def test_characterize_hub_no_harmonics_block_in_window_is_none():
     assert result.dominant_harmonics is None
 
 
+def test_characterize_hub_skips_a_latest_but_empty_harmonics_block():
+    """R3.4.3 (L-7): `pg_backend.latest_summary_aggregates`'s SQL disagreed with this Python path when
+    the LATEST sample's `harmonics_i` was an empty (but non-null) `{}` block -- the SQL's
+    `WHERE harmonics_i IS NOT NULL` picked it (matching NULL only), while `_dominant_harmonics`'s Python
+    truthiness check (`if summary.harmonics_i:`) treats `{}` as absent and keeps looking further back.
+    The SQL now excludes `{}` too (`<> '{}'::jsonb`); this pins down the Python side's half of that
+    contract so a future change here can't silently reintroduce the mismatch."""
+    older_with_data = _summary(
+        ts=datetime(2026, 9, 27, 0, 0, 0, tzinfo=UTC),
+        harmonics_i={"3": HarmonicComponent(mag_pct=1.2, angle_deg=30.0)},
+    )
+    newest_but_empty = _summary(ts=datetime(2026, 9, 27, 0, 1, 0, tzinfo=UTC), harmonics_i={})
+    result = characterize_hub("hub-00000", [older_with_data, newest_but_empty], now=NOW)
+    assert result is not None
+    assert result.dominant_harmonics == {"3": {"mag_pct": 1.2, "angle_deg": 30.0}}
+
+
 def test_characterize_fleet_groups_by_hub_and_skips_hubs_without_enough_data():
     summaries = [
         _summary(hub_id="hub-00000"),
