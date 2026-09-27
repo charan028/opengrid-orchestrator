@@ -1134,3 +1134,39 @@ async def test_firmware_status_handler_validates_then_records(monkeypatch) -> No
     monkeypatch.setattr(mqtt, "validate_payload", lambda kind, payload: None)
     await handler({"hub_id": "h1"})
     assert recorded == [{"hub_id": "h1"}]
+
+
+@pytest.mark.asyncio
+async def test_a_retained_device_info_burst_of_2501_hubs_is_ingested_without_drops(monkeypatch) -> None:
+    """Live r3 19:03: the retained burst overflowed the default 500-slot queue (2,000 dropped)."""
+    import asyncio
+    import importlib
+    import types
+
+    upserted: list[str] = []
+
+    async def upsert(pool, msg):
+        upserted.append(msg["hub_id"])
+
+    fake = types.ModuleType("opengrid.fleet.device_info")
+    fake.upsert_device_info = upsert  # type: ignore[attr-defined]
+    real_import = importlib.import_module
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name, *a: fake if name == "opengrid.fleet.device_info" else real_import(name, *a),
+    )
+    cfg = Config({"mqtt": {"topic_root": "og/v1"}})
+    worker = engine.build_device_info_worker("pool", cfg)
+    messages = [(f"og/v1/hub/hub-{i:05d}/info", {"hub_id": f"hub-{i:05d}"}) for i in range(2501)]
+    # The whole burst lands before the worker gets a turn (retained messages on connect).
+    await engine._mqtt_ingest_loop(_FakeMqtt(messages), cfg, raw_worker=None, device_info_worker=worker)  # type: ignore[arg-type]
+    assert worker.dropped == 0
+    task = asyncio.create_task(worker.run())
+    await worker.drain()
+    task.cancel()
+    assert len(upserted) == 2501 and worker.dropped == 0
+    small = engine.build_device_info_worker("pool", Config({"mqtt": {"device_info_queue_max": 3}}))
+    for i in range(5):
+        small.submit({"payload": {"hub_id": str(i)}})
+    assert small.dropped == 2  # the size is configurable
