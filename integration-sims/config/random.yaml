@@ -171,13 +171,17 @@ types:
     rate_per_hour: 0.1
     duration_s: [600, 3600]
     params: { home_load_kw: [4, 10] }
-  # Manual/scenario-only (build phase, 2026-09-26): a mobile trailer deployment/relocation is a
-  # deliberate dispatch decision, never a random background nuisance.
+  # Manual/scenario-only (build phase, 2026-09-26): a mobile trailer deployment/relocation/home-station
+  # charge is a deliberate dispatch decision, never a random background nuisance.
   mobile_deployment_start:
     rate_per_hour: 0.0
     duration_s: [0, 0]
     params: {}
   mobile_deployment_relocate:
+    rate_per_hour: 0.0
+    duration_s: [0, 0]
+    params: {}
+  mobile_home_station_charge:
     rate_per_hour: 0.0
     duration_s: [0, 0]
     params: {}

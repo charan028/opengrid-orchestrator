@@ -97,6 +97,16 @@ substation_assets:
     duration_h: 2.0
     enabled: true
 
+# Mobile-unit (trailer) registry (#33 target-check, D-31, 2026-09-26). A target-existence registry
+# only -- ogsim.fleet does not simulate a mobile unit's physics as a FleetState hub yet (D-31: never
+# charged from the fleet; see `ogsim.common.config.MobileUnitConfig`'s docstring). Mirrors SERVICES'
+# orchestrator/config/service_profiles/mobile_storage_home_stations.toml `[[assignment]]` 1:1 -- same
+# trailer_id/home_station_id ids (that file also lists hs-austin-north-01's own zone/lat/lon/
+# charger_kw, kept there since a home station is a charging depot, not a fleet hub/bank).
+mobile_units:
+  - trailer_id: trailer-mb-01
+    home_station_id: hs-austin-north-01
+
 guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
 # Local/dev override (hex or base64 32-byte Ed25519 public key), takes
 # precedence over guardian_public_key_path when non-empty:

@@ -406,6 +406,27 @@ CATALOGUE: list[AnomalyType] = [
         wire_type="FLEET_MOBILE_DEPLOYMENT_RELOCATE",
         wire_target_kind="asset",
     ),
+    AnomalyType(
+        id="mobile_home_station_charge",
+        owner="fleet",
+        target_kind="asset (mobile trailer, e.g. trailer-mb-01)",
+        params={
+            "home_station_id": {"type": "string", "default": ""},
+            "start_soc_pct": {"type": "number", "default": 40.0},
+            "target_soc_pct": {"type": "number", "default": 92.0},
+        },
+        description=(
+            "A mobile trailer charges at its registered home station (D-31, 2026-09-26: docs/orchestrator/"
+            "07-delivery/11-decision-log.md -- NEVER from the fleet or a customer deployment site), from "
+            "that station's own grid connection. The only legitimate source of a mobile unit's charge in "
+            "any ogsim-driven simulation of a MOBILE_STORAGE contract. Registered 2026-09-26 for "
+            "`svc-mobile-storage.yaml` (SERVICES agent), which had used this type as a stand-in ahead of "
+            "its catalogue registration; validated against fleet.yaml's `mobile_units:` registry (#33 "
+            "target-check)."
+        ),
+        wire_type="FLEET_MOBILE_HOME_STATION_CHARGE",
+        wire_target_kind="asset",
+    ),
     # ---- Power quality / inverter imperfection (owner: fleet, 06-service-profiles-and-
     # power-quality.md §7.2/§7.5) -- applied by ogsim.fleet.pq.PqAnomalyManager. ----
     AnomalyType(

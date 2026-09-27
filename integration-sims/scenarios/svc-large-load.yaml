@@ -11,12 +11,18 @@ description: >
   integration-sims/src/ogsim/control/catalogue.py) as a stand-in load-step trigger, since its wire
   shape (CUSTOMER_LOAD_STEP at a site) is generic to any site-metered customer load, not
   DATA_CENTER-specific in mechanism -- only its description names DATA_CENTER. A LARGE_LOAD-specific
-  "large_load_curtailment_request" type (mirroring it 1:1, correctly described) is the cleaner long-term
-  fix; see the SERVICES agent's 2026-09-26 report for that FLEET-SIM/customer wiring line.
+  "large_load_curtailment_request" type (mirroring it 1:1, correctly described) now also exists in the
+  catalogue (registered 2026-09-26); switching this step to it is a separate, later cleanup.
+
+  Target fix (#33 target-check, 2026-09-26): `ogsim.customer.anomalies.CustomerAnomalyManager`
+  resolves a CUSTOMER_* target by customer_id, not site_id -- the old `site-large-load-crypto-01`
+  ref matched nothing in any sim config (config/customer.yaml's LARGE_LOAD row's own `site_id` is
+  `large-load-crypto-01`, no "site-" prefix, and isn't what customer targets resolve against anyway).
+  Retargeted to the real LARGE_LOAD `customer_id` (config/customer.yaml).
 steps:
   - at_s: 0
     type: load_step_datacenter
-    target: site-large-load-crypto-01
+    target: "00000000-0000-7000-8000-0000000000ca"  # LARGE_LOAD customer_id (config/customer.yaml)
     params: {step_kw: 2000.0}
     duration: 1800
   - at_s: 300
