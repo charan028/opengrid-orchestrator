@@ -259,7 +259,9 @@ async def test_claude_covers_screening_when_typesafe_is_preferred_but_fails() ->
 
 async def test_explanations_stay_with_claude_whichever_provider_screens() -> None:
     claude = FakeProvider("claude")
-    typesafe = FakeProvider("typesafe", screen_model="jev-latest", explain_model=None)
+    typesafe = FakeProvider(
+        "typesafe", intent="explain_decision", screen_model="jev-latest", explain_model=None
+    )
     trace = RecordingTrace()
 
     answer = await _service(claude, typesafe, screening_provider="typesafe").ask(
