@@ -19,6 +19,8 @@ from typing import Literal
 from opengrid.core import limits as core_limits
 from opengrid.core import reasons
 from opengrid.core.physics import BankParams, HubParams
+from opengrid.core.services import ERCOT_AS_SERVICE_TYPE
+from opengrid.core.services import HOLD_SERVICE_TYPES as HOLD_SERVICE_TYPES
 from opengrid.core.timeutil import check_command_freshness, clock_offset_ok
 from opengrid.guardian.ports import L2Instruction, ProposedItem
 from opengrid.market.territory import TERRITORY_REASONS
@@ -439,9 +441,9 @@ def check_g19_need_basis(
 
 
 #: `og.obligation.service_type`s held at 0 kW with R-GRANT-AS-HOLD until deployed (og.as_deployment): an ERCOT
-#: ancillary-service award, and a REGULATED_CAPACITY utility toll (D-29, deployed only per obligation).
-AS_SERVICE_TYPE = "ERCOT_AS"
-HOLD_SERVICE_TYPES = frozenset({AS_SERVICE_TYPE, "REGULATED_CAPACITY"})
+#: ancillary-service award, and a REGULATED_CAPACITY utility toll (D-29, deployed only per obligation) --
+#: `core.services`, the one definition shared with the allocator and the K13 invariant.
+AS_SERVICE_TYPE = ERCOT_AS_SERVICE_TYPE
 
 
 def check_g19_as_hold(

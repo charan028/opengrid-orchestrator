@@ -16,9 +16,10 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
-from opengrid.allocator.models import HOLD_SERVICE_TYPES, HubSnapshot
+from opengrid.allocator.models import HubSnapshot
 from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.core.reasons import K13_SHORTFALL_REASONS, R_AS_RELEASE, R_SUBSTITUTION
+from opengrid.core.services import HOLD_SERVICE_TYPES
 from opengrid.invariants import checks
 from opengrid.invariants.models import CheckState, InvariantsSummary, Violation
 
@@ -293,7 +294,7 @@ async def fetch_hold_windows(
     window_start: datetime,
     window_end: datetime,
 ) -> tuple[checks.HoldWindow, ...] | None:
-    """K13 for capacity holds (`allocator.models.HOLD_SERVICE_TYPES`: ERCOT_AS, REGULATED_CAPACITY): the
+    """K13 for capacity holds (`core.services.HOLD_SERVICE_TYPES`: ERCOT_AS, REGULATED_CAPACITY): the
     `og.as_deployment` windows covering `obligation_id` inside `[window_start, window_end)` -- its own rows,
     plus the fleet-wide (`obligation_id IS NULL`) ones for an ERCOT_AS award, the same match the AS hold check
     uses -- each ending at `min(end_at, cancelled_at)` with its deployed kW (`checks.HoldWindow`). Returns

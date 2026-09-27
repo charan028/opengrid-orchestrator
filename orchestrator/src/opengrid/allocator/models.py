@@ -18,14 +18,14 @@ from typing import TYPE_CHECKING, Any, Literal
 from opengrid.core.models.engine import ServiceType
 from opengrid.core.models.market import Territory
 from opengrid.core.physics import DEFAULT_ETA_C, DEFAULT_ETA_D
+
+# Services held at 0 kW until called (`og.as_deployment` active for the obligation), then delivered up to
+# `committed_kw`: ONE definition in core (ERCOT_AS and the D-29 toll), re-exported for this package's callers.
+from opengrid.core.services import HOLD_SERVICE_TYPES as HOLD_SERVICE_TYPES
 from opengrid.market.territory import FREE, MarketRef
 
 if TYPE_CHECKING:
     from opengrid.allocator.pq_eligibility import EligibilityResult
-
-#: Services held at 0 kW until called (`og.as_deployment` active for the obligation), then delivered up to
-#: `committed_kw`: ERCOT_AS (NPRR1282) and the utility toll (D-29: REGULATED_CAPACITY, variant TOLLING).
-HOLD_SERVICE_TYPES: frozenset[str] = frozenset({"ERCOT_AS", "REGULATED_CAPACITY"})
 
 Tier = Literal["T1", "T2", "T3", "T4"]
 TIER_ORDER: tuple[Tier, ...] = ("T1", "T2", "T3", "T4")
