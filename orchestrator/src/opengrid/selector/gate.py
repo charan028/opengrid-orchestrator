@@ -52,6 +52,7 @@ from opengrid.fleet import bank_feeder as fleet_bank_feeder
 from opengrid.fleet import capability as fleet_capability
 from opengrid.fleet import hub_capabilities as fleet_hub_capabilities
 from opengrid.fleet import rated_discharge_kw as fleet_rated_discharge_kw
+from opengrid.health.model import HealthThresholds
 from opengrid.market import (
     MarketModel,
     MarketModelError,
@@ -589,6 +590,18 @@ def mobile_units_at_home(
     }
 
 
+def _hub_stale_s() -> float | None:
+    """`[health].hub_stale_s` for the stationary position rule (`core.geo.fresh_positions`); None (report
+    age only, stricter) when the config is unreadable."""
+    try:
+        return float(HealthThresholds.from_config(load_config()).hub_stale_s)
+    except Exception:
+        logger.warning(
+            "selector: config unreadable; mobile positions judged on report age only", exc_info=True
+        )
+        return None
+
+
 async def load_mobile_units_at_home(mobile_bank_ids: Sequence[str]) -> dict[str, bool]:
     """`mobile_units_at_home` over the registry's station coordinates and each unit's fresh device-reported
     position (never the seeded `og.hub.lat/lon`, which is the home station). A failed position read plans
@@ -596,7 +609,7 @@ async def load_mobile_units_at_home(mobile_bank_ids: Sequence[str]) -> dict[str,
     if not mobile_bank_ids:
         return {}
     try:
-        positions = await db.load_hub_positions(list(mobile_bank_ids))
+        positions = await db.load_hub_positions(list(mobile_bank_ids), telemetry_max_age_s=_hub_stale_s())
     except Exception:
         logger.warning(
             "selector: mobile unit positions unreadable; no mobile charging this gate", exc_info=True

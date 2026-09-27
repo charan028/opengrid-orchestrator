@@ -413,10 +413,12 @@ class ConfigMobileUnitPort:
 
     Location: the guardian's own read of the unit's DEVICE-REPORTED position (`core.geo.DEVICE_POSITIONS_SQL`:
     `og.hub.device_lat/device_lon`, stamped `device_info_at`, written by the device-info intake from each
-    report), accepted only while fresher than `max_age_s` (`core.geo.fresh_positions`). Never `og.hub.lat/
-    lon`, which is the seeded home station and never moves. The unit is at home per `core.geo.
-    at_home_station` (the one rule the selector's charge planning uses too). No pool, no station coordinates,
-    or a missing or stale report is UNKNOWN, which G-35 treats as away (fail closed)."""
+    report), trusted per `core.geo.fresh_positions`: while younger than `max_age_s`, or -- the stationary
+    rule -- while the unit's telemetry is younger than `telemetry_max_age_s` (`[health].hub_stale_s`; a unit
+    that moves must re-report). Never `og.hub.lat/lon`, which is the seeded home station and never moves. The
+    unit is at home per `core.geo.at_home_station` (the one rule the selector's charge planning uses too). No
+    pool, no station coordinates, no reported position, or an old report with stale telemetry is UNKNOWN,
+    which G-35 treats as away (fail closed)."""
 
     def __init__(
         self,
@@ -426,6 +428,7 @@ class ConfigMobileUnitPort:
         *,
         radius_km: float = geo.HOME_STATION_RADIUS_KM,
         max_age_s: float = geo.MOBILE_POSITION_MAX_AGE_S,
+        telemetry_max_age_s: float | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sites = dict(sites or {})
@@ -433,6 +436,7 @@ class ConfigMobileUnitPort:
         self._pool = pool
         self._radius_km = radius_km
         self._max_age_s = max_age_s
+        self._telemetry_max_age_s = telemetry_max_age_s
         self._clock = clock
 
     def is_mobile(self, hub_or_bank_id: str) -> bool:
@@ -444,7 +448,9 @@ class ConfigMobileUnitPort:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(geo.DEVICE_POSITIONS_SQL, {"ids": [hub_id]})
             rows = await cur.fetchall()
-        return geo.fresh_positions(rows, self._clock(), max_age_s=self._max_age_s).get(hub_id)
+        return geo.fresh_positions(
+            rows, self._clock(), max_age_s=self._max_age_s, telemetry_max_age_s=self._telemetry_max_age_s
+        ).get(hub_id)
 
     async def at_home_station(self, hub_id: str) -> bool | None:
         site = self._sites.get(hub_id)

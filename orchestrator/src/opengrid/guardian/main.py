@@ -64,6 +64,7 @@ from opengrid.guardian.repo import (
     mark_verdict_published,
 )
 from opengrid.guardian.service import GuardianService
+from opengrid.health.model import HealthThresholds
 from opengrid.platform.config import Config, load_config, resolve_secret
 from opengrid.platform.db import POOL_OPEN_TIMEOUT_S, build_dsn
 from opengrid.platform.heartbeat import write_heartbeat
@@ -420,7 +421,14 @@ async def main() -> None:
     # The at-home check reads each unit's position from og.hub against its home station's coordinates.
     ports = dataclasses.replace(
         ports,
-        mobile_units=ConfigMobileUnitPort(load_mobile_units(), load_mobile_home_station_sites(), pool),
+        mobile_units=ConfigMobileUnitPort(
+            load_mobile_units(),
+            load_mobile_home_station_sites(),
+            pool,
+            # Stationary rule (core.geo): a parked truck that reports on change only stays at its last
+            # reported position while its telemetry is fresh ([health].hub_stale_s).
+            telemetry_max_age_s=HealthThresholds.from_config(cfg).hub_stale_s,
+        ),
     )
     calibration_queue = PgCalibrationQueuePort(pool)
 

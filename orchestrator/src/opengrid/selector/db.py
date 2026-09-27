@@ -166,19 +166,19 @@ async def load_grandfathered_pairs() -> list[tuple[str, str]]:
 #: Since H4 that is `og.hub.device_lat/device_lon` (a report writes only those; `og.hub.lat/lon` stays the
 #: seeded home station), read through `core.geo.DEVICE_POSITIONS_SQL` and accepted only while fresh.
 async def load_hub_positions(
-    unit_ids: list[str], now: datetime | None = None
+    unit_ids: list[str], now: datetime | None = None, *, telemetry_max_age_s: float | None = None
 ) -> dict[str, tuple[float, float]]:
-    """Read-only: `id -> (lat, lon)` of the FRESH device-reported position of the hubs whose bank id or hub
+    """Read-only: `id -> (lat, lon)` of the trusted device-reported position of the hubs whose bank id or hub
     id is in `unit_ids`, keyed by both (D-31 mobile units: the selector's at-home test). The one query and
-    freshness rule G-35 uses (`core.geo.DEVICE_POSITIONS_SQL` / `fresh_positions`); a hub with no report,
-    or only a stale one, is absent (unknown: away)."""
+    freshness rule G-35 uses (`core.geo.DEVICE_POSITIONS_SQL` / `fresh_positions`, with the stationary rule
+    when `telemetry_max_age_s` is given); a hub with no trusted position is absent (unknown: away)."""
     if not unit_ids:
         return {}
     pool = await get_pool()
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(geo.DEVICE_POSITIONS_SQL, {"ids": unit_ids})
         rows = await cur.fetchall()
-    return geo.fresh_positions(rows, now or datetime.now(UTC))
+    return geo.fresh_positions(rows, now or datetime.now(UTC), telemetry_max_age_s=telemetry_max_age_s)
 
 
 async def load_degraded_modes() -> frozenset[str]:
