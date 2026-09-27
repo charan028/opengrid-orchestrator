@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from opengrid.ai_agent import fleet as fleet_query
 from opengrid.ai_agent.types import Intent, ProviderName, RouterVerdict
 
 #: Above this the text is treated as an injection attempt and the question is refused rather than sent on.
@@ -28,6 +29,7 @@ INJECTION_THRESHOLD = 0.6
 
 INTENTS: tuple[Intent, ...] = (
     "deterministic_query",
+    "fleet_query",
     "explain_decision",
     "draft_action",
     "out_of_scope",
@@ -39,6 +41,12 @@ INTENT_CRITERIA: dict[str, str] = {
     "deterministic_query": (
         "A factual lookup about current state -- counts, states, values, which items match a "
         "condition -- that can be answered from data the console already holds, with no prose needed"
+    ),
+    "fleet_query": (
+        "Counts, totals, lists or breakdowns of batteries, hubs, units, trucks or substations matching "
+        "conditions -- rated capacity (kWh) or power (kW), state of charge, load zone, bank, availability, "
+        "health, firmware or hardware, asset type (home, dual-unit, substation, truck), trucks at their home "
+        "station, or total available kW/kWh"
     ),
     "explain_decision": (
         "Asks why the optimizer, the guardian or the settlement did something, or asks for an "
@@ -82,12 +90,14 @@ def verdict_from(
     injection_risk: Any,
     provider: ProviderName,
     model: str,
+    fleet: Any = None,
 ) -> RouterVerdict:
     """Normalise one provider's screening answer.
 
     The intent is matched against the literals rather than cast: an unrecognised intent (a model change,
     a typo) becomes a zero-confidence deterministic query, which sends the question down the no-model
-    path instead of reaching the UI.
+    path instead of reaching the UI. `fleet` (the extracted fleet filters, when the provider offers them)
+    goes through `fleet.from_model`, which drops every value outside the tool's vocabulary.
     """
     raw_intent = str(intent) if intent else ""
     known: Intent | None = next((name for name in INTENTS if name == raw_intent), None)
@@ -99,4 +109,5 @@ def verdict_from(
         injection_risk=_probability(injection_risk, unreadable=1.0),
         model=model,
         provider=provider,
+        fleet=fleet_query.from_model(fleet),
     )

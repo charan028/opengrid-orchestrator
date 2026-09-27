@@ -1,5 +1,7 @@
 {# copilot_answer.html -- one question and its answer in the docked panel (issue #26).
-   Params: question: str, answer: dict (text/tier/citations/model/confidence_label/intent/trace_id).
+   Params: question: str, answer: dict (text/tier/citations/model/confidence_label/intent/trace_id/
+   screened_by). `screened_by` names the routing model that screened the question when the text itself
+   came from console data, so a working model is never reported as "no model used".
 
    The `AI-assisted` badge appears only when a model actually produced the text (UI spec S3.0(h)); a
    deterministic answer is not AI-assisted and must not claim to be. Citations are mandatory for any
@@ -19,6 +21,8 @@
     <p class="og-copilot-meta">
       {% if answer.model %}
       <span class="og-ai-badge">AI-assisted &middot; {{ answer.model }}{% if answer.confidence_label %} &middot; confidence: {{ answer.confidence_label }}{% endif %}</span>
+      {% elif answer.screened_by %}
+      <span class="og-copilot-tier">answered from console data &middot; question screened by {{ answer.screened_by }}</span>
       {% else %}
       <span class="og-copilot-tier">answered from console data &middot; no model used</span>
       {% endif %}

@@ -226,6 +226,42 @@ Filters: customer, contract, service, day (market-local, CT).
 - Since R3, **Run chain verify** also works from an unfiltered page: blank From/To are sent as "no filter".
   Every stream is verified whatever the filter.
 
+### 3.9 Copilot (launcher in the footer, every screen)
+
+The copilot is a question panel. It is **advisory only**: it reads what the console reads, cites its sources,
+and cannot command, approve or release anything. Viewers may use it.
+
+**Fleet counts and totals (r3.4.1).** The copilot answers these from the fleet data itself, through the same
+filters as the Fleet table (`GET /og/api/fleet/summary`, read-only). The numbers are exact counts, not
+estimates. For example:
+
+| Ask | What it counts |
+|---|---|
+| "how many units have capacity 78.4 kWh" | hubs rated 78.4 kWh (dual-unit homes) |
+| "how many hubs are below 30% charge in LZ_NORTH" | hubs in LZ_NORTH at or below 30% SoC, lowest charge listed first |
+| "how many trucks are at home" | D-31 trucks within 250 m of their home station (the same rule the guardian's G-35 check uses) |
+| "total available kW in LZ_AEN" | rated kW of LZ_AEN hubs that are online or stale on an available bank |
+| "how many hubs by zone" / "total available kWh by soc bucket" | a breakdown by zone, availability, health, asset class or 20% SoC band |
+| "which units have health issues?" | hubs that are stale, degraded, quarantined, in fault or offline |
+
+It understands rated capacity (kWh) and power (kW) per hub (exact, "over", "under", "between"), charge in
+percent, load zone (`LZ_...`), bank, availability (including regulated market with no contract), health,
+firmware and hardware version, and asset type (home, dual-unit, substation, truck). **Available kWh** is the
+energy above each hub's reserve floor, on hubs that could be dispatched now.
+
+**Reading the line under an answer:**
+
+- "answered from console data · question screened by `<model>`": a model checked the question for intent
+  and prompt injection; every number in the answer came from the console's own records.
+- "AI-assisted · `<model>`": a model wrote the explanation. Any figure it cites must be in the data it was
+  given; if one is not, the explanation is withheld and the console's own answer is shown.
+- "answered from console data · no model used": no model is configured or reachable. Fleet counts still work.
+
+**What reaches a model:** only query results (counts, totals, equipment ids, zones, ratings, SoC, health).
+Never configuration files, credentials, anything under `/etc/opengrid`, household data or positions. With a
+model configured, text that tries to instruct the assistant is refused before any fleet data is read. Model use is capped by the daily budget
+shown on System Health (`GET /og/api/ai/status`).
+
 ## 4. Commitments, in one page
 
 - A customer's opportunity is **Offered**, then **Selected** by the optimizer at a quarter-hour gate, then
