@@ -7,7 +7,7 @@ the utility customer API call. This adapter only translates:
 
 - origin `GRID_LINK`, principal `grid_link:<utility_id>`, idempotency key `ems:<ems_call_id>`;
 - the link's discharge MAGNITUDE into the core's signed kW (`-setpoint_kw`, -discharge);
-- `CallState` / `CallRefused` into `CallOutcome` (ACCEPTED -> ACCEPTED, RAMPING/DELIVERING -> ACTIVE,
+- `CallState` / `CallRefused` into `CallOutcome` (ACCEPTED -> ACCEPTED, ACTIVE -> ACTIVE,
   COMPLETED -> ENDED, REFUSED -> REJECTED with the core's reason code).
 """
 
@@ -35,8 +35,7 @@ __all__ = ["CoreTollCallPort", "idempotency_key", "principal_of"]
 
 _PHASE: dict[CallState, CallPhase] = {
     CallState.ACCEPTED: CallPhase.ACCEPTED,
-    CallState.RAMPING: CallPhase.ACTIVE,
-    CallState.DELIVERING: CallPhase.ACTIVE,
+    CallState.ACTIVE: CallPhase.ACTIVE,
     CallState.COMPLETED: CallPhase.ENDED,
     CallState.REFUSED: CallPhase.REJECTED,
 }
