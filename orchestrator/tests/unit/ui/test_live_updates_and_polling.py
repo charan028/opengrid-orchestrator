@@ -17,6 +17,7 @@ import pytest
 TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "src" / "opengrid" / "ui" / "templates"
 
 _SSE_SCREENS: tuple[tuple[str, str], ...] = (
+    ("story.html", "data.reserve_breach_count"),
     ("control_room.html", "data.fleet_mw"),
     ("fleet.html", "data.hubs"),
     ("health.html", "data.hub_health_counts"),

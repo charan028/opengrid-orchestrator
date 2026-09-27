@@ -1,0 +1,402 @@
+/* The Story screen (/og/story). Tokens only (og.css), so both themes and the contrast gate hold unchanged.
+   A reading surface, not a dashboard: one column of argument, with the live evidence set into it. */
+
+.st {
+  /* `.og-content` is a column flex box. Auto margins on a flex item make it shrink-to-fit in the cross
+     axis, and fit-content can never go below the content's min-content -- which for a six-column table
+     is wider than a phone. An explicit width makes the article the column's width, capped at 980px. */
+  width: 100%;
+  max-width: 980px;
+  min-width: 0;
+  margin: 0 auto;
+  padding: 8px 0 48px;
+}
+
+.st-kicker {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--kicker);
+}
+
+/* --- hero --------------------------------------------------------------------------------------- */
+
+.st-hero {
+  padding: 22px 0 30px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 34px;
+}
+
+.st-thesis {
+  margin: 0 0 18px;
+  font-size: clamp(22px, 3.2vw, 34px);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  font-weight: 650;
+  color: var(--text);
+  text-wrap: balance;
+  max-width: 26ch;
+}
+
+.st-thesis strong {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.st-lede {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 68ch;
+}
+
+/* --- sections ----------------------------------------------------------------------------------- */
+
+.st-section {
+  margin: 0 0 44px;
+}
+
+.st-section h2 {
+  margin: 0 0 12px;
+  font-size: clamp(19px, 2.2vw, 24px);
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  font-weight: 650;
+}
+
+.st-sub {
+  margin: 22px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.st-prose {
+  margin: 0 0 18px;
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--muted);
+  max-width: 72ch;
+}
+
+.st-prose strong,
+.st-why strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.st-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.st-why {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 60ch;
+}
+
+.is-critical {
+  color: var(--status-critical);
+}
+
+/* --- kpi rows (reuse og.css's tile styles; only the grid differs) --------------------------------- */
+
+.st-kpis {
+  margin-top: 4px;
+}
+
+.st-kpis-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.st-promises h2 {
+  color: var(--status-good);
+}
+
+/* --- table -------------------------------------------------------------------------------------- */
+
+.st-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.st-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.st-table th,
+.st-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.st-table thead th {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.st-table tbody th {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.st-table td.st-num {
+  text-align: right;
+}
+
+.st-table thead th:not(:first-child) {
+  text-align: right;
+}
+
+/* --- service swatches: the chart palette, so a buyer type is one colour everywhere ------------- */
+
+.st-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: baseline;
+  background: var(--status-neutral);
+}
+
+.st-swatch[data-service="HOME"] { background: var(--status-good); }
+.st-swatch[data-service="ERCOT_ENERGY"] { background: var(--series-ercot-energy); }
+.st-swatch[data-service="ERCOT_AS"] { background: var(--series-ercot-as); }
+.st-swatch[data-service="PARTNER_CAPACITY"] { background: var(--series-partner-capacity); }
+.st-swatch[data-service="DIST_DEFERRAL"] { background: var(--series-dist-deferral); }
+.st-swatch[data-service="LARGE_LOAD"] { background: var(--series-large-load); }
+.st-swatch[data-service="PIPELINE_AC"] { background: var(--series-pipeline-ac); }
+.st-swatch[data-service="PJM_CAPACITY"] { background: var(--series-pjm-capacity); }
+.st-swatch[data-service="DATA_CENTER"] { background: var(--accent); }
+.st-swatch[data-service="MOBILE_TEEEF"] { background: var(--status-caution); }
+
+/* --- money -------------------------------------------------------------------------------------- */
+
+.st-money-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.st-ticker {
+  min-width: 0;
+  overflow: hidden; /* ECharts sets its inner box to a pixel width measured at init; never let it widen the page */
+  margin-top: 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 8px;
+}
+
+.st-ticker-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.st-ticker-head strong {
+  font-size: 18px;
+  color: var(--text);
+}
+
+.st-ticker-head strong small {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.st-chart {
+  width: 100%;
+  min-width: 0;
+  height: 200px;
+}
+
+/* --- catalogue ---------------------------------------------------------------------------------- */
+
+.st-catalogue {
+  list-style: none;
+  margin: 0 0 20px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 16px;
+}
+
+.st-catalogue li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.st-catalogue li.is-live {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--status-good) 45%, var(--border));
+}
+
+.st-catalogue li > span:nth-child(2) {
+  flex: 1;
+}
+
+.st-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.st-catalogue li.is-live .st-tag {
+  color: var(--status-good);
+}
+
+.st-where {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.st-where .st-sub {
+  margin-top: 0;
+}
+
+/* --- pipeline ----------------------------------------------------------------------------------- */
+
+.st-pipeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.st-stage {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--status-neutral);
+  border-radius: var(--radius);
+  padding: 14px 14px 12px;
+  min-height: 150px;
+}
+
+.st-stage[data-status="ok"] { border-top-color: var(--status-good); }
+.st-stage[data-status="degraded"],
+.st-stage[data-status="stale"] { border-top-color: var(--status-caution); }
+.st-stage[data-status="down"] { border-top-color: var(--status-critical); }
+
+.st-stage-dot {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-neutral);
+}
+
+.st-stage[data-status="ok"] .st-stage-dot { background: var(--status-good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--status-good) 18%, transparent); }
+.st-stage[data-status="down"] .st-stage-dot { background: var(--status-critical); }
+.st-stage[data-status="degraded"] .st-stage-dot,
+.st-stage[data-status="stale"] .st-stage-dot { background: var(--status-caution); }
+
+.st-stage-n {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--kicker);
+  margin-bottom: 6px;
+}
+
+.st-stage h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.st-stage p {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.st-stage-status {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- prove it ----------------------------------------------------------------------------------- */
+
+.st-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.st-links li {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.st-links a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.st-links a:hover {
+  text-decoration: underline;
+}
+
+/* --- narrow screens ----------------------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .st-kpis-3,
+  .st-money-tiles,
+  .st-where {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .st-pipeline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .st-stage {
+    min-height: 0;
+  }
+}

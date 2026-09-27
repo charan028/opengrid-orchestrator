@@ -242,6 +242,7 @@ def _route_modules() -> list[ModuleType]:
     import opengrid.ui.routes.markets as markets
     import opengrid.ui.routes.pq as pq
     import opengrid.ui.routes.profitability as profitability
+    import opengrid.ui.routes.story as story
 
     return [
         alerts,
@@ -255,6 +256,7 @@ def _route_modules() -> list[ModuleType]:
         markets,
         pq,
         profitability,
+        story,
     ]
 
 

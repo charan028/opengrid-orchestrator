@@ -15,7 +15,7 @@ def test_scenarios_is_a_tool_link_not_a_screen() -> None:
     assert SCENARIOS_PATH == "/ogsim/"
     assert [t["path"] for t in NAV_TOOLS] == ["/ogsim/"]
     assert all(s["path"] != SCENARIOS_PATH for s in NAV_SCREENS)
-    assert len(NAV_SCREENS) == 8
+    assert len(NAV_SCREENS) == 9
 
 
 def test_every_screen_links_to_scenarios(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

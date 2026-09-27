@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from opengrid.ui.api_client import bind_remote_user
 from opengrid.ui.role import remote_user
-from opengrid.ui.routes import control_room, copilot, fleet, health
+from opengrid.ui.routes import control_room, copilot, fleet, health, story
 from opengrid.ui.routes import help as help_screen
 from opengrid.ui.templating import TEMPLATES_DIR
 
@@ -37,6 +37,7 @@ async def _forward_remote_user(request: Request) -> None:
 
 router = APIRouter(dependencies=[Depends(_forward_remote_user)])
 router.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+router.include_router(story.router)
 router.include_router(control_room.router)
 router.include_router(fleet.router)
 router.include_router(health.router)

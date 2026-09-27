@@ -31,6 +31,7 @@ def _csrf_context(request: Request) -> dict[str, Any]:
 
 # `icon` names a `<symbol id="i-...">` in base.html's inline icon sheet.
 NAV_SCREENS: tuple[dict[str, str], ...] = (
+    {"label": "Story", "path": f"{BASE_PATH}/story", "icon": "zap"},
     {"label": "Control room", "path": f"{BASE_PATH}/", "icon": "dashboard"},
     {"label": "Fleet", "path": f"{BASE_PATH}/fleet", "icon": "battery"},
     {"label": "Dispatch", "path": f"{BASE_PATH}/dispatch", "icon": "branch"},
@@ -60,6 +61,7 @@ HELP_PATH = f"{BASE_PATH}/help"
 #: entry deep-links to it (`/og/help#page-fleet`), so each screen opens the Help page at its own section.
 HELP_SECTIONS: dict[str, str] = {
     "": "page-control-room",
+    "story": "page-story",
     "fleet": "page-fleet",
     "dispatch": "page-dispatch",
     "markets": "page-markets",

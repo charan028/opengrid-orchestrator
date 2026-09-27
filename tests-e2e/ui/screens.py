@@ -10,6 +10,7 @@ BASE_PATH = "/og"
 
 # (path, expected <h1> text) -- `header_title` block of each screen template.
 SCREENS: tuple[tuple[str, str], ...] = (
+    (f"{BASE_PATH}/story", "One fleet, many buyers, homes first"),
     (f"{BASE_PATH}/", "Control room"),
     (f"{BASE_PATH}/fleet", "Fleet monitoring & control"),
     (f"{BASE_PATH}/dispatch", "Dispatch & commitments"),
@@ -22,6 +23,7 @@ SCREENS: tuple[tuple[str, str], ...] = (
 
 # (path, SSE stream name) -- screens that subscribe to `/og/api/stream/<name>` via `og.sse` (02b S7.2).
 LIVE_SCREENS: tuple[tuple[str, str], ...] = (
+    (f"{BASE_PATH}/story", "control-room"),
     (f"{BASE_PATH}/", "control-room"),
     (f"{BASE_PATH}/fleet", "health"),  # api serves no fleet stream (NEEDS_FROM_OTHER_OWNERS.md)
     (f"{BASE_PATH}/dispatch", "dispatch"),

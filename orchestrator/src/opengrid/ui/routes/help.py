@@ -57,6 +57,7 @@ TOC: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
         "pages",
         "Screens",
         (
+            ("page-story", "Story"),
             ("page-control-room", "Control room"),
             ("page-fleet", "Fleet"),
             ("page-dispatch", "Dispatch"),

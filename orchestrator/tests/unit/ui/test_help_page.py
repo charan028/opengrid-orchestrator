@@ -19,6 +19,7 @@ _ID = re.compile(r'\bid="([^"]+)"')
 
 def test_help_href_deep_links_each_screen_to_its_section() -> None:
     assert help_href("/og/") == "/og/help#page-control-room"
+    assert help_href("/og/story") == "/og/help#page-story"
     assert help_href("/og/fleet") == "/og/help#page-fleet"
     assert help_href("/og/fleet/hubs/hub-0001") == "/og/help#page-fleet"
     assert help_href("/og/billing") == "/og/help#page-billing"

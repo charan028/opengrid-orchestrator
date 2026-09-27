@@ -12,7 +12,7 @@ import pytest
 TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "src" / "opengrid" / "ui" / "templates"
 
 # ui-a's own screens (BUILD.md S4). ui-b's screens are checked once they land, not required here.
-UI_A_SCREENS = ["control_room.html", "fleet.html", "health.html"]
+UI_A_SCREENS = ["story.html", "control_room.html", "fleet.html", "health.html"]
 
 
 @pytest.mark.parametrize("screen", UI_A_SCREENS)

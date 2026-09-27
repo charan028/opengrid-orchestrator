@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+{% block title %}Story -- OpenGrid Orchestrator{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ base_path }}/static/og-story.css">{% endblock %}
+{% block header_title %}One fleet, many buyers, homes first{% endblock %}
+{% block header_actions %}
+<span class="stale-badge" id="story-updated" role="status" data-stale="false">live</span>
+{% endblock %}
+{% block content %}
+{# story.html -- the narrative over live data (routes/story.py). Every number on this page is the
+   same read an operational screen makes, shown with its age. Prose is the argument; the numbers are
+   the evidence. Nothing here is a control. #}
+<article class="st">
+
+  <header class="st-hero">
+    <p class="st-kicker">What this system is for</p>
+    <p class="st-thesis">The orchestrator sells each kilowatt-hour <strong>once</strong>, to the buyer the
+      contracts say should have it, <strong>proves</strong> it was delivered, and <strong>measures</strong> what
+      that is worth against the rule-based allocation it replaces.</p>
+    <p class="st-lede">One home battery is a backup-power product. Thousands of them are a power plant that
+      several kinds of buyer want at the same hour. The hard part is not selling the energy. It is
+      arbitrating competing claims on the same kilowatt safely, keeping every home's outage reserve out of
+      the trade, and being able to explain every decision afterwards.</p>
+  </header>
+
+  <section class="st-section" aria-labelledby="st-now">
+    <p class="st-kicker">Right now</p>
+    <h2 id="st-now">What the fleet is doing this minute</h2>
+    <p class="st-prose">
+      <strong class="st-num" id="story-hubs-online">{{ s.hubs_online }}</strong> of
+      <strong class="st-num">{{ s.hubs_total }}</strong> homes are reporting.
+      {% if s.live_obligations %}
+      They are holding <strong class="st-num">{{ s.promised_kw }} kW</strong> of promises across
+      <strong class="st-num">{{ s.live_obligations }}</strong> obligations for
+      <strong class="st-num">{{ s.distinct_buyers }}</strong> distinct buyers.
+      {% else %}
+      No obligation is live at this moment, so every kilowatt is either serving its own home or held for it.
+      {% endif %}
+    </p>
+    <div class="og-kpis st-kpis" aria-label="Fleet right now">
+      {% with label='Fleet power', value=(s.fleet_mw if s.fleet_mw is not none else '--'), unit='MW', since_iso=s.health_as_of|default(none), stale_after_s=10, tile_id='story-fleet-mw' %}
+        {% include "_partials/kpi_tile.html" %}
+      {% endwith %}
+      {% with label='Stored energy', value=(s.fleet_mwh if s.fleet_mwh is not none else '--'), unit='MWh', since_iso=s.health_as_of|default(none), stale_after_s=10 %}
+        {% include "_partials/kpi_tile.html" %}
+      {% endwith %}
+      {% with label='Active commitments', value=(s.active_commitments if s.active_commitments is not none else '--'), since_iso=s.health_as_of|default(none), stale_after_s=10, tile_id='story-active-commitments' %}
+        {% include "_partials/kpi_tile.html" %}
+      {% endwith %}
+      {% with label='Pipeline stages healthy', value=s.stages_ok ~ ' / ' ~ (s.stages|length), severity=('good' if s.stages_ok == s.stages|length else 'caution'), since_iso=s.health_as_of|default(none), stale_after_s=15 %}
+        {% include "_partials/kpi_tile.html" %}
+      {% endwith %}
+    </div>
+
+    {% if s.buyers %}
+    <h3 class="st-sub">Who holds a claim on it, and how much</h3>
+    <div class="st-table-wrap">
+    <table class="st-table">
+      <thead>
+        <tr><th scope="col">Buyer type</th><th scope="col">Promised</th><th scope="col">Obligations</th><th scope="col">Buyers</th><th scope="col">Delivering</th><th scope="col">At risk</th></tr>
+      </thead>
+      <tbody>
+        {% for row in s.buyers %}
+        <tr>
+          <th scope="row"><span class="st-swatch" data-service="{{ row.service_type }}" aria-hidden="true"></span>{{ row.label }}</th>
+          <td class="st-num">{{ row.kw }} kW</td>
+          <td class="st-num">{{ row.count }}</td>
+          <td class="st-num">{{ row.buyers }}</td>
+          <td class="st-num">{{ row.delivering }}</td>
+          <td class="st-num {% if row.at_risk %}is-critical{% endif %}">{{ row.at_risk }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="st-section st-promises" aria-labelledby="st-promises">
+    <p class="st-kicker">The three promises</p>
+    <h2 id="st-promises">
+      {% if s.promises_kept %}Every promise is being kept{% else %}A promise has been broken{% endif %}
+    </h2>
+    <p class="st-prose">These are not targets. They are invariants the allocator constrains on, the guardian
+      re-checks before signing, and an independent checker measures every cycle. Each must read zero, and
+      each value is backed by the trace chain.</p>
+    <div class="og-kpis st-kpis st-kpis-3">
+      <div>
+        {% with label='Homes pulled below their reserve', value=s.promises.reserve_breaches, severity=('critical' if s.promises.reserve_breaches else 'good'), since_iso=s.invariants_as_of|default(none), stale_after_s=10, tile_id='story-reserve-breaches', live_region=true %}
+          {% include "_partials/kpi_tile.html" %}
+        {% endwith %}
+        <p class="st-why">No command ever takes a home under the energy it keeps for its own outage. Not for
+          any price.</p>
+      </div>
+      <div>
+        {% with label='kWh sold twice', value=s.promises.double_sold_kwh, severity=('critical' if s.promises.double_sold_kwh else 'good'), since_iso=s.invariants_as_of|default(none), stale_after_s=10, tile_id='story-double-sold', live_region=true %}
+          {% include "_partials/kpi_tile.html" %}
+        {% endwith %}
+        <p class="st-why">Every kilowatt-hour has exactly one buyer. The ledger has a single writer and refuses a
+          second reservation.</p>
+      </div>
+      <div>
+        {% with label='Commitments moved for a better price', value=s.promises.commitment_switches, severity=('critical' if s.promises.commitment_switches else 'good'), since_iso=s.invariants_as_of|default(none), stale_after_s=10, tile_id='story-commitment-switches', live_region=true %}
+          {% include "_partials/kpi_tile.html" %}
+        {% endwith %}
+        <p class="st-why">Once committed, an obligation's capacity is locked. A price spike cannot take it;
+          only a grid instruction or physical infeasibility can.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="st-section" aria-labelledby="st-money">
+    <p class="st-kicker">The money it turned down</p>
+    <h2 id="st-money">Why this is a decision engine, not a dashboard</h2>
+    <p class="st-prose">A dashboard shows you the price. This system decides, every two seconds, whether to
+      chase it, and keeps a record of the value it declined. When the wholesale price spikes during a
+      delivery, committed customers keep their capacity and the spike goes uncaptured. That forgone money
+      is measured, not hidden, because keeping a promise has a cost and the cost belongs on the books.</p>
+    <div class="st-money">
+      <div class="st-money-tiles">
+        {% with label='Net value, settled', value=s.net_value, unit='USD', since_iso=s.settlement_as_of|default(none), stale_after_s=3600 %}
+          {% include "_partials/kpi_tile.html" %}
+        {% endwith %}
+        {% with label='Upside declined to keep promises', value=s.forgone_upside, unit='USD', severity=('caution' if s.forgone_upside else none), since_iso=s.settlement_as_of|default(none), stale_after_s=3600 %}
+          {% include "_partials/kpi_tile.html" %}
+        {% endwith %}
+        {% with label='Added over rule-based allocation', value=(s.value_of_orchestration if s.value_of_orchestration is not none else '--'), unit='USD', severity=('good' if (s.value_of_orchestration or 0) > 0 else none), since_iso=s.settlement_as_of|default(none), stale_after_s=3600 %}
+          {% include "_partials/kpi_tile.html" %}
+        {% endwith %}
+      </div>
+      <p class="st-why">
+        {% if s.pnl_rows %}
+        From {{ s.pnl_rows }} settled intervals{% if s.period.from %} since {{ s.period.from }}{% endif %}. The
+        rule-based figure is a faithful port of the allocator this replaces, scored by the same evaluator, so
+        the comparison is like for like.
+        {% else %}
+        No interval has settled yet in this period. The comparison appears as soon as one does.
+        {% endif %}
+      </p>
+      <div class="st-ticker">
+        <div class="st-ticker-head">
+          <span>Wholesale price, per load zone</span>
+          {% if s.ticker.latest_value is not none %}
+          <strong class="st-num">{{ s.ticker.latest_value }} <small>{{ s.ticker.unit or 'USD/MWh' }}</small></strong>
+          {% endif %}
+          {% with since_iso=s.ticker.latest_ts|default(none), stale_after_s=1200 %}{% include "_partials/stale_badge.html" %}{% endwith %}
+        </div>
+        <div id="story-price-chart" class="st-chart" role="img" aria-label="Wholesale price per load zone, recent intervals"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="st-section" aria-labelledby="st-who">
+    <p class="st-kicker">Who it serves, and where</p>
+    <h2 id="st-who">Every kind of buyer, one fleet, homes first</h2>
+    <p class="st-prose">Every customer type is described by one dispatch profile: what signal it follows, how
+      it is admitted, how it is prioritised, how delivery is measured and billed. The orchestrator executes
+      any profile generically, so a tenth buyer nobody has named yet is a configuration change, not code.
+      <strong class="st-num">{{ s.catalogue_live_count }}</strong> of {{ s.catalogue|length }} types hold a live
+      claim on this fleet at this moment.</p>
+    <ul class="st-catalogue" aria-label="Buyer catalogue">
+      {% for item in s.catalogue %}
+      <li class="{{ 'is-live' if item.live else '' }}">
+        <span class="st-swatch" data-service="{{ item.service_type }}" aria-hidden="true"></span>
+        <span>{{ item.label }}</span>
+        <span class="st-tag">{{ 'live' if item.live else 'catalogued' }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    <div class="st-where">
+      <div>
+        <h3 class="st-sub">Where</h3>
+        <p class="st-why">ERCOT, the Texas grid.
+          {% if s.zones %}This fleet spans {{ s.zones|length }} load zone{{ 's' if s.zones|length != 1 else '' }}:
+          {{ s.zones|join(', ') }}.{% endif %}
+          Prices are read per zone because the same kilowatt is worth a different amount in Houston than in
+          the west.</p>
+      </div>
+      <div>
+        <h3 class="st-sub">For whom, today</h3>
+        <p class="st-why">Base's control room. Operators command in two steps with a signed confirmation; a
+          viewer sees every number and can change nothing. The homeowner is the first beneficiary: their
+          reserve is the one constraint no buyer can price.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="st-section" aria-labelledby="st-how">
+    <p class="st-kicker">How it decides</p>
+    <h2 id="st-how">Five independent processes, and the path a kilowatt takes</h2>
+    <p class="st-prose">No single process can both decide and act. The engine plans, a separate guardian
+      signs, a separate stop path halts, and a separate settlement proves. Each square below is one live
+      process; its colour is that process's own heartbeat.</p>
+    <ol class="st-pipeline" aria-label="Decision pipeline">
+      {% for stage in s.stages %}
+      <li class="st-stage" data-status="{{ stage.status }}">
+        <span class="st-stage-dot" aria-hidden="true"></span>
+        <span class="st-stage-n" aria-hidden="true">{{ loop.index }}</span>
+        <h3>{{ stage.label }}</h3>
+        <p>{{ stage.blurb }}</p>
+        <span class="st-stage-status">og-{{ stage.process }}: {{ stage.status }}</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </section>
+
+  <section class="st-section st-prove" aria-labelledby="st-prove">
+    <p class="st-kicker">Prove it</p>
+    <h2 id="st-prove">Every claim on this page can be checked</h2>
+    <ul class="st-links">
+      <li><a href="{{ base_path }}/billing">Verify the audit chain</a> <span>recompute every hash from the first event to now</span></li>
+      <li><a href="{{ base_path }}/dispatch">Read the commitments</a> <span>each one carries its lock and its reason code</span></li>
+      <li><a href="{{ base_path }}/profitability">See the counterfactual</a> <span>the optimizer against the rule-based allocator, interval by interval</span></li>
+      <li><a href="{{ base_path }}/">Open the control room</a> <span>the live map, and the copilot that answers from this same data</span></li>
+    </ul>
+  </section>
+
+</article>
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    og.chart("#story-price-chart", {{ s.ticker.chart_option | tojson }});
+
+    // Live updates: the control-room stream emits `{fleet_mw, active_commitment_count,
+    // reserve_breach_count, double_sold_kwh, as_of, invariants_checked_at, degraded_modes}` about every
+    // 2 s. The promise counters and the fleet tiles update in place; everything else stays as of first
+    // paint, which is what its stale badge says.
+    function setValue(tileId, value) {
+      var el = document.querySelector("#" + tileId + " .kpi-value");
+      if (el && el.childNodes.length) { el.childNodes[0].nodeValue = String(value); }
+    }
+    function setSince(tileId, iso) {
+      var badge = iso && document.querySelector("#" + tileId + " [data-since]");
+      if (badge) { badge.setAttribute("data-since", iso); }
+    }
+    function setSeverity(tileId, n) {
+      var tile = document.getElementById(tileId);
+      if (tile) { tile.dataset.severity = n ? "critical" : "good"; }
+    }
+    og.sse("{{ base_path }}/api/stream/control-room", function (data) {
+      var pill = document.getElementById("story-updated");
+      pill.textContent = "live";
+      pill.dataset.stale = "false";
+      if (!data) { return; }
+      og.noteDegradedModes(data.degraded_modes);
+      setSince("story-fleet-mw", data.as_of);
+      setSince("story-active-commitments", data.as_of);
+      ["story-reserve-breaches", "story-double-sold", "story-commitment-switches"].forEach(function (id) {
+        setSince(id, data.invariants_checked_at || data.as_of);
+      });
+      if (typeof data.fleet_mw === "number") { setValue("story-fleet-mw", data.fleet_mw.toFixed(2)); }
+      if (typeof data.active_commitment_count === "number") { setValue("story-active-commitments", data.active_commitment_count); }
+      if (typeof data.reserve_breach_count === "number") {
+        setValue("story-reserve-breaches", data.reserve_breach_count);
+        setSeverity("story-reserve-breaches", data.reserve_breach_count);
+      }
+      if (typeof data.double_sold_kwh === "number") {
+        setValue("story-double-sold", data.double_sold_kwh);
+        setSeverity("story-double-sold", data.double_sold_kwh);
+      }
+    }, {
+      onError: function () {
+        var pill = document.getElementById("story-updated");
+        pill.textContent = "reconnecting";
+        pill.dataset.stale = "true";
+      }
+    });
+  })();
+</script>
+{% endblock %}

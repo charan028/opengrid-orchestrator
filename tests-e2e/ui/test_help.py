@@ -15,6 +15,7 @@ from screens import BASE_PATH, SCREENS, goto_ok
 HELP = f"{BASE_PATH}/help"
 _SECTION = {
     f"{BASE_PATH}/": "page-control-room",
+    f"{BASE_PATH}/story": "page-story",
     f"{BASE_PATH}/fleet": "page-fleet",
     f"{BASE_PATH}/dispatch": "page-dispatch",
     f"{BASE_PATH}/markets": "page-markets",
@@ -129,7 +130,8 @@ def test_help_page_is_readable_in_both_themes(viewer_page: Page, theme: str) -> 
         )
         ratio = contrast_ratio(_hex(colors[0]), _hex(colors[1]))
         assert ratio >= AA_BODY_TEXT, f"{theme} {selector}: {ratio:.2f}"
-    viewer_page.screenshot(path=_shot(f"help-{theme}.png"))
+    if shot := _shot(f"help-{theme}.png"):
+        viewer_page.screenshot(path=shot)
 
 
 def test_help_page_fits_390px(viewer_page: Page) -> None:
@@ -141,11 +143,12 @@ def test_help_page_fits_390px(viewer_page: Page) -> None:
     assert overflow <= 1
     expect(viewer_page.locator("#nav-help")).to_be_visible()
     expect(viewer_page.get_by_label("Search this page")).to_be_visible()
-    viewer_page.screenshot(path=_shot("help-390.png"))
+    if shot := _shot("help-390.png"):
+        viewer_page.screenshot(path=shot)
 
 
 def _shot(name: str) -> str:
     import os
 
     directory = os.environ.get("OG_UI_SCREENSHOT_DIR", "")
-    return os.path.join(directory, name) if directory else os.devnull
+    return os.path.join(directory, name) if directory else ""
