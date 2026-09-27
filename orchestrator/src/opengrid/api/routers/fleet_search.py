@@ -552,10 +552,12 @@ _DEVICE_POSITIONS = geo.DEVICE_POSITIONS_SQL.replace("%(ids)s", "%s")
 
 
 async def device_positions(
-    store: FleetRowsStore, ids: list[str], *, now: datetime
+    store: FleetRowsStore, ids: list[str], th: Thresholds, *, now: datetime
 ) -> tuple[dict[str, geo.LatLon], dict[str, dict[str, Any]]]:
-    """(fresh positions by hub AND bank id -- `core.geo.fresh_positions` --, the raw report row by hub id)
-    for the mobile units `ids`. A database without the device columns reads as no report (guarded)."""
+    """(trusted positions by hub AND bank id -- `core.geo.fresh_positions` --, the raw report row by hub id)
+    for the mobile units `ids`. Trusted exactly as G-35 and the selector trust them: a report younger than
+    `MOBILE_POSITION_MAX_AGE_S`, or the stationary rule while the unit's telemetry is younger than
+    `[health].hub_stale_s`. A database without the device columns reads as no report (guarded)."""
     rows = await _optional_rows(store, _DEVICE_POSITIONS, (ids, ids)) if ids else []
     reports = [
         (
@@ -564,10 +566,12 @@ async def device_positions(
             r.get("device_lat"),
             r.get("device_lon"),
             _parse_ts(r.get("device_info_at")),
+            _parse_ts(r.get("last_seen_at")),
         )
         for r in rows
     ]
-    return geo.fresh_positions(reports, now), {str(r["hub_id"]): r for r in rows}
+    fresh = geo.fresh_positions(reports, now, telemetry_max_age_s=th.health.hub_stale_s)
+    return fresh, {str(r["hub_id"]): r for r in rows}
 
 
 _MOBILE_POSITIONS = "SELECT h.hub_id, h.bank_id {from_} WHERE {where} AND {asset} = 'MOBILE'"
@@ -586,7 +590,9 @@ async def mobile_positions_at_home(
     sql += " ORDER BY h.hub_id LIMIT %s"
     rows = await store.fleet_rows(sql, (*where.params, *asset.params, 2 * len(th.mobile)))
     sites = home_station_sites()
-    fresh, _reports = await device_positions(store, [str(r["hub_id"]) for r in rows], now=datetime.now(UTC))
+    fresh, _reports = await device_positions(
+        store, [str(r["hub_id"]) for r in rows], th, now=datetime.now(UTC)
+    )
     return [
         {
             "hub_id": str(r["hub_id"]),
@@ -975,7 +981,7 @@ async def _asset_detail(
         # The DEVICE-REPORTED position (as G-35 and the selector read it), never og.hub.lat/lon: that is
         # the seed, i.e. the home station, and never moves (fix-trucks-r342).
         now = datetime.now(UTC)
-        fresh, reports = await device_positions(store, [hub_id, bank_id], now=now)
+        fresh, reports = await device_positions(store, [hub_id, bank_id], th, now=now)
         report = reports.get(hub_id) or {}
         reported_at = _parse_ts(report.get("device_info_at"))
         position = fresh.get(hub_id) or fresh.get(bank_id)
@@ -990,6 +996,10 @@ async def _asset_detail(
                     "reported_at": reported_at.isoformat() if reported_at else None,
                     "age_s": round((now - reported_at).total_seconds(), 1) if reported_at else None,
                     "fresh": position is not None,
+                    # trusted although older than max_age_s: parked, with fresh telemetry (stationary rule)
+                    "stationary": position is not None
+                    and reported_at is not None
+                    and (now - reported_at).total_seconds() > geo.MOBILE_POSITION_MAX_AGE_S,
                     "max_age_s": geo.MOBILE_POSITION_MAX_AGE_S,
                     "source": "device",
                 },

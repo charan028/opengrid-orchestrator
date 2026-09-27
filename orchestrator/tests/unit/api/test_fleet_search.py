@@ -489,7 +489,7 @@ def _truck_detail(
             [],
             [],
             [],
-            [{"hub_id": "trailer-mb-01", "bank_id": "trailer-mb-01", **report}],
+            [{"hub_id": "trailer-mb-01", "bank_id": "trailer-mb-01", "last_seen_at": None, **report}],
         ]
     )
     body: dict[str, Any] = search_client.get(
@@ -534,3 +534,30 @@ def test_truck_with_a_stale_report_is_unknown(
     }
     m = _truck_detail(search_client, rows_store, monkeypatch, stale)
     assert m["status"] == "UNKNOWN" and m["location"]["fresh"] is False and m["location"]["lat"] == 30.401
+
+
+def test_parked_truck_old_report_with_fresh_telemetry_is_at_home(
+    search_client: TestClient, rows_store: RecordingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TRUCKS r3.4.3 stationary rule, applied as G-35 does (telemetry_max_age_s = [health].hub_stale_s)."""
+    parked = {
+        "device_lat": 30.4015,
+        "device_lon": -97.7192,
+        "device_info_at": datetime.now(UTC) - timedelta(minutes=20),
+        "last_seen_at": datetime.now(UTC) - timedelta(seconds=2),
+    }
+    m = _truck_detail(search_client, rows_store, monkeypatch, parked)
+    assert m["status"] == "AT_HOME_STATION" and m["location"]["stationary"] is True
+
+
+async def test_device_positions_pass_hub_stale_s_like_g35(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def spy(rows: Any, now: datetime, **kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {}
+
+    monkeypatch.setattr(fleet_search.geo, "fresh_positions", spy)
+    th = Thresholds(HealthThresholds(hub_stale_s=25.0, hub_offline_s=60.0))
+    await fleet_search.device_positions(RecordingStore(), ["t1"], th, now=NOW)
+    assert seen == {"telemetry_max_age_s": 25.0}

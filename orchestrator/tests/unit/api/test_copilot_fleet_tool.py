@@ -94,6 +94,7 @@ async def test_trucks_at_home_uses_the_one_d31_rule_and_returns_no_position(
                 "device_lat": 30.5196,
                 "device_lon": -97.6481,
                 "device_info_at": datetime.now(UTC),
+                "last_seen_at": datetime.now(UTC),
             }
         ],
     ]
