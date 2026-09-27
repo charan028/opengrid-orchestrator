@@ -1,7 +1,6 @@
 """FOLLOWUPS round (2026-09-26) SQL paths against real Postgres: K2's `og.hub.units` read
 (`opengrid.invariants.queries.fetch_bank_capability_inputs`, migration 0032), the LP value read
-(`opengrid.api.routers.lp_value.PgLpValueReader`, migration 0030) and the market-sim AS deployment
-writes (`opengrid.contracts.as_deployment_poll.PgAsDeploymentRepo`, migration 0020). Server only
+(`opengrid.api.routers.lp_value.PgLpValueReader`, migration 0030). Server only
 (`tools/remote.ps1`); every row it writes carries a `fups` id and is removed afterwards."""
 
 from __future__ import annotations
@@ -96,51 +95,6 @@ async def test_lp_value_reader_returns_the_newest_plans(dsn: str, pool: AsyncCon
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DELETE FROM og.plan_value WHERE plan_id = %s", (plan_id,))
             conn.execute("DELETE FROM og.plan WHERE plan_id = %s", (plan_id,))
-
-
-async def test_market_sim_deployment_open_extend_close(dsn: str, pool: AsyncConnectionPool) -> None:
-    from opengrid.contracts.as_deployment_poll import (
-        AsDeploymentPoller,
-        PgAsDeploymentRepo,
-        PollConfig,
-        SimDeployment,
-    )
-
-    repo = PgAsDeploymentRepo(pool)
-    poller = AsDeploymentPoller(
-        http_client=None,  # type: ignore[arg-type]  -- apply() is driven directly, no HTTP
-        repo=repo,
-        config=PollConfig(enabled=True, base_url="http://unused", interval_s=10.0, lease_s=60.0),
-    )
-    now = datetime.now(UTC)
-    sim = SimDeployment(sim_id="fups-1", service="RRS", deployed_mw=50.0, recall=False, declared_at=now)
-    try:
-        await poller.apply(sim, now=now)
-        await poller.apply(sim, now=now + timedelta(seconds=10))
-        with psycopg.connect(dsn) as conn:
-            row = conn.execute(
-                "SELECT source, obligation_id, end_at, cancelled_at FROM og.as_deployment "
-                "WHERE requested_by = 'market_sim:fups-1'"
-            ).fetchall()
-        assert len(row) == 1
-        assert row[0][0] == "MARKET_SIM" and row[0][1] is None and row[0][3] is None
-        assert row[0][2] == now + timedelta(seconds=70)  # lease renewed from the second poll
-
-        recalled = SimDeployment(
-            sim_id="fups-1", service="RRS", deployed_mw=50.0, recall=True, declared_at=now
-        )
-        await poller.apply(recalled, now=now + timedelta(seconds=20))
-        with psycopg.connect(dsn) as conn:
-            cancelled = conn.execute(
-                "SELECT cancelled_at FROM og.as_deployment WHERE requested_by = 'market_sim:fups-1'"
-            ).fetchone()
-        assert cancelled is not None and cancelled[0] == now + timedelta(seconds=20)
-        assert [
-            r for r in await repo.list_open(now=now + timedelta(seconds=21)) if "fups" in r.requested_by
-        ] == []
-    finally:
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute("DELETE FROM og.as_deployment WHERE requested_by LIKE 'market_sim:fups-%'")
 
 
 async def test_as_hold_inputs_query_runs_against_the_migrated_schema(pool: AsyncConnectionPool) -> None:

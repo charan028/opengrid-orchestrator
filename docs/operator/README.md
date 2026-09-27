@@ -395,6 +395,28 @@ curl -s -u og-op-b:... -X POST https://base.tocy-net.net/og/api/safestop/release
   og-api accepts a second deployment of an award that is already deployed, so never chain deployments past the
   product's window: the energy hold covers one product duration.
 
+**Automatic deployments from ERCOT (r3.4.1, D-35).** When `[feeds.ercot_as_poll]` is enabled, og-feeds reads
+ERCOT's AS dispatch instructions every 5 s (today from the ogsim MMS simulator) and applies each one exactly
+as the Deploy button would: the same checks, the same deployment row (source `ERCOT`), the same hold rules. An
+ERCOT recall ends the deployment it names. You don't act on an accepted instruction; it appears in the
+award's row as `deployed` and in the trace (stream `ercot_as_poll`, origin `ERCOT_POLL`).
+
+- **Refused instruction** (`ALR-ERCOT-AS-REFUSED`). The summary names the instruction and why: `404`
+  no award for that resource and service now; `409` not deployable, already deployed, longer than the
+  product, more MW than awarded, two awards match, or arrived too late; `422` unreadable. ERCOT has been told
+  REJECT with that reason. Check the award (Dispatch, AS table). If ERCOT really needs the deployment, use
+  **Deploy** on the award and record the instruction id in the reason. Acknowledge the alert; it doesn't
+  clear on its own.
+- **Poll failing or stale** (`ALR-ERCOT-AS-POLL-FAILED`, `ALR-ERCOT-AS-POLL-STALE`). og-feeds cannot read
+  instructions, so a deployment could be missed. Check og-feeds and the simulator (`systemctl status
+  og-feeds og-sim-market`). Retries run every 5 to 60 s, and both alerts clear on the next good poll.
+- **Simulating ERCOT.** On `/ogsim/`, run a scenario `ercot_as_01_ecrs_deploy` … `ercot_as_07_exceed_award`,
+  or inject an `ercot_as_*` type with the resource as target. The market sim lists every instruction and our
+  answer at `/mms/admin/vdis`. A deployment on a real committed award discharges it: run these only when you
+  intend to.
+- **Switching it off:** set `[feeds.ercot_as_poll].enabled = false` and restart og-feeds. Active deployments
+  run to their end; Stop deploy still works.
+
 ### 6.6 Bulk command (a selection of hubs)
 
 Build a selection on the Fleet map (**Select an area**) or with the table's checkboxes, then Setpoint (kW) and
@@ -514,7 +536,8 @@ Every alert is a row with an id, a rule, a severity (`warning` or `critical`), a
 times. System Health's "Alerts" list is live; the Control room's "Open alerts" reflects page load. The rule id is
 not a column: the summary text says which it is. **Acknowledging** records who looked (section 6.8); it never
 clears an alert. An alert clears when its condition ends, and only its owner clears it: the health evaluator
-(which runs inside og-settle every 5 s), og-engine, og-settle or og-guardian. If og-settle is down, no health
+(which runs inside og-settle every 5 s), og-engine, og-settle, og-guardian or (for the ERCOT AS poll alerts)
+og-feeds. If og-settle is down, no health
 alert is raised or cleared and the degraded modes freeze.
 
 | Rule | Severity | Raised when | Clears |
@@ -542,6 +565,9 @@ alert is raised or cleared and the degraded modes freeze.
 | `ALR-CALIBRATION-BUDGET` | warning | The guardian held a remote calibration (fleet budget, concurrency or suspected systemic drift, G-25). Dormant while `[assets] drift_enabled = false` | No automatic clear |
 | `ALR-CALIBRATION-PROTOCOL` | warning | A calibration acknowledgement did not match the issued command, or the hub rejected it. Dormant like the above | No automatic clear |
 | `ALR-XFMR-UNMAPPED` | warning | og-guardian checked a batch with a hub that has no service-transformer mapping, so G-27 checks it as a group of one. Every hub today: expect one open row per bank the guardian commands, all with the same summary | No automatic clear |
+| `ALR-ERCOT-AS-REFUSED` | warning | Since r3.4.1 (D-35): og-feeds refused an ERCOT AS dispatch instruction (404/409/422 and a reason code) and answered ERCOT REJECT. One row per instruction; a re-delivered duplicate adds none (6.5) | No automatic clear |
+| `ALR-ERCOT-AS-POLL-FAILED` | warning | Three ERCOT AS instruction polls in a row failed | og-feeds clears it on the next good poll |
+| `ALR-ERCOT-AS-POLL-STALE` | critical | No ERCOT AS instruction poll has succeeded for 60 s: a deployment may be missed | og-feeds clears it on the next good poll |
 | `ALR-TRACE-VERDICT-WRITE-FAILED` | warning | A verdict's `GUARDIAN_VERDICT` trace row could not be written (the verdict stands; the audit row is missing) | No automatic clear |
 
 An open alert keeps the severity it opened with: a zone that goes from 6% to 25% offline stays a warning until

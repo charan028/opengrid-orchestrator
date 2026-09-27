@@ -46,7 +46,8 @@
 <tr><td>Customer site ingest</td><td>In (MQTT)</td><td>Site meter, corridor current</td><td>Per reading, flushed in batches</td><td><code>og.customer_site_meter_reading</code>, <code>og.corridor_current_reading</code></td><td>DATA_CENTER / PIPELINE_AC closed loops</td></tr>
 <tr><td>Signed commands</td><td>Out (MQTT)</td><td>Command batches, leases, stops</td><td>Engine cycle (2 s)</td><td><code>og.trace</code> (pre-image before signing)</td><td>Hubs</td></tr>
 <tr><td>Firmware commands</td><td>Out (MQTT)</td><td>Guardian-signed FIRMWARE_UPDATE</td><td>Per campaign job</td><td><code>og.firmware_command</code></td><td>Hubs</td></tr>
-<tr><td>ERCOT MMS</td><td>Out (HTTPS/SOAP)</td><td>Offers, awards, VDIs</td><td>n/a</td><td>n/a</td><td>Disabled</td></tr>
+<tr><td>ERCOT AS dispatch instructions (D-35)</td><td>In (HTTPS/SOAP pull), answered</td><td>DEPLOY_AS / RECALL_AS for ECRS, RRS, Reg, Non-Spin</td><td>Every 5 s when enabled (off in the repo)</td><td><code>og.as_deployment</code> (source <code>ERCOT</code>), <code>og.trace</code> stream <code>ercot_as_poll</code></td><td>Allocator (deploys the held award), alerts</td></tr>
+<tr><td>ERCOT MMS submission</td><td>Out (HTTPS/SOAP)</td><td>Offers, awards</td><td>n/a</td><td>n/a</td><td>Disabled</td></tr>
 <tr><td>Customer API</td><td>Out/in (HTTPS)</td><td>Contracts, obligations, invoices, disputes</td><td>On request</td><td><code>og.customer_obligation_request</code>, <code>og.invoice_dispute</code></td><td>Disabled by default</td></tr>
 </tbody></table></div>
 </section>
@@ -69,7 +70,19 @@
 <dl class="hp-dl">
 <dt>EIA v2 (<code>[feeds.eia]</code>)</dt><dd>Hourly demand (<code>type=D</code>) for respondent <code>ERCO</code> from <code>/electricity/rto/region-data/data/</code>. API key read from the environment variable named by <code>api_key_env</code> (<code>EIA_API_KEY</code>). It is polled only from inside the ERCOT <code>np6-345-cd</code> poll when that product's breaker blocks the request, so it is idle while ERCOT is healthy. An old EIA row does not raise <code>ALR-FEED-STALE</code> unless the ERCOT product it backs is itself unavailable. Staleness <code>eia_fresh_s</code> 10800. Stored in <code>og.feed_obs</code>.</dd>
 <dt>NWS (<code>[feeds.nws]</code>)</dt><dd>api.weather.gov, no key; a descriptive <code>User-Agent</code> is sent. The grid point (<code>grid_point</code>) is resolved once at start-up, then the hourly forecast is polled every hour with <code>If-Modified-Since</code>. Staleness <code>nws_fresh_s</code> 10800. Stored in <code>og.feed_obs</code>; used by the forecast. Not firm-blocking.</dd>
-<dt>AS deployment poller (<code>[market_sim]</code>)</dt><dd>An og-feeds poller against the local market simulator for AS deployments. Off: <code>as_deployment_poll = false</code>.</dd>
+</dl>
+</section>
+
+<section class="hp-sub" id="in-ercot-as-poll"><h3>ERCOT AS deployment instructions (r3.4.1, D-35)</h3>
+<p>og-feeds polls ERCOT's ancillary-service dispatch instructions (<code>DEPLOY_AS</code> and <code>RECALL_AS</code> for ECRS, RRS, Reg-Up/Down and Non-Spin) every 5 s, first in each tick and independent of the public-feed polls. The source is the <code>ercot_mms</code> adapter (EWS <code>get VDIs</code>, acknowledged with <code>change VDIs</code>), built from <code>[feeds.ercot_as_poll.mms]</code>. Until go-live the endpoint is the ogsim MMS simulator on the market sim (<code>http://127.0.0.1:8090/mms/ews/</code>); a real MMS endpoint replaces it by configuration only. Nothing is ever submitted to ERCOT.</p>
+<dl class="hp-dl">
+<dt>Which award</dt><dd>An instruction names an ERCOT resource and an AS type. <code>[feeds.ercot_as_poll.awards]</code> maps <code>"&lt;resource&gt;:&lt;AS type&gt;"</code> to the ERCOT_AS contract, and the obligation of that contract whose window covers the instruction's start is deployed. No match is 404; two matches are 409.</dd>
+<dt>Same rules as the operator</dt><dd>Each instruction goes through the same core as <code>POST /og/api/dispatch/as-deployments</code> (origin <code>ERCOT_POLL</code>): 404 no award, 409 not deployable, already deployed, over the product's duration or over the awarded kW, 422 malformed. It deploys only ERCOT_AS awards, never the utility TOLLING contract. A recall ends the deployment it names.</dd>
+<dt>Idempotent and ordered</dt><dd>The instruction id is the idempotency key: a duplicate delivery never deploys twice and gets the same answer. Each batch is processed in issue order. A recall that arrives before its deployment is held, and the deployment is then never started. An instruction first seen more than 5 minutes after issue is refused as late.</dd>
+<dt>Trace and answer</dt><dd>Every decision is traced on stream <code>ercot_as_poll</code> (origin <code>ERCOT_POLL</code>) before ERCOT is answered ACCEPT, or REJECT with <code>&lt;status&gt; &lt;reason code&gt;</code>.</dd>
+<dt>Alerts and retries</dt><dd><code>ALR-ERCOT-AS-REFUSED</code> for each refused instruction. <code>ALR-ERCOT-AS-POLL-FAILED</code> after 3 failed polls and <code>ALR-ERCOT-AS-POLL-STALE</code> after 60 s without a good poll; both clear on the next good one. A failed poll is retried after 5, 10, 20, 40 and then every 60 s.</dd>
+<dt>Switch</dt><dd><code>[feeds.ercot_as_poll].enabled</code> ships <code>false</code>; the release manager enables it in production. On its own it changes nothing: with no instruction nothing is written, and committed AS awards keep their 0 kW hold until ERCOT (or an operator) deploys them.</dd>
+<dt>Simulating ERCOT</dt><dd>On the <code>/ogsim/</code> control page, scenarios <code>ercot_as_01_ecrs_deploy</code> to <code>ercot_as_07_exceed_award</code> (normal ECRS, RRS event, recall with out-of-order delivery, duplicate, malformed, unknown award, over the award) or single <code>ercot_as_*</code> injections. The simulator adds 1-4 s delivery jitter, occasional duplicates and out-of-order batches, and lists every instruction with our answer at <code>/mms/admin/vdis</code>.</dd>
 </dl>
 </section>
 
@@ -117,7 +130,7 @@
 
 <section class="hp-sub" id="in-mms"><h3>ERCOT MMS adapter (disabled)</h3>
 <p><code>opengrid.integrations.ercot_mms</code> is a QSE submission client for ERCOT MMS External Web Services: energy and three-part offers and AS offers (BidSet create/cancel), DAM/RTM awards (AwardSet get) and verbal dispatch instructions (VDIs get and acknowledge). A submission is POSTed exactly once; timeouts and 5xx are recorded as errors and never resent.</p>
-<p class="hp-warn">It is off twice over: the market backend defaults to <code>backend = "none"</code>, and the factory refuses to build <code>ercot_mms</code> unless <code>[integrations.market].enabled = true</code>. Neither key is set in <code>orchestrator.toml</code>, and no process constructs the adapter at r3.4. Nothing is ever submitted to ERCOT. The Markets bid funnel shows an <code>mms</code> count only if an MMS submissions table exists.</p>
+<p class="hp-warn">Submission is off twice over: the market backend defaults to <code>backend = "none"</code>, and the factory refuses to build <code>ercot_mms</code> unless <code>[integrations.market].enabled = true</code>. Neither key is set in <code>orchestrator.toml</code>. Nothing is ever submitted to ERCOT. Since r3.4.1 og-feeds builds the same client read-only for <a href="#in-ercot-as-poll">AS deployment instructions</a> when <code>[feeds.ercot_as_poll]</code> is enabled; it only reads instructions and answers them. The Markets bid funnel shows an <code>mms</code> count only if an MMS submissions table exists.</p>
 </section>
 
 <section class="hp-sub" id="in-customer-api"><h3>Customer API</h3>

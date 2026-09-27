@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ogsim.market.anomalies import MARKET_ANOMALY_TYPES, Anomaly
+from ogsim.market.as_dispatch import AS_DISPATCH_TYPES
 from ogsim.market.data import active_as_deployment
 from ogsim.market.runtime import get_runtime
 
@@ -64,6 +65,10 @@ async def inject_anomaly(request: Request, body: InjectRequest) -> JSONResponse 
         duration=body.duration,
     )
     rt.anomalies.inject(anomaly)
+    published: list[str] = []
+    if body.type in AS_DISPATCH_TYPES:
+        # One-shot: ERCOT issues the instruction(s) now; the anomaly window only records it.
+        published = rt.as_dispatch.apply(body.type, body.target, body.params, rt.now())
     # Bug fix (build phase, 2026-09-26): must sweep against the injected/fake clock (`rt.now()`), not
     # `sweep_expired`'s own real-wall-clock default -- once the real system clock drifted past a fake
     # clock's injected "now" (as it does for any test whose fake clock is set to a near-future time,
@@ -71,7 +76,10 @@ async def inject_anomaly(request: Request, body: InjectRequest) -> JSONResponse 
     # EXPIRY_GRACE_PERIOD_S`, sweeping an anomaly the instant it was injected, before any caller ever
     # observed it as active.
     rt.anomalies.sweep_expired(rt.now().timestamp())
-    return {"ok": True, "anomaly": anomaly.to_dict()}
+    result: dict[str, Any] = {"ok": True, "anomaly": anomaly.to_dict()}
+    if published:
+        result["instructions"] = published
+    return result
 
 
 @router.delete("/anomalies/{anomaly_id}")

@@ -1,0 +1,18 @@
+name: ercot_as_02_rrs_event
+description: >
+  RRS event (frequency excursion): ERCOT deploys the OG_ESR_1 RRS award at once (no ramp) and recalls it
+  after 10 minutes when frequency recovers. Expected: accepted deployment, then the recall ends it early.
+  Publishes ERCOT AS dispatch instructions on ogsim.market's MMS/EWS endpoint (/mms/ews/, D-35). The
+  orchestrator sees them only when [feeds.ercot_as_poll] is enabled and points at this simulator; its
+  decision and acknowledgement are listed at GET /mms/admin/vdis on the market sim.
+steps:
+  - at_s: 0
+    type: ercot_as_deploy
+    target: OG_ESR_1
+    params: {service: RRS, duration_min: 60, ramp_min: 0}
+    duration: 600
+  - at_s: 600
+    type: ercot_as_recall
+    target: OG_ESR_1
+    params: {service: RRS}
+    duration: 1

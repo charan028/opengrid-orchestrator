@@ -38,6 +38,8 @@ from opengrid.integrations.interfaces import (
     Award,
     DispatchInstruction,
     EnergyOffer,
+    InstructionBatch,
+    MalformedInstruction,
     OfferCurvePoint,
     ThreePartSupplyOffer,
 )
@@ -54,6 +56,7 @@ __all__ = [
     "energy_offer_element",
     "parse_awards",
     "parse_reply",
+    "parse_vdi_batch",
     "parse_vdis",
     "three_part_offer_element",
 ]
@@ -355,37 +358,61 @@ def parse_awards(payload: Element | None, *, trading_date: date, market: str = "
     return awards
 
 
-def parse_vdis(payload: Element | None, *, type_map: dict[str, str]) -> list[DispatchInstruction]:
-    """`VDIs` -> dispatch instructions. `Details/instructionType` is mapped through `type_map`
-    (instructionType -> AS_DEPLOYMENT | AS_RECALL); unmapped types stay kind VDI (operator attention)."""
+def _vdi(el: Element, type_map: dict[str, str]) -> DispatchInstruction:
+    """One `VDI` element -> an instruction. Raises `EwsError` / `ValueError` when it cannot be read.
+    `Details/rampMinutes` and `Details/recallOf` (D-35) are UNCONFIRMED spellings, like the ack's."""
+    details = el.find(f"{_P}Details")
+
+    def detail(name: str) -> str | None:
+        return _find_text(details, f"{_P}{name}") if details is not None else None
+
+    kind = type_map.get(detail("instructionType") or "OTHER", "VDI")
+    as_type = (detail("asType") or "").upper()
+    service = _AWARD_AS_TYPES.get(as_type)
+    if kind != "VDI" and service is None:
+        raise EwsError(f"unknown asType {as_type!r}")
+    mw, ramp, start, end = detail("mw"), detail("rampMinutes"), detail("startTime"), detail("endTime")
+    issued = _dt(_find_text(el, f"{_P}notificationTime"), "notificationTime")
+    return DispatchInstruction.model_validate(
+        {
+            "instruction_id": _find_text(el, f"{_P}mRID") or _find_text(el, f"{_P}vdiRefNum") or "",
+            "kind": kind,
+            "resource_id": _find_text(el, f"{_P}resource") or "",
+            "service": service,
+            "mw": _decimal(mw, "mw") if mw else None,
+            "start_at": _dt(start, "startTime") if start else issued,
+            "end_at": _dt(end, "endTime") if end else None,
+            "issued_at": issued,
+            "text": detail("instructionText"),
+            "ramp_minutes": int(_decimal(ramp, "rampMinutes")) if ramp else None,
+            "recalls": detail("recallOf"),
+        }
+    )
+
+
+def parse_vdi_batch(payload: Element | None, *, type_map: dict[str, str]) -> InstructionBatch:
+    """`VDIs` -> instructions plus the ones that could not be parsed (each with its id when readable), so
+    one malformed instruction is rejected on its own instead of failing the whole poll. `type_map` maps
+    `Details/instructionType` to AS_DEPLOYMENT | AS_RECALL; unmapped types stay kind VDI."""
     if payload is None:
-        return []
-    out: list[DispatchInstruction] = []
+        return InstructionBatch()
+    instructions: list[DispatchInstruction] = []
+    malformed: list[MalformedInstruction] = []
     for el in payload.iter(f"{_P}VDI"):
-        details = el.find(f"{_P}Details")
-        itype = (_find_text(details, f"{_P}instructionType") if details is not None else None) or "OTHER"
-        kind = type_map.get(itype, "VDI")
-        mw = _find_text(details, f"{_P}mw") if details is not None else None
-        as_type = (_find_text(details, f"{_P}asType") if details is not None else None) or ""
-        end = _find_text(details, f"{_P}endTime") if details is not None else None
-        issued = _dt(_find_text(el, f"{_P}notificationTime"), "notificationTime")
-        start_text = _find_text(details, f"{_P}startTime") if details is not None else None
-        out.append(
-            DispatchInstruction.model_validate(
-                {
-                    "instruction_id": _find_text(el, f"{_P}mRID") or _find_text(el, f"{_P}vdiRefNum") or "",
-                    "kind": kind,
-                    "resource_id": _find_text(el, f"{_P}resource") or "",
-                    "service": _AWARD_AS_TYPES.get(as_type.upper()),
-                    "mw": Decimal(mw) if mw else None,
-                    "start_at": _dt(start_text, "startTime") if start_text else issued,
-                    "end_at": _dt(end, "endTime") if end else None,
-                    "issued_at": issued,
-                    "text": _find_text(details, f"{_P}instructionText") if details is not None else None,
-                }
-            )
-        )
-    return out
+        try:
+            instructions.append(_vdi(el, type_map))
+        except (EwsError, ValueError) as exc:  # pydantic's ValidationError is a ValueError
+            instruction_id = _find_text(el, f"{_P}mRID") or _find_text(el, f"{_P}vdiRefNum")
+            malformed.append(MalformedInstruction(instruction_id=instruction_id, error=str(exc)[:300]))
+    return InstructionBatch(instructions=instructions, malformed=malformed)
+
+
+def parse_vdis(payload: Element | None, *, type_map: dict[str, str]) -> list[DispatchInstruction]:
+    """`VDIs` -> dispatch instructions; strict: raises `EwsError` on the first malformed one."""
+    batch = parse_vdi_batch(payload, type_map=type_map)
+    if batch.malformed:
+        raise EwsError(f"malformed VDI {batch.malformed[0].instruction_id}: {batch.malformed[0].error}")
+    return list(batch.instructions)
 
 
 def serialize(envelope: Any) -> bytes:

@@ -1,0 +1,13 @@
+name: ercot_as_07_exceed_award
+description: >
+  Deployment exceeding the award: three times the awarded MW. Expected: refused as 409, acknowledged
+  REJECT, ALR-ERCOT-AS-REFUSED raised, nothing deployed (never a partial or a capped deployment).
+  Publishes ERCOT AS dispatch instructions on ogsim.market's MMS/EWS endpoint (/mms/ews/, D-35). The
+  orchestrator sees them only when [feeds.ercot_as_poll] is enabled and points at this simulator; its
+  decision and acknowledgement are listed at GET /mms/admin/vdis on the market sim.
+steps:
+  - at_s: 0
+    type: ercot_as_exceed_award
+    target: OG_ESR_1
+    params: {service: ECRS, factor: 3.0}
+    duration: 60
