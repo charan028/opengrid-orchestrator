@@ -5,20 +5,32 @@ ledger timeline, opportunity admission, and the dispatch SSE stream.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from opengrid.api.auth import Identity, require_operator, require_viewer
-from opengrid.api.deps import get_config, get_store, get_trace_store
+from opengrid.api.call_errors import call_refused_http
+from opengrid.api.deps import get_call_store, get_config, get_store, get_trace_store
 from opengrid.api.schemas import OpportunityCreate
 from opengrid.api.sse import sse_response
 from opengrid.api.store import StoreProtocol
+from opengrid.calls import (
+    CallLimits,
+    CallOrigin,
+    CallRefused,
+    CallRequest,
+    CallStore,
+    cancel_deployment,
+    issue_call,
+    list_calls,
+)
+from opengrid.calls.models import MAX_CALL_MINUTES
 from opengrid.contracts import AdmissionError, admit
 from opengrid.invariants import InvariantsSummary, read_summary
 from opengrid.platform.config import Config
@@ -58,137 +70,63 @@ async def create_opportunity(
     return opportunity.model_dump(mode="json")
 
 
-#: ERCOT deploys Non-Spin for up to 4 h (ECRS 1 h): an operator deployment is bounded by the longest.
-_AS_DEPLOYMENT_MAX_MINUTES = 240
-
-
-#: Obligation states an AS award can be deployed in (a held award inside its window).
-_DEPLOYABLE_STATES = frozenset({"COMMITTED", "DELIVERING", "SHORTFALL"})
-
-#: D-29: a utility's discharge call on a tolling agreement (REGULATED_CAPACITY, contract variant TOLLING)
-#: is issued through the same route, capped by the obligation's own product rule (TOLLING: 90 min).
-_UTILITY_CALL_SERVICE_TYPE = "REGULATED_CAPACITY"
-_UTILITY_CALL_VARIANT = "TOLLING"
-#: `og.as_deployment.source`'s CHECK (migration 0020) has no UTILITY value, so a utility call is recorded
-#: as OPERATOR (the operator issues it) with this marker leading the reason.
-UTILITY_CALL_REASON_PREFIX = "utility call"
-
-
-def _deployment_kind(award: dict[str, Any]) -> str | None:
-    """`"AS"` for an ERCOT_AS award, `"UTILITY_CALL"` for a tolling obligation, None otherwise."""
-    if award["service_type"] == "ERCOT_AS":
-        return "AS"
-    if (
-        award["service_type"] == _UTILITY_CALL_SERVICE_TYPE
-        and str(award.get("variant") or "").upper() == _UTILITY_CALL_VARIANT
-    ):
-        return "UTILITY_CALL"
-    return None
-
-
 class AsDeploymentCreate(BaseModel):
-    """Operator-triggered ERCOT_AS deployment of ONE award (the demo's stand-in for an ERCOT deployment
-    instruction). A fleet-wide deployment is refused: it would discharge every held award at once, which
-    needs a two-person approval this route does not provide (review finding, 2026-09-26)."""
+    """Operator-triggered deployment of ONE held award: an ERCOT_AS award (the demo's stand-in for an
+    ERCOT deployment instruction) or, D-29, a utility's call on a tolling obligation. A fleet-wide
+    deployment is refused: it would discharge every held award at once, which needs a two-person approval
+    this route does not provide (review finding, 2026-09-26). `requested_kw` is signed (+charge/
+    -discharge, so negative); omitted = the full committed kW. `start_at` omitted = now."""
 
     obligation_id: UUID | None = None
     scope: str | None = None
-    duration_minutes: int = Field(default=15, ge=1, le=_AS_DEPLOYMENT_MAX_MINUTES)
+    duration_minutes: int = Field(default=15, ge=1, le=MAX_CALL_MINUTES)
     reason: str = Field(min_length=1, max_length=200)
+    requested_kw: float | None = None
+    start_at: datetime | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 @router.post("/dispatch/as-deployments", status_code=status.HTTP_201_CREATED)
 async def create_as_deployment(
     body: AsDeploymentCreate,
-    store: Annotated[StoreProtocol, Depends(get_store)],
+    call_store: Annotated[CallStore, Depends(get_call_store)],
     trace_store: Annotated[TraceStore, Depends(get_trace_store)],
+    cfg: Annotated[Config, Depends(get_config)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
-    """Deploy one held ERCOT_AS award now: while active, the allocator discharges it up to its committed
-    kW (an AS award is otherwise a 0 kW capacity hold). The award must exist, be ERCOT_AS and be
-    deployable now (404/409 otherwise), the duration is capped by the obligation's own product rule (ECRS
-    60 min, Non-Spin 240; 409 when it has none), and a second deployment while one is active is refused
-    (409, no chaining). Traced before it takes effect (K10).
-
-    D-29: the same route issues a utility's discharge call on a tolling obligation (REGULATED_CAPACITY,
-    contract variant TOLLING) -- same checks, capped by its product rule (TOLLING 90 min), recorded as
-    source OPERATOR with a reason starting "utility call"."""
-    if body.obligation_id is None:
-        detail = (
-            "a fleet-wide AS deployment needs a two-person approval and is not supported; deploy one award"
-            if (body.scope or "").upper() == "ALL"
-            else "obligation_id is required"
-        )
-        raise HTTPException(
-            status.HTTP_409_CONFLICT if body.scope else status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail
-        )
-    award = await store.get_as_award(body.obligation_id)
-    if award is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no such obligation")
-    kind = _deployment_kind(award)
-    if kind is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, detail="obligation is not an ERCOT_AS award or a tolling obligation"
-        )
-    if award["state"] not in _DEPLOYABLE_STATES:
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=f"award is {award['state']}, not deployable")
-    if award.get("has_active_deployment"):
-        # R2 review: no chaining -- a second deployment on top of an active one would extend the call
-        # past the product's own limit.
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, detail="an active deployment already covers this obligation"
-        )
-    if not award.get("duration_minutes"):
-        # R2 review: the cap is the obligation's OWN product rule; with none, nothing bounds the call.
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail="the obligation's product has no deployment duration; cannot cap it",
-        )
-    max_minutes = int(award["duration_minutes"])
-    reason = f"{UTILITY_CALL_REASON_PREFIX}: {body.reason}" if kind == "UTILITY_CALL" else body.reason
-    if body.duration_minutes > max_minutes:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail=f"duration {body.duration_minutes} min exceeds the award's product limit ({max_minutes} min)",
-        )
-    start_at = datetime.now(UTC)
-    end_at = start_at + timedelta(minutes=body.duration_minutes)
-    target = str(body.obligation_id)
-    trace_ref = await trace_store.append(
-        stream_id=f"operator_action:{identity.user}",
-        decision_type="OPERATOR_ACTION",
-        event_class="AS_DEPLOYMENT",
-        payload={
-            "decision_ref": target,
-            "start_at": start_at.isoformat(),
-            "end_at": end_at.isoformat(),
-            "reason": reason,
-            "kind": kind,
-        },
-    )
-    deployment_id = await store.insert_as_deployment(
+    """Deploy one held award now (or at `start_at`) through the one call path, `opengrid.calls.issue_call`
+    (D-33): the same checks as a utility's own call -- deployable state, the obligation's own product
+    cap (ECRS 60, Non-Spin 240, TOLLING 90 min; refused when it has none), no overlap, discharge only,
+    within the committed kW and the reservation window, idempotency and rate limits. Traced before it
+    takes effect (K10), with origin OPERATOR."""
+    if body.obligation_id is None and not body.scope:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="obligation_id is required")
+    request = CallRequest(
+        origin=CallOrigin.OPERATOR,
+        principal=identity.user,
+        reason=body.reason,
+        duration_minutes=body.duration_minutes,
         obligation_id=body.obligation_id,
-        start_at=start_at,
-        end_at=end_at,
-        requested_by=identity.user,
-        reason=reason,
+        requested_kw=body.requested_kw,
+        start_at=body.start_at,
+        idempotency_key=body.idempotency_key,
+        fleet_wide=body.obligation_id is None,
     )
-    await store.insert_operator_action(
-        operator_ref=identity.user,
-        action_kind="MANUAL_COMMAND",
-        target_ref=f"{'UTILITY_CALL' if kind == 'UTILITY_CALL' else 'AS_DEPLOYMENT'}:{target}",
-        tier="TIER1",
-        reason=reason,
-        trace_id=trace_ref.trace_id,
-        confirmed_at=start_at,
-    )
+    try:
+        record = await issue_call(call_store, trace_store, request, limits=CallLimits.from_config(cfg))
+    except CallRefused as exc:
+        raise call_refused_http(exc) from exc
     return {
-        "deployment_id": str(deployment_id),
-        "obligation_id": str(body.obligation_id),
-        "start_at": start_at.isoformat(),
-        "end_at": end_at.isoformat(),
-        "trace_id": str(trace_ref.trace_id),
-        "kind": kind,
+        "call_id": str(record.call_id),
+        "deployment_id": str(record.deployment_id),
+        "obligation_id": str(record.obligation_id),
+        "start_at": record.start_at.isoformat(),
+        "end_at": record.end_at.isoformat(),
+        "trace_id": str(record.trace_id),
+        "kind": record.kind.value if record.kind else None,
+        "origin": record.origin.value,
+        "requested_kw": record.requested_kw,
+        "replayed": record.replayed,
     }
 
 
@@ -197,25 +135,35 @@ async def list_as_deployments(
     store: Annotated[StoreProtocol, Depends(get_store)],
     _identity: Annotated[Identity, Depends(require_viewer)],
 ) -> list[dict[str, Any]]:
+    """Active deployments with their origin (`source`: OPERATOR, UTILITY, GRID_LINK, ERCOT, MARKET_SIM,
+    SCENARIO) and who asked (`requested_by`), for the Dispatch screen."""
     rows = await store.list_active_as_deployments()
     return [{k: (str(v) if isinstance(v, UUID | datetime) else v) for k, v in row.items()} for row in rows]
+
+
+@router.get("/dispatch/calls")
+async def list_dispatch_calls(
+    call_store: Annotated[CallStore, Depends(get_call_store)],
+    _identity: Annotated[Identity, Depends(require_viewer)],
+    utility_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[dict[str, Any]]:
+    """The call ledger (every origin, refusals included), newest first."""
+    return [r.public() for r in await list_calls(call_store, utility_id=utility_id, limit=limit)]
 
 
 @router.delete("/dispatch/as-deployments/{deployment_id}")
 async def end_as_deployment(
     deployment_id: UUID,
-    store: Annotated[StoreProtocol, Depends(get_store)],
+    call_store: Annotated[CallStore, Depends(get_call_store)],
     trace_store: Annotated[TraceStore, Depends(get_trace_store)],
     identity: Annotated[Identity, Depends(require_operator)],
 ) -> dict[str, Any]:
-    """End a deployment early: the award(s) return to a 0 kW capacity hold on the next cycle."""
-    await trace_store.append(
-        stream_id=f"operator_action:{identity.user}",
-        decision_type="OPERATOR_ACTION",
-        event_class="AS_DEPLOYMENT_END",
-        payload={"decision_ref": str(deployment_id)},
+    """End a deployment early (any origin): the award returns to a 0 kW capacity hold on the next cycle."""
+    ended = await cancel_deployment(
+        call_store, trace_store, deployment_id, origin=CallOrigin.OPERATOR, principal=identity.user
     )
-    if not await store.cancel_as_deployment(deployment_id):
+    if not ended:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no active deployment with that id")
     return {"deployment_id": str(deployment_id), "ended": True}
 

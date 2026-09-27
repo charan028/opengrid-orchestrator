@@ -296,9 +296,31 @@ viewer = ["viewer"]
 "og-cust-mobile" = "00000000-0000-7000-8000-0000000000c9"
 "og-cust-largeld" = "00000000-0000-7000-8000-0000000000ca"
 
+[api.roles.utility]
+# D-33: Apache account -> the utility_id it acts for (og.utility.utility_id). The utility reads and calls
+# only its own tolling obligations (/og/api/customer/v1/utility/, opengrid.customer_api.utility_routes).
+"og-util-aen" = "AUSTIN_ENERGY"
+# D-37: regulated since 2026-09-26 but with sample (SUSPENDED) contracts only -- mapped, NOT enabled below,
+# and no Apache account exists for them, so nothing can authenticate or call as them.
+"og-util-lcra" = "LCRA"
+"og-util-rayburn" = "RAYBURN"
+
+[api.utility_api]
+# Utilities allowed to use the utility API (fail closed: absent = none). Add LCRA / RAYBURN only when a real
+# contract is ACTIVE (and their Apache accounts exist).
+enabled_utilities = ["AUSTIN_ENERGY"]
+
 [api.customer_api]
-# Ships dark: the customer routes are mounted only when true (go-live step 3, after owner confirmation).
-enabled = false
+# D-33 (2026-09-26, owner request): enabled for the utility customer API (Austin Energy toll calls). This
+# mounts every customer route; each stays scoped to the caller's own customer_id / utility_id.
+enabled = true
+
+[dispatch.calls]
+# D-33: per-principal limits on dispatch calls (every origin, opengrid.calls.rules.CallLimits), and the
+# share of the call's target kW below which a started call reports RAMPING rather than DELIVERING.
+max_calls_per_hour = 30
+max_calls_per_day = 200
+ramping_fraction = 0.9
 
 [site_ingest]
 # Customer site-meter / corridor-current ingest (og/v1/site/#, og/v1/corridor/#); off until go-live.

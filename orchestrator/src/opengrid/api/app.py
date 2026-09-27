@@ -19,6 +19,7 @@ from opengrid.api.csrf import CSRFMiddleware
 from opengrid.api.proposals import ProposalStore
 from opengrid.api.store import PgStore
 from opengrid.api.trace_backend import PgTraceBackend, journal_path_from_config
+from opengrid.calls import PgCallStore
 from opengrid.contracts import AdmissionError
 from opengrid.contracts import configure as configure_contracts
 from opengrid.contracts.pg_repo import PgContractsRepo
@@ -45,6 +46,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.config = cfg
     app.state.pool = pool
     app.state.store = PgStore(pool)
+    app.state.call_store = PgCallStore(pool)
     app.state.trace_store = trace_store
     app.state.proposals = ProposalStore()
     # `opengrid.contracts` has no signing key or safety-critical state (unlike guardian/safestop) --
@@ -198,6 +200,7 @@ def _include_routers(app: FastAPI) -> None:
 
         app.include_router(customer_api.router)
         app.include_router(customer_api.operator_router)
+        app.include_router(customer_api.utility_router)
 
 
 def customer_api_enabled() -> bool:

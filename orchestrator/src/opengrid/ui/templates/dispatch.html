@@ -72,7 +72,8 @@
           <td>{{ award.product }}{% if award.required_hours %} · {{ award.required_hours }} h hold{% endif %}</td>
           <td>{{ award.committed_kw or '--' }} kW</td>
           <td>{% if award.energy_held_kwh is not none %}{{ '%.1f'|format(award.energy_held_kwh) }} / {% endif %}{% if award.required_energy_kwh is not none %}{{ '%.1f'|format(award.required_energy_kwh) }} kWh{% if award.energy_held_kwh is none %} required{% endif %}{% else %}--{% endif %}{% if award.energy_held_kwh is none and award.energy_margin_kwh is not none %} <span class="og-card-meta">(margin {{ '%+.1f'|format(award.energy_margin_kwh) }} kWh)</span>{% endif %}</td>
-          <td><span class="status-badge {{ 'status-dispatching' if award.state == 'deployed' else 'status-info' }}">{{ award.state }}</span></td>
+          <td><span class="status-badge {{ 'status-dispatching' if award.state == 'deployed' else 'status-info' }}">{{ award.state }}</span>{% if award.deployment_origin %}
+            <span class="og-card-meta as-call-origin" data-origin="{{ award.deployment_origin }}">by {{ award.deployment_origin }}{% if award.deployment_by %} &middot; {{ award.deployment_by }}{% endif %}{% if award.deployment_kw is not none %} &middot; {{ '%.0f'|format(award.deployment_kw|float) }} kW{% endif %}</span>{% endif %}</td>
           <td>{% if award.at_risk %}<span class="status-badge status-caution">AT_RISK</span>{% else %}<span class="status-badge status-good">OK</span>{% endif %}</td>
           <td>
             {% if award.state == 'deployed' and is_operator %}
