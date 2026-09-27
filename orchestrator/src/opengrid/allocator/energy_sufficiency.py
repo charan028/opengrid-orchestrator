@@ -16,6 +16,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+import numpy as np
+
 from opengrid.core.physics import hub_available_energy_kwh
 
 _EPS = 1e-9
@@ -75,11 +77,18 @@ def evaluate_energy_sufficiency(
     hubs' energy before `window_end` at the current committed draw rate -- catching the case where the
     margin is still (barely) positive today but the depletion clock is shorter than the remaining window.
     """
-    required_kwh = max(committed_kw, 0.0) * max(remaining_window_h, 0.0)
     available_kwh = sum(
         hub_available_kwh_net_of_other_reservations(hub, reserved_kwh_by_hub_for_others)
         for hub in eligible_hubs
     )
+    return _verdict(obligation_id, committed_kw, remaining_window_h, available_kwh)
+
+
+def _verdict(
+    obligation_id: str, committed_kw: float, remaining_window_h: float, available_kwh: float
+) -> EnergySufficiencyResult:
+    """`evaluate_energy_sufficiency`'s verdict from the energy available to the obligation."""
+    required_kwh = max(committed_kw, 0.0) * max(remaining_window_h, 0.0)
     margin_kwh = available_kwh - required_kwh
     time_to_depletion_h = (available_kwh / committed_kw) if committed_kw > _EPS else None
     at_risk = margin_kwh < -_EPS or (
@@ -114,9 +123,8 @@ def evaluate_with_substitution(
     if not primary_result.at_risk or not substitute_hubs:
         return primary_result
 
-    combined_hubs = list(primary_hubs) + [
-        h for h in substitute_hubs if h.hub_id not in {p.hub_id for p in primary_hubs}
-    ]
+    primary_ids = {p.hub_id for p in primary_hubs}  # once, not once per substitute hub
+    combined_hubs = list(primary_hubs) + [h for h in substitute_hubs if h.hub_id not in primary_ids]
     combined_result = evaluate_energy_sufficiency(
         obligation_id, committed_kw, remaining_window_h, combined_hubs, reserved_kwh_by_hub_for_others
     )
@@ -131,3 +139,51 @@ def evaluate_with_substitution(
         at_risk=False,
         used_substitution=True,
     )
+
+
+def evaluate_bank_obligations(
+    obligations: Sequence[tuple[str, float, float]],
+    reserving_kwh: Sequence[float],
+    hubs: Sequence[HubEnergyState],
+    free_kw: Sequence[float],
+) -> list[EnergySufficiencyResult]:
+    """Every obligation on one bank at once, for the engine's per-cycle check (K1/K2): obligation `i`
+    (`(obligation_id, committed_kw, remaining_window_h)`) may use the bank's `hubs`, less the energy every
+    OTHER obligation reserves there (`reserving_kwh[j]`, spread over the hubs by their share of the bank's
+    free kW, `free_kw`). Result `i` is bit for bit
+    `evaluate_with_substitution(id_i, kw_i, h_i, hubs, hubs, reserved_i)` with `reserved_i[hub] = sum over
+    j != i, in order, of reserving_kwh[j] * (free_kw[hub] / total free kW)` -- substituting within the same
+    hubs adds none, so it is the primary verdict.
+
+    Each hub's energy above reserve is computed once (not once per obligation), and the K2 reservations are
+    accumulated for all obligations together, per other obligation in order (one vector step each instead of
+    a Python loop over obligation pairs and hubs): O(k x n) Python work instead of O(k^2 x n)."""
+    k, n = len(obligations), len(hubs)
+    gross = [
+        None if h.soc_kwh is None else hub_available_energy_kwh(h.soc_kwh, h.reserve_kwh, h.eta_d)
+        for h in hubs
+    ]
+    total_free_kw = sum(free_kw)
+    reserved: list[list[float]] | None = None
+    if total_free_kw > 0 and k > 1:
+        ids = [o[0] for o in obligations]
+        share = np.array([f / total_free_kw for f in free_kw], dtype=np.float64)
+        acc = np.zeros((k, n), dtype=np.float64)
+        for j, other_id in enumerate(ids):
+            # Rows of every obligation that counts `other_id` as another's reservation; the first addition to
+            # a row is 0.0 + term, exactly the reference's `dict.get(hub, 0.0) + share`.
+            rows = [i for i, oid in enumerate(ids) if oid != other_id]
+            if rows:
+                acc[rows] += reserving_kwh[j] * share
+        reserved = acc.tolist()
+    results: list[EnergySufficiencyResult] = []
+    for i, (obligation_id, committed_kw, remaining_window_h) in enumerate(obligations):
+        row = reserved[i] if reserved is not None else None
+        if row is None:
+            available_kwh = sum(0.0 if g is None else max(g - 0.0, 0.0) for g in gross)
+        else:
+            available_kwh = sum(
+                0.0 if g is None else max(g - r, 0.0) for g, r in zip(gross, row, strict=True)
+            )
+        results.append(_verdict(obligation_id, committed_kw, remaining_window_h, available_kwh))
+    return results
