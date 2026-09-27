@@ -12,8 +12,10 @@ other scenario keeps away from it.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 import pytest
+from delivery_check import CHECK_MINUTES, assert_delivered, hub_buckets, wait_delivered
 from e2e_stack import Stack, now_utc, wait_until
 
 pytestmark = pytest.mark.usefixtures("stack")
@@ -121,6 +123,52 @@ def test_every_veto_is_traced_with_its_rule(stack: Stack) -> None:
         {"t": trace_id, "s": started},
     )
     assert traced, f"verdict trace row {trace_id} missing (K10)"
+
+
+# --- R3 manual target: the hub reaches it and holds it (delivered power, D-38) -----------------------
+
+#: The discharge target, as a share of the hub's power rating. The engine steps a hub from its last REPORTED power
+#: by 0.9 x its G-04 step per 2 s cycle (`opengrid.engine._ramped_setpoint_kw`, RAMP_SAFETY_FACTOR; firm default:
+#: full rating in 3 minutes, `core.physics.hub_ramp_kw_per_s`), and hubs report every 10 s, so on the sim a hub
+#: moves about 1% of its rating per 10 s (operator guide 6.2): a full-rating target needs about 1000 s, longer than
+#: the core's ramp window (`DeliveryPolicy.ramp_time_s`, 600 s). The check keeps the core's window and tolerance and
+#: asks for 20% instead: 95% of it is reached in about 190 s.
+MANUAL_TARGET_SHARE = 0.2
+
+
+def _issued_at(stack: Stack, trace_id: str) -> datetime:
+    """The target's own `issued_at` (server clock), from the operator API's target list."""
+    items = stack.get("/fleet/manual-targets").json().get("items", [])
+    found = next((item for item in items if item["trace_id"] == trace_id), None)
+    assert found is not None, f"manual target {trace_id} is not listed"
+    return datetime.fromisoformat(found["issued_at"])
+
+
+@pytest.mark.slow
+def test_r3_a_manual_discharge_target_is_reached_and_held_measured_from_telemetry(stack: Stack) -> None:
+    hub = stack.online_hub(exclude_banks=(STOP_BANK,), idle=True)
+    target_kw = -MANUAL_TARGET_SHARE * float(hub["p_limit_kw"])
+    needed_kwh = -target_kw * CHECK_MINUTES / 60
+    if float(hub["soc_kwh"]) - float(hub["r_kwh"]) < needed_kwh:
+        pytest.skip(f"{hub['hub_id']} holds under {needed_kwh:.2f} kWh above its reserve for the check")
+
+    resp = stack.manual_command(hub["hub_id"], target_kw)
+
+    assert resp.status_code == 202 and resp.json().get("status") == "RAMPING", resp.text
+    trace_id = resp.json()["trace_id"]
+    try:
+        start = _issued_at(stack, trace_id)
+        delivered = wait_delivered(
+            lambda until: hub_buckets(
+                stack, hub["hub_id"], target_kw=target_kw, call_start=start, until=until
+            ),
+            call_start=start,
+            call_end=datetime.fromisoformat(resp.json()["expires_at"]),
+            what=f"the {target_kw:.2f} kW manual target on {hub['hub_id']}",
+        )
+        assert_delivered(delivered, what=f"the {target_kw:.2f} kW manual target on {hub['hub_id']}")
+    finally:
+        stack.post(f"/fleet/manual-targets/{trace_id}/cancel")
 
 
 # --- safe stop: scope, two-step, two-person release -------------------------------------------------

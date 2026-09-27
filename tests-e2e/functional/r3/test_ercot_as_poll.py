@@ -6,14 +6,22 @@ trace stream, `og.as_deployment` (source ERCOT) and `og.alert`.
 The stack must run og-feeds with `[feeds.ercot_as_poll]` enabled against the stack's market sim, mapping
 `OG_ESR_1:ECRS` to an ERCOT_AS contract (default: the seeded demo ECRS contract). Set OG_E2E_ERCOT_AS_POLL=1
 to run; otherwise the module skips.
+
+The accepted ECRS deployment is also checked as DELIVERED power (D-38, `delivery_check`) before it is recalled:
+measured from telemetry with `opengrid.core.delivery`, it must reach 95% of the deployed kW within the policy's
+600 s ramp time and hold it (the sim's instruction carries the same 10-minute ECRS ramp, which the call does not
+use). That check watches the running deployment for up to about 12 minutes; the deployment ends with the sim's
+instruction, 30 minutes by default.
 """
 
 from __future__ import annotations
 
 import os
 from typing import Any
+from uuid import UUID
 
 import pytest
+from delivery_check import assert_delivered, obligation_buckets, wait_delivered
 from e2e_stack import Stack, wait_until
 
 pytestmark = [
@@ -102,6 +110,32 @@ def test_an_ecrs_deployment_its_duplicate_and_its_recall(stack: Stack) -> None:
         {"o": accepted["payload"]["obligation_id"]},
     )
     assert len(rows) == 1  # the duplicate never deployed twice
+
+    # Accepted is not delivered (D-38): the deployment's measured discharge must reach the deployed kW (its signed
+    # `requested_kw`; none = the award's full committed kW) and hold it, judged by core.delivery's own policy.
+    deployment = stack.rows(
+        "SELECT d.start_at, d.end_at, d.requested_kw, o.committed_qty_kw FROM og.as_deployment d "
+        "JOIN og.obligation o USING (obligation_id) WHERE d.deployment_id = %(d)s",
+        {"d": rows[0]["deployment_id"]},
+    )[0]
+    called_kw = (
+        -float(deployment["requested_kw"])
+        if deployment["requested_kw"] is not None
+        else float(deployment["committed_qty_kw"])
+    )
+    delivered = wait_delivered(
+        lambda until: obligation_buckets(
+            stack,
+            UUID(accepted["payload"]["obligation_id"]),
+            committed_discharge_kw=called_kw,
+            call_start=deployment["start_at"],
+            until=until,
+        ),
+        call_start=deployment["start_at"],
+        call_end=deployment["end_at"],
+        what="the polled ECRS deployment",
+    )
+    assert_delivered(delivered, what="the polled ECRS deployment")
 
     stack.inject("ercot_as_recall", RESOURCE, service="ECRS")
     recalled = _decided(stack, since, "AS_RECALL_APPLIED")
