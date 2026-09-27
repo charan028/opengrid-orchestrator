@@ -225,6 +225,173 @@ def _unparsed(text: str, spans: Spans, fields: dict[str, Any]) -> UnparsedCondit
     return UnparsedCondition(text=snippet, fields=answers)
 
 
+_SMALL_NUMBERS = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+]
+_NUMBER_WORDS: dict[str, int] = {
+    **{word: value for value, word in enumerate(_SMALL_NUMBERS)},
+    **{
+        w: 10 * (i + 2)
+        for i, w in enumerate(["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"])
+    },
+}
+_NUMBER_WORD_RUN = re.compile(
+    r"\b(?:"
+    + "|".join([*_NUMBER_WORDS, "hundred", "thousand"])
+    + r")(?:[\s-]+(?:and[\s-]+)?(?:"
+    + "|".join([*_NUMBER_WORDS, "hundred", "thousand"])
+    + r"))*\b",
+    re.IGNORECASE,
+)
+
+
+def _number_value(words: str) -> int:
+    total = current = 0
+    for word in re.split(r"[\s-]+", words.lower()):
+        if word == "and":
+            continue
+        if word == "hundred":
+            current = max(current, 1) * 100
+        elif word == "thousand":
+            total += max(current, 1) * 1000
+            current = 0
+        else:
+            current += _NUMBER_WORDS[word]
+    return total + current
+
+
+def spell_numbers(text: str) -> str:
+    """Number words as digits ("more than forty kWh" -> "more than 40 kWh", "one hundred twenty" -> "120"),
+    so a condition written in words is read by the same rules as one written in digits -- on every path."""
+    return _NUMBER_WORD_RUN.sub(lambda m: str(_number_value(m.group(0))), text)
+
+
+#: Words a fleet question may contain besides the phrases the parser understood. Anything else left over
+#: ("in Houston", "near the depot", "a lot of") may be a condition the parser did not read, so the question
+#: is refused rather than answered with a count that ignores it.
+_FILLER = frozenset(
+    [
+        "a",
+        "all",
+        "an",
+        "and",
+        "any",
+        "are",
+        "at",
+        "be",
+        "being",
+        "battery",
+        "batteries",
+        "by",
+        "can",
+        "count",
+        "currently",
+        "do",
+        "does",
+        "each",
+        "entire",
+        "exist",
+        "fleet",
+        "for",
+        "give",
+        "got",
+        "has",
+        "have",
+        "hub",
+        "hubs",
+        "i",
+        "in",
+        "is",
+        "issues",
+        "it",
+        "its",
+        "list",
+        "many",
+        "me",
+        "much",
+        "my",
+        "now",
+        "number",
+        "of",
+        "on",
+        "or",
+        "our",
+        "overall",
+        "please",
+        "problems",
+        "right",
+        "s",
+        "score",
+        "show",
+        "sum",
+        "tell",
+        "that",
+        "the",
+        "their",
+        "there",
+        "these",
+        "those",
+        "today",
+        "total",
+        "unit",
+        "units",
+        "we",
+        "what",
+        "whats",
+        "which",
+        "whole",
+        "with",
+        "you",
+        "homes",
+        "home",
+        "trucks",
+        "truck",
+        "banks",
+        "bank",
+        "substations",
+        "substation",
+        "capacity",
+        "charge",
+        "charged",
+        "soc",
+        "state",
+        "power",
+        "rated",
+        "zone",
+        "zones",
+        "firmware",
+        "version",
+        "hardware",
+        "how",
+        "altogether",
+        "currently",
+    ]
+)
+
+
+def _leftover_words(text: str, spans: Spans) -> list[str]:
+    return [w for w in re.findall(r"[a-z]+", _masked(text, spans).lower()) if w not in _FILLER]
+
+
 def parse(question: str) -> FleetQuery | UnparsedCondition | None:
     """The fleet query a question asks for; `UnparsedCondition` when it is a fleet question with a
     condition the parser could not read (never answered as an unfiltered count); or None when it is not
@@ -234,7 +401,7 @@ def parse(question: str) -> FleetQuery | UnparsedCondition | None:
     to the handlers that own those, and a fleet noun with no filter, grouping, metric or counting cue
     ("tell me about the fleet") is left to the health summary. Every phrase that sets a filter is recorded
     as understood; whatever condition word is left over makes the question unparsed."""
-    text = question.strip()
+    text = spell_numbers(question.strip())
     if not text or _NOT_FLEET.search(text):
         return None
     spans: Spans = []
@@ -294,17 +461,13 @@ def parse(question: str) -> FleetQuery | UnparsedCondition | None:
     if unparsed is not None:
         return unparsed
     query = FleetQuery.model_validate(fields)
-    if query.has_filter or metric or group or _AGGREGATE_CUE.search(text):
-        return query
-    return None
-
-
-def covers(query: FleetQuery | None, condition: UnparsedCondition) -> bool:
-    """True when the routing model's validated `query` sets a filter that answers `condition` (for
-    "more than forty kWh", a capacity bound). A query that does not is never run in its place."""
-    if query is None or not condition.fields:
-        return False
-    return any(getattr(query, name, None) not in (None, (), "none") for name in condition.fields)
+    if not (query.has_filter or metric or group or _AGGREGATE_CUE.search(text)):
+        return None
+    leftover = _leftover_words(text, spans)
+    if leftover:
+        # e.g. "how many hubs in Houston": an unread word may be a filter; never answer the whole fleet.
+        return UnparsedCondition(text=" ".join(leftover)[:80], fields=())
+    return query
 
 
 def not_understood(condition: UnparsedCondition) -> CopilotAnswer:

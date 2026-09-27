@@ -65,7 +65,7 @@ def test_comparators_parse_to_bounds(question: str, expected: FleetQuery) -> Non
 
 UNPARSEABLE = [
     "how many units have more than X kWh",
-    "how many units have more than forty kWh",
+    "how many units have more than a lot of kWh",
     "how many hubs have more than 40",
     "how many hubs in LZ_NORTH with low charge",
     "how many hubs have a capacity of about forty",
@@ -77,7 +77,7 @@ UNPARSEABLE = [
 def test_an_unread_condition_is_flagged_not_dropped(question: str) -> None:
     reading = fleet.parse(question)
     assert isinstance(reading, fleet.UnparsedCondition), reading
-    assert reading.text and reading.text in question
+    assert reading.text and reading.text in fleet.spell_numbers(question)
 
 
 def _no_count(text: str, snippet: str) -> bool:
@@ -101,20 +101,35 @@ async def test_an_unread_condition_gets_no_number_without_a_model(question: str)
 
 async def test_the_snapshot_hub_total_is_not_offered_instead() -> None:
     """Without the tool the generic "N hubs are reporting" handler would have answered the fleet total."""
-    answer = await _service().ask("how many hubs have more than forty kWh", CONTEXT, trace=RecordingTrace())
+    answer = await _service().ask(
+        "how many hubs have more than a lot of kWh", CONTEXT, trace=RecordingTrace()
+    )
     assert "200" not in answer.text and answer.refusal_reason == "fleet_condition_unparsed"
 
 
-async def test_the_routing_models_filter_is_used_when_it_covers_the_condition() -> None:
-    claude = FakeProvider(intent="fleet_query", fleet={"capacity_min_kwh": 40})
-    tool = FakeFleetTool({"total": _total(700), "groups": [], "group_by": "none", "rows": []})
+async def test_number_words_are_parsed_so_every_path_gives_the_same_count() -> None:
+    """r3.4.3 opcheck: "more than forty kWh" was refused by the parser but answered through the routing
+    model's filters. Number words are now numbers, so the parser answers it, whatever the model says."""
+    claude = FakeProvider(intent="fleet_query", fleet={"capacity_min_kwh": 99})
+    tool = FakeFleetTool({"total": _total(709), "groups": [], "group_by": "none", "rows": []})
 
     answer = await _service(claude).ask(
         "how many units have more than forty kWh", CONTEXT, trace=RecordingTrace(), fleet_tool=tool
     )
 
     assert tool.queries == [FleetQuery(capacity_min_kwh=40.0)]
-    assert answer.text == "700 hubs rated at least 40 kWh." and answer.tier == "routed"
+    assert answer.text == "709 hubs rated at least 40 kWh." and answer.tier == "deterministic"
+
+
+async def test_the_routing_models_filter_is_never_trusted_over_an_unread_condition() -> None:
+    claude = FakeProvider(intent="fleet_query", fleet={"capacity_min_kwh": 40})
+    tool = FakeFleetTool({"total": _total(709), "groups": [], "group_by": "none", "rows": []})
+
+    answer = await _service(claude).ask(
+        "how many units have more than a lot of kWh", CONTEXT, trace=RecordingTrace(), fleet_tool=tool
+    )
+
+    assert tool.queries == [] and answer.refusal_reason == "fleet_condition_unparsed"
 
 
 @pytest.mark.parametrize(
@@ -122,7 +137,7 @@ async def test_the_routing_models_filter_is_used_when_it_covers_the_condition() 
     [
         ("how many hubs in LZ_NORTH with low charge", {"zones": ["LZ_NORTH"]}),  # drops the condition
         ("how many units have more than X kWh", {}),  # nothing extracted
-        ("how many units have more than forty kWh", {"soc_min_pct": 40}),  # wrong topic
+        ("how many units have more than a lot of kWh", {"soc_min_pct": 40}),  # wrong topic
     ],
 )
 async def test_model_filters_that_miss_the_condition_are_not_run(
@@ -140,6 +155,9 @@ async def test_model_filters_that_miss_the_condition_are_not_run(
 
 async def test_screening_down_still_counts_nothing_for_an_unread_condition() -> None:
     answer = await _service(FakeProvider(fail=True)).ask(
-        "how many hubs have more than forty kWh", CONTEXT, trace=RecordingTrace(), fleet_tool=FakeFleetTool()
+        "how many hubs have more than a lot of kWh",
+        CONTEXT,
+        trace=RecordingTrace(),
+        fleet_tool=FakeFleetTool(),
     )
     assert answer.refusal_reason == "fleet_condition_unparsed" and "200" not in answer.text

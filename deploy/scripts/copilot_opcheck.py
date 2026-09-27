@@ -27,10 +27,9 @@ import re
 import ssl
 import subprocess
 import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
-
-import tomllib
 
 CREDENTIALS = Path(os.environ.get("OG_UI_CREDENTIALS", "/root/opengrid-ui-credentials.txt"))
 ACCOUNT = os.environ.get("OG_CHECK_ACCOUNT", "viewer")
@@ -195,7 +194,7 @@ def check_trucks(auth: str) -> None:
 
 
 def check_unparseable(auth: str) -> None:
-    question = "how many units have more than forty kWh"
+    question = "how many units have more than a lot of kWh"
     answer = ask(question, auth)
     text = show(question, answer)
     unquoted = re.sub(r"'[^']*'", "", text)
@@ -212,6 +211,8 @@ def main() -> int:
     check_count("hubs in LZ_NORTH", "how many hubs in LZ_NORTH", "h.zone = 'LZ_NORTH'", auth)
     check_count("hubs rated 78.4 kWh", "how many units have capacity 78.4 kWh", "h.e_kwh BETWEEN 78.35 AND 78.45", auth)
     check_count("hubs on UNAVAILABLE banks", "how many hubs are unavailable", _UNAVAILABLE, auth)
+    # r3.4.4: number words are numbers on every path (r3.4.3 refused this in the parser, answered it via Haiku)
+    check_count("hubs rated more than forty kWh", "how many units have more than forty kWh", "h.e_kwh >= 40", auth)
     unavailable_banks = (
         "SELECT count(*) FROM og.bank b WHERE coalesce(to_jsonb(b.*) ->> 'availability', 'AVAILABLE') <> 'AVAILABLE'"
     )

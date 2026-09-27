@@ -147,10 +147,18 @@ class CopilotService:
         # generic hub counts.
         # A fleet question whose condition the parser could not read is never answered with a count
         # that ignores the condition -- not the fleet tool's, and not the snapshot's hub totals.
+        # The same parse decides every path (no model, screening down, screened): a parsed fleet query is
+        # answered from the fleet tool, an unread condition is refused, and a question that names a fleet
+        # filter is never answered with the snapshot's whole-fleet hub totals.
         reading = fleet.parse(question)
         parsed = reading if isinstance(reading, FleetQuery) else None
         unparsed = reading if isinstance(reading, fleet.UnparsedCondition) else None
-        early = fleet.not_understood(unparsed) if unparsed else deterministic.answer(question, context)
+        if unparsed is not None:
+            early: CopilotAnswer | None = fleet.not_understood(unparsed)
+        elif parsed is not None and _filtered(parsed):
+            early = None
+        else:
+            early = deterministic.answer(question, context)
 
         if not self._gateway.available:
             fleet_answer = await _fleet_answer(parsed, fleet_tool)
@@ -161,9 +169,10 @@ class CopilotService:
         calls: list[ModelCall] = list(screened.calls)
         verdict = screened.value
         if verdict is None:
-            # Screening unavailable: the injection risk is unknown, not zero. Stay on no-model answers.
+            # Screening unavailable: the injection risk is unknown, not zero, so no model is used. The
+            # parsed fleet query involves no model (typed values, bound parameters): it still answers.
             reason = screened.budget_refusal or "screening unavailable"
-            fallback = early or _unavailable(reason)
+            fallback = await _fleet_answer(parsed, fleet_tool) or early or _unavailable(reason)
             return _with_calls(fallback, calls, request)
 
         if verdict.injection_risk >= INJECTION_THRESHOLD:
@@ -183,9 +192,11 @@ class CopilotService:
 
         # The parser's reading wins; otherwise the routing model's validated extraction (only when it is
         # confident). Either way the query is typed values over a fixed vocabulary, run read-only.
-        model_query = verdict.fleet if verdict.is_confident else None
-        if unparsed is not None and not fleet.covers(model_query, unparsed):
-            # The model's filters (if any) do not answer the condition either: say so, count nothing.
+        # The routing model's filters are used only when the parser found no fleet question at all: an
+        # unread condition is refused on every path (the model's reading of it is not trusted over ours),
+        # and a model query with no filter, grouping or metric would be the whole-fleet total.
+        model_query = verdict.fleet if verdict.is_confident and reading is None else None
+        if model_query is not None and not _filtered(model_query):
             model_query = None
         query = parsed or model_query
         explaining = verdict.intent == "explain_decision"
@@ -276,13 +287,22 @@ async def _run_fleet(query: FleetQuery | None, tool: FleetTool | None) -> dict[s
 
 
 async def _fleet_answer(query: FleetQuery | None, tool: FleetTool | None) -> CopilotAnswer | None:
-    """The deterministic fleet answer, "can't verify" when the read failed, or None (no query/tool)."""
+    """The deterministic fleet answer; "can't verify" when the read failed, or when there is no tool for
+    a filtered question (whose honest answer is never the snapshot's whole-fleet count); None when there
+    is no query, or an unfiltered one and no tool."""
     result = await _run_fleet(query, tool)
-    if query is None or result is None:
+    if query is None:
         return None
+    if result is None:
+        return fleet.unavailable() if _filtered(query) else None
     if isinstance(result, Exception):
         return fleet.unavailable()
     return fleet.render(query, result)
+
+
+def _filtered(query: FleetQuery) -> bool:
+    """A query that narrows or shapes the fleet: any filter, a breakdown, or a metric other than count."""
+    return query.has_filter or query.group_by != "none" or query.metric != "count"
 
 
 def _with_calls(answer: CopilotAnswer, calls: list[ModelCall], request: ModelRequest) -> CopilotAnswer:
