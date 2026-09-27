@@ -142,6 +142,27 @@ async def load_bank_zones(bank_ids: list[str]) -> dict[str, str]:
         return {str(row[0]): str(row[1]) async for row in cur}
 
 
+#: A mobile unit is a single-hub bank; its hub's recorded position (device-reported, `og.hub.lat/lon`).
+_HUB_POSITIONS_SQL = """
+SELECT bank_id, hub_id, lat, lon FROM og.hub
+WHERE (bank_id = ANY(%(ids)s) OR hub_id = ANY(%(ids)s)) AND lat IS NOT NULL AND lon IS NOT NULL
+"""
+
+
+async def load_hub_positions(unit_ids: list[str]) -> dict[str, tuple[float, float]]:
+    """Read-only: `id -> (lat, lon)` for the hubs whose bank id or hub id is in `unit_ids`, keyed by both
+    (D-31 mobile units: the selector's at-home test). A hub without a recorded position is absent."""
+    if not unit_ids:
+        return {}
+    pool = await get_pool()
+    out: dict[str, tuple[float, float]] = {}
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_HUB_POSITIONS_SQL, {"ids": unit_ids})
+        async for bank_id, hub_id, lat, lon in cur:
+            out[str(bank_id)] = out[str(hub_id)] = (float(lat), float(lon))
+    return out
+
+
 async def load_degraded_modes() -> frozenset[str]:
     """Read-only: the currently-active degraded modes (`og.degraded_mode_state`, health's persisted
     set, read through health's own query). Raises on any DB error: callers fail closed."""

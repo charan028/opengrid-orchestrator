@@ -24,6 +24,7 @@ def _config(**overrides):
         "zones": ("LZ_NORTH", "LZ_SOUTH"),
         "history_tsv_path": "/nonexistent/substation_history.tsv",
         "substation_assets": (SUBSTATION,),
+        "mobile_units": (),  # the shipped scada.yaml's trucks are covered by test_fleet_mobile_units.py
     }
     base.update(overrides)
     return replace(load_scada_config(), **base)

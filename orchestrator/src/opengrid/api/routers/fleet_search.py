@@ -229,7 +229,9 @@ def home_stations() -> list[dict[str, Any]]:
     return [
         {
             "home_station_id": str(s["home_station_id"]),
+            "name": s.get("name"),
             "zone": s.get("zone"),
+            "utility_id": s.get("utility_id") or None,
             "lat": s.get("lat"),
             "lon": s.get("lon"),
             "charger_kw": s.get("charger_kw"),

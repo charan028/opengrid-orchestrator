@@ -30,8 +30,13 @@ from ogsim.common.config import (
     SUBSTATION_ETA_DEFAULT,
     SUBSTATION_RESERVE_FRAC_DEFAULT,
     FleetConfig,
+    MobileUnitConfig,
     SubstationAssetConfig,
 )
+
+#: One-way efficiency of a truck-mounted battery: the same 0.9487 as the home fleet seed (fleet.yaml
+#: eta_c/eta_d), round trip ~0.90.
+MOBILE_ETA_DEFAULT: float = 0.9487
 
 HEALTH_ONLINE = "online"
 HEALTH_STALE = "stale"
@@ -128,6 +133,12 @@ class FleetState:
     # home load) charges first, the rest from the grid. Both >= 0; both 0 when not charging.
     charge_pv_kw: np.ndarray = field(default_factory=lambda: np.zeros(0))
     charge_grid_kw: np.ndarray = field(default_factory=lambda: np.zeros(0))
+
+    # Mobile units (trucks, D-31): `is_mobile` marks a simulated `MobileUnitConfig` hub (no household
+    # load/PV); `charge_blocked` is True for a mobile unit away from its home station, where it must
+    # never charge (the runtime holds any charging request at 0 kW and reports p_ch_max_kw = 0).
+    is_mobile: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
+    charge_blocked: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
 
     hub_index: dict[str, int] = field(default_factory=dict)
 
@@ -235,6 +246,45 @@ def _substation_segment(
     return hub_ids, bank_ids, zones, physics
 
 
+def _mobile_segment(
+    units: tuple[MobileUnitConfig, ...], rng: np.random.Generator
+) -> tuple[list[str], list[str], list[str], dict[str, np.ndarray]]:
+    """Simulated mobile units (trucks, D-31; `MobileUnitConfig`'s docstring), each its OWN one-hub bank
+    like a substation asset: hub id `trailer_id`, bank id `sim_bank_id`, rated `p_kw`/`e_kwh` with its
+    own `reserve_frac` floor, no PV and no household load. Registry-only entries (`simulate=False`) are
+    skipped. Returns the same physics-dict shape `_segment_physics` does."""
+    sim = [u for u in units if u.simulate]
+    n = len(sim)
+    hub_ids = [u.trailer_id for u in sim]
+    bank_ids = [u.sim_bank_id for u in sim]
+    zones = [u.zone for u in sim]
+    p_kw_limit = np.array([u.p_kw for u in sim], dtype=float)
+    e_kwh = np.array([u.e_kwh for u in sim], dtype=float)
+    r_kwh = e_kwh * np.array([u.reserve_frac for u in sim], dtype=float)
+    soc_frac = rng.uniform(0.4, 0.9, size=n)
+    soc_kwh = np.clip(soc_frac * e_kwh, r_kwh, e_kwh)
+    physics = {
+        "soc_kwh": soc_kwh,
+        "e_kwh": e_kwh,
+        "r_kwh": r_kwh,
+        "p_kw_limit": p_kw_limit,
+        "eta_c": np.full(n, MOBILE_ETA_DEFAULT),
+        "eta_d": np.full(n, MOBILE_ETA_DEFAULT),
+        "self_discharge_kwh_per_h": np.zeros(n),
+        "pv_capacity_kw": np.zeros(n),  # no PV on a truck
+        "phase_offset_s": np.zeros(n),
+        "p_kw_commanded": np.zeros(n),
+        "p_kw_applied": np.zeros(n),
+        "last_epoch": np.full(n, -1, dtype=np.int64),
+        "last_seq": np.full(n, -1, dtype=np.int64),
+        "lease_expires_at": np.zeros(n),
+        "local_autonomy": np.ones(n, dtype=bool),
+        "holding_after_expiry": np.zeros(n, dtype=bool),
+        "offline": np.zeros(n, dtype=bool),
+    }
+    return hub_ids, bank_ids, zones, physics
+
+
 def build_fleet_state(config: FleetConfig, rng: np.random.Generator) -> FleetState:
     """Allocates a `FleetState` for `config.hub_count` hubs distributed round-robin across
     `config.bank_count` banks and `config.zones` (02b §4.1) -- banks are feeder segments and stay
@@ -293,6 +343,23 @@ def build_fleet_state(config: FleetConfig, rng: np.random.Generator) -> FleetSta
     lat_deg = np.concatenate([lat_deg, np.array([ll[0] for ll in sub_lat_lon])])
     lon_deg = np.concatenate([lon_deg, np.array([ll[1] for ll in sub_lat_lon])])
 
+    # Simulated mobile units (trucks) last, each at its configured current position (its home station
+    # while parked there) -- a real depot location, never a hashed zone-center jitter.
+    mobile_sim = [u for u in config.mobile_units if u.simulate]
+    mob_hub_ids, mob_bank_ids, mob_zones, mob_physics = _mobile_segment(config.mobile_units, rng)
+    fixed_count = len(hub_ids)
+    hub_ids += mob_hub_ids
+    bank_ids += mob_bank_ids
+    zones += mob_zones
+    for key, value in mob_physics.items():
+        physics[key] = np.concatenate([physics[key], value])
+    lat_deg = np.concatenate([lat_deg, np.array([u.lat for u in mobile_sim], dtype=float)])
+    lon_deg = np.concatenate([lon_deg, np.array([u.lon for u in mobile_sim], dtype=float)])
+    is_mobile = np.concatenate([np.zeros(fixed_count, dtype=bool), np.ones(len(mobile_sim), dtype=bool)])
+    charge_blocked = np.concatenate(
+        [np.zeros(fixed_count, dtype=bool), np.array([not u.at_home for u in mobile_sim], dtype=bool)]
+    )
+
     total = len(hub_ids)
     p_kw_limit = physics["p_kw_limit"]
     state = FleetState(
@@ -318,6 +385,8 @@ def build_fleet_state(config: FleetConfig, rng: np.random.Generator) -> FleetSta
         lon_deg=lon_deg,
         charge_pv_kw=np.zeros(total),
         charge_grid_kw=np.zeros(total),
+        is_mobile=is_mobile,
+        charge_blocked=charge_blocked,
         **physics,
     )
     return state

@@ -107,9 +107,23 @@ substation_assets:
 # orchestrator/config/service_profiles/mobile_storage_home_stations.toml `[[assignment]]` 1:1 -- same
 # trailer_id/home_station_id ids (that file also lists hs-austin-north-01's own zone/lat/lon/
 # charger_kw, kept there since a home station is a charging depot, not a fleet hub/bank).
+#
+# Truck fleet (owner request 2026-09-26): `simulate: true` entries are ALSO simulated as their own
+# one-hub bank (hub = trailer_id, bank = bank_id), publishing telemetry and device_info (asset_class
+# MOBILE_STORAGE) at lat/lon = their current position, parked at the home station (at_home: true, so
+# charging is allowed; D-31: never charged away from home). Must match mobile_storage_home_stations.toml
+# (bank_id/hub_id/home_station_id, station lat/lon/zone) and dev/seed/mobile_trucks_seed.sql 1:1.
 mobile_units:
   - trailer_id: trailer-mb-01
     home_station_id: hs-austin-north-01
+  - {trailer_id: truck-aus-01, bank_id: bank-truck-aus-01, home_station_id: hs-aus-roundrock-01, simulate: true, zone: LZ_SOUTH, lat: 30.5195, lon: -97.6480, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
+  - {trailer_id: truck-aus-02, bank_id: bank-truck-aus-02, home_station_id: hs-aus-sandhill-01, simulate: true, zone: LZ_AEN, lat: 30.2090, lon: -97.6125, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
+  - {trailer_id: truck-sat-01, bank_id: bank-truck-sat-01, home_station_id: hs-sat-selma-01, simulate: true, zone: LZ_CPS, lat: 29.5840, lon: -98.3170, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
+  - {trailer_id: truck-sat-02, bank_id: bank-truck-sat-02, home_station_id: hs-sat-leoncreek-01, simulate: true, zone: LZ_CPS, lat: 29.3570, lon: -98.5680, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
+  - {trailer_id: truck-dfw-01, bank_id: bank-truck-dfw-01, home_station_id: hs-dfw-irving-01, simulate: true, zone: LZ_NORTH, lat: 32.8385, lon: -96.9730, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
+  - {trailer_id: truck-dfw-02, bank_id: bank-truck-dfw-02, home_station_id: hs-dfw-garland-01, simulate: true, zone: LZ_NORTH, lat: 32.8920, lon: -96.6560, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
+  - {trailer_id: truck-dfw-03, bank_id: bank-truck-dfw-03, home_station_id: hs-dfw-mesquite-01, simulate: true, zone: LZ_NORTH, lat: 32.7905, lon: -96.6150, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
+  - {trailer_id: truck-dfw-04, bank_id: bank-truck-dfw-04, home_station_id: hs-dfw-grandprairie-01, simulate: true, zone: LZ_NORTH, lat: 32.7630, lon: -97.0560, p_kw: 500.0, e_kwh: 1000.0, reserve_frac: 0.20, at_home: true}
 
 guardian_public_key_path: /etc/opengrid/guardian_ed25519.pub
 # Local/dev override (hex or base64 32-byte Ed25519 public key), takes

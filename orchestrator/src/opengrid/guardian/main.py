@@ -69,7 +69,7 @@ from opengrid.platform.log import configure_logging
 from opengrid.platform.mqtt import build_client
 from opengrid.platform.mqtt_session import MqttPublisher, MqttSession
 from opengrid.platform.process import run_forever
-from opengrid.selector.gate import load_mobile_units
+from opengrid.selector.gate import load_mobile_home_station_sites, load_mobile_units
 from opengrid.trace import TraceStore
 from opengrid.trace.pg_backend import PgTraceBackend, journal_path_from_config
 
@@ -413,7 +413,11 @@ async def main() -> None:
         territory=PgTerritoryPort(pool, zone_territory),
     )
     # G-35 (D-31): the mobile-unit registry, read once at start (a malformed file fails the start loudly).
-    ports = dataclasses.replace(ports, mobile_units=ConfigMobileUnitPort(load_mobile_units()))
+    # The at-home check reads each unit's position from og.hub against its home station's coordinates.
+    ports = dataclasses.replace(
+        ports,
+        mobile_units=ConfigMobileUnitPort(load_mobile_units(), load_mobile_home_station_sites(), pool),
+    )
     calibration_queue = PgCalibrationQueuePort(pool)
 
     service = GuardianService(ports=ports, config=guardian_cfg, signing_seed=signing_seed)
