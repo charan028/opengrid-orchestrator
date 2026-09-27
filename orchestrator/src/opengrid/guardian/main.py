@@ -61,6 +61,7 @@ from opengrid.guardian.repo import (
     load_hub_params,
     load_signed_anchors,
     load_zones_by_bank,
+    mark_verdict_published,
 )
 from opengrid.guardian.service import GuardianService
 from opengrid.platform.config import Config, load_config, resolve_secret
@@ -485,6 +486,8 @@ async def main() -> None:
                 key_id=guardian_cfg.key_id,
                 proposal=proposal,
             )
+            # published: the engine and the startup reload may now anchor on it (DISPATCH contract)
+            await mark_verdict_published(pool, batch.command_batch_id)
         if ports.pq is not None:
             # Isolated from batch signing: a calibration-path failure (e.g. og.calibration_attempt
             # not yet migrated) must never stop the guardian signing or holding dispatch (K7).

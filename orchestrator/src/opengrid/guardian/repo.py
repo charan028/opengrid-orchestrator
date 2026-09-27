@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any, ClassVar, Literal
 from uuid import UUID, uuid4
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core import geo, manual_targets
@@ -137,9 +138,39 @@ JOIN og.command_batch cb
   ON cb.command_batch_id = (t.payload ->> 'command_batch_id')::uuid AND cb.trace_pre_image_id = t.trace_id
 JOIN og.verdict v ON v.command_batch_id = cb.command_batch_id
 WHERE t.event_class = 'RT_ALLOCATION' AND t.created_at > %(since)s
-  AND v.outcome = 'PASS' AND v.signed_at > %(since)s
+  AND v.outcome = 'PASS' AND v.signed_at > %(since)s {published}
 ORDER BY v.signed_at
 """
+#: og.verdict.published_at (additive migration, agreed with DISPATCH): stamped once the signed batch is published;
+#: "signed" for G-04's anchor on both sides means PASS AND published. Absent on an older schema.
+_VERDICT_PUBLISHED_COLUMN_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'og' AND table_name = 'verdict' AND column_name = 'published_at'
+)
+"""
+_MARK_VERDICT_PUBLISHED_SQL = """
+UPDATE og.verdict SET published_at = now() WHERE command_batch_id = %(command_batch_id)s AND published_at IS NULL
+"""
+_published_column_missing = False
+
+
+async def mark_verdict_published(pool: AsyncConnectionPool, command_batch_id: UUID) -> None:
+    """Stamp og.verdict.published_at once the signed batch is published (the engine's and the startup reload's
+    signal that it became G-04's anchor). Never raises; on a schema without the column it stops trying."""
+    global _published_column_missing
+    if _published_column_missing:
+        return
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_MARK_VERDICT_PUBLISHED_SQL, {"command_batch_id": command_batch_id})
+    except psycopg.errors.UndefinedColumn:
+        _published_column_missing = True
+        logger.warning("og.verdict.published_at not migrated yet: publish stamps skipped")
+    except Exception:
+        logger.exception("failed to stamp og.verdict.published_at", extra={"batch": str(command_batch_id)})
+
+
 #: The reload never delays startup by more than this: on timeout G-04 starts on telemetry (DISPATCH contract).
 SIGNED_ANCHORS_TIMEOUT_MS = 2000
 
@@ -666,7 +697,10 @@ async def load_signed_anchors(
     since = datetime.fromtimestamp(now.timestamp() - lookback_s, tz=UTC)
     async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
         await cur.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
-        await cur.execute(_SIGNED_ANCHORS_SQL, {"since": since})
+        await cur.execute(_VERDICT_PUBLISHED_COLUMN_SQL)
+        has_column = await cur.fetchone()
+        published = "AND v.published_at IS NOT NULL" if has_column is not None and has_column[0] else ""
+        await cur.execute(_SIGNED_ANCHORS_SQL.format(published=published), {"since": since})
         rows = await cur.fetchall()
     anchors: dict[str, tuple[float, datetime, datetime]] = {}
     for signed_at, payload in rows:  # oldest first: the latest signature per hub wins
