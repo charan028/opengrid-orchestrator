@@ -221,3 +221,73 @@ async def test_the_job_records_measured_delivery_meter_checks_and_vetoes(
 
     await job.run_once()  # final records are not re-verified or re-alerted
     assert len([r for r in trace.rows if r[1] == "DELIVERY_VERIFICATION"]) == 3
+
+
+async def test_restart_and_meter_queries_run_on_postgres(
+    pool: AsyncConnectionPool, seeded: dict[str, UUID], dsn: str
+) -> None:
+    settings = DeliverySettings(
+        bucket_s=30.0, telemetry_lag_s=0.0, meter_bank_ids=("dvit-ok-bank", "dvit-mm-bank")
+    )
+    await DeliveryJob(pool, _Trace(), settings).run_once()  # type: ignore[arg-type]
+    since = datetime.now(UTC) - timedelta(hours=1)
+    async with pool.connection() as conn:
+        latest = await store.latest_meter_status(conn, ["dvit-ok-bank", "dvit-mm-bank"], since=since)
+    assert latest["dvit-ok-bank"][0] == "CORROBORATED" and latest["dvit-mm-bank"][0] == "UNCORROBORATED"
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        (obligation_id,) = conn.execute(
+            "SELECT obligation_id FROM og.as_deployment WHERE deployment_id = %s", (seeded["vetoed"],)
+        ).fetchone()  # type: ignore[misc]
+        conn.execute("UPDATE og.obligation SET at_risk = true WHERE obligation_id = %s", (obligation_id,))
+        conn.execute(
+            """INSERT INTO og.trace (trace_id, decision_type, event_class, stream_id, seq, payload, hash)
+               VALUES (%s, 'ALERT', 'AT_RISK', %s, 0, %s, %s)""",
+            (
+                uuid4(),
+                f"obligation-{obligation_id}",
+                Jsonb({"cause": "measured_delivery", "call_id": "dvit-call"}),
+                f"dvit{uuid4()}",
+            ),
+        )
+    try:
+        async with pool.connection() as conn:
+            flags = await store.delivery_at_risk_flags(conn, since=since)
+        assert (obligation_id, "dvit-call") in flags
+        cleared: list[Any] = []
+
+        async def set_at_risk(oid: Any, at_risk: bool, **_kw: Any) -> None:
+            cleared.append((oid, at_risk))
+
+        await DeliveryJob(pool, _Trace(), settings, set_at_risk=set_at_risk).run_once()  # type: ignore[arg-type]
+        assert (obligation_id, False) in cleared  # the call is not running short: the stale flag is cleared
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM og.trace WHERE stream_id = %s", (f"obligation-{obligation_id}",))
+
+
+async def test_retention_keeps_the_summary_and_prunes_old_series(
+    pool: AsyncConnectionPool, seeded: dict[str, UUID], dsn: str
+) -> None:
+    settings = DeliverySettings(bucket_s=30.0, telemetry_lag_s=0.0)
+    await DeliveryJob(pool, _Trace(), settings).run_once()  # type: ignore[arg-type]
+    call_id = str(seeded["ok"])
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        policy = conn.execute(
+            "SELECT mode, keep_days, protected FROM og.data_retention WHERE table_name = 'delivery_record'"
+        ).fetchone()
+        assert policy == ("NONE", None, False)  # kept like og.as_deployment
+        conn.execute(
+            "UPDATE og.delivery_record SET window_end = window_end - interval '90 days' WHERE call_id = %s",
+            (call_id,),
+        )
+    now = datetime.now(UTC)
+    async with pool.connection() as conn:
+        pruned = await store.prune_series(conn, now=now, keep_days=60, batch=500)
+        await conn.commit()
+    assert pruned >= 1
+    record = await store.fetch_record(pool, call_id)
+    assert record is not None and record.series == [] and record.series_pruned_at is not None
+    assert record.result == "PASS" and record.discharged_kwh > 0  # the summary stays
+    recent = await store.fetch_record(pool, str(seeded["mismatch"]))
+    assert recent is not None and recent.series and recent.series_pruned_at is None

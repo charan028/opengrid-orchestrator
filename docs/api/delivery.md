@@ -56,7 +56,7 @@ Returns one record with its `series`. Each entry is one bucket:
 | `md` | Meter change from its pre-call baseline, on metered banks |
 | `bd` | Battery change from its pre-call baseline, on metered banks |
 
-The response is 404 when there is no record yet.
+The response is 404 when there is no record yet. After `[delivery].series_keep_days` (60 d) the series of a final record is emptied (`series: []`, `series_pruned_at` set); the summary fields are kept.
 
 ### `GET /og/api/delivery/summary?days=7`
 
@@ -66,6 +66,15 @@ Returns, per contract and CT day, over final records:
 - `compliance_pct` (the share of calls that passed) and `sustained_pct_avg`;
 - `uncorroborated` (calls whose meter disagreed);
 - `discharged_kwh` and `committed_kwh`.
+
+### `POST /og/api/delivery/records/{call_id}/meter-mismatch/clear` (operator)
+
+Body: `{"reason": "..."}` (1-200 characters).
+
+- Clears the call's open `ALR-DELIVERY-METER-MISMATCH` after investigation. It is traced before it takes effect.
+- The record stays UNCORROBORATED; only the alert closes.
+- Returns 404 when no such alert is open for the call.
+- The job also clears the alert by itself once the same meter agrees with battery telemetry on a later call.
 
 ## Utility (role `utility`, action `utility.read`)
 

@@ -157,7 +157,12 @@ lasted, and discharged against committed kWh.</p>
 While a SHORTFALL or NONE alert is open, the obligation is flagged AT_RISK
 (<code>R-DELIVERY-MEASURED-SHORTFALL</code>) and dispatch continues at the maximum feasible kW (K7, D-17). At the end
 of a call, a meter that disagrees by more than 10 % raises <code>ALR-DELIVERY-METER-MISMATCH</code> and marks the
-record <b>UNCORROBORATED</b>.</p>
+record <b>UNCORROBORATED</b>. That alert clears when the same meter agrees again on a later call, or when an operator
+clears it with a reason. After an og-settle restart, the job reconciles the AT_RISK flags it had set: a call still
+running short keeps its flag; any other flag is cleared, and so are the live alerts of calls that ended meanwhile.
+Products are matched by one canonical name (<code>core.services.canonical_product</code>), so NSPIN, NONSPIN and
+NON_SPIN all get Non-Spin's ramp time. The summary row is kept like the call (<code>og.as_deployment</code>); its
+per-bucket series is emptied after <code>[delivery].series_keep_days</code> (60 d).</p>
 <p>Where it shows:</p>
 <ul>
 <li>the Dispatch page's <b>Delivery</b> column and its detail drawer;</li>

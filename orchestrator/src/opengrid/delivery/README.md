@@ -30,15 +30,21 @@ og-settle runs `job.DeliveryJob.run_once` every `[delivery].interval_s`. For eac
 3. **Verifies the whole series** with `core.delivery.verify_delivery` (PASS/PARTIAL/FAIL, or IN_PROGRESS while running) and `corroborate_meter`.
 4. **Upserts `og.delivery_record`.** The final record is traced as `DELIVERY_VERIFICATION` on stream `delivery`.
 5. **Raises and clears the live alerts** `ALR-DELIVERY-RAMP-LATE`, `-SHORTFALL` and `-NONE` (`opengrid.health.delivery_rules`).
-   - `ALR-DELIVERY-METER-MISMATCH` is raised when a final record is UNCORROBORATED. It stays open for the operator.
+   - `ALR-DELIVERY-METER-MISMATCH` is raised when a final record is UNCORROBORATED. It clears once the same meter agrees again on a later call, or when an operator clears it with a reason (`POST /og/api/delivery/records/{call_id}/meter-mismatch/clear`).
+   - On startup, the job reconciles the AT_RISK flags it set, which are held in memory only. A call still running short keeps its flag; other flags are cleared. Live alerts of calls that are no longer open are cleared.
    - While a SHORTFALL or NONE alert is open, the obligation is flagged AT_RISK through `contracts.set_obligation_at_risk` (R-DELIVERY-MEASURED-SHORTFALL). The flag is cleared when delivery recovers.
 6. **Changes no dispatch** (K7, D-17). Mid-window SHORTFALL escalation remains the engine's.
+
+## Retention (migration 0051)
+
+The summary row is kept like the `og.as_deployment` it verifies: `og.data_retention` mode NONE, not protected. Each pass, the job also empties the per-bucket `series` of final records whose window ended more than `[delivery].series_keep_days` ago (default 60 d, the horizon of `og.grant` and `og.command_batch`, which the series is derived from). It does this in batches of `series_prune_batch` and sets `series_pruned_at`.
 
 ## Config (`[delivery]`)
 
 - `enabled`, `interval_s`, `bucket_s`, `telemetry_lag_s`, `lookback_s`, `baseline_s`;
 - tolerances: `target_frac`, `sustain_pass_pct`, `shortfall_alert_s`, `none_alert_s`, `meter_tolerance_frac`, `meter_floor_kw`;
 - `meter_bank_ids`;
+- `series_keep_days`, `series_prune_batch`;
 - `[delivery.ramp_time_s]` per product (TOLLING, ECRS, RRS, REGUP, REGDN, NSPIN, MANUAL).
 
 ## Tests

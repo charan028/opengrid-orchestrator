@@ -22,6 +22,7 @@ AEN = {"X-Remote-User": "og-util-aen"}
 CPS = {"X-Remote-User": "og-util-cps"}
 CUSTOMER = {"X-Remote-User": "og-cust-a"}
 VIEWER = {"X-Remote-User": "op-view"}
+OPERATOR = {"X-Remote-User": "op-admin"}
 
 
 @pytest.fixture
@@ -30,7 +31,7 @@ def config() -> Config:
         {
             "api": {
                 "roles": {
-                    "operator": [],
+                    "operator": ["op-admin"],
                     "viewer": ["op-view"],
                     "customer": {"og-cust-a": str(CUSTOMER_ID)},
                     "utility": {"og-util-aen": "AUSTIN_ENERGY", "og-util-cps": "CPS_ENERGY"},
@@ -136,3 +137,66 @@ def test_the_operator_api_lists_details_and_summarizes(api, records) -> None:
     assert api.get("/og/api/delivery/records/missing", headers=VIEWER).status_code == 404
     assert api.get("/og/api/delivery/summary?days=7", headers=VIEWER).json()[0]["compliance_pct"] == 100.0
     assert api.get("/og/api/delivery/records", headers=AEN).status_code == 403
+
+
+def test_an_operator_clears_a_meter_mismatch_with_a_reason(api, monkeypatch, trace_backend) -> None:
+    from opengrid.api.routers import delivery as router
+    from opengrid.core.models.platform import Alert
+
+    cleared: list[int] = []
+    open_alerts = [
+        Alert(
+            id=5,
+            rule="ALR-DELIVERY-METER-MISMATCH",
+            severity="critical",
+            summary="s",
+            detail={"call_id": "c1"},
+            opened_at=T0,
+        ),
+        Alert(
+            id=6,
+            rule="ALR-DELIVERY-SHORTFALL",
+            severity="critical",
+            summary="s",
+            detail={"call_id": "c1"},
+            opened_at=T0,
+        ),
+    ]
+
+    async def fetch_open_alerts(_pool: Any) -> list[Alert]:
+        return open_alerts
+
+    async def clear_alert(_pool: Any, alert_id: int, **_kw: Any) -> None:
+        cleared.append(alert_id)
+
+    monkeypatch.setattr(router, "fetch_open_alerts", fetch_open_alerts)
+    monkeypatch.setattr(router, "clear_alert", clear_alert)
+    url = "/og/api/delivery/records/c1/meter-mismatch/clear"
+
+    assert api.post(url, headers=VIEWER, json={"reason": "checked"}).status_code == 403
+    assert api.post(url, headers=OPERATOR, json={"reason": ""}).status_code == 422
+    done = api.post(url, headers=OPERATOR, json={"reason": "SCADA CT ratio fixed; telemetry verified"})
+    assert done.status_code == 200 and done.json() == {"call_id": "c1", "cleared": 1}
+    assert cleared == [5]  # only the meter mismatch, never the live shortfall
+    assert (
+        api.post(
+            "/og/api/delivery/records/other/meter-mismatch/clear", headers=OPERATOR, json={"reason": "x"}
+        ).status_code
+        == 404
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "headers"),
+    [
+        ("/og/api/customer/v1/utility/delivery-records", AEN),
+        ("/og/api/customer/delivery-records", CUSTOMER),
+        ("/og/api/delivery/records", VIEWER),
+    ],
+)
+@pytest.mark.parametrize("param", ["since", "until"])
+def test_a_timestamp_without_utc_offset_is_422(api, records, path, headers, param) -> None:
+    naive = T0.replace(tzinfo=None).isoformat()
+    resp = api.get(path, headers=headers, params={param: naive})
+    assert resp.status_code == 422 and "timezone" in resp.text
+    assert api.get(path, headers=headers, params={param: T0.isoformat()}).status_code == 200

@@ -6,7 +6,8 @@ call's facts in. One place names each rule, severity, summary and condition key 
 - ALR-DELIVERY-SHORTFALL: after the ramp, delivery has been below target for longer than N s;
 - ALR-DELIVERY-NONE: signed commands ask for discharge but no measurable delivery for longer than N s;
 - ALR-DELIVERY-METER-MISMATCH: at the end of a call the independent meter disagrees with battery
-  telemetry beyond tolerance (the record is UNCORROBORATED). Stays open until an operator clears it.
+  telemetry beyond tolerance (the record is UNCORROBORATED). Cleared when the same meter agrees again on a
+  later call, or by an operator (`POST /og/api/delivery/records/{call_id}/meter-mismatch/clear`).
 """
 
 from __future__ import annotations
@@ -113,9 +114,15 @@ def evaluate_delivery_alerts(facts: DeliveryAlertFacts) -> list[AlertFinding]:
 
 
 def evaluate_delivery_meter_mismatch_alert(
-    facts: DeliveryAlertFacts, *, mismatch_frac: float | None, window_end: datetime
+    facts: DeliveryAlertFacts,
+    *,
+    mismatch_frac: float | None,
+    window_end: datetime,
+    meter_bank_ids: list[str] | None = None,
 ) -> AlertFinding:
-    """ALR-DELIVERY-METER-MISMATCH for a final record whose meter check is UNCORROBORATED."""
+    """ALR-DELIVERY-METER-MISMATCH for a final record whose meter check is UNCORROBORATED. It clears when the
+    same meter agrees with battery telemetry on a later call, or when an operator clears it
+    (`POST /og/api/delivery/records/{call_id}/meter-mismatch/clear`, reason required, traced)."""
     pct = f"{100.0 * mismatch_frac:.0f}%" if mismatch_frac is not None else "unknown"
     return _finding(
         ALR_DELIVERY_METER_MISMATCH,
@@ -124,4 +131,5 @@ def evaluate_delivery_meter_mismatch_alert(
         "UNCORROBORATED",
         mismatch_frac=mismatch_frac,
         window_end=window_end.isoformat(),
+        meter_bank_ids=list(meter_bank_ids or []),
     )

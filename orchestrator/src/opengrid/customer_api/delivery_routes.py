@@ -11,11 +11,11 @@ A record of another utility or customer answers 404 exactly like a missing one. 
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from psycopg_pool import AsyncConnectionPool
+from pydantic import AwareDatetime
 
 from opengrid.api.deps import get_pool
 from opengrid.customer_api.identity import CustomerIdentity, require_customer
@@ -49,8 +49,8 @@ def _own(
 async def utility_delivery_records(
     who: Reader,
     pool: Pool,
-    since: datetime | None = None,
-    until: datetime | None = None,
+    since: AwareDatetime | None = None,
+    until: AwareDatetime | None = None,
     result: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_ROWS)] = 100,
 ) -> dict[str, Any]:
@@ -72,8 +72,8 @@ async def utility_delivery_record(call_id: str, who: Reader, pool: Pool) -> dict
 async def customer_delivery_records(
     who: Customer,
     pool: Pool,
-    since: datetime | None = None,
-    until: datetime | None = None,
+    since: AwareDatetime | None = None,
+    until: AwareDatetime | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_ROWS)] = 100,
 ) -> dict[str, Any]:
     """The customer's own calls' delivery records (its contracts), newest first."""

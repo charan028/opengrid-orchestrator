@@ -26,6 +26,7 @@ from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
 from opengrid.core.services import ERCOT_AS_SERVICE_TYPE, REGULATED_CAPACITY_SERVICE_TYPE
+from opengrid.core.services import AS_HOLD_HOURS, AS_MAX_DEPLOY_MINUTES, canonical_product
 from opengrid.ui.api_client import ApiUnavailable, delete_json, get_json, post_json
 from opengrid.ui.role import is_operator, remote_user, role_of
 from opengrid.ui.templating import BASE_PATH, templates
@@ -571,16 +572,9 @@ def commitment_lock_events_view(commitments: list[dict[str, Any]]) -> list[dict[
     return events
 
 
-#: NPRR1282 stored-energy duration per AS product (hours of full deployment the award must be able to hold).
-_AS_HOLD_HOURS: dict[str, int] = {"ECRS": 1, "NSPIN": 4, "NON_SPIN": 4, "NONSPIN": 4}
-#: Longest deployment the product rule allows, in minutes (ECRS 1 h, Non-Spin 4 h; tolling 90 min, D-29).
-AS_MAX_DEPLOY_MINUTES: dict[str, int] = {
-    "ECRS": 60,
-    "NSPIN": 240,
-    "NON_SPIN": 240,
-    "NONSPIN": 240,
-    "TOLLING": 90,
-}
+#: Hold hours and deployment caps per product live in `opengrid.core.services` (one owner), keyed by the
+#: canonical product (`canonical_product`: NONSPIN / NON_SPIN are NSPIN).
+_AS_HOLD_HOURS = AS_HOLD_HOURS
 #: Only an AWARDED AS obligation is a hold that can be deployed; an OFFERED one is just an offer.
 _TOLL_SERVICE_TYPE = REGULATED_CAPACITY_SERVICE_TYPE
 _TOLL_VARIANT = "TOLLING"
@@ -640,7 +634,7 @@ def as_awards_view(
             or (product_by_contract or {}).get(str(award.get("contract_id") or ""))
             or ""
         ).upper()
-        required_hours: int | None = _AS_HOLD_HOURS.get(product)
+        required_hours: int | None = _AS_HOLD_HOURS.get(canonical_product(product) or "")
         energy_held = _f(award.get("energy_held_kwh"))
         required_energy = _f(award.get("required_energy_kwh"))
         if required_energy is None:
@@ -662,7 +656,7 @@ def as_awards_view(
                 "energy_margin_kwh": _f(award.get("energy_margin_kwh")),
                 "required_energy_kwh": required_energy,
                 "required_hours": required_hours,
-                "max_minutes": AS_MAX_DEPLOY_MINUTES.get(product),
+                "max_minutes": AS_MAX_DEPLOY_MINUTES.get(canonical_product(product) or ""),
                 "at_risk": at_risk,
                 "state": state,
                 "deployment_id": str(deployment["deployment_id"]) if deployment else None,
@@ -704,7 +698,7 @@ async def propose_as_deployment(
     _require_operator(request)
     if not obligation_id.strip():
         return _action_result(request, message="Choose the held award to deploy (one award per deployment).")
-    cap = AS_MAX_DEPLOY_MINUTES.get(product.strip().upper(), 240)
+    cap = AS_MAX_DEPLOY_MINUTES.get(canonical_product(product) or "", 240)
     if not 1 <= duration_minutes <= cap:
         label = product.strip().upper() or "this product"
         return _action_result(request, message=f"Duration must be between 1 and {cap} minutes for {label}.")
