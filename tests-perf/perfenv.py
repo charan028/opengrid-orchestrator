@@ -198,6 +198,9 @@ def render_orchestrator_toml(repo: Path, run: Path) -> dict[str, Any]:
     )
     cfg["pq_ingest"]["blob_store_dir"] = str(var / "pq_waveform")
     cfg["market_sim"]["base_url"] = market
+    # r3.4.1's [grid_link] (D-34 utility DNP3 link, OFF in production) names certificates under /etc/opengrid.
+    # A perf stack never listens for a utility EMS: drop it, so the default (off) applies.
+    cfg.pop("grid_link", None)
     check_isolated(cfg)
     return cfg
 
@@ -220,6 +223,9 @@ def render_orchestrator_toml_compose(repo: Path) -> dict[str, Any]:
     cfg["pq_ingest"].pop("blob_store_dir", None)
     cfg["fleet"]["sim_config_path"] = f"{COMPOSE_APP_GEN}/fleet.perf.yaml"
     cfg["market_sim"]["base_url"] = "http://sim-market:8090"
+    cfg.pop(
+        "grid_link", None
+    )  # r3.4.1: OFF in production, its TLS paths are /etc/opengrid (see the base renderer)
     text = tomli_w.dumps(cfg)
     for needle in ("/etc/opengrid", "api.ercot.com", "api.eia.gov", "api.weather.gov"):
         if needle in text:
