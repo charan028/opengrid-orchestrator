@@ -3,7 +3,7 @@
 # For the release manager: run as root on base AFTER the release is deployed to /opt/opengrid/current and
 # AFTER r341_utility_api_apache.sh has created /etc/opengrid/utility_sim.env. DRY RUN by default; APPLY=1
 # applies. Idempotent. Never prints a secret. Steps:
-#   1. MQTT user og_sim_utility: password generated here, hashed into /etc/mosquitto/opengrid.passwd, the
+#   1. MQTT user og_sim_utility: password generated here (never in argv), hashed into opengrid.passwd, the
 #      clear value appended to /etc/opengrid/utility_sim.env (0640 root:opengrid) as OG_MQTT_UTILITY_PASSWORD;
 #   2. ACL: og_sim_utility may only READ og/v1/scenario/cmd (the /ogsim/ triggers); it publishes nothing;
 #   3. backups of passwd/acl, then a Mosquitto reload (SIGHUP via systemctl reload), restore on failure;
@@ -36,7 +36,14 @@ else
     if [ "$APPLY" = 1 ]; then
         umask 077
         PW=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c1-32)
-        mosquitto_passwd -b "$PASSWD" "$MQ_USER" "$PW"
+        # Never on a command line (ps): the clear pair goes to a 0600 temp file via the printf builtin, is
+        # hashed in place by `mosquitto_passwd -U` (as bootstrap_from_scratch.sh does), then appended.
+        TMP_PW=$(mktemp /dev/shm/og_mqpw.XXXXXX); chmod 600 "$TMP_PW"
+        trap 'rm -f "$TMP_PW"' EXIT
+        printf '%s:%s\n' "$MQ_USER" "$PW" >"$TMP_PW"
+        mosquitto_passwd -U "$TMP_PW"
+        cat "$TMP_PW" >>"$PASSWD"
+        rm -f "$TMP_PW"
         sed -i '/^OG_MQTT_UTILITY_PASSWORD=/d' "$SIM_ENV"
         printf 'OG_MQTT_UTILITY_PASSWORD=%s\n' "$PW" >>"$SIM_ENV"
         chown root:opengrid "$SIM_ENV"; chmod 0640 "$SIM_ENV"
