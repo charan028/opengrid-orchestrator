@@ -273,7 +273,8 @@ async def test_load_hub_params():
     assert params["sub-LZ_AEN-00"].params.utility_scale  # og.asset SUBSTATION: rated at its nameplate
     sql, sql_params = cursor.executed[0]
     assert "a.asset_id = h.hub_id" in sql
-    assert sql_params == {"nameplate": ["SUBSTATION", "MOBILE_STORAGE"]}  # D-31 trucks at nameplate too
+    assert "'SUBSTATION'" in sql and "'MOBILE_STORAGE'" in sql  # core.nameplate: D-31 trucks too
+    assert sql_params is None
 
 
 # ---------------------------------------------------------------------------------------------------

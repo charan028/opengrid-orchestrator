@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.invariants import queries
 from opengrid.invariants.models import CheckState, Violation
 
@@ -336,6 +337,8 @@ async def test_fetch_bank_capability_inputs_selects_hub_units_when_column_exists
     assert rows == [(*_CAP_ROW, 2, True)]
     assert "information_schema.columns" in cursor.executed[0][0]
     assert "h.units" in cursor.executed[1][0]
+    # utility_scale: the one nameplate rule the guardian's G-02 reads too (core.nameplate: SUBSTATION, MOBILE_STORAGE)
+    assert NAMEPLATE_HUB_EXISTS_SQL in cursor.executed[1][0]
 
 
 async def test_fetch_bank_capability_inputs_units_none_when_column_missing() -> None:

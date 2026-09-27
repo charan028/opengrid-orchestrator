@@ -34,6 +34,7 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from opengrid.core import geo, manual_targets
+from opengrid.core.nameplate import NAMEPLATE_HUB_EXISTS_SQL
 from opengrid.core.physics import BankParams, HubParams
 from opengrid.core.pq import OffsetVector
 from opengrid.guardian.config import DEFAULT_CLOCK_CACHE_S, ClockSource
@@ -126,20 +127,13 @@ ORDER BY seq DESC LIMIT 1
 """
 
 
-#: Asset classes rated at their nameplate `og.hub.p_kw`, never the home per-unit cap (11 kW per unit): the D-29
-#: substation set, and the D-31 mobile trucks (e.g. 1000 kWh / 500 kW, units=1).
-NAMEPLATE_ASSET_CLASSES = ("SUBSTATION", "MOBILE_STORAGE")
-
-#: `utility_scale`: the hub belongs to a nameplate-rated og.asset -- linked by its (one-hub) bank or by its
-#: own id. Home hubs have no such asset row and keep the home unit rules.
-_ALL_HUB_PARAMS_SQL = """
+#: `utility_scale`: the hub belongs to a nameplate-rated og.asset (`core.nameplate`, the one rule the planners
+#: share): the D-29 substation set or a D-31 truck. Home hubs keep the home unit rules.
+_ALL_HUB_PARAMS_SQL = f"""
 SELECT h.hub_id, h.e_kwh, h.r_kwh, h.p_kw, h.eta_c, h.eta_d, h.units,
-       EXISTS (
-           SELECT 1 FROM og.asset a
-           WHERE (a.bank_id = h.bank_id OR a.asset_id = h.hub_id) AND a.asset_class = ANY(%(nameplate)s)
-       ) AS utility_scale
+       {NAMEPLATE_HUB_EXISTS_SQL} AS utility_scale
 FROM og.hub h
-"""
+"""  # noqa: S608 -- NAMEPLATE_HUB_EXISTS_SQL is a fixed module-level literal
 
 
 async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
@@ -148,7 +142,7 @@ async def load_hub_params(pool: AsyncConnectionPool) -> dict[str, HubSnapshot]:
     otherwise keeps via MQTT). `soc_kwh`/`prev_p_kw` start at 0 and `health="stale"` until the first
     telemetry message for that hub arrives. `units` (migration 0032) feeds G-02's per-unit cap."""
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_ALL_HUB_PARAMS_SQL, {"nameplate": list(NAMEPLATE_ASSET_CLASSES)})
+        await cur.execute(_ALL_HUB_PARAMS_SQL)
         rows = await cur.fetchall()
     return {
         hub_id: HubSnapshot(
@@ -358,19 +352,17 @@ WHERE h.hub_id = ANY(%(hub_ids)s)
 """
 
 
-_HUB_POSITION_SQL = "SELECT lat, lon FROM og.hub WHERE hub_id = %(hub_id)s"
-
-
 class ConfigMobileUnitPort:
     """G-35 (D-31) from SERVICES' home-station registry (`config/service_profiles/mobile_storage_home_stations
     .toml`, read by `selector.gate`, the one reader of that file). A mobile unit is a single-hub bank; its
     bank id (and, for a truck, its hub id) is listed under `[[assignment]]`.
 
-    Location: the guardian's own read of the unit's position in `og.hub` (lat/lon; the device-info intake,
-    `opengrid.fleet.device_info`, re-rates it whenever the device reports a new position, with a K10 trace).
-    The unit is at home per `opengrid.core.geo.at_home_station` (the one rule the selector's charge planning
-    uses too): within `radius_km` of its home station. No pool, no station
-    coordinates, or no recorded position is UNKNOWN, which G-35 treats as away (fail closed)."""
+    Location: the guardian's own read of the unit's DEVICE-REPORTED position (`core.geo.DEVICE_POSITIONS_SQL`:
+    `og.hub.device_lat/device_lon`, stamped `device_info_at`, written by the device-info intake from each
+    report), accepted only while fresher than `max_age_s` (`core.geo.fresh_positions`). Never `og.hub.lat/
+    lon`, which is the seeded home station and never moves. The unit is at home per `core.geo.
+    at_home_station` (the one rule the selector's charge planning uses too). No pool, no station coordinates,
+    or a missing or stale report is UNKNOWN, which G-35 treats as away (fail closed)."""
 
     def __init__(
         self,
@@ -379,11 +371,15 @@ class ConfigMobileUnitPort:
         pool: AsyncConnectionPool | None = None,
         *,
         radius_km: float = geo.HOME_STATION_RADIUS_KM,
+        max_age_s: float = geo.MOBILE_POSITION_MAX_AGE_S,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sites = dict(sites or {})
         self._mobile = frozenset(mobile_ids) | frozenset(self._sites)
         self._pool = pool
         self._radius_km = radius_km
+        self._max_age_s = max_age_s
+        self._clock = clock
 
     def is_mobile(self, hub_or_bank_id: str) -> bool:
         return hub_or_bank_id in self._mobile
@@ -392,11 +388,9 @@ class ConfigMobileUnitPort:
         if self._pool is None:
             return None
         async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(_HUB_POSITION_SQL, {"hub_id": hub_id})
-            row = await cur.fetchone()
-        if row is None or row[0] is None or row[1] is None:
-            return None
-        return float(row[0]), float(row[1])
+            await cur.execute(geo.DEVICE_POSITIONS_SQL, {"ids": [hub_id]})
+            rows = await cur.fetchall()
+        return geo.fresh_positions(rows, self._clock(), max_age_s=self._max_age_s).get(hub_id)
 
     async def at_home_station(self, hub_id: str) -> bool | None:
         site = self._sites.get(hub_id)

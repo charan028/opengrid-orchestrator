@@ -1,0 +1,19 @@
+name: svc_truck_deploy_return
+description: >
+  D-31 end to end (r3.4 review): the Dallas truck truck-dfw-01 leaves its Irving depot for a customer site
+  in downtown Dallas, serves there for an hour, then returns to its depot. ogsim.fleet moves the truck
+  (FleetEngine.move_mobile_unit) and republishes its device_info at once, so the orchestrator's position
+  read (og.hub.device_lat/lon, core.geo) sees it away: G-35 vetoes any charging setpoint and the selector
+  plans none while it is at the site; back at the depot both allow charging again. While away the truck
+  may still discharge to serve the site (D-31 limits charging only).
+steps:
+  - at_s: 0
+    type: mobile_deployment_start
+    target: truck-dfw-01
+    params: {site_id: "site-dal-downtown-01", site_lat: 32.7767, site_lon: -96.7970, committed_kw: 250.0, arrival_soc_pct: 90.0}
+    duration: 3600
+  - at_s: 3600
+    type: mobile_home_station_charge
+    target: truck-dfw-01
+    params: {home_station_id: "hs-dfw-irving-01", start_soc_pct: 40.0, target_soc_pct: 92.0}
+    duration: 0
