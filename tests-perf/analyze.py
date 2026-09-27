@@ -45,7 +45,7 @@ LE_RE = re.compile(r'le="([^"]+)"')
 # --- pure helpers (unit-tested) ----------------------------------------------------------------------------
 
 
-def _p95_or_nan(value: Any) -> float:
+def _value_or_nan(value: Any) -> float:
     """A chart value: a missing measurement plots as a gap (NaN), never as 0."""
     return math.nan if value is None else float(value)
 
@@ -220,6 +220,19 @@ def window_summary(recs: list[dict[str, Any]], expected_hubs: int) -> dict[str, 
     out["verdict_p99_ms_max"] = max((v["p99_ms"] for v in vs), default=None)
     out["verdict_max_ms"] = max((v["max_ms"] for v in vs), default=None)
     out["g20_timeouts"] = int(sum(v.get("timeouts") or 0 for v in vs))
+    out["verdicts_per_min"] = round(out["verdicts"] / (dt / 60.0), 1) if dt else None
+
+    # dispatch load: home banks with grants per engine cycle (what separates DELIVERING from IDLE)
+    gs = [(r.get("db") or {}).get("grants") or {} for r in recs[1:]]
+    cycles = sum(float(g.get("cycles") or 0) for g in gs)
+    bank_cycles = sum(float(g.get("bank_cycles") or 0) for g in gs)
+    grant_rows = sum(float(g.get("rows") or 0) for g in gs)
+    miscs = [(r.get("db") or {}).get("misc") or {} for r in recs]
+    home_banks = next((int(m["home_banks"]) for m in reversed(miscs) if m.get("home_banks")), None)
+    out["home_banks"] = home_banks
+    out["banks_per_cycle"] = round(bank_cycles / cycles, 1) if cycles else 0.0
+    out["bank_share"] = round(out["banks_per_cycle"] / home_banks, 3) if home_banks else None
+    out["grant_rows_per_cycle"] = round(grant_rows / cycles, 1) if cycles else 0.0
 
     # telemetry ingest and freshness
     d0, d1 = first.get("db") or {}, last.get("db") or {}
@@ -350,22 +363,34 @@ def analyze(run: Path) -> dict[str, Any]:
     by_stage: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in samples:
         by_stage[r.get("stage", "")].append(r)
-    steps: dict[int, dict[str, Any]] = {}
+    steps: dict[int, dict[str, Any]] = {}  # IDLE: `step-<homes>`
+    deliver: dict[int, dict[str, Any]] = {}  # DELIVERING: `deliver-<homes>`
     for stage, recs in by_stage.items():
-        m = re.fullmatch(r"step-(\d+)", stage)
+        m = re.fullmatch(r"(step|deliver)-(\d+)", stage)
         if m and len(recs) >= 3:
-            homes = int(m.group(1))
-            steps[homes] = window_summary(recs, homes + 9)
-    result: dict[str, Any] = {"steps": {str(k): steps[k] for k in sorted(steps)}}
-    if steps:
-        largest = max(steps)
-        soak = by_stage.get(f"step-{largest}", []) + by_stage.get(f"soak-{largest}", [])
+            homes = int(m.group(2))
+            (steps if m.group(1) == "step" else deliver)[homes] = window_summary(recs, homes + 9)
+    result: dict[str, Any] = {
+        "steps": {str(k): steps[k] for k in sorted(steps)},
+        "deliver": {str(k): deliver[k] for k in sorted(deliver)},
+        "dispatch": {
+            p.stem.removeprefix("dispatch-"): json.loads(p.read_text())
+            for p in sorted(data.glob("dispatch-*.json"))
+        },
+    }
+    loaded = deliver or steps  # the soak runs in the DELIVERING regime when there is one
+    if loaded:
+        largest = max(loaded)
+        head = "deliver" if deliver else "step"
+        soak = by_stage.get(f"{head}-{largest}", []) + by_stage.get(f"soak-{largest}", [])
         if len(soak) >= 3:
             result["soak"] = soak_summary(soak)
-    sizes = sorted(steps)
-    p99s = [steps[s].get("trace_p99_ms") or steps[s].get("hist_p99_ms") for s in sizes]
-    if len(sizes) >= 3 and all(p is not None for p in p99s):
-        result["knee"] = fit_knee([s + 9.0 for s in sizes], [float(p) for p in p99s if p is not None])
+    for key, regime in (("knee", loaded), ("knee_idle", steps)):
+        sizes = sorted(regime)
+        p99s = [regime[s].get("trace_p99_ms") or regime[s].get("hist_p99_ms") for s in sizes]
+        if len(sizes) >= 3 and all(p is not None for p in p99s):
+            result[key] = fit_knee([s + 9.0 for s in sizes], [float(p) for p in p99s if p is not None])
+    result["knee_regime"] = "delivering" if deliver else "idle"
     result["stress"] = {
         p.stem.removeprefix("stress-"): json.loads(p.read_text()) for p in sorted(data.glob("stress-*.json"))
     }
@@ -398,7 +423,18 @@ def fmt(v: Any, nd: int = 0) -> str:
 
 
 def markdown(res: dict[str, Any]) -> str:
-    steps = res["steps"]
+    """One table per regime: IDLE (`step-<homes>`) and, when measured, DELIVERING (`deliver-<homes>`)."""
+    if not res.get("deliver"):
+        return table(res["steps"])
+    return (
+        "#### IDLE: between delivery windows (no committed obligation delivering)\n\n"
+        + table(res["steps"])
+        + "\n#### DELIVERING: committed obligations on about half the home banks\n\n"
+        + table(res["deliver"])
+    )
+
+
+def table(steps: dict[str, Any]) -> str:
     cols = list(steps)
     hubs = [steps[c]["expected_hubs"] for c in cols]
     lines = ["| Metric | " + " | ".join(f"{h:,} hubs" for h in hubs) + " |", "|---|" + "---:|" * len(cols)]
@@ -418,7 +454,11 @@ def markdown(res: dict[str, Any]) -> str:
     row("Engine cycle max (ms, trace)", "trace_max_ms", 1)
     row("Late ticks", "late_ticks")
     row("Event-loop lag p99 (ms)", "loop_lag_p99_ms", 1)
+    row("Home banks with grants per cycle", "banks_per_cycle", 1)
+    row("Share of home banks with grants", "bank_share", 2)
+    row("Grant rows per cycle", "grant_rows_per_cycle", 1)
     row("Guardian verdicts", "verdicts")
+    row("Verdicts per minute", "verdicts_per_min", 1)
     row("Verdict latency p50 (ms)", "verdict_p50_ms", 1)
     row("Verdict latency p99, worst 15 s (ms)", "verdict_p99_ms_max", 1)
     row("G-20 timeouts", "g20_timeouts")
@@ -464,8 +504,12 @@ def charts(res: dict[str, Any], out: Path) -> list[str]:
     ink, grid = "#1f2933", "#d9dee3"
     series_c = ["#2563eb", "#0d9488", "#d97706", "#9333ea", "#dc2626", "#64748b"]
     written = []
-    steps = res["steps"]
+    idle = res["steps"]
+    # Charts 2-5 show the loaded regime (DELIVERING when measured); chart 1 shows both.
+    steps = res.get("deliver") or idle
     hubs = [steps[c]["expected_hubs"] for c in steps]
+    idle_hubs = [idle[c]["expected_hubs"] for c in idle]
+    regime = "delivering" if res.get("deliver") else "idle"
 
     def save(fig: Any, name: str) -> None:
         fig.tight_layout()
@@ -484,8 +528,17 @@ def charts(res: dict[str, Any], out: Path) -> list[str]:
             ("trace_max_ms", "max"),
         )
     ):
-        ys = [steps[c].get(key) for c in steps]
-        ax.plot(hubs, ys, marker="o", color=series_c[i], label=label)
+        ys = [_value_or_nan(steps[c].get(key)) for c in steps]
+        ax.plot(hubs, ys, marker="o", color=series_c[i], label=f"{label} ({regime})")
+    if res.get("deliver") and idle:
+        ax.plot(
+            idle_hubs,
+            [_value_or_nan(idle[c].get("trace_p99_ms")) for c in idle],
+            marker="o",
+            linestyle=":",
+            color=series_c[2],
+            label="p99 (idle)",
+        )
     ax.axhline(BUDGET_MS, color="#dc2626", linestyle="--", linewidth=1)
     ax.text(hubs[0], BUDGET_MS * 1.03, "500 ms budget", color="#dc2626", fontsize=9)
     ax.set_xlabel("fleet size (hubs)")
@@ -517,7 +570,7 @@ def charts(res: dict[str, Any], out: Path) -> list[str]:
     # 3 CPU per process
     fig, ax = plt.subplots(figsize=(7.5, 4.2))
     for i, p in enumerate(("engine", "guardian", "api", "settle", "sim-fleet", "mosquitto")):
-        ys = [((steps[c].get("procs") or {}).get(p) or {}).get("cpu_pct") for c in steps]
+        ys = [_value_or_nan(((steps[c].get("procs") or {}).get(p) or {}).get("cpu_pct")) for c in steps]
         ax.plot(hubs, ys, marker="o", color=series_c[i], label=p)
     ax.axhline(100, color=grid, linestyle="--")
     ax.set_xlabel("fleet size (hubs)")
@@ -555,7 +608,7 @@ def charts(res: dict[str, Any], out: Path) -> list[str]:
     for i, name in enumerate(API_NAMES):
         ax.plot(
             hubs,
-            [_p95_or_nan(((steps[c].get("api") or {}).get(name) or {}).get("p95_ms")) for c in steps],
+            [_value_or_nan(((steps[c].get("api") or {}).get(name) or {}).get("p95_ms")) for c in steps],
             marker="o",
             color=series_c[i % len(series_c)],
             label=name,

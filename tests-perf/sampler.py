@@ -122,7 +122,9 @@ DB_SQL = {
     "misc": """select (select count(*) from og.stop_outbox where published_at is null) as stop_unpublished,
                       (select count(*) from og.alert where cleared_at is null) as alerts_open,
                       (select count(*) from og.alert where cleared_at is null and acked_by is null) as alerts_unacked,
-                      (select count(*) from og.degraded_mode_state) as degraded_modes""",
+                      (select count(*) from og.degraded_mode_state) as degraded_modes,
+                      (select count(*) from og.bank where bank_id not like 'bank-truck-%'
+                         and bank_id not like 'bank-sub-%') as home_banks""",
 }
 CYCLE_SQL = """select created_at, payload from og.trace
                where decision_type = 'RT_ALLOCATION' and event_class = 'CYCLE_LATENCY' and created_at > %s
@@ -137,6 +139,14 @@ VERDICT_SQL = """select count(*)::float8,
                         count(*) filter (where payload->>'outcome' like '%%VETO%%')::float8
                  from og.trace
                  where decision_type = 'GUARDIAN_VERDICT' and payload->>'kind' is null and created_at > %s"""
+#: Dispatch load since the last sample (the DELIVERING regime's "banks with grants per cycle"). cycle_id is
+#: "<epoch s>-<seq>", so a text range on its index replaces a created_at scan of og.grant.
+GRANT_SQL = """select count(*)::float8, count(distinct cycle_id)::float8,
+                      count(distinct (cycle_id, bank_id)) filter (
+                          where bank_id not like 'bank-truck-%%' and bank_id not like 'bank-sub-%%')::float8,
+                      count(distinct bank_id)::float8,
+                      count(*) filter (where is_headroom)::float8
+               from og.grant where cycle_id >= %s"""
 
 
 def dsn_from(ports: dict[str, str], secrets: dict[str, str], app: str) -> str:
@@ -176,6 +186,9 @@ class DbProbe:
             v = conn.execute(VERDICT_SQL, (since,)).fetchone()
             keys = ("n", "p50_ms", "p95_ms", "p99_ms", "max_ms", "timeouts", "pass", "vetoed")
             out["verdicts"] = dict(zip(keys, v, strict=True)) if v else {}
+            g = conn.execute(GRANT_SQL, (str(int(since.timestamp())),)).fetchone()
+            gkeys = ("rows", "cycles", "bank_cycles", "banks", "headroom_rows")
+            out["grants"] = dict(zip(gkeys, g, strict=True)) if g else {}
             self.last_ts = now
         except (psycopg.Error, OSError) as exc:
             out["error"] = f"{type(exc).__name__}: {exc}"[:300]

@@ -16,7 +16,8 @@ works on two targets, chosen with `--target`:
 |---|---|
 | `perfenv.py` | Sizes the fleet in production proportions (hubs = homes + 9) and writes the target's configs, `.run/ports.env` and `.run/etc/secrets.env` |
 | `targets.py` | Per-target process/disk/host readings, metrics scrape and broker control (cgroups + `docker exec`, or `/proc` + systemd) |
-| `campaign.py` | The full run: sizes, warm-up, measured windows, soak and stress, with guard handling and a single repeat after an abort |
+| `campaign.py` | The full run: sizes, warm-up, the IDLE and DELIVERING measured windows, soak and stress, with guard handling and a single repeat after an abort |
+| `dispatch.py` | The DELIVERING regime: commits obligations through og-api's admission (demo customers, then ERCOT_ENERGY offers) until about half the home banks carry grants for a window |
 | `sampler.py` | 15 s samples into `.run/data/samples.jsonl`: metrics, DB, broker `$SYS`, processes, disk, and API/UI latency |
 | `stress.py` | `burst`, `outage`, `safestop`, `bulk`, `alerts`, `price`, `dbslow`; each writes `.run/data/stress-<name>.json` with PASS/FAIL checks |
 | `analyze.py` | `results.json`, the per-step Markdown table, the knee fit and SVG charts (matplotlib) |
@@ -32,5 +33,15 @@ python -m venv .venv-perf && .venv-perf/bin/pip install -r tests-perf/requiremen
 .venv-perf/bin/python tests-perf/analyze.py --run tests-perf/.run --charts docs/orchestrator/07-delivery/assets/perf --md tests-perf/.run/data/steps.md
 make perf-check                                                         # ruff, format, mypy, unit tests
 ```
+
+Each size is measured in two regimes, because production dispatches in delivery windows and is idle between them:
+- **IDLE** (`step-<homes>`): nothing delivering.
+- **DELIVERING** (`deliver-<homes>`): committed obligations on about `--deliver-frac` (0.5) of the home banks.
+
+A fresh database has no FIRM forecast, so the selector would commit nothing. `--history` (default
+`tests-perf/.cache/ercot_history.csv`, git-ignored) loads 14 days of real ERCOT prices and load into each fresh
+database first. `HANDOFF.md` section 1 shows how to export that file from a dev database that ran
+`orchestrator/tools/ercot_backfill.py`; the campaign itself makes no live ERCOT call. `--no-deliver` measures
+IDLE only.
 
 The prerequisites, smoke run, report steps and clean-up are in `HANDOFF.md`.
