@@ -170,6 +170,10 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+#: og.grant keeps 3 decimals: a pro-rata share is judged with this much rounding slack (with DISPATCH, r3.4.4 live).
+PARTIAL_DEPLOYMENT_TOLERANCE_KW = 0.001
+
+
 @dataclass
 class GuardianService:
     ports: GuardianPorts
@@ -1206,6 +1210,28 @@ class GuardianService:
         g15 = checks.check_g15_l2_boundary(instruction, proposal.bank_id, aggregate_abs_kw)
         return [] if g15.ok else [g15]
 
+    async def _deployed_share_kw(self, obligation: ActiveObligation, frozen_kw: float) -> float | None:
+        """G-19's lock for a capacity hold (ERCOT_AS, REGULATED_CAPACITY) while a PARTIAL deployment is active: this
+        bank's pro-rata share of the requested kW -- its reservation x requested / the obligation's reservation on
+        every bank -- never more than the reservation, less `PARTIAL_DEPLOYMENT_TOLERANCE_KW` (og.grant keeps 3
+        decimals). r3.4.4 live: an ECRS 0.3 MW call of a 0.5 MW award; the same for a toll call below its
+        commitment. The guardian's own reads (og.obligation, og.as_deployment, og.reservation). None when there is
+        no such verified partial deployment (not a hold, none active, the full commitment deployed, or unread) --
+        then the full reservation stays the lock (never a looser lock on a missing read)."""
+        port = self.ports.as_awards
+        total = obligation.total_frozen_kw
+        if port is None or total is None or total <= 0:
+            return None
+        if await port.service_type(obligation.obligation_id) not in checks.HOLD_SERVICE_TYPES:
+            return None
+        if not await port.deployment_active(obligation.obligation_id):
+            return None
+        requested = await port.deployment_requested_kw(obligation.obligation_id)
+        if requested is None:
+            return None
+        share = min(frozen_kw, frozen_kw * min(1.0, float(requested) / float(total)))
+        return max(share - PARTIAL_DEPLOYMENT_TOLERANCE_KW, 0.0)
+
     async def _check_commitment_lock(self, proposal: ProposedBatch) -> list[CheckOutcome]:
         """GUARD-01/K13: enumerate ACTIVE obligations independently (never from the batch's own item
         list) so omitting an obligation, or relabelling it `obligation_id=None`, cannot evade G-19. A
@@ -1230,9 +1256,35 @@ class GuardianService:
             obligation_key = str(obligation.obligation_id)
             new_kw = float(totals.get(obligation_key, Decimal(0)))  # omitted from the batch -> 0 kw
             frozen_kw = float(obligation.frozen_kw)
-            prior = await self.ports.prior_grants.prior_granted_kw(obligation.obligation_id)
+            # this bank's own previous-cycle grant (never another bank's share, never this cycle's own row)
+            prior = await self.ports.prior_grants.prior_granted_kw(
+                obligation.obligation_id, proposal.bank_id, proposal.cycle_id
+            )
             prior_kw = float(prior) if prior is not None else frozen_kw
             reason_code = reason_by_obligation.get(obligation_key)
+            if reason_code == reasons.R_AS_PARTIAL_DEPLOYMENT:
+                # the engine's claim "the call asked for less": signed only on the guardian's own read of that
+                # partial deployment, at this bank's pro-rata share of it
+                share = await self._deployed_share_kw(obligation, frozen_kw)
+                if share is None:
+                    violations.append(
+                        CheckOutcome(
+                            "G-19", False, "AS_PARTIAL_DEPLOYMENT_UNVERIFIED", obligation_id=obligation_key
+                        )
+                    )
+                elif new_kw < share - 1e-9:
+                    violations.append(
+                        CheckOutcome(
+                            "G-19", False, reasons.R_COMMIT_LOCK_VIOLATION, obligation_id=obligation_key
+                        )
+                    )
+                continue
+            if checks.g19_reduction_below_floor(new_kw, frozen_kw, prior_kw):
+                # a PARTIAL deployment of a capacity hold: the lock is this bank's share of what was deployed
+                share = await self._deployed_share_kw(obligation, frozen_kw)
+                if share is not None:
+                    frozen_kw = share
+                    prior_kw = float(prior) if prior is not None else frozen_kw
             if reason_code == reasons.R_GRANT_AS_HOLD and checks.g19_reduction_below_floor(
                 new_kw, frozen_kw, prior_kw
             ):

@@ -153,7 +153,7 @@ class FakeCommitmentsPort:
 
 
 class FakePriorGrantsPort:
-    async def prior_granted_kw(self, obligation_id):
+    async def prior_granted_kw(self, obligation_id, bank_id=None, cycle_id=None):
         return None
 
 

@@ -127,8 +127,14 @@ class FakeCommitments:
 class FakePriorGrants:
     def __init__(self) -> None:
         self.prior: dict[UUID, Decimal] = {}
+        #: per (obligation, bank): the bank's own previous-cycle grant; falls back to `prior` (obligation-wide)
+        self.by_bank: dict[tuple[UUID, str], Decimal] = {}
 
-    async def prior_granted_kw(self, obligation_id: UUID) -> Decimal | None:
+    async def prior_granted_kw(
+        self, obligation_id: UUID, bank_id: str | None = None, cycle_id: str | None = None
+    ) -> Decimal | None:
+        if bank_id is not None and (obligation_id, bank_id) in self.by_bank:
+            return self.by_bank[(obligation_id, bank_id)]
         return self.prior.get(obligation_id)
 
 

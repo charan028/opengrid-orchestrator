@@ -43,6 +43,10 @@ R_GRANT_CLOSED_LOOP = "R-GRANT-CLOSED-LOOP"
 #: An ERCOT_AS award held at 0 kW until ERCOT deploys it (og.as_deployment, migration 0020): a capacity
 #: hold, its reservation stays locked (K13).
 R_GRANT_AS_HOLD = "R-GRANT-AS-HOLD"
+#: A capacity hold (ERCOT_AS, REGULATED_CAPACITY) granted its share of a PARTIAL deployment (requested kW below the
+#: commitment, og.as_deployment): below the reservation by the call's own request, not a lock dip. G-19 signs it only
+#: on its own read of that deployment, at the bank's pro-rata share of the requested kW.
+R_AS_PARTIAL_DEPLOYMENT = "R-AS-PARTIAL-DEPLOYMENT"
 
 # --- Shortfall reasons reported against the obligation that could not be fully served (never a
 # reallocation to a different obligation -- 00-invariants.md K13) ---------------------------------

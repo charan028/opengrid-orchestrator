@@ -295,6 +295,8 @@ class ActiveObligation:
 
     obligation_id: UUID
     frozen_kw: Decimal
+    #: the obligation's reservation across EVERY bank now (this bank's `frozen_kw` is its share); None: not read
+    total_frozen_kw: Decimal | None = None
 
 
 class CommitmentPort(Protocol):
@@ -312,9 +314,15 @@ class CommitmentPort(Protocol):
 
 
 class PriorGrantPort(Protocol):
-    async def prior_granted_kw(self, obligation_id: UUID) -> Decimal | None:
-        """The PRIOR cycle's actually-granted kw for this obligation (02a S6.2's `prior_grants`), or
-        None if there is none yet (falls back to the frozen commitment as the floor)."""
+    async def prior_granted_kw(
+        self, obligation_id: UUID, bank_id: str | None = None, cycle_id: str | None = None
+    ) -> Decimal | None:
+        """The PRIOR cycle's actually-granted kw for this obligation ON THIS BANK (02a S6.2's `prior_grants`):
+        the latest grant row for (obligation, bank) from a cycle other than `cycle_id` -- the current cycle's
+        own grants are persisted before the guardian judges them. None if there is none yet (falls back to the
+        frozen commitment as the floor). Per bank, because G-19 judges one bank's batch against that bank's
+        reservation: an obligation-wide latest row (another bank's share) vetoed the smaller share every cycle
+        (r3.4.4 live, ECRS 046a2ebb: 150.424 kW on bank-027 vs 149.576 kW on bank-034)."""
         ...
 
 
@@ -369,6 +377,11 @@ class AsAwardPort(Protocol):
 
     async def deployment_active(self, obligation_id: UUID) -> bool:
         """An uncancelled og.as_deployment covering now, for this obligation or for every AS award."""
+        ...
+
+    async def deployment_requested_kw(self, obligation_id: UUID) -> Decimal | None:
+        """The active deployment's requested kW (magnitude) for this obligation; None when no deployment is
+        active or it names none (the full commitment is deployed)."""
         ...
 
 
