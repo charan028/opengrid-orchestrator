@@ -82,7 +82,9 @@ quantiles = [0.10, 0.50, 0.90]
 hub_count = 200
 banks = 8
 zones = ["LZ_NORTH", "LZ_SOUTH", "LZ_HOUSTON", "LZ_WEST"]
-telemetry_interval_s = 2
+# R3: must match the simulator's hub telemetry cadence (fleet.dev.yaml: 10 s since R3). Health counts a hub
+# online only while its last report is under 2x this, and a hub not online gets no discharge.
+telemetry_interval_s = 10
 lease_ttl_s = 30
 
 [allocator]
@@ -106,10 +108,12 @@ ramp_fleet_s = 120
 guardian_public_key_path = "dev/keys/guardian-dev.pub"
 
 [health]
+# R3: base's value for the 10 s telemetry cadence.
+sim_offline_s = 90
 heartbeat_interval_s = 5
 heartbeat_miss_threshold = 3
-hub_stale_s = 6
-hub_offline_s = 30
+hub_stale_s = 25
+hub_offline_s = 60
 
 [retention]
 "trace.selection".days = 90
@@ -140,3 +144,8 @@ base_path = "/og"
 
 [metrics]
 bind_host = "127.0.0.1"
+
+
+[contracts.intake]
+# R3: AS intake ignores an AS clearing price older than this (base's value).
+as_price_max_age_s = 93600
