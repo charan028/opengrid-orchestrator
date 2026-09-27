@@ -449,14 +449,18 @@ CATALOGUE: list[AnomalyType] = [
         target_kind="asset (mobile trailer, e.g. trailer-mb-01)",
         params={
             "site_id": {"type": "string", "default": ""},
+            "site_lat": {"type": "number", "default": None},
+            "site_lon": {"type": "number", "default": None},
             "committed_kw": {"type": "number", "default": 500.0},
             "arrival_soc_pct": {"type": "number", "default": 90.0},
         },
         description=(
             "Deploys a mobile battery/trailer asset to `site_id` for a MOBILE_STORAGE contract "
             "(config/service_profiles/mobile_storage.toml): delivered kW is metered from the moment of "
-            "arrival, with `arrival_soc_pct` as the deployment's starting condition. Registered "
-            "2026-09-26 for `svc-mobile-storage.yaml` (SERVICES agent)."
+            "arrival, with `arrival_soc_pct` as the deployment's starting condition. With `site_lat`/"
+            "`site_lon`, ogsim.fleet drives a simulated truck there (its device_info position follows; D-31: "
+            "it never charges away from its home station). Registered 2026-09-26 for "
+            "`svc-mobile-storage.yaml`."
         ),
         wire_type="FLEET_MOBILE_DEPLOYMENT_START",
         wire_target_kind="asset",
@@ -468,6 +472,8 @@ CATALOGUE: list[AnomalyType] = [
         params={
             "from_site_id": {"type": "string", "default": ""},
             "to_site_id": {"type": "string", "default": ""},
+            "to_site_lat": {"type": "number", "default": None},
+            "to_site_lon": {"type": "number", "default": None},
             "committed_kw": {"type": "number", "default": 500.0},
         },
         description=(

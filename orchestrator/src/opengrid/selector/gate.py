@@ -562,8 +562,9 @@ def mobile_units_at_home(
     positions: Mapping[str, tuple[float, float]],
 ) -> dict[str, bool]:
     """Pure: which mobile units are at their home station now, by the one D-31 rule G-35 also uses
-    (`core.geo.at_home_station`, 250 m): the unit's recorded position vs its station's coordinates. Only
-    units known to be at home are True; away or unknown is False (fail closed)."""
+    (`core.geo.at_home_station`, 250 m): the unit's fresh device-reported position (`db.load_hub_positions`)
+    vs its station's coordinates. Only units known to be at home are True; away, or a missing or stale
+    report, is False (fail closed)."""
     return {
         bank_id: geo.at_home_station(positions.get(bank_id), sites.get(bank_id)) is True
         for bank_id in mobile_bank_ids
@@ -571,8 +572,9 @@ def mobile_units_at_home(
 
 
 async def load_mobile_units_at_home(mobile_bank_ids: Sequence[str]) -> dict[str, bool]:
-    """`mobile_units_at_home` over the registry's station coordinates and each unit's `og.hub` position. A
-    failed position read plans no mobile charging this gate (fail closed), never a crash."""
+    """`mobile_units_at_home` over the registry's station coordinates and each unit's fresh device-reported
+    position (never the seeded `og.hub.lat/lon`, which is the home station). A failed position read plans
+    no mobile charging this gate (fail closed), never a crash."""
     if not mobile_bank_ids:
         return {}
     try:
