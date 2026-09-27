@@ -86,12 +86,17 @@ def _utility_instruction_payload(
     `_revert` (lifting, `lift=True`) so both construct `kind`/`limit_kw` from `params` the
     same way -- never two independent copies of that mapping."""
     mode = str(params.get("mode", "limit"))
-    return {
+    payload: dict[str, Any] = {
         "bank_id": bank_id,
         "kind": mode.upper(),
         "limit_kw": float(params.get("limit_kw", 0.0)) if mode == "limit" else None,
         "lift": lift,
     }
+    if lift and params.get("lifts_instruction_id"):
+        # Q10 (r3.4.5): cancelling with an explicit id lifts THAT instruction -- e.g. one this sim issued
+        # before a restart (its id is in the orchestrator's stop reason); otherwise the sim names its own.
+        payload["lifts_instruction_id"] = str(params["lifts_instruction_id"])
+    return payload
 
 
 @dataclass

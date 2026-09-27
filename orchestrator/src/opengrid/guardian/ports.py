@@ -450,9 +450,18 @@ class EngagedStop:
     stop_id: UUID
     initiator_kind: str
     engaged_at: datetime
+    #: `og.stop_event.reason`: for a UTILITY stop it names the L2 instruction that engaged it
+    #: (`safestop.l2_intake.l2_reason`), which only that instruction's lift can end (Q10)
+    reason: str | None = None
 
 
 class StopReleasePort(Protocol):
+    async def utility_lifts(self, bank_ids: list[str]) -> dict[str, datetime]:
+        """Q10: the utility L2 instructions that the utility itself has LIFTED on these banks -- a lift carrying
+        the instruction's own id, recorded durably by og-safestop's L2 intake -- as `instruction_id -> lifted at`
+        (the first recorded lift of each)."""
+        ...
+
     async def pending_requests(self, *, max_age_s: float) -> list[ReleaseRequest]:
         """Approved Tier-2 release requests the guardian has not yet decided (no verdict trace row)."""
         ...

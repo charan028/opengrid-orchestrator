@@ -1079,7 +1079,7 @@ LIMIT 20
 """
 
 _OUTSTANDING_ENGAGES_SQL = """
-SELECT e.stop_event_id, e.initiator_kind, e.created_at
+SELECT e.stop_event_id, e.initiator_kind, e.created_at, e.reason
 FROM og.stop_event e
 WHERE e.scope_kind = %(scope_kind)s AND e.scope_ref = %(scope_ref)s AND e.action = 'ENGAGE'
   AND e.created_at > COALESCE(
@@ -1087,6 +1087,16 @@ WHERE e.scope_kind = %(scope_kind)s AND e.scope_ref = %(scope_ref)s AND e.action
        WHERE r.scope_kind = %(scope_kind)s AND r.scope_ref = %(scope_ref)s AND r.action = 'RELEASE'),
       '-infinity'::timestamptz)
 ORDER BY e.created_at
+"""
+
+#: Q10: lifts of utility L2 instructions og-safestop recorded (`safestop.l2_intake`: an expired BLOCK/ESTOP whose
+#: `lifts_instruction_id` names the instruction it ends), on the ix_trace_class_time index. The FIRST lift counts: a
+#: retained re-delivery re-recorded after a restart never moves it later.
+_UTILITY_LIFTS_SQL = """
+SELECT t.payload ->> 'lifted_instruction_id', min(t.created_at)
+FROM og.trace t
+WHERE t.event_class = 'SAFE_STOP' AND t.payload ->> 'l2' = 'LIFT' AND t.payload ->> 'bank_id' = ANY(%(bank_ids)s)
+GROUP BY 1
 """
 
 _BANKS_SQL = {
@@ -1175,7 +1185,18 @@ class PgStopReleasePort:
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(_OUTSTANDING_ENGAGES_SQL, {"scope_kind": scope_kind, "scope_ref": scope_ref})
             rows = await cur.fetchall()
-        return [EngagedStop(stop_id=row[0], initiator_kind=str(row[1]), engaged_at=row[2]) for row in rows]
+        return [
+            EngagedStop(stop_id=row[0], initiator_kind=str(row[1]), engaged_at=row[2], reason=row[3])
+            for row in rows
+        ]
+
+    async def utility_lifts(self, bank_ids: list[str]) -> dict[str, datetime]:
+        if not bank_ids:
+            return {}
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(_UTILITY_LIFTS_SQL, {"bank_ids": bank_ids})
+            rows = await cur.fetchall()
+        return {str(row[0]): row[1] for row in rows}
 
     async def banks_in_scope(self, scope_kind: StopScopeKind, scope_ref: str) -> list[str]:
         async with self._pool.connection() as conn, conn.cursor() as cur:

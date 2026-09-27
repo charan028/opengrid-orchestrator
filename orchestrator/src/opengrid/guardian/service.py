@@ -1025,10 +1025,15 @@ class GuardianService:
 
         engaged = await port.outstanding_engages(request.scope_kind, request.scope_ref)
         instruction_kinds: list[str] = []
-        for bank_id in await port.banks_in_scope(request.scope_kind, request.scope_ref):
+        banks = await port.banks_in_scope(request.scope_kind, request.scope_ref)
+        for bank_id in banks:
             instruction = await self.ports.l2_instructions.active_instruction(bank_id)
             if instruction is not None:
                 instruction_kinds.append(instruction.kind)
+        # Q10: the utility's own lifts, read only when a UTILITY stop is outstanding (else never needed)
+        utility_lifts = (
+            await port.utility_lifts(banks) if any(s.initiator_kind == "UTILITY" for s in engaged) else {}
+        )
         traced = request.trace_id is not None and await self.ports.trace.exists_preimage(request.trace_id)
         now = self.now_fn()
         outcome = stop_release.check_stop_release(
@@ -1040,6 +1045,7 @@ class GuardianService:
             approval_max_age_s=self.config.stop_release_max_age_s,
             max_clock_skew_s=self.config.stop_release_max_clock_skew_s,
             request_traced=traced,
+            utility_lifts=utility_lifts,
         )
         if not outcome.ok:
             await self._trace_release_verdict(request, "REFUSED", reason=outcome.reason)

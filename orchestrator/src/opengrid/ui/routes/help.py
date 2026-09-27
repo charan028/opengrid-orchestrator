@@ -119,6 +119,7 @@ TOC: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             ("pb-trucks-away", "Trucks away or home"),
             ("pb-as-poll-refusal", "AS poll refusal"),
             ("pb-grid-link-heartbeat", "Grid-link heartbeat loss"),
+            ("pb-utility-stop-release", "Releasing a utility (L2) stop"),
         ),
     ),
     ("glossary", "Glossary", ()),

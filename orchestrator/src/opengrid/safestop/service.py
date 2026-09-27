@@ -293,6 +293,30 @@ class SafestopService:
         await self.outbox.record_and_enqueue(row, stop_id=stop_id, topic_suffix=topic_suffix, payload=payload)
         await self._drain_after_accept()
 
+    async def record_utility_lift(
+        self, bank_id: str, lifted_instruction_id: UUID, lift_instruction_id: UUID, issued_by: str
+    ) -> None:
+        """Q10 (r3.4.5): the utility lifted the L2 instruction `lifted_instruction_id` on `bank_id` -- the only way
+        a UTILITY stop can become releasable. Durably traced (the guardian reads it: `guardian.repo`
+        `_UTILITY_LIFTS_SQL`); it releases nothing itself (the stop-only key never signs a RELEASE) -- the operators'
+        two-person release, approved after this lift, does. Raises when there is no trace to record it in, so the
+        L2 intake reports FAILED and the lift is retried on redelivery."""
+        if self.trace is None:
+            raise RuntimeError("no trace backend: a utility lift cannot be recorded")
+        await self.trace.append(
+            "safestop",
+            "SAFE_STOP",
+            "SAFE_STOP",
+            {
+                "l2": "LIFT",
+                "bank_id": bank_id,
+                "lifted_instruction_id": str(lifted_instruction_id),
+                "lift_instruction_id": str(lift_instruction_id),
+                "issued_by": issued_by,
+            },
+            reason_codes=["SAFE_STOP_L2_LIFT"],
+        )
+
     async def ensure_l2_engage_published(self, instruction_id: UUID, bank_id: str) -> bool:
         """H5 repair on a redelivered utility L2 instruction the intake reports ALREADY_ACTED: if its ENGAGE
         is recorded but was never queued to publish (a failure between the old separate writes), sign it again
