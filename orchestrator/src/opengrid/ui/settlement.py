@@ -34,6 +34,17 @@ def num(value: Any) -> float:
     return float(value) if value not in (None, "") else 0.0
 
 
+def _numeric(value: Any) -> float | None:
+    """`value` as a float when it is a number or a numeric string, else None (bools, None, labels such as
+    the plan mode "L-ID" that the lp-value breakdown also carries)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _local(ts: str) -> datetime:
     return datetime.fromisoformat(ts).astimezone(MARKET_TZ)
 
@@ -302,9 +313,9 @@ def lp_value_view(payload: Any) -> dict[str, Any]:
             "forgone_upside": num(latest.get("forgone_upside")),
             "breakdown": (
                 [
-                    {"label": str(k).replace("_", " "), "value": num(v)}
+                    {"label": str(k).replace("_", " "), "value": value}
                     for k, v in breakdown.items()
-                    if isinstance(v, int | float | str) and str(v).strip() not in ("", "None")
+                    if (value := _numeric(v)) is not None
                 ]
                 if isinstance(breakdown, dict)
                 else []
