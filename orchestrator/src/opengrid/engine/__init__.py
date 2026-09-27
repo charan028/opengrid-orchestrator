@@ -193,6 +193,7 @@ def build_command_batch_row(
     bank_id: str,
     grants: list[Grant],
     ledger_version: int,
+    attempt: int = 0,
 ) -> CommandBatchRow:
     """S8 command build (02a S5.1/S6): summarize one bank's grants for this cycle into the
     `og.command_batch` row engine hands to guardian. `merkle_root` here is a single SHA-256 over the
@@ -215,7 +216,8 @@ def build_command_batch_row(
         command_batch_id=command_batch_id,
         cycle_id=cycle_id,
         ledger_version=ledger_version,
-        submission_id=f"{cycle_id}:{bank_id}",
+        # A same-cycle re-proposal keeps the cycle id (guardian accumulators) but is its own submission.
+        submission_id=f"{cycle_id}:{bank_id}" + (f":r{attempt}" if attempt else ""),
         command_count=sum(1 for g in grants if not g.is_headroom),
         merkle_root=sha256_hex_of_json(payload),
         trace_pre_image_id=trace_pre_image_id,
@@ -227,10 +229,32 @@ def build_command_batch_row(
 RAMP_SAFETY_FACTOR = 0.9
 
 
+#: Last commanded setpoint per utility-scale hub: `hub_id -> (kW, monotonic time)`.
+_last_commanded_kw: dict[str, tuple[float, float]] = {}
+
+
 def _ramped_setpoint_kw(hub: Any, target_kw: float, cycle_interval_s: float | None) -> float:
     """K4/G-04: move from the hub's measured power toward `target_kw` by at most one cycle's ramp. The
-    obligation's grant is unchanged (G-19 compares the grant); only the per-hub command ramps."""
+    obligation's grant is unchanged (G-19 compares the grant); only the per-hub command ramps.
+
+    A utility-scale asset (the D-29 20 MW toll set) steps from its last COMMANDED setpoint while that
+    command is younger than the lease: its telemetry lags ~10 s, and stepping from it every 2 s cycle held
+    a 20 MW call to a fraction of its G-04 rate."""
     prev_kw = getattr(hub, "p_kw", None)
+    utility_scale = bool(getattr(hub, "utility_scale", False)) or is_utility_scale_bank(
+        str(getattr(hub, "bank_id", ""))
+    )
+    if utility_scale:
+        last = _last_commanded_kw.get(str(hub.hub_id))
+        if last is not None and time.monotonic() - last[1] <= DEFAULT_LEASE_TTL_S:
+            prev_kw = last[0]
+        stepped = _ramp_from(hub, prev_kw, target_kw, cycle_interval_s)
+        _last_commanded_kw[str(hub.hub_id)] = (stepped, time.monotonic())
+        return stepped
+    return _ramp_from(hub, prev_kw, target_kw, cycle_interval_s)
+
+
+def _ramp_from(hub: Any, prev_kw: float | None, target_kw: float, cycle_interval_s: float | None) -> float:
     ramp_kw_per_s = getattr(hub, "ramp_kw_per_s", 0.0)
     if cycle_interval_s is None or prev_kw is None or ramp_kw_per_s <= 0:
         return target_kw
@@ -400,6 +424,7 @@ async def propose_batch_to_guardian(
     hub_allocations: Mapping[tuple[str, str], Mapping[str, float]] | None = None,
     excluded_hub_ids: frozenset[str] = frozenset(),
     manual_targets: Mapping[str, ManualTarget] | None = None,
+    attempt: int = 0,
 ) -> UUID | None:
     """Build this bank's command-batch summary, durably write its `RT_ALLOCATION` decision pre-image to
     the trace FIRST (K10), then persist `og.command_batch` (carrying that SAME trace row's id as
@@ -454,6 +479,7 @@ async def propose_batch_to_guardian(
         bank_id=bank_id,
         grants=grants,
         ledger_version=ledger_version,
+        attempt=attempt,
     )
     await backend.insert_command_batch(row)
     await backend.notify_guardian(row.command_batch_id)
@@ -801,6 +827,17 @@ async def persist_fleet_state(state: Any) -> None:
     await _flush_pq_summaries(state)
 
 
+def known_hub_id_set() -> frozenset[str] | None:
+    """The fleet twin's hub ids (a verdict may name banks, feeders or substations too); None if unknown."""
+    from opengrid import fleet
+
+    try:
+        hubs = frozenset(fleet.known_hub_ids())
+    except Exception:
+        return None
+    return hubs or None  # an empty twin (not loaded yet) filters nothing
+
+
 def excluded_now(state: Any) -> frozenset[str]:
     """Hubs no dispatch item may use this cycle: vetoed hubs (K4 fail-safe) and hubs a firmware campaign is
     updating. (Operator-held hubs are handled separately: they get their own manual item.)"""
@@ -911,7 +948,7 @@ async def handle_vetoes(state: Any, proposed: dict[UUID, str], *, wait_s: float,
         return []
     outcomes = await wait_for_verdicts(reader, list(proposed), wait_s=wait_s)
     state.pending_verdicts = {b: bank for b, bank in proposed.items() if b not in outcomes}
-    by_bank = await vetoed_banks(reader, outcomes, proposed)
+    by_bank = await vetoed_banks(reader, outcomes, proposed, known_hub_ids=known_hub_id_set())
     for bank_id, hubs in sorted(by_bank.items()):
         new = state.veto_exclusions.exclude(hubs)
         try:
@@ -939,6 +976,8 @@ async def repropose_banks(
     other hubs of the same obligation, K13). A fresh `seq` and cycle id keep G-13 and grant ids distinct."""
     from opengrid import allocator
 
+    # Grant rows (og.grant ids) of the retry get their own cycle id; the batch keeps the ORIGINAL cycle
+    # id, so the guardian's per-cycle accumulators (fleet/feeder ramp, G-05/G-06) count both attempts.
     retry_cycle_id = f"{cycle_id}-r1"
     state.cycle_seq += 1
     grants = await allocator.run_cycle(
@@ -951,6 +990,7 @@ async def repropose_banks(
         now=now,
         lease_ttl_s=state.lease_ttl_s,
         only_bank_ids=bank_ids,
+        retry_excluded_hub_ids=state.veto_exclusions.active(),
     )
     hub_allocations = allocator.hub_allocations()
     grants_by_bank: dict[str, list[Grant]] = {}
@@ -962,7 +1002,8 @@ async def repropose_banks(
             backend=state.backend,
             trace=state.trace,
             fleet_module=fleet_module,
-            cycle_id=retry_cycle_id,
+            cycle_id=cycle_id,
+            attempt=1,
             bank_id=bank_id,
             grants=bank_grants,
             ledger_version=max((g.ledger_version for g in bank_grants), default=0),
@@ -1287,6 +1328,7 @@ async def main(cfg: Config) -> None:
             pool,
             bank_of_hub=lambda hub_id: hub_bank_id(fleet_mod, hub_id),
             zone_of_bank=lambda bank_id: fleet_mod.bank_zone(bank_id),
+            trace=trace_store.append,
         )
         banks_at_start = await load_utility_scale_banks(pool)
         if banks_at_start is not None:

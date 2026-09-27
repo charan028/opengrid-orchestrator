@@ -127,9 +127,15 @@ async def wait_for_verdicts(
 
 
 async def vetoed_banks(
-    reader: VerdictReader, outcomes: Mapping[UUID, str], bank_of: Mapping[UUID, str]
+    reader: VerdictReader,
+    outcomes: Mapping[UUID, str],
+    bank_of: Mapping[UUID, str],
+    *,
+    known_hub_ids: frozenset[str] | None = None,
 ) -> dict[str, set[str]]:
-    """`bank_id -> vetoed hubs` for every PARTLY_VETOED/VETOED batch that names hubs."""
+    """`bank_id -> vetoed hubs` for every PARTLY_VETOED/VETOED batch that names hubs. A verdict may name a
+    bank, feeder or substation id in a violation's `hub_id` slot: only ids in `known_hub_ids` (the fleet's
+    hubs) are taken, never those."""
     vetoed = [b for b, o in outcomes.items() if o in VETO_OUTCOMES]
     if not vetoed:
         return {}
@@ -141,6 +147,9 @@ async def vetoed_banks(
     out: dict[str, set[str]] = {}
     for batch_id in vetoed:
         named = hubs.get(batch_id, set())
+        if known_hub_ids is not None:
+            named = {h for h in named if h in known_hub_ids}
+        named.discard(bank_of.get(batch_id, ""))
         if named and batch_id in bank_of:
             out.setdefault(bank_of[batch_id], set()).update(named)
     return out

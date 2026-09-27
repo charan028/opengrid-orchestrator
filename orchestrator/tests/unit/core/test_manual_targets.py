@@ -83,3 +83,69 @@ def test_the_engine_re_imports_the_core_implementation() -> None:
     assert manual.parse_targets is mt.parse_targets
     assert manual.ManualTarget is mt.ManualTarget
     assert manual.SIGN_CONVENTION == mt.SIGN_CONVENTION
+
+
+# --- effective_targets: the one status rule (engine, API list, guardian) ------------------------------------
+
+
+def _states(rows, stops=(), now=NOW):
+    return mt.effective_targets(
+        rows, stops, now, bank_of_hub=lambda h: "b1", zone_of_bank=lambda b: "LZ_NORTH"
+    )
+
+
+def test_effective_targets_reports_every_status() -> None:
+    op_target = _row(["h1"], -5.0, issued=NOW - timedelta(minutes=2))
+    cancel = (
+        uuid4(),
+        {
+            "hub_ids": ["h1"],
+            "cancels": str(op_target[0]),
+            "issued_at": NOW.isoformat(),
+            "expires_at": NOW.isoformat(),
+        },
+        NOW,
+    )
+    late_target = _row(["h2"], -5.0, issued=NOW - timedelta(minutes=2))
+    late_cancel = (
+        uuid4(),
+        {
+            "hub_ids": ["h2"],
+            "cancels": str(late_target[0]),
+            "cancel_kind": "LATE_RECORD",
+            "issued_at": NOW.isoformat(),
+            "expires_at": NOW.isoformat(),
+        },
+        NOW,
+    )
+    expired = _row(["h3"], -1.0, issued=NOW - timedelta(minutes=20))
+    active = _row(["h4"], 3.0, issued=NOW - timedelta(minutes=1))
+    got = _states([op_target, late_target, expired, active, cancel, late_cancel])
+    assert got["h1"].status is mt.TargetStatus.CANCELLED_BY_OPERATOR and got["h1"].cancelled_by == str(
+        cancel[0]
+    )
+    assert got["h2"].status is mt.TargetStatus.CANCELLED_LATE_RECORD
+    assert got["h3"].status is mt.TargetStatus.EXPIRED
+    assert got["h4"].status is mt.TargetStatus.ACTIVE
+    assert set(mt.active_targets(got)) == {"h4"}
+
+
+def test_a_stop_cancelled_target_is_never_active_and_names_the_stop() -> None:
+    target = _row(["h1"], -5.0, issued=NOW - timedelta(minutes=2))
+    stop = [
+        (uuid4(), "BANK", "b1", "ENGAGE", NOW - timedelta(minutes=1)),
+        (uuid4(), "BANK", "b1", "RELEASE", NOW),
+    ]
+    got = _states([target], stop)
+    assert got["h1"].status is mt.TargetStatus.CANCELLED_BY_SAFE_STOP
+    assert got["h1"].stop_event_id == str(stop[0][0])
+    assert mt.active_targets(got) == {}
+    # A newer target after the stop is released is active again.
+    newer = _row(["h1"], -2.0, issued=NOW + timedelta(seconds=1))
+    assert (
+        _states([target, newer], stop, now=NOW + timedelta(seconds=2))["h1"].status is mt.TargetStatus.ACTIVE
+    )
+
+
+def test_stop_rows_sql_selects_the_id_first() -> None:
+    assert mt.STOP_EVENT_ROWS_SQL.split("FROM")[0].split()[1].rstrip(",") == "stop_event_id"

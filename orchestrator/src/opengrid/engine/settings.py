@@ -58,7 +58,7 @@ class DispatchSettings:
     dc_target_import_kw: dict[str, float] = field(default_factory=dict)
     pipeline_ac: PipelineAcDefaults = field(default_factory=PipelineAcDefaults)
     #: K4 veto fail-safe (`engine.veto`): on/off, cycles a vetoed hub stays out, wait for verdicts (s).
-    veto_retry_enabled: bool = True
+    veto_retry_enabled: bool = False  # off until proven in prod (H1/H2); the owner enables it
     veto_exclude_cycles: int = DEFAULT_EXCLUDE_CYCLES
     verdict_wait_s: float = DEFAULT_VERDICT_WAIT_S
     #: How often the K15 market model is rebuilt (re-zoning, market changes).
@@ -90,7 +90,7 @@ def dispatch_settings(cfg: Config) -> DispatchSettings:
         ),
         site_nominal_v=float(cfg.get("allocator.closed_loop.site_nominal_v", DEFAULT_SITE_NOMINAL_V)),
         dc_target_import_kw=_float_table(cfg.get("allocator.closed_loop.data_center.target_import_kw")),
-        veto_retry_enabled=bool(cfg.get("allocator.veto_retry.enabled", True)),
+        veto_retry_enabled=bool(cfg.get("allocator.veto_retry.enabled", False)),
         veto_exclude_cycles=int(cfg.get("allocator.veto_retry.exclude_cycles", DEFAULT_EXCLUDE_CYCLES)),
         verdict_wait_s=float(cfg.get("allocator.veto_retry.wait_s", DEFAULT_VERDICT_WAIT_S)),
         market_refresh_s=float(cfg.get("allocator.market_refresh_s", 60.0)),

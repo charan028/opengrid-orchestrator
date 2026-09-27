@@ -126,7 +126,14 @@ async def _run_one(
         logger.warning("intake skipped: NO_NEW_COMMITMENTS", extra=scope)
         try:
             await trace.append(
-                _GATE_TRACE_STREAM, "ALERT", "INTAKE_SKIPPED", {**scope, "mode": NO_NEW_COMMITMENTS}
+                _GATE_TRACE_STREAM,
+                "ALERT",
+                "INTAKE_SKIPPED",
+                {
+                    "gate_kind": str(trigger.gate_kind),
+                    "contract_scope": str(trigger.contract_scope) if trigger.contract_scope else None,
+                    "mode": NO_NEW_COMMITMENTS,
+                },
             )
         except Exception:
             logger.exception("could not trace a skipped intake", extra=scope)
