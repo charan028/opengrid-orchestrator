@@ -6,7 +6,9 @@ its backup reserve. It sells each kilowatt-hour once, to the buyer the contracts
 proves it was delivered, and measures what that is worth against the rule-based allocation it replaces.
 
 Open the console and the first screen, **Story** (`/og/story`), says all of this with the live
-system's own numbers. Read that before anything else. `SUBMISSION.md` carries the hackathon
+system's own numbers. Read that before anything else. New to the codebase? `docs/WALKTHROUGH.md` is
+the guided tour: the architecture, the fifteen invariants, what happens every two seconds, why the
+tests exist, and how the project was built. `SUBMISSION.md` carries the hackathon
 write-up, the video cut and the team.
 
 ## Quick start
